@@ -5420,14 +5420,23 @@ impl<'a> Lower<'a> {
             }
             // A NON-null `String` hashes via its own `String.hashCode()` (kotlinc's `invokevirtual`),
             // matching the bytecode. A nullable one stays on `Objects.hashCode` (which null-guards,
-            // returning 0 for `null`) — the null-guarded-ternary form is a future parity item.
+            // returning 0 for `null`) — the null-guarded-ternary form is a future parity item. The member's
+            // JVM owner/descriptor come from the provider (mapped builtin), not a `java/lang/*` core literal.
             t if !nullable && t.non_null().kotlin_class_internal() == Some("kotlin/String") => {
+                let m = crate::call_resolver::resolve_instance_member(
+                    &*self.syms.libraries,
+                    t.non_null(),
+                    "hashCode",
+                    &[],
+                )?
+                .member;
+                let owner = m.owner.clone()?;
                 Some(self.ir.add_expr(IrExpr::Call {
                     callee: Callee::Virtual {
-                        owner: "java/lang/String".to_string(),
-                        name: "hashCode".to_string(),
-                        descriptor: "()I".to_string(),
-                        interface: false,
+                        owner: owner.clone(),
+                        name: m.name,
+                        descriptor: m.descriptor,
+                        interface: self.library_type_is_interface(&owner),
                     },
                     dispatch_receiver: Some(v),
                     args: vec![],
@@ -10980,24 +10989,6 @@ impl<'a> Lower<'a> {
                 })
             }
         } else {
-            if name == "length"
-                && recv_ty.non_null().kotlin_class_internal() == Some("kotlin/String")
-            {
-                return Some((
-                    var,
-                    cond,
-                    self.ir.add_expr(IrExpr::Call {
-                        callee: Callee::Virtual {
-                            owner: "java/lang/String".to_string(),
-                            name: "length".to_string(),
-                            descriptor: "()I".to_string(),
-                            interface: false,
-                        },
-                        dispatch_receiver: Some(recv2),
-                        args: vec![],
-                    }),
-                ));
-            }
             let m = crate::call_resolver::resolve_property_member(
                 &*self.syms.libraries,
                 recv_ty,
