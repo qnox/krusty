@@ -13047,7 +13047,14 @@ impl<'a> Lower<'a> {
                 // target must be a reference (a primitive `as? Int` yields the boxed `Int?` wrapper —
                 // its `instanceof`/`checkcast` already test/keep the wrapper, per the `TypeOp` backend).
                 if nullable {
-                    let target = self.ty_ref(&ty)?;
+                    // The cast target. A type parameter (`x as? T`) erases to its bound — the same
+                    // representation the non-null `as T` branch below uses — so the `instanceof`/`checkcast`
+                    // run against the bound (`Object` for an unbounded `T`); `ty_ref` only yields concrete
+                    // reference types, so the type-parameter case is resolved here first.
+                    let target = match self.cur_tparams.iter().find(|(n, _, _)| *n == ty.name) {
+                        Some((name, bound, _)) => Ty::ty_param(name, *bound),
+                        None => self.ty_ref(&ty)?,
+                    };
                     let target_ir = ty_to_ir(target);
                     let v = self.expr(operand)?;
                     let ov = self.fresh_value();
