@@ -11273,6 +11273,27 @@ impl<'a> Lower<'a> {
                                     receiver: recv2,
                                     args: a.into_iter().map(Some).collect(),
                                 })
+                            } else if let Some(&fid) =
+                                self.ext_fun_ids.get(&(nn.erased_recv(), name.clone()))
+                            {
+                                // A same-module EXTENSION function via safe call (`s?.id()` where
+                                // `fun String.id()` is declared in this module): a static call whose first
+                                // argument is the (already non-null) receiver, exactly as the qualified
+                                // call lowers it. Stdlib/classpath extensions take the `lower_ext_call_on`
+                                // fallback below.
+                                let params = self.ir.functions[fid as usize].params.clone();
+                                if params.len() != args.len() + 1 {
+                                    return None;
+                                }
+                                let mut a = vec![recv2];
+                                for (arg, pt) in args.iter().zip(&params[1..]) {
+                                    a.push(self.lower_arg(*arg, pt)?);
+                                }
+                                self.ir.add_expr(IrExpr::Call {
+                                    callee: Callee::Local(fid),
+                                    dispatch_receiver: None,
+                                    args: a,
+                                })
                             } else {
                                 // A classpath instance method (`s?.substring(1)`).
                                 let arg_tys: Vec<Ty> =

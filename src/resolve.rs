@@ -5455,6 +5455,27 @@ impl<'a> Checker<'a> {
                         }
                     }
                 };
+                // A same-module EXTENSION via safe call (`s?.id()` where `fun String.id()` is declared in
+                // this module): the member/classpath/library lookups above don't see module extensions, so
+                // resolve it here on the non-null receiver. The lowerer emits the static extension call.
+                let result = if result == Ty::Error {
+                    let arg_tys: Vec<Ty> = match &args {
+                        Some(a) => a.iter().map(|x| self.expr(*x)).collect(),
+                        None => vec![],
+                    };
+                    crate::module_symbols::ModuleSymbols::new(self.syms)
+                        .functions(&name, Some(rt.non_null()))
+                        .overloads
+                        .into_iter()
+                        .find(|o| {
+                            o.kind == crate::libraries::FnKind::Extension
+                                && o.callable.params.len() == arg_tys.len() + 1
+                        })
+                        .map(|fi| fi.callable.ret)
+                        .unwrap_or(Ty::Error)
+                } else {
+                    result
+                };
                 // The safe-call result is nullable: a primitive member result becomes `Int?`
                 // (`s?.length`); the member value is boxed (or `null`) in lowering. A non-boxable
                 // primitive (unsigned/value) stays unsupported.
