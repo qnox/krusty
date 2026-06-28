@@ -2906,3 +2906,31 @@ Verified with `./run-tests.sh` (all binaries pass; clippy no new findings; `carg
 ```text
 scanned: 7351 | krusty-compiled: 2079 | box()=OK: 2079 | skipped(unsupported): 5272 | FAIL: 0
 ```
+
+Core `java/lang` literal removal — String members via provider. Common lowering hardcoded
+`owner: "java/lang/String"` for `String.length` (the safe-call property-read helper) and
+`String.hashCode` (data-class `field_hash`). These existed because a no-classpath compile (no JDK to
+read) made `resolve_type("kotlin/String")` return `None`, so the generic member-resolution path
+yielded nothing. The fix keeps the Kotlin↔JVM mapping a *backend* fact: the JVM provider gained
+`mapped_builtin_fallback`, a curated minimal ABI for well-known mapped builtins (String →
+`length()I`, `hashCode()I`) returned only when the classpath cannot supply the mapped JVM class. Core
+now resolves both members generically via `resolve_property_member`/`resolve_instance_member`; the
+owner flows as `kotlin/String` and the constant-pool boundary (`classfile::class` → `to_jvm_internal`)
+maps it to `java/lang/String`, byte-identical. A real classpath always wins, so the gate is
+unaffected. Both `java/lang/String` literals are gone from `ir_lower`. Verified `./run-tests.sh`,
+conformance unchanged at `box()=OK: 2079`, `FAIL: 0`.
+
+Core `java/lang` literal removal — builtin type-ref normalization. `ir_lower::ty_of` resolved a
+builtin type reference through the backend name map and then special-cased `java/lang/Object →
+kotlin/Any`, leaving a `java/lang` literal in core and silently keeping other JVM spellings (e.g.
+`String`) in the front-end `Ty`. It now routes the mapping result through `to_kotlin_internal`, so
+every built-in type reference carries its Kotlin identity in core (`java/lang/Object → kotlin/Any`,
+`java/lang/String → kotlin/String`); the backend re-maps at emit. Removed the `java/lang/Object`
+literal and a branch. Conformance unchanged, `FAIL: 0`.
+
+Remaining core `java/lang/Object` references are the two *defensive* erased-top checks
+(`ir_lower::ty_is_erased_top`, `resolve.rs`'s cast-target check): they recognize the JVM spelling that
+classpath/library metadata still legitimately surfaces. Removing them outright risks masking a real
+`java/lang/Object` arrival; the principled fix is to canonicalize JVM→Kotlin names where metadata
+*enters* core (provider `resolve_type`/`desc_to_ty`/metadata decode), after which these checks can drop
+the JVM arm. That is the next core-decoupling slice.
