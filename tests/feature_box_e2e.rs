@@ -123,6 +123,21 @@ fun box(): String {
 }
 "#,
     ),
+    // Dynamic `FunctionN.invoke` is an erased Object boundary. Value-class arguments must box before the
+    // invoke and the function-reference adapter unboxes for the physical target.
+    (
+        "FunctionValueInvokeValueClass",
+        r#"
+value class Value(val value: String)
+fun take(value: Value): String = value.value
+fun box(): String {
+    val f: (Value) -> String = ::take
+    if (f(Value("OK")) != "OK") return "f0"
+    if (f.invoke(Value("OK")) != "OK") return "f1"
+    return "OK"
+}
+"#,
+    ),
     // Generic stdlib extensions (`T.let`) must select using receiver-bound logical parameters from
     // metadata, not the erased `Function1` descriptor. A callable reference argument typed as
     // `(Value) -> Unit` then fits `block: (T) -> R` when `T` is the value-class receiver.

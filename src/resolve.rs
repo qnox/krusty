@@ -3854,13 +3854,6 @@ impl<'a> Checker<'a> {
         arg_tys: &[Ty],
         span: Span,
     ) -> Ty {
-        if !self.callable_invoke_signature_supported(sig) {
-            self.diags.error(
-                span,
-                "krusty: callable invoke with value-class signature is not supported".to_string(),
-            );
-            return Ty::Error;
-        }
         if sig.params.len() != arg_tys.len() {
             self.diags.error(
                 span,
@@ -3884,30 +3877,6 @@ impl<'a> Checker<'a> {
             );
         }
         sig.ret
-    }
-    fn callable_invoke_signature_supported(&self, sig: &crate::types::FnSig) -> bool {
-        sig.params
-            .iter()
-            .chain(std::iter::once(&sig.ret))
-            .all(|t| !self.ty_needs_callable_value_bridge(*t))
-    }
-    fn ty_needs_callable_value_bridge(&self, ty: Ty) -> bool {
-        match ty {
-            Ty::Obj(internal, _) => {
-                self.syms
-                    .class_by_internal(internal)
-                    .is_some_and(|c| c.value_field.is_some())
-                    || self
-                        .syms
-                        .libraries
-                        .resolve_type(internal)
-                        .is_some_and(|t| t.value_underlying.is_some())
-            }
-            Ty::Nullable(inner) | Ty::TyParam(_, inner) => {
-                self.ty_needs_callable_value_bridge(*inner)
-            }
-            _ => false,
-        }
     }
     fn local_function_expr_count(&self) -> usize {
         self.expr_lowers
