@@ -2777,6 +2777,19 @@ helper used by normal top-level calls, default-call lowering, inline-only top-le
 default calls. A unit regression pins a top-level callable whose metadata says `String?` so the selected
 logical return becomes `Ty::nullable(Ty::String)` while the physical return stays `String`.
 
+The next pass deleted the separate extension nullable-return branch. Ordinary extension calls now use
+the same `selected_return_type` helper for nullability, while metadata return-class substitution remains
+restricted to value classes because the current classpath lookup can still recover a return class by
+name rather than by the selected overload's exact source signature. A resolver unit regression covers an
+extension returning metadata `String?`; before this cleanup, that path kept the logical return as
+non-null `String`.
+
+This exposed a real downstream typing gap in `x ?: throw e`: `Nothing` is a diverging RHS, so the Elvis
+result must be the non-null form of `x`. The old Elvis typing only unwrapped nullable primitives; with
+nullable generic extension returns enabled, `removeLastOrNull() ?: throw` stayed `Any?` and the real
+corpus case `inference/pcla/issues/kt49887.kt` dropped out of conformance. `resolve` now strips
+`Ty::Nullable(inner)` when the RHS is `Nothing`, and the corpus case is pinned.
+
 This is still a stepping stone, not the final architecture. The next deletion target is to replace the
 parallel `ret`, `ret_nullable`, `ret_class`, and `physical_ret` fields with a single selected
 `ReturnShape`. That should remove the remaining ad hoc call-site return assembly and make nullable
