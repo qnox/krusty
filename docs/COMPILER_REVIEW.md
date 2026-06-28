@@ -2768,3 +2768,16 @@ The pushed commit after rebasing onto `origin/master` was:
 ```text
 bdc7422 compiler: move platform facts behind providers
 ```
+
+Hundred-fortieth-pass return-shape follow-up tightened the consumer side of the metadata cleanup. After
+`FunctionInfo.ret_nullable` started carrying top-level metadata nullability, the top-level call paths
+still had four separate copies of "bind generic return, apply metadata return class" and none applied
+the nullable bit. `CallResolver` now has one `selected_return_type(ret_class, ret_nullable, fallback)`
+helper used by normal top-level calls, default-call lowering, inline-only top-level calls, and extension
+default calls. A unit regression pins a top-level callable whose metadata says `String?` so the selected
+logical return becomes `Ty::nullable(Ty::String)` while the physical return stays `String`.
+
+This is still a stepping stone, not the final architecture. The next deletion target is to replace the
+parallel `ret`, `ret_nullable`, `ret_class`, and `physical_ret` fields with a single selected
+`ReturnShape`. That should remove the remaining ad hoc call-site return assembly and make nullable
+generic returns impossible to partially apply.
