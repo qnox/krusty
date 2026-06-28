@@ -16326,13 +16326,10 @@ fn ty_of(file: &ast::File, r: &ast::TypeRef) -> Ty {
         Ty::obj(&class_internal(file, &r.name))
     } else if let Some(internal) = crate::jvm::jvm_class_map::kotlin_builtin_to_internal(&r.name) {
         // A built-in collection/reference type resolves to its FRONT-END Kotlin name — a collection keeps
-        // `kotlin/collections/{List,MutableList,…}` (read-only vs mutable; emit erases to `java/util/List`),
-        // other built-ins keep their JVM identity. `Any` stays `kotlin/Any`, not `java/lang/Object`.
-        if internal == "java/lang/Object" {
-            Ty::obj("kotlin/Any")
-        } else {
-            Ty::obj(internal)
-        }
+        // `kotlin/collections/{List,MutableList,…}` (read-only vs mutable; emit erases to `java/util/List`).
+        // Normalize any JVM spelling the mapping returns back to the Kotlin identity (`java/lang/Object`
+        // → `kotlin/Any`); the backend re-maps at the emit boundary, so core stays in Kotlin names.
+        Ty::obj(crate::jvm::jvm_class_map::to_kotlin_internal(internal))
     } else {
         Ty::obj("kotlin/Any")
     }
