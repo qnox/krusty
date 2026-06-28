@@ -2794,3 +2794,25 @@ This is still a stepping stone, not the final architecture. The next deletion ta
 parallel `ret`, `ret_nullable`, `ret_class`, and `physical_ret` fields with a single selected
 `ReturnShape`. That should remove the remaining ad hoc call-site return assembly and make nullable
 generic returns impossible to partially apply.
+
+The next resolver/provider pass made that return-shape cleanup more uniform and bought real
+conformance. Instance member resolution had kept a separate return path: it applied only
+`ret_nullable`, while top-level and extension calls used the shared
+`selected_return_type(ret_class, ret_nullable, fallback)` helper. Member calls now use the same helper,
+with regressions for nullable member metadata returns and metadata return classes over erased physical
+`Any` returns.
+
+The same pass removed another resolver-visible stdlib gap for unsigned companion constants. `UInt` and
+`ULong` constants live as `public static final` fields on the value-class owner (`kotlin/UInt`), while
+their source property types live in the companion object's `@Metadata`. The JVM provider now decodes
+class property return classes and exposes metadata-typed static `ConstantValue` fields through
+`LibraryType.companion_consts`; the resolver still performs the same generic companion-constant lookup.
+No `UInt.MAX_VALUE`/`MIN_VALUE` special case was added to `resolve.rs`.
+
+Exposing those constants uncovered an existing unsigned literal bug: `9223372036854775808uL` was parsed
+through signed `i64` and became `0`. Unsigned literals now use a `u64` parse path and store the existing
+JVM bit pattern in `ULongLit`. The official conformance metric increased without new failures:
+
+```text
+scanned: 7351 | krusty-compiled: 2056 | box()=OK: 2056 | skipped(unsupported): 5295 | FAIL: 0
+```
