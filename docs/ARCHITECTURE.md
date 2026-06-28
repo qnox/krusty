@@ -50,21 +50,27 @@ boundary.
 
 The front end is not yet fully decoupled. The concrete blockers, in priority order:
 
-1. **`types::Ty` conflates the Kotlin type with its JVM representation.** `Ty::Obj(&str)` stores a
-   **JVM internal name** (`java/lang/String`) and `Ty::descriptor()` returns a **JVM descriptor**.
-   *Target:* `Ty` references a class by **Kotlin FqName / interned class-id** (`kotlin/String`); each
-   backend maps it (JVM via `JavaToKotlinClassMap`, already ported). `descriptor()` moves into `jvm`.
-2. **`resolve.rs` resolves to JVM internal names** (`class_names: simple → java/lang/…`). *Target:*
-   resolve to Kotlin FqNames; the JVM backend maps to internal names at lowering.
-3. **`resolve::{resolve_java_static,resolve_java_instance,resolve_java_ctor}`** operate on JVM
-   `ClassInfo`. *Target:* move into `jvm` as the JVM symbol provider; the checker calls an abstract
-   symbol-resolution interface the backend implements.
+1. **`types::Ty` still conflates Kotlin semantic identity with target/runtime shape.** JVM descriptor
+   formatting has moved out of `Ty`, but `Ty::Obj(&str)` still stores names that are sometimes Kotlin
+   builtins and sometimes JVM/internal runtime classes (`java/lang/String`, `kotlin/jvm/functions/*`).
+   Some non-backend code also still reasons about boxed primitives, nullable scalar wrappers, and
+   value-class representation. *Target:* `Ty` references a Kotlin class-id; each backend maps it to its
+   own ABI and runtime names.
+2. **`resolve.rs` and common lowering still contain JVM-shaped facts.** Examples include direct
+   `java/lang/*` names, function-interface names, boxed-wrapper assumptions, `$default` awareness, and
+   value-class erasure checks. *Target:* checker/lowerer select semantic calls/properties/types through
+   `SymbolSource`/`CallResolver`; JVM ABI decisions happen in JVM lowering/emission.
+3. **Checker and lowerer duplicate call selection.** The newer provider boundary is `SymbolSource` plus
+   `FunctionSet`/`FunctionInfo` and `CallResolver`, but `TypeInfo` still carries feature-specific side
+   maps and `ir_lower.rs` often re-resolves what the checker selected. *Target:* one resolved-call /
+   resolved-property table carries selected callable identity, argument mapping, metadata facts, and the
+   backend handle forward.
 4. **The driver** (`main.rs`) calls `jvm::emit` directly. *Target:* a `Backend` trait
    (`compile(checked program) → artifacts`); `-target jvm|wasm|js` selects the impl.
 
 Migration is incremental and gated by the conformance harness (never regress `0 FAIL`): introduce
-the `Backend` trait first (no behavior change), then move `descriptor()`/JVM-name resolution behind
-it, then flip `Ty` to Kotlin FqNames with the JVM mapping at the boundary.
+the `Backend` trait first (no behavior change), then carry selected calls/properties through a
+backend-neutral handle, then flip `Ty` to Kotlin class ids with JVM mapping at the backend boundary.
 
 ## The common IR (`src/ir.rs`)
 
@@ -79,7 +85,8 @@ to reuse. LLVM is the right tool only for a future **native** backend (as in Kot
   inserted by backend lowering, not hidden in codegen — so they are visible and testable.
 - Index-based arenas (`u32` ids into `Vec`s), per krusty's no-`Box`/`Rc` invariant.
 
-Pipeline target: `checked AST → ir (lower) → shared IR passes (desugar when/for/++, boxing form) →
-per-backend lowering + codegen`. Current state: the IR **node set + builder + smoke test** exist; the
-`ast → ir` lowering and the JVM backend consuming IR (replacing direct AST-to-bytecode emit) are the
-next phases.
+Pipeline target: `checked AST → common IR → shared semantic passes → per-backend lowering + codegen`.
+Current state: the JVM backend consumes the current IR, but that IR is still partly JVM-lowered: common
+`Callee` forms carry owners, names, descriptors, `$default` and `INSTANCE` knowledge, and some backend
+policy is still decided in `ir_lower.rs`. The migration target is a clean split between common semantic
+IR and JVM-lowered IR.
