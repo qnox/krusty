@@ -226,6 +226,7 @@ struct MetaCallable {
     jvm_name: String,
     ret_class: Option<String>,
     receiver_class: Option<String>,
+    is_extension: bool,
     ret_nullable: bool,
     value_param_types: Vec<Ty>,
     value_param_names: Vec<String>,
@@ -407,6 +408,7 @@ impl Classpath {
                 jvm_name: f.jvm_name.clone(),
                 ret_class: f.ret_class.clone(),
                 receiver_class: f.receiver_class.clone(),
+                is_extension: f.is_extension,
                 ret_nullable: f.ret_nullable,
                 value_param_types: f
                     .value_param_types
@@ -483,7 +485,7 @@ impl Classpath {
             .iter()
             .filter_map(|&i| {
                 let c = &meta.callables[i];
-                let off = c.receiver_class.is_some() as usize;
+                let off = c.is_extension as usize;
                 let end = off + c.value_param_types.len();
                 (end <= desc_params.len()
                     && compat_prefix(&c.value_param_types, &desc_params[off..end]))
@@ -514,7 +516,7 @@ impl Classpath {
                 {
                     return None;
                 }
-                let off = c.receiver_class.is_some() as usize;
+                let off = c.is_extension as usize;
                 let end = off + c.value_param_types.len();
                 (end <= desc_params.len()
                     && compat_prefix(&c.value_param_types, &desc_params[off..end]))
@@ -577,7 +579,7 @@ impl Classpath {
                 if !c.value_param_has_default.iter().any(|d| *d) {
                     return None;
                 }
-                let off = c.receiver_class.is_some() as usize;
+                let off = c.is_extension as usize;
                 let end = off + c.value_param_types.len();
                 (end <= desc_params.len()
                     && compat_prefix(&c.value_param_types, &desc_params[off..end]))

@@ -123,6 +123,23 @@ fun box(): String {
 }
 "#,
     ),
+    // Generic stdlib extensions (`T.let`) must select using receiver-bound logical parameters from
+    // metadata, not the erased `Function1` descriptor. A callable reference argument typed as
+    // `(Value) -> Unit` then fits `block: (T) -> R` when `T` is the value-class receiver.
+    (
+        "ValueClassLetCallableRef",
+        r#"// WITH_STDLIB
+value class Value(val value: String)
+object Sink {
+    var result: String = "FAIL"
+    fun take(value: Value) { result = value.value }
+}
+fun box(): String {
+    Value("OK").let(Sink::take)
+    return Sink.result
+}
+"#,
+    ),
     // A valueless `return@lambda` in a `() -> Unit` lambda: the closure method's JVM `invoke` returns
     // the `kotlin/Unit` SINGLETON (a reference, since the generic `R` erases to `Object`), so the local
     // return must `areturn Unit.INSTANCE`, not a `void` `return` (which the verifier rejects). The

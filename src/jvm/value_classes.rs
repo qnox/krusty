@@ -200,6 +200,19 @@ pub fn lower_value_classes(ir: &mut IrFile) -> bool {
     // `(owner-internal, plain name, arity)` → mangled name, for rewriting resolved-by-name calls
     // (`super.f(vc)`, an interface method) to the value-class-mangled method.
     let mut mangle_map: HashMap<(String, String, usize), String> = HashMap::new();
+    let mut target_param_map: HashMap<(String, String, usize), Vec<Ty>> = HashMap::new();
+    let mut target_nullable_map: HashMap<(String, String, usize), Vec<bool>> = HashMap::new();
+    for (fid, f) in ir.functions.iter().enumerate() {
+        let owner = f.dispatch_receiver.clone().unwrap_or_default();
+        let key = (owner, f.name.clone(), orig_params[fid].len());
+        let nullable = orig_params[fid]
+            .iter()
+            .enumerate()
+            .map(|(i, t)| t.is_nullable() || f.param_checks.get(i).is_none_or(Option::is_none))
+            .collect();
+        target_param_map.insert(key.clone(), orig_params[fid].clone());
+        target_nullable_map.insert(key, nullable);
+    }
     for (fid, f) in ir.functions.iter_mut().enumerate() {
         let is_box_impl = f.name == "box-impl";
         // A USER value-class member function's body runs on the BOXED object; its value-class-typed
@@ -299,6 +312,76 @@ pub fn lower_value_classes(ir: &mut IrFile) -> bool {
                 }
             }
         }
+    }
+    // Function-reference classes have two signatures: the public `FunctionN.invoke(Object...)Object`
+    // shape remains logical, while the target method call must follow JVM value-class erasure/mangling.
+    for c in &mut ir.classes {
+        let Some(fr) = &mut c.func_ref else {
+            continue;
+        };
+        let first_call_arg = match fr.dispatch {
+            crate::ir::FrDispatch::VirtualUnbound => 1usize,
+            _ => 0usize,
+        };
+        let call_params = fr.param_tys[first_call_arg..].to_vec();
+        let target_decl_params = target_param_map
+            .get(&(
+                fr.call_owner.clone(),
+                fr.call_name.clone(),
+                call_params.len(),
+            ))
+            .cloned()
+            .unwrap_or_else(|| call_params.clone());
+        let target_nullable = target_nullable_map
+            .get(&(
+                fr.call_owner.clone(),
+                fr.call_name.clone(),
+                call_params.len(),
+            ))
+            .cloned()
+            .unwrap_or_else(|| target_decl_params.iter().map(|t| t.is_nullable()).collect());
+        let is_file_class = matches!(fr.dispatch, crate::ir::FrDispatch::Static);
+        fr.call_name = vc_mangle(
+            &fr.call_name,
+            &target_decl_params,
+            &fr.ret_ty,
+            &under,
+            is_file_class,
+        );
+        fr.target_param_tys = fr.param_tys.iter().map(|t| erase(t, &under)).collect();
+        fr.target_ret_ty = erase(&fr.ret_ty, &under);
+        fr.unbox_params = fr
+            .param_tys
+            .iter()
+            .zip(&fr.target_param_tys)
+            .map(|(logical, target)| {
+                let fq = logical.non_null().obj_internal()?;
+                (under.contains_key(fq) && logical != target).then(|| fq.to_string())
+            })
+            .collect();
+        fr.unbox_param_nullable = fr
+            .param_tys
+            .iter()
+            .enumerate()
+            .map(|(i, _)| {
+                let target_i = i.checked_sub(first_call_arg);
+                target_i
+                    .and_then(|j| target_nullable.get(j))
+                    .copied()
+                    .unwrap_or(false)
+            })
+            .collect();
+        if fr
+            .unbox_param_nullable
+            .iter()
+            .zip(&fr.target_param_tys)
+            .any(|(nullable, target)| *nullable && is_jvm_scalar_ty(ir_ty_to_jvm(target)))
+        {
+            return false;
+        }
+        fr.box_ret = fr.ret_ty.non_null().obj_internal().and_then(|fq| {
+            (under.contains_key(fq) && fr.ret_ty != fr.target_ret_ty).then(|| fq.to_string())
+        });
     }
     // A covariant-override bridge delegates to the concrete method by name (mangle the target if it was
     // mangled). When the override returns a value class, the concrete method returns the erased underlying,
@@ -2474,6 +2557,13 @@ fn is_jvm_scalar_class(fq: &str) -> bool {
             | "kotlin/Char"
             | "kotlin/Double"
             | "kotlin/Float"
+    )
+}
+
+fn is_jvm_scalar_ty(t: Ty) -> bool {
+    matches!(
+        t,
+        Ty::Int | Ty::Long | Ty::Short | Ty::Byte | Ty::Boolean | Ty::Char | Ty::Double | Ty::Float
     )
 }
 

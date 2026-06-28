@@ -1272,20 +1272,33 @@ fn emit_func_ref_class(c: &crate::ir::IrClass, facade: &str) -> Vec<u8> {
     };
     let ret_jvm = ir_ty_to_jvm(&fr.ret_ty);
     let returns_void = matches!(fr.ret_ty, Ty::Unit | Ty::Nothing);
-    // JVM method descriptor of the target call (`(argDescs)retDesc`) and the kotlin reference signature
-    // (`name(argDescs)retDesc`) — both over the CALL arguments (the receiver, if any, is excluded).
-    let mut call_desc = String::from("(");
+    // The Kotlin reference metadata signature stays logical; the target JVM call descriptor follows
+    // backend lowerings such as value-class erasure. Both exclude the unbound receiver parameter.
+    let mut signature_desc = String::from("(");
     for pt in fr.param_tys.iter().skip(first_arg) {
-        call_desc.push_str(&type_descriptor(ir_ty_to_jvm(pt)));
+        signature_desc.push_str(&type_descriptor(ir_ty_to_jvm(pt)));
     }
-    call_desc.push(')');
-    let ret_desc = if returns_void {
+    signature_desc.push(')');
+    let signature_ret = if returns_void {
         "V".to_string()
     } else {
         type_descriptor(ret_jvm)
     };
+    signature_desc.push_str(&signature_ret);
+    let signature = format!("{}{}", fr.fn_name, signature_desc);
+
+    let mut call_desc = String::from("(");
+    for pt in fr.target_param_tys.iter().skip(first_arg) {
+        call_desc.push_str(&type_descriptor(ir_ty_to_jvm(pt)));
+    }
+    call_desc.push(')');
+    let target_ret_jvm = ir_ty_to_jvm(&fr.target_ret_ty);
+    let ret_desc = if returns_void {
+        "V".to_string()
+    } else {
+        type_descriptor(target_ret_jvm)
+    };
     call_desc.push_str(&ret_desc);
-    let signature = format!("{}{}", fr.fn_name, call_desc);
 
     if fr.bound {
         // `<init>(Object)V`: super(arity, receiver, owner.class, name, sig, flags).
@@ -1381,13 +1394,27 @@ fn emit_func_ref_class(c: &crate::ir::IrClass, facade: &str) -> Vec<u8> {
             let cref = cw.class_ref(&internal);
             inv.checkcast(cref);
         }
-        call_arg_words += slot_words(jt) as i32;
+        let target_jt = fr.target_param_tys.get(k).map(ir_ty_to_jvm).unwrap_or(jt);
+        if let Some(vc) = fr.unbox_params.get(k).and_then(|v| v.as_ref()) {
+            let locals = func_ref_invoke_locals(&mut cw, &fq, arity);
+            let stack_prefix = func_ref_call_stack_prefix(&mut cw, &fr.dispatch, call_owner);
+            emit_value_class_unbox_adapter(
+                &mut cw,
+                &mut inv,
+                vc,
+                target_jt,
+                fr.unbox_param_nullable.get(k).copied().unwrap_or(false),
+                Some(locals),
+                stack_prefix,
+            );
+        }
+        call_arg_words += slot_words(target_jt) as i32;
     }
     // Dispatch to the target.
     let ret_words = if returns_void {
         0
     } else {
-        slot_words(ret_jvm) as i32
+        slot_words(target_ret_jvm) as i32
     };
     match fr.dispatch {
         FrDispatch::Static => {
@@ -1407,14 +1434,93 @@ fn emit_func_ref_class(c: &crate::ir::IrClass, facade: &str) -> Vec<u8> {
     if returns_void {
         let unit = cw.fieldref("kotlin/Unit", "INSTANCE", "Lkotlin/Unit;");
         inv.getstatic(unit, 1);
-    } else if ret_jvm.is_jvm_scalar() {
-        box_prim_free(&mut cw, &mut inv, ret_jvm);
+    } else if let Some(vc) = &fr.box_ret {
+        let m = cw.methodref(
+            vc,
+            "box-impl",
+            &format!("({})L{};", type_descriptor(target_ret_jvm), vc),
+        );
+        inv.invokestatic(m, slot_words(target_ret_jvm) as i32, 1);
+    } else if target_ret_jvm.is_jvm_scalar() {
+        box_prim_free(&mut cw, &mut inv, target_ret_jvm);
     }
     inv.areturn();
     inv.ensure_locals(1 + arity);
     inv.link();
     cw.add_method(0x0001, "invoke", &invoke_desc, &inv);
     cw.finish()
+}
+
+fn func_ref_invoke_locals(cw: &mut ClassWriter, self_class: &str, arity: u16) -> Vec<VerifType> {
+    let mut locals = vec![VerifType::Object(cw.class_ref(self_class))];
+    let obj = VerifType::Object(cw.class_ref("java/lang/Object"));
+    locals.extend(std::iter::repeat_n(obj, arity as usize));
+    locals
+}
+
+fn func_ref_call_stack_prefix(
+    cw: &mut ClassWriter,
+    dispatch: &crate::ir::FrDispatch,
+    call_owner: &str,
+) -> Vec<VerifType> {
+    match dispatch {
+        crate::ir::FrDispatch::Static => Vec::new(),
+        crate::ir::FrDispatch::VirtualBound | crate::ir::FrDispatch::VirtualUnbound => {
+            vec![VerifType::Object(cw.class_ref(call_owner))]
+        }
+    }
+}
+
+fn verif_for_jvm_free(cw: &mut ClassWriter, t: Ty) -> VerifType {
+    match t {
+        Ty::Int | Ty::Boolean | Ty::Byte | Ty::Short | Ty::Char => VerifType::Integer,
+        Ty::Long => VerifType::Long,
+        Ty::Double => VerifType::Double,
+        Ty::Float => VerifType::Float,
+        Ty::String => VerifType::Object(cw.class_ref("java/lang/String")),
+        Ty::Obj(n, _) => VerifType::Object(cw.class_ref(n)),
+        Ty::Array(_) => VerifType::Object(cw.class_ref(&type_descriptor(t))),
+        Ty::Null => VerifType::Null,
+        _ => VerifType::Top,
+    }
+}
+
+fn emit_value_class_unbox_adapter(
+    cw: &mut ClassWriter,
+    code: &mut CodeBuilder,
+    value_class: &str,
+    target: Ty,
+    nullable: bool,
+    locals: Option<Vec<VerifType>>,
+    stack_prefix: Vec<VerifType>,
+) {
+    let unbox = cw.methodref(
+        value_class,
+        "unbox-impl",
+        &format!("(){}", type_descriptor(target)),
+    );
+    if !nullable {
+        code.invokevirtual(unbox, 0, slot_words(target) as i32);
+        return;
+    }
+    let null = code.new_label();
+    let end = code.new_label();
+    if let Some(locals) = locals {
+        let mut null_stack = stack_prefix.clone();
+        null_stack.push(VerifType::Object(cw.class_ref(value_class)));
+        let mut end_stack = stack_prefix;
+        end_stack.push(verif_for_jvm_free(cw, target));
+        code.add_frame_if_new(null, locals.clone(), null_stack);
+        code.add_frame_if_new(end, locals, end_stack);
+    }
+    code.dup();
+    code.ifnull(null);
+    code.invokevirtual(unbox, 0, slot_words(target) as i32);
+    code.goto(end);
+    code.bind(null);
+    code.pop();
+    code.aconst_null();
+    code.bind(end);
 }
 
 /// The `kotlin/jvm/internal/Ref$XxxRef` holder class and its `element` field descriptor for a boxed
@@ -3001,6 +3107,7 @@ impl<'a> Emitter<'a> {
             return None;
         }
         let param_tys: Vec<Ty> = fr.param_tys.iter().map(ir_ty_to_jvm).collect();
+        let target_param_tys: Vec<Ty> = fr.target_param_tys.iter().map(ir_ty_to_jvm).collect();
         let mut param_slots = vec![(0u16, Ty::Error); fr.arity as usize];
         scratch.set_stack(fr.arity as u16);
         for j in (0..fr.arity as usize).rev() {
@@ -3038,13 +3145,32 @@ impl<'a> Emitter<'a> {
 
         let mut call_desc = String::from("(");
         let mut call_arg_words = 0i32;
-        for (slot, jt) in param_slots.iter().skip(first_call_arg).copied() {
-            load(jt, slot, scratch);
-            call_desc.push_str(&type_descriptor(jt));
-            call_arg_words += slot_words(jt) as i32;
+        for (k, (slot, jt)) in param_slots.iter().enumerate().skip(first_call_arg) {
+            let target_jt = target_param_tys.get(k).copied().unwrap_or(*jt);
+            load(*jt, *slot, scratch);
+            if let Some(vc) = fr.unbox_params.get(k).and_then(|v| v.as_ref()) {
+                let locals = self.verif_locals_with(&param_slots);
+                let call_owner = if fr.call_owner.is_empty() {
+                    self.facade.as_str()
+                } else {
+                    fr.call_owner.as_str()
+                };
+                let stack_prefix = func_ref_call_stack_prefix(self.cw, &fr.dispatch, call_owner);
+                emit_value_class_unbox_adapter(
+                    self.cw,
+                    scratch,
+                    vc,
+                    target_jt,
+                    fr.unbox_param_nullable.get(k).copied().unwrap_or(false),
+                    Some(locals),
+                    stack_prefix,
+                );
+            }
+            call_desc.push_str(&type_descriptor(target_jt));
+            call_arg_words += slot_words(target_jt) as i32;
         }
         call_desc.push(')');
-        let ret_jvm = ir_ty_to_jvm(&fr.ret_ty);
+        let ret_jvm = ir_ty_to_jvm(&fr.target_ret_ty);
         let returns_void = matches!(fr.ret_ty, Ty::Unit | Ty::Nothing);
         if returns_void {
             call_desc.push('V');
@@ -3090,6 +3216,13 @@ impl<'a> Emitter<'a> {
         if returns_void {
             let unit = self.cw.fieldref("kotlin/Unit", "INSTANCE", "Lkotlin/Unit;");
             scratch.getstatic(unit, 1);
+        } else if let Some(vc) = &fr.box_ret {
+            let m = self.cw.methodref(
+                vc,
+                "box-impl",
+                &format!("({})L{};", type_descriptor(ret_jvm), vc),
+            );
+            scratch.invokestatic(m, slot_words(ret_jvm) as i32, 1);
         } else if ret_jvm.is_jvm_scalar() {
             box_prim_free(self.cw, scratch, ret_jvm);
         }
@@ -5808,10 +5941,19 @@ impl<'a> Emitter<'a> {
     }
 
     fn verif_locals(&mut self) -> Vec<VerifType> {
+        self.verif_locals_with(&[])
+    }
+
+    fn verif_locals_with(&mut self, extra: &[(u16, Ty)]) -> Vec<VerifType> {
         let max = self.next_slot as usize;
         let mut raw = vec![VerifType::Top; max];
         let entries: Vec<(u16, Ty)> = self.slots.values().copied().collect();
         for (slot, ty) in entries {
+            if (slot as usize) < raw.len() {
+                raw[slot as usize] = self.verif_single(ty);
+            }
+        }
+        for (slot, ty) in extra.iter().copied() {
             if (slot as usize) < raw.len() {
                 raw[slot as usize] = self.verif_single(ty);
             }

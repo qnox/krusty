@@ -8014,27 +8014,14 @@ impl<'a> Checker<'a> {
                         return c.ret;
                     }
                 }
-                // A no-lambda `@InlineOnly` extension is accepted when the provider/backend has already
-                // proven the selected body spliceable. Preserve the existing no-function-parameter route
-                // (`StringBuilder.appendLine`, etc.) and add one receiver-scope case: a function VALUE
-                // argument to `run`/`apply` (`x.apply(block)`) is just an argument to the spliced stdlib
-                // body. Literal receiver lambdas (`x.apply { ... }`) need receiver-aware typing/lowering
-                // above, and value-class callable references through `let(::f)` still require bridge/
-                // erasure work, so those keep skipping instead of miscompiling.
+                // A non-public (`@InlineOnly`) extension is legal when the provider/backend has selected
+                // an inline body; lowering emits an inline static call so the backend splices it instead
+                // of invoking the private package-part method.
                 if let Some(c) = self
                     .resolver()
                     .resolve_extension_inline_callable(&name, rt, &arg_tys)
                 {
-                    let has_literal_lambda = args
-                        .iter()
-                        .any(|&a| matches!(self.file.expr(a), Expr::Lambda { .. }));
-                    let no_function_params =
-                        !c.params.iter().skip(1).any(|p| matches!(p, Ty::Fun(_)));
-                    let receiver_scope_function_value =
-                        matches!(name.as_str(), "run" | "apply") && !has_literal_lambda;
-                    if c.inline.must_inline()
-                        && (no_function_params || receiver_scope_function_value)
-                    {
+                    if c.inline.can_inline() {
                         return c.ret;
                     }
                 }
