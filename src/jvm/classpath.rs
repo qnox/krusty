@@ -296,6 +296,10 @@ pub struct Classpath {
     /// supertypes + members. Built once per file on first use — the single source for BOTH the collection
     /// read-only/mutable hierarchy AND every builtin type's API. Empty if no stdlib is on the classpath.
     builtins: RefCell<HashMap<String, std::rc::Rc<HashMap<String, super::metadata::BuiltinClass>>>>,
+    /// Resolved builtin member vectors, keyed by Kotlin internal class name. The raw builtins fragment is
+    /// already cached, but mapping it to `LibraryMember`s also resolves JVM owners/interface flags and
+    /// allocates descriptors. `resolve_type` asks for these repeatedly during member/subtype lookup.
+    builtin_members: RefCell<HashMap<String, std::rc::Rc<Vec<crate::libraries::LibraryMember>>>>,
     /// Process-unique identity for this `Classpath`, assigned at construction. Caches keyed by a
     /// `Classpath` (e.g. the per-classpath library seed) MUST key on this — NOT on the `Rc<Classpath>`
     /// pointer address, which a freed-then-reallocated `Classpath` can reuse, yielding a false cache hit
@@ -341,6 +345,7 @@ impl Classpath {
             meta_fns: RefCell::new(HashMap::new()),
             meta_overloads: RefCell::new(HashMap::new()),
             builtins: RefCell::new(HashMap::new()),
+            builtin_members: RefCell::new(HashMap::new()),
             id,
         }
     }
@@ -727,94 +732,103 @@ impl Classpath {
     /// `LibraryMember` facts. The source name stays in `name`; JVM realization details stay in the JVM
     /// backend/provider and descriptor data.
     pub fn builtin_members(&self, internal: &str) -> Vec<crate::libraries::LibraryMember> {
+        if let Some(members) = self.builtin_members.borrow().get(internal) {
+            return members.as_ref().clone();
+        }
         let path = Self::builtins_path_for(internal);
         let f = self.builtins_file(&path);
-        let Some(class) = f.get(internal) else {
-            return Vec::new();
-        };
-        class
-            .members
-            .iter()
-            .map(|m| {
-                // A qualified Kotlin name (`kotlin/Int`, `kotlin/String`) → its JVM descriptor; a bare type
-                // parameter (`E`, `T` — no package) erases to `Object`.
-                let desc_of = |n: &str| -> String {
-                    if n.contains('/') {
-                        type_descriptor(kotlin_name_to_ty(n))
+        let members: Vec<_> = f
+            .get(internal)
+            .map(|class| {
+                class.members.iter().map(|m| {
+                    // A qualified Kotlin name (`kotlin/Int`, `kotlin/String`) → its JVM descriptor; a bare type
+                    // parameter (`E`, `T` — no package) erases to `Object`.
+                    let desc_of = |n: &str| -> String {
+                        if n.contains('/') {
+                            type_descriptor(kotlin_name_to_ty(n))
+                        } else {
+                            "Ljava/lang/Object;".to_string()
+                        }
+                    };
+                    let pdesc: String = m.params.iter().map(|p| desc_of(p)).collect();
+                    let descriptor = format!("({pdesc}){}", desc_of(&m.ret));
+                    let ret = kotlin_name_to_ty(&m.ret);
+                    let physical_ret = if m.ret.contains('/') {
+                        ret
                     } else {
-                        "Ljava/lang/Object;".to_string()
-                    }
-                };
-                let pdesc: String = m.params.iter().map(|p| desc_of(p)).collect();
-                let descriptor = format!("({pdesc}){}", desc_of(&m.ret));
-                let ret = kotlin_name_to_ty(&m.ret);
-                let physical_ret = if m.ret.contains('/') {
-                    ret
-                } else {
-                    Ty::obj("kotlin/Any")
-                };
-                // The owner's JVM class: the kotlin↔JVM map (`kotlin/String` → `java/lang/String`), and for the
-                // non-collection mapped builtins (`kotlin/CharSequence` → `java/lang/CharSequence`, …) the
-                // emit-only simple-name mapping — the member virtual-dispatches on that JVM type.
-                let mapped = crate::jvm::jvm_class_map::to_jvm_internal(internal);
-                let owner = if mapped != internal {
-                    mapped.to_string()
-                } else if let Some(j) = internal
-                    .strip_prefix("kotlin/")
-                    .filter(|s| !s.contains('/'))
-                    .and_then(crate::jvm::jvm_class_map::kotlin_builtin_to_jvm)
-                {
-                    j.to_string()
-                } else {
-                    internal.to_string()
-                };
-                // Interface dispatch: prefer the real class flag, but fall back to the curated mapped-builtin
-                // answer when the `.class` reader can't load the owner (a JDK jimage krusty can't decode).
-                let is_iface = self
-                    .find(&owner)
-                    .map(|ci| ci.is_interface())
-                    .or_else(|| crate::jvm::jvm_class_map::jvm_mapped_builtin_is_interface(&owner))
-                    .unwrap_or(false);
-                let member_name = if m.is_property {
-                    match m.name.as_str() {
-                        // Kotlin/JVM mapped builtins whose property accessor is a plain Java method.
-                        "length" | "size" | "values" => m.name.clone(),
-                        "keys" => "keySet".to_string(),
-                        "entries" => "entrySet".to_string(),
-                        n if n.starts_with("is")
-                            && n.as_bytes().get(2).is_some_and(|b| b.is_ascii_uppercase()) =>
-                        {
-                            n.to_string()
+                        Ty::obj("kotlin/Any")
+                    };
+                    // The owner's JVM class: the kotlin↔JVM map (`kotlin/String` → `java/lang/String`), and for the
+                    // non-collection mapped builtins (`kotlin/CharSequence` → `java/lang/CharSequence`, …) the
+                    // emit-only simple-name mapping — the member virtual-dispatches on that JVM type.
+                    let mapped = crate::jvm::jvm_class_map::to_jvm_internal(internal);
+                    let owner = if mapped != internal {
+                        mapped.to_string()
+                    } else if let Some(j) = internal
+                        .strip_prefix("kotlin/")
+                        .filter(|s| !s.contains('/'))
+                        .and_then(crate::jvm::jvm_class_map::kotlin_builtin_to_jvm)
+                    {
+                        j.to_string()
+                    } else {
+                        internal.to_string()
+                    };
+                    // Interface dispatch: prefer the real class flag, but fall back to the curated mapped-builtin
+                    // answer when the `.class` reader can't load the owner (a JDK jimage krusty can't decode).
+                    let is_iface = self
+                        .find(&owner)
+                        .map(|ci| ci.is_interface())
+                        .or_else(|| {
+                            crate::jvm::jvm_class_map::jvm_mapped_builtin_is_interface(&owner)
+                        })
+                        .unwrap_or(false);
+                    let member_name = if m.is_property {
+                        match m.name.as_str() {
+                            // Kotlin/JVM mapped builtins whose property accessor is a plain Java method.
+                            "length" | "size" | "values" => m.name.clone(),
+                            "keys" => "keySet".to_string(),
+                            "entries" => "entrySet".to_string(),
+                            n if n.starts_with("is")
+                                && n.as_bytes().get(2).is_some_and(|b| b.is_ascii_uppercase()) =>
+                            {
+                                n.to_string()
+                            }
+                            n => {
+                                let mut c = n.chars();
+                                format!(
+                                    "get{}{}",
+                                    c.next()
+                                        .map(|f| f.to_uppercase().to_string())
+                                        .unwrap_or_default(),
+                                    c.as_str()
+                                )
+                            }
                         }
-                        n => {
-                            let mut c = n.chars();
-                            format!(
-                                "get{}{}",
-                                c.next()
-                                    .map(|f| f.to_uppercase().to_string())
-                                    .unwrap_or_default(),
-                                c.as_str()
-                            )
-                        }
+                    } else {
+                        m.name.clone()
+                    };
+                    crate::libraries::LibraryMember {
+                        name: member_name,
+                        owner: Some(owner),
+                        physical_name: None,
+                        params: m.params.iter().map(|p| kotlin_name_to_ty(p)).collect(),
+                        ret,
+                        ret_nullable: false,
+                        physical_ret,
+                        descriptor,
+                        signature: None,
+                        is_interface: is_iface,
+                        inline: crate::libraries::InlineKind::None,
                     }
-                } else {
-                    m.name.clone()
-                };
-                crate::libraries::LibraryMember {
-                    name: member_name,
-                    owner: Some(owner),
-                    physical_name: None,
-                    params: m.params.iter().map(|p| kotlin_name_to_ty(p)).collect(),
-                    ret,
-                    ret_nullable: false,
-                    physical_ret,
-                    descriptor,
-                    signature: None,
-                    is_interface: is_iface,
-                    inline: crate::libraries::InlineKind::None,
-                }
+                })
             })
-            .collect()
+            .into_iter()
+            .flatten()
+            .collect();
+        self.builtin_members
+            .borrow_mut()
+            .insert(internal.to_string(), std::rc::Rc::new(members.clone()));
+        members
     }
 
     /// Direct supertypes declared in `.kotlin_builtins` for a Kotlin builtin class.
@@ -1830,5 +1844,14 @@ mod fq_tests {
         assert_ne!(id_a, b.id(), "a reallocated Classpath must not reuse an id");
         let c = Classpath::new(vec![PathBuf::from("/nonexistent/c")]);
         assert_ne!(b.id(), c.id(), "distinct live Classpaths have distinct ids");
+    }
+
+    #[test]
+    fn builtin_member_misses_are_cached() {
+        let cp = Classpath::new(vec![PathBuf::from("/nonexistent/stdlib.jar")]);
+        assert!(cp.builtin_members.borrow().is_empty());
+        assert!(cp.builtin_members("kotlin/String").is_empty());
+        assert!(cp.builtin_members.borrow().contains_key("kotlin/String"));
+        assert!(cp.builtin_members("kotlin/String").is_empty());
     }
 }
