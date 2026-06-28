@@ -685,6 +685,41 @@ fn source_internal_of_ty(t: Ty) -> Option<&'static str> {
     })
 }
 
+/// Curated JVM ABI for the well-known mapped builtins, used only when the classpath cannot supply the
+/// mapped JVM class (a no-classpath compile, e.g. a self-contained snippet with no `-cp`). This keeps
+/// the Kotlin↔JVM mapping a *backend* fact: the member's JVM owner/descriptor live here, so the compiler
+/// core resolves `kotlin/String.length` generically (through `resolve_type`/`functions`) and never spells
+/// `java/lang/String` itself. A real classpath always wins — this is reached only when the class is
+/// genuinely unreadable.
+fn mapped_builtin_fallback(internal: &str) -> Option<LibraryType> {
+    // Each tuple: Kotlin member name, JVM descriptor, logical return type. The owner is left implicit
+    // (the receiver's Kotlin internal, e.g. `kotlin/String`); the constant-pool boundary maps it to the
+    // JVM name, exactly as for a classpath-resolved member — so this fallback adds no `java/lang/*` name.
+    let members: &[(&str, &str, Ty)] = match internal {
+        "kotlin/String" => &[("length", "()I", Ty::Int), ("hashCode", "()I", Ty::Int)],
+        _ => return None,
+    };
+    let members = members
+        .iter()
+        .map(|(name, desc, ret)| {
+            LibraryMember::new((*name).to_string(), vec![], *ret, (*desc).to_string())
+        })
+        .collect();
+    Some(LibraryType {
+        is_public: true,
+        kind: crate::libraries::TypeKind::Class,
+        supertypes: Vec::new(),
+        constructors: Vec::new(),
+        members,
+        companion: Vec::new(),
+        companion_consts: Default::default(),
+        sam_method: None,
+        companion_object: None,
+        value_companion_fns: Vec::new(),
+        value_underlying: None,
+    })
+}
+
 fn nonpublic_ext_receiver_is_typevar(signature: Option<&str>) -> bool {
     signature
         .and_then(parse_method_gsig)
@@ -938,7 +973,14 @@ impl SymbolSource for JvmLibraries {
                 if mapped == internal {
                     return None;
                 }
-                self.cp.find(mapped)?
+                match self.cp.find(mapped) {
+                    Some(ci) => ci,
+                    // The classpath has neither the Kotlin name nor the mapped JVM class — a no-classpath
+                    // compile (no JDK/stdlib to read). Fall back to the backend's curated minimal ABI for
+                    // the well-known mapped builtins so member resolution stays generic and the compiler
+                    // core never has to spell a `java/lang/*` name itself.
+                    None => return mapped_builtin_fallback(internal),
+                }
             }
         };
         let mut constructors = Vec::new();
