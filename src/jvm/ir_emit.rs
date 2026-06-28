@@ -1434,13 +1434,6 @@ fn emit_func_ref_class(c: &crate::ir::IrClass, facade: &str) -> Vec<u8> {
     if returns_void {
         let unit = cw.fieldref("kotlin/Unit", "INSTANCE", "Lkotlin/Unit;");
         inv.getstatic(unit, 1);
-    } else if let Some(vc) = &fr.box_ret {
-        let m = cw.methodref(
-            vc,
-            "box-impl",
-            &format!("({})L{};", type_descriptor(target_ret_jvm), vc),
-        );
-        inv.invokestatic(m, slot_words(target_ret_jvm) as i32, 1);
     } else if target_ret_jvm.is_jvm_scalar() {
         box_prim_free(&mut cw, &mut inv, target_ret_jvm);
     }
@@ -3216,13 +3209,6 @@ impl<'a> Emitter<'a> {
         if returns_void {
             let unit = self.cw.fieldref("kotlin/Unit", "INSTANCE", "Lkotlin/Unit;");
             scratch.getstatic(unit, 1);
-        } else if let Some(vc) = &fr.box_ret {
-            let m = self.cw.methodref(
-                vc,
-                "box-impl",
-                &format!("({})L{};", type_descriptor(ret_jvm), vc),
-            );
-            scratch.invokestatic(m, slot_words(ret_jvm) as i32, 1);
         } else if ret_jvm.is_jvm_scalar() {
             box_prim_free(self.cw, scratch, ret_jvm);
         }
