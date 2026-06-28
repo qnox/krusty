@@ -7,11 +7,11 @@ each new case add branches instead of removing them.
 
 ## Current handoff
 
-Use the current tree as authoritative. As of 2026-06-28, `master` was last pushed at
-`c0989fe compiler: resolve object invoke operator`, with a clean worktree and:
+Use the current tree as authoritative. As of 2026-06-28, the invoke-convention unification pass below
+landed on top of `c0989fe compiler: resolve object invoke operator`, with:
 
 ```text
-scanned: 7351 | krusty-compiled: 2078 | box()=OK: 2078 | skipped(unsupported): 5273 | FAIL: 0
+scanned: 7351 | krusty-compiled: 2079 | box()=OK: 2079 | skipped(unsupported): 5272 | FAIL: 0
 ```
 
 Keep `FAIL: 0`. Use `./run-tests.sh` for validation and do not use `--release` or `--no-verify`.
@@ -24,25 +24,26 @@ Recent fixes that matter for future work:
   `FunctionN.invoke` boundary instead of boxed value-class wrappers.
 - Local object values with a member `operator fun invoke` can now be called as `a(args)`, matching
   `a.invoke(args)`.
+- The two invoke checker/lowering paths were unified (see the invoke-convention pass below). One
+  `ExprLowering::Invoke { receiver, params, kind: InvokeKind }` now covers both a function-value
+  receiver and a member `operator fun invoke`, selected by a single `Checker::record_invoke` and
+  lowered by a single `Lower::lower_invoke`.
 
-Architecture debt added or exposed by those fixes:
+Architecture debt still open in this area:
 
-- `ExprLowering::InvokeOperator` is a new side-channel. It is acceptable as an incremental bridge, but
-  it is not the target design. The next cleanup should fold both `a(args)` and `a.invoke(args)` into a
-  unified selected-call representation, not add more invoke-specific lowering branches.
-- `record_callable_invoke` and `record_invoke_operator` are still separate checker paths. Kotlin's
-  model is one invoke operator convention: function types, member `invoke`, and extension `invoke`
-  should all be selected through the same resolver surface and then lowered from the selected call.
-- Lowering still re-resolves calls that the checker already selected. This is the main source of
-  checker/resolver symbol divergence and should be attacked before adding more feature cases.
+- Lowering still re-resolves the operator member it dispatches: `lower_invoke`'s `InvokeKind::Operator`
+  arm re-runs `resolve_method` / `resolve_instance_member`. The checker already selected that member in
+  `record_invoke`; the user-class case cannot yet carry an IR function id (IR is built after the
+  checker), so closing this requires the `ResolvedCall` handle below, not another side table.
+- Extension `invoke` is still routed through the ordinary extension-call path, not `record_invoke`.
 
 Best next target:
 
 Introduce or grow a `ResolvedCall` table that carries the checker-selected callable identity,
 receiver/callee shape, argument mapping, logical return, physical return, inline/suspend/default/vararg
-facts, and backend handle. Migrate one call family at a time. Good first candidates are callable
-invocation and object/member `invoke`, because they currently demonstrate the same language rule split
-across multiple side channels.
+facts, and backend handle. Migrate one call family at a time. The invoke convention is now a single
+checker/lowerer path (`record_invoke` / `lower_invoke`); promoting its selected member onto a
+`ResolvedCall` is the natural next slice, since it is the remaining re-resolution in that family.
 
 ## Architecture baseline
 
@@ -2873,4 +2874,35 @@ Current verified conformance metric:
 
 ```text
 scanned: 7351 | krusty-compiled: 2070 | box()=OK: 2070 | skipped(unsupported): 5281 | FAIL: 0
+```
+
+Invoke-convention unification pass folded the two parallel invoke paths into one, per the handoff's
+best-next-target. Before this pass the checker had two recorders (`record_callable_invoke`,
+`record_invoke_operator`) writing two `ExprLowering` variants (`CallableInvoke`, `InvokeOperator`), and
+the lowerer matched them in two places (a top-level `Expr::Call` arm for callable invocation and a block
+nested inside the `Expr::Name` callee arm for the operator). That split is exactly the "same language
+rule across multiple side channels" the review flags.
+
+Now there is one `ExprLowering::Invoke { receiver, params, kind }` with
+`InvokeKind::{ Function { ret }, Operator { receiver_ty } }`, one `Checker::record_invoke` that
+dispatches on whether the receiver is a `Ty::Fun` value or an object carrying a member `operator fun
+invoke`, and one `Lower::lower_invoke` that emits the existing target-neutral `IrExpr::InvokeFunction`
+for the function case and the selected member call for the operator case. The four checker call sites
+(`f.invoke(...)` on a function value, a local of function/operator type, a top-level function-typed
+property, and an arbitrary callee expression) all route through `record_invoke`; the local-variable site
+collapsed from a function-vs-operator `if/else` into one call. Generalizing the arbitrary-callee site to
+the operator path (`make()(x)` where the result carries `operator fun invoke`) recovered one corpus
+case.
+
+Behavior was preserved deliberately at the explicit `recv.invoke(...)` member-call site: a non-function
+receiver's explicit `.invoke(...)` still flows through the ordinary member-call path, exactly as before,
+so this pass did not widen that spelling.
+
+Remaining debt in this family is recorded in the handoff: `lower_invoke`'s operator arm still
+re-resolves the member the checker already selected, because the user-class case needs an IR function id
+that does not exist until after the checker. Closing it is a `ResolvedCall` slice, not a new side table.
+Verified with `./run-tests.sh` (all binaries pass; clippy no new findings; `cargo fmt --check` clean):
+
+```text
+scanned: 7351 | krusty-compiled: 2079 | box()=OK: 2079 | skipped(unsupported): 5272 | FAIL: 0
 ```

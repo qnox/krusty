@@ -3091,18 +3091,25 @@ pub enum ExprLowering {
     ExtensionPropertyGet {
         getter: Box<crate::libraries::LibraryCallable>,
     },
-    /// A Kotlin callable-value invocation (`f(args)` or `f.invoke(args)`) selected by the checker.
-    CallableInvoke {
-        function: ExprId,
-        params: Vec<Ty>,
-        ret: Ty,
-    },
-    /// Kotlin `a(args)` operator call resolved as `a.invoke(args)` on a non-function receiver.
-    InvokeOperator {
+    /// A Kotlin invoke-operator call (`a(args)`, equivalently `a.invoke(args)`) selected by the
+    /// checker. The one convention covers both a function VALUE receiver (`Ty::Fun`, lowered to a
+    /// direct function invocation) and a non-function receiver carrying a member `operator fun invoke`
+    /// (lowered to that member call) — distinguished by [`InvokeKind`].
+    Invoke {
         receiver: ExprId,
-        receiver_ty: Ty,
         params: Vec<Ty>,
+        kind: InvokeKind,
     },
+}
+
+/// How a selected [`ExprLowering::Invoke`] is realized: the receiver is either a function value or an
+/// object whose member `invoke` operator is called.
+#[derive(Clone, Debug)]
+pub enum InvokeKind {
+    /// Receiver is a function value (`Ty::Fun`); lowering emits a direct function invocation.
+    Function { ret: Ty },
+    /// Receiver carries a member `operator fun invoke`; lowering calls that member.
+    Operator { receiver_ty: Ty },
 }
 
 #[derive(Clone, Debug)]
@@ -3851,40 +3858,11 @@ impl<'a> Checker<'a> {
         self.expr_lowers
             .insert(e, ExprLowering::LocalFunction { stmt_id });
     }
-    fn record_callable_invoke(
-        &mut self,
-        call: ExprId,
-        function: ExprId,
-        sig: &crate::types::FnSig,
-        args: &[ExprId],
-        arg_tys: &[Ty],
-        span: Span,
-    ) -> Ty {
-        if sig.params.len() != arg_tys.len() {
-            self.diags.error(
-                span,
-                format!(
-                    "function value expects {} args, got {}",
-                    sig.params.len(),
-                    arg_tys.len()
-                ),
-            );
-        } else {
-            for (i, (p, a)) in sig.params.iter().zip(arg_tys).enumerate() {
-                self.expect_assignable(*p, *a, self.span(args[i]), "argument");
-            }
-            self.expr_lowers.insert(
-                call,
-                ExprLowering::CallableInvoke {
-                    function,
-                    params: sig.params.clone(),
-                    ret: sig.ret,
-                },
-            );
-        }
-        sig.ret
-    }
-    fn record_invoke_operator(
+    /// Select the Kotlin invoke-operator convention for `receiver(args)`. One entry point covers both
+    /// a function-value receiver (`Ty::Fun`) and a non-function receiver with a member `operator fun
+    /// invoke`, recording a single [`ExprLowering::Invoke`] and returning the call's result type.
+    /// `None` only when the receiver is neither (the caller reports its own "not callable" error).
+    fn record_invoke(
         &mut self,
         call: ExprId,
         receiver: ExprId,
@@ -3893,22 +3871,31 @@ impl<'a> Checker<'a> {
         arg_tys: &[Ty],
         span: Span,
     ) -> Option<Ty> {
-        let member = crate::module_symbols::ModuleSymbols::new(self.syms)
-            .functions(CALLABLE_INVOKE_OPERATOR, Some(receiver_ty))
-            .overloads
-            .into_iter()
-            .find(|o| o.kind == crate::libraries::FnKind::Member)
-            .map(|o| (o.callable.params, o.callable.ret))
-            .or_else(|| {
-                crate::call_resolver::resolve_instance_member(
-                    &*self.syms.libraries,
-                    receiver_ty,
-                    CALLABLE_INVOKE_OPERATOR,
-                    arg_tys,
-                )
-                .map(|m| (m.member.params, m.ret))
-            })?;
-        let (params, ret) = member;
+        let (params, ret, kind) = match receiver_ty {
+            Ty::Fun(sig) => (
+                sig.params.clone(),
+                sig.ret,
+                InvokeKind::Function { ret: sig.ret },
+            ),
+            _ => {
+                let (params, ret) = crate::module_symbols::ModuleSymbols::new(self.syms)
+                    .functions(CALLABLE_INVOKE_OPERATOR, Some(receiver_ty))
+                    .overloads
+                    .into_iter()
+                    .find(|o| o.kind == crate::libraries::FnKind::Member)
+                    .map(|o| (o.callable.params, o.callable.ret))
+                    .or_else(|| {
+                        crate::call_resolver::resolve_instance_member(
+                            &*self.syms.libraries,
+                            receiver_ty,
+                            CALLABLE_INVOKE_OPERATOR,
+                            arg_tys,
+                        )
+                        .map(|m| (m.member.params, m.ret))
+                    })?;
+                (params, ret, InvokeKind::Operator { receiver_ty })
+            }
+        };
         if params.len() != arg_tys.len() {
             self.diags.error(
                 span,
@@ -3924,10 +3911,10 @@ impl<'a> Checker<'a> {
             }
             self.expr_lowers.insert(
                 call,
-                ExprLowering::InvokeOperator {
+                ExprLowering::Invoke {
                     receiver,
-                    receiver_ty,
                     params,
+                    kind,
                 },
             );
         }
@@ -8022,10 +8009,12 @@ impl<'a> Checker<'a> {
                         return c.ret;
                     }
                 }
-                if name == CALLABLE_INVOKE_OPERATOR {
-                    if let Ty::Fun(sig) = rt {
-                        return self
-                            .record_callable_invoke(call, receiver, sig, args, &arg_tys, span);
+                // Explicit `f.invoke(args)` on a function VALUE — the same invoke convention as `f(args)`.
+                // A non-function receiver's explicit `.invoke(...)` stays on the normal member path.
+                if name == CALLABLE_INVOKE_OPERATOR && matches!(rt, Ty::Fun(_)) {
+                    if let Some(ret) = self.record_invoke(call, receiver, rt, args, &arg_tys, span)
+                    {
+                        return ret;
                     }
                 }
                 // A non-public (`@InlineOnly`) extension the backend SPLICES (no callable method to call):
@@ -8228,16 +8217,13 @@ impl<'a> Checker<'a> {
             }
             // free function call: name(args)
             Expr::Name(fname) => {
-                // Calling a local variable of function type: `val f: () -> String = { "OK" }; f()`.
+                // Calling a local of function type (`val f: () -> String = …; f()`) or one carrying a
+                // member `operator fun invoke` — both go through the one invoke convention.
                 if let Some(local) = self.lookup(&fname) {
-                    if let Ty::Fun(s) = local.ty {
-                        let arg_tys: Vec<Ty> = args.iter().map(|a| self.expr(*a)).collect();
-                        return self.record_callable_invoke(call, callee, s, args, &arg_tys, span);
-                    }
                     let receiver_ty = local.ty;
                     let arg_tys: Vec<Ty> = args.iter().map(|a| self.expr(*a)).collect();
                     if let Some(ret) =
-                        self.record_invoke_operator(call, callee, receiver_ty, args, &arg_tys, span)
+                        self.record_invoke(call, callee, receiver_ty, args, &arg_tys, span)
                     {
                         return ret;
                     }
@@ -8247,9 +8233,13 @@ impl<'a> Checker<'a> {
                 // above) — read the property and `invoke` it; the backend reads the facade getter then
                 // calls `FunctionN.invoke`.
                 if self.lookup(&fname).is_none() {
-                    if let Some(&(Ty::Fun(s), _, _)) = self.syms.props.get(&fname) {
+                    if let Some(&(rt @ Ty::Fun(_), _, _)) = self.syms.props.get(&fname) {
                         let arg_tys: Vec<Ty> = args.iter().map(|a| self.expr(*a)).collect();
-                        return self.record_callable_invoke(call, callee, s, args, &arg_tys, span);
+                        if let Some(ret) =
+                            self.record_invoke(call, callee, rt, args, &arg_tys, span)
+                        {
+                            return ret;
+                        }
                     }
                 }
                 // Local function call — resolved before top-level funs and constructors.
@@ -9023,11 +9013,13 @@ impl<'a> Checker<'a> {
                 Ty::Error
             }
             _ => {
-                // Check if callee is a Fun type (any expression, e.g. a local variable).
+                // An arbitrary callee expression (e.g. `make()(x)`): invoke it if it is a function
+                // value or carries a member `operator fun invoke`.
                 let callee_ty = self.expr(callee);
                 let arg_tys: Vec<Ty> = args.iter().map(|a| self.expr(*a)).collect();
-                if let Ty::Fun(s) = callee_ty {
-                    return self.record_callable_invoke(call, callee, s, args, &arg_tys, span);
+                if let Some(ret) = self.record_invoke(call, callee, callee_ty, args, &arg_tys, span)
+                {
+                    return ret;
                 }
                 if callee_ty != Ty::Error {
                     self.diags.error(span, "expression is not callable");
