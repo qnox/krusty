@@ -5299,14 +5299,33 @@ impl<'a> Lower<'a> {
             }
         }
         let iface_internal = class_internal(file, iface_name);
-        let methods: Vec<(String, Vec<Ty>, Ty)> = self
-            .syms
-            .classes
-            .get(iface_name)?
-            .methods
-            .iter()
-            .map(|(n, s)| (n.clone(), s.params.clone(), s.ret))
-            .collect();
+        // Collect the delegated interface's methods AND those inherited from its super-interfaces
+        // (`interface Second : First` → forward `First`'s methods too): a `: Second by s` class must
+        // implement every method Second exposes, not just the ones Second declares directly. Walk the
+        // module-`ClassSig` super-interface graph breadth-first, deduping by name + parameter types.
+        let mut methods: Vec<(String, Vec<Ty>, Ty)> = Vec::new();
+        let mut seen_ifaces: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut queue = vec![iface_name.to_string()];
+        while let Some(cur) = queue.pop() {
+            if !seen_ifaces.insert(cur.clone()) {
+                continue;
+            }
+            // A classpath (non-module) interface in the delegated hierarchy can't have its method set
+            // enumerated here, so its forwarders would be missing — bail (skip the file) rather than
+            // emit a class with un-forwarded abstract methods (an `AbstractMethodError` at runtime).
+            let cs = self.syms.classes.get(&cur)?;
+            for (n, s) in &cs.methods {
+                if !methods.iter().any(|(on, op, _)| on == n && *op == s.params) {
+                    methods.push((n.clone(), s.params.clone(), s.ret));
+                }
+            }
+            // Super-interfaces (and any base) are stored by internal name; the module table is keyed by
+            // simple name, so recurse on the last path segment (same-module interfaces resolve; a
+            // classpath super-interface simply isn't found and is skipped, as before).
+            for sup in cs.interfaces.iter().chain(cs.super_internal.iter()) {
+                queue.push(sup.rsplit('/').next().unwrap_or(sup).to_string());
+            }
+        }
         for (mname, params, ret) in methods {
             let params_ir: Vec<Ty> = params.iter().map(|t| ty_to_ir(*t)).collect();
             let descriptor = self.syms.libraries.method_descriptor(&params, ret)?;
