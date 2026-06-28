@@ -22,3 +22,28 @@ fn safe_calls_run() {
     };
     assert_eq!(out, "OK");
 }
+
+/// A safe call to a SAME-MODULE extension function (`recv?.ext()`): the checker resolves the module
+/// extension on the non-null receiver and the lowerer emits the static extension call guarded by the
+/// null check. Member/classpath lookups don't see module extensions, so this is its own path.
+#[test]
+fn safe_call_to_module_extension() {
+    let Some(java_home) = common::java_home() else {
+        return;
+    };
+    let Some(stdlib) = common::stdlib_jar() else {
+        return;
+    };
+    let src = "fun String.shout(): String = this + \"!\"\n\
+fun maybe(s: String?): String = s?.shout() ?: \"none\"\n\
+fun box(): String {\n\
+    if (maybe(\"hi\") != \"hi!\") return \"f1\"\n\
+    if (maybe(null) != \"none\") return \"f2\"\n\
+    return \"OK\"\n\
+}\n";
+    let jdk = std::path::PathBuf::from(format!("{java_home}/lib/modules"));
+    let Some(out) = common::compile_and_run_box(src, "S", &[stdlib], Some(&jdk)) else {
+        return;
+    };
+    assert_eq!(out, "OK");
+}
