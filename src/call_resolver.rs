@@ -371,16 +371,19 @@ impl<'a> CallResolver<'a> {
         ranks.dedup();
 
         for rank in ranks {
-            let mut matches: Vec<&FunctionInfo> = fs
+            let mut matches: Vec<(&FunctionInfo, Vec<Ty>)> = fs
                 .overloads
                 .iter()
+                .filter_map(|o| {
+                    let logical = self.bound_logical_params(o, receiver, type_args);
+                    (logical.len() == args.len() + 1).then_some((o, logical))
+                })
                 .filter(|o| {
-                    o.kind == FnKind::Extension
-                        && o.receiver_rank != u32::MAX
-                        && (o.public || (allow_must_inline && o.flags.inline.must_inline()))
-                        && o.receiver_rank == rank
-                        && o.callable.params.len() == args.len() + 1
-                        && o.callable.params[1..]
+                    o.0.kind == FnKind::Extension
+                        && o.0.receiver_rank != u32::MAX
+                        && (o.0.public || (allow_must_inline && o.0.flags.inline.must_inline()))
+                        && o.0.receiver_rank == rank
+                        && o.1[1..]
                             .iter()
                             .zip(args)
                             .all(|(p, a)| self.arg_fits_or_subtype(p, a))
@@ -389,7 +392,7 @@ impl<'a> CallResolver<'a> {
             if matches.is_empty() {
                 continue;
             }
-            matches.sort_by_key(|o| o.overload_rank);
+            matches.sort_by_key(|o| o.0.overload_rank);
             let specific_over = |a: &[Ty], b: &[Ty]| -> bool {
                 a.iter()
                     .zip(b)
@@ -397,16 +400,11 @@ impl<'a> CallResolver<'a> {
             };
             let best = (0..matches.len())
                 .find(|&i| {
-                    (0..matches.len()).all(|j| {
-                        j == i
-                            || specific_over(
-                                &matches[i].callable.params[1..],
-                                &matches[j].callable.params[1..],
-                            )
-                    })
+                    (0..matches.len())
+                        .all(|j| j == i || specific_over(&matches[i].1[1..], &matches[j].1[1..]))
                 })
                 .unwrap_or(0);
-            let o = matches[best];
+            let o = matches[best].0;
             crate::trace_compiler!(
                 "resolve",
                 "extension {name} recv={receiver:?} args={args:?} inline={} -> {}.{}{} ret={:?}",
@@ -424,6 +422,22 @@ impl<'a> CallResolver<'a> {
             allow_must_inline
         );
         None
+    }
+
+    fn bound_logical_params(&self, o: &FunctionInfo, receiver: Ty, type_args: &[Ty]) -> Vec<Ty> {
+        o.generic_sig
+            .as_ref()
+            .map(|gsig| {
+                let mut binds = std::collections::HashMap::new();
+                for (f, t) in gsig.formals.iter().zip(type_args) {
+                    binds.insert(f.clone(), *t);
+                }
+                if let Some(recv_sig) = gsig.params.first() {
+                    unify_gsig(recv_sig, receiver, &mut binds);
+                }
+                gsig.params.iter().map(|p| gsig_to_ty(p, &binds)).collect()
+            })
+            .unwrap_or_else(|| o.callable.params.clone())
     }
 
     fn bind_extension_callable(

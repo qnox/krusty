@@ -688,9 +688,21 @@ pub struct FuncRef {
     pub call_interface: bool,
     /// The LOGICAL `invoke` parameter types. For `VirtualUnbound`, `param_tys[0]` is the receiver
     /// (excluded from the method descriptor / signature). The emitter derives the JVM signature and
-    /// call descriptor from these + `ret_ty`.
+    /// reference metadata signature from these + `ret_ty`.
     pub param_tys: Vec<Ty>,
     pub ret_ty: Ty,
+    /// The PHYSICAL target-call parameter/return types after backend lowerings such as JVM value-class
+    /// erasure. Same shape as `param_tys` (including the unbound receiver slot when present).
+    pub target_param_tys: Vec<Ty>,
+    pub target_ret_ty: Ty,
+    /// Per logical invoke parameter: `Some(value_class_internal)` means the erased Object argument is a
+    /// boxed value-class instance and must be unboxed before the physical target call.
+    pub unbox_params: Vec<Option<String>>,
+    /// Parallel to `unbox_params`: nullable value-class parameters unbox `null` to a null underlying.
+    pub unbox_param_nullable: Vec<bool>,
+    /// `Some(value_class_internal)` means the physical target returns the value-class underlying and the
+    /// function-reference `invoke` must box it back before returning Object.
+    pub box_ret: Option<String>,
 }
 
 /// A synthesized property-reference class's metadata (`Type::prop` → `Type$prop$N`): the referenced
