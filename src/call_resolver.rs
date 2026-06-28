@@ -125,6 +125,10 @@ fn logical_ret_from_metadata(ret_class: Option<Ty>, fallback: Ty) -> Ty {
         .unwrap_or(fallback)
 }
 
+fn selected_return_type(ret_class: Option<Ty>, ret_nullable: bool, fallback: Ty) -> Ty {
+    nullable_return_type(logical_ret_from_metadata(ret_class, fallback), ret_nullable)
+}
+
 /// The arg-dependent binding layer over a [`SymbolSource`]: it selects overloads and binds generics for
 /// a specific call site. Holds the oracle by reference — cheap to construct per query.
 pub struct CallResolver<'a> {
@@ -276,8 +280,11 @@ impl<'a> CallResolver<'a> {
                 gsig_to_ty(&gsig.ret, &binds)
             })
             .unwrap_or(*ret);
-        let ret_ty = logical_ret_from_metadata(o.ret_class, ret_ty);
-        let ret_ty = if o.flags.suspend { c.ret } else { ret_ty };
+        let ret_ty = selected_return_type(
+            o.ret_class,
+            o.ret_nullable,
+            if o.flags.suspend { c.ret } else { ret_ty },
+        );
 
         crate::trace_compiler!(
             "resolve",
@@ -539,7 +546,7 @@ impl<'a> CallResolver<'a> {
                         gsig_to_ty(&gsig.ret, &binds)
                     })
                     .unwrap_or(c.ret);
-                let ret_ty = logical_ret_from_metadata(o.ret_class, ret_ty);
+                let ret_ty = selected_return_type(o.ret_class, o.ret_nullable, ret_ty);
                 return Some(LibraryCallable {
                     owner: c.owner.clone(),
                     name: c.name.clone(),
@@ -702,7 +709,7 @@ impl<'a> CallResolver<'a> {
                     gsig_to_ty(&gsig.ret, &binds)
                 })
                 .unwrap_or(c.ret);
-            let ret_ty = logical_ret_from_metadata(o.ret_class, ret_ty);
+            let ret_ty = selected_return_type(o.ret_class, o.ret_nullable, ret_ty);
             return Some(LibraryCallable {
                 owner: c.owner.clone(),
                 name: c.name.clone(),
@@ -751,7 +758,7 @@ impl<'a> CallResolver<'a> {
                     gsig_to_ty(&gsig.ret, &binds)
                 })
                 .unwrap_or(c.ret);
-            let logical_ret = logical_ret_from_metadata(o.ret_class, recovered);
+            let logical_ret = selected_return_type(o.ret_class, o.ret_nullable, recovered);
             return Some(LibraryCallable {
                 owner: c.owner.clone(),
                 name: c.name.clone(),
@@ -1368,6 +1375,35 @@ mod tests {
         }
     }
 
+    fn top_level_nullable_string_info() -> FunctionInfo {
+        let callable = LibraryCallable {
+            owner: "kotlin/FooKt".to_string(),
+            name: "maybe".to_string(),
+            params: vec![],
+            ret: Ty::String,
+            physical_ret: Ty::String,
+            descriptor: "()Ljava/lang/String;".to_string(),
+            inline: InlineKind::None,
+            default_call: false,
+            vararg_elem: None,
+            signature: None,
+            origin: Origin::Library,
+        };
+        FunctionInfo {
+            kind: FnKind::TopLevel,
+            receiver: None,
+            ret_nullable: true,
+            ret_class: None,
+            flags: FnFlags::default(),
+            callable,
+            public: true,
+            receiver_rank: 0,
+            overload_rank: 0,
+            generic_sig: None,
+            call_sig: CallSig::default(),
+        }
+    }
+
     #[test]
     fn top_level_default_callable_preserves_metadata_return_type() {
         let source = FakeSource {
@@ -1381,5 +1417,19 @@ mod tests {
         assert!(call.default_call);
         assert_eq!(call.ret, Ty::UInt);
         assert_eq!(call.physical_ret, Ty::Int);
+    }
+
+    #[test]
+    fn top_level_callable_preserves_nullable_metadata_return() {
+        let source = FakeSource {
+            name: "maybe",
+            info: top_level_nullable_string_info(),
+        };
+        let resolver = CallResolver::new(&source);
+        let call = resolver
+            .resolve_top_level_callable("maybe", &[], &[])
+            .expect("nullable callable should resolve");
+        assert_eq!(call.ret, Ty::nullable(Ty::String));
+        assert_eq!(call.physical_ret, Ty::String);
     }
 }
