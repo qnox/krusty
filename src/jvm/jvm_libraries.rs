@@ -652,6 +652,10 @@ fn metadata_return_ty(class: Option<&str>) -> Option<Ty> {
     class.map(super::classpath::kotlin_name_to_ty)
 }
 
+fn kotlin_mapped_member_return_is_nullable(internal: &str, name: &str) -> bool {
+    matches!(internal, "kotlin/collections/MutableMap" | "java/util/Map") && name == "put"
+}
+
 /// Parse a class generic signature into its formal type-parameter names and its supertypes (the
 /// superclass followed by interfaces) as signature nodes, e.g. `java/util/List`'s
 /// `<E:Ljava/lang/Object;>Ljava/lang/Object;Ljava/util/Collection<TE;>;` → (`[E]`, `[Object,
@@ -905,6 +909,9 @@ impl SymbolSource for JvmLibraries {
             let (params, ret) = parse_method_desc(&m.descriptor);
             let mut member = LibraryMember::new(m.name.clone(), params, ret, m.descriptor.clone());
             member.signature = m.signature.clone();
+            if kotlin_mapped_member_return_is_nullable(internal, &member.name) {
+                member.ret_nullable = true;
+            }
             if m.name == "<init>" {
                 constructors.push(member);
             } else if m.is_static() {
@@ -1204,7 +1211,8 @@ impl SymbolSource for JvmLibraries {
                             .is_inline_callable(&c.owner, &c.name, &c.descriptor, &params);
                     let meta_ret = self.cp.metadata_return(&c.owner, meta_name);
                     let ret_nullable = meta_ret.as_ref().is_some_and(|r| r.nullable);
-                    let ret_class = metadata_return_ty(meta_ret.as_ref().map(|r| r.class.as_str()));
+                    let ret_class =
+                        metadata_return_ty(meta_ret.as_ref().and_then(|r| r.class.as_deref()));
                     // Logical return, recovered RECEIVER-substituted (arg-independent): `<T> T.takeIf(…): T?`
                     // → `receiver`. A type var the receiver doesn't bind (`fold`'s `R`) stays as the erased
                     // physical type — arg-binding selection in `CallResolver` refines that.
@@ -1524,7 +1532,9 @@ impl SymbolSource for JvmLibraries {
                     },
                 };
                 let meta_ret = self.cp.metadata_return(&c.owner, meta_name);
-                let ret_class = metadata_return_ty(meta_ret.as_ref().map(|r| r.class.as_str()));
+                let ret_class =
+                    metadata_return_ty(meta_ret.as_ref().and_then(|r| r.class.as_deref()));
+                let ret_nullable = meta_ret.as_ref().is_some_and(|r| r.nullable);
                 // A suspend method's physical return is erased to `Object`; recover the LOGICAL Kotlin
                 // return type from the selected metadata return class (`helper(): Int`), so the call types
                 // correctly. The physical (erased) return stays `Object` for the emit.
@@ -1546,7 +1556,7 @@ impl SymbolSource for JvmLibraries {
                 overloads.push(FunctionInfo {
                     kind: FnKind::TopLevel,
                     receiver: None,
-                    ret_nullable: false,
+                    ret_nullable,
                     ret_class,
                     public: c.public,
                     receiver_rank: 0,
