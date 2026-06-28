@@ -21,7 +21,8 @@ use crate::libraries::{
     RuntimeOp,
 };
 use crate::resolve::{
-    CtorDefaultValue, ExprLowering, LambdaCapture, Signature, StmtLowering, SymbolTable, TypeInfo,
+    CtorDefaultValue, ExprLowering, InvokeKind, LambdaCapture, Signature, StmtLowering,
+    SymbolTable, TypeInfo,
 };
 use crate::types::Ty;
 
@@ -10752,6 +10753,91 @@ impl<'a> Lower<'a> {
 
     /// Expand a call `param(args)` to an inlined lambda parameter: bind the lambda's parameters to the
     /// (evaluated) arguments, then lower its body in place. The body's value is the call's value.
+    /// Lower a selected invoke-operator call (`ExprLowering::Invoke`). A function-value receiver
+    /// becomes a direct function invocation (splicing through an inline lambda parameter when the
+    /// receiver names one); an operator receiver becomes the selected member call (a user-class
+    /// `invoke` method, or a classpath member resolved from library data).
+    fn lower_invoke(
+        &mut self,
+        e: AstExprId,
+        receiver: AstExprId,
+        params: &[Ty],
+        kind: InvokeKind,
+        args: &[AstExprId],
+    ) -> Option<u32> {
+        match kind {
+            InvokeKind::Function { ret } => {
+                if let Expr::Name(fname) = self.afile.expr(receiver).clone() {
+                    if let Some(idx) = self.inline_lambdas.iter().rposition(|(n, ..)| *n == fname) {
+                        return self.lower_inline_lambda_invoke(idx, args);
+                    }
+                }
+                let func = self.expr(receiver)?;
+                let mut ir_args = Vec::with_capacity(args.len());
+                for (&arg, param) in args.iter().zip(params) {
+                    ir_args.push(self.lower_arg(arg, &ty_to_ir(*param))?);
+                }
+                Some(self.ir.add_expr(IrExpr::InvokeFunction {
+                    func,
+                    args: ir_args,
+                    ret: ty_to_ir(ret),
+                }))
+            }
+            InvokeKind::Operator { receiver_ty: rt } => {
+                // A user class with a member `operator fun invoke`: a direct method call.
+                if let Some((class, index, fid, mret)) = self
+                    .class_of(rt)
+                    .map(|ci| ci.internal.clone())
+                    .and_then(|i| self.resolve_method(&i, "invoke"))
+                {
+                    let recv = self.expr(receiver)?;
+                    let target_params = self.ir.functions[fid as usize].params.clone();
+                    let a = self.lower_args(args, &target_params)?;
+                    let call = self.ir.add_expr(IrExpr::MethodCall {
+                        class,
+                        index,
+                        receiver: recv,
+                        args: a.into_iter().map(Some).collect(),
+                    });
+                    return Some(self.coerce_generic_read(call, e, mret));
+                }
+                // A classpath type whose `invoke` member comes from library data.
+                let Ty::Obj(internal, _) = rt else {
+                    return None;
+                };
+                let resolved = crate::call_resolver::resolve_instance_member(
+                    &*self.syms.libraries,
+                    rt,
+                    "invoke",
+                    params,
+                )?;
+                let recv = self.expr(receiver)?;
+                let ret = resolved.ret;
+                let member = resolved.member;
+                let physical_ret = member.physical_ret;
+                let mut a = Vec::new();
+                for (i, &arg) in args.iter().enumerate() {
+                    match member.params.get(i) {
+                        Some(p) => a.push(self.lower_arg(arg, &ty_to_ir(*p))?),
+                        None => a.push(self.expr(arg)?),
+                    }
+                }
+                let owner = member.owner.unwrap_or_else(|| internal.to_string());
+                let call = self.ir.add_expr(IrExpr::Call {
+                    callee: Callee::Virtual {
+                        owner,
+                        name: member.name,
+                        descriptor: member.descriptor,
+                        interface: member.is_interface,
+                    },
+                    dispatch_receiver: Some(recv),
+                    args: a,
+                });
+                Some(self.coerce_erased(call, ret, physical_ret))
+            }
+        }
+    }
+
     fn lower_inline_lambda_invoke(&mut self, idx: usize, args: &[AstExprId]) -> Option<u32> {
         let (_, lam_params, lam_body, lam_param_tys, lam_label) = self.inline_lambdas[idx].clone();
         if args.len() != lam_params.len() || lam_params.len() != lam_param_tys.len() {
@@ -13329,13 +13415,13 @@ impl<'a> Lower<'a> {
             Expr::Call { args, .. }
                 if matches!(
                     self.info.expr_lowers.get(&e),
-                    Some(ExprLowering::CallableInvoke { .. })
+                    Some(ExprLowering::Invoke { .. })
                 ) =>
             {
-                let ExprLowering::CallableInvoke {
-                    function,
+                let ExprLowering::Invoke {
+                    receiver,
                     params,
-                    ret,
+                    kind,
                 } = self.info.expr_lowers.get(&e).cloned()?
                 else {
                     return None;
@@ -13343,21 +13429,7 @@ impl<'a> Lower<'a> {
                 if params.len() != args.len() {
                     return None;
                 }
-                if let Expr::Name(fname) = self.afile.expr(function).clone() {
-                    if let Some(idx) = self.inline_lambdas.iter().rposition(|(n, ..)| *n == fname) {
-                        return self.lower_inline_lambda_invoke(idx, &args);
-                    }
-                }
-                let func = self.expr(function)?;
-                let mut ir_args = Vec::with_capacity(args.len());
-                for (&arg, param) in args.iter().zip(&params) {
-                    ir_args.push(self.lower_arg(arg, &ty_to_ir(*param))?);
-                }
-                self.ir.add_expr(IrExpr::InvokeFunction {
-                    func,
-                    args: ir_args,
-                    ret: ty_to_ir(ret),
-                })
+                self.lower_invoke(e, receiver, &params, kind, &args)?
             }
             Expr::Call { .. }
                 if matches!(
@@ -13414,66 +13486,6 @@ impl<'a> Lower<'a> {
             Expr::Call { callee, args } => match self.afile.expr(callee).clone() {
                 // Local top-level function, or constructor `C(args)`.
                 Expr::Name(fname) => {
-                    if let Some(ExprLowering::InvokeOperator {
-                        receiver,
-                        receiver_ty,
-                        params,
-                    }) = self.info.expr_lowers.get(&e).cloned()
-                    {
-                        let rt = receiver_ty;
-                        if let Some((class, index, fid, mret)) = self
-                            .class_of(rt)
-                            .map(|ci| ci.internal.clone())
-                            .and_then(|i| self.resolve_method(&i, "invoke"))
-                        {
-                            if params.len() != args.len() {
-                                return None;
-                            }
-                            let recv = self.expr(receiver)?;
-                            let target_params = self.ir.functions[fid as usize].params.clone();
-                            let a = self.lower_args(&args, &target_params)?;
-                            let call = self.ir.add_expr(IrExpr::MethodCall {
-                                class,
-                                index,
-                                receiver: recv,
-                                args: a.into_iter().map(Some).collect(),
-                            });
-                            return Some(self.coerce_generic_read(call, e, mret));
-                        }
-                        if let Ty::Obj(internal, _) = rt {
-                            if let Some(resolved) = crate::call_resolver::resolve_instance_member(
-                                &*self.syms.libraries,
-                                rt,
-                                "invoke",
-                                &params,
-                            ) {
-                                let recv = self.expr(receiver)?;
-                                let ret = resolved.ret;
-                                let member = resolved.member;
-                                let physical_ret = member.physical_ret;
-                                let mut a = Vec::new();
-                                for (i, &arg) in args.iter().enumerate() {
-                                    match member.params.get(i) {
-                                        Some(p) => a.push(self.lower_arg(arg, &ty_to_ir(*p))?),
-                                        None => a.push(self.expr(arg)?),
-                                    }
-                                }
-                                let owner = member.owner.unwrap_or_else(|| internal.to_string());
-                                let call = self.ir.add_expr(IrExpr::Call {
-                                    callee: Callee::Virtual {
-                                        owner,
-                                        name: member.name,
-                                        descriptor: member.descriptor,
-                                        interface: member.is_interface,
-                                    },
-                                    dispatch_receiver: Some(recv),
-                                    args: a,
-                                });
-                                return Some(self.coerce_erased(call, ret, physical_ret));
-                            }
-                        }
-                        return None;
-                    }
                     // NAMED-ARGUMENT call to a CLASSPATH top-level function (`foo(b = …, a = …)`): reorder
                     // the arguments into parameter order (from the callee's `@Metadata` names) so the
                     // positional lowering below sees them positionally. Same-file/module functions have
