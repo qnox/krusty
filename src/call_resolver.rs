@@ -452,10 +452,7 @@ impl<'a> CallResolver<'a> {
             None => ret_ty,
             _ => ret_ty,
         };
-        let nullable_scope_filter = matches!(c.name.as_str(), "takeIf" | "takeUnless")
-            && c.descriptor
-                == "(Ljava/lang/Object;Lkotlin/jvm/functions/Function1;)Ljava/lang/Object;";
-        let ret_ty = if ret_ty.boxed_ref().is_some() && (o.ret_nullable || nullable_scope_filter) {
+        let ret_ty = if ret_ty.boxed_ref().is_some() && o.ret_nullable {
             Ty::nullable(ret_ty)
         } else {
             ret_ty
@@ -1097,10 +1094,7 @@ pub fn resolve_instance(
     args: &[Ty],
 ) -> Option<LibraryMember> {
     select_instance_info(lib, Ty::obj(internal), name, args).map(|o| {
-        let ret = nullable_return_type(
-            o.callable.ret,
-            o.ret_nullable || is_nullable_map_put_return(&o.callable),
-        );
+        let ret = nullable_return_type(o.callable.ret, o.ret_nullable);
         let mut member = LibraryMember::new(
             o.callable.name,
             o.callable.params,
@@ -1162,15 +1156,8 @@ pub fn resolve_instance_member(
     } else {
         o.callable.ret
     };
-    let ret = nullable_return_type(
-        ret,
-        o.ret_nullable || is_nullable_map_put_return(&o.callable),
-    );
+    let ret = nullable_return_type(ret, o.ret_nullable);
     Some(ResolvedMember { ret, member })
-}
-
-fn is_nullable_map_put_return(c: &LibraryCallable) -> bool {
-    c.name == "put" && c.descriptor == "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;"
 }
 
 fn nullable_return_type(ret: Ty, ret_nullable: bool) -> Ty {

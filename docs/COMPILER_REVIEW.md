@@ -2692,9 +2692,11 @@ cargo run --profile gate --bin survey -- target/cache/box-corpus/2.4.0/compiler/
 ```
 
 Hundred-thirty-ninth-pass current-state audit after the platform-provider cleanup found the next
-systemic blocker: nullable generic return semantics are still not represented as first-class overload
-data. The green fixes for `takeIf`/`takeUnless` and `MutableMap.put` required descriptor/name checks in
-`call_resolver.rs`:
+systemic blocker: nullable generic return semantics were still not represented as first-class overload
+data. The first cleanup removed the most obvious resolver hardcodes: `takeIf`/`takeUnless` now use
+stdlib `@Metadata` nullability even when the return has no concrete class (`T?`), and `MutableMap.put`
+nullability is supplied by the JVM library provider for mapped Kotlin/JVM map members. The generic
+resolver no longer matches these JVM descriptors:
 
 ```text
 takeIf/takeUnless + (Object, Function1)Object => T?
@@ -2712,17 +2714,15 @@ buildMap/kt64066.kt: NullPointerException from Map.put returning null previous v
 withoutAnnotation.kt: VerifyError, lambda returning Object where String was declared
 ```
 
-The local fixes are intentionally documented as temporary compatibility patches, not as a desired
-architecture:
+The remaining local fixes are still compatibility patches, not the desired architecture:
 
-- `CallResolver::bind_extension_callable` hardcodes nullable scope filters by name and descriptor.
-- `is_nullable_map_put_return` hardcodes `put(Object,Object):Object`.
 - `Lower::coerce_erased_call_result` now correctly unboxes erased non-null scalar returns at use sites.
 - Lambda synthesis now casts reference returns to the lambda signature return type before `areturn`.
 
-The generic fix should be to carry return nullability in `GSig`, not to add more descriptor exceptions.
-`GenericSig.ret` currently stores only a type tree, so `T` and `T?` collapse. Replace it with a
-`GType { kind, nullable }` (or equivalent) and propagate that through `gsig_to_ty` / return binding:
+The broader generic fix should still carry return nullability in `GSig`, not add more descriptor
+exceptions. `GenericSig.ret` currently stores only a type tree, so `T` and `T?` collapse unless the
+provider has a side-channel `FunctionInfo.ret_nullable`. Replace it with a `GType { kind, nullable }`
+(or equivalent) and propagate that through `gsig_to_ty` / return binding:
 
 ```rust
 pub struct GType {
@@ -2739,10 +2739,8 @@ logical_ret_nullable: bool,
 physical_ret: Ty,
 ```
 
-or a single `ReturnShape { logical: Ty, nullable: bool, physical: Ty }`. After that:
+or a single `ReturnShape { logical: Ty, nullable: bool, physical: Ty }`. Remaining deletion targets:
 
-- delete `nullable_scope_filter`;
-- delete `is_nullable_map_put_return`;
 - stop using JVM descriptors to recover source-level nullability;
 - make lambda return coercion consume `ReturnShape` instead of guessing from `Ty`;
 - add a grep gate that rejects new descriptor strings in `call_resolver.rs`.

@@ -236,7 +236,7 @@ struct MetaCallable {
 
 #[derive(Clone, Debug)]
 pub struct MetadataReturn {
-    pub class: String,
+    pub class: Option<String>,
     pub nullable: bool,
 }
 
@@ -359,13 +359,16 @@ impl Classpath {
     pub fn metadata_return(&self, internal: &str, fn_name: &str) -> Option<MetadataReturn> {
         let meta = self.class_meta(internal);
         meta.by_kotlin_name.get(fn_name).and_then(|idxs| {
-            idxs.iter().rev().find_map(|&i| {
-                let c = &meta.callables[i];
-                Some(MetadataReturn {
-                    class: c.ret_class.clone()?,
-                    nullable: c.ret_nullable,
+            idxs.iter()
+                .rev()
+                .map(|&i| {
+                    let c = &meta.callables[i];
+                    MetadataReturn {
+                        class: c.ret_class.clone(),
+                        nullable: c.ret_nullable,
+                    }
                 })
-            })
+                .next()
         })
     }
 

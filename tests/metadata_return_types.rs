@@ -49,6 +49,24 @@ fn collection_factory_return_types_distinguish_mutable() {
     assert_eq!(ret("arrayListOf"), Some("java/util/ArrayList"));
 }
 
+#[test]
+fn nullable_type_parameter_return_metadata_is_kept() {
+    let Some(jar) = stdlib() else {
+        eprintln!("skip: set KRUSTY_KOTLINC");
+        return;
+    };
+    let cp = Classpath::new(vec![jar]);
+    let ret = ["kotlin/StandardKt", "kotlin/StandardKt__StandardKt"]
+        .iter()
+        .find_map(|owner| cp.metadata_return(owner, "takeIf"))
+        .expect("takeIf metadata return");
+    assert!(
+        ret.class.is_none(),
+        "takeIf returns a type parameter, not a concrete class"
+    );
+    assert!(ret.nullable, "takeIf returns T? in metadata");
+}
+
 /// The Kotlin collection hierarchy is read from `collections.kotlin_builtins` exactly as kotlinc stores
 /// it — the read-only/mutable supertyping (`MutableList : List, MutableCollection`) that exists in no JVM
 /// descriptor. Parsed straight from the jar entry (`PackageFragment` + `QualifiedNameTable`).
