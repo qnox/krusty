@@ -88,12 +88,12 @@ fn main() {
 
     // Common pipeline: front-end type-check each file, then lower through the selected backend
     // (JVM today; see docs/ARCHITECTURE.md). `-target wasm|js` would select a different backend here.
-    // The backend shares the same classpath instance (caches) as the library set, for the inliner.
+    // The backend shares the same classpath instance (caches) as the symbol provider, for the inliner.
     let backend = krusty::jvm::JvmBackend::new(cp);
     let outputs = krusty::backend::compile(
         &files,
         &stems,
-        &syms,
+        &mut syms,
         &backend,
         &opts.module_name,
         &mut diags,

@@ -695,6 +695,10 @@ pub struct File {
     /// the last slot, not the next free positional one (`f("x") { }` on `f(a, m = d, builder)` ⇒ `m`
     /// defaults, the lambda fills `builder`).
     pub call_has_trailing_lambda: std::collections::HashSet<u32>,
+    /// `ExprId`s of `Expr::Call`s produced from infix-call syntax (`a foo b`). The callee is still the
+    /// ordinary `Member { receiver: a, name: "foo" }`, but resolver/lowering need the source form for
+    /// primitive builtin names where Kotlin treats `a rem b` differently from `a.rem(b)`.
+    pub infix_calls: std::collections::HashSet<u32>,
     /// Explicit type arguments on a call (`Foo<Int>()`, `listOf<String>(…)`), keyed by the call's
     /// `ExprId`. Lets a constructor call carry its instantiation (`ArrayList<Int>()` → `ArrayList<Int>`)
     /// so member/element types resolve. Absent ⇒ no explicit type arguments.

@@ -203,8 +203,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   continuation, real return); the CPS form is the pass's job. The **classpath parser** enforces this:
   for a `suspend` top-level method (physical JVM form `Object foo(…, Continuation)`), `jvm_libraries`
   drops the trailing continuation parameter (`strip_continuation_param`) and recovers the logical
-  return type from `@Metadata` (`Classpath::metadata_return_ty`, e.g. `kotlin/Int` to `Int`), so a
-  normal call resolves and types correctly; the erased `Object` return is kept only as `physical_ret`.
+  return type from the selected metadata return class (e.g. `kotlin/Int` to `Int`), so a normal call
+  resolves and types correctly; the erased `Object` return is kept only as `physical_ret`.
   Proven end-to-end both ways: `caller` (Use.kt) suspends on `helper` (Lib.kt, a separate `IrFile`),
   and against a **real** kotlinc-compiled `helper` on the `-cp` classpath, both reaching 43
   (`tests/suspend_e2e.rs::suspend_fun_calls_cross_file_suspend_fun`,
@@ -399,8 +399,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `a.compareTo(b)` uses IEEE total order (`{Integer,Long,Float,Double}.compare`, so
   `0f.compareTo(-0f) == 1`, `Double.NaN.compareTo(x) == 1`). Kotlin routes the *infix* form
   `a rem b` to a user `operator`/`infix` extension but the *dot* form `a.rem(b)` to the builtin;
-  krusty can't tell them apart in the AST, so it skips when such a user extension exists
-  (`tests/cases`/box `infixFunctionOverBuiltinMember.kt`). `mod`/`rangeTo`/`inc`/`dec` unsupported.
+  the parser records infix-call source form so resolver/lowering keep that distinction
+  (`resolver_regression_e2e::primitive_builtin_infix_extension_source_form_matters`,
+  box `infixFunctionOverBuiltinMember.kt`). `mod`/`rangeTo`/`inc`/`dec` unsupported.
   The bitwise/shift members on `Int`/`Long` (`a.and(b)`/`a or b`, `a.shl(n)`/`a shr n`/`a ushr n`,
   `a.xor(b)`) lower to the `iand`/`ior`/`ixor`/`ishl`/… intrinsic; shifts take an `Int` count, the
   others the receiver's own type. `compareTo` and the arithmetic/bitwise/shift members all share
@@ -426,14 +427,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   non-generic function, are supported; capturing lambdas, `Unit`/`Nothing` lambdas (need the
   `kotlin/Unit` singleton), lambdas inside class methods, and generic/suspend consumers are skipped
   (`tests/lambda_e2e.rs`, `tests/indy_infra_e2e.rs`).
-- **Mutable capture**: a local `var` written by a non-inlined lambda (a closure) is boxed into a
-  `kotlin/jvm/internal/Ref$XxxRef` (`IntRef`/`ObjectRef`/… by element type), exactly as kotlinc does:
-  the local holds the holder, every read/write goes through its `element` field, and the closure
-  captures the shared holder by value (a reference) so its writes are visible to the enclosing scope
-  and vice versa. The checker records which vars a closure writes (`TypeInfo.boxed_vars`); the lowerer
-  boxes any matching `var` it declares (over-boxing an uncaptured same-named `var` is harmless — an
-  extra indirection). An inlined scope function (`let`/`also`/`run`/`apply`) needs no box (its body is
-  inlined), and a closure that writes a *field* (capturing `this`) is still skipped.
+- **Mutable capture**: a local `var` written by a non-inlined lambda (a closure) needs a shared mutable
+  cell so writes are visible to the enclosing scope and vice versa. The lowerer computes this per body by
+  checking whether a lambda captures a `var` from an outer local scope; the JVM realization currently
+  uses a `kotlin/jvm/internal/Ref$XxxRef` holder. An inlined scope function (`let`/`also`/`run`/`apply`)
+  needs no shared cell because its body is inlined, and a closure that writes a *field* (capturing
+  `this`) is still skipped.
 - Classes with **no primary constructor** (`class A { constructor(…) { … } }`): every constructor is a
   secondary `<init>`. A constructor delegating to `super(…)` (or implicitly, to a no-arg base/`Object`)
   runs the field initializers + `init {}` blocks (source order) before its own body; one delegating to a

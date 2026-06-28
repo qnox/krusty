@@ -54,12 +54,12 @@ pub fn compile_in_process(
             .clone()
     });
     let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(cp.clone()));
-    let syms = collect_signatures_with_cp(&files, platform, &mut diags);
+    let mut syms = collect_signatures_with_cp(&files, platform, &mut diags);
     if diags.has_errors() {
         return None;
     }
     let file = &files[0];
-    let info = check_file(file, &syms, &mut diags);
+    let info = check_file(file, &mut syms, &mut diags);
     if diags.has_errors() {
         return None;
     }
@@ -434,7 +434,9 @@ pub fn corpus_ready() -> bool {
 /// treat `None` as a skip (matching the gate's skip accounting), NOT a failure.
 #[allow(dead_code)]
 pub fn run_box_corpus_case(rel: &str) -> Option<String> {
-    let src = std::fs::read_to_string(box_corpus_dir()?.join(rel)).ok()?;
+    let src = std::fs::read_to_string(box_corpus_dir()?.join(rel))
+        .ok()?
+        .replace("OPTIONAL_JVM_INLINE_ANNOTATION", "@JvmInline");
     // Multi-file / multi-module cases need the gate's `// FILE:`/`// MODULE:` splitting — skip here
     // rather than miscompile all blocks as one source (enforce the contract, don't rely on luck).
     if src.contains("// FILE:") || src.contains("// MODULE:") {

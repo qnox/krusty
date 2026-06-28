@@ -41,7 +41,7 @@ pub trait Backend {
 pub fn compile<B: Backend>(
     files: &[File],
     stems: &[String],
-    syms: &SymbolTable,
+    syms: &mut SymbolTable,
     backend: &B,
     module_name: &str,
     diags: &mut DiagSink,

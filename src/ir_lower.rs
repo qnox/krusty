@@ -12,11 +12,17 @@ use std::collections::HashMap;
 
 use crate::ast::{self, BinOp, Decl, Expr, ExprId as AstExprId, FunBody, Stmt, TemplatePart};
 use crate::ir::{
-    Callee, ClassId, ExprId, IrBinOp, IrClass, IrConst, IrCtorArg, IrEnumEntry, IrExpr, IrField,
-    IrFile, IrFunction, IrTypeOp,
+    Callee, ClassId, ExprId, IrBinOp, IrCatch, IrClass, IrConst, IrCtorArg, IrEnumEntry, IrExpr,
+    IrField, IrFile, IrFunction, IrTypeOp,
 };
-use crate::libraries::InlineKind;
-use crate::resolve::{CtorDefaultValue, SymbolTable, TypeInfo};
+use crate::jvm::names::{property_getter_name, property_setter_name};
+use crate::libraries::{
+    CompilerPlatform, CountedLoopInfo, InlineKind, PlatformAccessor, PlatformCtor, RuntimeCtor,
+    RuntimeOp,
+};
+use crate::resolve::{
+    CtorDefaultValue, ExprLowering, LambdaCapture, Signature, StmtLowering, SymbolTable, TypeInfo,
+};
 use crate::types::Ty;
 
 // --- Lower-bail diagnostics ----------------------------------------------------------------------
@@ -35,6 +41,40 @@ fn set_bail(reason: &str) {
 pub fn lower_bail_reason() -> String {
     BAIL_REASON.with(|r| r.borrow().clone())
 }
+
+fn is_conversion_call_name(name: &str) -> bool {
+    matches!(
+        name,
+        "toInt"
+            | "toByte"
+            | "toShort"
+            | "toLong"
+            | "toFloat"
+            | "toDouble"
+            | "toChar"
+            | "toUInt"
+            | "toULong"
+    )
+}
+
+fn library_companion_const(
+    syms: &SymbolTable,
+    type_name: &str,
+    const_name: &str,
+) -> Option<crate::libraries::LibraryConst> {
+    let fallback;
+    let internal = match syms.class_names.get(type_name) {
+        Some(internal) => internal.as_str(),
+        None => {
+            fallback = format!("kotlin/{type_name}");
+            &fallback
+        }
+    };
+    syms.libraries
+        .resolve_type(internal)
+        .and_then(|t| t.companion_consts.get(const_name).copied())
+}
+
 /// The leading variant name of a `{:?}`-formatted AST node (`"Call { .. }"` → `"Call"`).
 fn bail_variant(dbg: &str) -> &str {
     dbg.split(['(', '{', ' ']).next().unwrap_or("?")
@@ -77,6 +117,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
         cur_fn_suspend: false,
         cur_tparams: Vec::new(),
         lambda_seq: 0,
+        shared_cell_vars: std::collections::HashSet::new(),
         boxed_elem: HashMap::new(),
         local_fun_ids: HashMap::new(),
         cur_ret_ty: Ty::Unit,
@@ -212,7 +253,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
         if let Decl::Class(c) = file.decl(d) {
             let internal = class_internal(file, &c.name);
             // A generic class gets a JVM class `Signature` (kotlinc does), matching its bytecode.
-            if let Some(s) = class_generic_sig(file, c) {
+            if let Some(s) = class_generic_sig(file, c, &*lo.syms.libraries) {
                 lo.ir.class_signatures.insert(internal.clone(), s);
             }
             // A field whose declared type is a bare type parameter (`val a: A`) gets a field `Signature`
@@ -393,13 +434,9 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 }
                 None => None,
             };
-            let superclass = if c.is_enum() {
-                "java/lang/Enum".to_string()
-            } else {
-                super_internal
-                    .clone()
-                    .unwrap_or_else(|| "kotlin/Any".to_string())
-            };
+            let superclass = super_internal
+                .clone()
+                .unwrap_or_else(|| "kotlin/Any".to_string());
             // Implemented interfaces (`: I, J`): a file interface, or a classpath interface
             // (`Runnable`, `Comparator`) resolved through the library set; else bail.
             let mut iface_internals = Vec::new();
@@ -419,7 +456,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     .syms
                     .libraries
                     .resolve_type(&resolved)
-                    .map_or(false, |t| t.is_interface())
+                    .is_some_and(|t| t.is_interface())
                 {
                     iface_internals.push(resolved);
                 } else {
@@ -594,7 +631,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 impl_class.is_annotation = false;
                 impl_class.annotation_impl_of = Some(internal.clone());
                 impl_class.interfaces = vec![internal.clone()];
-                impl_class.superclass = "java/lang/Object".to_string();
+                impl_class.superclass = "kotlin/Any".to_string();
                 impl_class.supertypes = vec![];
                 impl_class.methods = vec![];
                 lo.ir.add_class(impl_class);
@@ -672,7 +709,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     lo.ir.suspend_funs.push(fid);
                 }
                 // A generic member method gets the same JVM `Signature` as a generic top-level function.
-                if let Some(s) = fn_generic_sig(file, m) {
+                if let Some(s) = fn_generic_sig(file, m, &*lo.syms.libraries) {
                     lo.ir.signatures.insert(fid, s);
                 }
                 methods.insert(m.name.clone(), (mi as u32, fid, ret));
@@ -681,7 +718,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
             // Computed body properties → `getX()` instance methods (no backing field).
             for p in c.body_props.iter().filter(|p| is_computed_prop(p)) {
                 let ty = body_prop_ty(file, info, p);
-                let gname = getter_name(&p.name);
+                let gname = property_getter_name(&p.name);
                 let mi = method_fids.len() as u32;
                 let fid = lo.ir.add_fun(IrFunction {
                     name: gname.clone(),
@@ -708,7 +745,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                             .map(|(_, t, _)| *t)
                     })
                     .unwrap_or(Ty::Error);
-                let gname = getter_name(&p.name);
+                let gname = property_getter_name(&p.name);
                 let mi = method_fids.len() as u32;
                 let fid = lo.ir.add_fun(IrFunction {
                     name: gname.clone(),
@@ -722,7 +759,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 methods.insert(gname, (mi, fid, prop_ty));
                 method_fids.push(fid);
                 if p.is_var {
-                    let sname = setter_name(&p.name);
+                    let sname = property_setter_name(&p.name);
                     let mi = method_fids.len() as u32;
                     let fid = lo.ir.add_fun(IrFunction {
                         name: sname.clone(),
@@ -750,13 +787,14 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                         p.ty.as_ref()
                             .map(|r| ty_of(file, r))
                             .unwrap_or_else(|| Ty::obj("kotlin/Any"));
-                    let gname = getter_name(&p.name);
+                    let ir_ty = body_prop_ir_ty(file, info, p);
+                    let gname = property_getter_name(&p.name);
                     if !methods.contains_key(&gname) {
                         let mi = method_fids.len() as u32;
                         let fid = lo.ir.add_fun(IrFunction {
                             name: gname.clone(),
                             params: vec![],
-                            ret: ty_to_ir(ty),
+                            ret: ir_ty,
                             body: None,
                             is_static: false,
                             dispatch_receiver: Some(internal.clone()),
@@ -766,12 +804,12 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                         method_fids.push(fid);
                     }
                     if p.is_var {
-                        let sname = setter_name(&p.name);
+                        let sname = property_setter_name(&p.name);
                         if !methods.contains_key(&sname) {
                             let mi = method_fids.len() as u32;
                             let fid = lo.ir.add_fun(IrFunction {
                                 name: sname.clone(),
-                                params: vec![ty_to_ir(ty)],
+                                params: vec![ir_ty],
                                 ret: Ty::Unit,
                                 body: None,
                                 is_static: false,
@@ -813,8 +851,8 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     // Use the class field's IrType (carries declared `?` via `mark_nullable`), not the
                     // bare `Ty` — so a nullable value-class property getter erases consistently with the
                     // field (`z: Z1?` → `LZ1;`, not the collapsed final underlying).
-                    let fty_ir = lo.ir.classes[id as usize].fields[fidx].ty.clone();
-                    let gname = getter_name(pname);
+                    let fty_ir = lo.ir.classes[id as usize].fields[fidx].ty;
+                    let gname = property_getter_name(pname);
                     if !methods.contains_key(&gname) {
                         // A plain field read; if the field is `lateinit` the backend's `GetField`
                         // emission inserts the uninitialized null-check throw (so does every other read).
@@ -833,7 +871,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                         let fid = lo.ir.add_fun(IrFunction {
                             name: gname.clone(),
                             params: vec![],
-                            ret: fty_ir.clone(),
+                            ret: fty_ir,
                             body: Some(body),
                             is_static: false,
                             dispatch_receiver: Some(internal.clone()),
@@ -853,7 +891,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                         method_fids.push(fid);
                     }
                     if *is_var {
-                        let sname = setter_name(pname);
+                        let sname = property_setter_name(pname);
                         if !methods.contains_key(&sname) {
                             let this_e = lo.ir.add_expr(IrExpr::GetValue(0));
                             let v = lo.ir.add_expr(IrExpr::GetValue(1));
@@ -968,9 +1006,21 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     if let Some(isig) = syms.class_by_internal(&iface_internal) {
                         for (mname, cm) in &csig0.static_methods {
                             if let Some(im) = isig.methods.get(mname) {
-                                let ip: String = im.params.iter().map(|t| t.descriptor()).collect();
-                                let cp: String = cm.params.iter().map(|t| t.descriptor()).collect();
-                                if ip != cp || im.ret.descriptor() != cm.ret.descriptor() {
+                                let im_params: Option<Vec<_>> = im
+                                    .params
+                                    .iter()
+                                    .map(|t| lo.syms.libraries.type_descriptor(*t))
+                                    .collect();
+                                let cm_params: Option<Vec<_>> = cm
+                                    .params
+                                    .iter()
+                                    .map(|t| lo.syms.libraries.type_descriptor(*t))
+                                    .collect();
+                                if im.params.len() != cm.params.len()
+                                    || im_params? != cm_params?
+                                    || lo.syms.libraries.type_descriptor(im.ret)?
+                                        != lo.syms.libraries.type_descriptor(cm.ret)?
+                                {
                                     return None; // would need a bridge — skip, never miscompile
                                 }
                             }
@@ -1018,8 +1068,8 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                         // base in this file fills them with no cross-file `ExprId` deref.
                         let sargs = plan
                             .iter()
-                            .map(|dv| ctor_default_to_ir(&mut lo.ir, dv))
-                            .collect();
+                            .map(|dv| ctor_default_to_ir(&mut lo.ir, &*lo.syms.libraries, dv))
+                            .collect::<Option<Vec<_>>>()?;
                         (base_internal, sargs)
                     } else {
                         ("kotlin/Any".to_string(), Vec::new())
@@ -1104,7 +1154,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 if c.inner_of.is_some() {
                     return None;
                 }
-                lo.synth_data_members(&internal, id, ctor_param_count as usize);
+                lo.synth_data_members(&internal, id, ctor_param_count as usize)?;
             }
             // A `@JvmInline value class` is emitted as a plain single-field class here (field, `<init>`,
             // getter); the JVM `value_classes` pass synthesizes its unboxed-support members
@@ -1154,13 +1204,8 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 let sig = if sigs.len() == 1 {
                     &sigs[0]
                 } else {
-                    let want: String = f
-                        .params
-                        .iter()
-                        .map(|p| ty_of(file, &p.ty).descriptor())
-                        .collect();
-                    sigs.iter()
-                        .find(|s| crate::resolve::erased_params_key(s) == want)?
+                    let want: Vec<Ty> = f.params.iter().map(|p| ty_of(file, &p.ty)).collect();
+                    sigs.iter().find(|s| s.params == want)?
                 };
                 let params: Vec<Ty> = sig
                     .params
@@ -1175,12 +1220,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                         }
                     })
                     .collect();
-                let ret = ty_to_ir(
-                    info.fun_ret_overrides
-                        .get(&(f.name.clone(), sig.params.clone()))
-                        .copied()
-                        .unwrap_or(sig.ret),
-                );
+                let ret = ty_to_ir(sig.ret);
                 let ret = if f.ret.as_ref().is_some_and(|r| r.nullable) {
                     mark_nullable(ret)
                 } else {
@@ -1196,11 +1236,10 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     dispatch_receiver: None,
                     param_checks,
                 });
-                lo.fun_ids
-                    .insert((f.name.clone(), crate::resolve::erased_params_key(sig)), id);
+                lo.fun_ids.insert((f.name.clone(), sig.params.clone()), id);
                 // Emit a JVM generic `Signature` for a type-parameterized function (kotlinc does), so the
                 // bytecode matches for generics. `None` for non-generic / not-yet-modeled shapes.
-                if let Some(s) = fn_generic_sig(file, f) {
+                if let Some(s) = fn_generic_sig(file, f, &*lo.syms.libraries) {
                     lo.ir.signatures.insert(id, s);
                 }
                 // Tag a `suspend fun` for the coroutine pass (`jvm::suspend`), which owns the whole
@@ -1213,24 +1252,26 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
         }
     }
     // Pass 1b': register lifted local functions (`fun` inside a function body) as private static
-    // methods on the facade. The checker mangled each to `$local$<stmtid>` and rejected captures, so
-    // only non-capturing local functions reach here. A call to one routes to its `FunId` in pass 2.
+    // methods on the facade. Captured outer locals become leading parameters; calls route to the
+    // resulting `FunId` in pass 2.
     for (i, s) in file.stmt_arena.iter().enumerate() {
         if let Stmt::LocalFun(_) = s {
             let stmt_id = crate::ast::StmtId(i as u32);
-            if let Some((mangled, sig)) = info.local_fun_sigs.get(&stmt_id) {
-                // Captured outer locals become extra leading parameters (a boxed var is passed as its
-                // `Ref` holder reference, an ordinary one by value), then the declared parameters.
+            if let Some(local_fun) = info.local_fun(stmt_id) {
+                // Captured outer locals become extra leading parameters: runtime holder first when the
+                // capture needs a shared mutable cell, otherwise the captured value.
                 let mut params: Vec<Ty> = Vec::new();
-                if let Some(caps) = info.local_fun_captures.get(&stmt_id) {
-                    for (name, ty) in caps {
-                        params.push(captured_param_ir(name, *ty, &info.boxed_vars));
-                    }
+                for cap in &local_fun.captures {
+                    params.push(captured_param_ir(
+                        &*lo.syms.libraries,
+                        cap.ty,
+                        cap.shared_cell,
+                    )?);
                 }
-                params.extend(sig.params.iter().map(|t| ty_to_ir(*t)));
-                let ret = ty_to_ir(sig.ret);
+                params.extend(local_fun.sig.params.iter().map(|t| ty_to_ir(*t)));
+                let ret = ty_to_ir(local_fun.sig.ret);
                 let id = lo.ir.add_fun(IrFunction {
-                    name: mangled.clone(),
+                    name: local_fun.mangled.clone(),
                     params,
                     ret,
                     body: None,
@@ -1258,7 +1299,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 }
                 let ty = lo.delegated_prop_type(p)?;
                 let fid = lo.ir.add_fun(IrFunction {
-                    name: getter_name(&p.name),
+                    name: property_getter_name(&p.name),
                     params: vec![],
                     ret: ty_to_ir(ty),
                     body: None,
@@ -1295,11 +1336,11 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 }
                 let recv_ty = ty_of(file, recv_ref);
                 let recv_key = recv_ty.erased_recv();
-                let pty = body_prop_ty(file, info, p);
+                let pty_ir = body_prop_ir_ty(file, info, p);
                 let gfid = lo.ir.add_fun(IrFunction {
-                    name: getter_name(&p.name),
+                    name: property_getter_name(&p.name),
                     params: vec![ty_to_ir(recv_ty)],
-                    ret: ty_to_ir(pty),
+                    ret: pty_ir,
                     body: None,
                     is_static: true,
                     dispatch_receiver: None,
@@ -1308,8 +1349,8 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 lo.ext_prop_get_ids.insert((recv_key, p.name.clone()), gfid);
                 if p.is_var {
                     let sfid = lo.ir.add_fun(IrFunction {
-                        name: setter_name(&p.name),
-                        params: vec![ty_to_ir(recv_ty), ty_to_ir(pty)],
+                        name: property_setter_name(&p.name),
+                        params: vec![ty_to_ir(recv_ty), pty_ir],
                         ret: ty_to_ir(Ty::Unit),
                         body: None,
                         is_static: true,
@@ -1321,12 +1362,13 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 continue;
             }
             let ty = body_prop_ty(file, info, p);
+            let ir_ty = body_prop_ir_ty(file, info, p);
             if is_computed_prop(p) {
                 // A computed property: a `getX()` accessor (static on the facade), no backing field.
                 let fid = lo.ir.add_fun(IrFunction {
-                    name: getter_name(&p.name),
+                    name: property_getter_name(&p.name),
                     params: vec![],
-                    ret: ty_to_ir(ty),
+                    ret: ir_ty,
                     body: None,
                     is_static: true,
                     dispatch_receiver: None,
@@ -1382,17 +1424,10 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     let sig = if sigs.len() == 1 {
                         &sigs[0]
                     } else {
-                        let want: String = f
-                            .params
-                            .iter()
-                            .map(|p| ty_of(file, &p.ty).descriptor())
-                            .collect();
-                        sigs.iter()
-                            .find(|s| crate::resolve::erased_params_key(s) == want)?
+                        let want: Vec<Ty> = f.params.iter().map(|p| ty_of(file, &p.ty)).collect();
+                        sigs.iter().find(|s| s.params == want)?
                     };
-                    let fid = *lo
-                        .fun_ids
-                        .get(&(f.name.clone(), crate::resolve::erased_params_key(sig)))?;
+                    let fid = *lo.fun_ids.get(&(f.name.clone(), sig.params.clone()))?;
                     (fid, sig)
                 };
                 let mut param_vals = Vec::new();
@@ -1558,8 +1593,10 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                         };
                         for (pname, sty, _) in sc.props.clone() {
                             if let Some((own_ty, _)) = lo.syms.prop_of(&internal, &pname) {
-                                if sty.descriptor() != own_ty.descriptor() {
-                                    let gname = getter_name(&pname);
+                                let sty_desc = lo.syms.libraries.type_descriptor(sty)?;
+                                let own_desc = lo.syms.libraries.type_descriptor(own_ty)?;
+                                if sty_desc != own_desc {
+                                    let gname = property_getter_name(&pname);
                                     let already = lo.ir.classes[cid as usize]
                                         .bridges
                                         .iter()
@@ -1625,7 +1662,12 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                         // dispatch an interface-typed call — without it `(x as Comparable).compareTo(y)`
                         // hits `AbstractMethodError` instead of running the override (or throwing CCE).
                         if !lo.classes.contains_key(itf) {
-                            if let Some(m) = lo.syms.libraries.sam_method(itf) {
+                            if let Some(m) = lo
+                                .syms
+                                .libraries
+                                .resolve_type(itf)
+                                .and_then(|t| t.sam_method)
+                            {
                                 if let Some((_, _, impl_fid, _)) =
                                     lo.resolve_method(&internal, &m.name)
                                 {
@@ -1708,7 +1750,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 }
                 // Computed body-property getter bodies → `getX()` methods on the class.
                 for p in c.body_props.iter().filter(|p| is_computed_prop(p)) {
-                    let gname = getter_name(&p.name);
+                    let gname = property_getter_name(&p.name);
                     let (_, fid, _) = lo.classes[&internal].methods[&gname];
                     lo.scope.clear();
                     lo.next_value = 0;
@@ -1735,7 +1777,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                         .ty
                         .clone();
                     if let Some(getter) = p.getter.clone() {
-                        let gname = getter_name(&p.name);
+                        let gname = property_getter_name(&p.name);
                         let (_, fid, _) = lo.classes[&internal].methods[&gname];
                         lo.scope.clear();
                         lo.next_value = 0;
@@ -1754,7 +1796,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                         if let Some(setter) =
                             p.setter.as_ref().filter(|s| s.body.is_some()).cloned()
                         {
-                            let sname = setter_name(&p.name);
+                            let sname = property_setter_name(&p.name);
                             let (_, fid, _) = lo.classes[&internal].methods[&sname];
                             let pty = body_prop_ty(file, info, p);
                             lo.scope.clear();
@@ -1791,9 +1833,10 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                         .position(|f| f.name == fname)
                         .expect("delegate field") as u32;
                     // Build a fresh `PropertyReference1Impl(A::class, "x", "getX()<ret>", 0)`.
-                    let gname = getter_name(&p.name);
+                    let gname = property_getter_name(&p.name);
                     let (_, get_fid, prop_ty) = lo.classes[&internal].methods[&gname];
-                    let ret_desc = prop_ty.descriptor();
+                    let prop_sig = lo.property_reference_signature(&gname, prop_ty)?;
+                    let propref_impl = lo.property_reference_impl(1, false)?;
                     let make_propref = |lo: &mut Lower| {
                         let cls = lo.ir.add_expr(IrExpr::ClassConst {
                             internal: internal.clone(),
@@ -1801,29 +1844,19 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                         let nm = lo
                             .ir
                             .add_expr(IrExpr::Const(IrConst::String(p.name.clone())));
-                        let sigc = lo.ir.add_expr(IrExpr::Const(IrConst::String(format!(
-                            "{}(){}",
-                            gname, ret_desc
-                        ))));
+                        let sigc = lo
+                            .ir
+                            .add_expr(IrExpr::Const(IrConst::String(prop_sig.clone())));
                         let flag = lo.ir.add_expr(IrExpr::Const(IrConst::Int(0)));
                         lo.ir.add_expr(IrExpr::NewExternal {
-                            internal: "kotlin/jvm/internal/PropertyReference1Impl".to_string(),
-                            ctor_desc: "(Ljava/lang/Class;Ljava/lang/String;Ljava/lang/String;I)V"
-                                .to_string(),
+                            internal: propref_impl.internal.clone(),
+                            ctor_desc: propref_impl.ctor_desc.clone(),
                             args: vec![cls, nm, sigc, flag],
                         })
                     };
                     // getX(): return this.x$delegate.getValue(this, propref)
                     let gv = lo.syms.method_of(&delegate_internal, "getValue")?;
-                    let gv_desc = {
-                        let mut s = String::from("(");
-                        for pt in &gv.params {
-                            s.push_str(&pt.descriptor());
-                        }
-                        s.push(')');
-                        s.push_str(&gv.ret.descriptor());
-                        s
-                    };
+                    let gv_desc = lo.syms.libraries.method_descriptor(&gv.params, gv.ret)?;
                     let this_e = lo.ir.add_expr(IrExpr::GetValue(0));
                     let dele = lo.ir.add_expr(IrExpr::GetField {
                         receiver: this_e,
@@ -1853,18 +1886,10 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     lo.ir.functions[get_fid as usize].body = Some(body);
                     // setX(value): this.x$delegate.setValue(this, propref, value)
                     if p.is_var {
-                        let sname = setter_name(&p.name);
+                        let sname = property_setter_name(&p.name);
                         let (_, set_fid, _) = lo.classes[&internal].methods[&sname];
                         let sv = lo.syms.method_of(&delegate_internal, "setValue")?;
-                        let sv_desc = {
-                            let mut s = String::from("(");
-                            for pt in &sv.params {
-                                s.push_str(&pt.descriptor());
-                            }
-                            s.push(')');
-                            s.push_str(&sv.ret.descriptor());
-                            s
-                        };
+                        let sv_desc = lo.syms.libraries.method_descriptor(&sv.params, sv.ret)?;
                         let this_e = lo.ir.add_expr(IrExpr::GetValue(0));
                         let dele = lo.ir.add_expr(IrExpr::GetField {
                             receiver: this_e,
@@ -1878,7 +1903,10 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                         // T)`); a PRIMITIVE property value boxes into it (`Integer.valueOf`), exactly as
                         // kotlinc does. A reference value passes through.
                         let value_arg = match sv.params.last() {
-                            Some(vp) if vp.is_reference() && prop_ty.is_primitive() => {
+                            Some(vp)
+                                if vp.is_reference()
+                                    && lo.syms.libraries.scalar_value_repr(prop_ty).is_some() =>
+                            {
                                 lo.ir.add_expr(IrExpr::TypeOp {
                                     op: IrTypeOp::ImplicitCoercion,
                                     arg: value_arg,
@@ -1995,8 +2023,8 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                             .collect();
                     let sargs = defaults
                         .iter()
-                        .map(|dv| ctor_default_to_ir(&mut lo.ir, dv))
-                        .collect();
+                        .map(|dv| ctor_default_to_ir(&mut lo.ir, &*lo.syms.libraries, dv))
+                        .collect::<Option<Vec<_>>>()?;
                     lo.ir.classes[class_id as usize].super_args = sargs;
                 }
                 // Base-class constructor arguments (`: A(args)`), evaluated with the primary-ctor
@@ -2009,8 +2037,19 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     let this_v = lo.fresh_value();
                     lo.scope
                         .push(("this".to_string(), this_v, Ty::obj(&internal)));
-                    // ALL ctor params (property and plain) are in scope as values `1..=M` in declaration
-                    // order — a plain parameter is an argument the initializer / `super(…)` can read.
+                    // An inner class constructor receives the captured outer instance before source
+                    // constructor parameters, so source params start at slot 2. Keep the lowering scope
+                    // aligned with the JVM constructor shape when lowering `super(...)` arguments.
+                    if let Some(outer) = &c.inner_of {
+                        let v = lo.fresh_value();
+                        lo.scope.push((
+                            "this$0".to_string(),
+                            v,
+                            Ty::obj(&class_internal(file, outer)),
+                        ));
+                    }
+                    // ALL source ctor params (property and plain) are then in scope in declaration order
+                    // — a plain parameter is an argument the initializer / `super(…)` can read.
                     for p in c.props.iter() {
                         let v = lo.fresh_value();
                         lo.scope.push((p.name.clone(), v, ty_of(file, &p.ty)));
@@ -2462,9 +2501,9 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                             .map(|m| m.name.clone())
                             .collect();
                         for p in &ic.body_props {
-                            abstract_members.push(getter_name(&p.name));
+                            abstract_members.push(property_getter_name(&p.name));
                             if p.is_var {
-                                abstract_members.push(setter_name(&p.name));
+                                abstract_members.push(property_setter_name(&p.name));
                             }
                         }
                         for m in abstract_members {
@@ -2681,7 +2720,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                         // Property getters (`getX()` → `return this.<field>`), kotlinc emits them on the
                         // subclass. Appended after the overrides (add_synth_method pushes onto methods).
                         for (fi, (pname, pty)) in prop_fields.iter().enumerate() {
-                            let getter = getter_name(pname);
+                            let getter = property_getter_name(pname);
                             let get = lo.this_field(sub_id, fi as u32);
                             let ret = lo.ir.add_expr(IrExpr::Return(Some(get)));
                             let gbody = lo.ir.add_expr(IrExpr::Block {
@@ -2713,12 +2752,13 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     let recv_key = recv_ty.erased_recv();
                     let pty = body_prop_ty(file, info, p);
                     let gfid = *lo.ext_prop_get_ids.get(&(recv_key, p.name.clone()))?;
-                    lo.cur_fn_name = getter_name(&p.name);
+                    lo.cur_fn_name = property_getter_name(&p.name);
                     lo.lambda_seq = 0;
                     let this_v = lo.fresh_value();
                     lo.scope.push(("this".to_string(), this_v, recv_ty));
                     let body = p.getter.clone().unwrap();
-                    lo.lower_body(&body, &ty_to_ir(pty), gfid)?;
+                    let pty_ir = body_prop_ir_ty(file, info, p);
+                    lo.lower_body(&body, &pty_ir, gfid)?;
                     // `var` extension property setter: `set(v) { … }` with `this` = receiver (param 0),
                     // the value parameter `v` (param 1).
                     if p.is_var {
@@ -2726,7 +2766,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                         let setter = p.setter.as_ref().unwrap();
                         lo.scope.clear();
                         lo.next_value = 0;
-                        lo.cur_fn_name = setter_name(&p.name);
+                        lo.cur_fn_name = property_setter_name(&p.name);
                         lo.lambda_seq = 0;
                         let this_v = lo.fresh_value();
                         lo.scope.push(("this".to_string(), this_v, recv_ty));
@@ -2737,16 +2777,15 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     }
                 } else if p.delegate.is_some() {
                     lo.lower_delegated_top_level(p)?;
-                } else if let Some(&(fid, ty)) = lo.computed_props.get(&p.name) {
+                } else if let Some(&(fid, _)) = lo.computed_props.get(&p.name) {
                     // A computed property: lower its custom getter into the `getX()` body.
-                    lo.cur_fn_name = getter_name(&p.name);
+                    lo.cur_fn_name = property_getter_name(&p.name);
                     lo.lambda_seq = 0;
-                    let ret_ty = ty_to_ir(ty);
+                    let ret_ty = body_prop_ir_ty(file, info, p);
                     let body = p.getter.clone().unwrap();
                     lo.lower_body(&body, &ret_ty, fid)?;
                 } else {
-                    let (_, ty) = lo.statics[&p.name].clone();
-                    let ir_ty = ty_to_ir(ty);
+                    let ir_ty = body_prop_ir_ty(file, info, p);
                     let init = lo.lower_arg(p.init.unwrap(), &ir_ty)?;
                     lo.ir.statics.push(crate::ir::IrStatic {
                         name: p.name.clone(),
@@ -2780,19 +2819,18 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
         lo.cur_class = None;
         lo.cur_fn_name = lo.ir.functions[fid as usize].name.clone();
         lo.lambda_seq = 0;
-        let sig = info.local_fun_sigs.get(stmt_id)?.1.clone();
+        let local_fun = info.local_fun(*stmt_id)?;
+        let sig = local_fun.sig.clone();
         // Captured outer locals occupy the leading value slots; a boxed one binds its `Ref` holder
         // (reads/writes go through `element` via `boxed_elem`), an ordinary one binds its value.
-        if let Some(caps) = info.local_fun_captures.get(stmt_id) {
-            for (name, ty) in caps {
-                let v = lo.fresh_value();
-                if info.boxed_vars.contains(name) {
-                    lo.scope
-                        .push((name.clone(), v, Ty::obj(ref_holder_internal(*ty))));
-                    lo.boxed_elem.insert(name.clone(), *ty);
-                } else {
-                    lo.scope.push((name.clone(), v, *ty));
-                }
+        for cap in &local_fun.captures {
+            let v = lo.fresh_value();
+            if cap.shared_cell {
+                let holder_ty = lo.mutable_local_ref_type(cap.ty)?;
+                lo.scope.push((cap.name.clone(), v, holder_ty));
+                lo.boxed_elem.insert(cap.name.clone(), cap.ty);
+            } else {
+                lo.scope.push((cap.name.clone(), v, cap.ty));
             }
         }
         for (p, t) in f.params.iter().zip(&sig.params) {
@@ -2801,21 +2839,6 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
         }
         let ret_ty = lo.ir.functions[fid as usize].ret.clone();
         lo.lower_body(&f.body, &ret_ty, fid)?;
-    }
-    // A covariant/generic override returning `Nothing` (always throws) needs a bridge krusty can't emit:
-    // the throwing concrete method leaves nothing to `areturn` as the erased reference return. Skip the
-    // file rather than emit bad bytecode (cf. inlineClasses/overrideReturnNothing).
-    // A covariant/generic override returning `Nothing` (always throws) lowers its return to the JVM
-    // `java/lang/Void` repr; the bridge would `areturn` it as the erased reference return, which krusty's
-    // bridge emitter can't reconcile (the throwing concrete leaves nothing). Skip the file rather than
-    // emit bad bytecode (cf. inlineClasses/overrideReturnNothing).
-    let nothing_bridge = lo.ir.classes.iter().any(|c| {
-        c.bridges
-            .iter()
-            .any(|b| b.concrete_ret.non_null().obj_internal() == Some("java/lang/Void"))
-    });
-    if nothing_bridge {
-        return None;
     }
     // Discover classpath `@JvmInline value class`es referenced by type in this file and record their
     // REFERENCE underlying (`Result` → `Object`), so the value-class pass erases them like a user value
@@ -2858,7 +2881,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 .resolve_type(&fq)
                 .and_then(|t| t.value_underlying)
             {
-                if !under.is_primitive() {
+                if lo.syms.libraries.scalar_value_repr(under).is_none() {
                     // The underlying reference is null-capable (`Result`'s `Any?`), mirroring how the pass
                     // marks a type-parameter value-class field.
                     let ir_under = Ty::nullable(ty_to_ir(under));
@@ -3099,9 +3122,7 @@ fn ast_init_is_jvm_default(file: &ast::File, e: AstExprId) -> bool {
         Expr::CharLit(c) => *c as u32 == 0,
         // `0.toByte()` / `0.toChar()` — a primitive conversion of a zero literal is still the default.
         Expr::Call { callee, args } if args.is_empty() => match file.expr(*callee) {
-            Expr::Member { receiver, name }
-                if crate::resolve::conversion_target(name).is_some() =>
-            {
+            Expr::Member { receiver, name } if is_conversion_call_name(name) => {
                 ast_init_is_jvm_default(file, *receiver)
             }
             _ => false,
@@ -3154,6 +3175,15 @@ fn body_prop_ty(file: &ast::File, info: &TypeInfo, p: &ast::PropDecl) -> Ty {
     }
 }
 
+fn body_prop_ir_ty(file: &ast::File, info: &TypeInfo, p: &ast::PropDecl) -> Ty {
+    let ir = ty_to_ir(body_prop_ty(file, info, p));
+    if p.ty.as_ref().is_some_and(|r| r.nullable) {
+        mark_nullable(ir)
+    } else {
+        ir
+    }
+}
+
 fn is_computed_prop(p: &ast::PropDecl) -> bool {
     p.receiver.is_none()
         && !p.is_lateinit
@@ -3181,29 +3211,6 @@ fn is_field_accessor_prop(p: &ast::PropDecl) -> bool {
         && (p.getter.is_some() || p.setter.as_ref().is_some_and(|s| s.body.is_some()))
 }
 
-/// The JVM accessor name for a property: `x` → `getX`; an `is`-prefixed boolean keeps its name
-/// (`isEmpty` → `isEmpty`), matching kotlinc.
-fn getter_name(prop: &str) -> String {
-    let b = prop.as_bytes();
-    if prop.starts_with("is") && b.len() > 2 && b[2].is_ascii_uppercase() {
-        return prop.to_string();
-    }
-    let mut c = prop.chars();
-    format!("get{}{}", c.next().unwrap().to_uppercase(), c.as_str())
-}
-
-/// The JVM setter name for a property: `x` → `setX`; `isOpen` → `setOpen` (the `is` prefix is dropped).
-pub(crate) fn setter_name(prop: &str) -> String {
-    let b = prop.as_bytes();
-    let base = if prop.starts_with("is") && b.len() > 2 && b[2].is_ascii_uppercase() {
-        &prop[2..]
-    } else {
-        prop
-    };
-    let mut c = base.chars();
-    format!("set{}{}", c.next().unwrap().to_uppercase(), c.as_str())
-}
-
 /// One active inlined-lambda parameter: `(param name, lambda parameter names, lambda body, lambda
 /// parameter types, the inline fn's name — the implicit label for a `return@<fn>` local return)`.
 type InlineLambda = (String, Vec<String>, AstExprId, Vec<Ty>, String);
@@ -3214,14 +3221,14 @@ type InlineLambda = (String, Vec<String>, AstExprId, Vec<Ty>, String);
 struct LocalDelegate {
     /// JVM internal name of the delegate type (owner of `getValue`/`setValue`).
     delegate_internal: String,
-    /// `getValue(Object, KProperty)ret` descriptor.
-    getvalue_desc: String,
-    /// `setValue(Object, KProperty, value)V` descriptor — `None` for a `val`.
-    setvalue_desc: Option<String>,
+    /// Resolved `getValue(Object, KProperty): T` signature.
+    getvalue_sig: Signature,
+    /// Resolved `setValue(Object, KProperty, value): Unit` signature — `None` for a `val`.
+    setvalue_sig: Option<Signature>,
     /// The property name (for the inline `PropertyReference0Impl` metadata).
     name: String,
-    /// The property type's JVM descriptor (for the property-reference signature string).
-    ret_desc: String,
+    /// The logical property return type.
+    ret_ty: Ty,
 }
 
 /// Context for lowering a `tailrec` function into a `while(true)` loop.
@@ -3238,9 +3245,9 @@ pub(crate) struct Lower<'a> {
     info: &'a TypeInfo,
     syms: &'a SymbolTable,
     ir: IrFile,
-    /// Top-level function ids keyed by (name, erased-parameter-descriptor) so overloads (same name,
+    /// Top-level function ids keyed by (name, parameter types) so overloads (same name,
     /// different params) each map to their own compiled method.
-    fun_ids: HashMap<(String, String), u32>,
+    fun_ids: HashMap<(String, Vec<Ty>), u32>,
     /// Top-level extension functions, keyed by `(erased receiver, name)` ([`Ty::erased_recv`]) —
     /// separate from `fun_ids` since `fun Int.foo()` and `fun String.foo()` share a name but differ by
     /// receiver. Same key scheme as `SymbolTable::ext_funs` so the two never disagree.
@@ -3285,11 +3292,14 @@ pub(crate) struct Lower<'a> {
     cur_tparams: Vec<(String, Ty, bool)>,
     /// Per-enclosing-function counter for lambda impl-method naming.
     lambda_seq: u32,
+    /// Names of local `var`s in the current lowered body that need a shared mutable cell because a
+    /// non-inlined closure captures them from an outer local scope.
+    shared_cell_vars: std::collections::HashSet<String>,
     /// A boxed mutable-capture local's name → its element (unboxed) type. The scope holds the name
     /// bound to the `Ref$XxxRef` HOLDER value; reads/writes go through `RefGet`/`RefSet` with this type.
     boxed_elem: HashMap<String, Ty>,
-    /// A local function's `StmtId` → its lifted static `FunId` (a private method on the facade). A call
-    /// to it (via `info.local_call_map`) lowers to `Callee::Local(fid)`.
+    /// A local function's `StmtId` → its lifted static `FunId` (a private method on the facade). A
+    /// selected `ExprLowering::LocalFunction` lowers to `Callee::Local(fid)`.
     local_fun_ids: HashMap<crate::ast::StmtId, u32>,
     /// Return type of the function currently being lowered — used to coerce `return` values (e.g. a
     /// generic-erased `Object` return gets the `checkcast` kotlinc inserts).
@@ -3348,10 +3358,80 @@ pub(crate) struct Lower<'a> {
 }
 
 impl<'a> Lower<'a> {
-    /// The arg-binding call-resolution layer over this lowerer's [`LibrarySet`]. Cheap to construct.
+    /// The arg-binding call-resolution layer over this lowerer's [`SymbolSource`]. Cheap to construct.
     fn resolver(&self) -> crate::call_resolver::CallResolver<'_> {
         crate::call_resolver::CallResolver::new(&*self.syms.libraries)
     }
+
+    fn scalar_value_repr(&self, ty: Ty) -> Option<Ty> {
+        self.syms.libraries.scalar_value_repr(ty)
+    }
+
+    fn has_scalar_value_repr(&self, ty: Ty) -> bool {
+        self.scalar_value_repr(ty).is_some()
+    }
+
+    fn is_unsigned_integer_type(&self, ty: Ty) -> bool {
+        self.syms.libraries.is_unsigned_integer_type(ty)
+    }
+
+    fn unsigned_integer_box_type(&self, ty: Ty) -> Option<Ty> {
+        self.syms.libraries.unsigned_integer_box_type(ty)
+    }
+
+    fn compare_ordered(&mut self, ty: Ty, op: IrBinOp, lhs: u32, rhs: u32) -> Option<u32> {
+        if self.is_unsigned_integer_type(ty) {
+            let call = self.runtime_call(RuntimeOp::UnsignedCompare, ty, vec![lhs, rhs])?;
+            let zero = self.ir.add_expr(IrExpr::Const(IrConst::Int(0)));
+            Some(self.ir.add_expr(IrExpr::PrimitiveBinOp {
+                op,
+                lhs: call,
+                rhs: zero,
+            }))
+        } else {
+            Some(self.ir.add_expr(IrExpr::PrimitiveBinOp { op, lhs, rhs }))
+        }
+    }
+
+    fn runtime_call(&mut self, op: RuntimeOp, ty: Ty, args: Vec<u32>) -> Option<u32> {
+        let c = self.syms.libraries.runtime_callable(op, ty)?;
+        Some(self.ir.add_expr(IrExpr::Call {
+            callee: Callee::Static {
+                owner: c.owner,
+                name: c.name,
+                descriptor: c.descriptor,
+                inline: c.inline,
+            },
+            dispatch_receiver: None,
+            args,
+        }))
+    }
+
+    fn platform_static_field(&mut self, field: crate::libraries::PlatformField) -> u32 {
+        self.ir.add_expr(platform_field_expr(field))
+    }
+
+    fn mutable_local_ref_type(&self, elem: Ty) -> Option<Ty> {
+        self.syms.libraries.mutable_local_ref_type(elem)
+    }
+
+    fn property_reference_impl(&self, arity: usize, mutable: bool) -> Option<PlatformCtor> {
+        self.syms.libraries.property_reference_impl(arity, mutable)
+    }
+
+    fn property_reference_signature(&self, getter_name: &str, ret: Ty) -> Option<String> {
+        self.syms
+            .libraries
+            .property_reference_signature(getter_name, ret)
+    }
+
+    fn library_type_is_interface(&self, internal: &str) -> bool {
+        self.syms
+            .libraries
+            .resolve_type(internal)
+            .map_or(false, |t| t.is_interface())
+    }
+
     /// Whether the current module declares a top-level function `name` (shadow-precedence test) — asked
     /// through the module source rather than touching `syms.funs` directly.
     fn module_declares(&self, name: &str) -> bool {
@@ -3520,24 +3600,23 @@ impl<'a> Lower<'a> {
     /// Build a fresh `PropertyReference0Impl(<facade>::class, name, "name()<ret>", 0)` for a local
     /// delegated property's `getValue`/`setValue` call (the `KProperty` argument). The enclosing facade
     /// is the empty-internal `ClassConst` sentinel (resolved to `self.facade` at emit).
-    fn make_local_propref(&mut self, ld: &LocalDelegate) -> ExprId {
+    fn make_local_propref(&mut self, ld: &LocalDelegate) -> Option<ExprId> {
+        let propref_impl = self.property_reference_impl(0, false)?;
         let cls = self.ir.add_expr(IrExpr::ClassConst {
             internal: String::new(),
         });
         let nm = self
             .ir
             .add_expr(IrExpr::Const(IrConst::String(ld.name.clone())));
-        let sig = self.ir.add_expr(IrExpr::Const(IrConst::String(format!(
-            "{}(){}",
-            getter_name(&ld.name),
-            ld.ret_desc
-        ))));
+        let getter_name = property_getter_name(&ld.name);
+        let signature = self.property_reference_signature(&getter_name, ld.ret_ty)?;
+        let sig = self.ir.add_expr(IrExpr::Const(IrConst::String(signature)));
         let flag = self.ir.add_expr(IrExpr::Const(IrConst::Int(0)));
-        self.ir.add_expr(IrExpr::NewExternal {
-            internal: "kotlin/jvm/internal/PropertyReference0Impl".to_string(),
-            ctor_desc: "(Ljava/lang/Class;Ljava/lang/String;Ljava/lang/String;I)V".to_string(),
+        Some(self.ir.add_expr(IrExpr::NewExternal {
+            internal: propref_impl.internal,
+            ctor_desc: propref_impl.ctor_desc,
             args: vec![cls, nm, sig, flag],
-        })
+        }))
     }
 
     /// Lower a top-level delegated property `val x: T by Del()` (pass 2). Model: two synthetic statics —
@@ -3559,15 +3638,13 @@ impl<'a> Lower<'a> {
             return None;
         }
         let gv = self.syms.method_of(&delegate_internal, "getValue")?;
-        let prop_ty = self.delegated_prop_type(p)?;
+        let prop_ty =
+            p.ty.as_ref()
+                .map(|r| ty_of(self.afile, r))
+                .unwrap_or(gv.ret);
 
         // getValue descriptor `(thisRef, KProperty)ret` from the resolved signature.
-        let mut gv_desc = String::from("(");
-        for pt in &gv.params {
-            gv_desc.push_str(&pt.descriptor());
-        }
-        gv_desc.push(')');
-        gv_desc.push_str(&gv.ret.descriptor());
+        let gv_desc = self.syms.libraries.method_descriptor(&gv.params, gv.ret)?;
 
         // x$delegate: Del — init = lowered delegate expression.
         let delegate_ir = ty_to_ir(delegate_ty);
@@ -3589,12 +3666,14 @@ impl<'a> Lower<'a> {
         let name_c = self
             .ir
             .add_expr(IrExpr::Const(IrConst::String(p.name.clone())));
-        let sig_str = format!("{}(){}", getter_name(&p.name), prop_ty.descriptor());
+        let getter_name = property_getter_name(&p.name);
+        let sig_str = self.property_reference_signature(&getter_name, prop_ty)?;
         let sig_c = self.ir.add_expr(IrExpr::Const(IrConst::String(sig_str)));
         let flag_c = self.ir.add_expr(IrExpr::Const(IrConst::Int(1)));
+        let propref_impl = self.property_reference_impl(0, false)?;
         let propref = self.ir.add_expr(IrExpr::NewExternal {
-            internal: "kotlin/jvm/internal/PropertyReference0Impl".to_string(),
-            ctor_desc: "(Ljava/lang/Class;Ljava/lang/String;Ljava/lang/String;I)V".to_string(),
+            internal: propref_impl.internal,
+            ctor_desc: propref_impl.ctor_desc,
             args: vec![facade_cls, name_c, sig_c, flag_c],
         });
         let kprop_ty = ty_to_ir(Ty::obj("kotlin/reflect/KProperty"));
@@ -3872,6 +3951,13 @@ impl<'a> Lower<'a> {
         // (`asSeq<String>(x): String` physically `CharSequence`), insert the `checkcast` kotlinc emits so
         // a member access on the result verifies.
         let st = self.info.ty(e);
+        if self.has_scalar_value_repr(st) && phys == Ty::obj("kotlin/Any") {
+            return self.ir.add_expr(IrExpr::TypeOp {
+                op: IrTypeOp::ImplicitCoercion,
+                arg: call,
+                type_operand: ty_to_ir(st),
+            });
+        }
         if st.is_reference()
             && st != Ty::obj("kotlin/Any")
             && st != Ty::Null
@@ -3953,10 +4039,11 @@ impl<'a> Lower<'a> {
     /// (`a = temp.component1()`, …). Each component is a user-class `componentN` (data class) or a
     /// library member (`Pair`, `Map.Entry`); a generic component's erased return coerces to its element.
     /// Lower a single-spread call `foo(*a)` to a top-level `vararg` function: pass the array through
-    /// `Arrays.copyOf(a, a.size)` + `checkcast`, exactly as kotlinc does, instead of packing the array
-    /// as one element. Returns `None` (→ the file skips) for any shape this doesn't handle: more than one
-    /// argument, a non-spread sole argument, a non-`Name` (non-reusable) spread expression, a primitive
-    /// element type, or a callee that isn't a single-`vararg`-parameter top-level function in this file.
+    /// the platform array-copy helper + `checkcast`, exactly as kotlinc does, instead of packing the
+    /// array as one element. Returns `None` (→ the file skips) for any shape this doesn't handle: more
+    /// than one argument, a non-spread sole argument, a non-`Name` (non-reusable) spread expression, an
+    /// unsupported element type, or a callee that isn't a single-`vararg`-parameter top-level function in
+    /// this file.
     fn lower_single_spread_call(
         &mut self,
         callee: AstExprId,
@@ -3980,10 +4067,9 @@ impl<'a> Lower<'a> {
             return None;
         }
         let elem = ty_of(self.afile, &decl.params[0].ty);
-        // A genuine JVM primitive element (`vararg xs: Int` → `IntArray`/`[I`) uses the matching
-        // `Arrays.copyOf(int[], int): int[]` overload and needs NO checkcast (the result is already the
-        // exact array type). Unsigned `UInt`/`ULong` varargs are a value-class array (`UIntArray`) with a
-        // different copy path — leave those (skip) rather than miscompile.
+        // A primitive element uses the matching platform array-copy overload and needs no checkcast
+        // (the result is already the exact array type). Unsigned `UInt`/`ULong` varargs are a value-class
+        // array with a different copy path — leave those (skip) rather than miscompile.
         let prim = matches!(
             elem,
             Ty::Int
@@ -3999,11 +4085,10 @@ impl<'a> Lower<'a> {
             return None;
         }
         let array_ty = Ty::array(elem);
-        let key: String = array_ty.descriptor();
-        let fid = *self.fun_ids.get(&(fname.clone(), key))?;
+        let fid = *self.fun_ids.get(&(fname.clone(), vec![array_ty]))?;
         let array_ir = ty_to_ir(array_ty);
 
-        // `Arrays.copyOf(a, a.size)` — the primitive overload returns the exact array type (no cast); the
+        // Platform array copy. The JVM primitive overload returns the exact array type (no cast); the
         // reference overload returns `Object[]` and needs a `checkcast` to the element array type.
         let a0 = self.lower_arg(spread, &array_ir)?;
         let a1 = self.lower_arg(spread, &array_ir)?;
@@ -4012,22 +4097,7 @@ impl<'a> Lower<'a> {
             dispatch_receiver: Some(a1),
             args: vec![],
         });
-        let copyof_desc = if prim {
-            let p = elem.descriptor();
-            format!("([{p}I)[{p}")
-        } else {
-            "([Ljava/lang/Object;I)[Ljava/lang/Object;".to_string()
-        };
-        let copy = self.ir.add_expr(IrExpr::Call {
-            callee: Callee::Static {
-                owner: "java/util/Arrays".to_string(),
-                name: "copyOf".to_string(),
-                descriptor: copyof_desc,
-                inline: InlineKind::None,
-            },
-            dispatch_receiver: None,
-            args: vec![a0, size],
-        });
+        let copy = self.runtime_call(RuntimeOp::ArrayCopyOf, array_ir, vec![a0, size])?;
         let arg = if prim {
             copy // primitive `copyOf` already returns `[<prim>` — no cast
         } else {
@@ -4065,127 +4135,115 @@ impl<'a> Lower<'a> {
             }
             let comp = format!("component{}", idx + 1);
             let recv = self.ir.add_expr(IrExpr::GetValue(tmp));
-            let (call, log_ty) = if let Some((class, index, _, _)) =
-                self.resolve_method(&internal, &comp)
-            {
-                let ret = self
-                    .syms
-                    .method_of(&internal, &comp)
-                    .map(|s| s.ret)
-                    .unwrap_or_else(|| Ty::obj("kotlin/Any"));
-                (
-                    self.ir.add_expr(IrExpr::MethodCall {
-                        class,
-                        index,
-                        receiver: recv,
+            let (call, log_ty) =
+                if let Some((class, index, _, _)) = self.resolve_method(&internal, &comp) {
+                    let ret = self
+                        .syms
+                        .method_of(&internal, &comp)
+                        .map(|s| s.ret)
+                        .unwrap_or_else(|| Ty::obj("kotlin/Any"));
+                    (
+                        self.ir.add_expr(IrExpr::MethodCall {
+                            class,
+                            index,
+                            receiver: recv,
+                            args: vec![],
+                        }),
+                        ret,
+                    )
+                } else if self.class_of(it_ty).is_none()
+                    && self.syms.class_by_internal(&internal).is_some_and(|cs| {
+                        cs.value_field.is_none()
+                            && cs.methods.get(&comp).is_some_and(|s| s.params.is_empty())
+                    })
+                {
+                    // `componentN` of a class defined in ANOTHER file of this compilation → `CrossFileVirtual`
+                    // (mirrors a cross-file instance call), so a destructure of a sibling-file value resolves.
+                    let (ret, interface) = {
+                        let cs = self.syms.class_by_internal(&internal).unwrap();
+                        (cs.methods[&comp].ret, cs.is_interface)
+                    };
+                    let c = self.ir.add_expr(IrExpr::Call {
+                        callee: Callee::CrossFileVirtual {
+                            owner: internal.clone(),
+                            name: comp.clone(),
+                            params: vec![],
+                            ret: ty_to_ir(ret),
+                            interface,
+                        },
+                        dispatch_receiver: Some(recv),
                         args: vec![],
-                    }),
-                    ret,
-                )
-            } else if self.class_of(it_ty).is_none()
-                && self.syms.class_by_internal(&internal).is_some_and(|cs| {
-                    cs.value_field.is_none()
-                        && cs.methods.get(&comp).is_some_and(|s| s.params.is_empty())
-                })
-            {
-                // `componentN` of a class defined in ANOTHER file of this compilation → `CrossFileVirtual`
-                // (mirrors a cross-file instance call), so a destructure of a sibling-file value resolves.
-                let (ret, interface) = {
-                    let cs = self.syms.class_by_internal(&internal).unwrap();
-                    (cs.methods[&comp].ret, cs.is_interface)
-                };
-                let c = self.ir.add_expr(IrExpr::Call {
-                    callee: Callee::CrossFileVirtual {
-                        owner: internal.clone(),
-                        name: comp.clone(),
-                        params: vec![],
-                        ret: ty_to_ir(ret),
-                        interface,
-                    },
-                    dispatch_receiver: Some(recv),
-                    args: vec![],
-                });
-                (c, ret)
-            } else if let Some(m) =
-                crate::call_resolver::resolve_instance(&*self.syms.libraries, &internal, &comp, &[])
-            {
-                let is_iface = self
-                    .syms
-                    .libraries
-                    .resolve_type(&internal)
-                    .map_or(false, |t| t.is_interface());
-                let log = self
-                    .syms
-                    .libraries
-                    .member_return(it_ty, &comp, &[])
-                    .unwrap_or(m.ret);
-                let c = self.ir.add_expr(IrExpr::Call {
-                    callee: Callee::Virtual {
-                        owner: internal.clone(),
-                        name: comp.clone(),
-                        descriptor: m.descriptor.clone(),
-                        interface: is_iface,
-                    },
-                    dispatch_receiver: Some(recv),
-                    args: vec![],
-                });
-                (self.coerce_erased(c, log, m.ret), log)
-            } else if let Some(c) =
-                self.syms
-                    .libraries
-                    .resolve_callable(&comp, Some(it_ty), &[], &[])
-            {
-                // `List.component1()` etc. are stdlib extensions: `invokestatic facade.componentN(recv)`.
-                let call = self.ir.add_expr(IrExpr::Call {
-                    callee: Callee::Static {
-                        owner: c.owner,
-                        name: c.name,
-                        descriptor: c.descriptor,
-                        inline: c.inline,
-                    },
-                    dispatch_receiver: None,
-                    args: vec![recv],
-                });
-                (self.coerce_erased(call, c.ret, c.physical_ret), c.ret)
-            } else {
-                // An indexable type: `componentN` is the inline `get(N-1)`.
-                let m = crate::call_resolver::resolve_instance(
+                    });
+                    (c, ret)
+                } else if let Some(m) = crate::call_resolver::resolve_instance_member(
                     &*self.syms.libraries,
-                    &internal,
-                    "get",
-                    &[Ty::Int],
-                )?;
-                let is_iface = self
-                    .syms
-                    .libraries
-                    .resolve_type(&internal)
-                    .map_or(false, |t| t.is_interface());
-                let log = self
-                    .syms
-                    .libraries
-                    .member_return(it_ty, "get", &[Ty::Int])
-                    .unwrap_or(m.ret);
-                let i = self.ir.add_expr(IrExpr::Const(IrConst::Int(idx as i32)));
-                let c = self.ir.add_expr(IrExpr::Call {
-                    callee: Callee::Virtual {
-                        owner: internal.clone(),
-                        name: "get".to_string(),
-                        descriptor: m.descriptor.clone(),
-                        interface: is_iface,
-                    },
-                    dispatch_receiver: Some(recv),
-                    args: vec![i],
-                });
-                (self.coerce_erased(c, log, m.ret), log)
-            };
+                    it_ty,
+                    &comp,
+                    &[],
+                ) {
+                    let is_iface = self
+                        .syms
+                        .libraries
+                        .resolve_type(&internal)
+                        .map_or(false, |t| t.is_interface());
+                    let c = self.ir.add_expr(IrExpr::Call {
+                        callee: Callee::Virtual {
+                            owner: internal.clone(),
+                            name: comp.clone(),
+                            descriptor: m.member.descriptor.clone(),
+                            interface: is_iface,
+                        },
+                        dispatch_receiver: Some(recv),
+                        args: vec![],
+                    });
+                    (self.coerce_erased(c, m.ret, m.member.physical_ret), m.ret)
+                } else if let Some(c) = self.library_extension_callable(&comp, it_ty, &[], &[]) {
+                    // `List.component1()` etc. are stdlib extensions: `invokestatic facade.componentN(recv)`.
+                    let call = self.ir.add_expr(IrExpr::Call {
+                        callee: Callee::Static {
+                            owner: c.owner,
+                            name: c.name,
+                            descriptor: c.descriptor,
+                            inline: c.inline,
+                        },
+                        dispatch_receiver: None,
+                        args: vec![recv],
+                    });
+                    (self.coerce_erased(call, c.ret, c.physical_ret), c.ret)
+                } else {
+                    // An indexable type: `componentN` is the inline `get(N-1)`.
+                    let m = crate::call_resolver::resolve_instance_member(
+                        &*self.syms.libraries,
+                        it_ty,
+                        "get",
+                        &[Ty::Int],
+                    )?;
+                    let is_iface = self
+                        .syms
+                        .libraries
+                        .resolve_type(&internal)
+                        .map_or(false, |t| t.is_interface());
+                    let i = self.ir.add_expr(IrExpr::Const(IrConst::Int(idx as i32)));
+                    let c = self.ir.add_expr(IrExpr::Call {
+                        callee: Callee::Virtual {
+                            owner: internal.clone(),
+                            name: "get".to_string(),
+                            descriptor: m.member.descriptor.clone(),
+                            interface: is_iface,
+                        },
+                        dispatch_receiver: Some(recv),
+                        args: vec![i],
+                    });
+                    (self.coerce_erased(c, m.ret, m.member.physical_ret), m.ret)
+                };
             // A `var` component captured AND written by a closure is boxed into a `Ref$XxxRef`, exactly
             // like a plain mutable local (see the `Stmt::Local` path) — without this the closure mutates
             // a private copy and the outer read misses it (e.g. `var [a,b]=A(); { a=3 }()`).
-            if self.info.boxed_vars.contains(name) {
+            if self.shared_cell_vars.contains(name) {
                 let elem_ty = self.value_class_underlying(log_ty).unwrap_or(log_ty);
                 let elem = ty_to_ir(elem_ty);
                 let holder = self.fresh_value();
-                let holder_ty = Ty::obj(ref_holder_internal(elem_ty));
+                let holder_ty = self.mutable_local_ref_type(elem_ty)?;
                 self.scope.push((name.clone(), holder, holder_ty));
                 self.boxed_elem.insert(name.clone(), elem_ty);
                 let new_ref = self.ir.add_expr(IrExpr::RefNew { elem, init: call });
@@ -4235,7 +4293,8 @@ impl<'a> Lower<'a> {
         // is the receiver (the closure method's leading parameter), bound as the implicit `this` so a bare
         // member/extension call inside dispatches against it. The user's EXPLICIT params are the remaining
         // (value) parameters. `None` for an ordinary lambda.
-        let recv_ty = self.info.recv_lambda_tys.get(&e).copied();
+        let lambda_info = lambda_info(self.info, e);
+        let recv_ty = lambda_info.receiver;
         let value_arity = if recv_ty.is_some() {
             arity.saturating_sub(1)
         } else {
@@ -4274,7 +4333,7 @@ impl<'a> Lower<'a> {
         // innermost binding (the last in the scope stack). A real CLOSURE also captures a name used in a
         // NESTED lambda (`f { g { use(outer) } }`); an INLINE-spliced lambda accesses it directly, so its
         // captures must NOT be inflated by nested uses (the splice's stack frames would break).
-        let deep = !self.info.inline_lambdas.contains(&e);
+        let deep = lambda_info.capture != LambdaCapture::InlineSplice;
         let mut captures: Vec<(String, u32, Ty)> = Vec::new();
         for (name, v, ty) in self.scope.iter().rev() {
             let used = if deep {
@@ -4363,12 +4422,24 @@ impl<'a> Lower<'a> {
             });
             (ty_to_ir(Ty::obj("kotlin/Unit")), b, inline_b)
         } else {
-            let ret = self.ir.add_expr(IrExpr::Return(Some(ve)));
+            let ret_val = if sig.ret.is_reference()
+                && !matches!(sig.ret, Ty::Null)
+                && sig.ret != Ty::obj("kotlin/Any")
+            {
+                self.ir.add_expr(IrExpr::TypeOp {
+                    op: IrTypeOp::Cast,
+                    arg: ve,
+                    type_operand: ty_to_ir(sig.ret),
+                })
+            } else {
+                ve
+            };
+            let ret = self.ir.add_expr(IrExpr::Return(Some(ret_val)));
             let b = self.ir.add_expr(IrExpr::Block {
                 stmts: vec![ret],
                 value: None,
             });
-            (ty_to_ir(sig.ret), b, ve)
+            (ty_to_ir(sig.ret), b, ret_val)
         };
         let impl_name = format!("{}$lambda${}", self.cur_fn_name, self.lambda_seq);
         self.lambda_seq += 1;
@@ -4455,6 +4526,12 @@ impl<'a> Lower<'a> {
             .iter()
             .any(|n| susp_names.contains(n) || self.resolver().toplevel_is_suspend(n));
         let jvm_arity = arity + 1; // + the trailing continuation
+        let function_iface = self
+            .syms
+            .libraries
+            .function_type(jvm_arity)?
+            .obj_internal()?
+            .to_string();
         let internal = class_internal(
             self.afile,
             &format!("{}$suspend${}", self.cur_fn_name, self.lambda_seq),
@@ -4555,7 +4632,7 @@ impl<'a> Lower<'a> {
             prop_ref: None,
             func_ref: None,
             bridges: vec![],
-            interfaces: vec![format!("kotlin/jvm/functions/Function{jvm_arity}")],
+            interfaces: vec![function_iface],
             is_object: false,
             is_companion: false,
             companion_class: None,
@@ -4572,18 +4649,9 @@ impl<'a> Lower<'a> {
 
         // invokeSuspend(Object result): either the LEAF form (throwOnFailure; load captures; return
         // box(<body>)) or, when the body suspends, a TAIL state machine with `this` as the continuation.
-        let throw_on_failure = |s: &mut Self, value_idx: u32| {
+        let throw_on_failure = |s: &mut Self, value_idx: u32| -> Option<u32> {
             let v = s.ir.add_expr(IrExpr::GetValue(value_idx));
-            s.ir.add_expr(IrExpr::Call {
-                callee: Callee::Static {
-                    owner: "kotlin/ResultKt".to_string(),
-                    name: "throwOnFailure".to_string(),
-                    descriptor: "(Ljava/lang/Object;)V".to_string(),
-                    inline: InlineKind::None,
-                },
-                dispatch_receiver: None,
-                args: vec![v],
-            })
+            s.runtime_call(RuntimeOp::ThrowOnFailure, Ty::Unit, vec![v])
         };
         // Set when the body needs the general (multi-suspension / control-flow) lambda-mode machine,
         // built by the coroutine pass from the plain `invokeSuspend` body.
@@ -4707,19 +4775,15 @@ impl<'a> Lower<'a> {
                 });
                 // For a same-file callee (`Local`) the CPS descriptor comes from the callee's
                 // pass-rewritten signature; a classpath (`Static`) / sibling (`CrossFile`) callee is
-                // resolved by its LOGICAL signature, so rewrite it to the physical CPS form here (append the
-                // `Continuation` parameter, erase the return to `Object`).
+                // resolved by its LOGICAL signature, so ask the target runtime for the physical CPS form.
                 let cont_param_ty = cont_ir.clone();
                 let object_ret_ty = object_ir.clone();
                 match &mut self.ir.exprs[tail as usize] {
                     IrExpr::Call { args, callee, .. } => {
                         match callee {
                             Callee::Static { descriptor, .. } => {
-                                let close = descriptor.rfind(')').unwrap_or(descriptor.len());
-                                *descriptor = format!(
-                                    "{}Lkotlin/coroutines/Continuation;)Ljava/lang/Object;",
-                                    &descriptor[..close]
-                                );
+                                *descriptor =
+                                    self.syms.libraries.suspend_cps_descriptor(descriptor)?;
                             }
                             Callee::CrossFile { params, ret, .. } => {
                                 params.push(cont_param_ty);
@@ -4732,16 +4796,8 @@ impl<'a> Lower<'a> {
                     _ => return None,
                 }
                 // SUSPENDED marker into local 2 (this=0, result=1).
-                let susp_call = self.ir.add_expr(IrExpr::Call {
-                    callee: Callee::Static {
-                        owner: "kotlin/coroutines/intrinsics/IntrinsicsKt".to_string(),
-                        name: "getCOROUTINE_SUSPENDED".to_string(),
-                        descriptor: "()Ljava/lang/Object;".to_string(),
-                        inline: InlineKind::None,
-                    },
-                    dispatch_receiver: None,
-                    args: vec![],
-                });
+                let susp_call =
+                    self.runtime_call(RuntimeOp::CoroutineSuspended, Ty::Unit, vec![])?;
                 // Machine locals are allocated ABOVE the body's locals (the body was already lowered) so the
                 // bound `a` slot (if any) can't collide with the SUSPENDED marker / call-result temp.
                 let susp_idx = self.fresh_value();
@@ -4752,7 +4808,7 @@ impl<'a> Lower<'a> {
                     init: Some(susp_call),
                 });
                 // State 0: throwOnFailure(result); this.label = 1; r = call; if r==SUSPENDED return it; tail.
-                let s0_tof = throw_on_failure(self, 1);
+                let s0_tof = throw_on_failure(self, 1)?;
                 let this_l = self.ir.add_expr(IrExpr::GetValue(0));
                 let one = self.ir.add_expr(IrExpr::Const(IrConst::Int(1)));
                 let set_label = self.ir.add_expr(IrExpr::SetField {
@@ -4820,7 +4876,7 @@ impl<'a> Lower<'a> {
                     value: None,
                 });
                 // State 1 (resume): throwOnFailure(result); bind `a` from `result`; run the tail.
-                let s1_tof = throw_on_failure(self, 1);
+                let s1_tof = throw_on_failure(self, 1)?;
                 let mut s1_stmts = vec![s1_tof];
                 s1_stmts.extend(tail_at(self, 1));
                 let s1 = self.ir.add_expr(IrExpr::Block {
@@ -4855,9 +4911,13 @@ impl<'a> Lower<'a> {
                 let msg = self.ir.add_expr(IrExpr::Const(IrConst::String(
                     "call to 'resume' before 'invoke' with coroutine".to_string(),
                 )));
+                let exc_ctor = self
+                    .syms
+                    .libraries
+                    .runtime_ctor(RuntimeCtor::IllegalStateException)?;
                 let exc = self.ir.add_expr(IrExpr::NewExternal {
-                    internal: "java/lang/IllegalStateException".to_string(),
-                    ctor_desc: "(Ljava/lang/String;)V".to_string(),
+                    internal: exc_ctor.internal,
+                    ctor_desc: exc_ctor.ctor_desc,
                     args: vec![msg],
                 });
                 let throw = self.ir.add_expr(IrExpr::Throw { operand: exc });
@@ -4875,7 +4935,7 @@ impl<'a> Lower<'a> {
                 })
             }
         } else {
-            let mut stmts = vec![throw_on_failure(self, 1)];
+            let mut stmts = vec![throw_on_failure(self, 1)?];
             let saved_scope = std::mem::take(&mut self.scope);
             let saved_next = self.next_value;
             self.next_value = 2; // this=0, result=1
@@ -5248,11 +5308,7 @@ impl<'a> Lower<'a> {
             .collect();
         for (mname, params, ret) in methods {
             let params_ir: Vec<Ty> = params.iter().map(|t| ty_to_ir(*t)).collect();
-            let descriptor = format!(
-                "({}){}",
-                params.iter().map(|t| t.descriptor()).collect::<String>(),
-                ret.descriptor()
-            );
+            let descriptor = self.syms.libraries.method_descriptor(&params, ret)?;
             let field = self.this_field(class_id, delegate_idx);
             let args: Vec<u32> = (0..params.len())
                 .map(|i| self.ir.add_expr(IrExpr::GetValue(i as u32 + 1)))
@@ -5284,71 +5340,53 @@ impl<'a> Lower<'a> {
         Some(())
     }
 
-    /// Convert an unsigned value (`UInt`/`ULong`, represented as int/long) to its unsigned-decimal
-    /// `String` via `Integer.toUnsignedString`/`Long.toUnsignedString` — what kotlinc uses for an
-    /// unsigned `toString()`/string-template part (a signed `toString` would print the wrong value).
-    /// Box an unsigned primitive (`UInt`/`ULong`, represented as int/long) to its inline-class object
-    /// via `kotlin/UInt."box-impl"(I)Lkotlin/UInt;` (kotlinc's synthetic factory) — NOT
-    /// `Integer.valueOf`, which would lose the unsigned identity (`is UInt`, the unsigned `toString`).
-    fn box_unsigned(&mut self, val: u32, ty: Ty) -> u32 {
-        let (owner, prim) = if ty == Ty::UInt {
-            ("kotlin/UInt", "I")
-        } else {
-            ("kotlin/ULong", "J")
-        };
-        self.ir.add_expr(IrExpr::Call {
+    /// Box an unsigned primitive to its target/library value-class object via the platform synthetic
+    /// factory — not a plain boxed carrier, which would lose unsigned identity (`is UInt`, `toString`).
+    fn box_unsigned(&mut self, val: u32, ty: Ty) -> Option<u32> {
+        let c = self
+            .syms
+            .libraries
+            .runtime_callable(RuntimeOp::UnsignedBox, ty)?;
+        Some(self.ir.add_expr(IrExpr::Call {
             callee: Callee::Static {
-                owner: owner.to_string(),
-                name: "box-impl".to_string(),
-                descriptor: format!("({prim})L{owner};"),
-                inline: InlineKind::None,
+                owner: c.owner,
+                name: c.name,
+                descriptor: c.descriptor,
+                inline: c.inline,
             },
             dispatch_receiver: None,
             args: vec![val],
-        })
+        }))
     }
 
-    /// Unbox a (possibly `Object`-typed) `kotlin/UInt`/`ULong` object back to its int/long: checkcast
-    /// to the inline-class type, then `unbox-impl`.
-    fn unbox_unsigned(&mut self, val: u32, ty: Ty) -> u32 {
-        let (owner, prim) = if ty == Ty::UInt {
-            ("kotlin/UInt", "I")
-        } else {
-            ("kotlin/ULong", "J")
-        };
+    /// Unbox a possibly `Object`-typed unsigned library object back to its scalar carrier: checkcast to the
+    /// target value-class type, then `unbox-impl`.
+    fn unbox_unsigned(&mut self, val: u32, ty: Ty) -> Option<u32> {
+        let c = self
+            .syms
+            .libraries
+            .runtime_callable(RuntimeOp::UnsignedUnbox, ty)?;
+        let owner_ty = Ty::obj(&c.owner);
+        let owner = owner_ty.obj_internal()?;
         let cast = self.ir.add_expr(IrExpr::TypeOp {
             op: IrTypeOp::Cast,
             arg: val,
-            type_operand: ty_to_ir(Ty::obj(owner)),
+            type_operand: ty_to_ir(owner_ty),
         });
-        self.ir.add_expr(IrExpr::Call {
+        Some(self.ir.add_expr(IrExpr::Call {
             callee: Callee::Virtual {
                 owner: owner.to_string(),
-                name: "unbox-impl".to_string(),
-                descriptor: format!("(){prim}"),
+                name: c.name,
+                descriptor: c.descriptor,
                 interface: false,
             },
             dispatch_receiver: Some(cast),
             args: vec![],
-        })
+        }))
     }
 
-    fn unsigned_to_string(&mut self, val: u32, ty: Ty) -> u32 {
-        let (owner, prim) = if ty == Ty::UInt {
-            ("java/lang/Integer", "I")
-        } else {
-            ("java/lang/Long", "J")
-        };
-        self.ir.add_expr(IrExpr::Call {
-            callee: Callee::Static {
-                owner: owner.to_string(),
-                name: "toUnsignedString".to_string(),
-                descriptor: format!("({prim})Ljava/lang/String;"),
-                inline: InlineKind::None,
-            },
-            dispatch_receiver: None,
-            args: vec![val],
-        })
+    fn unsigned_to_string(&mut self, val: u32, ty: Ty) -> Option<u32> {
+        self.runtime_call(RuntimeOp::UnsignedToString, ty, vec![val])
     }
 
     fn ir_const_str(&mut self, s: String) -> u32 {
@@ -5362,13 +5400,6 @@ impl<'a> Lower<'a> {
             index: i,
         })
     }
-    fn static_call(&mut self, fq: &str, args: Vec<u32>) -> u32 {
-        self.ir.add_expr(IrExpr::Call {
-            callee: Callee::External(fq.to_string()),
-            dispatch_receiver: None,
-            args,
-        })
-    }
     /// The `Int` hash of a field value `v` of type `t` (Kotlin's per-field `.hashCode()`). A value-class
     /// field reads here as its erased underlying; the JVM value-class pass boxes it at the reference
     /// boundary (`Objects.hashCode`) so the value class's own `hashCode` runs.
@@ -5379,56 +5410,54 @@ impl<'a> Lower<'a> {
             .ty
             .is_nullable()
     }
-    fn field_hash(&mut self, v: u32, t: Ty, nullable: bool) -> u32 {
+    fn field_hash(&mut self, v: u32, t: Ty, nullable: bool) -> Option<u32> {
         match t {
             // kotlinc hashes each primitive field via its boxed type's static `hashCode(prim)` (so the
             // bytecode matches even though `Integer.hashCode(I)` is the identity on `int`).
-            Ty::Int => self.static_call("java/lang/Integer.hashCode", vec![v]),
-            Ty::Short => self.static_call("java/lang/Short.hashCode", vec![v]),
-            Ty::Byte => self.static_call("java/lang/Byte.hashCode", vec![v]),
-            Ty::Char => self.static_call("java/lang/Character.hashCode", vec![v]),
-            Ty::Boolean => self.static_call("java/lang/Boolean.hashCode", vec![v]),
+            Ty::Int | Ty::Short | Ty::Byte | Ty::Char | Ty::Boolean => {
+                self.runtime_call(RuntimeOp::HashCode, t, vec![v])
+            }
             // A NON-null `String` hashes via its own `String.hashCode()` (kotlinc's `invokevirtual`),
             // matching the bytecode. A nullable one stays on `Objects.hashCode` (which null-guards,
             // returning 0 for `null`) — the null-guarded-ternary form is a future parity item.
-            Ty::String if !nullable => self.ir.add_expr(IrExpr::Call {
-                callee: Callee::External("kotlin/Any.hashCode".to_string()),
-                dispatch_receiver: Some(v),
-                args: vec![],
-            }),
-            Ty::Long => self.static_call("java/lang/Long.hashCode", vec![v]),
-            Ty::Double => self.static_call("java/lang/Double.hashCode", vec![v]),
-            Ty::Float => self.static_call("java/lang/Float.hashCode", vec![v]),
-            // An array property hashes by reference identity (`Objects.hashCode`), matching kotlinc — a
-            // data class does NOT content-hash arrays (consistent with its reference-based `equals`).
-            _ => self.static_call("java/util/Objects.hashCode", vec![v]),
+            t if !nullable && t.non_null().kotlin_class_internal() == Some("kotlin/String") => {
+                Some(self.ir.add_expr(IrExpr::Call {
+                    callee: Callee::Virtual {
+                        owner: "java/lang/String".to_string(),
+                        name: "hashCode".to_string(),
+                        descriptor: "()I".to_string(),
+                        interface: false,
+                    },
+                    dispatch_receiver: Some(v),
+                    args: vec![],
+                }))
+            }
+            Ty::Long | Ty::Double | Ty::Float => self.runtime_call(RuntimeOp::HashCode, t, vec![v]),
+            // An array/reference property hashes by reference identity/null-safe object hash, matching
+            // kotlinc — a data class does NOT content-hash arrays.
+            _ => self.runtime_call(RuntimeOp::HashCode, t, vec![v]),
         }
     }
     /// A `Boolean` IR expr testing field *inequality* (IEEE-aware for float/double, structural for
     /// refs) — used to build `equals` as a chain of `if (a != b) return false` early-outs.
-    fn field_ne(&mut self, a: u32, b: u32, t: Ty) -> u32 {
+    fn field_ne(&mut self, a: u32, b: u32, t: Ty) -> Option<u32> {
         match t {
             Ty::Double | Ty::Float => {
-                let fq = if t == Ty::Double {
-                    "java/lang/Double.compare"
-                } else {
-                    "java/lang/Float.compare"
-                };
-                let cmp = self.static_call(fq, vec![a, b]);
+                let cmp = self.runtime_call(RuntimeOp::PrimitiveCompare, t, vec![a, b])?;
                 let z = self.ir.add_expr(IrExpr::Const(IrConst::Int(0)));
-                self.ir.add_expr(IrExpr::PrimitiveBinOp {
+                Some(self.ir.add_expr(IrExpr::PrimitiveBinOp {
                     op: IrBinOp::Ne,
                     lhs: cmp,
                     rhs: z,
-                })
+                }))
             }
             // Int/Long/… → native compare; reference (incl. an array property, which a data class
             // compares by reference, not content) → `!Intrinsics.areEqual` via the reference Ne path.
-            _ => self.ir.add_expr(IrExpr::PrimitiveBinOp {
+            _ => Some(self.ir.add_expr(IrExpr::PrimitiveBinOp {
                 op: IrBinOp::Ne,
                 lhs: a,
                 rhs: b,
-            }),
+            })),
         }
     }
     /// `if (cond) return false` — a no-`else` statement-`when` whose only branch diverges.
@@ -5450,7 +5479,7 @@ impl<'a> Lower<'a> {
 
     /// Synthesize a `data class`'s `componentN`/`toString`/`hashCode`/`equals` as IR methods over the
     /// first `n` (primary-constructor) fields.
-    fn synth_data_members(&mut self, internal: &str, class_id: ClassId, n: usize) {
+    fn synth_data_members(&mut self, internal: &str, class_id: ClassId, n: usize) -> Option<()> {
         let fields: Vec<(String, Ty)> = self.classes[internal].fields[..n].to_vec();
 
         // componentN(): `return this.fieldN`.
@@ -5549,21 +5578,13 @@ impl<'a> Lower<'a> {
                     parts.push(self.ir_const_str(format!(", {name}=")));
                 }
                 let mut fv = self.this_field(class_id, i as u32);
-                // A data class renders an array property with `java.util.Arrays.toString(field)` (so
-                // `[true]`, not the default `[Z@hash`), matching kotlinc.
-                if let Some(param) =
-                    data_array_param(&self.ir.classes[class_id as usize].fields[i].ty)
+                // A data class renders an array property with the platform array-to-string helper (so
+                // `[true]`, not the default array identity string), matching kotlinc.
+                let field_ir_ty = self.ir.classes[class_id as usize].fields[i].ty;
+                if let Some(rendered) =
+                    self.runtime_call(RuntimeOp::ArrayToString, field_ir_ty, vec![fv])
                 {
-                    fv = self.ir.add_expr(IrExpr::Call {
-                        callee: Callee::Static {
-                            owner: "java/util/Arrays".to_string(),
-                            name: "toString".to_string(),
-                            descriptor: format!("({param})Ljava/lang/String;"),
-                            inline: InlineKind::None,
-                        },
-                        dispatch_receiver: None,
-                        args: vec![fv],
-                    });
+                    fv = rendered;
                 }
                 parts.push(fv);
             }
@@ -5604,7 +5625,7 @@ impl<'a> Lower<'a> {
             } else if fields.len() == 1 {
                 let fv = self.this_field(class_id, 0);
                 let n = self.field_nullable(class_id, 0);
-                let h = self.field_hash(fv, fields[0].1, n);
+                let h = self.field_hash(fv, fields[0].1, n)?;
                 let ret = self.ir.add_expr(IrExpr::Return(Some(h)));
                 self.ir.add_expr(IrExpr::Block {
                     stmts: vec![ret],
@@ -5616,7 +5637,7 @@ impl<'a> Lower<'a> {
                 let mut stmts = Vec::new();
                 let f0 = self.this_field(class_id, 0);
                 let n0 = self.field_nullable(class_id, 0);
-                let h0 = self.field_hash(f0, fields[0].1, n0);
+                let h0 = self.field_hash(f0, fields[0].1, n0)?;
                 stmts.push(self.ir.add_expr(IrExpr::Variable {
                     index: RV,
                     ty: ty_to_ir(Ty::Int),
@@ -5625,7 +5646,7 @@ impl<'a> Lower<'a> {
                 for (i, f) in fields.iter().enumerate().skip(1) {
                     let fv = self.this_field(class_id, i as u32);
                     let ni = self.field_nullable(class_id, i);
-                    let h = self.field_hash(fv, f.1, ni);
+                    let h = self.field_hash(fv, f.1, ni)?;
                     let prev = self.ir.add_expr(IrExpr::GetValue(RV));
                     let c31 = self.ir.add_expr(IrExpr::Const(IrConst::Int(31)));
                     let mul = self.ir.add_expr(IrExpr::PrimitiveBinOp {
@@ -5704,7 +5725,7 @@ impl<'a> Lower<'a> {
                     class: class_id,
                     index: i as u32,
                 });
-                let ne = self.field_ne(af, bf, *t);
+                let ne = self.field_ne(af, bf, *t)?;
                 let g = self.guard_return_false(ne);
                 stmts.push(g);
             }
@@ -5724,6 +5745,7 @@ impl<'a> Lower<'a> {
                 self.ir.open_methods.insert(fid); // kotlinc keeps the Object-override open
             }
         }
+        Some(())
     }
 
     fn lookup(&self, name: &str) -> Option<(u32, Ty)> {
@@ -5761,22 +5783,19 @@ impl<'a> Lower<'a> {
         ) {
             return None;
         }
-        // Resolve via the inline-only path, which (unlike `resolve_callable`) matches `@InlineOnly`
+        // Resolve via the inline-only path, which (unlike ordinary extension selection) matches `@InlineOnly`
         // package-private scope fns (`let`/`also`) — safe because we *inline* it (no call is emitted).
-        let c = self
-            .syms
-            .libraries
-            .resolve_scope_inline(name, rty, &[self.info.ty(lam_arg)])?;
+        let c = self.resolver().resolve_extension_inline_callable(
+            name,
+            rty,
+            &[self.info.ty(lam_arg)],
+        )?;
         if !c.inline.can_inline() {
             return None;
         }
         // The platform must be able to splice this body (branchless, single lambda-invoke, single exit) —
         // else the emitter would fall back to a real call, which is broken for an `@InlineOnly` callee.
-        if !self
-            .syms
-            .libraries
-            .can_inline_lambda(&c.owner, &c.name, &c.descriptor)
-        {
+        if !c.inline.can_inline() {
             return None;
         }
         // The emitter's lambda-splice is branchless-only: a branch in the lambda body produces a
@@ -6326,41 +6345,29 @@ impl<'a> Lower<'a> {
     /// lower it to the same `PrimitiveBinOp` the operator form produces (with mixed-operand promotion and
     /// the unsigned `div`/`rem` intrinsics). Returns `None` for a name/receiver this doesn't model.
     fn lower_prim_op_method(&mut self, recv: AstExprId, name: &str, arg: AstExprId) -> Option<u32> {
+        let lt = self.info.ty(recv);
         // Bitwise/shift operator-methods (`a.and(b)`, `a shl b`, …) are stdlib intrinsics on `Int`/`Long`
         // only — kotlinc maps them to `iand`/`ishl`/… . `and`/`or`/`xor` take the receiver's own type;
         // the shifts take an `Int` count (no numeric promotion). Recognized here so both the plain `.`
         // call and an (unnecessary) safe `?.` call on a non-null primitive share one lowering.
-        let lt = self.info.ty(recv);
         // `a.compareTo(b)` on numeric primitives → `{Integer,Long,Float,Double}.compare(a, b)` (−1/0/1)
         // after promoting both operands to their common type (`1.compareTo(1.1)` → `Double.compare`).
         // `Byte`/`Short`/`Char` compare in the `int` category. Shared so `a?.compareTo(b)` on a non-null
         // primitive lowers identically; a user `operator compareTo` has a reference receiver, handled
         // elsewhere.
-        if name == "compareTo" && lt.is_primitive() {
+        if name == "compareTo" && self.has_scalar_value_repr(lt) {
             let at = self.info.ty(arg);
-            if let Some(p) = Ty::promote(lt, at).filter(|p| p.is_primitive() && *p != Ty::Boolean) {
+            if let Some(p) =
+                Ty::promote(lt, at).filter(|p| self.has_scalar_value_repr(*p) && *p != Ty::Boolean)
+            {
                 let pir = ty_to_ir(p);
                 let l = self.lower_arg(recv, &pir)?;
                 let r = self.lower_arg(arg, &pir)?;
-                let (owner, prim) = match p {
-                    Ty::Long => ("java/lang/Long", "J"),
-                    Ty::Float => ("java/lang/Float", "F"),
-                    Ty::Double => ("java/lang/Double", "D"),
-                    _ => ("java/lang/Integer", "I"), // Int/Byte/Short/Char compare as int
-                };
-                return Some(self.ir.add_expr(IrExpr::Call {
-                    callee: Callee::Static {
-                        owner: owner.to_string(),
-                        name: "compare".to_string(),
-                        descriptor: format!("({prim}{prim})I"),
-                        inline: InlineKind::None,
-                    },
-                    dispatch_receiver: None,
-                    args: vec![l, r],
-                }));
+                return self.runtime_call(RuntimeOp::PrimitiveCompare, p, vec![l, r]);
             }
         }
-        if matches!(lt, Ty::Int | Ty::Long) {
+        let lt_bits = self.scalar_value_repr(lt).unwrap_or(lt);
+        if matches!(lt_bits, Ty::Int | Ty::Long) {
             let shift = matches!(name, "shl" | "shr" | "ushr");
             let bop = match name {
                 "and" => Some(IrBinOp::BitAnd),
@@ -6381,6 +6388,22 @@ impl<'a> Lower<'a> {
                 );
             }
         }
+        if lt == Ty::Boolean {
+            let bop = match name {
+                "and" => Some(IrBinOp::BitAnd),
+                "or" => Some(IrBinOp::BitOr),
+                "xor" => Some(IrBinOp::BitXor),
+                _ => None,
+            };
+            if let Some(op) = bop {
+                let l = self.expr(recv)?;
+                let r = self.lower_arg(arg, &ty_to_ir(Ty::Boolean))?;
+                return Some(
+                    self.ir
+                        .add_expr(IrExpr::PrimitiveBinOp { op, lhs: l, rhs: r }),
+                );
+            }
+        }
         let op = match name {
             "plus" => BinOp::Add,
             "minus" => BinOp::Sub,
@@ -6390,35 +6413,23 @@ impl<'a> Lower<'a> {
             _ => return None,
         };
         let (lt, rt) = (self.info.ty(recv), self.info.ty(arg));
-        if !lt.is_primitive() || !rt.is_primitive() || lt == Ty::Boolean || rt == Ty::Boolean {
+        if !self.has_scalar_value_repr(lt)
+            || !self.has_scalar_value_repr(rt)
+            || lt == Ty::Boolean
+            || rt == Ty::Boolean
+        {
             return None;
         }
-        // Unsigned `div`/`rem` need the JDK unsigned intrinsics (signed `+`/`-`/`*` share opcodes).
-        if lt.is_unsigned() && matches!(op, BinOp::Div | BinOp::Rem) {
-            let is_uint = lt == Ty::UInt;
-            let owner = if is_uint {
-                "java/lang/Integer"
-            } else {
-                "java/lang/Long"
-            };
-            let prim = if is_uint { "I" } else { "J" };
+        // Unsigned `div`/`rem` need platform unsigned helpers (signed `+`/`-`/`*` share opcodes).
+        if self.is_unsigned_integer_type(lt) && matches!(op, BinOp::Div | BinOp::Rem) {
             let l = self.expr(recv)?;
             let r = self.expr(arg)?;
-            let mname = if op == BinOp::Div {
-                "divideUnsigned"
+            let runtime_op = if op == BinOp::Div {
+                RuntimeOp::UnsignedDivide
             } else {
-                "remainderUnsigned"
+                RuntimeOp::UnsignedRemainder
             };
-            return Some(self.ir.add_expr(IrExpr::Call {
-                callee: Callee::Static {
-                    owner: owner.to_string(),
-                    name: mname.to_string(),
-                    descriptor: format!("({prim}{prim}){prim}"),
-                    inline: InlineKind::None,
-                },
-                dispatch_receiver: None,
-                args: vec![l, r],
-            }));
+            return self.runtime_call(runtime_op, lt, vec![l, r]);
         }
         let irop = bin_to_ir(op)?;
         let mut l = self.expr(recv)?;
@@ -6519,45 +6530,39 @@ impl<'a> Lower<'a> {
         out
     }
 
-    /// Resolve a method by name, walking the superclass chain. Returns the *owning* class id, the
-    /// method index within that class, its FunId, and its return type.
-    /// Lower an unbound property reference `Type::prop` (typed `KProperty1`) to a synthesized
-    /// `PropertyReference1Impl` singleton, read as its `INSTANCE`. Bound (`obj::prop`) and mutable
-    /// (`KMutableProperty*`) references aren't modeled yet (`None` ⇒ skip).
-    fn lower_prop_ref(&mut self, e: AstExprId, recv: AstExprId, name: &str) -> Option<u32> {
-        // Unbound `Type::prop` (a `KProperty1` singleton) or bound `obj::prop` (a `KProperty0` carrying
-        // the captured receiver).
-        let bound = match self.info.ty(e).obj_internal()? {
-            "kotlin/reflect/KProperty1" => false,
-            "kotlin/reflect/KProperty0" => true,
-            _ => return None,
-        };
+    /// Lower a property reference to a synthesized `PropertyReference*Impl`. The checker types the
+    /// expression as its callable shape; this JVM lowering pass chooses the reflection runtime class.
+    fn lower_prop_ref(&mut self, _e: AstExprId, recv: AstExprId, name: &str) -> Option<u32> {
         let Expr::Name(rn) = self.afile.expr(recv).clone() else {
             return None;
         };
-        // Bound: the receiver is an in-scope value; its type gives the owner. Unbound: `rn` is the class.
-        let (owner, recv_val) = if bound {
-            let (v, ty) = self.lookup(&rn)?;
+        // Bound: the receiver is an in-scope value; its type gives the owner. Unbound: `rn` names the
+        // class, and the generated reference takes the receiver as its invoke/get argument.
+        let (owner, recv_val) = if let Some((v, ty)) = self.lookup(&rn) {
             (ty.obj_internal()?.to_string(), Some(v))
         } else {
             (class_internal(self.afile, &rn), None)
         };
         let owner_id = self.classes.get(&owner)?.id;
-        let prop_ty = {
+        let (prop_ty, is_var) = {
             let cls = &self.ir.classes[owner_id as usize];
             let idx = cls.fields.iter().position(|f| f.name == *name)?;
-            cls.fields[idx].ty.clone()
+            (cls.fields[idx].ty, !cls.fields[idx].is_final)
         };
+        // Member mutable property references need a mutable property-reference runtime class and setter
+        // dispatch; top-level mutable references are modeled separately.
+        if is_var {
+            return None;
+        }
+        let bound = recv_val.is_some();
         let synth_fq = class_internal(
             self.afile,
             &format!("{}$propref${}${}", self.cur_fn_name, name, self.lambda_seq),
         );
         self.lambda_seq += 1;
-        let superclass = if bound {
-            "kotlin/jvm/internal/PropertyReference0Impl"
-        } else {
-            "kotlin/jvm/internal/PropertyReference1Impl"
-        };
+        let superclass = self
+            .property_reference_impl(if bound { 0 } else { 1 }, false)?
+            .internal;
         let synth_id = self.ir.add_class(IrClass {
             fq_name: synth_fq,
             serial_names: Vec::new(),
@@ -6580,14 +6585,14 @@ impl<'a> Lower<'a> {
 
             is_sealed: false,
             is_abstract: false,
-            superclass: superclass.to_string(),
+            superclass,
             super_args: vec![],
             enum_entries: vec![],
             enum_entry_of: None,
             prop_ref: Some(crate::ir::PropRef {
                 owner_internal: owner,
                 prop_name: name.to_string(),
-                getter_name: getter_name(name),
+                getter_name: property_getter_name(name),
                 prop_ty,
                 bound,
                 static_dispatch: false,
@@ -6651,11 +6656,7 @@ impl<'a> Lower<'a> {
                 return None;
             };
         let prop_ty = ty_to_ir(prop_ty);
-        let superclass = if is_var {
-            "kotlin/jvm/internal/MutablePropertyReference0Impl"
-        } else {
-            "kotlin/jvm/internal/PropertyReference0Impl"
-        };
+        let superclass = self.property_reference_impl(0, is_var)?.internal;
         let synth_fq = class_internal(
             self.afile,
             &format!("{}$propref${}${}", self.cur_fn_name, name, self.lambda_seq),
@@ -6682,14 +6683,14 @@ impl<'a> Lower<'a> {
             annotation_impl_of: None,
             is_sealed: false,
             is_abstract: false,
-            superclass: superclass.to_string(),
+            superclass,
             super_args: vec![],
             enum_entries: vec![],
             enum_entry_of: None,
             prop_ref: Some(crate::ir::PropRef {
                 owner_internal: owner,
                 prop_name: name.to_string(),
-                getter_name: getter_name(name),
+                getter_name: property_getter_name(name),
                 prop_ty,
                 bound: false,
                 static_dispatch: true,
@@ -6800,7 +6801,7 @@ impl<'a> Lower<'a> {
             crate::ir::FrDispatch::VirtualUnbound
         };
         let param_tys: Vec<Ty> = params.iter().map(|t| ty_to_ir(*t)).collect();
-        Some(self.make_func_ref(
+        self.make_func_ref(
             e.0,
             bound,
             params.len() as u8,
@@ -6814,7 +6815,7 @@ impl<'a> Lower<'a> {
             param_tys,
             ty_to_ir(ret),
             capture,
-        ))
+        )
     }
 
     /// Bound callable reference on an arbitrary EXPRESSION receiver (`"abc"::get`, `1::foo`, `mk()::m`):
@@ -6919,8 +6920,14 @@ impl<'a> Lower<'a> {
         param_tys: Vec<Ty>,
         ret_ty: Ty,
         capture: Option<u32>,
-    ) -> u32 {
+    ) -> Option<u32> {
         let synth_fq = class_internal(self.afile, &format!("{}$fnref${}", self.cur_fn_name, uniq));
+        let superclass = self
+            .syms
+            .libraries
+            .function_reference_impl_type()?
+            .obj_internal()?
+            .to_string();
         let synth_id = self.ir.add_class(IrClass {
             fq_name: synth_fq,
             serial_names: Vec::new(),
@@ -6943,7 +6950,7 @@ impl<'a> Lower<'a> {
 
             is_sealed: false,
             is_abstract: false,
-            superclass: "kotlin/jvm/internal/FunctionReferenceImpl".to_string(),
+            superclass,
             super_args: vec![],
             enum_entries: vec![],
             enum_entry_of: None,
@@ -6970,16 +6977,16 @@ impl<'a> Lower<'a> {
             has_primary_ctor: true,
         });
         match capture {
-            Some(cap) => self.ir.add_expr(IrExpr::New {
+            Some(cap) => Some(self.ir.add_expr(IrExpr::New {
                 class: synth_id,
                 args: vec![cap],
                 ctor_params: Some(vec![ty_to_ir(Ty::obj("kotlin/Any"))]),
-            }),
-            None => self.ir.add_expr(IrExpr::StaticInstance {
+            })),
+            None => Some(self.ir.add_expr(IrExpr::StaticInstance {
                 owner: synth_id,
                 ty: synth_id,
                 field: "INSTANCE",
-            }),
+            })),
         }
     }
 
@@ -7146,27 +7153,13 @@ impl<'a> Lower<'a> {
         iterable: AstExprId,
         body: AstExprId,
         it_ty: Ty,
-        elem: Ty,
-        prim_desc: &str,
+        loop_info: CountedLoopInfo,
         label: Option<String>,
     ) -> Option<u32> {
         let internal = it_ty.obj_internal()?.to_string();
+        let elem = loop_info.elem;
         let depth = self.scope.len();
         let elem_ir = ty_to_ir(elem);
-        // The `first`/`last` getters: a signed range names them `getFirst`/`getLast`; an unsigned range's
-        // are mangled inline-class members (`getFirst-pVg5ArA`), looked up from the classpath by prefix.
-        let (gf_name, gf_desc, gl_name, gl_desc) = if elem.is_unsigned() {
-            let (gf, gfd) = self.syms.libraries.mangled_member(&internal, "getFirst-")?;
-            let (gl, gld) = self.syms.libraries.mangled_member(&internal, "getLast-")?;
-            (gf, gfd, gl, gld)
-        } else {
-            (
-                "getFirst".to_string(),
-                format!("(){prim_desc}"),
-                "getLast".to_string(),
-                format!("(){prim_desc}"),
-            )
-        };
         // Evaluate the range once into a temp (the getters must share one receiver).
         let rng = self.expr(iterable)?;
         let r_v = self.fresh_value();
@@ -7175,13 +7168,13 @@ impl<'a> Lower<'a> {
             ty: ty_to_ir(it_ty),
             init: Some(rng),
         });
-        let getter = |this: &mut Self, name: &str, desc: &str| {
+        let getter = |this: &mut Self, accessor: &PlatformAccessor| {
             let recv = this.ir.add_expr(IrExpr::GetValue(r_v));
             this.ir.add_expr(IrExpr::Call {
                 callee: Callee::Virtual {
                     owner: internal.clone(),
-                    name: name.to_string(),
-                    descriptor: desc.to_string(),
+                    name: accessor.name.clone(),
+                    descriptor: accessor.descriptor.clone(),
                     interface: false,
                 },
                 dispatch_receiver: Some(recv),
@@ -7189,7 +7182,7 @@ impl<'a> Lower<'a> {
             })
         };
         // i = range.getFirst()
-        let first = getter(self, &gf_name, &gf_desc);
+        let first = getter(self, &loop_info.first);
         let i_v = self.fresh_value();
         self.scope.push((name.to_string(), i_v, elem));
         let var_i = self.ir.add_expr(IrExpr::Variable {
@@ -7198,46 +7191,18 @@ impl<'a> Lower<'a> {
             init: Some(first),
         });
         // last = range.getLast()  (hoisted)
-        let last = getter(self, &gl_name, &gl_desc);
+        let last = getter(self, &loop_info.last);
         let n_v = self.fresh_value();
         let var_n = self.ir.add_expr(IrExpr::Variable {
             index: n_v,
             ty: elem_ir.clone(),
             init: Some(last),
         });
-        // condition: i <= last (unsigned: compareUnsigned(i, last) <= 0, so values past the sign bit
-        // order correctly — a signed `<=` would end the loop early).
+        // condition: i <= last. Unsigned element types use the platform unsigned comparator so values
+        // past the sign bit order correctly.
         let gi = self.ir.add_expr(IrExpr::GetValue(i_v));
         let gn = self.ir.add_expr(IrExpr::GetValue(n_v));
-        let cond = if elem.is_unsigned() {
-            let (owner, prim) = if elem == Ty::UInt {
-                ("java/lang/Integer", "I")
-            } else {
-                ("java/lang/Long", "J")
-            };
-            let call = self.ir.add_expr(IrExpr::Call {
-                callee: Callee::Static {
-                    owner: owner.to_string(),
-                    name: "compareUnsigned".to_string(),
-                    descriptor: format!("({prim}{prim})I"),
-                    inline: InlineKind::None,
-                },
-                dispatch_receiver: None,
-                args: vec![gi, gn],
-            });
-            let zero = self.ir.add_expr(IrExpr::Const(IrConst::Int(0)));
-            self.ir.add_expr(IrExpr::PrimitiveBinOp {
-                op: IrBinOp::Le,
-                lhs: call,
-                rhs: zero,
-            })
-        } else {
-            self.ir.add_expr(IrExpr::PrimitiveBinOp {
-                op: IrBinOp::Le,
-                lhs: gi,
-                rhs: gn,
-            })
-        };
+        let cond = self.compare_ordered(elem, IrBinOp::Le, gi, gn)?;
         // body (the loop variable `x` is the counter `i` itself)
         let mut out = Vec::new();
         if self.append_body_stmts(body, &mut out).is_none() {
@@ -7307,46 +7272,22 @@ impl<'a> Lower<'a> {
     /// guards against overflowing past a `MAX`/`MIN` bound:
     ///   i = p.getFirst(); last = p.getLast(); step = p.getStep();
     ///   while ((step > 0 && i <= last) || (step < 0 && i >= last)) { x = i; …; if (i == last) break; i += step }
-    /// An unsigned progression compares its (sign-bit-spanning) elements via `compareUnsigned`; its
-    /// `step` stays signed, so the direction test is an ordinary signed comparison.
+    /// An unsigned progression compares its sign-bit-spanning elements via the platform unsigned
+    /// comparator; its `step` stays signed, so the direction test is an ordinary signed comparison.
     fn lower_foreach_progression(
         &mut self,
         name: &str,
         iterable: AstExprId,
         body: AstExprId,
         it_ty: Ty,
-        elem: Ty,
+        loop_info: CountedLoopInfo,
         label: Option<String>,
     ) -> Option<u32> {
         let internal = it_ty.obj_internal()?.to_string();
         let depth = self.scope.len();
+        let elem = loop_info.elem;
         let elem_ir = ty_to_ir(elem);
-        let is_unsigned = elem.is_unsigned();
-        // `Long`/`ULong` counters and steps use 64-bit arithmetic; `Int`/`Char`/`UInt` use 32-bit.
-        let wide = matches!(elem, Ty::Long | Ty::ULong);
-        // The element's primitive descriptor for the `getFirst`/`getLast` getters (a `Char` reads `C`;
-        // unsigned and the rest erase to the signed primitive).
-        let prim_desc = match elem {
-            Ty::Char => "C",
-            _ if wide => "J",
-            _ => "I",
-        };
-        // `step` is a plain signed `Int`/`Long` (never a value class), so its getter is unmangled.
-        let step_desc = if wide { "J" } else { "I" };
-        // The unsigned progressions' `first`/`last` are mangled inline-class members; signed ones are
-        // the plain `getFirst`/`getLast`.
-        let (gf_name, gf_desc, gl_name, gl_desc) = if is_unsigned {
-            let (gf, gfd) = self.syms.libraries.mangled_member(&internal, "getFirst-")?;
-            let (gl, gld) = self.syms.libraries.mangled_member(&internal, "getLast-")?;
-            (gf, gfd, gl, gld)
-        } else {
-            (
-                "getFirst".to_string(),
-                format!("(){prim_desc}"),
-                "getLast".to_string(),
-                format!("(){prim_desc}"),
-            )
-        };
+        let (step_accessor, step_ty) = loop_info.step.clone()?;
         // Evaluate the progression once; the three getters share the one receiver.
         let rng = self.expr(iterable)?;
         let r_v = self.fresh_value();
@@ -7355,13 +7296,13 @@ impl<'a> Lower<'a> {
             ty: ty_to_ir(it_ty),
             init: Some(rng),
         });
-        let getter = |this: &mut Self, gname: &str, gdesc: &str| {
+        let getter = |this: &mut Self, accessor: &PlatformAccessor| {
             let recv = this.ir.add_expr(IrExpr::GetValue(r_v));
             this.ir.add_expr(IrExpr::Call {
                 callee: Callee::Virtual {
                     owner: internal.clone(),
-                    name: gname.to_string(),
-                    descriptor: gdesc.to_string(),
+                    name: accessor.name.clone(),
+                    descriptor: accessor.descriptor.clone(),
                     interface: false,
                 },
                 dispatch_receiver: Some(recv),
@@ -7369,7 +7310,7 @@ impl<'a> Lower<'a> {
             })
         };
         // i = p.getFirst()
-        let first = getter(self, &gf_name, &gf_desc);
+        let first = getter(self, &loop_info.first);
         let i_v = self.fresh_value();
         self.scope.push((name.to_string(), i_v, elem));
         let var_i = self.ir.add_expr(IrExpr::Variable {
@@ -7378,7 +7319,7 @@ impl<'a> Lower<'a> {
             init: Some(first),
         });
         // last = p.getLast()  (hoisted)
-        let last = getter(self, &gl_name, &gl_desc);
+        let last = getter(self, &loop_info.last);
         let n_v = self.fresh_value();
         let var_n = self.ir.add_expr(IrExpr::Variable {
             index: n_v,
@@ -7386,55 +7327,26 @@ impl<'a> Lower<'a> {
             init: Some(last),
         });
         // step = p.getStep()  (hoisted)
-        let step = getter(self, "getStep", &format!("(){step_desc}"));
+        let step = getter(self, &step_accessor);
         let s_v = self.fresh_value();
         let var_s = self.ir.add_expr(IrExpr::Variable {
             index: s_v,
-            ty: ty_to_ir(if wide { Ty::Long } else { Ty::Int }),
+            ty: ty_to_ir(step_ty),
             init: Some(step),
         });
         // The step zero literal, in the step's own (signed) type.
         let zero_step = |this: &mut Self| {
-            this.ir.add_expr(IrExpr::Const(if wide {
+            this.ir.add_expr(IrExpr::Const(if step_ty == Ty::Long {
                 IrConst::Long(0)
             } else {
                 IrConst::Int(0)
             }))
         };
-        // Compare two counter-typed values; an unsigned element orders via `compareUnsigned(a,b) <op> 0`
-        // (a signed opcode would misorder values past the sign bit).
-        let cmp = |this: &mut Self, op: IrBinOp, a: u32, b: u32| -> u32 {
+        // Compare two counter-typed values; unsigned elements use the platform unsigned comparator.
+        let cmp = |this: &mut Self, op: IrBinOp, a: u32, b: u32| -> Option<u32> {
             let la = this.ir.add_expr(IrExpr::GetValue(a));
             let lb = this.ir.add_expr(IrExpr::GetValue(b));
-            if is_unsigned {
-                let (owner, prim) = if elem == Ty::UInt {
-                    ("java/lang/Integer", "I")
-                } else {
-                    ("java/lang/Long", "J")
-                };
-                let call = this.ir.add_expr(IrExpr::Call {
-                    callee: Callee::Static {
-                        owner: owner.to_string(),
-                        name: "compareUnsigned".to_string(),
-                        descriptor: format!("({prim}{prim})I"),
-                        inline: InlineKind::None,
-                    },
-                    dispatch_receiver: None,
-                    args: vec![la, lb],
-                });
-                let zero = this.ir.add_expr(IrExpr::Const(IrConst::Int(0)));
-                this.ir.add_expr(IrExpr::PrimitiveBinOp {
-                    op,
-                    lhs: call,
-                    rhs: zero,
-                })
-            } else {
-                this.ir.add_expr(IrExpr::PrimitiveBinOp {
-                    op,
-                    lhs: la,
-                    rhs: lb,
-                })
-            }
+            this.compare_ordered(elem, op, la, lb)
         };
         // cond: (step > 0 && i <= last) || (step < 0 && i >= last). A constant step folds to one branch
         // at the bytecode level; iterating is correct for either direction.
@@ -7445,7 +7357,7 @@ impl<'a> Lower<'a> {
             lhs: sg1,
             rhs: z1,
         });
-        let i_le = cmp(self, IrBinOp::Le, i_v, n_v);
+        let i_le = cmp(self, IrBinOp::Le, i_v, n_v)?;
         let asc = self.ir.add_expr(IrExpr::PrimitiveBinOp {
             op: IrBinOp::And,
             lhs: step_pos,
@@ -7458,7 +7370,7 @@ impl<'a> Lower<'a> {
             lhs: sg2,
             rhs: z2,
         });
-        let i_ge = cmp(self, IrBinOp::Ge, i_v, n_v);
+        let i_ge = cmp(self, IrBinOp::Ge, i_v, n_v)?;
         let desc = self.ir.add_expr(IrExpr::PrimitiveBinOp {
             op: IrBinOp::And,
             lhs: step_neg,
@@ -7538,11 +7450,7 @@ impl<'a> Lower<'a> {
             crate::call_resolver::resolve_instance(&*self.syms.libraries, internal, "iterator", &[])
         {
             (m.ret, m.descriptor, internal.to_string(), false)
-        } else if let Some(c) =
-            self.syms
-                .libraries
-                .resolve_callable("iterator", Some(it_ty), &[], &[])
-        {
+        } else if let Some(c) = self.library_extension_callable("iterator", it_ty, &[], &[]) {
             (c.ret, c.descriptor, c.owner, true)
         } else {
             return None;
@@ -7653,11 +7561,11 @@ impl<'a> Lower<'a> {
             dispatch_receiver: Some(it_g2),
             args: vec![],
         });
-        let x_init = if elem.is_unsigned() {
+        let x_init = if self.is_unsigned_integer_type(elem) {
             // The element is a boxed `kotlin/UInt`/`ULong` — checkcast + `unbox-impl`, not the
-            // `Integer` unbox a plain `is_primitive` coercion would emit.
-            self.unbox_unsigned(next_call, elem)
-        } else if elem.is_primitive() {
+            // `Integer` unbox a plain JVM-scalar coercion would emit.
+            self.unbox_unsigned(next_call, elem)?
+        } else if self.has_scalar_value_repr(elem) {
             self.ir.add_expr(IrExpr::TypeOp {
                 op: IrTypeOp::ImplicitCoercion,
                 arg: next_call,
@@ -7787,21 +7695,16 @@ impl<'a> Lower<'a> {
         let target_ref = ir_type_is_reference(target);
         // An unsigned value flowing into a reference context (`Any`, a generic, a collection element)
         // boxes via the inline-class `box-impl` factory to a `kotlin/UInt`/`ULong` object.
-        if at.is_unsigned() && target_ref {
-            return Some(self.box_unsigned(e, at));
+        if self.is_unsigned_integer_type(at) && target_ref {
+            return self.box_unsigned(e, at);
         }
         // A reference (`Any`, a smart-cast `is UInt`) flowing into an unsigned target unboxes the
         // `kotlin.UInt`/`ULong` value type — but krusty erases unsigned to `int` and would emit an
         // `Integer` unbox (ClassCastException). Skip rather than miscompile.
-        if at.is_reference()
-            && matches!(
-                target.non_null().obj_internal(),
-                Some("kotlin/UInt" | "kotlin/ULong")
-            )
-        {
+        if at.is_reference() && self.unsigned_integer_box_type(target.non_null()).is_some() {
             return None;
         }
-        if at.is_primitive() && target_ref {
+        if self.has_scalar_value_repr(at) && target_ref {
             Some(self.ir.add_expr(IrExpr::TypeOp {
                 op: IrTypeOp::ImplicitCoercion,
                 arg: e,
@@ -7813,7 +7716,7 @@ impl<'a> Lower<'a> {
                 arg: e,
                 type_operand: target.clone(),
             }))
-        } else if at.is_primitive()
+        } else if self.has_scalar_value_repr(at)
             && !target_ref
             && *target != Ty::Error
             && *target != Ty::Unit
@@ -7856,10 +7759,74 @@ impl<'a> Lower<'a> {
             Ty::Long => IrConst::Long(0),
             Ty::Double => IrConst::Double(0.0),
             Ty::Float => IrConst::Float(0.0),
-            t if t.is_primitive() => IrConst::Int(0), // Int/Short/Byte/Char/Boolean → iconst_0
+            t if self.has_scalar_value_repr(t) => IrConst::Int(0),
             _ => IrConst::Null,
         };
         self.ir.add_expr(IrExpr::Const(c))
+    }
+
+    fn lower_assert_fails_with_default(
+        &mut self,
+        call: AstExprId,
+        callable: &crate::libraries::LibraryCallable,
+        args: &[AstExprId],
+    ) -> Option<u32> {
+        if !self
+            .syms
+            .libraries
+            .is_reified_assert_fails_with_default(callable)
+        {
+            return None;
+        }
+        let expected = self
+            .afile
+            .call_type_args
+            .get(&call.0)?
+            .first()
+            .and_then(|r| self.ty_ref(r))?;
+        let exc_internal = expected.obj_internal()?.to_string();
+        let lambda_arg = *args.last()?;
+        let lambda_param = callable
+            .params
+            .last()
+            .copied()
+            .or_else(|| self.syms.libraries.function_type(0))
+            .unwrap_or_else(|| Ty::fun(Vec::new(), Ty::obj("kotlin/Any")));
+        let lambda = self.lower_arg(lambda_arg, &lambda_param)?;
+        let invoke = self.ir.add_expr(IrExpr::InvokeFunction {
+            func: lambda,
+            args: Vec::new(),
+            ret: Ty::obj("kotlin/Any"),
+        });
+        let msg = self.ir.add_expr(IrExpr::Const(IrConst::String(
+            "Expected an exception to be thrown.".to_string(),
+        )));
+        let assertion_ctor = self
+            .syms
+            .libraries
+            .runtime_ctor(RuntimeCtor::AssertionError)?;
+        let assertion = self.ir.add_expr(IrExpr::NewExternal {
+            internal: assertion_ctor.internal,
+            ctor_desc: assertion_ctor.ctor_desc,
+            args: vec![msg],
+        });
+        let throw_assertion = self.ir.add_expr(IrExpr::Throw { operand: assertion });
+        let body = self.ir.add_expr(IrExpr::Block {
+            stmts: vec![invoke],
+            value: Some(throw_assertion),
+        });
+        let catch_var = self.fresh_value();
+        let caught = self.ir.add_expr(IrExpr::GetValue(catch_var));
+        Some(self.ir.add_expr(IrExpr::Try {
+            body,
+            catches: vec![IrCatch {
+                var: catch_var,
+                exc_internal,
+                body: caught,
+            }],
+            finally: None,
+            result: ty_to_ir(callable.ret),
+        }))
     }
 
     fn coerce_erased(&mut self, read: u32, logical: Ty, physical: Ty) -> u32 {
@@ -7868,12 +7835,14 @@ impl<'a> Lower<'a> {
         }
         // An unsigned value out of an erased reference: checkcast to the inline-class object, then
         // `unbox-impl` — the wrapper is `kotlin/UInt`, not `Integer`.
-        if logical.is_unsigned() && physical.is_reference() {
-            return self.unbox_unsigned(read, logical);
+        if self.is_unsigned_integer_type(logical) && physical.is_reference() {
+            return self
+                .unbox_unsigned(read, logical)
+                .expect("unsigned integer target must provide box/unbox shape");
         }
         // A primitive flowing out of any erased reference (`Object`, or a type-parameter bound like
         // `Comparable`/`Number` — `maxOrNull(): T`) unboxes; a reference erased to `Object` checkcasts.
-        if logical.is_primitive() && physical.is_reference() {
+        if self.has_scalar_value_repr(logical) && physical.is_reference() {
             self.ir.add_expr(IrExpr::TypeOp {
                 op: IrTypeOp::ImplicitCoercion,
                 arg: read,
@@ -7922,7 +7891,7 @@ impl<'a> Lower<'a> {
         let owner_internal = self.ir.classes[class as usize].fq_name.clone();
         if self.cur_class.as_deref() != Some(owner_internal.as_str()) {
             if let Some((mclass, mindex, _, _)) =
-                self.resolve_method(recv_internal, &getter_name(name))
+                self.resolve_method(recv_internal, &property_getter_name(name))
             {
                 let read = self.ir.add_expr(IrExpr::MethodCall {
                     class: mclass,
@@ -7977,7 +7946,7 @@ impl<'a> Lower<'a> {
                     return Some(self.ir.add_expr(IrExpr::Call {
                         callee: Callee::CrossFileVirtual {
                             owner,
-                            name: getter_name(name),
+                            name: property_getter_name(name),
                             params: vec![],
                             ret: ty_to_ir(ret_ty),
                             interface: is_iface,
@@ -7988,34 +7957,28 @@ impl<'a> Lower<'a> {
                 }
             }
         }
-        // A Kotlin property is a zero-arg accessor on the JVM. Resolve it from the stdlib/classpath
-        // reader by the property's own name (`size()`), its `getX()` form, or a collection-mapped name —
-        // a `String` receiver reads its `java.lang.String` members.
+        // A Kotlin property is a zero-arg member. Resolve the semantic property name through the
+        // library source first; mapped builtins supply their physical owner/name/descriptor there.
         let internal = match rt {
-            Ty::String => "java/lang/String".to_string(),
+            Ty::String => "kotlin/String".to_string(),
             Ty::Obj(i, _) => i.to_string(),
             _ => return None,
         };
-        let mapped = crate::resolve::collection_mapped_accessor(name).map(|s| s.to_string());
-        let resolved = [Some(name.to_string()), Some(getter_name(name)), mapped]
-            .into_iter()
-            .flatten()
-            .find_map(|cand| {
-                crate::call_resolver::resolve_instance(&*self.syms.libraries, &internal, &cand, &[])
-                    .filter(|m| !matches!(m.ret, Ty::Unit | Ty::Error))
-                    .map(|m| {
-                        let is_iface = self
-                            .syms
-                            .libraries
-                            .resolve_type(&internal)
-                            .map_or(false, |t| t.is_interface());
-                        (m, is_iface)
-                    })
-            });
-        if let Some((m, is_iface)) = resolved {
+        let resolved =
+            crate::call_resolver::resolve_property_member(&*self.syms.libraries, rt, name).map(
+                |r| {
+                    let m = r.member;
+                    let physical_ret = m.physical_ret;
+                    let owner = m.owner.clone().unwrap_or_else(|| internal.clone());
+                    let is_iface = self.library_type_is_interface(&owner);
+                    (m, is_iface, physical_ret)
+                },
+            );
+        if let Some((m, is_iface, physical_ret)) = resolved {
+            let owner = m.owner.clone().unwrap_or_else(|| internal.clone());
             let read = self.ir.add_expr(IrExpr::Call {
                 callee: Callee::Virtual {
-                    owner: internal,
+                    owner,
                     name: m.name.clone(),
                     descriptor: m.descriptor,
                     interface: is_iface,
@@ -8023,38 +7986,64 @@ impl<'a> Lower<'a> {
                 dispatch_receiver: Some(recv),
                 args: vec![],
             });
-            return Some(self.coerce_generic_read(read, e, m.ret));
-        }
-        // A Kotlin BUILTIN member the classpath `resolve_instance` can't surface — e.g. `String.length`
-        // (a property over `java.lang.String.length()`), `List.size`, `CharSequence.length`. Resolved
-        // generically from the builtins metadata + the kotlin↔JVM class map (owner/jvm-name/descriptor/
-        // interface), NOT a hardcode. A JVM-mapped receiver (`java/lang/CharSequence`) maps back to its
-        // Kotlin builtin (`kotlin/CharSequence`) whose `.kotlin_builtins` declares the member.
-        let kotlin_internal = match rt {
-            Ty::String => "kotlin/String".to_string(),
-            Ty::Obj(i, _) => crate::jvm::jvm_class_map::jvm_to_kotlin_builtin_with_members(i)
-                .unwrap_or(i)
-                .to_string(),
-            _ => return None,
-        };
-        if let Some((owner, jvm_name, descriptor, ret_ty, is_iface)) = self
-            .syms
-            .libraries
-            .builtin_member_call(&kotlin_internal, name, 0)
-        {
-            let read = self.ir.add_expr(IrExpr::Call {
-                callee: Callee::Virtual {
-                    owner,
-                    name: jvm_name,
-                    descriptor,
-                    interface: is_iface,
-                },
-                dispatch_receiver: Some(recv),
-                args: vec![],
-            });
-            return Some(self.coerce_generic_read(read, e, ret_ty));
+            return Some(self.coerce_generic_read(read, e, physical_ret));
         }
         None
+    }
+
+    fn lower_library_property_read_on(&mut self, recv: u32, rt: Ty, name: &str) -> Option<u32> {
+        let resolved =
+            crate::call_resolver::resolve_property_member(&*self.syms.libraries, rt, name)?;
+        let m = resolved.member;
+        let owner = m.owner.clone().unwrap_or_else(|| {
+            rt.kotlin_class_internal()
+                .unwrap_or("kotlin/Any")
+                .to_string()
+        });
+        let is_iface = self.library_type_is_interface(&owner);
+        Some(self.ir.add_expr(IrExpr::Call {
+            callee: Callee::Virtual {
+                owner,
+                name: m.name,
+                descriptor: m.descriptor,
+                interface: is_iface,
+            },
+            dispatch_receiver: Some(recv),
+            args: vec![],
+        }))
+    }
+
+    fn lower_library_instance_call_on(
+        &mut self,
+        recv: u32,
+        rt: Ty,
+        name: &str,
+        arg_exprs: Vec<u32>,
+        arg_tys: &[Ty],
+    ) -> Option<u32> {
+        let resolved = crate::call_resolver::resolve_instance_member(
+            &*self.syms.libraries,
+            rt,
+            name,
+            arg_tys,
+        )?;
+        let m = resolved.member;
+        let owner = m.owner.clone().unwrap_or_else(|| {
+            rt.kotlin_class_internal()
+                .unwrap_or("kotlin/Any")
+                .to_string()
+        });
+        let is_iface = self.library_type_is_interface(&owner);
+        Some(self.ir.add_expr(IrExpr::Call {
+            callee: Callee::Virtual {
+                owner,
+                name: m.name,
+                descriptor: m.descriptor,
+                interface: is_iface,
+            },
+            dispatch_receiver: Some(recv),
+            args: arg_exprs,
+        }))
     }
 
     /// Lower a CALL `recv.name(args)` that resolves to a top-level EXTENSION function on `rt` — the
@@ -8075,11 +8064,7 @@ impl<'a> Lower<'a> {
         args: &[AstExprId],
         arg_tys: &[Ty],
     ) -> Option<crate::libraries::LibraryCallable> {
-        if let Some(c) = self
-            .syms
-            .libraries
-            .resolve_callable(name, Some(rt), arg_tys, &[])
-        {
+        if let Some(c) = self.library_extension_callable(name, rt, arg_tys, &[]) {
             return Some(c);
         }
         let widened: Vec<Ty> = arg_tys
@@ -8096,9 +8081,34 @@ impl<'a> Lower<'a> {
         if widened == arg_tys {
             return None;
         }
-        self.syms
-            .libraries
-            .resolve_callable(name, Some(rt), &widened, &[])
+        self.library_extension_callable(name, rt, &widened, &[])
+    }
+
+    fn library_extension_callable(
+        &self,
+        name: &str,
+        receiver: Ty,
+        arg_tys: &[Ty],
+        type_args: &[Ty],
+    ) -> Option<crate::libraries::LibraryCallable> {
+        self.resolver()
+            .resolve_extension_callable(name, receiver, arg_tys, type_args)
+    }
+
+    fn library_extension_return(
+        &self,
+        name: &str,
+        receiver: Ty,
+        arg_tys: &[Ty],
+        type_args: &[Ty],
+    ) -> Option<Ty> {
+        self.library_extension_callable(name, receiver, arg_tys, type_args)
+            .map(|c| c.ret)
+    }
+
+    fn has_library_iterator_extension(&self, receiver: Ty) -> bool {
+        self.library_extension_return("iterator", receiver, &[], &[])
+            .is_some()
     }
 
     fn lower_ext_call_on(
@@ -8114,21 +8124,14 @@ impl<'a> Lower<'a> {
             .resolve_ext_lit_widened(name, rt, args, &arg_tys)
             .filter(|c| !c.default_call) // a defaulted extension needs the AST receiver expr — bail
             .or_else(|| {
-                self.syms
-                    .libraries
-                    .resolve_scope_inline(name, rt, &arg_tys)
-                    .filter(|c| {
-                        c.inline.can_inline()
-                            && self
-                                .syms
-                                .libraries
-                                .can_inline_call(&c.owner, &c.name, &c.descriptor)
-                    })
+                self.resolver()
+                    .resolve_extension_inline_callable(name, rt, &arg_tys)
+                    .filter(|c| c.inline.can_inline())
             })?;
         // The first parameter is the extension receiver. Box a primitive receiver flowing into a generic
         // `Object` receiver param; a reference receiver widens to its declared param type for free.
         let p0 = *c.params.first().unwrap_or(&rt);
-        let recv = if rt.is_primitive() && p0.is_reference() {
+        let recv = if self.has_scalar_value_repr(rt) && p0.is_reference() {
             self.coerce_erased(recv_ir, rt, p0)
         } else {
             recv_ir
@@ -8146,14 +8149,14 @@ impl<'a> Lower<'a> {
                 name: c.name,
                 descriptor: c.descriptor,
                 // `c` is either a public extension (`resolve_ext_lit_widened` → `None`/`CanInline`, emit
-                // its real inline-ness) or a `@InlineOnly` scope-inline match the `can_inline_call` filter
-                // already dry-ran (`CanInline`/`MustInline`, spliceable) — so pass `c.inline` through.
+                // its real inline-ness) or a `@InlineOnly` scope-inline match the spliceability filter
+                // is selected as inline-capable (`CanInline`/`MustInline`) — so pass `c.inline` through.
                 inline: c.inline,
             },
             dispatch_receiver: None,
             args: a,
         });
-        Some(self.coerce_generic_read(call, e, c.physical_ret))
+        Some(self.coerce_erased_call_result(e, call, &c.physical_ret, true))
     }
 
     /// Lower an unqualified CALL `name(args)` against the implicit `this` receiver — the body of a
@@ -8189,7 +8192,7 @@ impl<'a> Lower<'a> {
         // A builtin/library member method (`StringBuilder.append`, `String.isEmpty`) — `this.m(args)`.
         let arg_tys: Vec<Ty> = args.iter().map(|&a| self.info.ty(a)).collect();
         let lib_owner = match this_ty {
-            Ty::String => Some("java/lang/String".to_string()),
+            Ty::String => Some("kotlin/String".to_string()),
             Ty::Obj(i, _) => Some(i.to_string()),
             _ => None,
         };
@@ -8201,29 +8204,61 @@ impl<'a> Lower<'a> {
                 &arg_tys,
             ) {
                 if m.params.len() == args.len() {
-                    let is_iface = self
-                        .syms
-                        .libraries
-                        .resolve_type(internal)
-                        .map_or(false, |ty| ty.is_interface());
+                    let owner = m.owner.clone().unwrap_or_else(|| internal.clone());
+                    let is_iface = self.library_type_is_interface(&owner);
                     let recv = self.ir.add_expr(IrExpr::GetValue(this_v));
                     let mut a = Vec::new();
                     for (arg, pt) in args.iter().zip(&m.params) {
                         a.push(self.lower_arg(*arg, &ty_to_ir(*pt))?);
                     }
+                    let descriptor = m.descriptor.clone();
+                    let ret = m.ret;
                     let call = self.ir.add_expr(IrExpr::Call {
                         callee: Callee::Virtual {
-                            owner: internal.clone(),
+                            owner,
                             name: m.name.clone(),
-                            descriptor: m.descriptor,
+                            descriptor,
                             interface: is_iface,
                         },
                         dispatch_receiver: Some(recv),
                         args: a,
                     });
-                    return Some(self.coerce_generic_read(call, e, m.ret));
+                    return Some(self.coerce_generic_read(call, e, ret));
                 }
             }
+        }
+        if let Some(member) = crate::call_resolver::resolve_instance_member(
+            &*self.syms.libraries,
+            this_ty,
+            name,
+            &arg_tys,
+        ) {
+            let member = member.member;
+            let mut a = Vec::new();
+            for (i, &arg) in args.iter().enumerate() {
+                match member.params.get(i) {
+                    Some(p) => a.push(self.lower_arg(arg, &ty_to_ir(*p))?),
+                    None => a.push(self.expr(arg)?),
+                }
+            }
+            let owner = member
+                .owner
+                .clone()
+                .unwrap_or_else(|| this_ty.obj_internal().unwrap_or("kotlin/Any").to_string());
+            let descriptor = member.descriptor.clone();
+            let physical_ret = member.physical_ret;
+            let recv = self.ir.add_expr(IrExpr::GetValue(this_v));
+            let call = self.ir.add_expr(IrExpr::Call {
+                callee: Callee::Virtual {
+                    owner,
+                    name: member.name.clone(),
+                    descriptor,
+                    interface: member.is_interface,
+                },
+                dispatch_receiver: Some(recv),
+                args: a,
+            });
+            return Some(self.coerce_generic_read(call, e, physical_ret));
         }
         // A MODULE extension on the receiver (`fun Recv.name(args)` declared in this compilation) —
         // `invokestatic <facade>.name(this, args)` (the receiver is the first parameter of the lowered
@@ -8300,8 +8335,8 @@ impl<'a> Lower<'a> {
         body: AstExprId,
         returns_receiver: bool,
     ) -> Option<u32> {
-        // A nullable-primitive receiver (`Int?` = `java/lang/Integer`, from a chained `…?.let { … }`) binds
-        // the scope param as the UNBOXED primitive — matching the checker, so `it + 1` is primitive math.
+        // A nullable-primitive receiver from a chained `…?.let { … }` binds the scope param as the
+        // unboxed primitive — matching the checker, so `it + 1` is primitive math.
         let (rty, recv_val) = match rty.nullable_primitive() {
             Some(prim) => {
                 let unboxed = self.ir.add_expr(IrExpr::TypeOp {
@@ -8474,6 +8509,10 @@ impl<'a> Lower<'a> {
     }
 
     fn lower_body(&mut self, body: &FunBody, ret_ty: &Ty, fid: u32) -> Option<()> {
+        let prev_shared_cell_vars = std::mem::replace(
+            &mut self.shared_cell_vars,
+            shared_cell_vars_for_body(self.afile, body, self.info),
+        );
         self.cur_ret_ty = ret_ty.clone();
         // A named/local function returning `Unit` is a `void` JVM method (only a `() -> Unit` lambda's
         // closure method returns the `Unit` reference) — reset so a nested fun doesn't inherit it.
@@ -8500,6 +8539,7 @@ impl<'a> Lower<'a> {
             FunBody::None => return None,
         };
         self.ir.functions[fid as usize].body = Some(b);
+        self.shared_cell_vars = prev_shared_cell_vars;
         Some(())
     }
 
@@ -8830,7 +8870,8 @@ impl<'a> Lower<'a> {
         }
     }
 
-    /// Lower a compound assignment the checker marked as a user `opAssign` operator call (`plus_assign`):
+    /// Lower a compound assignment the checker selected as an `opAssign` operator call
+    /// (`StmtLowering::PlusAssign`):
     /// `target op= rhs` → `target.plusAssign(rhs)` (member `invokevirtual`, or extension `invokestatic`
     /// with the receiver as the first argument). `value` is the parser's desugared `Binary { op, lhs, rhs }`
     /// where `lhs` is the target read.
@@ -8879,10 +8920,11 @@ impl<'a> Lower<'a> {
         // `invokestatic owner.plusAssign(recv, arg)` — the bytecode splicer expands its real body
         // (`add`/`addAll`) at the call site (nothing about `add`/`addAll` is hardcoded here).
         let arg_ty = self.info.ty(rhs);
-        let c = self
-            .syms
-            .libraries
-            .resolve_scope_inline(aname, self.recv_ty(lhs), &[arg_ty])?;
+        let c = self.resolver().resolve_extension_inline_callable(
+            aname,
+            self.recv_ty(lhs),
+            &[arg_ty],
+        )?;
         if c.params.len() == 2 {
             let r = self.lower_arg(lhs, &ty_to_ir(c.params[0]))?;
             let a = self.lower_arg(rhs, &ty_to_ir(c.params[1]))?;
@@ -8912,8 +8954,11 @@ impl<'a> Lower<'a> {
     }
 
     fn stmt_inner(&mut self, s: crate::ast::StmtId) -> Option<u32> {
-        // A compound assignment routed to a user `opAssign` operator (checker-marked) — emit the call.
-        if self.info.plus_assign.contains(&s) {
+        // A compound assignment routed to an `opAssign` operator (checker-selected) — emit the call.
+        if matches!(
+            self.info.stmt_lowers.get(&s),
+            Some(StmtLowering::PlusAssign)
+        ) {
             if let Stmt::Assign { value, .. } | Stmt::AssignMember { value, .. } =
                 self.afile.stmt(s).clone()
             {
@@ -9050,7 +9095,7 @@ impl<'a> Lower<'a> {
                 // A diverging initializer (`val x = when { … all branches return … }`) never binds
                 // anything — emit it for effect (it returns/throws), no slot store.
                 if init_ty == Ty::Nothing {
-                    return Some(self.expr(init)?);
+                    return self.expr(init);
                 }
                 // `Unit` as a stored value: kotlinc runs the initializer for effect, then binds the
                 // `kotlin.Unit` singleton to the slot (a `kotlin/Unit` reference). `val u = f()` where
@@ -9077,9 +9122,7 @@ impl<'a> Lower<'a> {
                 // Resolve the declared type: a builtin, else a known file class (`A?` → reference
                 // `A`, not the `null` initializer's `Ty::Null`), else the checker's inferred type.
                 let kty = match ty.as_ref() {
-                    // A declared function type (`val f: (C) -> Int`): use the annotation's `Ty::Fun`, not
-                    // the initializer's type — a property reference `C::n` is typed `KProperty1`, but the
-                    // slot (and any `f(arg)` invoke) must see the function type it was declared as.
+                    // A declared function type (`val f: (C) -> Int`): use the annotation's `Ty::Fun`.
                     Some(r) if !r.fun_params.is_empty() || r.name == "<fun>" => {
                         ty_of(self.afile, r)
                     }
@@ -9113,7 +9156,7 @@ impl<'a> Lower<'a> {
                 // A mutable local captured (and written) by a closure is boxed into a `Ref$XxxRef`:
                 // the local holds the holder, reads/writes go through `element`, and the closure
                 // captures the shared holder (so its writes are visible here and vice versa).
-                if self.info.boxed_vars.contains(&name) {
+                if self.shared_cell_vars.contains(&name) {
                     // A `@JvmInline value class` var is represented UNBOXED as its underlying type, so its
                     // `Ref` holder + element must use that underlying type (`var z: Z(Int)` → `Ref.IntRef`,
                     // not `Ref.ObjectRef` of an erased object — that mismatches the unboxed `int` value).
@@ -9121,7 +9164,7 @@ impl<'a> Lower<'a> {
                     let elem = ty_to_ir(elem_ty);
                     let it = self.lower_arg(init, &ty_to_ir(kty))?;
                     let holder = self.fresh_value();
-                    let holder_ty = Ty::obj(ref_holder_internal(elem_ty));
+                    let holder_ty = self.mutable_local_ref_type(elem_ty)?;
                     self.scope.push((name.clone(), holder, holder_ty));
                     self.boxed_elem.insert(name.clone(), elem_ty);
                     // A single `Variable` (no scoping block) so the holder's slot lives in the enclosing
@@ -9210,20 +9253,8 @@ impl<'a> Lower<'a> {
                 if gv.ret != prop_ty || prop_ty.obj_internal().is_some_and(is_value_cls) {
                     return None;
                 }
-                let desc_of = |sig: &crate::resolve::Signature| {
-                    let mut s = String::from("(");
-                    for pt in &sig.params {
-                        s.push_str(&pt.descriptor());
-                    }
-                    s.push(')');
-                    s.push_str(&sig.ret.descriptor());
-                    s
-                };
-                let getvalue_desc = desc_of(&gv);
-                let setvalue_desc = if is_var {
-                    Some(desc_of(
-                        &self.syms.method_of(&delegate_internal, "setValue")?,
-                    ))
+                let setvalue_sig = if is_var {
+                    Some(self.syms.method_of(&delegate_internal, "setValue")?)
                 } else {
                     None
                 };
@@ -9236,10 +9267,10 @@ impl<'a> Lower<'a> {
                     name.clone(),
                     LocalDelegate {
                         delegate_internal,
-                        getvalue_desc,
-                        setvalue_desc,
+                        getvalue_sig: gv,
+                        setvalue_sig,
                         name: name.clone(),
-                        ret_desc: prop_ty.descriptor(),
+                        ret_ty: prop_ty,
                     },
                 );
                 Some(self.ir.add_expr(IrExpr::Variable {
@@ -9274,19 +9305,19 @@ impl<'a> Lower<'a> {
                 }
                 // A local delegated `var`: write through the delegate's `setValue(null, propref, value)`.
                 if let Some(ld) = self.local_delegated.get(&name).cloned() {
-                    let setvalue_desc = ld.setvalue_desc.clone()?;
-                    let sv = self.syms.method_of(&ld.delegate_internal, "setValue")?;
+                    let sv = ld.setvalue_sig.clone()?;
                     let value_ty = sv.params.last().copied().unwrap_or(Ty::Error);
                     let val = self.lower_arg(value, &ty_to_ir(value_ty))?;
                     let (dslot, _) = self.lookup(&format!("{name}$delegate"))?;
                     let dele = self.ir.add_expr(IrExpr::GetValue(dslot));
                     let null_a = self.ir.add_expr(IrExpr::Const(IrConst::Null));
-                    let pref = self.make_local_propref(&ld);
+                    let pref = self.make_local_propref(&ld)?;
                     return Some(self.ir.add_expr(IrExpr::Call {
                         callee: crate::ir::Callee::Virtual {
                             owner: ld.delegate_internal.clone(),
                             name: "setValue".to_string(),
-                            descriptor: setvalue_desc,
+                            descriptor:
+                                self.syms.libraries.method_descriptor(&sv.params, sv.ret)?,
                             interface: false,
                         },
                         dispatch_receiver: Some(dele),
@@ -9356,7 +9387,7 @@ impl<'a> Lower<'a> {
                     Some(self.ir.add_expr(IrExpr::Call {
                         callee: Callee::CrossFile {
                             facade,
-                            name: setter_name(&name),
+                            name: property_setter_name(&name),
                             params: vec![ty_to_ir(ty)],
                             ret: Ty::Unit,
                         },
@@ -9371,7 +9402,7 @@ impl<'a> Lower<'a> {
                     {
                         let internal = this_ty.obj_internal()?.to_string();
                         let (sclass, sindex, sfid, _) =
-                            self.resolve_method(&internal, &setter_name(&name))?;
+                            self.resolve_method(&internal, &property_setter_name(&name))?;
                         let pty = self.ir.functions[sfid as usize]
                             .params
                             .first()
@@ -9473,7 +9504,7 @@ impl<'a> Lower<'a> {
                         })
                     } else {
                         let (gclass, gindex, _, _) =
-                            self.resolve_method(&internal, &getter_name(&name))?;
+                            self.resolve_method(&internal, &property_getter_name(&name))?;
                         self.ir.add_expr(IrExpr::MethodCall {
                             class: gclass,
                             index: gindex,
@@ -9515,7 +9546,7 @@ impl<'a> Lower<'a> {
                         })
                     } else {
                         let (sclass, sindex, _, _) =
-                            self.resolve_method(&internal, &setter_name(&name))?;
+                            self.resolve_method(&internal, &property_setter_name(&name))?;
                         self.ir.add_expr(IrExpr::MethodCall {
                             class: sclass,
                             index: sindex,
@@ -9609,7 +9640,7 @@ impl<'a> Lower<'a> {
                             return Some(self.ir.add_expr(IrExpr::Call {
                                 callee: Callee::CrossFileVirtual {
                                     owner,
-                                    name: setter_name(&name),
+                                    name: property_setter_name(&name),
                                     params: vec![ty_to_ir(pty)],
                                     ret: Ty::Unit,
                                     interface,
@@ -9625,7 +9656,7 @@ impl<'a> Lower<'a> {
                 // the public `setX()` accessor (matching kotlinc). Inside the class, write directly.
                 if self.cur_class.as_deref() != Some(owner_internal.as_str()) {
                     if let Some((mclass, mindex, mfid, _)) =
-                        self.resolve_method(&owner_internal, &setter_name(&name))
+                        self.resolve_method(&owner_internal, &property_setter_name(&name))
                     {
                         let pty = self.ir.functions[mfid as usize].params[0].clone();
                         let r = self.expr(receiver)?;
@@ -9707,11 +9738,17 @@ impl<'a> Lower<'a> {
                         });
                         if let Some((mname, m)) = resolved {
                             // A narrowing store into a primitive-element collection (`List<Byte>[i] = intVal`)
-                            // needs `(value).toByte()` before boxing as `java/lang/Byte` — not yet modeled.
+                            // needs `(value).toByte()` before boxing as the element wrapper — not yet modeled.
                             // Bail (skip the file) rather than box the wrong wrapper type.
-                            if let Some(elem) = self.syms.libraries.member_return(at, "get", &[it])
+                            if let Some(elem) = crate::call_resolver::resolve_instance_member(
+                                &*self.syms.libraries,
+                                at,
+                                "get",
+                                &[it],
+                            )
+                            .map(|m| m.ret)
                             {
-                                if elem.is_primitive() && elem != vt {
+                                if self.has_scalar_value_repr(elem) && elem != vt {
                                     return None;
                                 }
                             }
@@ -9867,9 +9904,8 @@ impl<'a> Lower<'a> {
                     });
                     (Some(var), Some(ev))
                 };
-                // condition. Constant bound: a single `i < C`. Otherwise the form's comparison against the
-                // hoisted bound (unsigned via `compareUnsigned(i, end) <op> 0`, since a signed `<=` would
-                // misorder values past the sign bit).
+                // condition. Constant bound: a single `i < C`. Otherwise compare against the hoisted
+                // bound; unsigned element types use the platform unsigned comparator.
                 let cmp = match range.kind {
                     RangeKind::Through => IrBinOp::Le,
                     RangeKind::Until => IrBinOp::Lt,
@@ -9890,38 +9926,10 @@ impl<'a> Lower<'a> {
                         lhs,
                         rhs,
                     })
-                } else if elem.is_unsigned() {
-                    let gi = self.ir.add_expr(IrExpr::GetValue(i_v));
-                    let ge = self.ir.add_expr(IrExpr::GetValue(end_v.unwrap()));
-                    let (owner, prim) = if elem == Ty::UInt {
-                        ("java/lang/Integer", "I")
-                    } else {
-                        ("java/lang/Long", "J")
-                    };
-                    let cmp_call = self.ir.add_expr(IrExpr::Call {
-                        callee: Callee::Static {
-                            owner: owner.to_string(),
-                            name: "compareUnsigned".to_string(),
-                            descriptor: format!("({prim}{prim})I"),
-                            inline: InlineKind::None,
-                        },
-                        dispatch_receiver: None,
-                        args: vec![gi, ge],
-                    });
-                    let zero = self.ir.add_expr(IrExpr::Const(IrConst::Int(0)));
-                    self.ir.add_expr(IrExpr::PrimitiveBinOp {
-                        op: cmp,
-                        lhs: cmp_call,
-                        rhs: zero,
-                    })
                 } else {
                     let gi = self.ir.add_expr(IrExpr::GetValue(i_v));
                     let ge = self.ir.add_expr(IrExpr::GetValue(end_v.unwrap()));
-                    self.ir.add_expr(IrExpr::PrimitiveBinOp {
-                        op: cmp,
-                        lhs: gi,
-                        rhs: ge,
-                    })
+                    self.compare_ordered(elem, cmp, gi, ge)?
                 };
                 // body + increment
                 let mut out = Vec::new();
@@ -10031,15 +10039,18 @@ impl<'a> Lower<'a> {
         label: Option<String>,
     ) -> Option<u32> {
         let it_ty = self.info.ty(iterable);
-        // A primitive range value (`IntRange`/`LongRange`/`CharRange`) iterates as a counted loop over
-        // its `getFirst()`/`getLast()` bounds (step +1), matching kotlinc and avoiding per-element boxing.
-        if let Some((elem, prim_desc)) = it_ty.obj_internal().and_then(range_counted_elem) {
-            return self.lower_foreach_range(name, iterable, body, it_ty, elem, prim_desc, label);
-        }
-        // A progression value (`IntProgression`/`LongProgression`/…, e.g. from `downTo`/`step`)
-        // iterates as a counted loop reading its `getStep()` — the increment may be negative.
-        if let Some((elem, _)) = it_ty.obj_internal().and_then(progression_counted_elem) {
-            return self.lower_foreach_progression(name, iterable, body, it_ty, elem, label);
+        // A platform range/progression value may expose a counted-loop shape. The platform owns the
+        // library class names, physical getter names, and descriptors; common lowering only builds the
+        // generic loop once that shape is supplied.
+        if let Some(loop_info) = it_ty
+            .obj_internal()
+            .and_then(|internal| self.syms.libraries.counted_loop_info(internal))
+        {
+            return if loop_info.step.is_some() {
+                self.lower_foreach_progression(name, iterable, body, it_ty, loop_info, label)
+            } else {
+                self.lower_foreach_range(name, iterable, body, it_ty, loop_info, label)
+            };
         }
         // An array, or a `String` (iterated as its `Char`s), uses an index loop; any other iterable
         // (`List`, `Set`, a progression value, …) uses the iterator protocol.
@@ -10077,16 +10088,15 @@ impl<'a> Lower<'a> {
         // n = arr.size (hoisted)
         let n_v = self.fresh_value();
         let arr_g = self.ir.add_expr(IrExpr::GetValue(arr_v));
-        let size_fq = if it_ty == Ty::String {
-            "kotlin/String.length"
+        let size = if it_ty == Ty::String {
+            self.lower_library_property_read_on(arr_g, it_ty, "length")?
         } else {
-            "kotlin/Array.size"
+            self.ir.add_expr(IrExpr::Call {
+                callee: Callee::External("kotlin/Array.size".to_string()),
+                dispatch_receiver: Some(arr_g),
+                args: vec![],
+            })
         };
-        let size = self.ir.add_expr(IrExpr::Call {
-            callee: Callee::External(size_fq.to_string()),
-            dispatch_receiver: Some(arr_g),
-            args: vec![],
-        });
         let var_n = self.ir.add_expr(IrExpr::Variable {
             index: n_v,
             ty: ty_to_ir(Ty::Int),
@@ -10105,16 +10115,15 @@ impl<'a> Lower<'a> {
         self.scope.push((name.to_string(), x_v, elem));
         let arr_g2 = self.ir.add_expr(IrExpr::GetValue(arr_v));
         let gi2 = self.ir.add_expr(IrExpr::GetValue(i_v));
-        let getq = if it_ty == Ty::String {
-            "kotlin/String.get"
+        let elem_get = if it_ty == Ty::String {
+            self.lower_library_instance_call_on(arr_g2, it_ty, "get", vec![gi2], &[Ty::Int])?
         } else {
-            "kotlin/Array.get"
+            self.ir.add_expr(IrExpr::Call {
+                callee: Callee::External("kotlin/Array.get".to_string()),
+                dispatch_receiver: Some(arr_g2),
+                args: vec![gi2],
+            })
         };
-        let elem_get = self.ir.add_expr(IrExpr::Call {
-            callee: Callee::External(getq.to_string()),
-            dispatch_receiver: Some(arr_g2),
-            args: vec![gi2],
-        });
         let var_x = self.ir.add_expr(IrExpr::Variable {
             index: x_v,
             ty: ty_to_ir(elem),
@@ -10305,14 +10314,8 @@ impl<'a> Lower<'a> {
             let s = if sigs.len() == 1 {
                 sigs[0].clone()
             } else {
-                let want: String = f
-                    .params
-                    .iter()
-                    .map(|p| ty_of(self.afile, &p.ty).descriptor())
-                    .collect();
-                sigs.iter()
-                    .find(|s| crate::resolve::erased_params_key(s) == want)?
-                    .clone()
+                let want: Vec<Ty> = f.params.iter().map(|p| ty_of(self.afile, &p.ty)).collect();
+                sigs.iter().find(|s| s.params == want)?.clone()
             };
             (s.params.clone(), s.ret)
         };
@@ -10842,11 +10845,8 @@ impl<'a> Lower<'a> {
         if !rty.is_reference() {
             return None;
         }
-        let internal = if rty == Ty::String {
-            "java/lang/String".to_string()
-        } else {
-            rty.obj_internal()?.to_string()
-        };
+        let recv_ty = rty.non_null();
+        let internal = recv_ty.kotlin_class_internal()?.to_string();
         let rv = self.expr(receiver)?;
         let v = self.fresh_value();
         let var = self.ir.add_expr(IrExpr::Variable {
@@ -10862,16 +10862,11 @@ impl<'a> Lower<'a> {
             rhs: nullc,
         });
         let recv2 = self.ir.add_expr(IrExpr::GetValue(v));
-        let is_iface = self
-            .syms
-            .libraries
-            .resolve_type(&internal)
-            .is_some_and(|t| t.is_interface());
         let member = if let Some((fclass, idx, _)) = self.resolve_field(&internal, name) {
             let owner_internal = self.ir.classes[fclass as usize].fq_name.clone();
             if self.cur_class.as_deref() != Some(owner_internal.as_str()) {
                 if let Some((mclass, mindex, _, _)) =
-                    self.resolve_method(&internal, &getter_name(name))
+                    self.resolve_method(&internal, &property_getter_name(name))
                 {
                     self.ir.add_expr(IrExpr::MethodCall {
                         class: mclass,
@@ -10893,29 +10888,36 @@ impl<'a> Lower<'a> {
                     index: idx,
                 })
             }
-        } else if internal == "java/lang/String" && name == "length" {
-            self.ir.add_expr(IrExpr::Call {
-                callee: Callee::External("kotlin/String.length".to_string()),
-                dispatch_receiver: Some(recv2),
-                args: vec![],
-            })
         } else {
-            let mapped = crate::resolve::collection_mapped_accessor(name).map(|s| s.to_string());
-            let m = [Some(name.to_string()), Some(getter_name(name)), mapped]
-                .into_iter()
-                .flatten()
-                .find_map(|c| {
-                    crate::call_resolver::resolve_instance(
-                        &*self.syms.libraries,
-                        &internal,
-                        &c,
-                        &[],
-                    )
-                    .filter(|m| !matches!(m.ret, Ty::Unit | Ty::Error))
-                })?;
+            if name == "length"
+                && recv_ty.non_null().kotlin_class_internal() == Some("kotlin/String")
+            {
+                return Some((
+                    var,
+                    cond,
+                    self.ir.add_expr(IrExpr::Call {
+                        callee: Callee::Virtual {
+                            owner: "java/lang/String".to_string(),
+                            name: "length".to_string(),
+                            descriptor: "()I".to_string(),
+                            interface: false,
+                        },
+                        dispatch_receiver: Some(recv2),
+                        args: vec![],
+                    }),
+                ));
+            }
+            let m = crate::call_resolver::resolve_property_member(
+                &*self.syms.libraries,
+                recv_ty,
+                name,
+            )?
+            .member;
+            let owner = m.owner.clone().unwrap_or_else(|| internal.clone());
+            let is_iface = self.library_type_is_interface(&owner);
             self.ir.add_expr(IrExpr::Call {
                 callee: Callee::Virtual {
-                    owner: internal.clone(),
+                    owner,
                     name: m.name,
                     descriptor: m.descriptor,
                     interface: is_iface,
@@ -11094,7 +11096,7 @@ impl<'a> Lower<'a> {
                     let asserted = self.ir.add_expr(IrExpr::NotNullAssert { operand: v });
                     // `Int?!!` narrows to the unboxed primitive — unbox the wrapper after the null check.
                     let result = self.info.ty(e);
-                    if result.is_primitive() {
+                    if self.has_scalar_value_repr(result) {
                         self.ir.add_expr(IrExpr::TypeOp {
                             op: IrTypeOp::ImplicitCoercion,
                             arg: asserted,
@@ -11137,13 +11139,13 @@ impl<'a> Lower<'a> {
                 // (tried first) unboxes it itself, so a placeholder owner suffices for the null-check.
                 let nn = rty.non_null();
                 let internal = if nn == Ty::String {
-                    "java/lang/String".to_string()
+                    "kotlin/String".to_string()
                 } else if let Some(i) = nn.obj_internal() {
                     i.to_string()
-                } else if nn.is_primitive() {
+                } else if self.has_scalar_value_repr(nn) {
                     // A nullable-PRIMITIVE receiver (`Int?` in a chained `?.let`) has no class internal —
                     // the scope-fn path (tried first) unboxes it; a placeholder owner suffices.
-                    "java/lang/Object".to_string()
+                    "kotlin/Any".to_string()
                 } else {
                     // A non-object, non-primitive receiver (e.g. a literal `null?.…`): unsupported — bail.
                     return None;
@@ -11166,11 +11168,6 @@ impl<'a> Lower<'a> {
                     rhs: nullc,
                 });
                 let recv2 = self.ir.add_expr(IrExpr::GetValue(v));
-                let is_iface = self
-                    .syms
-                    .libraries
-                    .resolve_type(&internal)
-                    .map_or(false, |t| t.is_interface());
                 // A safe-call scope function (`s?.let { it… }`, `s?.run { … }`): inline it with the
                 // non-null receiver `recv2`; the surrounding null-check + nullable-wrap below make the
                 // whole `s?.…` yield `null` when `s` is null.
@@ -11208,9 +11205,11 @@ impl<'a> Lower<'a> {
                                     for (arg, pt) in args.iter().zip(&m.params) {
                                         a.push(self.lower_arg(*arg, &ty_to_ir(*pt))?);
                                     }
+                                    let owner = m.owner.clone().unwrap_or_else(|| internal.clone());
+                                    let is_iface = self.library_type_is_interface(&owner);
                                     self.ir.add_expr(IrExpr::Call {
                                         callee: Callee::Virtual {
-                                            owner: internal.clone(),
+                                            owner,
                                             name: m.name,
                                             descriptor: m.descriptor,
                                             interface: is_iface,
@@ -11221,7 +11220,7 @@ impl<'a> Lower<'a> {
                                 } else {
                                     // A stdlib EXTENSION via safe call (`s?.uppercase()`) — inline it on
                                     // the non-null receiver, the same path as the qualified call.
-                                    self.lower_ext_call_on(recv2, rty, &name, &args, e)?
+                                    self.lower_ext_call_on(recv2, nn, &name, &args, e)?
                                 }
                             }
                         }
@@ -11230,31 +11229,20 @@ impl<'a> Lower<'a> {
                                 self.lower_field_read_on(recv2, &internal, &name, e, None)
                             {
                                 read
-                            } else if internal == "java/lang/String" && name == "length" {
-                                self.ir.add_expr(IrExpr::Call {
-                                    callee: Callee::External("kotlin/String.length".to_string()),
-                                    dispatch_receiver: Some(recv2),
-                                    args: vec![],
-                                })
                             } else {
                                 // A classpath property (`list?.size`) — a zero-arg accessor.
-                                let mapped = crate::resolve::collection_mapped_accessor(&name)
-                                    .map(|s| s.to_string());
-                                let m = [Some(name.clone()), Some(getter_name(&name)), mapped]
-                                    .into_iter()
-                                    .flatten()
-                                    .find_map(|c| {
-                                        crate::call_resolver::resolve_instance(
-                                            &*self.syms.libraries,
-                                            &internal,
-                                            &c,
-                                            &[],
-                                        )
-                                        .filter(|m| !matches!(m.ret, Ty::Unit | Ty::Error))
-                                    })?;
+                                let recv_ty = nn;
+                                let m = crate::call_resolver::resolve_property_member(
+                                    &*self.syms.libraries,
+                                    recv_ty,
+                                    &name,
+                                )
+                                .map(|r| r.member)?;
+                                let owner = m.owner.clone().unwrap_or_else(|| internal.clone());
+                                let is_iface = self.library_type_is_interface(&owner);
                                 self.ir.add_expr(IrExpr::Call {
                                     callee: Callee::Virtual {
-                                        owner: internal.clone(),
+                                        owner,
                                         name: m.name,
                                         descriptor: m.descriptor,
                                         interface: is_iface,
@@ -11306,7 +11294,7 @@ impl<'a> Lower<'a> {
                 // Fuse `recv?.prop ?: default` for a PRIMITIVE result: null-check the receiver and select
                 // the UNBOXED member or the default — no boxing of the member (kotlinc's `dup;ifnull`
                 // form). Only the no-arg property/length safe-access is fused here.
-                if result_ty.is_primitive() {
+                if self.has_scalar_value_repr(result_ty) {
                     if let Expr::SafeCall {
                         receiver,
                         name,
@@ -11363,7 +11351,7 @@ impl<'a> Lower<'a> {
                 // non-null lhs unboxes to the primitive and the rhs coerces to it too.
                 let result_ty = self.info.ty(e);
                 let mut get2 = self.ir.add_expr(IrExpr::GetValue(v));
-                if result_ty.is_primitive() && lty.is_reference() {
+                if self.has_scalar_value_repr(result_ty) && lty.is_reference() {
                     // Unbox to the wrapper's OWN primitive (`Integer`→`Int`), then numeric-convert to the
                     // result if it differs (`Int? ?: 0.0` → unbox to `Int`, then `i2d` to `Double`) —
                     // unboxing `Integer` straight to `Double` would be an invalid checkcast.
@@ -11424,16 +11412,15 @@ impl<'a> Lower<'a> {
             // `LambdaMetafactory` machinery as a lambda, but the impl method handle points directly at
             // the referenced function (no synthesized body). Bound/object/constructor references bail.
             Expr::CallableRef { receiver, name } => {
-                // A property reference (`Type::prop`) is typed as a `KProperty*`, not a function type;
-                // handle it before the `Fun` guard below.
+                // A property reference is typed by its callable shape, but still lowers to the Kotlin
+                // property-reference runtime object on the JVM.
                 if let Some(recv) = receiver {
                     if let Some(pr) = self.lower_prop_ref(e, recv, &name) {
                         return Some(pr);
                     }
                 }
-                // Top-level property reference `::foo` (no receiver) — typed as `KProperty0` /
-                // `KMutableProperty0`, lowered to a `(Mutable)PropertyReference0Impl` singleton whose
-                // `get`/`set` dispatch statically to the facade accessor.
+                // Top-level property reference `::foo` lowers to a `(Mutable)PropertyReference0Impl`
+                // singleton whose `get`/`set` dispatch statically to the facade accessor.
                 if receiver.is_none() {
                     if let Some(pr) = self.lower_toplevel_prop_ref(e, &name) {
                         return Some(pr);
@@ -11456,21 +11443,18 @@ impl<'a> Lower<'a> {
                 // closure over the lifted static method, capturing the same outer locals the method
                 // takes as leading params. A `Unit` SAM-return is wrapped (`invoke` yields the `Unit`
                 // singleton); `Nothing` stays unmodeled.
-                if let Some(&stmt_id) = self.info.local_call_map.get(&e) {
-                    if let Some(&fid) = self.local_fun_ids.get(&stmt_id) {
+                if let Some(ExprLowering::LocalFunction { stmt_id }) = self.info.expr_lowers.get(&e)
+                {
+                    if let Some(&fid) = self.local_fun_ids.get(stmt_id) {
                         if sig.ret == Ty::Nothing {
                             return None;
                         }
-                        let caps = self
-                            .info
-                            .local_fun_captures
-                            .get(&stmt_id)
-                            .cloned()
-                            .unwrap_or_default();
-                        let captures: Vec<u32> = caps
+                        let local_fun = self.info.local_fun(*stmt_id)?;
+                        let captures: Vec<u32> = local_fun
+                            .captures
                             .iter()
-                            .map(|(n, _)| {
-                                self.lookup(n)
+                            .map(|cap| {
+                                self.lookup(&cap.name)
                                     .map(|(cv, _)| self.ir.add_expr(IrExpr::GetValue(cv)))
                             })
                             .collect::<Option<Vec<_>>>()?;
@@ -11577,7 +11561,7 @@ impl<'a> Lower<'a> {
                     // calls `invokestatic <facade>.foo(args)` (empty owner = facade). Unbound (an
                     // `INSTANCE` singleton), top-level flags = 1. The subclass carries real reference
                     // equality.
-                    return Some(self.make_func_ref(
+                    return self.make_func_ref(
                         e.0,
                         false,
                         arity as u8,
@@ -11591,7 +11575,7 @@ impl<'a> Lower<'a> {
                         fn_params,
                         ret,
                         None,
-                    ));
+                    );
                 }
                 // A CLASSPATH top-level function reference (`::greet` from a jar/dependency module): the
                 // sole `TopLevel` overload's `invoke` does `invokestatic <classpath-facade>.greet(args)`.
@@ -11613,7 +11597,7 @@ impl<'a> Lower<'a> {
                 // round-trips to a primitive descriptor — convert via `ty_to_ir` (a bare `Ty::Int` would
                 // emit as `Object` and the `invoke` would call a non-existent erased target method).
                 let param_tys: Vec<Ty> = c.params.iter().map(|t| ty_to_ir(*t)).collect();
-                return Some(self.make_func_ref(
+                return self.make_func_ref(
                     e.0,
                     false,
                     arity as u8,
@@ -11627,26 +11611,17 @@ impl<'a> Lower<'a> {
                     param_tys,
                     ty_to_ir(c.ret),
                     None,
-                ));
+                );
             }
             Expr::Name(n) => {
                 // `COROUTINE_SUSPENDED` (a `kotlin.coroutines` intrinsic, recognized via the registry) —
-                // read the sentinel through its accessor `IntrinsicsKt.getCOROUTINE_SUSPENDED()`. A local
-                // of the same name shadows it (resolved through the scope below).
+                // read the sentinel through the target runtime. A local of the same name shadows it
+                // (resolved through the scope below).
                 if self.lookup(&n).is_none()
-                    && self.syms.libraries.coroutine_intrinsic(&n)
+                    && crate::libraries::coroutine_intrinsic(&n)
                         == Some(crate::libraries::CoroutineIntrinsic::CoroutineSuspended)
                 {
-                    return Some(self.ir.add_expr(IrExpr::Call {
-                        callee: crate::ir::Callee::Static {
-                            owner: "kotlin/coroutines/intrinsics/IntrinsicsKt".to_string(),
-                            name: "getCOROUTINE_SUSPENDED".to_string(),
-                            descriptor: "()Ljava/lang/Object;".to_string(),
-                            inline: InlineKind::None,
-                        },
-                        dispatch_receiver: None,
-                        args: vec![],
-                    }));
+                    return self.runtime_call(RuntimeOp::CoroutineSuspended, Ty::Unit, vec![]);
                 }
                 // The `field` keyword inside a custom accessor body reads the property's backing field.
                 if n == "field" {
@@ -11661,12 +11636,10 @@ impl<'a> Lower<'a> {
                 }
                 // A CLASSPATH `object` referenced as a value (`EmptyCoroutineContext`) — the checker
                 // recorded it; read `getstatic <internal>.INSTANCE`.
-                if let Some(internal) = self.info.obj_value_refs.get(&e) {
-                    return Some(self.ir.add_expr(IrExpr::ExternalStaticField {
-                        owner: internal.clone(),
-                        name: "INSTANCE".to_string(),
-                        descriptor: format!("L{internal};"),
-                    }));
+                if let Some(ExprLowering::ObjectValue { internal }) = self.info.expr_lowers.get(&e)
+                {
+                    let field = self.syms.libraries.object_instance_field(internal)?;
+                    return Some(self.platform_static_field(field));
                 }
                 // A class NAME with a typed `companion object` used as a VALUE (`val c: I = C`): read its
                 // companion singleton `getstatic C.Companion:LC$Companion;`. Only classes whose companion
@@ -11676,11 +11649,12 @@ impl<'a> Lower<'a> {
                     if let Some(cls) = self.syms.classes.get(&n) {
                         let comp_internal = format!("{}$Companion", cls.internal);
                         if self.syms.class_by_internal(&comp_internal).is_some() {
-                            return Some(self.ir.add_expr(IrExpr::ExternalStaticField {
-                                owner: cls.internal.clone(),
-                                name: "Companion".to_string(),
-                                descriptor: format!("L{comp_internal};"),
-                            }));
+                            let field = self.syms.libraries.companion_instance_field(
+                                &cls.internal,
+                                &comp_internal,
+                                "Companion",
+                            )?;
+                            return Some(self.platform_static_field(field));
                         }
                     }
                 }
@@ -11692,12 +11666,16 @@ impl<'a> Lower<'a> {
                     let (dslot, _) = self.lookup(&format!("{n}$delegate"))?;
                     let dele = self.ir.add_expr(IrExpr::GetValue(dslot));
                     let null_a = self.ir.add_expr(IrExpr::Const(IrConst::Null));
-                    let pref = self.make_local_propref(&ld);
+                    let pref = self.make_local_propref(&ld)?;
                     return Some(self.ir.add_expr(IrExpr::Call {
                         callee: crate::ir::Callee::Virtual {
                             owner: ld.delegate_internal.clone(),
                             name: "getValue".to_string(),
-                            descriptor: ld.getvalue_desc.clone(),
+                            descriptor:
+                                self.syms.libraries.method_descriptor(
+                                    &ld.getvalue_sig.params,
+                                    ld.getvalue_sig.ret,
+                                )?,
                             interface: false,
                         },
                         dispatch_receiver: Some(dele),
@@ -11722,11 +11700,11 @@ impl<'a> Lower<'a> {
                     // A reference (`Any`) smart-cast to `UInt`/`ULong` (`if (x is UInt) … x …`) would
                     // unbox the `kotlin.UInt` value type, but krusty erases unsigned to `int` and would
                     // emit an `Integer` unbox (ClassCastException) — skip rather than miscompile.
-                    if matches!(narrowed, Ty::UInt | Ty::ULong) && slot_ty.is_reference() {
+                    if self.is_unsigned_integer_type(narrowed) && slot_ty.is_reference() {
                         return None;
                     }
                     if narrowed != slot_ty && narrowed != Ty::Error {
-                        if narrowed.is_primitive() && slot_ty.is_reference() {
+                        if self.has_scalar_value_repr(narrowed) && slot_ty.is_reference() {
                             self.ir.add_expr(IrExpr::TypeOp {
                                 op: IrTypeOp::ImplicitCoercion,
                                 arg: read,
@@ -11775,7 +11753,7 @@ impl<'a> Lower<'a> {
                         self.ir.add_expr(IrExpr::ExternalStaticField {
                             owner: facade,
                             name: n.clone(),
-                            descriptor: ty.descriptor(),
+                            descriptor: self.syms.libraries.type_descriptor(ty)?,
                         })
                     } else {
                         // A top-level property from ANOTHER file → call its facade's `getX()` (the field is
@@ -11783,7 +11761,7 @@ impl<'a> Lower<'a> {
                         self.ir.add_expr(IrExpr::Call {
                             callee: Callee::CrossFile {
                                 facade,
-                                name: getter_name(&n),
+                                name: property_getter_name(&n),
                                 params: vec![],
                                 ret: ty_to_ir(ty),
                             },
@@ -11864,7 +11842,7 @@ impl<'a> Lower<'a> {
                                 index: idx,
                             })
                         } else if let Some((class, index, _, _)) =
-                            self.resolve_method(&cur, &getter_name(&n))
+                            self.resolve_method(&cur, &property_getter_name(&n))
                         {
                             self.ir.add_expr(IrExpr::MethodCall {
                                 class,
@@ -11890,7 +11868,7 @@ impl<'a> Lower<'a> {
                             });
                             // The outer backing field is private — read it through its synthesized getter.
                             let (class, index, _, _) =
-                                self.resolve_method(&outer, &getter_name(&n))?;
+                                self.resolve_method(&outer, &property_getter_name(&n))?;
                             self.ir.add_expr(IrExpr::MethodCall {
                                 class,
                                 index,
@@ -11907,7 +11885,7 @@ impl<'a> Lower<'a> {
                         let internal = this_ty.obj_internal();
                         if let Some(internal) = internal {
                             if let Some((class, index, _, _)) =
-                                self.resolve_method(internal, &getter_name(&n))
+                                self.resolve_method(internal, &property_getter_name(&n))
                             {
                                 self.ir.add_expr(IrExpr::MethodCall {
                                     class,
@@ -11937,7 +11915,7 @@ impl<'a> Lower<'a> {
                         .obj_internal()
                         .and_then(|i| self.syms.prop_of(i, &n))
                         .map_or(false, |(t, _)| t.is_reference());
-                    if narrowed.is_primitive() && field_is_ref {
+                    if self.has_scalar_value_repr(narrowed) && field_is_ref {
                         self.ir.add_expr(IrExpr::TypeOp {
                             op: IrTypeOp::ImplicitCoercion,
                             arg: read,
@@ -11948,8 +11926,8 @@ impl<'a> Lower<'a> {
                     }
                 }
             }
-            // `a[i]` read → an intrinsic; `String[i]` is `kotlin/String.get` (a `Char`), else
-            // `kotlin/Array.get` (backend reads element from the receiver type).
+            // `a[i]` read. User/library `get` operators resolve through their member metadata; arrays
+            // keep the IR intrinsic because the backend reads the element from the receiver type.
             Expr::Index { array, index } => {
                 let at = self.info.ty(array);
                 // `m[i]` on a USER class with an `operator fun get(index)` → `m.get(i)` (walks supers, so
@@ -12010,15 +11988,13 @@ impl<'a> Lower<'a> {
                         }
                     }
                 }
-                let fq = if at == Ty::String {
-                    "kotlin/String.get"
-                } else {
-                    "kotlin/Array.get"
-                };
                 let a = self.expr(array)?;
                 let i = self.expr(index)?;
+                if at == Ty::String {
+                    return self.lower_library_instance_call_on(a, at, "get", vec![i], &[Ty::Int]);
+                }
                 self.ir.add_expr(IrExpr::Call {
-                    callee: Callee::External(fq.to_string()),
+                    callee: Callee::External("kotlin/Array.get".to_string()),
                     dispatch_receiver: Some(a),
                     args: vec![i],
                 })
@@ -12026,23 +12002,22 @@ impl<'a> Lower<'a> {
             Expr::Member { receiver, name } => {
                 // A classpath nested singleton object recorded by the checker (`PrimitiveKind.STRING`) →
                 // `getstatic <Outer$Nested>.INSTANCE`.
-                if let Some(internal) = self.info.obj_value_refs.get(&e) {
-                    return Some(self.ir.add_expr(IrExpr::ExternalStaticField {
-                        owner: internal.clone(),
-                        name: "INSTANCE".to_string(),
-                        descriptor: format!("L{internal};"),
-                    }));
+                if let Some(ExprLowering::ObjectValue { internal }) = self.info.expr_lowers.get(&e)
+                {
+                    let field = self.syms.libraries.object_instance_field(internal)?;
+                    return Some(self.platform_static_field(field));
                 }
                 // A classpath EXTENSION property recorded by the checker (`d.elementDescriptors`) →
                 // `invokestatic <Kt>.get<Name>(recv)`.
-                if let Some((owner, method, descriptor)) = self.info.ext_prop_calls.get(&e).cloned()
+                if let Some(ExprLowering::ExtensionPropertyGet { getter }) =
+                    self.info.expr_lowers.get(&e).cloned()
                 {
                     let a = self.expr(receiver)?;
                     return Some(self.ir.add_expr(IrExpr::Call {
                         callee: Callee::Static {
-                            owner,
-                            name: method,
-                            descriptor,
+                            owner: getter.owner,
+                            name: getter.name,
+                            descriptor: getter.descriptor,
                             inline: InlineKind::None,
                         },
                         dispatch_receiver: None,
@@ -12059,10 +12034,8 @@ impl<'a> Lower<'a> {
                         .find(|c| c.fq_name == internal && c.is_annotation)
                         .and_then(|c| c.fields.iter().find(|f| f.name == *name))
                     {
-                        let descriptor = format!(
-                            "(){}",
-                            crate::jvm::ir_emit::ir_ty_to_jvm(&field.ty).descriptor()
-                        );
+                        let descriptor =
+                            format!("(){}", self.syms.libraries.ir_type_descriptor(field.ty)?);
                         let a = self.expr(receiver)?;
                         return Some(self.ir.add_expr(IrExpr::Call {
                             callee: Callee::Virtual {
@@ -12092,26 +12065,25 @@ impl<'a> Lower<'a> {
                 // Primitive companion constant `Int.MAX_VALUE` / `Double.NaN` / … — inline the
                 // compile-time value read from the library (kotlinc emits the same `ldc`).
                 if let Expr::Name(rn) = self.afile.expr(receiver).clone() {
-                    if matches!(
-                        rn.as_str(),
-                        "Int" | "Long" | "Short" | "Byte" | "Char" | "Double" | "Float" | "Boolean"
-                    ) && self.lookup(&rn).is_none()
+                    if let Some(lc) = self
+                        .lookup(&rn)
+                        .is_none()
+                        .then(|| library_companion_const(self.syms, &rn, &name))
+                        .flatten()
                     {
-                        if let Some(lc) = self.syms.libraries.prim_companion_const(&rn, &name) {
-                            let c = match lc {
-                                // `Char.MAX_VALUE`/`MIN_VALUE` read back as an integer ConstantValue, but
-                                // the constant's type is `Char` — emit a `Char` const so it boxes to
-                                // `Character` (not `Integer`) in a vararg/generic position.
-                                crate::libraries::LibConst::Int(v) if rn == "Char" => {
-                                    IrConst::Char(char::from_u32(v as u32).unwrap_or('\0'))
-                                }
-                                crate::libraries::LibConst::Int(v) => IrConst::Int(v),
-                                crate::libraries::LibConst::Long(v) => IrConst::Long(v),
-                                crate::libraries::LibConst::Float(v) => IrConst::Float(v),
-                                crate::libraries::LibConst::Double(v) => IrConst::Double(v),
-                            };
-                            return Some(self.ir.add_expr(IrExpr::Const(c)));
-                        }
+                        let c = match lc.value {
+                            // `Char.MAX_VALUE`/`MIN_VALUE` read back as an integer ConstantValue, but
+                            // the constant's type is `Char` — emit a `Char` const so it boxes to
+                            // `Character` (not `Integer`) in a vararg/generic position.
+                            crate::libraries::LibConst::Int(v) if lc.ty == Ty::Char => {
+                                IrConst::Char(char::from_u32(v as u32).unwrap_or('\0'))
+                            }
+                            crate::libraries::LibConst::Int(v) => IrConst::Int(v),
+                            crate::libraries::LibConst::Long(v) => IrConst::Long(v),
+                            crate::libraries::LibConst::Float(v) => IrConst::Float(v),
+                            crate::libraries::LibConst::Double(v) => IrConst::Double(v),
+                        };
+                        return Some(self.ir.add_expr(IrExpr::Const(c)));
                     }
                 }
                 // `EnumClass.ENTRY` — a static enum-constant read.
@@ -12137,31 +12109,25 @@ impl<'a> Lower<'a> {
                         return Some(self.ir.add_expr(IrExpr::ExternalStaticField {
                             owner: internal,
                             name: name.clone(),
-                            descriptor: cty.descriptor(),
+                            descriptor: self.syms.libraries.type_descriptor(*cty)?,
                         }));
                     }
                 }
                 let rt = self.recv_ty(receiver);
-                // `e.ordinal` / `e.name` on an enum value → `ordinal()`/`name()` inherited from
-                // `java.lang.Enum`, but dispatched on the receiver's STATIC type (kotlinc emits
-                // `invokevirtual Color.ordinal`, not `Enum.ordinal`).
-                if matches!(name.as_str(), "ordinal" | "name") {
+                // `e.ordinal` / `e.name` on an enum value: dispatched on the receiver's STATIC type while
+                // the platform owns the inherited accessor's physical name/descriptor.
+                if let Some(accessor) = self.syms.libraries.enum_member_accessor(&name) {
                     if let Some(ci) = self.class_of(rt) {
                         let cid = ci.id as usize;
                         if !self.ir.classes[cid].enum_entries.is_empty() {
                             // Read the owner before the mutable `self.expr` borrow (drops `ci`'s borrow).
                             let owner = self.ir.classes[cid].fq_name.clone();
                             let recv = self.expr(receiver)?;
-                            let descriptor = if name == "ordinal" {
-                                "()I"
-                            } else {
-                                "()Ljava/lang/String;"
-                            };
                             return Some(self.ir.add_expr(IrExpr::Call {
                                 callee: Callee::Virtual {
                                     owner,
-                                    name: name.clone(),
-                                    descriptor: descriptor.to_string(),
+                                    name: accessor.name,
+                                    descriptor: accessor.descriptor,
                                     interface: false,
                                 },
                                 dispatch_receiver: Some(recv),
@@ -12201,7 +12167,7 @@ impl<'a> Lower<'a> {
                     {
                         read
                     } else if let Some((class, index, _, _)) =
-                        self.resolve_method(&recv_internal, &getter_name(&name))
+                        self.resolve_method(&recv_internal, &property_getter_name(&name))
                     {
                         // A computed property → `recv.getX()`.
                         self.ir.add_expr(IrExpr::MethodCall {
@@ -12279,65 +12245,27 @@ impl<'a> Lower<'a> {
                     }
                 }
                 // Unsigned `+`/`-`/`*`/`==`/`!=` match the signed two's-complement opcodes, but
-                // `/`/`%`/`<`/`>`/`<=`/`>=` need the JDK unsigned intrinsics kotlinc calls:
-                // `Integer.{divide,remainder,compare}Unsigned` (`Long.*` for `ULong`). A comparison is
-                // `compareUnsigned(l, r) <op> 0`.
+                // `/`/`%` need target unsigned intrinsics. Comparisons use the platform unsigned
+                // comparator and compare its result with zero.
                 let lty = self.info.ty(lhs);
-                if lty.is_unsigned()
+                if self.is_unsigned_integer_type(lty)
                     && matches!(
                         op,
                         BinOp::Div | BinOp::Rem | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge
                     )
                 {
-                    let is_uint = lty == Ty::UInt;
-                    let owner = if is_uint {
-                        "java/lang/Integer"
-                    } else {
-                        "java/lang/Long"
-                    };
-                    let prim = if is_uint { "I" } else { "J" };
                     let l = self.expr(lhs)?;
                     let r = self.expr(rhs)?;
-                    let call = |this: &mut Self, name: &str, desc: String, args: Vec<u32>| {
-                        this.ir.add_expr(IrExpr::Call {
-                            callee: Callee::Static {
-                                owner: owner.to_string(),
-                                name: name.to_string(),
-                                descriptor: desc,
-                                inline: InlineKind::None,
-                            },
-                            dispatch_receiver: None,
-                            args,
-                        })
-                    };
-                    return Some(match op {
-                        BinOp::Div => call(
-                            self,
-                            "divideUnsigned",
-                            format!("({prim}{prim}){prim}"),
-                            vec![l, r],
-                        ),
-                        BinOp::Rem => call(
-                            self,
-                            "remainderUnsigned",
-                            format!("({prim}{prim}){prim}"),
-                            vec![l, r],
-                        ),
-                        _ => {
-                            let cmp = call(
-                                self,
-                                "compareUnsigned",
-                                format!("({prim}{prim})I"),
-                                vec![l, r],
-                            );
-                            let zero = self.ir.add_expr(IrExpr::Const(IrConst::Int(0)));
-                            self.ir.add_expr(IrExpr::PrimitiveBinOp {
-                                op: bin_to_ir(op)?,
-                                lhs: cmp,
-                                rhs: zero,
-                            })
+                    if matches!(op, BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge) {
+                        return self.compare_ordered(lty, bin_to_ir(op)?, l, r);
+                    }
+                    return match op {
+                        BinOp::Div => self.runtime_call(RuntimeOp::UnsignedDivide, lty, vec![l, r]),
+                        BinOp::Rem => {
+                            self.runtime_call(RuntimeOp::UnsignedRemainder, lty, vec![l, r])
                         }
-                    });
+                        _ => unreachable!(),
+                    };
                 }
                 // A user `operator fun LhsType.plus(…)` (etc.) extension overrides the builtin operator.
                 let op_name = match op {
@@ -12416,11 +12344,7 @@ impl<'a> Lower<'a> {
                     let lt = self.info.ty(lhs);
                     if lt.is_reference() && self.info.ty(rhs) != Ty::Error {
                         let rt = self.info.ty(rhs);
-                        if let Some(c) =
-                            self.syms
-                                .libraries
-                                .resolve_callable(opn, Some(lt), &[rt], &[])
-                        {
+                        if let Some(c) = self.library_extension_callable(opn, lt, &[rt], &[]) {
                             if c.params.len() == 2 {
                                 let l = self.lower_arg(lhs, &ty_to_ir(c.params[0]))?;
                                 let r = self.lower_arg(rhs, &ty_to_ir(c.params[1]))?;
@@ -12472,8 +12396,8 @@ impl<'a> Lower<'a> {
                     let lower_concat_operand = |this: &mut Self, oe: AstExprId| -> Option<u32> {
                         let v = this.expr(oe)?;
                         let t = this.info.ty(oe);
-                        Some(if t.is_unsigned() {
-                            this.unsigned_to_string(v, t)
+                        Some(if this.is_unsigned_integer_type(t) {
+                            this.unsigned_to_string(v, t)?
                         } else {
                             v
                         })
@@ -12535,7 +12459,8 @@ impl<'a> Lower<'a> {
                             raw
                         });
                     }
-                    if lt.is_primitive() && rt.is_primitive() && lt != rt {
+                    if self.has_scalar_value_repr(lt) && self.has_scalar_value_repr(rt) && lt != rt
+                    {
                         let p = Ty::promote(lt, rt)?;
                         let pir = ty_to_ir(p);
                         if lt != p {
@@ -12606,7 +12531,7 @@ impl<'a> Lower<'a> {
                         }
                         // A general `Any == 5`: box the primitive operand → structural `Intrinsics.areEqual`.
                         let obj = ty_to_ir(Ty::obj("kotlin/Any"));
-                        if lt.is_primitive() {
+                        if self.has_scalar_value_repr(lt) {
                             l = self.ir.add_expr(IrExpr::TypeOp {
                                 op: IrTypeOp::ImplicitCoercion,
                                 arg: l,
@@ -12743,18 +12668,15 @@ impl<'a> Lower<'a> {
                     if ty.nullable {
                         None
                     } else {
-                        Ty::from_name(&ty.name)
-                            .filter(|t| t.is_primitive() && !matches!(t, Ty::Double | Ty::Float))
+                        Ty::from_name(&ty.name).filter(|t| {
+                            self.has_scalar_value_repr(*t) && !matches!(t, Ty::Double | Ty::Float)
+                        })
                     }
                 })?;
                 // An unsigned target tests against its inline-class object (`kotlin/UInt`), not the
                 // representation's wrapper (`Integer`).
-                let type_operand = if target.is_unsigned() {
-                    ty_to_ir(Ty::obj(if target == Ty::UInt {
-                        "kotlin/UInt"
-                    } else {
-                        "kotlin/ULong"
-                    }))
+                let type_operand = if self.is_unsigned_integer_type(target) {
+                    ty_to_ir(self.unsigned_integer_box_type(target)?)
                 } else {
                     ty_to_ir(target)
                 };
@@ -12803,52 +12725,23 @@ impl<'a> Lower<'a> {
                     RangeKind::Until => (sv, ev, true),
                     RangeKind::DownTo => (ev, sv, false),
                 };
-                // A comparison `a <op> b` on the loaded temps. For an unsigned element type the operands
-                // are compared via `Integer/Long.compareUnsigned(a, b) <op> 0` (a signed opcode would
-                // misorder values past the sign bit), matching kotlinc's unsigned-range membership.
+                // A comparison `a <op> b` on the loaded temps. Unsigned element types use the platform
+                // unsigned comparator, matching kotlinc's unsigned-range membership.
                 let elem = self.info.ty(value);
-                let cmp = |this: &mut Self, op: IrBinOp, a: u32, b: u32| -> u32 {
+                let cmp = |this: &mut Self, op: IrBinOp, a: u32, b: u32| -> Option<u32> {
                     let la = this.ir.add_expr(IrExpr::GetValue(a));
                     let lb = this.ir.add_expr(IrExpr::GetValue(b));
-                    if elem.is_unsigned() {
-                        let (owner, prim) = if elem == Ty::UInt {
-                            ("java/lang/Integer", "I")
-                        } else {
-                            ("java/lang/Long", "J")
-                        };
-                        let call = this.ir.add_expr(IrExpr::Call {
-                            callee: Callee::Static {
-                                owner: owner.to_string(),
-                                name: "compareUnsigned".to_string(),
-                                descriptor: format!("({prim}{prim})I"),
-                                inline: InlineKind::None,
-                            },
-                            dispatch_receiver: None,
-                            args: vec![la, lb],
-                        });
-                        let zero = this.ir.add_expr(IrExpr::Const(IrConst::Int(0)));
-                        this.ir.add_expr(IrExpr::PrimitiveBinOp {
-                            op,
-                            lhs: call,
-                            rhs: zero,
-                        })
-                    } else {
-                        this.ir.add_expr(IrExpr::PrimitiveBinOp {
-                            op,
-                            lhs: la,
-                            rhs: lb,
-                        })
-                    }
+                    this.compare_ordered(elem, op, la, lb)
                 };
                 let cond = if negated {
                     // value < lo  ||  value (> | >=) hi
-                    let c1 = cmp(self, IrBinOp::Lt, vv, lo);
+                    let c1 = cmp(self, IrBinOp::Lt, vv, lo)?;
                     let c2 = cmp(
                         self,
                         if hi_strict { IrBinOp::Ge } else { IrBinOp::Gt },
                         vv,
                         hi,
-                    );
+                    )?;
                     self.ir.add_expr(IrExpr::PrimitiveBinOp {
                         op: IrBinOp::Or,
                         lhs: c1,
@@ -12856,13 +12749,13 @@ impl<'a> Lower<'a> {
                     })
                 } else {
                     // lo <= value  &&  value (< | <=) hi
-                    let c1 = cmp(self, IrBinOp::Le, lo, vv);
+                    let c1 = cmp(self, IrBinOp::Le, lo, vv)?;
                     let c2 = cmp(
                         self,
                         if hi_strict { IrBinOp::Lt } else { IrBinOp::Le },
                         vv,
                         hi,
-                    );
+                    )?;
                     self.ir.add_expr(IrExpr::PrimitiveBinOp {
                         op: IrBinOp::And,
                         lhs: c1,
@@ -12876,60 +12769,31 @@ impl<'a> Lower<'a> {
             }
             Expr::RangeTo { lo, hi, kind } => {
                 use crate::ast::RangeKind;
-                // The operand types select the range class and the element type its operands widen to:
-                // `Char..Char` → `CharRange`; the integer family widens (`Byte`/`Short`/`Int` → `IntRange`,
-                // anything with a `Long` → `LongRange`), mirroring kotlinc's `rangeTo` overloads. The
-                // bounds are coerced to that element type (`Byte`→`Int` is a no-op on the JVM stack).
                 let lt = self.info.ty(lo);
                 let rt = self.info.ty(hi);
-                let small_int = |t: &Ty| matches!(t, Ty::Byte | Ty::Short | Ty::Int);
-                let (range_internal, prim_desc, elem) = match (lt, rt) {
-                    (Ty::Char, Ty::Char) => ("kotlin/ranges/CharRange", "C", Ty::Char),
-                    (Ty::UInt, Ty::UInt) => ("kotlin/ranges/UIntRange", "I", Ty::UInt),
-                    (Ty::ULong, Ty::ULong) => ("kotlin/ranges/ULongRange", "J", Ty::ULong),
-                    (l, r) if small_int(&l) && small_int(&r) => {
-                        ("kotlin/ranges/IntRange", "I", Ty::Int)
-                    }
-                    (l, r)
-                        if (small_int(&l) || l == Ty::Long) && (small_int(&r) || r == Ty::Long) =>
-                    {
-                        ("kotlin/ranges/LongRange", "J", Ty::Long)
-                    }
-                    _ => return None,
-                };
-                let lo_v = self.lower_arg(lo, &ty_to_ir(elem))?;
-                let hi_v = self.lower_arg(hi, &ty_to_ir(elem))?;
+                let range = self.syms.libraries.range_construction(lt, rt)?;
+                let lo_v = self.lower_arg(lo, &ty_to_ir(range.elem))?;
+                let hi_v = self.lower_arg(hi, &ty_to_ir(range.elem))?;
                 match kind {
-                    // `a..b` → `new IntRange(a, b)` (kotlinc's intrinsic constructor). The unsigned range
-                    // classes' public ctor takes a trailing synthetic `DefaultConstructorMarker` (null).
-                    RangeKind::Through if elem.is_unsigned() => {
-                        let marker = self.ir.add_expr(IrExpr::Const(IrConst::Null));
-                        let ctor_desc = format!("({prim_desc}{prim_desc}Lkotlin/jvm/internal/DefaultConstructorMarker;)V");
-                        self.ir.add_expr(IrExpr::NewExternal {
-                            internal: range_internal.to_string(),
-                            ctor_desc,
-                            args: vec![lo_v, hi_v, marker],
-                        })
-                    }
                     RangeKind::Through => {
-                        let ctor_desc = format!("({prim_desc}{prim_desc})V");
+                        let mut args = vec![lo_v, hi_v];
+                        for _ in 0..range.through.trailing_nulls {
+                            args.push(self.ir.add_expr(IrExpr::Const(IrConst::Null)));
+                        }
                         self.ir.add_expr(IrExpr::NewExternal {
-                            internal: range_internal.to_string(),
-                            ctor_desc,
-                            args: vec![lo_v, hi_v],
+                            internal: range.through.internal,
+                            ctor_desc: range.through.ctor_desc,
+                            args,
                         })
                     }
-                    // `a..<b` → `RangesKt.until(a, b)` (the `rangeUntil` operator), returning the range.
-                    // (Unsigned `..<` uses a different intrinsic krusty doesn't model yet — skip.)
-                    RangeKind::Until if elem.is_unsigned() => return None,
                     RangeKind::Until => {
-                        let descriptor = format!("({prim_desc}{prim_desc})L{range_internal};");
+                        let c = range.until?;
                         self.ir.add_expr(IrExpr::Call {
                             callee: Callee::Static {
-                                owner: "kotlin/ranges/RangesKt".to_string(),
-                                name: "until".to_string(),
-                                descriptor,
-                                inline: InlineKind::None,
+                                owner: c.owner,
+                                name: c.name,
+                                descriptor: c.descriptor,
+                                inline: c.inline,
                             },
                             dispatch_receiver: None,
                             args: vec![lo_v, hi_v],
@@ -13139,7 +13003,10 @@ impl<'a> Lower<'a> {
                 // reference-target paths below (which assume a reference operand + `checkcast`).
                 let operand_ty = self.info.ty(operand);
                 let target_is_tparam = self.cur_tparams.iter().any(|(n, _, _)| *n == ty.name);
-                if operand_ty.is_primitive() && !operand_ty.is_unsigned() && !target_is_tparam {
+                if self.has_scalar_value_repr(operand_ty)
+                    && !self.is_unsigned_integer_type(operand_ty)
+                    && !target_is_tparam
+                {
                     let target = self.info.ty(e);
                     if target.is_reference() {
                         return Some(self.ir.add_expr(IrExpr::TypeOp {
@@ -13172,9 +13039,9 @@ impl<'a> Lower<'a> {
                 // emitted by the `ImplicitCoercion` reference→primitive path. `ty_ref` only yields
                 // reference types, so handle the primitive case before it.
                 if !ty.nullable {
-                    if let Some(prim) =
-                        Ty::from_name(&ty.name).filter(|t| t.is_primitive() && !t.is_unsigned())
-                    {
+                    if let Some(prim) = Ty::from_name(&ty.name).filter(|t| {
+                        self.has_scalar_value_repr(*t) && !self.is_unsigned_integer_type(*t)
+                    }) {
                         return Some(self.ir.add_expr(IrExpr::TypeOp {
                             op: IrTypeOp::ImplicitCoercion,
                             arg,
@@ -13281,7 +13148,7 @@ impl<'a> Lower<'a> {
                 // An unsigned subject compares its arms with unsigned `==` (bit-equal, same as signed),
                 // but a `ULong` subject whose magnitude exceeds `Long.MAX` needs care, and the unsigned
                 // const-val arms aren't materialized yet — bail rather than risk a mismatch.
-                if subject.map_or(false, |s| self.info.ty(s).is_unsigned()) {
+                if subject.map_or(false, |s| self.is_unsigned_integer_type(self.info.ty(s))) {
                     return None;
                 }
                 // A no-`else` `when` used as a *value* is only accepted by the checker when it is
@@ -13300,7 +13167,9 @@ impl<'a> Lower<'a> {
                             if is_when_test(self.afile, c) {
                                 continue;
                             }
-                            if st.is_primitive() != self.info.ty(c).is_primitive() {
+                            if self.has_scalar_value_repr(st)
+                                != self.has_scalar_value_repr(self.info.ty(c))
+                            {
                                 return None;
                             }
                         }
@@ -13406,8 +13275,8 @@ impl<'a> Lower<'a> {
                             let v = self.expr(e)?;
                             // An unsigned interpolated value prints in unsigned decimal.
                             let ety = self.info.ty(e);
-                            let v = if ety.is_unsigned() {
-                                self.unsigned_to_string(v, ety)
+                            let v = if self.is_unsigned_integer_type(ety) {
+                                self.unsigned_to_string(v, ety)?
                             } else {
                                 v
                             };
@@ -13440,7 +13309,7 @@ impl<'a> Lower<'a> {
             Expr::Call { callee, args }
                 if args.len() == 1
                     && matches!(self.afile.expr(callee), ast::Expr::Name(n)
-                        if self.syms.libraries.coroutine_intrinsic(n)
+                        if crate::libraries::coroutine_intrinsic(n)
                             == Some(crate::libraries::CoroutineIntrinsic::SuspendCoroutineUninterceptedOrReturn)) =>
             {
                 let ast::Expr::Lambda { params, body } = self.afile.expr(args[0]).clone() else {
@@ -13452,42 +13321,52 @@ impl<'a> Lower<'a> {
                 }
                 self.expr(body)?
             }
-            Expr::Call { .. } if self.info.companion_calls.contains_key(&e) => {
-                let cf = self.info.companion_calls[&e].clone();
-                let args = match self.afile.expr(e).clone() {
-                    Expr::Call { args, .. } => args,
+            Expr::Call { .. }
+                if matches!(
+                    self.info.expr_lowers.get(&e),
+                    Some(ExprLowering::InlineCall(_))
+                ) =>
+            {
+                match self.info.expr_lowers.get(&e).cloned()? {
+                    ExprLowering::InlineCall(crate::resolve::InlineCall::ValueCompanion(cf)) => {
+                        let args = match self.afile.expr(e).clone() {
+                            Expr::Call { args, .. } => args,
+                            _ => return None,
+                        };
+                        let recv_field = self.syms.libraries.companion_instance_field(
+                            &cf.class_internal,
+                            &cf.companion_internal,
+                            &cf.companion_field,
+                        )?;
+                        let recv = self.platform_static_field(recv_field);
+                        // A value-class companion fn's params are erased reference types
+                        // (`success(Object)`, `failure(Throwable)`) — target `Object` so a primitive
+                        // argument is boxed (`Integer.valueOf`), matching kotlinc; a reference argument
+                        // passes through unchanged.
+                        let obj_ty = Ty::nullable(Ty::obj("kotlin/Any"));
+                        let mut ir_args = Vec::with_capacity(args.len());
+                        for &a in &args {
+                            ir_args.push(self.lower_arg(a, &obj_ty)?);
+                        }
+                        Some(self.ir.add_expr(IrExpr::Call {
+                            callee: Callee::Static {
+                                owner: cf.callable.owner.clone(),
+                                name: cf.callable.name.clone(),
+                                descriptor: cf.callable.descriptor.clone(),
+                                inline: cf.callable.inline,
+                            },
+                            dispatch_receiver: Some(recv),
+                            args: ir_args,
+                        }))?
+                    }
+                    ExprLowering::InlineCall(crate::resolve::InlineCall::ReceiverLambda(rl)) => {
+                        self.lower_receiver_lambda(rl)?
+                    }
                     _ => return None,
-                };
-                let recv = self.ir.add_expr(IrExpr::ExternalStaticField {
-                    owner: cf.class_internal.clone(),
-                    name: cf.companion_field.clone(),
-                    descriptor: format!("L{};", cf.companion_internal),
-                });
-                // A value-class companion fn's params are erased reference types (`success(Object)`,
-                // `failure(Throwable)`) — target `Object` so a primitive argument is boxed (`Integer.
-                // valueOf`), matching kotlinc; a reference argument passes through unchanged.
-                let obj_ty = Ty::nullable(Ty::obj("kotlin/Any"));
-                let mut ir_args = Vec::with_capacity(args.len());
-                for &a in &args {
-                    ir_args.push(self.lower_arg(a, &obj_ty)?);
                 }
-                Some(self.ir.add_expr(IrExpr::Call {
-                    callee: Callee::Static {
-                        owner: cf.companion_internal.clone(),
-                        name: cf.jvm_name.clone(),
-                        descriptor: cf.descriptor.clone(),
-                        inline: InlineKind::MustInline,
-                    },
-                    dispatch_receiver: Some(recv),
-                    args: ir_args,
-                }))?
-            }
-            Expr::Call { .. } if self.info.receiver_lambdas.contains_key(&e) => {
-                let rl = self.info.receiver_lambdas[&e];
-                self.lower_receiver_lambda(rl)?
             }
             // A call with a spread argument (`foo(*a)`). Only the single-spread-to-a-top-level-vararg
-            // form is handled (the array is passed through via `Arrays.copyOf`, like kotlinc); ANY other
+            // form is handled (the array is passed through via the platform copy helper); ANY other
             // shape (mixed spreads, fixed args, member/library callee, primitive element, complex spread
             // expr) returns `None` → the file skips, never miscompiles. The guard ensures a spread arg
             // never reaches the normal vararg-packing paths below.
@@ -13550,22 +13429,21 @@ impl<'a> Lower<'a> {
                     // A call to a lifted local function — the checker mapped this call to its decl.
                     // Prepend the captured outer locals (the enclosing scope holds each captured var's
                     // value, or its `Ref` holder when boxed), then the declared arguments.
-                    if let Some(&stmt_id) = self.info.local_call_map.get(&e) {
-                        if let Some(&fid) = self.local_fun_ids.get(&stmt_id) {
+                    if let Some(ExprLowering::LocalFunction { stmt_id }) =
+                        self.info.expr_lowers.get(&e)
+                    {
+                        if let Some(&fid) = self.local_fun_ids.get(stmt_id) {
                             let params = self.ir.functions[fid as usize].params.clone();
-                            let caps = self
-                                .info
-                                .local_fun_captures
-                                .get(&stmt_id)
-                                .cloned()
-                                .unwrap_or_default();
-                            if args.len() + caps.len() == params.len() {
+                            let local_fun = self.info.local_fun(*stmt_id)?;
+                            if args.len() + local_fun.captures.len() == params.len() {
                                 let mut a = Vec::new();
-                                for (name, _) in &caps {
-                                    let (cv, _) = self.lookup(name)?;
+                                for cap in &local_fun.captures {
+                                    let (cv, _) = self.lookup(&cap.name)?;
                                     a.push(self.ir.add_expr(IrExpr::GetValue(cv)));
                                 }
-                                for (arg, pt) in args.iter().zip(&params[caps.len()..]) {
+                                for (arg, pt) in
+                                    args.iter().zip(&params[local_fun.captures.len()..])
+                                {
                                     a.push(self.lower_arg(*arg, pt)?);
                                 }
                                 return Some(self.ir.add_expr(IrExpr::Call {
@@ -13622,7 +13500,8 @@ impl<'a> Lower<'a> {
                                 .or_else(|| {
                                     self.syms
                                         .libraries
-                                        .sam_method(internal)
+                                        .resolve_type(internal)
+                                        .and_then(|t| t.sam_method)
                                         .map(|m| (m.name, m.ret == Ty::Unit))
                                 });
                             if let Some((method, void)) = target {
@@ -13718,11 +13597,8 @@ impl<'a> Lower<'a> {
                         crate::module_symbols::ModuleSymbols::new(self.syms)
                             .resolve_top_level(&fname, &arg_tys)
                             .and_then(|fi| {
-                                // `erased_params_key` == the params' descriptors concatenated.
-                                let key: String =
-                                    fi.callable.params.iter().map(|t| t.descriptor()).collect();
                                 self.fun_ids
-                                    .get(&(fname.clone(), key))
+                                    .get(&(fname.clone(), fi.callable.params.clone()))
                                     .copied()
                                     .map(|fid| (fi, fid))
                             })
@@ -13751,7 +13627,7 @@ impl<'a> Lower<'a> {
                                     .get(&e.0)
                                     .and_then(|ts| ts.first())
                                     .map(|r| ty_of(self.afile, r))
-                                    .filter(|t| t.is_primitive())
+                                    .filter(|t| self.has_scalar_value_repr(*t))
                             } else {
                                 None
                             };
@@ -13888,15 +13764,18 @@ impl<'a> Lower<'a> {
                                     .collect()
                             })
                             .unwrap_or_default();
-                        self.syms
-                            .libraries
-                            .resolve_callable(&fname, None, &arg_tys, &call_targs)
+                        self.resolver()
+                            .resolve_top_level_callable(&fname, &arg_tys, &call_targs)
                     } {
                         // For a spliced top-level `inline fun` (`run { 2 + 3 }`), the body returns the
                         // ERASED `Object` (a generic `R`); coerce it to the logical type so a primitive
                         // result unboxes instead of landing boxed in a primitive slot.
                         let (call_inline, call_log, call_phys) =
                             (c.inline.can_inline(), c.ret, c.physical_ret);
+                        if let Some(intrinsic) = self.lower_assert_fails_with_default(e, &c, &args)
+                        {
+                            return Some(intrinsic);
+                        }
                         // Is the callee a `suspend fun`? Ask the resolver (the flag flows uniformly from
                         // the AST for a module/sibling-file fn and from `@Metadata` for a classpath one).
                         // A suspend call is recorded by `ExprId` so the coroutine pass threads the
@@ -13919,13 +13798,10 @@ impl<'a> Lower<'a> {
                         {
                             return None;
                         }
-                        // krusty's `Ty` erases `byte`/`short` to `Int`, but a resolved overload's
-                        // descriptor keeps `B`/`S` — so for a `byte`/`short` parameter the lowering builds
-                        // an `int`/`int[]` that mismatches the callee's `B`/`[B` descriptor (a verify error).
-                        // This happens when the precise `Int` overload is private `@InlineOnly` and the
-                        // public `Byte` one is mis-selected (`maxOf(3, 7)`). Bail (skip) rather than
-                        // miscompile — a genuine `byte`-parameter library call is rare and skips safely.
-                        if descriptor_has_byte_or_short_param(&c.descriptor) {
+                        // Classpath callables preserve Kotlin `Byte`/`Short` parameter shapes. krusty
+                        // does not yet adapt a widened `Int` argument/array to such params, so bail
+                        // rather than emit a call whose JVM argument shape cannot match the callee.
+                        if has_byte_or_short_param(&c.params) {
                             return None;
                         }
                         let last_is_array =
@@ -13983,27 +13859,45 @@ impl<'a> Lower<'a> {
                             let prim_args: Vec<Ty> = args
                                 .iter()
                                 .map(|&a| self.info.ty(a))
-                                .filter(|t| t.is_primitive())
+                                .filter(|t| self.has_scalar_value_repr(*t))
                                 .collect();
-                            let generic_provided = c.params.iter().take(args.len()).all(|p| {
-                                matches!(
-                                    p.obj_internal(),
-                                    Some("kotlin/Any") | Some("java/lang/Object")
-                                )
-                            });
+                            let generic_provided =
+                                c.params.iter().take(args.len()).all(ty_is_erased_top);
                             if generic_provided && prim_args.windows(2).any(|w| w[0] != w[1]) {
                                 return None;
                             }
-                            for (i, &arg) in args.iter().enumerate() {
-                                a.push(self.lower_arg(arg, &ty_to_ir(c.params[i]))?);
+                            let trailing_lambda = args
+                                .last()
+                                .is_some_and(|&x| matches!(self.info.ty(x), Ty::Fun(_)));
+                            if trailing_lambda && args.len() < c.params.len() {
+                                let prefix_len = args.len() - 1;
+                                let last = c.params.len() - 1;
+                                for j in 0..c.params.len() {
+                                    let pj = ty_to_ir(c.params[j]);
+                                    if j < prefix_len {
+                                        a.push(self.lower_arg(args[j], &pj)?);
+                                    } else if j == last {
+                                        a.push(self.lower_arg(args[prefix_len], &pj)?);
+                                    } else {
+                                        a.push(self.zero_placeholder(c.params[j]));
+                                    }
+                                }
+                                let mask: i32 = (prefix_len..last).map(|j| 1i32 << j).sum();
+                                a.push(self.ir.add_expr(IrExpr::Const(IrConst::Int(mask))));
+                                a.push(self.ir.add_expr(IrExpr::Const(IrConst::Null)));
+                            } else {
+                                for (i, &arg) in args.iter().enumerate() {
+                                    a.push(self.lower_arg(arg, &ty_to_ir(c.params[i]))?);
+                                }
+                                for j in args.len()..c.params.len() {
+                                    let ph = self.zero_placeholder(c.params[j]);
+                                    a.push(ph);
+                                }
+                                let mask: i32 =
+                                    (args.len()..c.params.len()).map(|j| 1i32 << j).sum();
+                                a.push(self.ir.add_expr(IrExpr::Const(IrConst::Int(mask))));
+                                a.push(self.ir.add_expr(IrExpr::Const(IrConst::Null)));
                             }
-                            for j in args.len()..c.params.len() {
-                                let ph = self.zero_placeholder(c.params[j]);
-                                a.push(ph);
-                            }
-                            let mask: i32 = (args.len()..c.params.len()).map(|j| 1i32 << j).sum();
-                            a.push(self.ir.add_expr(IrExpr::Const(IrConst::Int(mask))));
-                            a.push(self.ir.add_expr(IrExpr::Const(IrConst::Null)));
                         } else {
                             if c.params.len() != args.len() {
                                 return None;
@@ -14025,10 +13919,12 @@ impl<'a> Lower<'a> {
                         if call_suspend {
                             self.ir.suspend_calls.insert(call, ty_to_ir(call_log));
                         }
-                        // A spliced inline fn leaves its erased return on the stack — coerce to the logical
-                        // type (unbox/checkcast). A no-op when they match (the non-generic common case).
+                        // A spliced inline fn leaves its erased return on the stack. Refine it the same
+                        // way as a type-parameter-returning source function: checkcast a stricter
+                        // reference, but do not eagerly unbox nullable generic returns (`T?`), because
+                        // null must stay a legal value until a primitive/non-null use site demands it.
                         if call_inline {
-                            self.coerce_erased(call, call_log, call_phys)
+                            self.coerce_erased_call_result(e, call, &call_phys, true)
                         } else {
                             call
                         }
@@ -14155,23 +14051,25 @@ impl<'a> Lower<'a> {
                             .call_arg_names
                             .get(&e.0)
                             .map_or(true, |ns| ns.iter().all(|n| n.is_none()));
-                        let arg_prim = |i: usize| {
-                            prop_tys
-                                .get(i)
-                                .and_then(|pn| tparams.iter().position(|tp| tp == pn))
-                                .and_then(|ti| targs.get(ti))
-                                .copied()
-                                .filter(|t| t.is_primitive())
-                        };
+                        let arg_prims: Vec<Option<Ty>> = (0..args.len())
+                            .map(|i| {
+                                prop_tys
+                                    .get(i)
+                                    .and_then(|pn| tparams.iter().position(|tp| tp == pn))
+                                    .and_then(|ti| targs.get(ti))
+                                    .copied()
+                                    .filter(|t| self.has_scalar_value_repr(*t))
+                            })
+                            .collect();
                         if !targs.is_empty()
                             && no_named
                             && args.len() == field_tys.len()
                             && prop_tys.len() == field_tys.len()
-                            && (0..args.len()).any(|i| arg_prim(i).is_some())
+                            && arg_prims.iter().any(Option::is_some)
                         {
                             let mut a = Vec::new();
                             for (i, &arg) in args.iter().enumerate() {
-                                if let Some(p) = arg_prim(i) {
+                                if let Some(p) = arg_prims[i] {
                                     let v = self.lower_arg(arg, &ty_to_ir(p))?;
                                     a.push(self.ir.add_expr(IrExpr::TypeOp {
                                         op: IrTypeOp::ImplicitCoercion,
@@ -14295,28 +14193,21 @@ impl<'a> Lower<'a> {
                         args
                     };
                     // `recv.startCoroutine(completion)` — a `kotlin.coroutines` extension intrinsic
-                    // (recognized via the registry). The suspend-function receiver + completion are passed
-                    // to `invokestatic ContinuationKt.startCoroutine(Function1, Continuation)V`.
+                    // (recognized via the registry). The target runtime owns the helper's physical
+                    // owner/descriptor.
                     if args.len() == 1
                         && matches!(self.info.ty(receiver), Ty::Fun(s) if s.suspend)
-                        && self.syms.libraries.coroutine_intrinsic(&name)
+                        && crate::libraries::coroutine_intrinsic(&name)
                             == Some(crate::libraries::CoroutineIntrinsic::StartCoroutine)
                     {
                         let recv_v = self.expr(receiver)?;
                         let cont_ir = ty_to_ir(Ty::obj("kotlin/coroutines/Continuation"));
                         let comp_v = self.lower_arg(args[0], &cont_ir)?;
-                        return Some(self.ir.add_expr(IrExpr::Call {
-                            callee: Callee::Static {
-                                owner: "kotlin/coroutines/ContinuationKt".to_string(),
-                                name: "startCoroutine".to_string(),
-                                descriptor:
-                                    "(Lkotlin/jvm/functions/Function1;Lkotlin/coroutines/Continuation;)V"
-                                        .to_string(),
-                                inline: InlineKind::None,
-                            },
-                            dispatch_receiver: None,
-                            args: vec![recv_v, comp_v],
-                        }));
+                        return self.runtime_call(
+                            RuntimeOp::StartCoroutine,
+                            Ty::Unit,
+                            vec![recv_v, comp_v],
+                        );
                     }
                     // `super.method(args)` → a non-virtual `invokespecial` on `this` (value 0) to the base
                     // class's method (the receiver's own override is skipped). The base is the current
@@ -14334,7 +14225,9 @@ impl<'a> Lower<'a> {
                             if let Some(sig) = self.syms.method_of(&sup, &name) {
                                 (
                                     sig.params.clone(),
-                                    crate::jvm::names::method_descriptor(&sig.params, sig.ret),
+                                    self.syms
+                                        .libraries
+                                        .method_descriptor(&sig.params, sig.ret)?,
                                 )
                             } else if let Some(m) = crate::call_resolver::resolve_instance(
                                 &*self.syms.libraries,
@@ -14371,7 +14264,14 @@ impl<'a> Lower<'a> {
                     }
                     // An arithmetic operator member called by name on a primitive numeric receiver
                     // (`a.plus(b)` ≡ `a + b`) → the same `PrimitiveBinOp` lowering as the operator form.
-                    if args.len() == 1 && self.info.ty(receiver).is_primitive() {
+                    if args.len() == 1
+                        && self.has_scalar_value_repr(self.info.ty(receiver))
+                        && !(self.afile.infix_calls.contains(&e.0)
+                            && self.ext_fun_ids.contains_key(&(
+                                self.info.ty(receiver).erased_recv(),
+                                name.clone(),
+                            )))
+                    {
                         if let Some(r) = self.lower_prim_op_method(receiver, &name, args[0]) {
                             return Some(r);
                         }
@@ -14462,7 +14362,7 @@ impl<'a> Lower<'a> {
                             let iterable = rty.array_elem().is_some()
                                 || rty == Ty::String
                                 || rty.obj_internal().map_or(false, |i| {
-                                    range_counted_elem(i).is_some()
+                                    self.syms.libraries.counted_loop_info(i).is_some()
                                         || crate::call_resolver::resolve_instance(
                                             &*self.syms.libraries,
                                             i,
@@ -14470,11 +14370,7 @@ impl<'a> Lower<'a> {
                                             &[],
                                         )
                                         .is_some()
-                                        || self
-                                            .syms
-                                            .libraries
-                                            .resolve_callable("iterator", Some(rty), &[], &[])
-                                            .is_some()
+                                        || self.has_library_iterator_extension(rty)
                                 });
                             if iterable {
                                 let param =
@@ -14501,11 +14397,7 @@ impl<'a> Lower<'a> {
                                     &[],
                                 )
                                 .is_some()
-                                    || self
-                                        .syms
-                                        .libraries
-                                        .resolve_callable("iterator", Some(rty), &[], &[])
-                                        .is_some()
+                                    || self.has_library_iterator_extension(rty)
                             });
                             if iterable && params.len() == 2 {
                                 let idx = params[0].clone();
@@ -14524,7 +14416,8 @@ impl<'a> Lower<'a> {
                     // Metadata-driven inline route: any library `inline fun` taking a single lambda whose
                     // body the platform can splice (`let`/`also`/…) is inlined from its REAL stdlib
                     // bytecode — no per-function desugar, no hardcoded name list. The route self-gates on
-                    // the resolved callee's `is_inline` + spliceability, so non-spliceable inline fns
+                    // the resolved callee's inline kind; backend splice failures are compiler errors, not
+                    // semantic overload choices.
                     // (`map`/`filter`, branchy) and user methods simply fall through.
                     // `run`/`apply` are receiver lambdas (the lambda's `this` is the receiver); the
                     // bytecode splice routes them as ordinary value-lambdas, mishandling that receiver, so
@@ -14798,20 +14691,22 @@ impl<'a> Lower<'a> {
                     }
                     // Unsigned conversions. `UInt`/`Int` and `ULong`/`Long` share a JVM representation,
                     // so a conversion that doesn't change the representation is a no-op reinterpret;
-                    // `UInt.toLong()`/`toULong()` zero-extend (`Integer.toUnsignedLong`, NOT the
-                    // sign-extending `i2l`); `ULong.toInt()` truncates (`l2i`); `inc`/`dec` are ±1.
+                    // `UInt.toLong()`/`toULong()` zero-extend via the platform helper; `ULong.toInt()`
+                    // truncates (`l2i`); `inc`/`dec` are ±1.
                     {
                         let rty = self.info.ty(receiver);
                         if args.is_empty()
-                            && (rty.is_unsigned() || matches!(name.as_str(), "toUInt" | "toULong"))
+                            && (self.is_unsigned_integer_type(rty)
+                                || matches!(name.as_str(), "toUInt" | "toULong"))
                         {
-                            let repr = |t: Ty| t.unsigned_repr().unwrap_or(t);
-                            if rty.is_unsigned() && name == "toString" {
+                            if self.is_unsigned_integer_type(rty) && name == "toString" {
                                 let r = self.expr(receiver)?;
-                                return Some(self.unsigned_to_string(r, rty));
+                                return self.unsigned_to_string(r, rty);
                             }
-                            if rty.is_unsigned() && matches!(name.as_str(), "inc" | "dec") {
-                                let one = if rty == Ty::ULong {
+                            if self.is_unsigned_integer_type(rty)
+                                && matches!(name.as_str(), "inc" | "dec")
+                            {
+                                let one = if self.scalar_value_repr(rty) == Some(Ty::Long) {
                                     IrConst::Long(1)
                                 } else {
                                     IrConst::Int(1)
@@ -14829,29 +14724,32 @@ impl<'a> Lower<'a> {
                                     rhs: o,
                                 }));
                             }
-                            if let Some(target) = crate::resolve::conversion_target(&name) {
-                                let r = self.expr(receiver)?;
-                                if rty == Ty::UInt && matches!(target, Ty::Long | Ty::ULong) {
-                                    // zero-extend the 32-bit unsigned value into a long
-                                    return Some(self.ir.add_expr(IrExpr::Call {
-                                        callee: Callee::Static {
-                                            owner: "java/lang/Integer".to_string(),
-                                            name: "toUnsignedLong".to_string(),
-                                            descriptor: "(I)J".to_string(),
-                                            inline: InlineKind::None,
-                                        },
-                                        dispatch_receiver: None,
-                                        args: vec![r],
-                                    }));
+                            if is_conversion_call_name(&name) {
+                                let target = self.info.ty(e);
+                                if target == Ty::Error {
+                                    return None;
                                 }
-                                if repr(rty) == repr(target) {
+                                let r = self.expr(receiver)?;
+                                if matches!(target, Ty::Long | Ty::ULong) {
+                                    // zero-extend the 32-bit unsigned value into a long
+                                    if let Some(call) =
+                                        self.runtime_call(RuntimeOp::UIntToLong, rty, vec![r])
+                                    {
+                                        return Some(call);
+                                    }
+                                }
+                                let rrepr = self.scalar_value_repr(rty).unwrap_or(rty);
+                                let trepr = self.scalar_value_repr(target).unwrap_or(target);
+                                if rrepr == trepr {
                                     return Some(r); // identity reinterpret (UInt↔Int, ULong↔Long, UInt→UInt)
                                 }
-                                if repr(rty).is_primitive() && repr(target).is_primitive() {
+                                if self.has_scalar_value_repr(rrepr)
+                                    && self.has_scalar_value_repr(trepr)
+                                {
                                     return Some(self.ir.add_expr(IrExpr::TypeOp {
                                         op: IrTypeOp::ImplicitCoercion,
                                         arg: r,
-                                        type_operand: ty_to_ir(repr(target)),
+                                        type_operand: ty_to_ir(trepr),
                                     }));
                                 }
                             }
@@ -14872,17 +14770,19 @@ impl<'a> Lower<'a> {
                                 | Ty::Char
                                 | Ty::Double
                                 | Ty::Float
-                        ) {
-                            if let Some(target) = crate::resolve::conversion_target(&name) {
-                                if args.is_empty() {
-                                    let r = self.expr(receiver)?;
-                                    return Some(self.ir.add_expr(IrExpr::TypeOp {
-                                        op: IrTypeOp::ImplicitCoercion,
-                                        arg: r,
-                                        type_operand: ty_to_ir(target),
-                                    }));
-                                }
+                        ) && args.is_empty()
+                            && is_conversion_call_name(&name)
+                        {
+                            let target = self.info.ty(e);
+                            if target == Ty::Error {
+                                return None;
                             }
+                            let r = self.expr(receiver)?;
+                            return Some(self.ir.add_expr(IrExpr::TypeOp {
+                                op: IrTypeOp::ImplicitCoercion,
+                                arg: r,
+                                type_operand: ty_to_ir(target),
+                            }));
                         }
                     }
                     // (`a.compareTo(b)` on a primitive is handled by the shared `lower_prim_op_method`
@@ -15091,7 +14991,7 @@ impl<'a> Lower<'a> {
                             dispatch_receiver: Some(recv),
                             args: vec![],
                         })
-                    } else if let Some((internal, desc, is_iface, mparams, mret)) = {
+                    } else if let Some((owner, mname, desc, is_iface, mparams, mret)) = {
                         // A classpath *instance* method `recv.name(args)` → `invokevirtual`/
                         // `invokeinterface recvType.name:descriptor` (descriptor from the classpath; no
                         // hardcoded names). Enables stdlib member calls (iterators, collections, …).
@@ -15105,12 +15005,12 @@ impl<'a> Lower<'a> {
                                     None
                                 }
                             })
-                            // A `String` receiver resolves its `java.lang.String` members (`isEmpty()`,
-                            // `isBlank()`, …) — a member wins over a same-named extension, as in kotlinc
-                            // (and a private `@InlineOnly` extension like `StringsKt.isEmpty` can't be called).
+                            // A `String` receiver resolves its Kotlin builtin members (`isEmpty()`,
+                            // `isBlank()`, …); the provider supplies the physical owner. A member wins
+                            // over a same-named extension, as in kotlinc.
                             .or_else(|| {
                                 if rt == Ty::String {
-                                    Some("java/lang/String".to_string())
+                                    Some("kotlin/String".to_string())
                                 } else {
                                     None
                                 }
@@ -15123,12 +15023,9 @@ impl<'a> Lower<'a> {
                                     &arg_tys,
                                 )
                                 .map(|m| {
-                                    let is_iface = self
-                                        .syms
-                                        .libraries
-                                        .resolve_type(&internal)
-                                        .map_or(false, |t| t.is_interface());
-                                    (internal, m.descriptor, is_iface, m.params, m.ret)
+                                    let owner = m.owner.clone().unwrap_or_else(|| internal.clone());
+                                    let is_iface = self.library_type_is_interface(&owner);
+                                    (owner, m.name, m.descriptor, is_iface, m.params, m.ret)
                                 })
                             })
                     } {
@@ -15139,7 +15036,10 @@ impl<'a> Lower<'a> {
                         // (`checkcast Byte`/`Long`) throws `ClassCastException`. Coerced only when the
                         // argument's primitive type actually differs from the element (below).
                         let elem_prim = if let Ty::Obj(_, targs) = &rt {
-                            targs.first().copied().filter(|t| t.is_primitive())
+                            targs
+                                .first()
+                                .copied()
+                                .filter(|t| self.has_scalar_value_repr(*t))
                         } else {
                             None
                         };
@@ -15149,13 +15049,11 @@ impl<'a> Lower<'a> {
                         for (i, &arg) in args.iter().enumerate() {
                             match mparams.get(i) {
                                 Some(p)
-                                    if matches!(
-                                        p.obj_internal(),
-                                        Some("kotlin/Any") | Some("java/lang/Object")
-                                    ) && elem_prim.is_some_and(|e| {
-                                        let a = self.info.ty(arg);
-                                        a.is_primitive() && a != e
-                                    }) =>
+                                    if ty_is_erased_top(p)
+                                        && elem_prim.is_some_and(|e| {
+                                            let a = self.info.ty(arg);
+                                            self.has_scalar_value_repr(a) && a != e
+                                        }) =>
                                 {
                                     // Coerce to the element primitive (i2b/i2l/…), then box as THAT
                                     // wrapper for the erased `Object` parameter.
@@ -15173,8 +15071,8 @@ impl<'a> Lower<'a> {
                         }
                         let call = self.ir.add_expr(IrExpr::Call {
                             callee: Callee::Virtual {
-                                owner: internal,
-                                name: name.clone(),
+                                owner,
+                                name: mname,
                                 descriptor: desc,
                                 interface: is_iface,
                             },
@@ -15184,47 +15082,44 @@ impl<'a> Lower<'a> {
                         // A generic member whose erased return is `Object` but whose substituted type is
                         // more specific (`List<Int>.get` → `Int`) gets the unbox/checkcast kotlinc emits.
                         self.coerce_generic_read(call, e, mret)
-                    } else if let Some((owner, jvm_name, descriptor, ret_ty, is_iface)) = {
-                        // A Kotlin built-in member over a JVM-mapped receiver whose JVM method is RENAMED
-                        // (`CharSequence.get` → `charAt`, `Number.toInt` → `intValue`) — declared in
-                        // `.kotlin_builtins`, reachable under its Kotlin name only here. A same-named member
-                        // (`Comparable.compareTo`, `CharSequence.length`) is left to the classpath
-                        // `resolve_instance` above, which dispatches it correctly (incl. value-class
-                        // receivers); only the rename needs this path.
-                        rt.obj_internal()
-                            .and_then(crate::jvm::jvm_class_map::jvm_to_kotlin_builtin_with_members)
-                            .and_then(|kotlin| {
-                                self.syms
-                                    .libraries
-                                    .builtin_member_call(kotlin, &name, args.len())
-                            })
-                            .filter(|(_, jvm_name, ..)| *jvm_name != name)
+                    } else if let Some(resolved) = {
+                        let arg_tys: Vec<Ty> = args.iter().map(|&a| self.info.ty(a)).collect();
+                        crate::call_resolver::resolve_instance_member(
+                            &*self.syms.libraries,
+                            rt,
+                            &name,
+                            &arg_tys,
+                        )
                     } {
                         let recv = self.expr(receiver)?;
-                        let (param_tys, _) =
-                            crate::jvm::jvm_libraries::parse_method_desc(&descriptor);
+                        let ret = resolved.ret;
+                        let member = resolved.member;
+                        let physical_ret = member.physical_ret;
                         let mut a = Vec::new();
                         for (i, &arg) in args.iter().enumerate() {
-                            match param_tys.get(i) {
+                            match member.params.get(i) {
                                 Some(p) => a.push(self.lower_arg(arg, &ty_to_ir(*p))?),
                                 None => a.push(self.expr(arg)?),
                             }
                         }
+                        let owner = member.owner.unwrap_or_else(|| {
+                            rt.obj_internal().unwrap_or("kotlin/Any").to_string()
+                        });
                         let call = self.ir.add_expr(IrExpr::Call {
                             callee: Callee::Virtual {
                                 owner,
-                                name: jvm_name,
-                                descriptor,
-                                interface: is_iface,
+                                name: member.name,
+                                descriptor: member.descriptor,
+                                interface: member.is_interface,
                             },
                             dispatch_receiver: Some(recv),
                             args: a,
                         });
-                        self.coerce_generic_read(call, e, ret_ty)
+                        self.coerce_erased(call, ret, physical_ret)
                     } else if let Some(c) = {
                         // A library-resolved extension `recv.name(args)` → `invokestatic
-                        // facade.name(recv, args)`. Owner + descriptor come from the library
-                        // (`resolve_callable` with the receiver), so no stdlib name is hardcoded here.
+                        // facade.name(recv, args)`. Owner + descriptor come from resolver data, so no
+                        // stdlib name is hardcoded here.
                         let arg_tys: Vec<Ty> = args.iter().map(|&a| self.info.ty(a)).collect();
                         self.resolve_ext_lit_widened(&name, rt, &args, &arg_tys)
                     } {
@@ -15367,25 +15262,20 @@ impl<'a> Lower<'a> {
                         // A private `@InlineOnly` extension (`String.uppercase()` → inlines
                         // `toUpperCase(Locale.ROOT)`): resolve via the inline-only path and emit an inline
                         // `Callee::Static` so the backend splices its REAL body (no call to the
-                        // package-private method is emitted). Gated on `can_inline_call`, which DRY-RUNS the
+                        // package-private method is emitted). Gated on provider-computed spliceability, which
+                        // DRY-RUNS the
                         // actual splice — so a body the emitter couldn't splice (and would fall back to an
                         // `invokestatic` on the private method) is never routed; the call simply skips.
                         let arg_tys: Vec<Ty> = args.iter().map(|&a| self.info.ty(a)).collect();
-                        self.syms
-                            .libraries
-                            .resolve_scope_inline(&name, rt, &arg_tys)
+                        self.resolver()
+                            .resolve_extension_inline_callable(&name, rt, &arg_tys)
                             .filter(|c| {
                                 // The `@Metadata` `inline` flag is keyed by the Kotlin name; a
                                 // `@JvmName`-mangled method (`sumOf` → `sumOfInt`) loses it, reading back
                                 // `is_inline=false`. A PRIVATE (`must_inline`) extension has no callable
-                                // method regardless, so it MUST be spliced — gate on `can_inline_call`
-                                // (a real splice dry-run), which is the actual correctness condition.
+                                // method regardless, so it MUST be spliced — gate on the real splice dry-run,
+                                // which is the actual current backend correctness condition.
                                 c.inline.can_inline()
-                                    && self.syms.libraries.can_inline_call(
-                                        &c.owner,
-                                        &c.name,
-                                        &c.descriptor,
-                                    )
                             })
                     } {
                         let recv =
@@ -15547,7 +15437,7 @@ fn is_branchy(file: &ast::File, e: AstExprId) -> bool {
         Expr::Binary { op, lhs, .. } => {
             use ast::BinOp::*;
             matches!(op, Lt | Le | Gt | Ge | And | Or)
-                || (matches!(op, Eq | Ne) && file_expr_is_primitive(file, *lhs))
+                || (matches!(op, Eq | Ne) && file_expr_is_jvm_scalar(file, *lhs))
         }
         Expr::Unary {
             op: ast::UnOp::Not, ..
@@ -15585,33 +15475,12 @@ fn stmt_contains_branch(file: &ast::File, s: ast::StmtId) -> bool {
     }
 }
 
-/// Whether a JVM method descriptor `(params)ret` has a top-level `byte` (`B`) or `short` (`S`) parameter
-/// (including a `byte[]`/`short[]` array). krusty's `Ty` erases these to `Int`, so it can't build a
-/// matching argument/array — a call to such an overload would fail the verifier; the caller bails.
-fn descriptor_has_byte_or_short_param(desc: &str) -> bool {
-    let Some(end) = desc.find(')') else {
-        return false;
-    };
-    let bytes = desc[1..end].as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'[' => {
-                i += 1;
-            } // array prefix — fall through to the element type
-            b'L' => {
-                while i < bytes.len() && bytes[i] != b';' {
-                    i += 1;
-                }
-                i += 1;
-            } // skip `Lname;`
-            b'B' | b'S' => return true,
-            _ => {
-                i += 1;
-            }
-        }
-    }
-    false
+fn has_byte_or_short_param(params: &[Ty]) -> bool {
+    params.iter().any(|p| {
+        matches!(p, Ty::Byte | Ty::Short)
+            || p.array_elem()
+                .is_some_and(|elem| matches!(elem, Ty::Byte | Ty::Short))
+    })
 }
 
 /// A `when (subject) { … }` condition that is a complete boolean test of the subject (`is`/`!is`,
@@ -15674,7 +15543,11 @@ fn top_level_const_string_d(file: &ast::File, name: &str, depth: u32) -> Option<
 /// Build the IR for a primary-constructor default value (file-independent — no AST `ExprId`, so it works
 /// when a subclass/companion in a DIFFERENT file fills a base's default). A literal → a `Const`; an
 /// object singleton → `getstatic <internal>.INSTANCE`.
-fn ctor_default_to_ir(ir: &mut IrFile, dv: &CtorDefaultValue) -> ExprId {
+fn ctor_default_to_ir(
+    ir: &mut IrFile,
+    runtime: &dyn CompilerPlatform,
+    dv: &CtorDefaultValue,
+) -> Option<ExprId> {
     let e = match dv {
         CtorDefaultValue::Int(v) => IrExpr::Const(IrConst::Int(*v as i32)),
         CtorDefaultValue::Long(v) => IrExpr::Const(IrConst::Long(*v)),
@@ -15684,13 +15557,20 @@ fn ctor_default_to_ir(ir: &mut IrFile, dv: &CtorDefaultValue) -> ExprId {
         CtorDefaultValue::Char(v) => IrExpr::Const(IrConst::Char(*v)),
         CtorDefaultValue::Str(s) => IrExpr::Const(IrConst::String(s.clone())),
         CtorDefaultValue::Null => IrExpr::Const(IrConst::Null),
-        CtorDefaultValue::Object(internal) => IrExpr::ExternalStaticField {
-            owner: internal.clone(),
-            name: "INSTANCE".to_string(),
-            descriptor: format!("L{internal};"),
-        },
+        CtorDefaultValue::Object(internal) => {
+            let field = runtime.object_instance_field(internal)?;
+            platform_field_expr(field)
+        }
     };
-    ir.add_expr(e)
+    Some(ir.add_expr(e))
+}
+
+fn platform_field_expr(field: crate::libraries::PlatformField) -> IrExpr {
+    IrExpr::ExternalStaticField {
+        owner: field.owner,
+        name: field.name,
+        descriptor: field.descriptor,
+    }
 }
 
 /// Const-fold a primary-constructor default-value expression to an [`IrConst`] for the serialization
@@ -15759,7 +15639,7 @@ fn is_const_literal(file: &ast::File, e: AstExprId) -> bool {
 
 /// Best-effort: is the literal/operand a primitive (so `==` would use a numeric branch, not
 /// `Intrinsics.areEqual`)? Conservative — only obvious primitive literals count.
-fn file_expr_is_primitive(file: &ast::File, e: AstExprId) -> bool {
+fn file_expr_is_jvm_scalar(file: &ast::File, e: AstExprId) -> bool {
     matches!(
         file.expr(e),
         Expr::IntLit(_)
@@ -15773,30 +15653,399 @@ fn file_expr_is_primitive(file: &ast::File, e: AstExprId) -> bool {
     )
 }
 
-/// The IR parameter type for a captured local lifted into a local function: a boxed (closure-written)
-/// var is passed as its `Ref$XxxRef` holder reference; an ordinary captured local by its own value.
-fn captured_param_ir(name: &str, ty: Ty, boxed: &std::collections::HashSet<String>) -> Ty {
-    if boxed.contains(name) {
-        ty_to_ir(Ty::obj(ref_holder_internal(ty)))
+/// The IR parameter type for a captured local lifted into a local function: a boxed capture is passed as
+/// the runtime holder reference; an ordinary captured local by its own value.
+fn captured_param_ir(
+    runtime: &dyn crate::libraries::TargetRuntime,
+    ty: Ty,
+    shared_cell: bool,
+) -> Option<Ty> {
+    if shared_cell {
+        runtime.mutable_local_ref_type(ty).map(ty_to_ir)
     } else {
-        ty_to_ir(ty)
+        Some(ty_to_ir(ty))
     }
 }
 
-/// The `kotlin/jvm/internal/Ref$XxxRef` holder class for a boxed mutable local of (erased) type `t`.
-fn ref_holder_internal(t: Ty) -> &'static str {
-    match t {
-        // Unboxed unsigned types ARE their signed primitive on the JVM (`UInt`=int, `ULong`=long), so
-        // they share the signed `Ref` holder — matching `ty_to_ir`'s erasure used by the emitter.
-        Ty::Int | Ty::UInt => "kotlin/jvm/internal/Ref$IntRef",
-        Ty::Long | Ty::ULong => "kotlin/jvm/internal/Ref$LongRef",
-        Ty::Float => "kotlin/jvm/internal/Ref$FloatRef",
-        Ty::Double => "kotlin/jvm/internal/Ref$DoubleRef",
-        Ty::Boolean => "kotlin/jvm/internal/Ref$BooleanRef",
-        Ty::Char => "kotlin/jvm/internal/Ref$CharRef",
-        Ty::Byte => "kotlin/jvm/internal/Ref$ByteRef",
-        Ty::Short => "kotlin/jvm/internal/Ref$ShortRef",
-        _ => "kotlin/jvm/internal/Ref$ObjectRef",
+fn lambda_info(info: &TypeInfo, e: AstExprId) -> crate::resolve::LambdaInfo {
+    match info.expr_lowers.get(&e) {
+        Some(ExprLowering::Lambda(li)) => *li,
+        _ => Default::default(),
+    }
+}
+
+fn shared_cell_vars_for_body(
+    file: &ast::File,
+    body: &FunBody,
+    info: &TypeInfo,
+) -> std::collections::HashSet<String> {
+    let root = match body {
+        FunBody::Expr(e) | FunBody::Block(e) => *e,
+        FunBody::None => return std::collections::HashSet::new(),
+    };
+    let mut reassigned = std::collections::HashSet::new();
+    collect_reassigned_names(file, root, &mut reassigned);
+    let mut scopes: Vec<std::collections::HashMap<String, bool>> = Vec::new();
+    let mut out = std::collections::HashSet::new();
+    collect_shared_cell_expr(file, root, info, &reassigned, &mut scopes, &mut out);
+    out
+}
+
+fn collect_shared_cell_expr(
+    file: &ast::File,
+    e: AstExprId,
+    info: &TypeInfo,
+    reassigned: &std::collections::HashSet<String>,
+    scopes: &mut Vec<std::collections::HashMap<String, bool>>,
+    out: &mut std::collections::HashSet<String>,
+) {
+    match file.expr(e) {
+        Expr::Block { stmts, trailing } => {
+            scopes.push(std::collections::HashMap::new());
+            for &s in stmts {
+                collect_shared_cell_stmt(file, s, info, reassigned, scopes, out);
+            }
+            if let Some(t) = trailing {
+                collect_shared_cell_expr(file, *t, info, reassigned, scopes, out);
+            }
+            scopes.pop();
+        }
+        Expr::Lambda { params, body } => {
+            let inline_splice = lambda_info(info, e).capture == LambdaCapture::InlineSplice;
+            if !inline_splice {
+                for (name, is_var) in visible_locals(scopes) {
+                    let access = outer_local_access(file, *body, &name);
+                    if is_var && (access.writes || (reassigned.contains(&name) && access.reads)) {
+                        out.insert(name);
+                    }
+                }
+            }
+            scopes.push(params.iter().map(|p| (p.clone(), false)).collect());
+            collect_shared_cell_expr(file, *body, info, reassigned, scopes, out);
+            scopes.pop();
+        }
+        _ => {
+            let mut exprs = Vec::new();
+            let mut stmts = Vec::new();
+            file.any_child_expr(
+                e,
+                &mut |c| {
+                    exprs.push(c);
+                    false
+                },
+                &mut |s| {
+                    stmts.push(s);
+                    false
+                },
+            );
+            for c in exprs {
+                collect_shared_cell_expr(file, c, info, reassigned, scopes, out);
+            }
+            for s in stmts {
+                collect_shared_cell_stmt(file, s, info, reassigned, scopes, out);
+            }
+        }
+    }
+}
+
+fn collect_shared_cell_stmt(
+    file: &ast::File,
+    s: crate::ast::StmtId,
+    info: &TypeInfo,
+    reassigned: &std::collections::HashSet<String>,
+    scopes: &mut Vec<std::collections::HashMap<String, bool>>,
+    out: &mut std::collections::HashSet<String>,
+) {
+    match file.stmt(s) {
+        Stmt::Local {
+            is_var, name, init, ..
+        } => {
+            collect_shared_cell_expr(file, *init, info, reassigned, scopes, out);
+            if let Some(scope) = scopes.last_mut() {
+                scope.insert(name.clone(), *is_var);
+            }
+        }
+        Stmt::Destructure { entries, init } => {
+            collect_shared_cell_expr(file, *init, info, reassigned, scopes, out);
+            if let Some(scope) = scopes.last_mut() {
+                for (name, is_var) in entries {
+                    if name != "_" {
+                        scope.insert(name.clone(), *is_var);
+                    }
+                }
+            }
+        }
+        Stmt::For {
+            name, range, body, ..
+        } => {
+            collect_shared_cell_expr(file, range.start, info, reassigned, scopes, out);
+            collect_shared_cell_expr(file, range.end, info, reassigned, scopes, out);
+            scopes.push(std::iter::once((name.clone(), false)).collect());
+            collect_shared_cell_expr(file, *body, info, reassigned, scopes, out);
+            scopes.pop();
+        }
+        Stmt::ForEach {
+            name,
+            iterable,
+            body,
+            ..
+        } => {
+            collect_shared_cell_expr(file, *iterable, info, reassigned, scopes, out);
+            scopes.push(std::iter::once((name.clone(), false)).collect());
+            collect_shared_cell_expr(file, *body, info, reassigned, scopes, out);
+            scopes.pop();
+        }
+        Stmt::LocalFun(_) => {
+            if let Some(local_fun) = info.local_fun(s) {
+                for cap in &local_fun.captures {
+                    if cap.shared_cell {
+                        out.insert(cap.name.clone());
+                    }
+                }
+            }
+        }
+        Stmt::LocalClass(_) => {}
+        _ => {
+            let mut exprs = Vec::new();
+            file.any_child_stmt(s, &mut |c| {
+                exprs.push(c);
+                false
+            });
+            for c in exprs {
+                collect_shared_cell_expr(file, c, info, reassigned, scopes, out);
+            }
+        }
+    }
+}
+
+fn visible_locals(scopes: &[std::collections::HashMap<String, bool>]) -> Vec<(String, bool)> {
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for scope in scopes.iter().rev() {
+        for (name, is_var) in scope {
+            if seen.insert(name.clone()) {
+                out.push((name.clone(), *is_var));
+            }
+        }
+    }
+    out
+}
+
+fn collect_reassigned_names(
+    file: &ast::File,
+    e: AstExprId,
+    out: &mut std::collections::HashSet<String>,
+) {
+    let mut exprs = Vec::new();
+    let mut stmts = Vec::new();
+    file.any_child_expr(
+        e,
+        &mut |x| {
+            exprs.push(x);
+            false
+        },
+        &mut |s| {
+            stmts.push(s);
+            false
+        },
+    );
+    for x in exprs {
+        collect_reassigned_names(file, x, out);
+    }
+    for s in stmts {
+        match file.stmt(s) {
+            Stmt::Assign { name, .. } | Stmt::IncDec { name, .. } => {
+                out.insert(name.clone());
+            }
+            _ => {}
+        }
+        let mut child_exprs = Vec::new();
+        file.any_child_stmt(s, &mut |x| {
+            child_exprs.push(x);
+            false
+        });
+        for x in child_exprs {
+            collect_reassigned_names(file, x, out);
+        }
+    }
+}
+
+#[derive(Clone, Copy, Default)]
+struct OuterLocalAccess {
+    reads: bool,
+    writes: bool,
+}
+
+impl OuterLocalAccess {
+    fn join(&mut self, other: Self) {
+        self.reads |= other.reads;
+        self.writes |= other.writes;
+    }
+}
+
+fn outer_local_access(file: &ast::File, e: AstExprId, name: &str) -> OuterLocalAccess {
+    outer_local_access_expr(file, e, name, false)
+}
+
+fn outer_local_access_expr(
+    file: &ast::File,
+    e: AstExprId,
+    name: &str,
+    shadowed: bool,
+) -> OuterLocalAccess {
+    match file.expr(e) {
+        Expr::Name(n) if !shadowed && n == name => OuterLocalAccess {
+            reads: true,
+            writes: false,
+        },
+        Expr::IncDec { target, .. } => {
+            let mut out = outer_local_access_expr(file, *target, name, shadowed);
+            if !shadowed && matches!(file.expr(*target), Expr::Name(n) if n == name) {
+                out.writes = true;
+            }
+            out
+        }
+        Expr::Block { stmts, trailing } => {
+            let mut out = OuterLocalAccess::default();
+            let mut shadowed = shadowed;
+            for &s in stmts {
+                let (access, next_shadowed) = outer_local_access_stmt(file, s, name, shadowed);
+                out.join(access);
+                shadowed = next_shadowed;
+            }
+            if let Some(t) = trailing {
+                out.join(outer_local_access_expr(file, *t, name, shadowed));
+            }
+            out
+        }
+        Expr::Lambda { params, body } => {
+            let lambda_shadowed =
+                shadowed || params.iter().any(|p| p == name) || (params.is_empty() && name == "it");
+            outer_local_access_expr(file, *body, name, lambda_shadowed)
+        }
+        Expr::Try {
+            body,
+            catches,
+            finally,
+        } => {
+            let mut out = outer_local_access_expr(file, *body, name, shadowed);
+            for c in catches {
+                out.join(outer_local_access_expr(
+                    file,
+                    c.body,
+                    name,
+                    shadowed || c.name == name,
+                ));
+            }
+            if let Some(f) = finally {
+                out.join(outer_local_access_expr(file, *f, name, shadowed));
+            }
+            out
+        }
+        _ => {
+            let mut out = OuterLocalAccess::default();
+            let mut exprs = Vec::new();
+            let mut stmts = Vec::new();
+            file.any_child_expr(
+                e,
+                &mut |c| {
+                    exprs.push(c);
+                    false
+                },
+                &mut |s| {
+                    stmts.push(s);
+                    false
+                },
+            );
+            for c in exprs {
+                out.join(outer_local_access_expr(file, c, name, shadowed));
+            }
+            for s in stmts {
+                out.join(outer_local_access_stmt(file, s, name, shadowed).0);
+            }
+            out
+        }
+    }
+}
+
+fn outer_local_access_stmt(
+    file: &ast::File,
+    s: crate::ast::StmtId,
+    name: &str,
+    shadowed: bool,
+) -> (OuterLocalAccess, bool) {
+    match file.stmt(s) {
+        Stmt::Local { name: n, init, .. } => {
+            let access = outer_local_access_expr(file, *init, name, shadowed);
+            (access, shadowed || n == name)
+        }
+        Stmt::LocalDelegate {
+            name: n, delegate, ..
+        } => {
+            let access = outer_local_access_expr(file, *delegate, name, shadowed);
+            (access, shadowed || n == name)
+        }
+        Stmt::Destructure { entries, init } => {
+            let access = outer_local_access_expr(file, *init, name, shadowed);
+            (
+                access,
+                shadowed || entries.iter().any(|(n, _)| n != "_" && n == name),
+            )
+        }
+        Stmt::Assign { name: n, value } => {
+            let mut access = outer_local_access_expr(file, *value, name, shadowed);
+            if !shadowed && n == name {
+                access.writes = true;
+            }
+            (access, shadowed)
+        }
+        Stmt::IncDec { name: n, .. } => (
+            OuterLocalAccess {
+                reads: !shadowed && n == name,
+                writes: !shadowed && n == name,
+            },
+            shadowed,
+        ),
+        Stmt::For {
+            name: n,
+            range,
+            body,
+            ..
+        } => {
+            let mut access = outer_local_access_expr(file, range.start, name, shadowed);
+            access.join(outer_local_access_expr(file, range.end, name, shadowed));
+            access.join(outer_local_access_expr(
+                file,
+                *body,
+                name,
+                shadowed || n == name,
+            ));
+            (access, shadowed)
+        }
+        Stmt::ForEach {
+            name: n,
+            iterable,
+            body,
+            ..
+        } => {
+            let mut access = outer_local_access_expr(file, *iterable, name, shadowed);
+            access.join(outer_local_access_expr(
+                file,
+                *body,
+                name,
+                shadowed || n == name,
+            ));
+            (access, shadowed)
+        }
+        Stmt::LocalFun(_) | Stmt::LocalClass(_) => (OuterLocalAccess::default(), shadowed),
+        _ => {
+            let mut access = OuterLocalAccess::default();
+            file.any_child_stmt(s, &mut |c| {
+                access.join(outer_local_access_expr(file, c, name, shadowed));
+                false
+            });
+            (access, shadowed)
+        }
     }
 }
 
@@ -15832,39 +16081,19 @@ fn class_internal(file: &ast::File, name: &str) -> String {
     }
 }
 
-/// Resolve a written type to a `Ty`: a builtin (`Int`, `String`, …), else a class declared in this
-/// file (`A` → its internal name), else an erased reference (generic type param / external type →
-/// `Object`). Without this, class-typed fields resolve to `Error` and emit a bad descriptor.
-/// For an array-typed IR field, the `java.util.Arrays.toString` array-parameter
-/// descriptor (`[Z`, `[Ljava/lang/Object;` for a reference array); `None` if the field isn't an array.
-/// A `data class` renders/compares/hashes array properties through `java.util.Arrays`, like kotlinc.
-fn data_array_param(t: &Ty) -> Option<&'static str> {
-    let Some(fq_name) = t.non_null().obj_internal() else {
-        return None;
-    };
-    Some(match fq_name {
-        "kotlin/BooleanArray" => "[Z",
-        "kotlin/CharArray" => "[C",
-        "kotlin/ByteArray" => "[B",
-        "kotlin/ShortArray" => "[S",
-        "kotlin/IntArray" => "[I",
-        "kotlin/LongArray" => "[J",
-        "kotlin/FloatArray" => "[F",
-        "kotlin/DoubleArray" => "[D",
-        "kotlin/Array" => "[Ljava/lang/Object;",
-        _ => return None,
-    })
-}
-
 /// Extract the BACKEND-AGNOSTIC generic-signature shape of a generic class (`class Box<T>`), or `None`
 /// for a non-generic class / one with explicit supertypes (whose generic args aren't modeled yet) / an
 /// unsupported bound. The `jvm` backend formats this into the class `Signature` attribute.
-fn class_generic_sig(file: &ast::File, c: &ast::ClassDecl) -> Option<crate::ir::IrGenericSig> {
+fn class_generic_sig(
+    file: &ast::File,
+    c: &ast::ClassDecl,
+    libraries: &dyn CompilerPlatform,
+) -> Option<crate::ir::IrGenericSig> {
     if c.type_params.is_empty() || c.base_class.is_some() || !c.supertypes.is_empty() {
         return None;
     }
     Some(crate::ir::IrGenericSig {
-        type_params: type_param_bounds_ir(file, &c.type_params, &c.type_param_bounds)?,
+        type_params: type_param_bounds_ir(file, &c.type_params, &c.type_param_bounds, libraries)?,
         param_tparams: Vec::new(),
         ret_tparam: None,
     })
@@ -15899,7 +16128,11 @@ fn class_field_tparams(c: &ast::ClassDecl) -> Vec<(String, String)> {
 /// a non-generic function / an unmodeled shape (a type parameter inside a generic argument like
 /// `List<T>`, a vararg, an unsupported bound). Concrete parameter/return types are left to the backend
 /// (which reads them from the `IrFunction`); only the bare-type-parameter positions are recorded.
-fn fn_generic_sig(file: &ast::File, f: &ast::FunDecl) -> Option<crate::ir::IrGenericSig> {
+fn fn_generic_sig(
+    file: &ast::File,
+    f: &ast::FunDecl,
+    libraries: &dyn CompilerPlatform,
+) -> Option<crate::ir::IrGenericSig> {
     if f.type_params.is_empty() {
         return None;
     }
@@ -15923,7 +16156,7 @@ fn fn_generic_sig(file: &ast::File, f: &ast::FunDecl) -> Option<crate::ir::IrGen
         _ => None,
     };
     Some(crate::ir::IrGenericSig {
-        type_params: type_param_bounds_ir(file, tps, &f.type_param_bounds)?,
+        type_params: type_param_bounds_ir(file, tps, &f.type_param_bounds, libraries)?,
         param_tparams,
         ret_tparam,
     })
@@ -15936,6 +16169,7 @@ fn type_param_bounds_ir(
     file: &ast::File,
     names: &[String],
     bounds: &[(String, ast::TypeRef)],
+    libraries: &dyn CompilerPlatform,
 ) -> Option<Vec<(String, Ty)>> {
     let any = || Ty::obj("kotlin/Any");
     let mut out = Vec::with_capacity(names.len());
@@ -15944,7 +16178,10 @@ fn type_param_bounds_ir(
             None => any(),
             Some((_, b)) if b.name == "Any" && !b.nullable => any(),
             // A primitive bound (`T : Int`) is specialized; its Signature bound is the boxed wrapper.
-            Some((_, b)) if Ty::from_name(&b.name).is_some_and(|t| t.is_primitive()) => {
+            Some((_, b))
+                if Ty::from_name(&b.name)
+                    .is_some_and(|t| libraries.scalar_value_repr(t).is_some()) =>
+            {
                 ty_to_ir(Ty::from_name(&b.name).unwrap())
             }
             // A PARAMETERIZED bound (`T : Comparable<T>`, `T : List<String>`) needs a nested generic
@@ -16060,31 +16297,24 @@ fn ty_of(file: &ast::File, r: &ast::TypeRef) -> Ty {
 
 /// Whether an `IrType` is a reference type (anything except a primitive class FqName / Unit).
 fn ir_type_is_reference(t: &Ty) -> bool {
-    if matches!(t.non_null(), Ty::Fun(_)) {
-        return true;
-    }
-    match t.non_null().obj_internal() {
-        Some(fq_name) => !matches!(
-            fq_name,
-            "kotlin/Int"
-                | "kotlin/Long"
-                | "kotlin/Short"
-                | "kotlin/Byte"
-                | "kotlin/Boolean"
-                | "kotlin/Char"
-                | "kotlin/Double"
-                | "kotlin/Float"
-        ),
-        None => false,
-    }
+    let t = t.non_null();
+    matches!(t, Ty::Fun(_))
+        || t.obj_internal()
+            .is_some_and(|_| t.unboxed_primitive().is_none())
 }
 
-/// Whether `t` is exactly `java/lang/Object` / `kotlin/Any` (the erased top type — no `checkcast` to it).
-fn ir_type_is_object(t: &Ty) -> bool {
+/// Whether `t` is exactly the erased top type. Some classpath/library metadata still reports the
+/// physical JVM spelling, but common lowering treats it as Kotlin's semantic top type.
+fn ty_is_erased_top(t: &Ty) -> bool {
     matches!(
         t.non_null().obj_internal(),
-        Some("java/lang/Any" | "kotlin/Any" | "java/lang/Object")
+        Some("kotlin/Any" | "java/lang/Object")
     )
+}
+
+/// Whether `t` is exactly the erased top type (no `checkcast` to it).
+fn ir_type_is_object(t: &Ty) -> bool {
+    ty_is_erased_top(t)
 }
 
 /// Conservative "is `arg` assignable to `param`" for constructor-overload selection: an exact match,
@@ -16094,13 +16324,6 @@ fn ir_type_is_object(t: &Ty) -> bool {
 /// assignable to the primary's `List<T>` param, but IS to the secondary's erased `T`).
 fn ir_arg_assignable(arg: &Ty, param: &Ty) -> bool {
     arg == param || (ir_type_is_object(param) && ir_type_is_reference(arg))
-}
-
-/// Whether `e` contains a `return` (always exits the function), or a `break`/`continue` that targets a
-/// loop *outside* `e` (i.e. at loop-depth 0 here) — control transfers that would skip an enclosing
-/// `finally`. Does not descend into lambdas (their control flow is separate).
-fn body_has_nonlocal_exit(file: &ast::File, e: AstExprId) -> bool {
-    body_has_exit(file, e, true)
 }
 
 /// Whether `e` declares a local `val`/`var` (a `Stmt::Local`/`Destructure`), not descending into a
@@ -16165,39 +16388,6 @@ fn body_has_exit(file: &ast::File, e: AstExprId, with_return: bool) -> bool {
         }
     }
     ex(file, e, 0, with_return)
-}
-
-/// The element type of a primitive-array constructor name (`IntArray` → `Int`).
-/// A primitive range class iterated by a counted loop: its (unboxed) element type and the JVM
-/// primitive descriptor of its `getFirst`/`getLast` getters. Only the step-+1 *range* classes
-/// (not the general progressions) use the counted loop; `Char` ranges fall to the iterator path.
-fn range_counted_elem(internal: &str) -> Option<(Ty, &'static str)> {
-    match internal {
-        "kotlin/ranges/IntRange" => Some((Ty::Int, "I")),
-        "kotlin/ranges/LongRange" => Some((Ty::Long, "J")),
-        // Unsigned ranges erase to the signed primitive; the counted loop uses unsigned comparison.
-        "kotlin/ranges/UIntRange" => Some((Ty::UInt, "I")),
-        "kotlin/ranges/ULongRange" => Some((Ty::ULong, "J")),
-        _ => None,
-    }
-}
-
-/// The element type + primitive descriptor for a progression iterated via `getStep()`. A `…Range` is
-/// a `…Progression` subtype, but ranges keep the cheaper unit-step path above; only a bare
-/// progression (the result of `downTo`/`step`/`reversed`) reaches here. Unsigned progressions are
-/// handled too — their elements compare via `compareUnsigned` (see `lower_foreach_progression`).
-fn progression_counted_elem(internal: &str) -> Option<(Ty, &'static str)> {
-    match internal {
-        "kotlin/ranges/IntProgression" => Some((Ty::Int, "I")),
-        "kotlin/ranges/LongProgression" => Some((Ty::Long, "J")),
-        // A `CharProgression`'s counter is a `Char` but its `step` is an `Int`; char arithmetic is
-        // int-based on the JVM, so the counted loop works with an `Int` increment.
-        "kotlin/ranges/CharProgression" => Some((Ty::Char, "C")),
-        // Unsigned progressions erase to the signed primitive; the counted loop compares unsigned.
-        "kotlin/ranges/UIntProgression" => Some((Ty::UInt, "I")),
-        "kotlin/ranges/ULongProgression" => Some((Ty::ULong, "J")),
-        _ => None,
-    }
 }
 
 /// Carry a declared `?` into a field/underlying type. The JVM value-class pass keys unboxed-vs-boxed

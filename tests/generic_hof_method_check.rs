@@ -13,8 +13,8 @@ fn errors(src: &str) -> Vec<String> {
     let mut d = DiagSink::new();
     let toks = lex(src, &mut d);
     let files = vec![parse(src, &toks, &mut d)];
-    let syms = collect_signatures(&files, &mut d);
-    check_file(&files[0], &syms, &mut d);
+    let mut syms = collect_signatures(&files, &mut d);
+    check_file(&files[0], &mut syms, &mut d);
     d.diags.iter().map(|x| x.msg.clone()).collect()
 }
 

@@ -51,7 +51,7 @@ fn compile_two(a: &str, b: &str) -> Option<Vec<(String, Vec<u8>)>> {
     }
     let mut all = Vec::new();
     for (i, file) in files.iter().enumerate() {
-        let info = check_file(file, &syms, &mut diags);
+        let info = check_file(file, &mut syms, &mut diags);
         if diags.has_errors() {
             return None;
         }

@@ -13,12 +13,12 @@ fn first_error(src: &str) -> Option<(String, u32)> {
         let e = &d.diags[0];
         return Some((e.msg.clone(), e.span.lo));
     }
-    let syms = collect_signatures(&files, &mut d);
+    let mut syms = collect_signatures(&files, &mut d);
     if d.has_errors() {
         let e = &d.diags[0];
         return Some((e.msg.clone(), e.span.lo));
     }
-    check_file(&files[0], &syms, &mut d);
+    check_file(&files[0], &mut syms, &mut d);
     if d.has_errors() {
         let e = &d.diags[0];
         return Some((e.msg.clone(), e.span.lo));

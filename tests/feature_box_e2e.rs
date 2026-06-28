@@ -12,6 +12,51 @@ fn env(k: &str) -> Option<String> {
     std::env::var(k).ok().filter(|v| !v.is_empty())
 }
 
+fn bytes_contain(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack.windows(needle.len()).any(|w| w == needle)
+}
+
+#[test]
+fn lambda_shadowed_outer_var_does_not_allocate_ref_cell() {
+    let Some(stdlib) = common::stdlib_jar() else {
+        return;
+    };
+    let Some(java_home) = common::java_home() else {
+        return;
+    };
+    let jdk = std::path::PathBuf::from(format!("{java_home}/lib/modules"));
+    let src = r#"
+fun eval(f: () -> Int): Int = f()
+fun box(): String {
+    var x = 1
+    val r = eval {
+        var x = 10
+        x++
+        x
+    }
+    x = 2
+    if (r != 11) return "r=$r"
+    return if (x == 2) "OK" else "x=$x"
+}
+"#;
+    let Some(classes) =
+        common::compile_in_process(src, "ShadowCell", std::slice::from_ref(&stdlib), Some(&jdk))
+    else {
+        return;
+    };
+    let box_class = common::find_box_class(&classes).expect("box class");
+    assert_eq!(
+        common::run_box(&classes, &box_class, &[stdlib]).as_deref(),
+        Some("OK")
+    );
+    assert!(
+        classes
+            .iter()
+            .all(|(_, bytes)| !bytes_contain(bytes, b"kotlin/jvm/internal/Ref$IntRef")),
+        "shadowed lambda-local x must not force the outer x into a Ref cell"
+    );
+}
+
 /// `(class-stem, source)` — the file is written as `<stem>.kt`, whose facade class is `<stem>Kt`.
 const SNIPPETS: &[(&str, &str)] = &[
     // `joinToString` with a TRAILING LAMBDA: the lambda fills the LAST parameter (`transform`), the five
@@ -316,6 +361,21 @@ fun box(): String {
     val tr = "  hi  ".run { trim() }                   // another stdlib extension on `this`
     if (tr != "hi") return "f6: $tr"
     return "OK"
+}
+"#,
+    ),
+    // `StringBuilder` is a Kotlin source-level alias in `kotlin.text`; the JVM provider resolves that
+    // alias to the platform class. The resolver must not need a direct `java/lang/StringBuilder` branch.
+    (
+        "KotlinTextStringBuilderAlias",
+        r#"// WITH_STDLIB
+import kotlin.text.StringBuilder
+
+fun box(): String {
+    val sb: StringBuilder = StringBuilder()
+    sb.append("O")
+    sb.apply { append("K") }
+    return if (sb.toString() == "OK") "OK" else sb.toString()
 }
 "#,
     ),
@@ -3415,6 +3475,23 @@ fun box(): String {
     for (x in arr) sum += x.v
     if (sum != 6) return "f1:$sum"
     if (arr[1].v != 2) return "f2"
+    return "OK"
+}
+"#,
+    ),
+    // The sized reference-array constructor must treat value-class elements as logical `Array<Vc>` via the
+    // provider-owned value-underlying fact, not by hardcoding unsigned/builtin carriers in the checker.
+    (
+        "ValueClassSizedArray",
+        r#"
+@JvmInline
+value class Vc(val v: Int)
+fun box(): String {
+    val arr = Array(3) { Vc(it + 1) }
+    var sum = 0
+    for (x in arr) sum += x.v
+    if (sum != 6) return "f1:$sum"
+    if (arr[2].v != 3) return "f2"
     return "OK"
 }
 "#,

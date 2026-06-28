@@ -564,34 +564,6 @@ fn parse_type_nullable(body: &[u8]) -> bool {
     false
 }
 
-/// Per top-level function in a `Package`'s `@Metadata`: its Kotlin name → the *Kotlin* class name of its
-/// return type (`mutableListOf` → `kotlin/collections/MutableList`), recovered from `@Metadata` (the JVM
-/// descriptor/`Signature` erase this to `java/util/List`). Only entries whose return type is a class are
-/// included. The `d2` string is the qualified name with `/` separators already.
-pub fn return_types(fns: &[MetaFn]) -> std::collections::HashMap<String, String> {
-    fns.iter()
-        .filter_map(|f| Some((f.kotlin_name.clone(), f.ret_class.clone()?)))
-        .collect()
-}
-
-/// Per top-level function name in a `Package`'s `@Metadata`: ALL the *Kotlin* class names of its
-/// extension RECEIVERs (`plusAssign` → `[kotlin/collections/MutableCollection, …/MutableMap]`). A name
-/// is overloaded across receivers (`plus` applies to `Collection`, `Map`, `Set`, `String`), so the value
-/// is a list — a receiver applies if it is a subtype of ANY entry. The JVM descriptor erases the receiver
-/// to its first parameter (`java/util/Collection`); only `@Metadata` keeps the read-only/mutable identity.
-pub fn receivers(fns: &[MetaFn]) -> std::collections::HashMap<String, Vec<String>> {
-    let mut out: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
-    for f in fns {
-        if let Some(cn) = &f.receiver_class {
-            let v = out.entry(f.kotlin_name.clone()).or_default();
-            if !v.contains(cn) {
-                v.push(cn.clone());
-            }
-        }
-    }
-    out
-}
-
 /// A function decoded from a `Class`/`Package` `@Metadata` message — the *metadata-truth* signature
 /// kotlinc resolves against (`JvmProtoBufUtil.getJvmMethodSignature`): the Kotlin name, the JVM method
 /// name + descriptor (from the `method_signature` extension when present), Kotlin visibility/`inline`/
@@ -632,9 +604,13 @@ pub struct MetaFn {
     /// A classpath call may omit a trailing run of these; the resolver counts the NON-defaulted params as
     /// the required arity, and the omitted call lowers to the `<name>$default` synthetic.
     pub value_param_has_default: Vec<bool>,
+    /// Per SOURCE value parameter: whether it is a RECEIVER function-type param, carrying
+    /// `@ExtensionFunctionType`. This is true even when the receiver is generic and has no class id.
+    pub value_param_recv_fun_flags: Vec<bool>,
     /// Per SOURCE value parameter: `Some(receiver_internal)` when it is a RECEIVER function-type param
-    /// (`Recv.() -> R`, carrying `@ExtensionFunctionType`). A lambda passed to it binds `this` to that
-    /// receiver. Parallel to `value_param_types`; `None` for an ordinary parameter.
+    /// with a concrete receiver class (`Recv.() -> R`). Generic receivers (`T.() -> R`) use
+    /// [`MetaFn::value_param_recv_fun_flags`] plus the generic signature for substitution.
+    /// Parallel to `value_param_types`; `None` for an ordinary or generic-receiver parameter.
     pub value_param_recv_funs: Vec<Option<String>>,
 }
 
@@ -706,8 +682,10 @@ fn decode_functions(ci: &ClassInfo, fn_field: u64) -> Vec<MetaFn> {
                         .map(|&id| resolve_string(&records, d2, id as usize).unwrap_or_default())
                         .collect();
                     // A RECEIVER function-type param: the type annotation must resolve to
-                    // `kotlin/ExtensionFunctionType`; then the receiver is the first type argument's class.
-                    let value_param_recv_funs: Vec<Option<String>> = pf
+                    // `kotlin/ExtensionFunctionType`. A concrete receiver is the first type argument's
+                    // class; a generic receiver keeps only the receiver-function flag and is substituted
+                    // from the generic signature during call resolution.
+                    let recv_fun_info: Vec<(bool, Option<String>)> = pf
                         .value_param_recv_ids
                         .iter()
                         .map(|(anno_id, arg0)| {
@@ -715,13 +693,18 @@ fn decode_functions(ci: &ClassInfo, fn_field: u64) -> Vec<MetaFn> {
                                 .and_then(|id| resolve_class_name(&records, d2, id as usize))
                                 .as_deref()
                                 == Some("kotlin/ExtensionFunctionType");
-                            if is_ext_fun {
+                            let recv = if is_ext_fun {
                                 arg0.and_then(|id| resolve_class_name(&records, d2, id as usize))
                             } else {
                                 None
-                            }
+                            };
+                            (is_ext_fun, recv)
                         })
                         .collect();
+                    let value_param_recv_fun_flags =
+                        recv_fun_info.iter().map(|(is_recv, _)| *is_recv).collect();
+                    let value_param_recv_funs =
+                        recv_fun_info.into_iter().map(|(_, recv)| recv).collect();
                     out.push(MetaFn {
                         kotlin_name,
                         jvm_name,
@@ -736,6 +719,7 @@ fn decode_functions(ci: &ClassInfo, fn_field: u64) -> Vec<MetaFn> {
                         value_param_types,
                         value_param_names,
                         value_param_has_default: pf.value_param_has_default,
+                        value_param_recv_fun_flags,
                         value_param_recv_funs,
                     });
                 }
@@ -860,74 +844,6 @@ pub struct JvmOverload {
     pub ret_class: String,
 }
 
-/// Per `Package` function: its Kotlin name → its `@JvmName`-mangled overloads. Bridges the Kotlin name to
-/// the JVM method that `@OverloadResolutionByLambdaReturnType` selects by return type (the source name
-/// `sumOf` has no JVM method of its own — only `sumOfInt`/`sumOfLong`/…).
-pub fn package_lambda_return_overloads(
-    ci: &ClassInfo,
-) -> std::collections::HashMap<String, Vec<JvmOverload>> {
-    let mut out: std::collections::HashMap<String, Vec<JvmOverload>> =
-        std::collections::HashMap::new();
-    if ci.kotlin_d1.is_empty() {
-        return out;
-    }
-    let bytes = decode_d1(&ci.kotlin_d1);
-    let (st_body, pkg_body) = split_d1(&bytes);
-    let records = parse_string_table(st_body);
-    let d2 = &ci.kotlin_d2;
-    let mut pb = Pb { b: pkg_body, i: 0 };
-    while !pb.at_end() {
-        let Some(tag) = pb.varint() else { break };
-        match (tag >> 3, tag & 7) {
-            (3, 2) => {
-                let Some(len) = pb.varint() else { break };
-                let Some(fbody) = pb.bytes(len as usize) else {
-                    break;
-                };
-                if let Some(f) = parse_function(fbody) {
-                    if let (Some(kname), Some((ni, di)), Some(rc)) =
-                        (d2.get(f.name_id as usize), f.jvm_sig, f.ret_class)
-                    {
-                        // The JVM `@JvmName` method name/descriptor index the d1 STRING TABLE — resolve as
-                        // PLAIN strings (no class-name `operation` transform). The return type is a class id
-                        // (`resolve_class_name`, which applies the transform).
-                        if let (Some(jvm_name), Some(jvm_desc), Some(ret_class)) = (
-                            resolve_string(&records, d2, ni as usize),
-                            resolve_string(&records, d2, di as usize),
-                            resolve_class_name(&records, d2, rc as usize),
-                        ) {
-                            out.entry(kname.clone()).or_default().push(JvmOverload {
-                                jvm_name,
-                                jvm_desc,
-                                ret_class,
-                            });
-                        }
-                    }
-                }
-            }
-            (_, w) => {
-                if pb.skip(w).is_none() {
-                    break;
-                }
-            }
-        }
-    }
-    out
-}
-
-/// Per top-level function name in a `Package`'s `@Metadata`: whether its Kotlin return type is nullable
-/// (`takeIf`/`takeUnless` → `T?` → `true`). The JVM descriptor/`Signature` erase nullability; only
-/// `@Metadata` keeps it. A name is `true` if ANY overload's return is nullable (the scope fns are not
-/// overloaded, so this is exact for them).
-pub fn return_nullable(fns: &[MetaFn]) -> std::collections::HashMap<String, bool> {
-    let mut out = std::collections::HashMap::new();
-    for f in fns {
-        let e = out.entry(f.kotlin_name.clone()).or_insert(false);
-        *e = *e || f.ret_nullable;
-    }
-    out
-}
-
 // === `.kotlin_builtins` supertype reader ==========================================================
 // A `.kotlin_builtins` resource (e.g. `kotlin/collections/collections.kotlin_builtins`) stores a
 // `BuiltInsProtoBuf.PackageFragment` preceded by a `BuiltInsBinaryVersion` header — a big-endian int
@@ -1019,6 +935,7 @@ pub struct BuiltinMember {
     pub name: String,
     pub params: Vec<String>,
     pub ret: String,
+    pub is_property: bool,
 }
 
 /// A builtin `Class` decoded from a `.kotlin_builtins` fragment: its direct supertypes and declared
@@ -1226,7 +1143,12 @@ pub fn parse_builtins(data: &[u8]) -> std::collections::HashMap<String, BuiltinC
             if let (Some(ni), Some(ri)) = (name_id, ret_id) {
                 if let (Some(name), Some(ret)) = (strings.get(ni as usize).cloned(), type_of_id(ri))
                 {
-                    members.push(BuiltinMember { name, params, ret });
+                    members.push(BuiltinMember {
+                        name,
+                        params,
+                        ret,
+                        is_property: false,
+                    });
                 }
             }
         }
@@ -1255,6 +1177,7 @@ pub fn parse_builtins(data: &[u8]) -> std::collections::HashMap<String, BuiltinC
                         name,
                         params: vec![],
                         ret,
+                        is_property: true,
                     });
                 }
             }

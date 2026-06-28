@@ -1,6 +1,6 @@
 //! A method type parameter that SHADOWS its class's (`class Box<T> { fun <T> echo(x: T): T }`) is
 //! INDEPENDENT of the receiver's type argument. The classpath member-return substitution
-//! (`JvmLibraries::member_return`) binds the class's formals to the receiver's arguments and
+//! (`resolve_instance_member`) binds the class's formals to the receiver's arguments and
 //! substitutes the method's generic return under them; if it also substituted a method-declared
 //! parameter of the same name, `Box<String>.echo(42)` would be typed `String` and the call site would
 //! `checkcast String` an `Integer` → `ClassCastException`. The substitution now drops any class

@@ -11,7 +11,7 @@ use std::collections::HashMap;
 
 use crate::ast::*;
 use crate::diag::{DiagSink, Span};
-use crate::libraries::{EmptyLibrarySet, LibrarySet};
+use crate::libraries::{CompilerPlatform, EmptySymbolSource};
 use crate::symbol_source::SymbolSource;
 use crate::types::Ty;
 
@@ -79,7 +79,7 @@ fn extract_ctor_default(
     file: &File,
     dx: ExprId,
     class_names: &ClassNames,
-    libraries: &dyn LibrarySet,
+    libraries: &dyn SymbolSource,
 ) -> Option<CtorDefaultValue> {
     Some(match file.expr(dx) {
         Expr::IntLit(v) => CtorDefaultValue::Int(*v),
@@ -238,7 +238,7 @@ pub struct SymbolTable {
     pub enums: HashMap<String, Vec<String>>,
     /// The target's compiled library set — a JVM classpath or a klib (empty unless the driver
     /// supplies one). The front end resolves external references only through this abstraction.
-    pub libraries: Box<dyn LibrarySet>,
+    pub libraries: Box<dyn CompilerPlatform>,
     /// Top-level extension functions: (erased receiver, method_name) → Signature. The receiver is its
     /// [`Ty::erased_recv`] key (nullability/generics/type-params folded). Used to resolve
     /// `recv.method(args)` when no instance method matches.
@@ -250,6 +250,9 @@ pub struct SymbolTable {
     /// classes, classpath `TypeAliasesKt` aliases, and the ported `JavaToKotlinClassMap`
     /// built-ins. The single source of truth for "does this type name resolve, and to what".
     pub class_names: ClassNames,
+    /// Internal-name canonical aliases for subtype identity checks. This is seeded by the library
+    /// source, so the checker does not call back into a backend map while comparing types.
+    pub canonical_names: std::rc::Rc<HashMap<String, String>>,
     /// Top-level function name → the facade class it lives on (`helper` → `pkg/AKt`), for the WHOLE
     /// multi-file compilation. Populated only by the multi-file driver (which knows each file's
     /// stem/facade); empty for single-file/in-process callers. Lets `lower_file` emit a call to a
@@ -272,10 +275,11 @@ impl Default for SymbolTable {
             computed_props: std::collections::HashSet::new(),
             objects: std::collections::HashSet::new(),
             enums: HashMap::new(),
-            libraries: Box::new(EmptyLibrarySet),
+            libraries: Box::new(EmptySymbolSource),
             ext_funs: HashMap::new(),
             ext_props: HashMap::new(),
             class_names: ClassNames::default(),
+            canonical_names: std::rc::Rc::new(HashMap::new()),
             fn_facades: HashMap::new(),
             prop_facades: HashMap::new(),
         }
@@ -286,6 +290,10 @@ impl SymbolTable {
     /// Resolve a class reference type `Ty::Obj` back to its declaration (by internal name).
     pub fn class_by_internal(&self, internal: &str) -> Option<&ClassSig> {
         self.classes.values().find(|c| c.internal == internal)
+    }
+
+    pub fn class_by_internal_mut(&mut self, internal: &str) -> Option<&mut ClassSig> {
+        self.classes.values_mut().find(|c| c.internal == internal)
     }
 
     /// A method (own or inherited up the base-class chain) on a class internal name.
@@ -368,21 +376,10 @@ impl SymbolTable {
     }
 }
 
-/// The JVM internal name of a common JDK exception/error referenced by simple name (Kotlin's
-/// auto-imported `kotlin.*` exception aliases map onto these `java.lang` types). Used so
-/// `throw RuntimeException("…")` resolves without an explicit import.
-
-/// The target type of a numeric conversion method (`n.toInt()` → `Int`, …).
-/// The erased JVM parameter descriptor of a signature (`(II)`-style, params only) — the backend key
-/// used by IR lowering for the compiled method. Checker-side collision/selection uses the semantic
-/// erased key below so the checker does not need to format bytecode descriptors.
-pub fn erased_params_key(sig: &Signature) -> String {
-    sig.params.iter().map(|t| t.descriptor()).collect()
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum ErasedTypeKey {
     Ty(Ty),
+    Function(usize),
     Unresolved(String),
 }
 
@@ -391,6 +388,14 @@ struct ErasedSigKey {
     name: String,
     receiver: Option<ErasedTypeKey>,
     params: Vec<ErasedTypeKey>,
+}
+
+fn erased_key_ty(key: ErasedTypeKey) -> Ty {
+    match key {
+        ErasedTypeKey::Ty(t) => t,
+        ErasedTypeKey::Function(n) => Ty::obj(&format!("kotlin/Function{n}")),
+        ErasedTypeKey::Unresolved(n) => Ty::obj(&n),
+    }
 }
 
 /// Kotlin-level erasure key used by the checker for overload identity. This mirrors the JVM-relevant
@@ -404,26 +409,15 @@ fn erased_type_key(t: Ty) -> ErasedTypeKey {
         Ty::String => Ty::obj("kotlin/String"),
         Ty::Obj(n, _) => Ty::Obj(n, &[]),
         Ty::Null | Ty::Nothing | Ty::Error => Ty::obj("kotlin/Any"),
-        Ty::Array(elem) => Ty::array(match erased_type_key(*elem) {
-            ErasedTypeKey::Ty(t) => t,
-            ErasedTypeKey::Unresolved(n) => Ty::obj(&n),
-        }),
-        Ty::Fun(s) => Ty::obj(&Ty::fun_interface(
-            (s.params.len() + usize::from(s.suspend)) as u8,
-        )),
+        Ty::Array(elem) => Ty::array(erased_key_ty(erased_type_key(*elem))),
+        Ty::Fun(s) => return ErasedTypeKey::Function(s.params.len() + usize::from(s.suspend)),
         Ty::Nullable(inner) => match *inner {
             Ty::UInt => Ty::obj("kotlin/UInt"),
             Ty::ULong => Ty::obj("kotlin/ULong"),
-            other if other.is_primitive() => other.boxed_ref().unwrap_or(other),
-            other => match erased_type_key(other) {
-                ErasedTypeKey::Ty(t) => t,
-                ErasedTypeKey::Unresolved(n) => Ty::obj(&n),
-            },
+            other if other.boxed_ref().is_some() => other.boxed_ref().unwrap_or(other),
+            other => erased_key_ty(erased_type_key(other)),
         },
-        Ty::TyParam(_, bound) => match erased_type_key(*bound) {
-            ErasedTypeKey::Ty(t) => t,
-            ErasedTypeKey::Unresolved(n) => Ty::obj(&n),
-        },
+        Ty::TyParam(_, bound) => erased_key_ty(erased_type_key(*bound)),
         other => other,
     };
     ErasedTypeKey::Ty(key)
@@ -507,21 +501,6 @@ pub fn pick_overload(sigs: &[Signature], arg_tys: &[Ty]) -> Option<usize> {
         .max_by_key(|&(sc, _)| sc)
         .map(|(_, i)| i);
     best.or_else(|| cands.first().copied())
-}
-
-pub fn conversion_target(name: &str) -> Option<Ty> {
-    Some(match name {
-        "toInt" => Ty::Int,
-        "toByte" => Ty::Byte,
-        "toShort" => Ty::Short,
-        "toLong" => Ty::Long,
-        "toFloat" => Ty::Float,
-        "toDouble" => Ty::Double,
-        "toChar" => Ty::Char,
-        "toUInt" => Ty::UInt,
-        "toULong" => Ty::ULong,
-        _ => return None,
-    })
 }
 
 /// The return type of a builtin bitwise/shift operator method on an `Int`/`Long` receiver — the named
@@ -621,32 +600,33 @@ fn collect_file_type_names(file: &File, out: &mut std::collections::HashSet<Stri
     }
 }
 
-/// The packages Kotlin imports by DEFAULT into every file, as internal names — kotlinc's fixed list for
-/// the JVM target. A bare type name resolves against these (plus the file's own imports + same package),
-/// NOT against every class on the classpath. (`kotlin.coroutines` is NOT here — it needs an explicit
-/// import, matching kotlinc.)
-pub const DEFAULT_IMPORT_PACKAGES: &[&str] = &[
+/// Kotlin's common default imports, in source package syntax. Target-specific additions are supplied by
+/// the platform symbol source and composed by [`import_wildcards`].
+pub const KOTLIN_DEFAULT_IMPORT_PACKAGES: &[&str] = &[
     "kotlin",
-    "kotlin/annotation",
-    "kotlin/collections",
-    "kotlin/comparisons",
-    "kotlin/io",
-    "kotlin/ranges",
-    "kotlin/sequences",
-    "kotlin/text",
-    "kotlin/jvm",
-    "java/lang",
+    "kotlin.annotation",
+    "kotlin.collections",
+    "kotlin.comparisons",
+    "kotlin.io",
+    "kotlin.ranges",
+    "kotlin.sequences",
+    "kotlin.text",
 ];
 
 /// A file's wildcard-import packages as internal names (`import kotlin.coroutines.*` →
-/// `"kotlin/coroutines"`), PLUS Kotlin's default-import packages — so a bare type name resolves through
-/// the generic import machinery against exactly the packages kotlinc would consult, instead of a global
-/// every-class simple-name index (which falsely collides `Continuation` with `jdk/internal/vm/...`).
-pub fn import_wildcards(file: &File) -> Vec<String> {
+/// `"kotlin/coroutines"`), PLUS Kotlin's common default-import packages and the target's documented
+/// default additions — so a bare type name resolves through the generic import machinery instead of a
+/// global every-class simple-name index (which falsely collides `Continuation` with JDK internals).
+pub fn import_wildcards(file: &File, platform_defaults: &[&str]) -> Vec<String> {
     file.imports
         .iter()
         .filter_map(|fq| fq.strip_suffix(".*").map(|p| p.replace('.', "/")))
-        .chain(DEFAULT_IMPORT_PACKAGES.iter().map(|s| s.to_string()))
+        .chain(
+            KOTLIN_DEFAULT_IMPORT_PACKAGES
+                .iter()
+                .chain(platform_defaults.iter())
+                .map(|s| s.replace('.', "/")),
+        )
         .collect()
 }
 
@@ -663,46 +643,6 @@ pub fn qualified_path(file: &File, e: ExprId) -> Option<String> {
     }
 }
 
-/// Resolve the *result type* of a `kotlin.String` instance method by name + argument types — a
-/// curated subset matching what the backend supports. The JVM method/descriptor it lowers to is the
-/// backend's concern (the emitter uses Kotlin-named external calls), so only the Kotlin `Ty` lives
-/// here; this keeps `java/lang/String` out of the front end.
-pub fn resolve_string_instance(method: &str, arg_tys: &[Ty]) -> Option<Ty> {
-    Some(match (method, arg_tys) {
-        // NOTE: String CLASS members (`length`, `get`/`charAt`, `plus`, `compareTo`, `toString`,
-        // `subSequence`, `equals`) are NOT listed here — they're resolved from the builtins declarations
-        // (`Classpath::builtin_member_ret` ← `kotlin.kotlin_builtins`). This table is now only the stdlib
-        // EXTENSIONS on `String`/`CharSequence` (`StringsKt`), a curated subset pending metadata sourcing.
-        ("isEmpty", []) | ("isBlank", []) => Ty::Boolean,
-        ("substring", [Ty::Int]) | ("substring", [Ty::Int, Ty::Int]) => Ty::String,
-        ("indexOf", [Ty::String]) | ("indexOf", [Ty::Char]) => Ty::Int,
-        ("lastIndexOf", [Ty::String]) | ("lastIndexOf", [Ty::Char]) => Ty::Int,
-        ("contains", [Ty::String]) => Ty::Boolean,
-        ("startsWith", [Ty::String]) | ("endsWith", [Ty::String]) => Ty::Boolean,
-        ("concat", [Ty::String]) => Ty::String,
-        ("replace", [Ty::String, Ty::String]) => Ty::String,
-        ("uppercase", []) | ("toUpperCase", []) => Ty::String,
-        ("lowercase", []) | ("toLowerCase", []) => Ty::String,
-        ("trim", []) => Ty::String,
-        ("toString", []) => Ty::String,
-        ("toCharArray", []) => Ty::array(Ty::Char),
-        _ => return None,
-    })
-}
-
-/// Resolve the *result type* of a `kotlin.text.StringBuilder` instance method (a curated subset).
-/// `append`/`appendLine` return the builder (chainable); `toString`/`length` as expected.
-pub fn resolve_stringbuilder_instance(method: &str, arg_tys: &[Ty]) -> Option<Ty> {
-    let sb = Ty::obj("java/lang/StringBuilder");
-    Some(match (method, arg_tys) {
-        ("toString", []) => Ty::String,
-        ("length", []) => Ty::Int,
-        ("append", [_]) => sb,
-        ("appendLine", [_] | []) => sb,
-        _ => return None,
-    })
-}
-
 fn class_internal(file: &File, name: &str) -> String {
     // A nested class's source name `Outer.Inner` maps to the JVM internal name `Outer$Inner`.
     let mangled = name.replace('.', "$");
@@ -716,20 +656,21 @@ fn class_internal(file: &File, name: &str) -> String {
 /// class type can be referenced before its declaration (and across files).
 /// Convenience wrapper — uses an empty classpath (no stdlib type scanning).
 pub fn collect_signatures(files: &[File], diags: &mut DiagSink) -> SymbolTable {
-    collect_signatures_with_cp(files, Box::new(EmptyLibrarySet), diags)
+    collect_signatures_with_cp(files, Box::new(EmptySymbolSource), diags)
 }
 
 /// Like `collect_signatures` but also seeds class names and type aliases from the target's
 /// libraries (a JVM classpath, a klib), eliminating the need for any hardcoded type lists.
 pub fn collect_signatures_with_cp(
     files: &[File],
-    libraries: Box<dyn LibrarySet>,
+    libraries: Box<dyn CompilerPlatform>,
     diags: &mut DiagSink,
 ) -> SymbolTable {
+    let platform_default_imports = libraries.platform_default_import_packages();
     // The library set's type universe: importable names + type aliases (and intrinsic built-in maps).
     // The (large) class-name base is shared by `Rc` — NOT cloned per compilation; only the small
     // per-file overlay (user classes + aliases) is owned here.
-    let (base_class_names, base_aliases) = libraries.seed_shared();
+    let (base_class_names, base_aliases, canonical_names) = libraries.seed_shared();
 
     // Pass 1: every class simple-name -> internal name (no bodies, just the type universe).
     // Pre-seed from the library type index so imports/stdlib types are visible.
@@ -806,9 +747,9 @@ pub fn collect_signatures_with_cp(
         let mut from_import: HashMap<String, Option<String>> = HashMap::new();
         for file in files {
             let imap = import_map(file);
-            let wilds = import_wildcards(file); // explicit `a.b.*` packages + Kotlin's default imports
-                                                // Candidate simple names: every type referenced in the file (so a WILDCARD import can supply
-                                                // it) plus the explicit-import names themselves.
+            let wilds = import_wildcards(file, platform_default_imports);
+            // Candidate simple names: every type referenced in the file (so a WILDCARD import can supply
+            // it) plus the explicit-import names themselves.
             let mut names = std::collections::HashSet::new();
             collect_file_type_names(file, &mut names);
             names.extend(imap.keys().cloned());
@@ -846,6 +787,13 @@ pub fn collect_signatures_with_cp(
             }
         }
     }
+
+    let type_ref_ctx = TypeRefCtx {
+        class_literal_ty: libraries.class_literal_type(),
+    };
+    let ty_of_ref = |r: &TypeRef, classes: &ClassNames, tparams: &TParams, diags: &mut DiagSink| {
+        ty_of_ref_with(r, classes, tparams, &type_ref_ctx, diags)
+    };
 
     // Top-level function return types (explicit annotations only), collected first so a property
     // initializer `val v = f()` can infer its type from `f`'s return type regardless of decl order.
@@ -893,8 +841,8 @@ pub fn collect_signatures_with_cp(
                         None => {
                             // For expression-body functions, try to infer the return type from
                             // the body literal (handles `fun f() = "literal"` etc.).  Falls back
-                            // to Unit; check_fun will do a deeper inference pass and record any
-                            // non-Unit result in TypeInfo::fun_ret_overrides for codegen.
+                            // to Unit; check_fun will do a deeper inference pass and patch the
+                            // canonical signature table before lowering.
                             if let FunBody::Expr(e) = &f.body {
                                 // For an extension function, bind `this` to the receiver type so a body
                                 // using it (`fun Int.double() = this * 2`) infers correctly.
@@ -1313,6 +1261,17 @@ pub fn collect_signatures_with_cp(
                                 .as_ref()
                                 .map(|r| ty_of_ref(r, &class_names, &mtp, diags))
                                 .unwrap_or_else(|| {
+                                    // These overridable Object/Comparable members have fixed Kotlin
+                                    // contract returns. Do not let erased generic body inference widen
+                                    // `toString() = privateFun()` to `Any`, which would emit
+                                    // `toString(): Object` and fail to override `Object.toString`.
+                                    match (m.name.as_str(), m.params.len()) {
+                                        ("compareTo", 1) => return Ty::Int,
+                                        ("equals", 1) => return Ty::Boolean,
+                                        ("hashCode", 0) => return Ty::Int,
+                                        ("toString", 0) => return Ty::String,
+                                        _ => {}
+                                    }
                                     if let FunBody::Expr(e) = &m.body {
                                         // The method's own parameters are in scope for its expression body, so
                                         // `fun m(x: Int) = x + 1` infers `Int`. Parameters come FIRST: a
@@ -1342,17 +1301,7 @@ pub fn collect_signatures_with_cp(
                                             return t;
                                         }
                                     }
-                                    // The overridable members `Comparable.compareTo`/`Any.equals`/`hashCode`
-                                    // have a Kotlin-CONTRACT return type (`Int`/`Boolean`/`Int`) the body must
-                                    // conform to — use it when the body can't be inferred locally (a body like
-                                    // `compareTo(o) = v - o.v` references the parameter, which the literal
-                                    // inference can't resolve). kotlinc fixes these signatures.
-                                    match (m.name.as_str(), m.params.len()) {
-                                        ("compareTo", 1) => Ty::Int,
-                                        ("equals", 1) => Ty::Boolean,
-                                        ("hashCode", 0) => Ty::Int,
-                                        _ => Ty::Unit,
-                                    }
+                                    Ty::Unit
                                 });
                             (m.name.clone(), {
                                 let lambda_param_types: Vec<Vec<Ty>> = m
@@ -1869,6 +1818,7 @@ pub fn collect_signatures_with_cp(
 
     table.libraries = libraries;
     table.class_names = class_names;
+    table.canonical_names = canonical_names;
     table
 }
 
@@ -1972,40 +1922,6 @@ fn stmt_refs_param(file: &File, s: StmtId, names: &std::collections::HashSet<&st
 
 /// Whether `e`'s subtree contains a `try` expression (used to reject *nested* try/catch, which hits
 /// a StackMapTable frame bug in codegen).
-/// The JVM getter name for a Kotlin property `name`: `x` → `getX`, but an `isFoo` boolean property keeps
-/// its name. A Kotlin property is a zero-arg accessor on the JVM; callers try the property's own name
-/// AND this getter form. Shared by the checker's property-read path and the signature-inference pre-pass.
-pub(crate) fn property_getter_name(name: &str) -> String {
-    if name.starts_with("is")
-        && name
-            .as_bytes()
-            .get(2)
-            .is_some_and(|b| b.is_ascii_uppercase())
-    {
-        name.to_string()
-    } else {
-        let mut c = name.chars();
-        format!(
-            "get{}{}",
-            c.next()
-                .map(|f| f.to_uppercase().to_string())
-                .unwrap_or_default(),
-            c.as_str()
-        )
-    }
-}
-
-/// Kotlin's built-in read-only/mutable collection types remap a handful of member names onto their JVM
-/// `java.util` methods (the compiler's "mapped members"): `Map.keys`→`keySet`, `Map.entries`→`entrySet`.
-/// `values`/`size` keep their JVM name, so only the renamed ones need listing. Returns the JVM accessor.
-pub(crate) fn collection_mapped_accessor(name: &str) -> Option<&'static str> {
-    match name {
-        "keys" => Some("keySet"),
-        "entries" => Some("entrySet"),
-        _ => None,
-    }
-}
-
 fn expr_has_try(file: &File, e: ExprId) -> bool {
     match file.expr(e) {
         Expr::Try { .. } => true,
@@ -2188,97 +2104,103 @@ fn local_fun_body_uses_any(
     e: ExprId,
     outer: &std::collections::HashSet<String>,
 ) -> bool {
-    fn check_e(file: &File, e: ExprId, outer: &std::collections::HashSet<String>) -> bool {
+    fn check_e(file: &File, e: ExprId, active: &std::collections::HashSet<String>) -> bool {
         match file.expr(e) {
-            Expr::Name(n) => outer.contains(n),
-            _ => file.any_child_expr(e, &mut |c| check_e(file, c, outer), &mut |s| {
-                check_s(file, s, outer)
+            Expr::Name(n) => active.contains(n),
+            Expr::Block { stmts, trailing } => {
+                let mut active = active.clone();
+                for &s in stmts {
+                    if check_s(file, s, &mut active) {
+                        return true;
+                    }
+                }
+                trailing.is_some_and(|t| check_e(file, t, &active))
+            }
+            Expr::Lambda { params, body } => {
+                let mut active = active.clone();
+                for p in params {
+                    active.remove(p);
+                }
+                if params.is_empty() {
+                    active.remove("it");
+                }
+                check_e(file, *body, &active)
+            }
+            Expr::Try {
+                body,
+                catches,
+                finally,
+            } => {
+                if check_e(file, *body, active) {
+                    return true;
+                }
+                for c in catches {
+                    let mut catch_active = active.clone();
+                    catch_active.remove(&c.name);
+                    if check_e(file, c.body, &catch_active) {
+                        return true;
+                    }
+                }
+                finally.is_some_and(|f| check_e(file, f, active))
+            }
+            _ => file.any_child_expr(e, &mut |c| check_e(file, c, active), &mut |s| {
+                let mut active = active.clone();
+                check_s(file, s, &mut active)
             }),
         }
     }
-    fn check_s(file: &File, s: StmtId, outer: &std::collections::HashSet<String>) -> bool {
+    fn check_s(file: &File, s: StmtId, active: &mut std::collections::HashSet<String>) -> bool {
         match file.stmt(s) {
-            Stmt::IncDec { name, .. } => outer.contains(name),
+            Stmt::IncDec { name, .. } => active.contains(name),
+            Stmt::Local { name, init, .. } => {
+                let used = check_e(file, *init, active);
+                active.remove(name);
+                used
+            }
+            Stmt::LocalDelegate { name, delegate, .. } => {
+                let used = check_e(file, *delegate, active);
+                active.remove(name);
+                used
+            }
+            Stmt::Destructure { entries, init } => {
+                let used = check_e(file, *init, active);
+                for (name, _) in entries {
+                    active.remove(name);
+                }
+                used
+            }
+            Stmt::For {
+                name, range, body, ..
+            } => {
+                if check_e(file, range.start, active) || check_e(file, range.end, active) {
+                    return true;
+                }
+                let mut body_active = active.clone();
+                body_active.remove(name);
+                check_e(file, *body, &body_active)
+            }
+            Stmt::ForEach {
+                name,
+                iterable,
+                body,
+                ..
+            } => {
+                if check_e(file, *iterable, active) {
+                    return true;
+                }
+                let mut body_active = active.clone();
+                body_active.remove(name);
+                check_e(file, *body, &body_active)
+            }
             Stmt::LocalFun(_) => false, // nested local funs have their own capture check
-            _ => file.any_child_stmt(s, &mut |c| check_e(file, c, outer)),
+            _ => file.any_child_stmt(s, &mut |c| check_e(file, c, active)),
         }
     }
     check_e(file, e, outer)
 }
 
-/// Returns `true` if an expression subtree contains a `Stmt::Assign` (or `+=`-style via
-/// `AssignMember` on a Name) whose target is a `Name` that appears in `outer_names`.
-/// Used to detect mutable captures in non-inlined lambda bodies.
-fn lambda_body_writes_outer(
-    file: &File,
-    e: ExprId,
-    outer_names: &std::collections::HashSet<String>,
-) -> bool {
-    fn check_e(file: &File, e: ExprId, outer_names: &std::collections::HashSet<String>) -> bool {
-        let r = |x: ExprId| check_e(file, x, outer_names);
-        let rs = |x: StmtId| check_s(file, x, outer_names);
-        match file.expr(e) {
-            Expr::Block { stmts, trailing } => {
-                stmts.iter().any(|&s| rs(s)) || trailing.map_or(false, |t| r(t))
-            }
-            Expr::If {
-                cond,
-                then_branch,
-                else_branch,
-            } => r(*cond) || r(*then_branch) || else_branch.map_or(false, |x| r(x)),
-            Expr::Try {
-                body,
-                catches,
-                finally,
-            } => r(*body) || catches.iter().any(|c| r(c.body)) || finally.map_or(false, |f| r(f)),
-            Expr::When { subject, arms } => {
-                subject.map_or(false, |s| r(s))
-                    || arms
-                        .iter()
-                        .any(|a| a.conditions.iter().any(|&c| r(c)) || r(a.body))
-            }
-            // Don't recurse into nested lambdas — they have their own scope.
-            Expr::Lambda { .. } => false,
-            _ => false,
-        }
-    }
-    fn check_s(file: &File, s: StmtId, outer_names: &std::collections::HashSet<String>) -> bool {
-        let r = |x: ExprId| check_e(file, x, outer_names);
-        match file.stmt(s) {
-            Stmt::IncDec { name, .. } => outer_names.contains(name),
-            Stmt::Assign { name, value } => {
-                // `x = expr` or `x += expr` — check if target is an outer var.
-                outer_names.contains(name) || r(*value)
-            }
-            Stmt::Local { init, .. } => r(*init),
-            Stmt::LocalDelegate { delegate, .. } => r(*delegate),
-            Stmt::Destructure { init, .. } => r(*init),
-            Stmt::AssignMember {
-                receiver, value, ..
-            } => r(*receiver) || r(*value),
-            Stmt::AssignIndex {
-                array,
-                index,
-                value,
-            } => r(*array) || r(*index) || r(*value),
-            Stmt::Return(Some(e), _) => r(*e),
-            Stmt::Return(None, _) | Stmt::Break(_) | Stmt::Continue(_) => false,
-            Stmt::While { cond, body, .. } | Stmt::DoWhile { cond, body, .. } => {
-                r(*cond) || r(*body)
-            }
-            Stmt::For { range, body, .. } => r(range.start) || r(range.end) || r(*body),
-            Stmt::ForEach { iterable, body, .. } => r(*iterable) || r(*body),
-            Stmt::Expr(e) => r(*e),
-            Stmt::LocalFun(_) => false,
-            Stmt::LocalClass(_) => false,
-        }
-    }
-    check_e(file, e, outer_names)
-}
-
 /// Collect the outer-variable names a lambda body writes (assigns / `++`/`--`), so the lowerer can box
-/// them. Mirrors [`lambda_body_writes_outer`] but accumulates the names instead of returning a bool;
-/// like it, does not descend into nested lambdas (their writes are recorded when they're checked).
+/// them. Does not descend into nested lambdas; their writes are recorded when those lambdas are checked.
 fn collect_lambda_outer_writes(
     file: &File,
     e: ExprId,
@@ -2288,16 +2210,17 @@ fn collect_lambda_outer_writes(
     fn ce(
         file: &File,
         e: ExprId,
-        outer: &std::collections::HashSet<String>,
+        active: &std::collections::HashSet<String>,
         out: &mut std::collections::HashSet<String>,
     ) {
         match file.expr(e) {
             Expr::Block { stmts, trailing } => {
+                let mut active = active.clone();
                 for &s in stmts {
-                    cs(file, s, outer, out);
+                    cs(file, s, &mut active, out);
                 }
                 if let Some(t) = trailing {
-                    ce(file, *t, outer, out);
+                    ce(file, *t, &active, out);
                 }
             }
             Expr::If {
@@ -2305,10 +2228,10 @@ fn collect_lambda_outer_writes(
                 then_branch,
                 else_branch,
             } => {
-                ce(file, *cond, outer, out);
-                ce(file, *then_branch, outer, out);
+                ce(file, *cond, active, out);
+                ce(file, *then_branch, active, out);
                 if let Some(x) = else_branch {
-                    ce(file, *x, outer, out);
+                    ce(file, *x, active, out);
                 }
             }
             Expr::Try {
@@ -2316,23 +2239,25 @@ fn collect_lambda_outer_writes(
                 catches,
                 finally,
             } => {
-                ce(file, *body, outer, out);
+                ce(file, *body, active, out);
                 for c in catches {
-                    ce(file, c.body, outer, out);
+                    let mut catch_active = active.clone();
+                    catch_active.remove(&c.name);
+                    ce(file, c.body, &catch_active, out);
                 }
                 if let Some(f) = finally {
-                    ce(file, *f, outer, out);
+                    ce(file, *f, active, out);
                 }
             }
             Expr::When { subject, arms } => {
                 if let Some(s) = subject {
-                    ce(file, *s, outer, out);
+                    ce(file, *s, active, out);
                 }
                 for a in arms {
                     for &c in &a.conditions {
-                        ce(file, c, outer, out);
+                        ce(file, c, active, out);
                     }
-                    ce(file, a.body, outer, out);
+                    ce(file, a.body, active, out);
                 }
             }
             Expr::Lambda { .. } => {}
@@ -2342,55 +2267,76 @@ fn collect_lambda_outer_writes(
     fn cs(
         file: &File,
         s: StmtId,
-        outer: &std::collections::HashSet<String>,
+        active: &mut std::collections::HashSet<String>,
         out: &mut std::collections::HashSet<String>,
     ) {
         match file.stmt(s) {
             Stmt::IncDec { name, .. } => {
-                if outer.contains(name) {
+                if active.contains(name) {
                     out.insert(name.clone());
                 }
             }
             Stmt::Assign { name, value } => {
-                if outer.contains(name) {
+                if active.contains(name) {
                     out.insert(name.clone());
                 }
-                ce(file, *value, outer, out);
+                ce(file, *value, active, out);
             }
-            Stmt::Local { init, .. } | Stmt::Destructure { init, .. } => {
-                ce(file, *init, outer, out)
+            Stmt::Local { name, init, .. } => {
+                ce(file, *init, active, out);
+                active.remove(name);
             }
-            Stmt::LocalDelegate { delegate, .. } => ce(file, *delegate, outer, out),
+            Stmt::LocalDelegate { name, delegate, .. } => {
+                ce(file, *delegate, active, out);
+                active.remove(name);
+            }
+            Stmt::Destructure { entries, init } => {
+                ce(file, *init, active, out);
+                for (name, _) in entries {
+                    active.remove(name);
+                }
+            }
             Stmt::AssignMember {
                 receiver, value, ..
             } => {
-                ce(file, *receiver, outer, out);
-                ce(file, *value, outer, out);
+                ce(file, *receiver, active, out);
+                ce(file, *value, active, out);
             }
             Stmt::AssignIndex {
                 array,
                 index,
                 value,
             } => {
-                ce(file, *array, outer, out);
-                ce(file, *index, outer, out);
-                ce(file, *value, outer, out);
+                ce(file, *array, active, out);
+                ce(file, *index, active, out);
+                ce(file, *value, active, out);
             }
-            Stmt::Return(Some(e), _) => ce(file, *e, outer, out),
+            Stmt::Return(Some(e), _) => ce(file, *e, active, out),
             Stmt::While { cond, body, .. } | Stmt::DoWhile { cond, body, .. } => {
-                ce(file, *cond, outer, out);
-                ce(file, *body, outer, out);
+                ce(file, *cond, active, out);
+                ce(file, *body, active, out);
             }
-            Stmt::For { range, body, .. } => {
-                ce(file, range.start, outer, out);
-                ce(file, range.end, outer, out);
-                ce(file, *body, outer, out);
+            Stmt::For {
+                name, range, body, ..
+            } => {
+                ce(file, range.start, active, out);
+                ce(file, range.end, active, out);
+                let mut body_active = active.clone();
+                body_active.remove(name);
+                ce(file, *body, &body_active, out);
             }
-            Stmt::ForEach { iterable, body, .. } => {
-                ce(file, *iterable, outer, out);
-                ce(file, *body, outer, out);
+            Stmt::ForEach {
+                name,
+                iterable,
+                body,
+                ..
+            } => {
+                ce(file, *iterable, active, out);
+                let mut body_active = active.clone();
+                body_active.remove(name);
+                ce(file, *body, &body_active, out);
             }
-            Stmt::Expr(e) => ce(file, *e, outer, out),
+            Stmt::Expr(e) => ce(file, *e, active, out),
             Stmt::Return(None, _)
             | Stmt::Break(_)
             | Stmt::Continue(_)
@@ -2403,7 +2349,7 @@ fn collect_lambda_outer_writes(
 
 /// Collect every name reassigned (`=`, `+=`-style, `++`/`--`) anywhere in `e`'s subtree — INCLUDING
 /// inside nested lambdas and local functions (a `var` reassigned in a sibling closure still needs the
-/// box). Used to decide which captured `var`s must be boxed.
+/// box). Used to decide which captured local-function `var`s need a shared mutable cell.
 fn collect_all_reassigned(file: &File, e: ExprId, out: &mut std::collections::HashSet<String>) {
     // Traverse via `any_child_expr`/`any_child_stmt` (which visit EVERY child, including lambda and
     // local-function bodies) so no expression form can hide a reassignment from the scan. The closures
@@ -2487,25 +2433,22 @@ fn infer_getter_ty(file: &File, e: ExprId, locals: &HashMap<&str, Ty>) -> Ty {
     }
 }
 
-/// Type of a primitive-type companion constant: `Int.MAX_VALUE`, `Long.MIN_VALUE`, etc.
-fn prim_companion_ty(prim: &str, field: &str) -> Option<Ty> {
-    match (prim, field) {
-        ("Int", "MAX_VALUE" | "MIN_VALUE" | "SIZE_BITS" | "SIZE_BYTES") => Some(Ty::Int),
-        ("Long", "MAX_VALUE" | "MIN_VALUE") => Some(Ty::Long),
-        ("Long", "SIZE_BITS" | "SIZE_BYTES") => Some(Ty::Int),
-        ("Short", "MAX_VALUE" | "MIN_VALUE") => Some(Ty::Short),
-        ("Byte", "MAX_VALUE" | "MIN_VALUE") => Some(Ty::Byte),
-        ("Char", "MAX_VALUE" | "MIN_VALUE") => Some(Ty::Char),
-        (
-            "Float",
-            "MAX_VALUE" | "MIN_VALUE" | "NaN" | "POSITIVE_INFINITY" | "NEGATIVE_INFINITY",
-        ) => Some(Ty::Float),
-        (
-            "Double",
-            "MAX_VALUE" | "MIN_VALUE" | "NaN" | "POSITIVE_INFINITY" | "NEGATIVE_INFINITY",
-        ) => Some(Ty::Double),
-        _ => None,
-    }
+fn companion_const(
+    src: &dyn SymbolSource,
+    class_names: &ClassNames,
+    type_name: &str,
+    const_name: &str,
+) -> Option<crate::libraries::LibraryConst> {
+    let fallback;
+    let internal = match class_names.get(type_name) {
+        Some(internal) => internal.as_str(),
+        None => {
+            fallback = format!("kotlin/{type_name}");
+            &fallback
+        }
+    };
+    src.resolve_type(internal)
+        .and_then(|t| t.companion_consts.get(const_name).copied())
 }
 
 /// Best-effort type of a simple literal initializer (for an unannotated top-level property).
@@ -2554,7 +2497,7 @@ fn infer_lit_ty(
     e: ExprId,
     class_names: &ClassNames,
     fun_rets: &HashMap<String, Ty>,
-    src: &dyn crate::libraries::LibrarySet,
+    src: &dyn SymbolSource,
 ) -> Ty {
     infer_lit_ty_p(file, e, class_names, fun_rets, &[], src)
 }
@@ -2577,18 +2520,14 @@ fn infer_lit_ty_p(
     class_names: &ClassNames,
     fun_rets: &HashMap<String, Ty>,
     props: &[(String, Ty, bool)],
-    src: &dyn crate::libraries::LibrarySet,
+    src: &dyn SymbolSource,
 ) -> Ty {
     // Resolve the (single) return type of `name` applied to `receiver` (a method/extension when
     // `receiver` is `Some`, a top-level function when `None`) through the FEDERATED symbol source — the
     // same classpath/stdlib resolution the full checker uses. Returns a type only when every applicable
     // overload AGREES on the return type (no arg-based overload selection here); otherwise `None`, so the
     // caller falls back to `Error` (skip) rather than guess. NO stdlib symbol names are hardcoded.
-    fn resolved_ret(
-        src: &dyn crate::libraries::LibrarySet,
-        name: &str,
-        receiver: Option<Ty>,
-    ) -> Option<Ty> {
+    fn resolved_ret(src: &dyn SymbolSource, name: &str, receiver: Option<Ty>) -> Option<Ty> {
         let fs = src.functions(name, receiver);
         let mut ret: Option<Ty> = None;
         for o in &fs.overloads {
@@ -2627,42 +2566,16 @@ fn infer_lit_ty_p(
             })
             .unwrap_or(Ty::Error),
         Expr::Member { receiver, name } => {
-            if let Expr::Name(prim) = file.expr(*receiver) {
-                if let Some(t) = prim_companion_ty(prim, name) {
-                    return t;
+            if let Expr::Name(type_name) = file.expr(*receiver) {
+                if let Some(c) = companion_const(src, class_names, type_name, name) {
+                    return c.ty;
                 }
             }
             // Property read (`s.length`, `list.size`, `vc.value`): resolve through the FEDERATED source —
-            // the same path the full checker uses, no hardcoded property names. A `String`/`CharSequence`
-            // builtin member goes through the source's builtin-member resolution; an object property tries
-            // its own name, its `getX` accessor, and any mapped collection accessor.
+            // the same path the full checker uses, no hardcoded property names.
             let rt = infer_lit_ty_p(file, *receiver, class_names, fun_rets, props, src);
-            // `String`/`CharSequence` is its own `Ty` (not `Obj`); the checker resolves its members via
-            // the source's builtin-member API keyed on `kotlin/String` — mirror that here.
-            if rt == Ty::String {
-                if let Some(t) = src.builtin_member_ret("kotlin/String", name, &[]) {
-                    if !matches!(t, Ty::Unit | Ty::Error) {
-                        return t;
-                    }
-                }
-            }
-            if let Some(internal) = rt.obj_internal() {
-                if let Some(t) = src.builtin_member_ret(internal, name, &[]) {
-                    if !matches!(t, Ty::Unit | Ty::Error) {
-                        return t;
-                    }
-                }
-                let getter = property_getter_name(name);
-                let mapped = collection_mapped_accessor(name).map(|s| s.to_string());
-                for cand in [name.to_string(), getter].into_iter().chain(mapped) {
-                    if let Some(m) =
-                        crate::call_resolver::resolve_instance(src, internal, &cand, &[])
-                    {
-                        if !matches!(m.ret, Ty::Unit | Ty::Error) {
-                            return m.ret;
-                        }
-                    }
-                }
+            if let Some(m) = crate::call_resolver::resolve_property_member(src, rt, name) {
+                return m.ret;
             }
             Ty::Error
         }
@@ -2724,18 +2637,6 @@ fn infer_lit_ty_p(
                     let recv_ty =
                         infer_lit_ty_p(file, *receiver, class_names, fun_rets, props, src);
                     if recv_ty != Ty::Error {
-                        // Builtin primitive intrinsics — the SAME shared helpers the full checker uses
-                        // (NOT classpath functions, which don't carry these): numeric/char/unsigned
-                        // conversions (`toLong`/`toChar`/…) and the named bitwise/shift operators.
-                        if args.is_empty()
-                            && (recv_ty.is_numeric()
-                                || recv_ty == Ty::Char
-                                || recv_ty.is_unsigned())
-                        {
-                            if let Some(t) = conversion_target(name) {
-                                return t;
-                            }
-                        }
                         if let Some(t) = builtin_bitwise_ret(recv_ty, name, args.len()) {
                             return t;
                         }
@@ -2798,13 +2699,16 @@ fn infer_lit_ty_p(
         Expr::RangeTo { lo, hi, .. } => {
             let lt = infer_lit_ty_p(file, *lo, class_names, fun_rets, props, src);
             let rt = infer_lit_ty_p(file, *hi, class_names, fun_rets, props, src);
-            let small_int = |t: &Ty| matches!(t, Ty::Byte | Ty::Short | Ty::Int);
             match (lt, rt) {
                 (Ty::Char, Ty::Char) => Ty::obj("kotlin/ranges/CharRange"),
                 (Ty::UInt, Ty::UInt) => Ty::obj("kotlin/ranges/UIntRange"),
                 (Ty::ULong, Ty::ULong) => Ty::obj("kotlin/ranges/ULongRange"),
-                _ if small_int(&lt) && small_int(&rt) => Ty::obj("kotlin/ranges/IntRange"),
-                _ if (small_int(&lt) || lt == Ty::Long) && (small_int(&rt) || rt == Ty::Long) => {
+                _ if lt.is_int_range_operand() && rt.is_int_range_operand() => {
+                    Ty::obj("kotlin/ranges/IntRange")
+                }
+                _ if (lt.is_int_range_operand() || lt == Ty::Long)
+                    && (rt.is_int_range_operand() || rt == Ty::Long) =>
+                {
                     Ty::obj("kotlin/ranges/LongRange")
                 }
                 _ => Ty::Error,
@@ -2832,20 +2736,6 @@ fn infer_lit_ty_p(
             }
         }
         _ => Ty::Error,
-    }
-}
-
-/// The unboxed element type a primitive range / progression iterates as (and the element of its
-/// `first`/`last`/`step` members). `None` for any other type. Mirrors kotlinc's specialized
-/// `IntIterator`/`LongIterator`/`CharIterator` loops, which yield the primitive without boxing.
-fn range_primitive_elem(internal: &str) -> Option<Ty> {
-    match internal {
-        "kotlin/ranges/IntRange" | "kotlin/ranges/IntProgression" => Some(Ty::Int),
-        "kotlin/ranges/LongRange" | "kotlin/ranges/LongProgression" => Some(Ty::Long),
-        "kotlin/ranges/CharRange" | "kotlin/ranges/CharProgression" => Some(Ty::Char),
-        "kotlin/ranges/UIntRange" | "kotlin/ranges/UIntProgression" => Some(Ty::UInt),
-        "kotlin/ranges/ULongRange" | "kotlin/ranges/ULongProgression" => Some(Ty::ULong),
-        _ => None,
     }
 }
 
@@ -3038,20 +2928,35 @@ fn tparam_bound_erasure(b: Option<&TypeRef>, resolve: &dyn Fn(&str) -> Option<St
     }
 }
 
+#[derive(Clone, Copy, Default)]
+struct TypeRefCtx {
+    class_literal_ty: Option<Ty>,
+}
+
 /// Resolve a syntactic type reference to a `Ty`: a primitive/String/Unit, a declared class
-/// (→ `Ty::Obj`), or a generic type parameter (erased per `TParams`, normally `java/lang/Object`).
+/// (→ `Ty::Obj`), or a generic type parameter (erased per `TParams`, normally `Any`).
 fn ty_of_ref(r: &TypeRef, classes: &ClassNames, tparams: &TParams, diags: &mut DiagSink) -> Ty {
+    ty_of_ref_with(r, classes, tparams, &TypeRefCtx::default(), diags)
+}
+
+fn ty_of_ref_with(
+    r: &TypeRef,
+    classes: &ClassNames,
+    tparams: &TParams,
+    ctx: &TypeRefCtx,
+    diags: &mut DiagSink,
+) -> Ty {
     // Function type: `(A, B) -> R` — parsed with `fun_params` non-empty.
     if !r.fun_params.is_empty() || r.name == "<fun>" {
         let params: Vec<Ty> = r
             .fun_params
             .iter()
-            .map(|p| ty_of_ref(p, classes, tparams, diags))
+            .map(|p| ty_of_ref_with(p, classes, tparams, ctx, diags))
             .collect();
         let ret = r
             .arg
             .as_ref()
-            .map(|a| ty_of_ref(a, classes, tparams, diags))
+            .map(|a| ty_of_ref_with(a, classes, tparams, ctx, diags))
             .unwrap_or(Ty::Unit);
         return if r.fun_suspend {
             Ty::fun_suspend(params, ret)
@@ -3066,7 +2971,7 @@ fn ty_of_ref(r: &TypeRef, classes: &ClassNames, tparams: &TParams, diags: &mut D
     } else if r.name == "Array" {
         match &r.arg {
             Some(a) => {
-                let e = ty_of_ref(a, classes, tparams, diags);
+                let e = ty_of_ref_with(a, classes, tparams, ctx, diags);
                 if e.is_reference() {
                     Ty::array(e)
                 } else if let Some(boxed) = e.boxed_ref() {
@@ -3090,9 +2995,16 @@ fn ty_of_ref(r: &TypeRef, classes: &ClassNames, tparams: &TParams, diags: &mut D
             }
         }
     } else if r.name == "KClass" {
-        // `KClass<*>` is modeled as `java.lang.Class` (the JVM annotation representation, and what
-        // `X::class` lowers to here). Enough for class-literal storage/identity, not full reflection.
-        Ty::obj("java/lang/Class")
+        match ctx.class_literal_ty {
+            Some(t) => t,
+            None => {
+                diags.error(
+                    r.span,
+                    "krusty: KClass is not available on this target".to_string(),
+                );
+                Ty::Error
+            }
+        }
     } else if tparams.contains(&r.name) {
         tparams.erase(&r.name) // erased generic type parameter (primitive if `<T: Int>`)
     } else if let Some(internal) = classes.get(&r.name) {
@@ -3106,7 +3018,7 @@ fn ty_of_ref(r: &TypeRef, classes: &ClassNames, tparams: &TParams, diags: &mut D
             let args: Vec<Ty> = r
                 .targs
                 .iter()
-                .map(|a| ty_of_ref(a, classes, tparams, diags))
+                .map(|a| ty_of_ref_with(a, classes, tparams, ctx, diags))
                 .collect();
             Ty::obj_args(internal, &args)
         }
@@ -3132,66 +3044,14 @@ fn ty_of_ref(r: &TypeRef, classes: &ClassNames, tparams: &TParams, diags: &mut D
 /// Result of typechecking a file: the type assigned to every expression node.
 pub struct TypeInfo {
     pub expr_types: Vec<Ty>,
-    /// Maps the `StmtId` of each `Stmt::LocalFun` to its (mangled JVM method name, signature).
-    pub local_fun_sigs: HashMap<StmtId, (String, Signature)>,
-    /// Maps a call `ExprId` to the `StmtId` of the local function it dispatches to.
-    pub local_call_map: HashMap<ExprId, StmtId>,
-    /// A bare `Name` expr that resolves to a CLASSPATH `object` used as a value → the object's internal
-    /// name. Lowering emits `getstatic <internal>.INSTANCE` (`ExternalStaticField`) for it.
-    pub obj_value_refs: HashMap<ExprId, String>,
-    /// A property-read `recv.name` that resolved to a CLASSPATH EXTENSION property — its getter is a
-    /// static `get<Name>(recv)` on `(owner, method, descriptor)` (e.g. `d.elementDescriptors` →
-    /// `SerialDescriptorKt.getElementDescriptors(d)`). Lowering emits that `invokestatic`.
-    pub ext_prop_calls: HashMap<ExprId, (String, String, String)>,
-    /// A `ClassName.fn(args)` call resolving to a value-class COMPANION function (`Result.success`).
-    /// Lowering emits the companion `getstatic` receiver + an inline-splice of the companion method.
-    pub companion_calls: HashMap<ExprId, crate::libraries::CompanionFn>,
-    /// Inferred return types for expression-body functions that lacked an explicit return annotation.
-    /// Codegen overrides the pre-collected `Ty::Unit` default with this when present. Keyed by
-    /// `(name, parameter types)` so overloads (`fun f(x: Int) = …` vs `fun f(s: String) = …`) don't
-    /// clobber each other — a name-only key mis-typed one overload's calls as the other's return.
-    pub fun_ret_overrides: HashMap<(String, Vec<Ty>), Ty>,
-    /// Extension / static method calls resolved from the classpath:
-    /// `call_expr_id → (owner_internal, jvm_method_name, jvm_descriptor)`.
-    /// Emitter emits `invokestatic owner.name descriptor` (receiver is the first arg).
-    pub ext_calls: HashMap<ExprId, (String, String, String)>,
-    /// Synthetic bridge methods a class must emit so a supertype's erased call dispatches to the
-    /// class's concrete override (`class_internal → [bridge]`).
-    pub bridges: HashMap<String, Vec<BridgeSpec>>,
-    /// A capturing local function's `StmtId` → the enclosing locals it captures, as ordered
-    /// `(name, type)`. The lowerer lifts the function with these prepended as extra leading parameters
-    /// and passes the captured values at each call site (a written-captured var is also boxed via
-    /// `boxed_vars`, so its captured "value" is the shared `Ref` holder).
-    pub local_fun_captures: std::collections::HashMap<StmtId, Vec<(String, Ty)>>,
-    /// Names of local `var`s that a non-inlined lambda (a closure) writes — they must be boxed into a
-    /// `kotlin/jvm/internal/Ref$XxxRef` so the closure and its enclosing scope share the cell. Tracked
-    /// by name (a file-wide set); the lowerer boxes any matching `var` it declares (over-boxing an
-    /// unrelated same-named `var` is harmless — an extra indirection, never incorrect).
-    pub boxed_vars: std::collections::HashSet<String>,
-    /// `StmtId`s of compound assignments (`target op= rhs`) the parser desugared to `target = target op
-    /// rhs`, but where `target`'s type has a USER-defined `plusAssign`/`minusAssign`/… operator — so the
-    /// statement is an in-place operator CALL (`target.plusAssign(rhs)`), legal even on a `val`, NOT a
-    /// reassignment. The lowerer resolves the operator and emits the call for these.
-    pub plus_assign: std::collections::HashSet<StmtId>,
-    /// Calls the checker resolved as a RECEIVER-lambda scope function (`x.run { … }`, `x.apply { … }`,
-    /// `with(x) { … }`): the call `ExprId` → how to inline it (the receiver expression, the lambda body,
-    /// and whether the call yields the receiver — `apply`/`also` — or the body — `run`/`with`). The
-    /// lowerer drives its receiver-lambda inlining off this table, so the decision lives once in the
-    /// checker rather than being re-derived (and name-matched) in the backend.
-    pub receiver_lambdas: HashMap<ExprId, ReceiverLambda>,
-    /// A LAMBDA literal `ExprId` passed to a user function's RECEIVER function-type parameter
-    /// (`Recv.(A) -> R`) → its receiver `Ty`. Unlike `receiver_lambdas` (inlined `apply`/`with`, keyed on
-    /// the CALL), this lambda lowers to a real `FunctionN` closure whose FIRST parameter IS the receiver;
-    /// the backend binds that param as `this` so bare member/extension calls inside dispatch against it.
-    pub recv_lambda_tys: HashMap<ExprId, Ty>,
-    /// Lambda literal `ExprId`s checked in an INLINE-splice context (passed to an `inline fun`): the
-    /// backend splices their body, accessing enclosing variables DIRECTLY, so their captures must NOT be
-    /// inflated by names used only in NESTED lambdas (which would break the splice). The lowering uses
-    /// deep (through-nested-lambda) capture detection for every OTHER (closure) lambda.
-    pub inline_lambdas: std::collections::HashSet<ExprId>,
+    /// Selected expression lowerings that cannot be recovered from the expression shape alone: classpath
+    /// object value reads and classpath extension-property getter calls.
+    pub expr_lowers: HashMap<ExprId, ExprLowering>,
+    /// Selected statement lowerings that differ from the parser's generic statement shape.
+    pub stmt_lowers: HashMap<StmtId, StmtLowering>,
 }
 
-/// How to inline a receiver-lambda scope-function call (see [`TypeInfo::receiver_lambdas`]).
+/// How to inline a receiver-lambda scope-function call (see [`InlineCall::ReceiverLambda`]).
 #[derive(Clone, Copy, Debug)]
 pub struct ReceiverLambda {
     /// The receiver expression — the lambda body's implicit `this`.
@@ -3202,26 +3062,90 @@ pub struct ReceiverLambda {
     pub returns_receiver: bool,
 }
 
-/// A bridge method: erased signature (the supertype's descriptor, what callers invoke) delegating to
-/// the class's concrete method (`name(concrete_params)concrete_ret`).
+/// Call-site selections whose legal lowering is an inline/custom emit form rather than the normal
+/// function-call path.
 #[derive(Clone, Debug)]
-pub struct BridgeSpec {
+pub enum InlineCall {
+    /// `Result.success(args)`: load the companion singleton and inline-splice the selected method.
+    ValueCompanion(Box<crate::libraries::CompanionFn>),
+    /// `x.run { ... }`, `x.apply { ... }`, or `with(x) { ... }`: evaluate the receiver once and lower
+    /// the lambda body in the caller with that receiver bound as implicit `this`.
+    ReceiverLambda(ReceiverLambda),
+}
+
+#[derive(Clone, Debug)]
+pub enum ExprLowering {
+    /// A call or function reference resolved to a local function declaration.
+    LocalFunction { stmt_id: StmtId },
+    /// A call whose selected lowering is an inline/custom emit form rather than the normal function-call
+    /// path: value-class companion calls (`Result.success`) or receiver-lambda scope calls.
+    InlineCall(InlineCall),
+    /// Lambda literal resolution facts: receiver-function closure receiver, if any, and whether capture
+    /// collection must stay shallow because the lambda is spliced by an inline call.
+    Lambda(LambdaInfo),
+    /// A classpath `object` used as a value. Lowering emits `getstatic <internal>.INSTANCE`.
+    ObjectValue { internal: String },
+    /// A property-read `recv.name` resolved to a classpath extension property getter.
+    ExtensionPropertyGet {
+        getter: Box<crate::libraries::LibraryCallable>,
+    },
+}
+
+#[derive(Clone, Debug)]
+pub struct LocalFunInfo {
+    /// Unique JVM method name for the lifted local function.
+    pub mangled: String,
+    pub sig: Signature,
+    /// Enclosing locals captured by the lifted function, ordered by name. A capture with `shared_cell`
+    /// true must observe the same mutable cell as the enclosing scope; otherwise it is passed by value.
+    pub captures: Vec<LocalCapture>,
+}
+
+#[derive(Clone, Debug)]
+pub struct LocalCapture {
     pub name: String,
-    pub erased_params: Vec<Ty>,
-    pub erased_ret: Ty,
-    pub concrete_params: Vec<Ty>,
-    pub concrete_ret: Ty,
+    pub ty: Ty,
+    pub shared_cell: bool,
+}
+
+#[derive(Clone, Debug)]
+pub enum StmtLowering {
+    /// A lifted local function: mangled name, signature, and captures.
+    LocalFunction(Box<LocalFunInfo>),
+    /// A compound assignment (`target op= rhs`) selected as an in-place `opAssign` operator call.
+    PlusAssign,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct LambdaInfo {
+    pub receiver: Option<Ty>,
+    pub capture: LambdaCapture,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LambdaCapture {
+    #[default]
+    Closure,
+    InlineSplice,
 }
 
 impl TypeInfo {
     pub fn ty(&self, e: ExprId) -> Ty {
         self.expr_types[e.0 as usize]
     }
+    pub fn local_fun(&self, stmt_id: StmtId) -> Option<&LocalFunInfo> {
+        match self.stmt_lowers.get(&stmt_id)? {
+            StmtLowering::LocalFunction(info) => Some(info.as_ref()),
+            _ => None,
+        }
+    }
     /// If call `e` was resolved to a local function, return its mangled name and signature.
     pub fn local_fun_for_call(&self, e: ExprId) -> Option<(&str, &Signature)> {
-        let stmt_id = self.local_call_map.get(&e)?;
-        let (name, sig) = self.local_fun_sigs.get(stmt_id)?;
-        Some((name.as_str(), sig))
+        let ExprLowering::LocalFunction { stmt_id } = self.expr_lowers.get(&e)? else {
+            return None;
+        };
+        let info = self.local_fun(*stmt_id)?;
+        Some((info.mangled.as_str(), &info.sig))
     }
 }
 
@@ -3230,10 +3154,11 @@ struct Local {
     is_var: bool,
 }
 
-pub fn check_file(file: &File, syms: &SymbolTable, diags: &mut DiagSink) -> TypeInfo {
+fn make_checker<'a>(file: &'a File, syms: &'a SymbolTable, diags: &'a mut DiagSink) -> Checker<'a> {
     let imports = import_map(file);
-    let import_wildcards = import_wildcards(file);
-    let mut c = Checker {
+    let import_wildcards =
+        import_wildcards(file, syms.libraries.platform_default_import_packages());
+    Checker {
         file,
         syms,
         diags,
@@ -3247,25 +3172,58 @@ pub fn check_file(file: &File, syms: &SymbolTable, diags: &mut DiagSink) -> Type
         field_ty: None,
         companion_of: None,
         local_funs: Vec::new(),
-        local_fun_sigs: HashMap::new(),
-        local_call_map: HashMap::new(),
-        obj_value_refs: HashMap::new(),
-        ext_prop_calls: HashMap::new(),
-        companion_calls: HashMap::new(),
-        fun_ret_overrides: HashMap::new(),
-        ext_calls: HashMap::new(),
-        bridges: HashMap::new(),
-        boxed_vars: std::collections::HashSet::new(),
-        plus_assign: std::collections::HashSet::new(),
-        receiver_lambdas: HashMap::new(),
-        recv_lambda_tys: HashMap::new(),
-        inline_lambdas: std::collections::HashSet::new(),
-        local_fun_captures: std::collections::HashMap::new(),
+        expr_lowers: HashMap::new(),
+        inferred_fun_rets: HashMap::new(),
+        inferred_ext_fun_rets: HashMap::new(),
+        inferred_method_rets: HashMap::new(),
+        stmt_lowers: HashMap::new(),
         fn_reassigned: std::collections::HashSet::new(),
         expr_depth: 0,
         allow_lambda_mutation: false,
         loop_labels: Vec::new(),
-    };
+    }
+}
+
+fn apply_inferred_top_level_returns(
+    syms: &mut SymbolTable,
+    inferred_fun_rets: HashMap<(String, Vec<Ty>), Ty>,
+    inferred_ext_fun_rets: HashMap<(Ty, String), Ty>,
+) {
+    for ((name, params), ret) in inferred_fun_rets {
+        if let Some(sig) = syms
+            .funs
+            .get_mut(&name)
+            .and_then(|sigs| sigs.iter_mut().find(|s| s.params == params))
+        {
+            sig.ret = ret;
+        }
+    }
+    for ((recv, name), ret) in inferred_ext_fun_rets {
+        if let Some(sig) = syms.ext_funs.get_mut(&(recv, name)) {
+            sig.ret = ret;
+        }
+    }
+}
+
+pub fn check_file(file: &File, syms: &mut SymbolTable, diags: &mut DiagSink) -> TypeInfo {
+    {
+        let mut scratch = DiagSink::new();
+        let mut pre = make_checker(file, &*syms, &mut scratch);
+        for &d in &file.decls {
+            if let Decl::Fun(f) = file.decl(d) {
+                if f.ret.is_none() && matches!(f.body, FunBody::Expr(_)) {
+                    let resolve = class_internal_resolver(pre.syms);
+                    pre.tparams =
+                        TParams::from_decl_with(&f.type_params, &f.type_param_bounds, &resolve);
+                    pre.check_fun(f);
+                    pre.tparams.clear();
+                }
+            }
+        }
+        apply_inferred_top_level_returns(syms, pre.inferred_fun_rets, pre.inferred_ext_fun_rets);
+    }
+
+    let mut c = make_checker(file, &*syms, diags);
     // Top-level functions that erase to the same JVM signature collide in the facade class.
     let top_funs: Vec<&FunDecl> = file
         .decls
@@ -3745,22 +3703,42 @@ pub fn check_file(file: &File, syms: &SymbolTable, diags: &mut DiagSink) -> Type
             }
         }
     }
+    let Checker {
+        expr_types,
+        expr_lowers,
+        inferred_fun_rets,
+        inferred_ext_fun_rets,
+        inferred_method_rets,
+        stmt_lowers,
+        ..
+    } = c;
+    for ((name, params), ret) in inferred_fun_rets {
+        if let Some(sig) = syms
+            .funs
+            .get_mut(&name)
+            .and_then(|sigs| sigs.iter_mut().find(|s| s.params == params))
+        {
+            sig.ret = ret;
+        }
+    }
+    for ((recv, name), ret) in inferred_ext_fun_rets {
+        if let Some(sig) = syms.ext_funs.get_mut(&(recv, name)) {
+            sig.ret = ret;
+        }
+    }
+    for ((internal, name, params), ret) in inferred_method_rets {
+        if let Some(sig) = syms
+            .class_by_internal_mut(&internal)
+            .and_then(|c| c.methods.get_mut(&name))
+            .filter(|s| s.params == params)
+        {
+            sig.ret = ret;
+        }
+    }
     TypeInfo {
-        expr_types: c.expr_types,
-        local_fun_sigs: c.local_fun_sigs,
-        local_call_map: c.local_call_map,
-        obj_value_refs: c.obj_value_refs,
-        ext_prop_calls: c.ext_prop_calls,
-        companion_calls: c.companion_calls,
-        fun_ret_overrides: c.fun_ret_overrides,
-        ext_calls: c.ext_calls,
-        bridges: c.bridges,
-        boxed_vars: c.boxed_vars,
-        local_fun_captures: c.local_fun_captures,
-        plus_assign: c.plus_assign,
-        receiver_lambdas: c.receiver_lambdas,
-        recv_lambda_tys: c.recv_lambda_tys,
-        inline_lambdas: c.inline_lambdas,
+        expr_types,
+        expr_lowers,
+        stmt_lowers,
     }
 }
 
@@ -3788,20 +3766,11 @@ struct Checker<'a> {
     /// innermost frame so that sibling local-function calls resolve correctly.
     local_funs: Vec<HashMap<String, (StmtId, Signature)>>,
     /// Accumulated output maps (moved into TypeInfo at the end of `check_file`).
-    local_fun_sigs: HashMap<StmtId, (String, Signature)>,
-    local_call_map: HashMap<ExprId, StmtId>,
-    obj_value_refs: HashMap<ExprId, String>,
-    ext_prop_calls: HashMap<ExprId, (String, String, String)>,
-    companion_calls: HashMap<ExprId, crate::libraries::CompanionFn>,
-    fun_ret_overrides: HashMap<(String, Vec<Ty>), Ty>,
-    ext_calls: HashMap<ExprId, (String, String, String)>,
-    bridges: HashMap<String, Vec<BridgeSpec>>,
-    boxed_vars: std::collections::HashSet<String>,
-    plus_assign: std::collections::HashSet<StmtId>,
-    receiver_lambdas: HashMap<ExprId, ReceiverLambda>,
-    recv_lambda_tys: HashMap<ExprId, Ty>,
-    inline_lambdas: std::collections::HashSet<ExprId>,
-    local_fun_captures: std::collections::HashMap<StmtId, Vec<(String, Ty)>>,
+    expr_lowers: HashMap<ExprId, ExprLowering>,
+    inferred_fun_rets: HashMap<(String, Vec<Ty>), Ty>,
+    inferred_ext_fun_rets: HashMap<(Ty, String), Ty>,
+    inferred_method_rets: HashMap<(String, String, Vec<Ty>), Ty>,
+    stmt_lowers: HashMap<StmtId, StmtLowering>,
     /// Names reassigned anywhere in the function body currently being checked (including inside its
     /// closures). A captured `var` is boxed only if it's in here — kotlinc treats a captured-but-never-
     /// reassigned `var` as effectively final (passed by value).
@@ -3819,7 +3788,7 @@ struct Checker<'a> {
 }
 
 impl<'a> Checker<'a> {
-    /// The arg-binding call-resolution layer over this checker's [`LibrarySet`]. Cheap to construct.
+    /// The arg-binding call-resolution layer over this checker's [`SymbolSource`]. Cheap to construct.
     fn resolver(&self) -> crate::call_resolver::CallResolver<'_> {
         crate::call_resolver::CallResolver::new(&*self.syms.libraries)
     }
@@ -3841,6 +3810,38 @@ impl<'a> Checker<'a> {
     }
     fn pop_scope(&mut self) {
         self.scopes.pop();
+    }
+    fn update_lambda_info(&mut self, e: ExprId, update: impl FnOnce(&mut LambdaInfo)) {
+        let mut info = match self.expr_lowers.remove(&e) {
+            Some(ExprLowering::Lambda(info)) => info,
+            Some(other) => {
+                debug_assert!(
+                    false,
+                    "lambda metadata collided with a non-lambda expression lowering"
+                );
+                self.expr_lowers.insert(e, other);
+                return;
+            }
+            None => LambdaInfo::default(),
+        };
+        update(&mut info);
+        self.expr_lowers.insert(e, ExprLowering::Lambda(info));
+    }
+    fn mark_inline_lambda(&mut self, e: ExprId) {
+        self.update_lambda_info(e, |info| info.capture = LambdaCapture::InlineSplice);
+    }
+    fn mark_receiver_lambda(&mut self, e: ExprId, receiver: Ty) {
+        self.update_lambda_info(e, |info| info.receiver = Some(receiver));
+    }
+    fn mark_local_function_expr(&mut self, e: ExprId, stmt_id: StmtId) {
+        self.expr_lowers
+            .insert(e, ExprLowering::LocalFunction { stmt_id });
+    }
+    fn local_function_expr_count(&self) -> usize {
+        self.expr_lowers
+            .values()
+            .filter(|v| matches!(v, ExprLowering::LocalFunction { .. }))
+            .count()
     }
     fn declare(&mut self, name: &str, ty: Ty, is_var: bool) {
         self.scopes
@@ -3875,24 +3876,17 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// Record the enclosing locals a closure (`body`) captures that must be boxed: a `var` it WRITES,
-    /// or a `var` it reads that is REASSIGNED somewhere in the function (`fn_reassigned`) — both need a
-    /// shared `Ref$XxxRef` cell. A captured `val`, or a captured `var` never reassigned, stays by value.
-    fn record_captured_vars(
-        &mut self,
-        body: ExprId,
-        outer_names: &std::collections::HashSet<String>,
-    ) {
-        collect_lambda_outer_writes(self.file, body, outer_names, &mut self.boxed_vars);
-        for n in outer_names {
-            if self.fn_reassigned.contains(n) && self.lookup(n).map_or(false, |l| l.is_var) {
-                let single: std::collections::HashSet<String> =
-                    std::iter::once(n.clone()).collect();
-                if local_fun_body_uses_any(self.file, body, &single) {
-                    self.boxed_vars.insert(n.clone());
-                }
-            }
-        }
+    fn local_capture_needs_shared_cell(&self, body: ExprId, name: &str) -> bool {
+        let single: std::collections::HashSet<String> = std::iter::once(name.to_string()).collect();
+        let written = {
+            let mut out = std::collections::HashSet::new();
+            collect_lambda_outer_writes(self.file, body, &single, &mut out);
+            out.contains(name)
+        };
+        written
+            || (self.fn_reassigned.contains(name)
+                && self.lookup(name).map_or(false, |l| l.is_var)
+                && local_fun_body_uses_any(self.file, body, &single))
     }
 
     /// Build a class reference type, carrying any generic arguments from the syntactic type
@@ -4073,19 +4067,8 @@ impl<'a> Checker<'a> {
                     .zip(&impl_sig.params)
                     .all(|(e, c)| e == c || *e == obj);
             if (params_differ || ret_differs) && params_bridgeable {
-                // Record a synthetic bridge `name(erased)` that downcasts its args and delegates to
-                // the concrete `name(impl)`. (Primitive params would need (un)boxing in the bridge —
-                // left out of this pass.)
-                self.bridges
-                    .entry(internal.to_string())
-                    .or_default()
-                    .push(BridgeSpec {
-                        name: name.clone(),
-                        erased_params: ssig.params.clone(),
-                        erased_ret: ssig.ret,
-                        concrete_params: impl_sig.params.clone(),
-                        concrete_ret: impl_sig.ret,
-                    });
+                // Bridgeable generic/covariant override; IR lowering synthesizes the bridge from the
+                // canonical symbol table when it has concrete function ids to delegate to.
             } else if params_differ {
                 self.diags.error(span, format!("krusty: method '{name}' needs a bridge method (generic parameter override is not supported)"));
                 return;
@@ -4094,10 +4077,6 @@ impl<'a> Checker<'a> {
                 return;
             }
         }
-        // A property overriding a supertype property with a different erased type needs a bridge `getX()`
-        // returning the supertype's (erased) type — the lowering synthesizes it (an `ACC_BRIDGE` getter
-        // delegating to the concrete one). A primitive own-type would need (un)boxing in that bridge,
-        // which the property-bridge path doesn't emit yet — reject only that case.
         // A property overriding a supertype property with a different erased type needs a getter bridge,
         // which the lowering synthesizes (boxing a primitive own type in the bridge as needed).
     }
@@ -4402,7 +4381,8 @@ impl<'a> Checker<'a> {
                 .unwrap_or(Ty::Unit);
         }
         // For expression-body functions with no explicit return type, infer the return type from the
-        // body expression and record it as an override (so codegen uses the right JVM descriptor).
+        // body expression and write it back to the canonical signature table. Later call resolution and
+        // lowering then consume the same `Signature::ret` field as annotated functions.
         let infer_ret =
             f.ret.is_none() && self.ret_ty == Ty::Unit && matches!(&f.body, FunBody::Expr(_));
         // Default arguments are evaluated in the caller's context (they may not read other params —
@@ -4441,9 +4421,14 @@ impl<'a> Checker<'a> {
                 let inferred = self.expr(*e);
                 if inferred != Ty::Unit && inferred != Ty::Error {
                     self.ret_ty = inferred;
-                    // Key by (name, parameter types) so overloads don't clobber each other's return.
-                    self.fun_ret_overrides
-                        .insert((f.name.clone(), ptys.clone()), inferred);
+                    if let Some(recv_ref) = &f.receiver {
+                        let recv_ty = self.resolve_ty(recv_ref);
+                        self.inferred_ext_fun_rets
+                            .insert((recv_ty.erased_recv(), f.name.clone()), inferred);
+                    } else {
+                        self.inferred_fun_rets
+                            .insert((f.name.clone(), ptys.clone()), inferred);
+                    }
                 }
             }
         } else {
@@ -4482,11 +4467,21 @@ impl<'a> Checker<'a> {
         let added = self
             .tparams
             .insert_decl_with(&f.type_params, &f.type_param_bounds, &resolve);
+        let object_contract_ret = match (f.name.as_str(), f.params.len()) {
+            ("compareTo", 1) => Some(Ty::Int),
+            ("equals", 1) => Some(Ty::Boolean),
+            ("hashCode", 0) => Some(Ty::Int),
+            ("toString", 0) => Some(Ty::String),
+            _ => None,
+        };
         self.ret_ty = f
             .ret
             .as_ref()
             .map(|r| self.resolve_ty(r))
             .unwrap_or_else(|| {
+                if let Some(ret) = object_contract_ret {
+                    return ret;
+                }
                 // For a method without an explicit return type (e.g. `override fun foo() = "Z"`),
                 // use the return type that collect_signatures already inferred from the method body, or —
                 // for an `override` of an inherited member (a base class OR an implemented interface, e.g.
@@ -4521,7 +4516,34 @@ impl<'a> Checker<'a> {
             let ty = if p.is_vararg { Ty::array(ty) } else { ty };
             self.declare(&p.name, ty, false);
         }
-        self.check_fun_body(f);
+        let infer_ret =
+            f.ret.is_none() && object_contract_ret.is_none() && matches!(&f.body, FunBody::Expr(_));
+        if infer_ret {
+            if let FunBody::Expr(e) = &f.body {
+                let inferred = self.expr(*e);
+                if inferred != Ty::Unit && inferred != Ty::Error {
+                    self.ret_ty = inferred;
+                    if let Some(Ty::Obj(internal, _)) = self.this_ty {
+                        let params: Vec<Ty> = f
+                            .params
+                            .iter()
+                            .map(|p| {
+                                let ty = self.resolve_ty(&p.ty);
+                                if p.is_vararg {
+                                    Ty::array(ty)
+                                } else {
+                                    ty
+                                }
+                            })
+                            .collect();
+                        self.inferred_method_rets
+                            .insert((internal.to_string(), f.name.clone(), params), inferred);
+                    }
+                }
+            }
+        } else {
+            self.check_fun_body(f);
+        }
         self.pop_scope();
         self.pop_scope();
         self.pop_local_funs();
@@ -4572,11 +4594,18 @@ impl<'a> Checker<'a> {
         // names so `MutableList`/`List` (and a `kotlin/collections/List` vs a platform `java/util/List`)
         // are mutually assignable — the read-only/mutable distinction is enforced only at the `+=`
         // operator, not in general assignability. Also lets a `kotlin/collections/MutableList` reach
-        // `java/util/Collection` via the hierarchy walk below. The platform name map is the backend's
-        // (`LibrarySet::canonical_internal`), so the checker stays in Kotlin terms.
-        let sub = self.syms.libraries.canonical_internal(sub);
-        let sup = self.syms.libraries.canonical_internal(sup);
-        let (sub, sup) = (sub.as_ref(), sup.as_ref());
+        // `java/util/Collection` via the hierarchy walk below. The aliases are seeded with the type
+        // universe, so the checker does not call into the backend's name map here.
+        let sub = self
+            .syms
+            .canonical_names
+            .get(sub)
+            .map_or(sub, String::as_str);
+        let sup = self
+            .syms
+            .canonical_names
+            .get(sup)
+            .map_or(sup, String::as_str);
         if sub == sup {
             return true;
         }
@@ -4646,6 +4675,10 @@ impl<'a> Checker<'a> {
         }
         let s = c.super_internal.clone()?;
         self.lookup_prop(&s, name)
+    }
+
+    fn property_ref_ty(&self, arity: usize, mutable: bool) -> Option<Ty> {
+        self.syms.libraries.property_reference_type(arity, mutable)
     }
 
     /// If `name` is a CLASSPATH class with a companion object, the companion instance's type
@@ -4752,15 +4785,20 @@ impl<'a> Checker<'a> {
         if actual == Ty::obj("kotlin/Any") && expected != Ty::Unit {
             return;
         }
-        // A numeric primitive is a subtype of `Number`: it boxes to its wrapper, which IS a `Number`
-        // (`val n: Number = 5`, `fun f(n: Number)` called with an `Int`).
-        if let Ty::Obj(e, _) = expected {
-            let numeric = matches!(
-                actual,
-                Ty::Int | Ty::Long | Ty::Short | Ty::Byte | Ty::Double | Ty::Float
-            );
-            if numeric && (e == "java/lang/Number" || e == "kotlin/Number") {
+        // A primitive flowing into a reference supertype is checked through its boxed source type; the
+        // provider's type hierarchy decides whether that box implements `Number`, `Comparable`, etc.
+        if let (Some(Ty::Obj(b, _)), Ty::Obj(e, _)) = (actual.boxed_ref(), expected) {
+            if self.obj_is_subtype(b, e) {
                 return;
+            }
+        }
+        // String is a reference type with classpath supertypes; ask the same hierarchy walker instead of
+        // keeping a local list of platform interfaces.
+        if actual == Ty::String {
+            if let Ty::Obj(e, _) = expected {
+                if self.obj_is_subtype("kotlin/String", e) {
+                    return;
+                }
             }
         }
         // A class value is assignable to an interface (supertype) it implements.
@@ -4777,28 +4815,9 @@ impl<'a> Checker<'a> {
                 return;
             }
         }
-        // A property reference is a function: `KProperty1<T,R>` IS a `(T)->R` and `KProperty0<R>` a
-        // `()->R` (kotlinc's `PropertyReference{1,0}` implements the matching `FunctionN` via
-        // `invoke = get`), so it's assignable to a function type of the matching arity.
         if let Ty::Fun(e) = &expected {
-            let prop_arity = actual.obj_internal().and_then(|ai| match ai {
-                "kotlin/reflect/KProperty1" | "kotlin/reflect/KMutableProperty1" => Some(1),
-                "kotlin/reflect/KProperty0" | "kotlin/reflect/KMutableProperty0" => Some(0),
-                _ => None,
-            });
-            if prop_arity == Some(e.params.len()) {
+            if self.syms.libraries.function_like_arity(actual) == Some(e.params.len()) {
                 return;
-            }
-        }
-        // Known classpath supertypes of `String` (`String : CharSequence, Comparable, Serializable`).
-        if actual == Ty::String {
-            if let Some(ei) = expected.obj_internal() {
-                if matches!(
-                    ei,
-                    "java/lang/CharSequence" | "java/lang/Comparable" | "java/io/Serializable"
-                ) {
-                    return;
-                }
             }
         }
         if expected != actual {
@@ -4873,16 +4892,6 @@ impl<'a> Checker<'a> {
                     vec![]
                 };
                 let arity = bind_names.len() as u8;
-                // A lambda that writes an enclosing local: record those vars so the lowerer boxes them
-                // into a `kotlin/jvm/internal/Ref$XxxRef` (a closure can't write a captured-by-value
-                // local otherwise). Recorded unconditionally — over-boxing a var that turns out inlined
-                // is harmless, and NOT recording one that becomes a closure would miscompile. The body
-                // still checks normally below.
-                let outer_names: std::collections::HashSet<String> =
-                    self.scopes.iter().flat_map(|s| s.keys().cloned()).collect();
-                if !outer_names.is_empty() {
-                    self.record_captured_vars(body, &outer_names);
-                }
                 // Type each parameter from its explicit annotation (`{ x: Int -> … }`) if present, so a
                 // bare-value lambda checks its body correctly; otherwise the erased `Any` (an expected
                 // function type, when there is one, is applied via `check_lambda_with_types` instead).
@@ -4905,12 +4914,12 @@ impl<'a> Checker<'a> {
                 // emit a backing-field read from the lambda class. Clear it so `field` inside a
                 // lambda body is unresolved (→ the property skips) rather than miscompiled.
                 let saved_field = self.field_ty.take();
-                let lc_before = self.local_call_map.len();
+                let lc_before = self.local_function_expr_count();
                 let bret = self.expr(body);
                 // A non-inlined lambda that calls a local function would dispatch it on the lambda
                 // class (the local fun lives on the enclosing facade/class) — reject rather than
                 // miscompile (the recursive nested-closure case).
-                if self.local_call_map.len() > lc_before {
+                if self.local_function_expr_count() > lc_before {
                     self.diags.error(
                         self.file.expr_spans[e.0 as usize],
                         "krusty: a lambda that calls a local function is not supported".to_string(),
@@ -4942,11 +4951,13 @@ impl<'a> Checker<'a> {
                 // `str[i]` is the `String.get(Int): Char` operator — resolved from the builtins String
                 // declarations (then the curated table for anything builtins doesn't declare).
                 if at == Ty::String {
-                    if let Some(ret) = self
-                        .syms
-                        .libraries
-                        .builtin_member_ret("kotlin/String", "get", &[it])
-                        .or_else(|| resolve_string_instance("get", &[it]))
+                    if let Some(ret) = crate::call_resolver::resolve_instance_member(
+                        &*self.syms.libraries,
+                        at,
+                        "get",
+                        &[it],
+                    )
+                    .map(|m| m.ret)
                     {
                         return self.set(e, ret);
                     }
@@ -4962,19 +4973,14 @@ impl<'a> Checker<'a> {
                 }
                 // `coll[i]` on a library type → the `get(index)` operator member (`List.get(Int)`,
                 // `Map.get(K)`); the index type is checked against the member's parameter.
-                if let Ty::Obj(internal, _) = at {
-                    if let Some(m) = crate::call_resolver::resolve_instance(
+                if let Ty::Obj(..) = at {
+                    if let Some(m) = crate::call_resolver::resolve_instance_member(
                         &*self.syms.libraries,
-                        internal,
+                        at,
                         "get",
                         &[it],
                     ) {
-                        let ret = self
-                            .syms
-                            .libraries
-                            .member_return(at, "get", &[it])
-                            .unwrap_or(m.ret);
-                        return self.set(e, ret);
+                        return self.set(e, m.ret);
                     }
                 }
                 if at != Ty::Error {
@@ -5061,8 +5067,10 @@ impl<'a> Checker<'a> {
                 // `kotlin.UInt`/`ULong` value-type box, but krusty erases unsigned to `int`/`long` and a
                 // smart-cast *use* of it would unbox as `Integer`/`Long` (ClassCastException), so skip.
                 let tt_known = tt.is_reference()
-                    || (tt.is_primitive()
-                        && !matches!(tt, Ty::Double | Ty::Float | Ty::UInt | Ty::ULong));
+                    || matches!(
+                        tt,
+                        Ty::Int | Ty::Byte | Ty::Short | Ty::Long | Ty::Boolean | Ty::Char
+                    );
                 // A nullable target is allowed only for a REFERENCE type (`x is A?` lowers to
                 // `x == null || x is A`); a nullable primitive (`x is Int?`) would mix box/unbox
                 // semantics krusty doesn't model here, so it stays rejected.
@@ -5086,7 +5094,7 @@ impl<'a> Checker<'a> {
                 // `checkcast` needs a reference operand. The target is either a *known* reference type (an
                 // unresolved one erases to a no-op `Object` cast — rejected), or a non-unsigned primitive:
                 // `x as Int` on a reference operand is an unbox (`checkcast Integer; intValue()`).
-                let prim_unbox = ot.is_reference() && tt.is_primitive() && !tt.is_unsigned();
+                let prim_unbox = ot.is_reference() && tt.boxed_ref().is_some();
                 // A PRIMITIVE operand cast to a CONCRETE reference type (`42 as Any`, `'a' as Char?`,
                 // `b as Byte?`) is a BOX — but only when the operand's wrapper is actually assignable
                 // to the target (`Any`/`Object`, the wrapper itself, or a supertype like `Number`).
@@ -5094,8 +5102,7 @@ impl<'a> Checker<'a> {
                 // slot is a VerifyError; reject it (skip), as kotlinc rejects it at compile time. A
                 // type-parameter target (`56 as T`) is excluded too — the boxed value would flow into
                 // an erased/bridged generic slot krusty doesn't reconcile.
-                let prim_box = ot.is_primitive()
-                    && !ot.is_unsigned()
+                let prim_box = ot.boxed_ref().is_some()
                     && tt.is_reference()
                     && !self.tparams.contains(&ty.name)
                     // `'a' as Char?` / `42 as Int?` — box to the operand's own nullable form …
@@ -5105,7 +5112,10 @@ impl<'a> Checker<'a> {
                         // (`kotlin/Int` <: `Number` <: `Any`); the wrapper realization is the backend's.
                         || ot.boxed_ref().and_then(|b| b.obj_internal()).is_some_and(|bw| {
                             tt.obj_internal()
-                                .is_some_and(|t| self.obj_is_subtype(bw, t))
+                                .is_some_and(|t| {
+                                    matches!(t, "kotlin/Any" | "java/lang/Object")
+                                        || self.obj_is_subtype(bw, t)
+                                })
                         }));
                 if !(tt.is_reference() || prim_unbox)
                     || (!ot.is_reference() && !prim_box && ot != Ty::Error)
@@ -5159,16 +5169,17 @@ impl<'a> Checker<'a> {
                 // `CharRange`; the integer family widens like kotlinc's `rangeTo` overloads — any of
                 // `Byte`/`Short`/`Int` yields an `IntRange`, and if either operand is `Long` a
                 // `LongRange`. Unsigned and floating ranges are not modeled here (the file is skipped).
-                let small_int = |t: &Ty| matches!(t, Ty::Byte | Ty::Short | Ty::Int);
                 match (lt, rt) {
                     (Ty::Char, Ty::Char) => Ty::obj("kotlin/ranges/CharRange"),
                     // Unsigned ranges are their own stdlib classes (`UIntRange`/`ULongRange`), iterated
                     // with unsigned comparison and mangled inline-class getters.
                     (Ty::UInt, Ty::UInt) => Ty::obj("kotlin/ranges/UIntRange"),
                     (Ty::ULong, Ty::ULong) => Ty::obj("kotlin/ranges/ULongRange"),
-                    _ if small_int(&lt) && small_int(&rt) => Ty::obj("kotlin/ranges/IntRange"),
-                    _ if (small_int(&lt) || lt == Ty::Long)
-                        && (small_int(&rt) || rt == Ty::Long) =>
+                    _ if lt.is_int_range_operand() && rt.is_int_range_operand() => {
+                        Ty::obj("kotlin/ranges/IntRange")
+                    }
+                    _ if (lt.is_int_range_operand() || lt == Ty::Long)
+                        && (rt.is_int_range_operand() || rt == Ty::Long) =>
                     {
                         Ty::obj("kotlin/ranges/LongRange")
                     }
@@ -5197,7 +5208,7 @@ impl<'a> Checker<'a> {
                                 self.diags
                                     .error(self.span(e), "'val' cannot be reassigned.".to_string());
                             }
-                            if !tt.is_numeric() && tt != Ty::Char {
+                            if !tt.is_numeric_or_char() {
                                 self.diags.error(
                                     self.span(e),
                                     "krusty: '++'/'--' is only supported on a numeric variable"
@@ -5283,14 +5294,6 @@ impl<'a> Checker<'a> {
                                 ),
                             );
                         }
-                        self.ext_calls.insert(
-                            e,
-                            (
-                                "$local".to_string(),
-                                name.clone(),
-                                fi.callable.descriptor.clone(),
-                            ),
-                        );
                         return self.set(e, fi.callable.ret);
                     }
                 }
@@ -5303,16 +5306,32 @@ impl<'a> Checker<'a> {
                         None => self.check_member(rt, &name, self.span(e), Some(e)),
                         Some(a) => {
                             let arg_tys: Vec<Ty> = a.iter().map(|x| self.expr(*x)).collect();
+                            let inline_arg_supported = !a
+                                .iter()
+                                .any(|x| matches!(self.file.expr(*x), Expr::CallableRef { .. }));
                             if let ("toString", []) = (name.as_str(), arg_tys.as_slice()) {
                                 Ty::String
                             } else if let ("hashCode", []) = (name.as_str(), arg_tys.as_slice()) {
                                 Ty::Int // Int (not a reference), so safe-call rejection fires below
                             } else if rt == Ty::String {
-                                self.syms
-                                    .libraries
-                                    .builtin_member_ret("kotlin/String", &name, &arg_tys)
-                                    .or_else(|| resolve_string_instance(&name, &arg_tys))
-                                    .unwrap_or(Ty::Error)
+                                crate::call_resolver::resolve_instance_member(
+                                    &*self.syms.libraries,
+                                    rt,
+                                    &name,
+                                    &arg_tys,
+                                )
+                                .map(|m| m.ret)
+                                .or_else(|| self.library_extension_return(&name, rt, &arg_tys, &[]))
+                                .or_else(|| {
+                                    inline_arg_supported
+                                        .then(|| {
+                                            self.library_extension_inline_return(
+                                                &name, rt, &arg_tys,
+                                            )
+                                        })
+                                        .flatten()
+                                })
+                                .unwrap_or(Ty::Error)
                             } else if let Ty::Obj(internal, _) = rt {
                                 crate::module_symbols::ModuleSymbols::new(self.syms)
                                     .functions(&name, Some(rt))
@@ -5328,6 +5347,18 @@ impl<'a> Checker<'a> {
                                             &arg_tys,
                                         )
                                         .map(|m| m.ret)
+                                    })
+                                    .or_else(|| {
+                                        self.library_extension_return(&name, rt, &arg_tys, &[])
+                                    })
+                                    .or_else(|| {
+                                        inline_arg_supported
+                                            .then(|| {
+                                                self.library_extension_inline_return(
+                                                    &name, rt, &arg_tys,
+                                                )
+                                            })
+                                            .flatten()
                                     })
                                     .unwrap_or(Ty::Error)
                             } else {
@@ -5424,7 +5455,7 @@ impl<'a> Checker<'a> {
                     }
                     if let Some(&(ty, _, _)) = self.syms.props.get(&n) {
                         ty // top-level property
-                    } else if self.syms.libraries.coroutine_intrinsic(&n)
+                    } else if crate::libraries::coroutine_intrinsic(&n)
                         == Some(crate::libraries::CoroutineIntrinsic::CoroutineSuspended)
                     {
                         // `COROUTINE_SUSPENDED` — the coroutine suspension sentinel (typed `Any`);
@@ -5445,7 +5476,12 @@ impl<'a> Checker<'a> {
                     } else if let Some(internal) = self.classpath_object_value(&n) {
                         // A CLASSPATH `object` referenced as a value (`EmptyCoroutineContext`): its type is
                         // the object type; lowering reads `getstatic <internal>.INSTANCE`.
-                        self.obj_value_refs.insert(e, internal.clone());
+                        self.expr_lowers.insert(
+                            e,
+                            ExprLowering::ObjectValue {
+                                internal: internal.clone(),
+                            },
+                        );
                         Ty::obj(&internal)
                     } else {
                         self.diags
@@ -5514,14 +5550,6 @@ impl<'a> Checker<'a> {
                         {
                             // logical params (receiver is `callable.params[0]`) — operators take one arg.
                             if fi.callable.params.len() == 2 {
-                                self.ext_calls.insert(
-                                    e,
-                                    (
-                                        "$local".to_string(),
-                                        fname.to_string(),
-                                        fi.callable.descriptor.clone(),
-                                    ),
-                                );
                                 return self.set(e, fi.callable.ret);
                             }
                         }
@@ -5585,13 +5613,10 @@ impl<'a> Checker<'a> {
                     // `list + element` → the element overload), so a reference right operand is fine.
                     if let Some(fname) = op_name {
                         if rt != Ty::Error {
-                            if let Some(c) =
-                                self.syms
-                                    .libraries
-                                    .resolve_callable(fname, Some(lt), &[rt], &[])
+                            if let Some(ret) =
+                                self.record_library_extension_call(fname, lt, &[rt], &[])
                             {
-                                self.ext_calls.insert(e, (c.owner, c.name, c.descriptor));
-                                return self.set(e, c.ret);
+                                return self.set(e, ret);
                             }
                         }
                     }
@@ -5599,11 +5624,16 @@ impl<'a> Checker<'a> {
                 self.check_binary(op, lt, rt, self.span(e))
             }
             Expr::Member { receiver, name } => {
-                // Primitive companion constants: `Int.MAX_VALUE`, `Long.MIN_VALUE`, etc.
-                if let Expr::Name(prim) = self.file.expr(receiver).clone() {
-                    if self.lookup(&prim).is_none() {
-                        if let Some(ty) = prim_companion_ty(&prim, &name) {
-                            return self.set(e, ty);
+                // Library companion constants: `Int.MAX_VALUE`, `Double.NaN`, etc.
+                if let Expr::Name(type_name) = self.file.expr(receiver).clone() {
+                    if self.lookup(&type_name).is_none() {
+                        if let Some(c) = companion_const(
+                            &*self.syms.libraries,
+                            &self.syms.class_names,
+                            &type_name,
+                            &name,
+                        ) {
+                            return self.set(e, c.ty);
                         }
                     }
                 }
@@ -5650,7 +5680,8 @@ impl<'a> Checker<'a> {
                                 // TYPE it as the OUTER class — the runtime object is-a Outer, and erased
                                 // argument matching wants `Outer` (`PrimitiveSerialDescriptor(_, PrimitiveKind)`
                                 // accepts `PrimitiveKind.STRING`), not the narrower nested type.
-                                self.obj_value_refs.insert(e, nested);
+                                self.expr_lowers
+                                    .insert(e, ExprLowering::ObjectValue { internal: nested });
                                 return self.set(e, Ty::obj(&outer));
                             }
                         }
@@ -5804,13 +5835,14 @@ impl<'a> Checker<'a> {
                 }
             }
             Expr::CallableRef { receiver, name } => {
-                // Class literal `UserType::class` → a `java.lang.Class`. Restricted to a declared
-                // class name: primitive `Int::class` (needs `Integer.TYPE`) and bound `obj::class`
-                // (needs `getClass()`) aren't modeled — skip them rather than emit a bad `ldc`.
+                // Class literal `UserType::class`. Restricted to a declared class name: primitive
+                // `Int::class` and bound `obj::class` need target-specific lowering that is not modeled.
                 if name == "class" {
                     let is_user_type = matches!(receiver.map(|r| self.file.expr(r)), Some(Expr::Name(n)) if self.syms.classes.contains_key(n) && self.lookup(n).is_none());
                     if is_user_type {
-                        return self.set(e, Ty::obj("java/lang/Class"));
+                        if let Some(ty) = self.syms.libraries.class_literal_type() {
+                            return self.set(e, ty);
+                        }
                     }
                     self.diags.error(
                         self.span(e),
@@ -5851,21 +5883,16 @@ impl<'a> Checker<'a> {
                     // find the lifted static method and prepend its captures.
                     if let Some((stmt_id, sig)) = self.lookup_local_fun(&name) {
                         if !sig.vararg && sig.params.len() == sig.required {
-                            self.local_call_map.insert(e, stmt_id);
+                            self.mark_local_function_expr(e, stmt_id);
                             return self.set(e, Ty::fun(sig.params.clone(), sig.ret));
                         }
                     }
-                    // Top-level property reference `::foo` → `KProperty0` (a `val`) or
-                    // `KMutableProperty0` (a `var`). Backed by a static getter (and setter) on the
-                    // file facade; the lowering emits a `PropertyReference0Impl` /
-                    // `MutablePropertyReference0Impl` whose `get`/`set` dispatch statically.
+                    // Top-level property reference `::foo` keeps its property-reference API (`get`,
+                    // `name`) while the provider marks it callable-like for function-typed positions.
                     if let Some((_, is_var, _)) = self.syms.props.get(&name) {
-                        let iface = if *is_var {
-                            "kotlin/reflect/KMutableProperty0"
-                        } else {
-                            "kotlin/reflect/KProperty0"
-                        };
-                        return self.set(e, Ty::obj(iface));
+                        if let Some(ty) = self.property_ref_ty(0, *is_var) {
+                            return self.set(e, ty);
+                        }
                     }
                     if let Some(sig) = self
                         .syms
@@ -5926,12 +5953,9 @@ impl<'a> Checker<'a> {
                                     }
                                 }
                                 if let Some((_, is_var)) = self.lookup_prop(internal, &name) {
-                                    let iface = if is_var {
-                                        "kotlin/reflect/KMutableProperty0"
-                                    } else {
-                                        "kotlin/reflect/KProperty0"
-                                    };
-                                    return self.set(e, Ty::obj(iface));
+                                    if let Some(ty) = self.property_ref_ty(0, is_var) {
+                                        return self.set(e, ty);
+                                    }
                                 }
                             }
                         }
@@ -5944,7 +5968,7 @@ impl<'a> Checker<'a> {
                                         return self.set(e, Ty::fun(sig.params.clone(), sig.ret));
                                     }
                                 }
-                                // bound property reference `obj::prop` → `KProperty0`/`KMutableProperty0`.
+                                // bound property reference `obj::prop` keeps property-reference APIs.
                                 let internal = internal.to_string();
                                 if let Some(is_var) =
                                     self.syms.class_by_internal(&internal).and_then(|c| {
@@ -5955,12 +5979,9 @@ impl<'a> Checker<'a> {
                                     })
                                 {
                                     self.expr(r); // capture the receiver
-                                    let iface = if is_var {
-                                        "kotlin/reflect/KMutableProperty0"
-                                    } else {
-                                        "kotlin/reflect/KProperty0"
-                                    };
-                                    return self.set(e, Ty::obj(iface));
+                                    if let Some(ty) = self.property_ref_ty(0, is_var) {
+                                        return self.set(e, ty);
+                                    }
                                 }
                             }
                         }
@@ -5975,20 +5996,16 @@ impl<'a> Checker<'a> {
                                         return self.set(e, Ty::fun(params, sig.ret));
                                     }
                                 }
-                                // unbound property reference `Type::prop` → `KProperty1<Type, V>`
-                                // (`KMutableProperty1` for a `var`), erased to the reflection interface.
+                                // unbound property reference `Type::prop` keeps property-reference APIs.
                                 if let Some(is_var) = cls
                                     .props
                                     .iter()
                                     .find(|(n, _, _)| *n == name)
                                     .map(|(_, _, v)| *v)
                                 {
-                                    let iface = if is_var {
-                                        "kotlin/reflect/KMutableProperty1"
-                                    } else {
-                                        "kotlin/reflect/KProperty1"
-                                    };
-                                    return self.set(e, Ty::obj(iface));
+                                    if let Some(ty) = self.property_ref_ty(1, is_var) {
+                                        return self.set(e, ty);
+                                    }
                                 }
                             }
                         }
@@ -6061,10 +6078,10 @@ impl<'a> Checker<'a> {
         if lt == Ty::Error || rt == Ty::Error {
             return Ty::Error;
         }
-        // Unsigned arithmetic: both operands the same unsigned type (`UInt`/`ULong`). `+`/`-`/`*`/`/`/`%`
-        // keep the type; comparisons/equality yield `Boolean`. Mixed signed/unsigned is a type error in
-        // Kotlin (explicit conversion required), so it falls through to `bin_err`.
-        if lt.is_unsigned() && lt == rt {
+        // Unsigned arithmetic: both operands the same unsigned library integer type. The source owns which
+        // types those are (`UInt`/`ULong` on the JVM stdlib); mixed signed/unsigned falls through to the
+        // ordinary type error.
+        if self.syms.libraries.is_unsigned_integer_type(lt) && lt == rt {
             return match op {
                 BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem => lt,
                 BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge | BinOp::Eq | BinOp::Ne => {
@@ -6115,8 +6132,9 @@ impl<'a> Checker<'a> {
                 }
             }
             BinOp::Eq | BinOp::Ne => {
-                // `Any` compares with anything (Kotlin structural equality boxes a primitive operand);
-                // otherwise require equal/promotable primitives or two references.
+                // Structural equality accepts reference-vs-value comparisons: Kotlin boxes the value
+                // operand and calls null-safe equality (`Any? == 5`, `x.getOrNull() == 42`). Ordering and
+                // arithmetic remain stricter.
                 let any = Ty::obj("kotlin/Any");
                 // A nullable-primitive wrapper (`Int?` = `Integer`) compares with its primitive (`a == 5`):
                 // the primitive operand is boxed at the emit site for structural equality. Excludes
@@ -6126,9 +6144,25 @@ impl<'a> Checker<'a> {
                     w.nullable_primitive()
                         .map_or(false, |pw| pw == p && !matches!(pw, Ty::Float | Ty::Double))
                 };
+                let is_any_ref = |t: Ty| t.non_null() == Ty::obj("kotlin/Any");
+                let has_boxable_value_equality = |t: Ty| {
+                    matches!(
+                        t,
+                        Ty::Int
+                            | Ty::Byte
+                            | Ty::Short
+                            | Ty::Long
+                            | Ty::Boolean
+                            | Ty::Char
+                            | Ty::UInt
+                            | Ty::ULong
+                    )
+                };
                 if lt == rt
                     || Ty::promote(lt, rt).is_some()
                     || (lt.is_reference() && rt.is_reference())
+                    || (is_any_ref(lt) && has_boxable_value_equality(rt))
+                    || (is_any_ref(rt) && has_boxable_value_equality(lt))
                     || lt == any
                     || rt == any
                     || wrapper_vs_prim(lt, rt)
@@ -6274,15 +6308,19 @@ impl<'a> Checker<'a> {
                 );
                 return Some(Ty::Error);
             }
-            // `Array(n) { … }` is the reference `Array<T>`, distinct from a primitive array. A
-            // reference element keeps the existing `Ty::Array` reference representation; a primitive
-            // element is the logical `Array<Int>` (`Obj("kotlin/Array", [Int])`) — NOT boxed here, so
-            // element reads type as `Int`. The backend boxes to `Integer[]` when it lays out the array.
-            return Some(if elem.is_primitive() {
-                Ty::obj_args("kotlin/Array", &[elem])
-            } else {
-                Ty::array(elem)
-            });
+            // `Array(n) { … }` is the reference `Array<T>`, distinct from a primitive array. A reference
+            // element keeps the existing `Ty::Array` reference representation; scalar and value-class
+            // elements are the logical `Array<T>` (`Obj("kotlin/Array", [T])`) — NOT boxed here, so
+            // element reads type as `T`. The backend owns the physical boxed/value-class layout.
+            return Some(
+                if elem.boxed_ref().is_some()
+                    || self.syms.libraries.value_underlying(elem).is_some()
+                {
+                    Ty::obj_args("kotlin/Array", &[elem])
+                } else {
+                    Ty::array(elem)
+                },
+            );
         }
         None
     }
@@ -6370,21 +6408,18 @@ impl<'a> Checker<'a> {
             return Some(Ty::String);
         }
         if rt == Ty::String {
-            if let Some(ret) = self
-                .syms
-                .libraries
-                .builtin_member_ret("kotlin/String", name, arg_tys)
-                .or_else(|| resolve_string_instance(name, arg_tys))
+            if let Some(ret) = crate::call_resolver::resolve_instance_member(
+                &*self.syms.libraries,
+                rt,
+                name,
+                arg_tys,
+            )
+            .map(|m| m.ret)
             {
                 return Some(ret);
             }
         }
-        if rt == Ty::obj("java/lang/StringBuilder") {
-            if let Some(ret) = resolve_stringbuilder_instance(name, arg_tys) {
-                return Some(ret);
-            }
-        }
-        if let Ty::Obj(internal, _) = rt {
+        if let Ty::Obj(_, _) = rt {
             let module_member = crate::module_symbols::ModuleSymbols::new(self.syms)
                 .functions(name, Some(rt))
                 .overloads
@@ -6396,21 +6431,19 @@ impl<'a> Checker<'a> {
                     for (i, (p, a)) in params.iter().zip(arg_tys).enumerate() {
                         self.expect_assignable(*p, *a, self.span(args[i]), "argument");
                     }
-                    return Some(fi.callable.ret);
+                    return Some(
+                        self.inferred_member_ret(rt, name, &params)
+                            .unwrap_or(fi.callable.ret),
+                    );
                 }
             }
-            if let Some(m) = crate::call_resolver::resolve_instance(
+            if let Some(m) = crate::call_resolver::resolve_instance_member(
                 &*self.syms.libraries,
-                internal,
+                rt,
                 name,
                 arg_tys,
             ) {
-                return Some(
-                    self.syms
-                        .libraries
-                        .member_return(rt, name, arg_tys)
-                        .unwrap_or(m.ret),
-                );
+                return Some(m.ret);
             }
         }
         // A MODULE extension on the receiver (`fun Recv.name(args)` declared in this compilation) — keyed
@@ -6433,14 +6466,20 @@ impl<'a> Checker<'a> {
         // resolved receiver-aware so the right overload is selected (`CharSequence.reversed`, not the
         // `Iterable.reversed` that a receiver-blind fallthrough would pick). Mirrors the qualified
         // `recv.name(args)` extension typing.
-        if let Some(c) = self
-            .syms
-            .libraries
-            .resolve_callable(name, Some(rt), arg_tys, &[])
-        {
-            return Some(c.ret);
+        if let Some(ret) = self.library_extension_return(name, rt, arg_tys, &[]) {
+            return Some(ret);
+        }
+        if let Some(ret) = self.library_extension_inline_return(name, rt, arg_tys) {
+            return Some(ret);
         }
         None
+    }
+
+    fn inferred_member_ret(&self, receiver: Ty, name: &str, params: &[Ty]) -> Option<Ty> {
+        let internal = receiver.obj_internal()?;
+        self.inferred_method_rets
+            .get(&(internal.to_string(), name.to_string(), params.to_vec()))
+            .copied()
     }
 
     /// Check a lambda expression with explicit parameter types (for type-directed inference).
@@ -6593,6 +6632,53 @@ impl<'a> Checker<'a> {
         (t != Ty::Error).then_some(t)
     }
 
+    /// Resolve and record a classpath/library extension call. This keeps the legacy classpath-call
+    /// side-channel in one place while the call-resolution surface is being migrated to
+    /// `FunctionSet`/`ResolvedCall`.
+    fn record_library_extension_call(
+        &mut self,
+        name: &str,
+        receiver: Ty,
+        arg_tys: &[Ty],
+        type_args: &[Ty],
+    ) -> Option<Ty> {
+        let c = self.library_extension_callable(name, receiver, arg_tys, type_args)?;
+        Some(c.ret)
+    }
+
+    fn library_extension_callable(
+        &self,
+        name: &str,
+        receiver: Ty,
+        arg_tys: &[Ty],
+        type_args: &[Ty],
+    ) -> Option<crate::libraries::LibraryCallable> {
+        self.resolver()
+            .resolve_extension_callable(name, receiver, arg_tys, type_args)
+    }
+
+    fn library_extension_return(
+        &self,
+        name: &str,
+        receiver: Ty,
+        arg_tys: &[Ty],
+        type_args: &[Ty],
+    ) -> Option<Ty> {
+        self.library_extension_callable(name, receiver, arg_tys, type_args)
+            .map(|c| c.ret)
+    }
+
+    fn library_extension_inline_return(
+        &self,
+        name: &str,
+        receiver: Ty,
+        arg_tys: &[Ty],
+    ) -> Option<Ty> {
+        self.resolver()
+            .resolve_extension_inline_callable(name, receiver, arg_tys)
+            .map(|c| c.ret)
+    }
+
     /// When calling `f({ it.method() })` and `f`'s param is `(String) -> R`, this lets `it` have
     /// type `String` instead of the default `Object`.
     /// Type-check a RECEIVER lambda `{ a -> … }` passed to a `Recv.(value params) -> R` parameter: its
@@ -6603,7 +6689,7 @@ impl<'a> Checker<'a> {
     /// leading parameter, matching how `lambda_param_types` was built).
     fn check_lambda_with_receiver(&mut self, e: ExprId, recv: Ty, value_types: &[Ty]) -> Ty {
         if self.allow_lambda_mutation {
-            self.inline_lambdas.insert(e);
+            self.mark_inline_lambda(e);
         }
         if let Expr::Lambda { params, body } = self.file.expr(e).clone() {
             let bind_names: Vec<String> = if !params.is_empty() {
@@ -6613,14 +6699,7 @@ impl<'a> Checker<'a> {
             } else {
                 vec![]
             };
-            if !self.allow_lambda_mutation {
-                let outer_names: std::collections::HashSet<String> =
-                    self.scopes.iter().flat_map(|s| s.keys().cloned()).collect();
-                if !outer_names.is_empty() {
-                    self.record_captured_vars(body, &outer_names);
-                }
-            }
-            self.recv_lambda_tys.insert(e, recv);
+            self.mark_receiver_lambda(e, recv);
             let prev_this = self.this_ty;
             self.this_ty = Some(recv);
             self.push_scope();
@@ -6650,7 +6729,7 @@ impl<'a> Checker<'a> {
 
     fn check_lambda_with_types(&mut self, e: ExprId, param_types: &[Ty]) -> Ty {
         if self.allow_lambda_mutation {
-            self.inline_lambdas.insert(e);
+            self.mark_inline_lambda(e);
         }
         if let Expr::Lambda { params, body } = self.file.expr(e).clone() {
             let bind_names: Vec<String> = if !params.is_empty() {
@@ -6660,15 +6739,6 @@ impl<'a> Checker<'a> {
             } else {
                 vec![]
             };
-            // A non-inlined lambda that writes an enclosing local captures it through a `Ref$XxxRef`
-            // box (handled in lowering); record those vars. The body still checks normally here.
-            if !self.allow_lambda_mutation {
-                let outer_names: std::collections::HashSet<String> =
-                    self.scopes.iter().flat_map(|s| s.keys().cloned()).collect();
-                if !outer_names.is_empty() {
-                    self.record_captured_vars(body, &outer_names);
-                }
-            }
             self.push_scope();
             for (i, name) in bind_names.iter().enumerate() {
                 let pty = param_types.get(i).copied().unwrap_or(Ty::obj("kotlin/Any"));
@@ -6787,9 +6857,6 @@ impl<'a> Checker<'a> {
         if let (Ty::Array(_), "size") = (rt, name) {
             return Ty::Int;
         }
-        if rt == Ty::obj("java/lang/StringBuilder") && name == "length" {
-            return Ty::Int; // `sb.length` property → length()
-        }
         // Property read on a class value: `p.prop` (own or inherited).
         if let Ty::Obj(internal, args) = rt {
             if let Some((ty, _)) = self.lookup_prop(internal, name) {
@@ -6829,91 +6896,34 @@ impl<'a> Checker<'a> {
         {
             return *ty;
         }
-        // Library-type property read (`list.size`): a Kotlin property is a zero-arg accessor on the
-        // JVM — try the property's own name and its `getX()` form.
-        if let Ty::Obj(internal, _) = rt {
-            // `x` → `getX` (an `isFoo` boolean property keeps its name).
-            let getter = if name.starts_with("is")
-                && name
-                    .as_bytes()
-                    .get(2)
-                    .map_or(false, |b| b.is_ascii_uppercase())
-            {
-                name.to_string()
-            } else {
-                let mut c = name.chars();
-                format!(
-                    "get{}{}",
-                    c.next()
-                        .map(|f| f.to_uppercase().to_string())
-                        .unwrap_or_default(),
-                    c.as_str()
-                )
-            };
-            // Kotlin's built-in collection types remap a few property names to their JVM method (Kotlin
-            // `Map.keys`/`entries` → `java.util.Map.keySet()`/`entrySet()`), like kotlinc's mapped members.
-            let mapped = collection_mapped_accessor(&name).map(|s| s.to_string());
-            for cand in [Some(name.to_string()), Some(getter), mapped]
-                .into_iter()
-                .flatten()
-            {
-                if let Some(m) = crate::call_resolver::resolve_instance(
-                    &*self.syms.libraries,
-                    internal,
-                    &cand,
-                    &[],
-                ) {
-                    if !matches!(m.ret, Ty::Unit | Ty::Error) {
-                        return m.ret;
-                    }
-                }
-            }
+        // Library-type property read (`list.size`): semantic property metadata first, source-owned
+        // physical getter fallback second. Mapped builtins stay in the symbol provider.
+        if let Some(m) =
+            crate::call_resolver::resolve_property_member(&*self.syms.libraries, rt, name)
+        {
+            return m.ret;
         }
         // Classpath EXTENSION property: `recv.name` whose getter is a top-level `get<Name>(recv)` static
         // (e.g. `descriptor.elementDescriptors` → `SerialDescriptorKt.getElementDescriptors(descriptor)`).
         // Tried last, after members/user-ext-props/library getters, so it never shadows a real member.
         if let Ty::Obj(_, _) = rt {
-            // `x` → `getX`; a boolean `isFoo` property keeps its name (mirrors the library-getter rule).
-            let getter = if name.starts_with("is")
-                && name
-                    .as_bytes()
-                    .get(2)
-                    .is_some_and(|b| b.is_ascii_uppercase())
-            {
-                name.to_string()
-            } else {
-                let mut c = name.chars();
-                format!(
-                    "get{}{}",
-                    c.next()
-                        .map(|f| f.to_uppercase().to_string())
-                        .unwrap_or_default(),
-                    c.as_str()
-                )
-            };
-            if let Some(cl) = self
-                .syms
-                .libraries
-                .resolve_callable(&getter, Some(rt), &[], &[])
-            {
-                if !matches!(cl.ret, Ty::Unit | Ty::Error) {
-                    if let Some(e) = mexpr {
-                        self.ext_prop_calls.insert(
-                            e,
-                            (cl.owner.clone(), cl.name.clone(), cl.descriptor.clone()),
-                        );
-                    }
-                    return cl.ret;
+            if let Some(getter) = self.resolver().resolve_extension_property_getter(name, rt) {
+                if let Some(e) = mexpr {
+                    self.expr_lowers.insert(
+                        e,
+                        ExprLowering::ExtensionPropertyGet {
+                            getter: Box::new(getter.clone()),
+                        },
+                    );
                 }
+                return getter.ret;
             }
         }
-        // A Kotlin built-in PROPERTY over a JVM-mapped receiver (`CharSequence.length`) — declared in
-        // `.kotlin_builtins` (the backend's `builtin_member_ret` retries the mapped Kotlin identity).
-        if let Some(internal) = rt.obj_internal() {
-            if let Some(t) = self.syms.libraries.builtin_member_ret(internal, name, &[]) {
-                if !matches!(t, Ty::Unit | Ty::Error) {
-                    return t;
-                }
+        if let Some(m) =
+            crate::call_resolver::resolve_instance_member(&*self.syms.libraries, rt, name, &[])
+        {
+            if m.ret.is_read_value_result() {
+                return m.ret;
             }
         }
         self.diags.error(
@@ -7144,15 +7154,23 @@ impl<'a> Checker<'a> {
                     if self.lookup(&root).is_none() {
                         if let Some(internal) = self.imported_type_internal(&root) {
                             if let Some(cf) =
-                                self.syms
-                                    .libraries
-                                    .value_companion_fn(&internal, &name, args.len())
+                                self.syms.libraries.resolve_type(&internal).and_then(|t| {
+                                    t.value_companion_fns.into_iter().find(|cf| {
+                                        cf.callable.name == name
+                                            && cf.callable.params.len() == args.len()
+                                    })
+                                })
                             {
                                 for &a in args {
                                     self.expr(a);
                                 }
-                                let ret = cf.ret;
-                                self.companion_calls.insert(call, cf);
+                                let ret = cf.callable.ret;
+                                self.expr_lowers.insert(
+                                    call,
+                                    ExprLowering::InlineCall(InlineCall::ValueCompanion(Box::new(
+                                        cf,
+                                    ))),
+                                );
                                 return ret;
                             }
                         }
@@ -7166,13 +7184,15 @@ impl<'a> Checker<'a> {
                             let rt = self.expr(receiver);
                             let bt = self.check_with_receiver(rt, body, self.span(args[0]));
                             let returns_receiver = name == "apply";
-                            self.receiver_lambdas.insert(
+                            self.expr_lowers.insert(
                                 call,
-                                ReceiverLambda {
-                                    receiver,
-                                    body,
-                                    returns_receiver,
-                                },
+                                ExprLowering::InlineCall(InlineCall::ReceiverLambda(
+                                    ReceiverLambda {
+                                        receiver,
+                                        body,
+                                        returns_receiver,
+                                    },
+                                )),
                             );
                             return self.set(call, if returns_receiver { rt } else { bt });
                         }
@@ -7297,9 +7317,9 @@ impl<'a> Checker<'a> {
                                         .resolve_type(&internal)
                                         .and_then(|lt| lt.companion_object)
                                         .and_then(|(_, cty)| {
-                                            crate::call_resolver::resolve_instance(
+                                            crate::call_resolver::resolve_instance_member(
                                                 &*self.syms.libraries,
-                                                &cty,
+                                                Ty::obj(&cty),
                                                 &name,
                                                 &arg_tys,
                                             )
@@ -7317,19 +7337,11 @@ impl<'a> Checker<'a> {
                                             // Only when erased — a concrete return (`encodeToString: String`)
                                             // keeps the canonical `m.ret` (the recovered form would be a
                                             // non-canonical `Obj("kotlin/String")`).
-                                            if m.ret == Ty::obj("kotlin/Any") {
+                                            if m.member.physical_ret == Ty::obj("kotlin/Any") {
                                                 // A reified member (`<T> T decodeFromString(…)`) called
                                                 // with an explicit type argument (`decodeFromString<C>`)
                                                 // returns that type; else recover it from the arguments.
-                                                self.reified_type_arg(call)
-                                                    .or_else(|| {
-                                                        self.syms.libraries.instance_call_return(
-                                                            Ty::obj(&cty),
-                                                            &name,
-                                                            &arg_tys,
-                                                        )
-                                                    })
-                                                    .unwrap_or(m.ret)
+                                                self.reified_type_arg(call).unwrap_or(m.ret)
                                             } else {
                                                 m.ret
                                             }
@@ -7365,28 +7377,36 @@ impl<'a> Checker<'a> {
                 // element type and the non-lambda arguments — so the lambda body checks against `Int`
                 // rather than the erased `Any`. Type the non-lambda arguments first (the accumulator in
                 // `fold(0) { acc, x -> }` binds `R`); lambda positions are `None` until resolved.
-                let ext_lambda_pts: Option<Vec<Vec<Ty>>> = if method_sig.is_none()
+                let ext_lambda_partial: Option<Vec<Option<Ty>>> = if method_sig.is_none()
                     && rt != Ty::Error
                     && args
                         .iter()
                         .any(|&a| matches!(self.file.expr(a), Expr::Lambda { .. }))
                 {
-                    let partial: Vec<Option<Ty>> = args
-                        .iter()
-                        .map(|&a| {
-                            if matches!(self.file.expr(a), Expr::Lambda { .. }) {
-                                None
-                            } else {
-                                Some(self.expr(a))
-                            }
-                        })
-                        .collect();
-                    self.syms
-                        .libraries
-                        .extension_lambda_param_types(rt, &name, &partial)
+                    Some(
+                        args.iter()
+                            .map(|&a| {
+                                if matches!(self.file.expr(a), Expr::Lambda { .. }) {
+                                    None
+                                } else {
+                                    Some(self.expr(a))
+                                }
+                            })
+                            .collect(),
+                    )
                 } else {
                     None
                 };
+                let ext_lambda_pts: Option<Vec<Vec<Ty>>> =
+                    ext_lambda_partial.as_ref().and_then(|partial| {
+                        self.resolver()
+                            .extension_lambda_param_types(rt, &name, partial)
+                    });
+                let ext_lambda_recvs: Option<Vec<Option<Ty>>> =
+                    ext_lambda_partial.as_ref().and_then(|partial| {
+                        self.resolver()
+                            .extension_lambda_receivers(rt, &name, partial)
+                    });
                 // Array/`String` `forEach`/`forEachIndexed` have no `Obj` generic signature; supply the
                 // lambda parameter types directly from the element (the index is `Int`).
                 let ext_lambda_pts = ext_lambda_pts.or_else(|| {
@@ -7480,9 +7500,8 @@ impl<'a> Checker<'a> {
                 // the receiver's element type, at the lambda argument's position.
                 let ext_lambda_pts = ext_lambda_pts.or_else(|| {
                     let params = self
-                        .syms
-                        .libraries
-                        .lambda_return_overload_param(rt, &name)?;
+                        .resolver()
+                        .lambda_return_overload_param_types(rt, &name)?;
                     Some(
                         args.iter()
                             .map(|&a| {
@@ -7531,6 +7550,16 @@ impl<'a> Checker<'a> {
                             if pts.get(i).map_or(false, |v| !v.is_empty())
                                 && matches!(self.file.expr(a), Expr::Lambda { .. })
                             {
+                                if let Some(recv) = ext_lambda_recvs
+                                    .as_ref()
+                                    .and_then(|recvs| recvs.get(i))
+                                    .copied()
+                                    .flatten()
+                                {
+                                    let pt = &pts[i];
+                                    let value_types = pt.get(1..).unwrap_or(&[]);
+                                    return self.check_lambda_with_receiver(a, recv, value_types);
+                                }
                                 let pt = pts[i].clone();
                                 return self.check_lambda_with_types(a, &pt);
                             }
@@ -7546,13 +7575,23 @@ impl<'a> Checker<'a> {
                     return Ty::String; // intrinsic on any type
                 }
                 if rt == Ty::String {
-                    if let Some(ret) = self
-                        .syms
-                        .libraries
-                        .builtin_member_ret("kotlin/String", &name, &arg_tys)
-                        .or_else(|| resolve_string_instance(&name, &arg_tys))
+                    if let Some(ret) = crate::call_resolver::resolve_instance_member(
+                        &*self.syms.libraries,
+                        rt,
+                        &name,
+                        &arg_tys,
+                    )
+                    .map(|m| m.ret)
                     {
                         return ret;
+                    }
+                    match (name.as_str(), arg_tys.as_slice()) {
+                        ("substring", [Ty::Int]) | ("substring", [Ty::Int, Ty::Int]) => {
+                            return Ty::String;
+                        }
+                        ("indexOf", [Ty::String]) => return Ty::Int,
+                        ("concat", [Ty::String]) => return Ty::String,
+                        _ => {}
                     }
                     // `trimIndent()`/`trimMargin()` — stdlib extensions; krusty folds them at compile
                     // time on a string-literal receiver (codegen rejects a non-literal receiver).
@@ -7560,24 +7599,16 @@ impl<'a> Checker<'a> {
                         return Ty::String;
                     }
                 }
-                // Numeric/`Char` conversion intrinsics: `n.toInt()`/`toLong()`/`c.toChar()`/….
-                if (rt.is_numeric() || rt == Ty::Char || rt.is_unsigned()) && arg_tys.is_empty() {
-                    if let Some(target) = conversion_target(&name) {
-                        return target;
-                    }
-                    // `inc`/`dec` on an unsigned value return the same unsigned type.
-                    if rt.is_unsigned() && matches!(name.as_str(), "inc" | "dec") {
-                        return rt;
-                    }
-                }
-                // Curated `java.lang.StringBuilder` instance methods (append/toString/length).
-                if rt == Ty::obj("java/lang/StringBuilder") {
-                    if let Some(ret) = resolve_stringbuilder_instance(&name, &arg_tys) {
-                        return ret;
-                    }
+                if let Some(m) = crate::call_resolver::resolve_instance_member(
+                    &*self.syms.libraries,
+                    rt,
+                    &name,
+                    &arg_tys,
+                ) {
+                    return m.ret;
                 }
                 // Instance method call on a class value: `p.method(args)` (own or inherited).
-                if let Ty::Obj(internal, _) = rt {
+                if let Ty::Obj(_, _) = rt {
                     // The user member resolved through the current module as a `SymbolSource`
                     // (`ModuleSymbols`); its DFS member walk matches `lookup_method`, so the first Member
                     // overload is the same one hand-rolled lookup would pick. Collected owned so the
@@ -7661,7 +7692,9 @@ impl<'a> Checker<'a> {
                         if let Some((gm, class_binds, _)) = &generic_member {
                             return self.generic_member_ret(gm, class_binds, &arg_tys);
                         }
-                        return fi.callable.ret;
+                        return self
+                            .inferred_member_ret(rt, &name, &params)
+                            .unwrap_or(fi.callable.ret);
                     }
                     // A CLASSPATH instance member called with NAMED arguments: reorder the labels onto
                     // parameter positions via the member's `@Metadata` names, then check each against its
@@ -7707,30 +7740,13 @@ impl<'a> Checker<'a> {
                         }
                     }
                     // A classpath Java object: resolve the instance method via the `.class` reader.
-                    if let Some(m) = crate::call_resolver::resolve_instance(
+                    if let Some(m) = crate::call_resolver::resolve_instance_member(
                         &*self.syms.libraries,
-                        internal,
+                        rt,
                         &name,
                         &arg_tys,
                     ) {
-                        // A parameterized receiver (`List<Int>`) recovers the member's substituted
-                        // return (`get` → `Int`) from the generic signature; else the erased return.
-                        let ret = self
-                            .syms
-                            .libraries
-                            .member_return(rt, &name, &arg_tys)
-                            .unwrap_or(m.ret);
-                        return ret;
-                    }
-                    // A Kotlin built-in member over a JVM-mapped receiver (`CharSequence.get`,
-                    // `Number.toInt`) — declared in `.kotlin_builtins` (the backend's `builtin_member_ret`
-                    // retries the mapped Kotlin identity). The backend emits it via `builtin_member_call`.
-                    if let Some(ret) = self
-                        .syms
-                        .libraries
-                        .builtin_member_ret(internal, &name, &arg_tys)
-                    {
-                        return ret;
+                        return m.ret;
                     }
                 }
                 // Builtin bitwise/shift operator methods on `Int`/`Long` (`a shl b`, `a and b`,
@@ -7754,12 +7770,9 @@ impl<'a> Checker<'a> {
                 // directly to the equivalent operator bytecode (see the mirror in `emit_call`); the
                 // rest (`mod` floor-semantics, `rangeTo`, `inc`/`dec`) aren't modeled → reject rather
                 // than dispatch to a user extension, which would miscompile.
-                if rt.is_primitive() && is_builtin_operator_method(&name) {
+                if rt.is_numeric_or_char() && is_builtin_operator_method(&name) {
                     // A user `infix`/`operator` extension with this name shadows the builtin for the
-                    // *infix* form (`a rem b`) while the dot form (`a.rem(b)`) keeps the builtin —
-                    // but krusty parses both to the same AST, so it can't tell them apart. When such
-                    // an extension exists, reject (skip) rather than risk picking the wrong one.
-                    // An exact-receiver user extension (module source rung 0) of this operator name.
+                    // *infix* form (`a rem b`) while the dot form (`a.rem(b)`) keeps the builtin.
                     let user_ext = crate::module_symbols::ModuleSymbols::new(self.syms)
                         .functions(&name, Some(rt))
                         .overloads
@@ -7767,7 +7780,8 @@ impl<'a> Checker<'a> {
                         .any(|o| {
                             o.kind == crate::libraries::FnKind::Extension && o.receiver_rank == 0
                         });
-                    if rt.is_numeric() && !user_ext {
+                    let infix_user_ext = self.file.infix_calls.contains(&call.0) && user_ext;
+                    if !infix_user_ext && rt.is_numeric() {
                         // Binary arithmetic methods: `a.plus(b)` ≡ `a + b` (same numeric promotion).
                         let bin = match name.as_str() {
                             "plus" => Some(BinOp::Add),
@@ -7797,7 +7811,7 @@ impl<'a> Checker<'a> {
                     // `Char` arithmetic methods: `c.plus(n): Char`, `c.minus(n): Char`, `c.minus(c2): Int`.
                     // `Char` isn't `is_numeric` (no promotion), but these map to the operator form, which
                     // `check_binary` types with the correct `Char`/`Int` operand rules.
-                    if rt == Ty::Char && !user_ext {
+                    if !infix_user_ext && rt == Ty::Char {
                         let bin = match name.as_str() {
                             "plus" => Some(BinOp::Add),
                             "minus" => Some(BinOp::Sub),
@@ -7807,8 +7821,10 @@ impl<'a> Checker<'a> {
                             return self.check_binary(op, rt, *at, span);
                         }
                     }
-                    self.diags.error(span, format!("krusty: builtin operator method '{name}' on a primitive is not supported"));
-                    return Ty::Error;
+                    if !infix_user_ext {
+                        self.diags.error(span, format!("krusty: builtin operator method '{name}' on a primitive is not supported"));
+                        return Ty::Error;
+                    }
                 }
                 // Extension / static method from any classpath library (e.g. Kotlin stdlib).
                 // Receiver type is passed as the first argument (invokestatic at the JVM level).
@@ -7847,26 +7863,19 @@ impl<'a> Checker<'a> {
                             if let Some(sel) = slots.into_iter().collect::<Option<Vec<ExprId>>>() {
                                 let tys: Vec<Ty> =
                                     sel.iter().map(|a| self.expr_types[a.0 as usize]).collect();
-                                if let Some(c) = self.syms.libraries.resolve_callable(
-                                    &name,
-                                    Some(rt),
-                                    &tys,
-                                    &call_targs,
-                                ) {
-                                    self.ext_calls.insert(call, (c.owner, c.name, c.descriptor));
-                                    return c.ret;
+                                if let Some(ret) =
+                                    self.record_library_extension_call(&name, rt, &tys, &call_targs)
+                                {
+                                    return ret;
                                 }
                             }
                         }
                     }
                 }
-                if let Some(c) =
-                    self.syms
-                        .libraries
-                        .resolve_callable(&name, Some(rt), &arg_tys, &call_targs)
+                if let Some(ret) =
+                    self.record_library_extension_call(&name, rt, &arg_tys, &call_targs)
                 {
-                    self.ext_calls.insert(call, (c.owner, c.name, c.descriptor));
-                    return c.ret;
+                    return ret;
                 }
                 // kotlinc adapts an integer LITERAL argument to a wider expected integer type
                 // (`longRange step 3` resolves `LongProgression.step(Long)`, with `3` as `3L`). When the
@@ -7889,13 +7898,10 @@ impl<'a> Checker<'a> {
                             }
                         })
                         .collect();
-                    if let Some(c) =
-                        self.syms
-                            .libraries
-                            .resolve_callable(&name, Some(rt), &widened, &call_targs)
+                    if let Some(ret) =
+                        self.record_library_extension_call(&name, rt, &widened, &call_targs)
                     {
-                        self.ext_calls.insert(call, (c.owner, c.name, c.descriptor));
-                        return c.ret;
+                        return ret;
                     }
                 }
                 // A call selected by lambda RETURN type (`recv.sumOf { it * 2 }: Int`): the `@JvmName`
@@ -7919,50 +7925,34 @@ impl<'a> Checker<'a> {
                 // a lambda-bearing scope fn (`takeIf`/`takeUnless`/…), recovering the receiver-bound return.
                 if args.len() == 1 && matches!(self.file.expr(args[0]), Expr::Lambda { .. }) {
                     if let Some(c) = self
-                        .syms
-                        .libraries
-                        .resolve_scope_inline(&name, rt, &arg_tys)
+                        .resolver()
+                        .resolve_extension_inline_callable(&name, rt, &arg_tys)
                     {
                         return c.ret;
                     }
                 }
-                // A NO-lambda `@InlineOnly` extension on a NON-UNSIGNED PRIMITIVE receiver returning a
-                // primitive/`String` — `Char.isDigit()`/`isLetter()`/`uppercaseChar()` (inline
-                // `Character.isDigit(this)`/`toUpperCase(this)`). Restricted to this shape because the
-                // generic no-lambda splice is value-correct only for these simple bodies: a function-typed
-                // parameter (`let`/`apply` fallback) → `IllegalAccessError`, and an unsigned/value-class or
-                // multi-step reference body (`StringBuilder.appendLine`) → wrong values. Gated further on
-                // `can_inline_call` (the body is actually spliceable), so the checker accepts only what the
-                // emitter splices correctly. No name match — the receiver/return SHAPE selects it.
-                if rt.is_primitive()
-                    && !rt.is_unsigned()
-                    && (arg_tys.is_empty()
-                        || arg_tys.iter().all(|a| a.is_primitive() && !a.is_unsigned()))
+                // A no-lambda `@InlineOnly` extension is accepted when the provider/backend has already
+                // proven the selected body spliceable. Preserve the existing no-function-parameter route
+                // (`StringBuilder.appendLine`, etc.) and add one receiver-scope case: a function VALUE
+                // argument to `run`/`apply` (`x.apply(block)`) is just an argument to the spliced stdlib
+                // body. Literal receiver lambdas (`x.apply { ... }`) need receiver-aware typing/lowering
+                // above, and value-class callable references through `let(::f)` still require bridge/
+                // erasure work, so those keep skipping instead of miscompiling.
+                if let Some(c) = self
+                    .resolver()
+                    .resolve_extension_inline_callable(&name, rt, &arg_tys)
                 {
-                    if let Some(c) = self
-                        .syms
-                        .libraries
-                        .resolve_scope_inline(&name, rt, &arg_tys)
+                    let has_literal_lambda = args
+                        .iter()
+                        .any(|&a| matches!(self.file.expr(a), Expr::Lambda { .. }));
+                    let no_function_params =
+                        !c.params.iter().skip(1).any(|p| matches!(p, Ty::Fun(_)));
+                    let receiver_scope_function_value =
+                        matches!(name.as_str(), "run" | "apply") && !has_literal_lambda;
+                    if c.inline.must_inline()
+                        && (no_function_params || receiver_scope_function_value)
                     {
-                        // The KOTLIN return must be a real primitive/`String` — not an unsigned type the
-                        // JVM signature erased to a signed primitive (`toUShort(): UShort` reads back as
-                        // `Short`), which would splice to a wrong value (krusty's `Ty` can't model it).
-                        let ret_ok = ((c.ret.is_primitive() && !c.ret.is_unsigned())
-                            || c.ret == Ty::String)
-                            && !self
-                                .syms
-                                .libraries
-                                .metadata_return_unsigned(&c.owner, &c.name);
-                        let no_fun = !c.descriptor.contains("Lkotlin/jvm/functions/Function");
-                        if ret_ok
-                            && no_fun
-                            && self
-                                .syms
-                                .libraries
-                                .can_inline_call(&c.owner, &c.name, &c.descriptor)
-                        {
-                            return c.ret;
-                        }
+                        return c.ret;
                     }
                 }
                 // User-defined extension function in this file (invokestatic on the file facade), resolved
@@ -8023,14 +8013,6 @@ impl<'a> Checker<'a> {
                                 self.expect_assignable(*p, *a, self.span(args[i]), "argument");
                             }
                         }
-                        self.ext_calls.insert(
-                            call,
-                            (
-                                "$local".to_string(),
-                                name.clone(),
-                                fi.callable.descriptor.clone(),
-                            ),
-                        );
                         return fi.callable.ret;
                     }
                 }
@@ -8137,9 +8119,9 @@ impl<'a> Checker<'a> {
                 }
                 // `(suspend (…)->T).startCoroutine(completion)` — a `kotlin.coroutines` extension intrinsic
                 // (recognized via the registry). Receiver is a suspend function value; the call starts the
-                // coroutine and returns `Unit`. Lowering emits `ContinuationKt.startCoroutine(...)`.
+                // coroutine and returns `Unit`; lowering asks the target runtime for the physical helper.
                 if matches!(rt, Ty::Fun(s) if s.suspend)
-                    && self.syms.libraries.coroutine_intrinsic(&name)
+                    && crate::libraries::coroutine_intrinsic(&name)
                         == Some(crate::libraries::CoroutineIntrinsic::StartCoroutine)
                 {
                     return Ty::Unit;
@@ -8191,7 +8173,7 @@ impl<'a> Checker<'a> {
                         }
                     }
                     let ret = sig.ret;
-                    self.local_call_map.insert(call, stmt_id);
+                    self.mark_local_function_expr(call, stmt_id);
                     return ret;
                 }
                 // `with(x) { … }` — `x` is the lambda body's implicit receiver (intercept before the
@@ -8201,13 +8183,15 @@ impl<'a> Checker<'a> {
                         if params.is_empty() {
                             let rt = self.expr(args[0]);
                             let bt = self.check_with_receiver(rt, body, self.span(args[1]));
-                            self.receiver_lambdas.insert(
+                            self.expr_lowers.insert(
                                 call,
-                                ReceiverLambda {
-                                    receiver: args[0],
-                                    body,
-                                    returns_receiver: false,
-                                },
+                                ExprLowering::InlineCall(InlineCall::ReceiverLambda(
+                                    ReceiverLambda {
+                                        receiver: args[0],
+                                        body,
+                                        returns_receiver: false,
+                                    },
+                                )),
                             );
                             return self.set(call, bt);
                         }
@@ -8223,7 +8207,7 @@ impl<'a> Checker<'a> {
                     && self.lookup(&fname).is_none()
                     && !self.module_declares(&fname)
                     && matches!(self.file.expr(args[0]), Expr::Lambda { .. })
-                    && self.syms.libraries.coroutine_intrinsic(&fname)
+                    && crate::libraries::coroutine_intrinsic(&fname)
                         == Some(
                             crate::libraries::CoroutineIntrinsic::SuspendCoroutineUninterceptedOrReturn,
                         )
@@ -8249,7 +8233,12 @@ impl<'a> Checker<'a> {
                     }
                     // A classpath functional interface (`Runnable`, `Comparator`, …).
                     if let Some(internal) = self.syms.class_names.get(&fname).cloned() {
-                        if let Some(sam) = self.syms.libraries.sam_method(&internal) {
+                        if let Some(sam) = self
+                            .syms
+                            .libraries
+                            .resolve_type(&internal)
+                            .and_then(|t| t.sam_method)
+                        {
                             self.check_lambda_with_types(args[0], &sam.params);
                             return self.set(call, Ty::obj(&internal));
                         }
@@ -8310,9 +8299,8 @@ impl<'a> Checker<'a> {
                     // A library top-level function only when no user function shadows it.
                     .filter(|_| known_sig.is_none())
                     .and_then(|partial| {
-                        self.syms
-                            .libraries
-                            .toplevel_lambda_param_types(&fname, partial)
+                        self.resolver()
+                            .top_level_lambda_param_types(&fname, partial)
                     })
                     .or_else(|| user_generic.clone());
                 // Per-param RECEIVER function type for a classpath top-level HOF (`NavHost(builder:
@@ -8323,7 +8311,9 @@ impl<'a> Checker<'a> {
                 let toplevel_lambda_recvs: Option<Vec<Option<Ty>>> = toplevel_partial
                     .as_ref()
                     .filter(|_| known_sig.is_none())
-                    .and_then(|partial| self.syms.libraries.toplevel_lambda_recvs(&fname, partial));
+                    .and_then(|partial| {
+                        self.resolver().top_level_lambda_receivers(&fname, partial)
+                    });
                 // A top-level NON-public (`@InlineOnly`) inline fn (`require`/`check`) inlines its lambda
                 // argument (or the file is skipped), so a mutable capture is an inline capture — type the
                 // lambda body with mutation allowed (don't `Ref`-box the captured var).
@@ -8634,12 +8624,6 @@ impl<'a> Checker<'a> {
                             return self.ctor_result(call, &internal);
                         }
                     }
-                    // `StringBuilder()` / `StringBuilder("init")` / `StringBuilder(capacity)`.
-                    if fname == "StringBuilder"
-                        && matches!(arg_tys.as_slice(), [] | [Ty::String] | [Ty::Int])
-                    {
-                        return Ty::obj("java/lang/StringBuilder");
-                    }
                     // `Any()` constructs java.lang.Object (Kotlin's root type).
                     if fname == "Any" && arg_tys.is_empty() {
                         return Ty::obj("kotlin/Any");
@@ -8695,10 +8679,8 @@ impl<'a> Checker<'a> {
                     let params = &fi.callable.params;
                     let cs = &fi.call_sig;
                     let mut ret_ty = fi.callable.ret;
-                    // Inferred return (signature defaulted to Unit) from the inference pass — keyed by
-                    // (name, the RESOLVED overload's parameter types) so the right overload is read.
                     if let Some(&inferred) =
-                        self.fun_ret_overrides.get(&(fname.clone(), params.clone()))
+                        self.inferred_fun_rets.get(&(fname.clone(), params.clone()))
                     {
                         ret_ty = inferred;
                     }
@@ -8872,14 +8854,14 @@ impl<'a> Checker<'a> {
                         None => (args.to_vec(), arg_tys.clone()),
                     };
                     if let Some(c) =
-                        self.syms
-                            .libraries
-                            .resolve_callable(&fname, None, &arg_tys, &call_targs)
+                        self.resolver()
+                            .resolve_top_level_callable(&fname, &arg_tys, &call_targs)
                     {
-                        let vararg = c.params.len() != arg_tys.len()
-                            || c.params.last().map_or(false, |p| {
-                                p.array_elem().is_some() && arg_tys.last() != Some(p)
-                            });
+                        let last_is_array =
+                            c.params.last().is_some_and(|p| p.array_elem().is_some());
+                        let vararg = last_is_array
+                            && (c.params.len() != arg_tys.len()
+                                || c.params.last().map_or(false, |p| arg_tys.last() != Some(p)));
                         if vararg && !c.params.is_empty() {
                             let fixed = c.params.len() - 1;
                             let elem = c.params[fixed].array_elem().unwrap_or(Ty::Error);
@@ -8897,6 +8879,30 @@ impl<'a> Checker<'a> {
                                     arg_tys[i],
                                     self.span(sel_args[i]),
                                     "vararg argument",
+                                );
+                            }
+                        } else if c.default_call
+                            && arg_tys.last().is_some_and(|t| matches!(t, Ty::Fun(_)))
+                            && !arg_tys.is_empty()
+                            && arg_tys.len() < c.params.len()
+                        {
+                            let prefix_len = arg_tys.len() - 1;
+                            let last = c.params.len() - 1;
+                            for i in 0..prefix_len {
+                                self.expect_assignable(
+                                    c.params[i],
+                                    arg_tys[i],
+                                    self.span(sel_args[i]),
+                                    "argument",
+                                );
+                            }
+                            let lambda_arg = sel_args[prefix_len];
+                            if !matches!(self.file.expr(lambda_arg), Expr::Lambda { .. }) {
+                                self.expect_assignable(
+                                    c.params[last],
+                                    arg_tys[prefix_len],
+                                    self.span(lambda_arg),
+                                    "argument",
                                 );
                             }
                         } else {
@@ -9047,7 +9053,7 @@ impl<'a> Checker<'a> {
             if rt != Ty::Error {
                 self.expect_assignable(param, rt, self.span(rhs), "operator argument");
             }
-            self.plus_assign.insert(s);
+            self.stmt_lowers.insert(s, StmtLowering::PlusAssign);
             return true;
         }
         // Otherwise resolve a `plusAssign` operator on the receiver, exactly as kotlinc does: if one is
@@ -9060,12 +9066,11 @@ impl<'a> Checker<'a> {
         if rt != Ty::Error
             && matches!(recv, Ty::Obj(..))
             && self
-                .syms
-                .libraries
-                .resolve_scope_inline(aname, recv, &[rt])
+                .resolver()
+                .resolve_extension_inline_callable(aname, recv, &[rt])
                 .is_some()
         {
-            self.plus_assign.insert(s);
+            self.stmt_lowers.insert(s, StmtLowering::PlusAssign);
             return true;
         }
         false
@@ -9161,43 +9166,28 @@ impl<'a> Checker<'a> {
                                 .method_of(i, &comp)
                                 .map(|sig| sig.ret)
                                 .or_else(|| {
-                                    crate::call_resolver::resolve_instance(
+                                    crate::call_resolver::resolve_instance_member(
                                         &*self.syms.libraries,
-                                        i,
+                                        it,
                                         &comp,
                                         &[],
                                     )
-                                    .map(|m| {
-                                        self.syms
-                                            .libraries
-                                            .member_return(it, &comp, &[])
-                                            .unwrap_or(m.ret)
-                                    })
+                                    .map(|m| m.ret)
                                 })
                         })
                         // `List.component1()`, … are stdlib *extensions* — try those too.
-                        .or_else(|| {
-                            self.syms
-                                .libraries
-                                .resolve_callable(&comp, Some(it), &[], &[])
-                                .map(|c| c.ret)
-                        })
+                        .or_else(|| self.library_extension_return(&comp, it, &[], &[]))
                         // An indexable type (`List`): `componentN` is the inline `get(N-1)` — use the
                         // element type from `get(Int)` (which kotlinc inlines the component to).
                         .or_else(|| {
-                            internal.and_then(|i| {
-                                crate::call_resolver::resolve_instance(
+                            internal.and_then(|_| {
+                                crate::call_resolver::resolve_instance_member(
                                     &*self.syms.libraries,
-                                    i,
+                                    it,
                                     "get",
                                     &[Ty::Int],
                                 )
-                                .map(|m| {
-                                    self.syms
-                                        .libraries
-                                        .member_return(it, "get", &[Ty::Int])
-                                        .unwrap_or(m.ret)
-                                })
+                                .map(|m| m.ret)
                             })
                         });
                     match ty {
@@ -9220,8 +9210,8 @@ impl<'a> Checker<'a> {
                 // need a user `inc`/`dec` operator krusty doesn't support (reject, never miscompile).
                 let span = self.file.stmt_spans[s.0 as usize];
                 let inherited = || {
-                    if let Some(Ty::Obj(internal, _)) = self.this_ty.clone() {
-                        self.lookup_prop(&internal, &name)
+                    if let Some(Ty::Obj(internal, _)) = self.this_ty {
+                        self.lookup_prop(internal, &name)
                     } else {
                         None
                     }
@@ -9237,7 +9227,7 @@ impl<'a> Checker<'a> {
                             self.diags
                                 .error(span, "'val' cannot be reassigned.".to_string());
                         }
-                        if !ty.is_numeric() && ty != Ty::Char {
+                        if !ty.is_numeric_or_char() {
                             self.diags.error(
                                 span,
                                 "krusty: '++'/'--' is only supported on a numeric variable"
@@ -9293,9 +9283,8 @@ impl<'a> Checker<'a> {
                             // A bare write to an *inherited* `var` member (`x = …` where `x` is declared in a
                             // superclass): the own properties are in the implicit-`this` scope (found by
                             // `lookup` above), but inherited ones are resolved through `this`'s class chain.
-                            let inherited = if let Some(Ty::Obj(internal, _)) = self.this_ty.clone()
-                            {
-                                self.lookup_prop(&internal, &name)
+                            let inherited = if let Some(Ty::Obj(internal, _)) = self.this_ty {
+                                self.lookup_prop(internal, &name)
                             } else {
                                 None
                             };
@@ -9526,44 +9515,31 @@ impl<'a> Checker<'a> {
                     Ty::Array(_) => it.array_elem().unwrap_or(Ty::Error),
                     Ty::String => Ty::Char, // iterating a String yields its chars
                     Ty::Error => Ty::Error,
-                    // A primitive range / progression iterates as its (unboxed) primitive element,
-                    // matching kotlinc's specialized `IntIterator.nextInt()` loop (no boxing).
-                    Ty::Obj(internal, _) if range_primitive_elem(internal).is_some() => {
-                        range_primitive_elem(internal).unwrap()
-                    }
-                    // A collection/range value with an `iterator()` — the iterator protocol. The
-                    // element is its generic argument (`List<Int>` → `Int`), erased `Any` if absent.
-                    Ty::Obj(internal, args)
-                        if crate::call_resolver::resolve_instance(
+                    Ty::Obj(internal, args) => {
+                        if let Some(info) = self.syms.libraries.counted_loop_info(internal) {
+                            info.elem
+                        } else if crate::call_resolver::resolve_instance(
                             &*self.syms.libraries,
                             internal,
                             "iterator",
                             &[],
                         )
-                        .is_some() =>
-                    {
-                        args.first()
-                            .copied()
-                            .unwrap_or_else(|| Ty::obj("kotlin/Any"))
-                    }
-                    // A value with no `iterator()` member but an `iterator` extension (`for (e in map)`
-                    // uses `Map.iterator()` → `Iterator<Map.Entry<K,V>>`): the element is that iterator's
-                    // type argument.
-                    Ty::Obj(..) => {
-                        match self
-                            .syms
-                            .libraries
-                            .resolve_callable("iterator", Some(it), &[], &[])
+                        .is_some()
                         {
-                            Some(c) => c
-                                .ret
-                                .type_args()
-                                .first()
+                            args.first()
                                 .copied()
-                                .unwrap_or_else(|| Ty::obj("kotlin/Any")),
-                            None => {
-                                self.diags.error(self.span(iterable), format!("krusty: 'for' over '{}' is not supported (only arrays, String, and Iterables)", it.name()));
-                                Ty::Error
+                                .unwrap_or_else(|| Ty::obj("kotlin/Any"))
+                        } else {
+                            match self.library_extension_return("iterator", it, &[], &[]) {
+                                Some(ret) => ret
+                                    .type_args()
+                                    .first()
+                                    .copied()
+                                    .unwrap_or_else(|| Ty::obj("kotlin/Any")),
+                                None => {
+                                    self.diags.error(self.span(iterable), format!("krusty: 'for' over '{}' is not supported (only arrays, String, and Iterables)", it.name()));
+                                    Ty::Error
+                                }
                             }
                         }
                     }
@@ -9596,7 +9572,7 @@ impl<'a> Checker<'a> {
     }
 
     /// Type-check a local function declaration (`fun` inside a function body). Non-capturing local
-    /// functions are lifted to private static methods; captures are rejected.
+    /// functions are lifted to private static methods; captures become leading parameters.
     fn check_local_fun(&mut self, f: &FunDecl, stmt_id: StmtId) {
         let span = f.span;
         if !f.type_params.is_empty() {
@@ -9617,31 +9593,38 @@ impl<'a> Checker<'a> {
             .cloned()
             .collect();
 
-        // Captured outer locals: lifted to extra leading parameters (recorded as ordered `(name,
-        // type)`); a captured var the body *writes* is also boxed (`Ref$XxxRef`) so the lift shares the
-        // cell. Determined by walking the body (stops at nested local funs, which capture separately).
+        // Captured outer locals: lifted to extra leading parameters. A captured var whose cell must be
+        // shared is marked explicitly; the target runtime chooses the holder representation.
+        let mut captured_locals: Vec<(String, Ty)> = Vec::new();
         if !outer_names.is_empty() {
             if let FunBody::Expr(e) | FunBody::Block(e) = &f.body {
-                let mut captured: Vec<(String, Ty)> = Vec::new();
                 for n in &outer_names {
                     let single: std::collections::HashSet<String> =
                         std::iter::once(n.clone()).collect();
                     if local_fun_body_uses_any(self.file, *e, &single) {
                         let ty = self.lookup(n).map(|l| l.ty).unwrap_or(Ty::Error);
-                        captured.push((n.clone(), ty));
+                        captured_locals.push((n.clone(), ty));
                     }
                 }
-                captured.sort_by(|a, b| a.0.cmp(&b.0));
-                // Box the captures that need a shared cell (a `var` written here, or a `var` reassigned
-                // elsewhere in the function) — `record_captured_vars` adds them to `boxed_vars`; the
-                // lift passes each captured holder/value accordingly. A captured `val` (or a never-
-                // reassigned `var`) is passed by value.
-                self.record_captured_vars(*e, &outer_names);
-                if !captured.is_empty() {
-                    self.local_fun_captures.insert(stmt_id, captured);
-                }
+                captured_locals.sort_by(|a, b| a.0.cmp(&b.0));
             }
         }
+        let captures: Vec<LocalCapture> = captured_locals
+            .into_iter()
+            .map(|(name, ty)| {
+                let shared_cell = match &f.body {
+                    FunBody::Expr(e) | FunBody::Block(e) => {
+                        self.local_capture_needs_shared_cell(*e, &name)
+                    }
+                    FunBody::None => false,
+                };
+                LocalCapture {
+                    name,
+                    ty,
+                    shared_cell,
+                }
+            })
+            .collect();
 
         // Add the local function's own type parameters (a primitive/reference bound carries through).
         let resolve = class_internal_resolver(self.syms);
@@ -9702,7 +9685,14 @@ impl<'a> Checker<'a> {
 
         // Register in current local-funs frame and in the TypeInfo maps.
         self.register_local_fun(&f.name, stmt_id, sig.clone());
-        self.local_fun_sigs.insert(stmt_id, (mangled, sig.clone()));
+        self.stmt_lowers.insert(
+            stmt_id,
+            StmtLowering::LocalFunction(Box::new(LocalFunInfo {
+                mangled,
+                sig: sig.clone(),
+                captures,
+            })),
+        );
 
         // Check the body (for a block body or when return type was already inferred above for expr).
         let prev_ret = self.ret_ty;
@@ -9743,8 +9733,8 @@ mod tests {
         let toks = lex(src, &mut d);
         let file = parse(src, &toks, &mut d);
         let files = vec![file];
-        let syms = collect_signatures(&files, &mut d);
-        let info = check_file(&files[0], &syms, &mut d);
+        let mut syms = collect_signatures(&files, &mut d);
+        let info = check_file(&files[0], &mut syms, &mut d);
         let errs: Vec<String> = d.diags.iter().map(|x| x.msg.clone()).collect();
         (errs, Some(info))
     }
@@ -9795,7 +9785,7 @@ mod tests {
     // NOTE: `require`/`check`/`error`/`TODO`/`assertEquals`/`assertTrue`/`assertFalse` are no longer
     // hardcoded in the checker — they resolve generically from the classpath (a real stdlib / kotlin.test
     // jar) and are validated by the box-conformance + `feature_box_e2e` suites, not here (these unit
-    // tests use `EmptyLibrarySet`, so a classpath-resolved call can't be typed).
+    // tests use `EmptySymbolSource`, so a classpath-resolved call can't be typed).
 
     #[test]
     fn object_self_reference_resolves() {
@@ -9959,18 +9949,5 @@ mod tests {
             "fun f(p: Widget): Int = 0",
             "unresolved reference 'Widget'.",
         );
-    }
-
-    #[test]
-    fn string_method_table() {
-        assert_eq!(
-            resolve_string_instance("substring", &[Ty::Int]),
-            Some(Ty::String)
-        );
-        assert_eq!(
-            resolve_string_instance("indexOf", &[Ty::String]),
-            Some(Ty::Int)
-        );
-        assert_eq!(resolve_string_instance("substring", &[Ty::String]), None);
     }
 }

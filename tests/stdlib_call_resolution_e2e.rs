@@ -12,6 +12,7 @@ mod common;
 
 use krusty::diag::DiagSink;
 use krusty::resolve::{check_file, collect_signatures_with_cp};
+use krusty::symbol_source::SymbolSource;
 
 /// Compile-check `src` against the shared toolchain classpath; return any error diagnostics' messages.
 /// `None` means the toolchain (stdlib jar / JDK modules) isn't available — the caller should skip.
@@ -33,8 +34,8 @@ fn resolve_errors(src: &str) -> Option<Vec<String>> {
     )];
     let cp = std::rc::Rc::new(krusty::jvm::classpath::Classpath::new(cp_paths));
     let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(cp));
-    let syms = collect_signatures_with_cp(&files, platform, &mut diags);
-    let _ = check_file(&files[0], &syms, &mut diags);
+    let mut syms = collect_signatures_with_cp(&files, platform, &mut diags);
+    let _ = check_file(&files[0], &mut syms, &mut diags);
     Some(
         diags
             .diags
@@ -86,5 +87,65 @@ fn kotlin_test_assert_equals_resolves() {
     assert_resolves(
         "assertEquals",
         "// WITH_STDLIB\nimport kotlin.test.assertEquals\nfun box(): String { assertEquals(2, 1 + 1); return \"OK\" }",
+    );
+}
+
+#[test]
+fn kotlin_test_assert_fails_with_resolves() {
+    assert_resolves(
+        "assertFailsWith",
+        "// WITH_STDLIB\nimport kotlin.test.assertFailsWith\nfun box(): String { assertFailsWith<IllegalArgumentException> { throw IllegalArgumentException() }; return \"OK\" }",
+    );
+}
+
+#[test]
+fn receiver_scope_function_accepts_function_value_argument() {
+    assert_resolves(
+        "Buildee.apply(instructions)",
+        "// WITH_STDLIB\n\
+class Buildee<T> { fun yield(arg: T) {} }\n\
+fun <T> build(instructions: Buildee<T>.() -> Unit): Buildee<T> = Buildee<T>().apply(instructions)\n\
+fun box(): String { build<String> { yield(\"OK\") }; return \"OK\" }\n",
+    );
+}
+
+#[test]
+fn kotlin_test_assert_fails_with_default_is_inline_only_callable() {
+    let mut cp_paths =
+        common::classpath_jars_for("// WITH_STDLIB\nimport kotlin.test.assertFailsWith\n");
+    let Some(jdk) = common::jdk_modules() else {
+        eprintln!("skip assertFailsWith provider shape: no JDK modules");
+        return;
+    };
+    if cp_paths.is_empty() {
+        eprintln!("skip assertFailsWith provider shape: no stdlib/test jars");
+        return;
+    }
+    cp_paths.push(jdk);
+    let cp = std::rc::Rc::new(krusty::jvm::classpath::Classpath::new(cp_paths));
+    let platform = krusty::jvm::jvm_libraries::JvmLibraries::new(cp);
+    let fs = platform.functions("assertFailsWith$default", None);
+    let overload = fs
+        .overloads
+        .iter()
+        .find(|o| o.callable.params.len() == 2)
+        .unwrap_or_else(|| {
+            panic!(
+                "expected assertFailsWith$default overload, got {} overload(s)",
+                fs.overloads.len()
+            )
+        });
+    assert!(
+        overload.flags.inline.must_inline(),
+        "assertFailsWith$default must be exposed as splice-only inline"
+    );
+    assert_eq!(overload.call_sig.param_defaults, vec![true, false]);
+}
+
+#[test]
+fn string_builder_append_line_resolves() {
+    assert_resolves(
+        "StringBuilder.appendLine",
+        "// WITH_STDLIB\nfun box(): String { val sb = StringBuilder(); sb.appendLine(\"OK\"); return sb.toString().trim() }",
     );
 }

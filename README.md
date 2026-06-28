@@ -97,7 +97,8 @@ docs/METADATA_NOTES.md            reverse-engineered @Metadata schema
 
 ```sh
 cargo build
-cargo test                       # unit + e2e (kotlinc-gated tests skip without env)
+./run-tests.sh                   # normal full-suite gate; no parameters needed
+just test                        # equivalent harness entrypoint
 
 # kotlinc-style usage (krusty is a drop-in for the supported subset):
 krusty src/ -d out/                          # compile a source tree to a class dir
@@ -106,13 +107,30 @@ krusty -cp deps.jar:classes/ App.kt -d out/  # with a classpath
 krusty -version | -help
 ```
 
-The differential tests against the real compiler are opt-in via environment variables:
+The test harness self-provisions the reference Kotlin compiler and box corpus through `just` when
+available, uses the fast `gate` profile, builds once, and runs test binaries in parallel. Pass
+arguments only for a focused Cargo test/filter. `KRUSTY_TEST_JOBS=<n>` overrides full-suite binary
+parallelism for profiling. Do not use `--release` for tests because the longer build cycle outweighs
+the faster run. See `docs/TEST_HARNESS.md` for the agent-facing harness reference.
+
+For performance work, use the harness output instead of inventing one-off runners. Full `./run-tests.sh`
+prints the slowest test binaries. Compiler-only conformance profiling is:
+
+```sh
+KRUSTY_NO_RUN=1 KRUSTY_FLAMEGRAPH=1 ./run-tests.sh --test kotlin_box_ir_jvm_conformance -- --nocapture
+```
+
+That writes `target/flamegraph.svg` and prints phase timing. New JVM-running tests should use the
+shared helpers in `tests/common` (`compile_and_run_box`, `run_box`, `javac_run`) so they reuse the
+persistent JVM runners rather than spawning `javac`/`java` per case.
+
+Explicit environment overrides are still supported:
 
 ```sh
 KRUSTY_KOTLINC=/path/to/kotlinc/bin/kotlinc \
 KRUSTY_REF_JAVA_HOME=/path/to/jdk-21 \
 KRUSTY_KOTLIN_STDLIB=/path/to/kotlin-stdlib.jar \
-cargo test
+./run-tests.sh
 ```
 
 ## Status

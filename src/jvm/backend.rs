@@ -4,7 +4,7 @@
 use crate::ast::{Decl, File};
 use crate::backend::{Artifact, Backend};
 use crate::diag::DiagSink;
-use crate::jvm::names::file_class_name;
+use crate::jvm::names::{file_class_name, type_descriptor};
 use crate::resolve::{SymbolTable, TypeInfo};
 
 /// The JVM backend holds the shared classpath (`Rc`, same instance as `JvmLibraries`) so the emitter
@@ -43,6 +43,9 @@ impl Backend for JvmBackend {
         // (The legacy direct AST emitter has been removed — IR is the sole JVM codegen path.)
         let facade_name = file_class_name(stem, file.package.as_deref());
         let Some(mut ir) = crate::ir_lower::lower_file(file, info, syms) else {
+            if std::env::var("KRUSTY_IR_DEBUG").ok().as_deref() == Some("1") {
+                eprintln!("lower bail: {}", crate::ir_lower::lower_bail_reason());
+            }
             diags.error(
                 crate::diag::Span::new(0, 0),
                 "krusty: this construct is not yet supported by the IR backend".to_string(),
@@ -97,7 +100,7 @@ impl Backend for JvmBackend {
                     .collect();
                 // Physical CPS descriptor: the logical params then a trailing `Continuation`, returning
                 // the erased `Object`.
-                let pdescs: String = sig.params.iter().map(|t| t.descriptor()).collect();
+                let pdescs: String = sig.params.iter().map(|t| type_descriptor(*t)).collect();
                 let jvm_desc =
                     format!("({pdescs}Lkotlin/coroutines/Continuation;)Ljava/lang/Object;");
                 Some(crate::metadata::builder::FnMeta {
@@ -125,11 +128,19 @@ impl Backend for JvmBackend {
                 d2,
             }
         });
-        // `emit_all` returns `None` when the IR uses a JVM-unsupported construct (e.g. a function type
-        // above the fixed-arity `Function0..22` the JVM stdlib provides) — skip rather than miscompile.
+        // `emit_all` returns `None` when the IR uses a JVM-unsupported construct. Inline splice failures
+        // are reported separately: selected inline calls are required to splice, so those are backend
+        // errors to fix rather than silent skips.
         let Some(classes) =
             crate::jvm::ir_emit::emit_all(&ir, &facade_name, &*self.cp, metadata.as_ref())
         else {
+            if let Some(reason) = crate::jvm::ir_emit::inline_bail_reason() {
+                diags.error(
+                    crate::diag::Span::new(0, 0),
+                    format!("krusty: JVM backend inline error: {reason}"),
+                );
+                return outputs;
+            }
             diags.error(
                 crate::diag::Span::new(0, 0),
                 "krusty: this construct is not yet supported by the IR backend".to_string(),

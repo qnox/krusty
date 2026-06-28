@@ -51,15 +51,26 @@ pub fn applies(src: &str) -> bool {
     backend_applicable(src, BACKENDS) && !needs_unmodeled_compiler_flag(src)
 }
 
-/// A `// FREE_COMPILER_ARGS:` directive requesting a flag that changes codegen krusty doesn't model —
-/// the test's expected `box()` outcome assumes that flag, so running it against krusty's DEFAULT
-/// semantics is unsound (it would diverge from the flagged reference). `-Xbinary=genericSafeCasts`
-/// turns an unchecked `as T` into a real runtime-typed `checkcast` (so the test expects a CCE that
-/// default `as T` erasure never throws) — exclude rather than mis-judge.
+/// A directive requesting semantics krusty doesn't model. The test's expected `box()` outcome assumes
+/// that option, so running it against krusty's default semantics is unsound.
 pub fn needs_unmodeled_compiler_flag(src: &str) -> bool {
-    src.lines()
-        .filter(|l| l.starts_with("// FREE_COMPILER_ARGS:"))
-        .any(|l| l.contains("genericSafeCasts"))
+    const UNMODELED_FREE_ARGS: &[&str] = &["genericSafeCasts"];
+    const UNMODELED_LANGUAGE_FLAGS: &[&str] = &["+UnrestrictedBuilderInference"];
+    const UNMODELED_DIRECTIVES: &[&str] = &["KJS_WITH_FULL_RUNTIME"];
+    const UNMODELED_SOURCE_MARKERS: &[&str] = &["ExperimentalTypeInference"];
+
+    fn line_contains_any(src: &str, prefix: &str, needles: &[&str]) -> bool {
+        src.lines()
+            .filter(|l| l.starts_with(prefix))
+            .any(|l| needles.iter().any(|needle| l.contains(needle)))
+    }
+
+    line_contains_any(src, "// FREE_COMPILER_ARGS:", UNMODELED_FREE_ARGS)
+        || line_contains_any(src, "// LANGUAGE:", UNMODELED_LANGUAGE_FLAGS)
+        || UNMODELED_DIRECTIVES.iter().any(|name| directive(src, name))
+        || UNMODELED_SOURCE_MARKERS
+            .iter()
+            .any(|marker| src.contains(marker))
 }
 
 /// The EXTRA libraries (beyond kotlin-stdlib, which `kotlinc` always supplies) a test's classpath needs,

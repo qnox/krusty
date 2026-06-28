@@ -16,8 +16,8 @@ fn check(src: &str) -> Vec<String> {
     let toks = lex(src, &mut d);
     let file = parse(src, &toks, &mut d);
     let files = vec![file];
-    let syms = collect_signatures(&files, &mut d);
-    let _ = check_file(&files[0], &syms, &mut d);
+    let mut syms = collect_signatures(&files, &mut d);
+    let _ = check_file(&files[0], &mut syms, &mut d);
     d.diags.iter().map(|x| x.msg.clone()).collect()
 }
 

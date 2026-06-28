@@ -40,6 +40,14 @@ var m = 0u; for (i in 0u..6u step 2) m = m + i\n\
 if (m != 12u) return \"m\"\n\
 var n = 0u; for (i in 0u..6u step 2 step 3) n = n + i\n\
 if (n != 9u) return \"n\"\n\
+var o = 0u; for (i in 1u until 5u step 1) o = o + i\n\
+if (o != 10u) return \"o\"\n\
+var q = 0uL; for (i in 1uL until 5uL step 1L) q = q + i\n\
+if (q != 10uL) return \"q\"\n\
+val ur = 1u..<3u\n\
+if (!ur.contains(1u) || ur.contains(3u)) return \"ur\"\n\
+val ulr = 1uL..<3uL\n\
+if (!ulr.contains(1uL) || ulr.contains(3uL)) return \"ulr\"\n\
 return \"OK\"\n\
 }\n";
     let jdk = std::path::PathBuf::from(format!("{java_home}/lib/modules"));

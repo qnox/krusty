@@ -11,11 +11,11 @@ mod common;
 
 fn run(src: &str) -> Option<String> {
     let java_home = common::java_home()?;
-    let stdlib = common::stdlib_jar()?;
     let jdk = PathBuf::from(format!("{java_home}/lib/modules"));
-    let cs = common::compile_in_process(src, "S", std::slice::from_ref(&stdlib), Some(&jdk))?;
+    let cp = common::classpath_jars_for("// WITH_STDLIB");
+    let cs = common::compile_in_process(src, "S", &cp, Some(&jdk))?;
     let box_class = common::find_box_class(&cs)?;
-    common::run_box(&cs, &box_class, &[stdlib])
+    common::run_box(&cs, &box_class, &cp)
 }
 
 #[test]
@@ -40,6 +40,47 @@ fn concat_with_classpath_string_returning_call() {
     let src = "fun box(): String {\n\
         \x20   val r = \"x=\" + \"ab\".uppercase()\n\
         \x20   return if (r == \"x=AB\") \"OK\" else \"fail:\" + r\n\
+        }\n";
+    match run(src) {
+        Some(o) => assert_eq!(o.trim(), "OK", "box() = {o:?}"),
+        None => eprintln!("skipping: toolchain unavailable"),
+    }
+}
+
+#[test]
+fn string_get_uses_interface_owner_dispatch() {
+    // `String.get(Int)` can resolve to a classpath member physically owned by `CharSequence`.
+    // The emitted call must use interface dispatch for that owner.
+    let src = "fun box(): String {\n\
+        \x20   val c = \"OK\"[1]\n\
+        \x20   return if (c == 'K') \"OK\" else \"fail:\" + c\n\
+        }\n";
+    match run(src) {
+        Some(o) => assert_eq!(o.trim(), "OK", "box() = {o:?}"),
+        None => eprintln!("skipping: toolchain unavailable"),
+    }
+}
+
+#[test]
+fn string_extensions_resolve_on_implicit_receiver() {
+    let src = "fun box(): String {\n\
+        \x20   val up = \"ab\".run { uppercase() }\n\
+        \x20   if (up != \"AB\") return \"uppercase:\" + up\n\
+        \x20   val tr = \"  OK  \".run { trim() }\n\
+        \x20   return tr\n\
+        }\n";
+    match run(src) {
+        Some(o) => assert_eq!(o.trim(), "OK", "box() = {o:?}"),
+        None => eprintln!("skipping: toolchain unavailable"),
+    }
+}
+
+#[test]
+fn string_for_loop_uses_library_members() {
+    let src = "fun box(): String {\n\
+        \x20   var out = \"\"\n\
+        \x20   for (c in \"OK\") out += c\n\
+        \x20   return out\n\
         }\n";
     match run(src) {
         Some(o) => assert_eq!(o.trim(), "OK", "box() = {o:?}"),

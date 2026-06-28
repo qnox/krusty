@@ -1,4 +1,5 @@
 use krusty::diag::DiagSink;
+use krusty::ir::IrFile;
 use krusty::ir_lower::lower_file;
 use krusty::jvm::classpath::Classpath;
 use krusty::jvm::ir_emit::emit_all;
@@ -10,6 +11,49 @@ use krusty::resolve::{check_file, collect_signatures_with_cp};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
+
+const COROUTINE_HELPERS: &str = r#"package helpers
+import kotlin.coroutines.*
+import kotlin.coroutines.intrinsics.*
+
+fun <T> runBlocking(block: suspend () -> T): T {
+    var res: Result<T>? = null
+    block.startCoroutine(Continuation(EmptyCoroutineContext) {
+        res = it
+    })
+    return res!!.getOrThrow()
+}
+
+fun <T> handleResultContinuation(x: (T) -> Unit): Continuation<T> = object: Continuation<T> {
+    override val context = EmptyCoroutineContext
+    override fun resumeWith(result: Result<T>) {
+       x(result.getOrThrow())
+    }
+}
+
+fun handleExceptionContinuation(x: (Throwable) -> Unit): Continuation<Any?> = object: Continuation<Any?> {
+    override val context = EmptyCoroutineContext
+    override fun resumeWith(result: Result<Any?>) {
+       result.exceptionOrNull()?.let(x)
+    }
+}
+
+open class EmptyContinuation(override val context: CoroutineContext = EmptyCoroutineContext) : Continuation<Any?> {
+    companion object : EmptyContinuation()
+    override fun resumeWith(result: Result<Any?>) {
+       result.getOrThrow()
+    }
+}
+
+class ResultContinuation : Continuation<Any?> {
+    override val context = EmptyCoroutineContext
+    override fun resumeWith(result: Result<Any?>) {
+       this.result = result.getOrThrow()
+    }
+
+    var result: Any? = null
+}
+"#;
 
 /// Run the FULL pipeline (lex→parse→sigs→check→lower→value-classes→emit) against the real
 /// classpath (stdlib + JDK `lib/modules`), so skip reasons match the conformance harness — not a
@@ -26,11 +70,11 @@ fn first_error(src: &str, cp: &Rc<Classpath>, stem: &str) -> Option<String> {
         return Some(d.diags[0].msg.clone());
     }
     let platform = Box::new(JvmLibraries::new(cp.clone()));
-    let syms = collect_signatures_with_cp(&files, platform, &mut d);
+    let mut syms = collect_signatures_with_cp(&files, platform, &mut d);
     if d.has_errors() {
         return Some(d.diags[0].msg.clone());
     }
-    let info = check_file(&files[0], &syms, &mut d);
+    let info = check_file(&files[0], &mut syms, &mut d);
     if d.has_errors() {
         return Some(d.diags[0].msg.clone());
     }
@@ -39,16 +83,83 @@ fn first_error(src: &str, cp: &Rc<Classpath>, stem: &str) -> Option<String> {
         Some(ir) => ir,
         None => return Some(format!("lower: {}", krusty::ir_lower::lower_bail_reason())),
     };
-    if !lower_value_classes(&mut ir) {
+    emit_checked_ir(&mut ir, &facade, cp)
+}
+
+fn emit_checked_ir(ir: &mut IrFile, facade: &str, cp: &Rc<Classpath>) -> Option<String> {
+    if !lower_value_classes(ir) {
         return Some("lower: value-class shape not lowered".into());
     }
-    if !krusty::jvm::suspend::lower_suspend(&mut ir, &facade) {
+    if !krusty::jvm::suspend::lower_suspend(ir, facade) {
         return Some("lower: suspend-function shape not lowered".into());
     }
-    match emit_all(&ir, &facade, &**cp, None) {
+    match emit_all(ir, facade, &**cp, None) {
         Some(o) if !o.is_empty() => None,
-        _ => Some("emit: emit_all bailed (unsupported codegen)".into()),
+        _ => Some(
+            krusty::jvm::ir_emit::inline_bail_reason()
+                .map(|r| format!("emit: {r}"))
+                .unwrap_or_else(|| "emit: emit_all bailed (unsupported codegen)".into()),
+        ),
     }
+}
+
+fn first_error_with_coroutine_helpers(src: &str, cp: &Rc<Classpath>, stem: &str) -> Option<String> {
+    let mut d = DiagSink::new();
+    let features = krusty::features::LangFeatures::from_source(src);
+    let blocks = [
+        (stem.to_string(), src.to_string()),
+        ("CoroutineUtil".to_string(), COROUTINE_HELPERS.to_string()),
+    ];
+    let files: Vec<_> = blocks
+        .iter()
+        .map(|(_, content)| {
+            let toks = lex(content, &mut d);
+            krusty::parser::parse_with_features(content, &toks, &mut d, &features)
+        })
+        .collect();
+    if d.has_errors() {
+        return Some(d.diags[0].msg.clone());
+    }
+
+    let platform = Box::new(JvmLibraries::new(cp.clone()));
+    let mut syms = collect_signatures_with_cp(&files, platform, &mut d);
+    if d.has_errors() {
+        return Some(d.diags[0].msg.clone());
+    }
+
+    for (i, file) in files.iter().enumerate() {
+        let facade = file_class_name(&blocks[i].0, file.package.as_deref());
+        for &decl in &file.decls {
+            match file.decl(decl) {
+                krusty::ast::Decl::Fun(f) if f.receiver.is_none() && !f.is_inline => {
+                    syms.fn_facades.insert(f.name.clone(), facade.clone());
+                }
+                krusty::ast::Decl::Property(p) if p.receiver.is_none() => {
+                    if let Some(&(ty, is_var, is_const)) = syms.props.get(&p.name) {
+                        syms.prop_facades
+                            .insert(p.name.clone(), (facade.clone(), ty, is_var, is_const));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    for (i, file) in files.iter().enumerate() {
+        let info = check_file(file, &mut syms, &mut d);
+        if d.has_errors() {
+            return Some(d.diags[0].msg.clone());
+        }
+        let facade = file_class_name(&blocks[i].0, file.package.as_deref());
+        let mut ir = match lower_file(file, &info, &syms) {
+            Some(ir) => ir,
+            None => return Some(format!("lower: {}", krusty::ir_lower::lower_bail_reason())),
+        };
+        if let Some(err) = emit_checked_ir(&mut ir, &facade, cp) {
+            return Some(err);
+        }
+    }
+    None
 }
 
 fn categorize(err: &str) -> String {
@@ -152,7 +263,12 @@ fn main() {
             .entry(cp_paths.clone())
             .or_insert_with(|| Rc::new(Classpath::new(cp_paths.clone())))
             .clone();
-        match first_error(&src, &cp, stem) {
+        let err = if src.contains("// WITH_COROUTINES") {
+            first_error_with_coroutine_helpers(&src, &cp, stem)
+        } else {
+            first_error(&src, &cp, stem)
+        };
+        match err {
             None => compiled += 1,
             Some(e) => {
                 let cat = categorize(&e);

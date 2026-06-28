@@ -18,6 +18,7 @@
 
 use crate::ir::{Callee, ExprId, IrExpr, IrFile};
 use crate::jvm::ir_emit::ir_ty_to_jvm;
+use crate::jvm::names::{method_descriptor, property_getter_name, type_descriptor};
 use crate::libraries::InlineKind;
 use crate::types::Ty;
 use std::collections::{HashMap, HashSet};
@@ -118,7 +119,7 @@ pub fn lower_value_classes(ir: &mut IrFile) -> bool {
         .iter()
         .map(|c| {
             if c.is_value {
-                c.fields.first().map(|f| getter_name(&f.name))
+                c.fields.first().map(|f| property_getter_name(&f.name))
             } else {
                 None
             }
@@ -134,7 +135,7 @@ pub fn lower_value_classes(ir: &mut IrFile) -> bool {
         .filter_map(|c| {
             c.fields
                 .first()
-                .map(|f| (c.fq_name.clone(), getter_name(&f.name)))
+                .map(|f| (c.fq_name.clone(), property_getter_name(&f.name)))
         })
         .collect();
 
@@ -324,6 +325,12 @@ pub fn lower_value_classes(ir: &mut IrFile) -> bool {
                     }
                     _ => None,
                 };
+                let erased_ret_vc = b
+                    .erased_ret
+                    .non_null()
+                    .obj_internal()
+                    .filter(|fq_name| under.contains_key(*fq_name))
+                    .map(str::to_string);
                 if let Some(fq_name) = concrete_ret_vc {
                     if b.target_name.is_none() {
                         b.target_name = Some(b.name.clone());
@@ -334,7 +341,10 @@ pub fn lower_value_classes(ir: &mut IrFile) -> bool {
                     // (`fun bar(): Gx`) also mangles by the return; a generic `T` return (erased
                     // `Object`) does not.
                     // A bridge lives on a class (never a file class); its value-class return mangles.
-                    b.name = vc_mangle(&b.name, &b.concrete_params, &b.erased_ret, &under, false);
+                    if !is_property_getter_bridge_name(&b.name) {
+                        b.name =
+                            vc_mangle(&b.name, &b.concrete_params, &b.erased_ret, &under, false);
+                    }
                     // A value-class PARAM erases to its underlying in both the bridge descriptor and the
                     // target call (`foo-<hash>(Marker)` → `foo-<hash>(int)`). Done AFTER the mangle,
                     // which keys on the un-erased param type.
@@ -370,6 +380,34 @@ pub fn lower_value_classes(ir: &mut IrFile) -> bool {
                         b.box_ret = Some(fq_name.clone());
                         b.concrete_ret = erase(&b.concrete_ret, &under);
                     }
+                } else if erased_ret_vc.is_some() {
+                    // A bottom/null override (`Nothing`/`Nothing?`) can implement a value-class-returning
+                    // member. The concrete target is not itself a value-class return, but the bridge still
+                    // satisfies the SUPERTYPE declaration, whose JVM name is mangled by its value-class
+                    // return type (`foo(): X?` -> `foo-<hash>()LX;`). Keep the target's source name and
+                    // publish the bridge under the mangled supertype name.
+                    if b.target_name.is_none() {
+                        b.target_name = Some(b.name.clone());
+                    }
+                    if !is_property_getter_bridge_name(&b.name) {
+                        b.name =
+                            vc_mangle(&b.name, &b.concrete_params, &b.erased_ret, &under, false);
+                    }
+                    for p in b.erased_params.iter_mut() {
+                        *p = erase(p, &under);
+                    }
+                    let supertype_returns_unboxed_vc = b
+                        .erased_ret
+                        .non_null()
+                        .obj_internal()
+                        .is_some_and(|fq_name| {
+                            under.contains_key(fq_name)
+                                && (!b.erased_ret.is_nullable()
+                                    || !nullable_is_boxed(fq_name, &under))
+                        });
+                    if supertype_returns_unboxed_vc {
+                        b.erased_ret = erase(&b.erased_ret, &under);
+                    }
                 } else if b.target_name.is_some() && !owner_is_value {
                     // A bridge to a mangled override whose VALUE-CLASS PARAMS erased to their underlying:
                     // a generic supertype method (`B.f(T,U)`) keeps its erased `f(Object,Object)` bridge
@@ -377,11 +415,17 @@ pub fn lower_value_classes(ir: &mut IrFile) -> bool {
                     // incoming args are BOXED `X` (the generic call site boxes), so record each value-class
                     // param to `checkcast` + `unbox-impl`, then erase the param to its underlying for the
                     // target call descriptor. The bridge's OWN name/params (the erased generic) are unchanged.
+                    // EXTERNAL value classes (`Result`) are different: they are already represented by
+                    // their erased underlying (`Object`) everywhere in krusty, so a bridge must not
+                    // materialize a nonexistent boxed `Result`.
                     let vc_params: Vec<Option<String>> = b
                         .concrete_params
                         .iter()
                         .map(|p| match p {
-                            Ty::Obj(fq_name, _) if under.contains_key(*fq_name) => {
+                            Ty::Obj(fq_name, _)
+                                if under.contains_key(*fq_name)
+                                    && !external_vc.contains(*fq_name) =>
+                            {
                                 Some(fq_name.to_string())
                             }
                             _ => None,
@@ -421,6 +465,30 @@ pub fn lower_value_classes(ir: &mut IrFile) -> bool {
                 *p = erase(p, &under);
             }
         }
+    }
+
+    for c in &mut ir.classes {
+        let mut method_keys: HashSet<(String, String)> = c
+            .methods
+            .iter()
+            .map(|&fid| {
+                let f = &ir.functions[fid as usize];
+                (
+                    f.name.clone(),
+                    method_descriptor(
+                        &f.params.iter().map(ir_ty_to_jvm).collect::<Vec<_>>(),
+                        ir_ty_to_jvm(&f.ret),
+                    ),
+                )
+            })
+            .collect();
+        c.bridges.retain(|b| {
+            let desc = method_descriptor(
+                &b.erased_params.iter().map(ir_ty_to_jvm).collect::<Vec<_>>(),
+                ir_ty_to_jvm(&b.erased_ret),
+            );
+            method_keys.insert((b.name.clone(), desc))
+        });
     }
 
     // 3. Erase every type carried inside an expression (locals, casts, vararg/array elements, …).
@@ -1221,7 +1289,7 @@ pub fn lower_value_classes(ir: &mut IrFile) -> bool {
     for (impl_fn, body) in lambda_impls {
         // A value-class result is boxed; the impl method then returns the BOX type `X` (its erased
         // underlying return would mis-type the boxed value, e.g. `LX;` vs `String`).
-        if let Some(x) = tail_vc(&ir.exprs, &orig_rets, body) {
+        if let Some(x) = tail_vc(&ir.exprs, &orig_rets, &under, body) {
             ir.functions[impl_fn as usize].ret = Ty::obj(&x);
         }
         box_vc_tail(ir, body, &under, &orig_rets, false);
@@ -1276,7 +1344,10 @@ fn box_vc_tail(
             box_vc_tail(ir, arg, under, rets, prim_only);
         }
         _ => {
-            if let Some(x) = unboxed_vc_class(&ir.exprs, rets, id, !prim_only) {
+            if let Some(x) = unboxed_vc_class(&ir.exprs, rets, under, id, !prim_only) {
+                if ir.external_value_classes.contains_key(&x) {
+                    return;
+                }
                 let prim = under
                     .get(&x)
                     .map(|u| !is_ref(&erase(u, under)))
@@ -1290,36 +1361,53 @@ fn box_vc_tail(
 }
 
 /// The value class produced at a tail position of `id` (recursing `when`/block/return tails), if any.
-fn tail_vc(exprs: &[IrExpr], rets: &[Ty], id: ExprId) -> Option<String> {
+fn tail_vc(
+    exprs: &[IrExpr],
+    rets: &[Ty],
+    under: &HashMap<String, Ty>,
+    id: ExprId,
+) -> Option<String> {
     match &exprs[id as usize] {
-        IrExpr::When { branches } => branches.iter().find_map(|(_, r)| tail_vc(exprs, rets, *r)),
-        IrExpr::Block { value: Some(v), .. } => tail_vc(exprs, rets, *v),
-        IrExpr::Block { value: None, stmts } => stmts.last().and_then(|&s| tail_vc(exprs, rets, s)),
-        IrExpr::Return(Some(v)) => tail_vc(exprs, rets, *v),
-        _ => unboxed_vc_class(exprs, rets, id, false),
+        IrExpr::When { branches } => branches
+            .iter()
+            .find_map(|(_, r)| tail_vc(exprs, rets, under, *r)),
+        IrExpr::Block { value: Some(v), .. } => tail_vc(exprs, rets, under, *v),
+        IrExpr::Block { value: None, stmts } => {
+            stmts.last().and_then(|&s| tail_vc(exprs, rets, under, s))
+        }
+        IrExpr::Return(Some(v)) => tail_vc(exprs, rets, under, *v),
+        _ => unboxed_vc_class(exprs, rets, under, id, false),
     }
 }
 
 /// The value class an expr produces UNBOXED (a `constructor-impl`/`unbox-impl` result, or a local call
 /// whose return type is a non-null value class), if any.
-fn unboxed_vc_class(exprs: &[IrExpr], rets: &[Ty], id: ExprId, calls: bool) -> Option<String> {
+fn unboxed_vc_class(
+    exprs: &[IrExpr],
+    rets: &[Ty],
+    under: &HashMap<String, Ty>,
+    id: ExprId,
+    calls: bool,
+) -> Option<String> {
     match &exprs[id as usize] {
         IrExpr::Call {
             callee: Callee::Static { owner, name, .. },
             ..
-        } if name == "constructor-impl" || name == "unbox-impl" => Some(owner.clone()),
+        } if name == "constructor-impl" || name == "unbox-impl" => {
+            under.contains_key(owner).then(|| owner.clone())
+        }
         // A local call returning an unboxed value class — only considered when `calls` is set (the
         // `Any`-return case); the lambda case must NOT box these (they already satisfy `Object`).
         IrExpr::Call {
             callee: Callee::Local(fid),
             ..
         } if calls => match rets.get(*fid as usize) {
-            Some(Ty::Obj(fq_name, _)) => Some(fq_name.to_string()),
+            Some(Ty::Obj(fq_name, _)) if under.contains_key(*fq_name) => Some(fq_name.to_string()),
             _ => None,
         },
-        IrExpr::Block { value: Some(v), .. } => unboxed_vc_class(exprs, rets, *v, calls),
+        IrExpr::Block { value: Some(v), .. } => unboxed_vc_class(exprs, rets, under, *v, calls),
         IrExpr::NotNullAssert { operand } if calls => {
-            unboxed_vc_class(exprs, rets, *operand, calls)
+            unboxed_vc_class(exprs, rets, under, *operand, calls)
         }
         _ => None,
     }
@@ -1861,7 +1949,7 @@ fn is_ref(t: &Ty) -> bool {
         return true;
     }
     match t.obj_internal() {
-        Some(fq_name) => !is_primitive_class(fq_name),
+        Some(fq_name) => !is_jvm_scalar_class(fq_name),
         None => false,
     }
 }
@@ -2170,7 +2258,7 @@ fn synth_value_members(
     // `secondary_ctors` are then cleared so no instance `<init>` is also emitted.
     let secs = std::mem::take(&mut ir.classes[class_id as usize].secondary_ctors);
     if !secs.is_empty() {
-        let udesc = ir_ty_to_jvm(&u_ir).descriptor();
+        let udesc = type_descriptor(ir_ty_to_jvm(&u_ir));
         for sc in secs {
             // Drop the `this` slot: shift all value-slot references in the body + delegation args.
             if let Some(b) = sc.body {
@@ -2368,7 +2456,14 @@ fn erase_descriptor(descriptor: &str, under: &HashMap<String, Ty>) -> String {
     out
 }
 
-fn is_primitive_class(fq: &str) -> bool {
+fn is_property_getter_bridge_name(name: &str) -> bool {
+    name.starts_with("get")
+        || name
+            .strip_prefix("is")
+            .is_some_and(|s| s.chars().next().is_some_and(char::is_uppercase))
+}
+
+fn is_jvm_scalar_class(fq: &str) -> bool {
     matches!(
         fq,
         "kotlin/Int"
@@ -2383,16 +2478,7 @@ fn is_primitive_class(fq: &str) -> bool {
 }
 
 fn desc(t: &Ty) -> String {
-    ir_ty_to_jvm(t).descriptor()
-}
-
-/// kotlin getter name for a property: `value` → `getValue`.
-fn getter_name(field: &str) -> String {
-    let mut c = field.chars();
-    match c.next() {
-        Some(f) => format!("get{}{}", f.to_uppercase(), c.as_str()),
-        None => "get".to_string(),
-    }
+    type_descriptor(ir_ty_to_jvm(t))
 }
 
 /// Collect every `ExprId` reachable from `root` (a function body), so rewrites stay within bodies that

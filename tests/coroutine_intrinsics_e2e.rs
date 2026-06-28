@@ -1,9 +1,9 @@
 //! `kotlin.coroutines` compiler intrinsics — `COROUTINE_SUSPENDED`, `suspendCoroutineUninterceptedOrReturn`,
 //! `startCoroutine`. These are `@InlineOnly` stdlib declarations whose stub bodies just `throw`; the
 //! reference compiler recognizes them by FQ name (an intrinsics table) and emits dedicated codegen rather
-//! than calling/inlining. krusty's splice gate refuses the `throw` body, so without the registry
-//! (`jvm::coroutine_intrinsics`) they resolved to "unresolved". The checker now types them via the
-//! registry (LibrarySet) and lowering emits the intrinsic codegen. These compile-only checks pin the
+//! than calling/inlining. krusty's splice gate refuses the `throw` body, so without the shared intrinsic
+//! registry they resolved to "unresolved". The checker now types them via that compiler table and
+//! lowering emits the intrinsic codegen. These compile-only checks pin the
 //! resolution+lowering of the leaf shapes (a full coroutine `box()` round-trip additionally needs the
 //! companion-object-as-value completion, a separate piece).
 

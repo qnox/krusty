@@ -127,9 +127,9 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
 ### 6c — minimal Java *source* front end ⬜ (signatures only, for mixed kt+java)
 ### 6d — scale benchmark ⬜ (peak RSS vs kotlinc on many_functions/multifile)
 ### 6e — `java.lang.String` instance methods ✅
-- ✅ `resolve_string_instance` (curated `java.lang.String` subset: `length`/`isEmpty`/`substring`×2/
-  `indexOf`/`concat`) drives typecheck + `invokevirtual` codegen. Interim until jimage gives the
-  full JDK; each entry matches what kotlinc emits.
+- ✅ Superseded: the old `resolve_string_instance` curated `java.lang.String` subset was removed.
+  String members now type through the same classpath/library member resolver as other receivers, and
+  String extensions resolve from stdlib metadata plus the inline-splice path.
 - ✅ **Differential pass**: `tests/diff_kotlinc.rs` now includes `s.substring(1)`, `s.substring(1,3)`,
   `s.indexOf("b")` — krusty's bytecode + execution match kotlinc exactly. Unit tests in `resolve.rs`.
 
@@ -1237,8 +1237,8 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
 - ✅ TDD: `tests/infix_call_e2e.rs` (chaining + precedence vs `+`) on the JVM.
 - 🛡️ Fixed a miscompile the change *exposed* (`infixFunctionOverBuiltinMember.kt`): an explicit
   `5.rem(2)`/`5.plus(2)` on a primitive binds to the builtin operator, which beats a same-named
-  user extension. krusty doesn't emit primitive operator-methods, so it now **rejects** such calls
-  (skip) instead of dispatching to the shadowing extension (which returned the wrong value).
+  user extension. The parser now preserves infix-call source form so `5 rem 2` can dispatch to the
+  extension while `5.rem(2)` keeps the primitive builtin.
 - Box conformance **424 → 425 OK / 0 FAIL** (most unblocked files still need other features;
   the parse foundation compounds as those land).
 
