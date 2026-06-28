@@ -5,6 +5,45 @@ conformance coverage. The recurring pattern is not lack of feature code. It is d
 paths, JVM representation leaking above the backend boundary, and per-feature side tables that make
 each new case add branches instead of removing them.
 
+## Current handoff
+
+Use the current tree as authoritative. As of 2026-06-28, `master` was last pushed at
+`c0989fe compiler: resolve object invoke operator`, with a clean worktree and:
+
+```text
+scanned: 7351 | krusty-compiled: 2078 | box()=OK: 2078 | skipped(unsupported): 5273 | FAIL: 0
+```
+
+Keep `FAIL: 0`. Use `./run-tests.sh` for validation and do not use `--release` or `--no-verify`.
+The harness is self-provisioning; see `docs/TEST_HARNESS.md`.
+
+Recent fixes that matter for future work:
+
+- `FunctionN.invoke` with value-class signatures is now supported. The stale checker rejection was
+  removed, and JVM function-reference adapters now return the erased `Object` shape expected at the
+  `FunctionN.invoke` boundary instead of boxed value-class wrappers.
+- Local object values with a member `operator fun invoke` can now be called as `a(args)`, matching
+  `a.invoke(args)`.
+
+Architecture debt added or exposed by those fixes:
+
+- `ExprLowering::InvokeOperator` is a new side-channel. It is acceptable as an incremental bridge, but
+  it is not the target design. The next cleanup should fold both `a(args)` and `a.invoke(args)` into a
+  unified selected-call representation, not add more invoke-specific lowering branches.
+- `record_callable_invoke` and `record_invoke_operator` are still separate checker paths. Kotlin's
+  model is one invoke operator convention: function types, member `invoke`, and extension `invoke`
+  should all be selected through the same resolver surface and then lowered from the selected call.
+- Lowering still re-resolves calls that the checker already selected. This is the main source of
+  checker/resolver symbol divergence and should be attacked before adding more feature cases.
+
+Best next target:
+
+Introduce or grow a `ResolvedCall` table that carries the checker-selected callable identity,
+receiver/callee shape, argument mapping, logical return, physical return, inline/suspend/default/vararg
+facts, and backend handle. Migrate one call family at a time. Good first candidates are callable
+invocation and object/member `invoke`, because they currently demonstrate the same language rule split
+across multiple side channels.
+
 ## Architecture baseline
 
 `docs/ARCHITECTURE.md` says:
