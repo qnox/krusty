@@ -3,9 +3,8 @@
 //! It wraps the user-declared half of a [`SymbolTable`] (top-level functions, classes, extensions) and
 //! answers the same `seed`/`functions`/`resolve_type` queries a compiled library does — so module code
 //! federates with libraries through one [`crate::symbol_source::CompositeSource`] instead of the
-//! scattered "user-first, else library" branching. Descriptors are synthesized from the declared `Ty`s
-//! (`Ty::descriptor`), since the module isn't emitted yet; every callable is stamped [`Origin::Module`]
-//! so the lowerer can pick the same-file / cross-file / library emit form from resolution alone.
+//! scattered "user-first, else library" branching. Every callable is stamped [`Origin::Module`] so the
+//! lowerer can pick the same-file / cross-file / library emit form from resolution alone.
 
 use crate::libraries::{
     CallSig, FnFlags, FnKind, FunctionInfo, FunctionSet, InlineKind, LibraryCallable,
@@ -14,6 +13,7 @@ use crate::libraries::{
 use crate::resolve::{ClassSig, Signature, SymbolTable};
 use crate::symbol_source::SymbolSource;
 use crate::types::Ty;
+use std::collections::HashMap;
 
 /// The current module's declarations as a [`SymbolSource`]. Borrows the [`SymbolTable`]; cheap.
 pub struct ModuleSymbols<'a> {
@@ -91,17 +91,6 @@ impl<'a> ModuleSymbols<'a> {
     }
 }
 
-/// A JVM method descriptor `(params)ret` synthesized from declared `Ty`s.
-fn descriptor(params: &[Ty], ret: Ty) -> String {
-    let mut s = String::from("(");
-    for p in params {
-        s.push_str(&p.descriptor());
-    }
-    s.push(')');
-    s.push_str(&ret.descriptor());
-    s
-}
-
 /// Build a top-level / extension `FunctionInfo` from a user [`Signature`]. `receiver` is `Some` for an
 /// extension (prepended to `params`, matching the library convention that `params[0]` is the receiver).
 fn fn_info(
@@ -122,13 +111,32 @@ fn fn_info(
         kind,
         receiver,
         ret_nullable: false,
+        ret_class: None,
         public: true,
         receiver_rank: rank,
+        overload_rank: 0,
+        generic_sig: None,
         // The call shape mirrors the source Signature, parallel to the LOGICAL params (no receiver).
         call_sig: CallSig {
             param_names: sig.param_names.clone(),
             param_defaults: sig.param_defaults.clone(),
             lambda_param_types: sig.lambda_param_types.clone(),
+            lambda_receivers: sig
+                .lambda_recv
+                .iter()
+                .enumerate()
+                .map(|(i, has_recv)| {
+                    has_recv
+                        .then(|| {
+                            sig.lambda_param_types
+                                .get(i)
+                                .and_then(|v| v.first())
+                                .copied()
+                        })
+                        .flatten()
+                })
+                .collect(),
+            lambda_receiver_params: sig.lambda_recv.clone(),
             required: sig.required,
             vararg: sig.vararg,
         },
@@ -141,7 +149,7 @@ fn fn_info(
         callable: LibraryCallable {
             owner,
             name: name.to_string(),
-            descriptor: descriptor(&params, sig.ret),
+            descriptor: String::new(),
             params,
             ret: sig.ret,
             physical_ret: sig.ret,
@@ -174,6 +182,7 @@ impl SymbolSource for ModuleSymbols<'_> {
         LibrarySeed {
             class_names,
             type_aliases: std::collections::HashMap::new(),
+            canonical_names: HashMap::new(),
         }
     }
 
@@ -237,28 +246,25 @@ impl SymbolSource for ModuleSymbols<'_> {
 
     fn resolve_type(&self, internal: &str) -> Option<LibraryType> {
         let c = self.class_by_internal(internal)?;
-        let member = |name: &str, sig: &Signature| LibraryMember {
-            name: name.to_string(),
-            params: sig.params.clone(),
-            ret: sig.ret,
-            descriptor: descriptor(&sig.params, sig.ret),
+        let member = |name: &str, sig: &Signature| {
+            LibraryMember::new(name.to_string(), sig.params.clone(), sig.ret, String::new())
         };
         let members = c.methods.iter().map(|(n, s)| member(n, s)).collect();
         let companion = c.static_methods.iter().map(|(n, s)| member(n, s)).collect();
         // The primary constructor (+ secondaries) as `<init>` members returning Unit.
-        let mut constructors = vec![LibraryMember {
-            name: "<init>".to_string(),
-            params: c.ctor_params.clone(),
-            ret: Ty::Unit,
-            descriptor: descriptor(&c.ctor_params, Ty::Unit),
-        }];
+        let mut constructors = vec![LibraryMember::new(
+            "<init>".to_string(),
+            c.ctor_params.clone(),
+            Ty::Unit,
+            String::new(),
+        )];
         for params in &c.secondary_ctors {
-            constructors.push(LibraryMember {
-                name: "<init>".to_string(),
-                params: params.clone(),
-                ret: Ty::Unit,
-                descriptor: descriptor(params, Ty::Unit),
-            });
+            constructors.push(LibraryMember::new(
+                "<init>".to_string(),
+                params.clone(),
+                Ty::Unit,
+                String::new(),
+            ));
         }
         let mut supertypes = c.interfaces.clone();
         if let Some(s) = &c.super_internal {
@@ -280,9 +286,12 @@ impl SymbolSource for ModuleSymbols<'_> {
             constructors,
             members,
             companion,
+            companion_consts: HashMap::new(),
+            sam_method: None,
             // In-module classes resolve a bare-companion reference via their own companion path
             // (`companion_class`/`companion_methods`); the classpath fallback isn't used for them.
             companion_object: None,
+            value_companion_fns: Vec::new(),
             value_underlying: None,
         })
     }
@@ -334,7 +343,7 @@ mod tests {
     }
 
     #[test]
-    fn top_level_functions_are_module_origin_with_synth_descriptor() {
+    fn top_level_functions_are_module_origin_with_semantic_shape() {
         let mut st = SymbolTable::default();
         st.funs
             .insert("twice".into(), vec![sig(vec![Ty::Int], Ty::Int)]);
@@ -343,7 +352,8 @@ mod tests {
         assert_eq!(fs.overloads.len(), 1);
         let o = &fs.overloads[0];
         assert_eq!(o.kind, FnKind::TopLevel);
-        assert_eq!(o.callable.descriptor, "(I)I");
+        assert_eq!(o.callable.params, vec![Ty::Int]);
+        assert_eq!(o.callable.ret, Ty::Int);
         assert_eq!(o.callable.origin, Origin::Module { facade: "".into() });
     }
 
@@ -445,9 +455,10 @@ mod tests {
         let m = ModuleSymbols::new(&st);
         let t = m.resolve_type("demo/Point").expect("shape");
         assert_eq!(t.constructors.len(), 1);
-        assert_eq!(t.constructors[0].descriptor, "(II)V");
+        assert_eq!(t.constructors[0].params, vec![Ty::Int, Ty::Int]);
         assert_eq!(t.members.len(), 1);
         assert_eq!(t.members[0].name, "sum");
+        assert_eq!(t.members[0].ret, Ty::Int);
         assert_eq!(t.supertypes, vec!["demo/Shape".to_string()]);
         assert!(m.resolve_type("demo/Nope").is_none());
     }

@@ -1,5 +1,5 @@
-//! Type model: the primitive/String/Unit set plus `Obj` (a JVM reference type by internal name,
-//! e.g. a Kotlin class `demo/Point`). No generics or nullability yet.
+//! Type model: Kotlin scalar, object, array, function, nullable, and type-parameter shapes.
+//! Backend-specific names and descriptors are kept out of this module.
 
 use std::collections::HashSet;
 use std::sync::{Mutex, OnceLock};
@@ -55,8 +55,7 @@ pub fn intern_tys(ts: &[Ty]) -> &'static [Ty] {
 pub struct FnSig {
     pub params: Vec<Ty>,
     pub ret: Ty,
-    /// A `suspend` function type (`suspend (A) -> R`). Its JVM representation is `Function{n+1}` with a
-    /// trailing `kotlin/coroutines/Continuation` parameter and an `Object`-erased result.
+    /// A `suspend` function type (`suspend (A) -> R`).
     pub suspend: bool,
 }
 
@@ -83,21 +82,18 @@ pub enum Ty {
     Double,
     Boolean,
     Char,
-    /// Unsigned integers — Kotlin inline classes over the matching signed primitive (`UInt` over
-    /// `Int`, `ULong` over `Long`). Unboxed they ARE that JVM primitive (`I`/`J`); the unsignedness
-    /// shows only in operation choice (unsigned `/`/`%`/compare/`toString`) and boxing (`kotlin/UInt`).
-    /// Kept distinct from the signed types so those operations and widening (`toLong` = zero-extend)
-    /// are selected correctly.
+    /// Unsigned integers — Kotlin inline-class types with unsigned operation semantics. Kept distinct
+    /// from signed types so those operations and widening (`toLong` = zero-extend) are selected correctly.
     UInt,
     ULong,
     String,
     Unit,
-    /// A JVM reference type by internal name (e.g. `demo/Point`), with its generic type arguments
+    /// A reference type by internal name (e.g. `demo/Point`), with its generic type arguments
     /// (`List<Int>` → `Obj("kotlin/collections/List", [Int])`). Arguments are interned (`intern_tys`)
-    /// so equal instantiations share a pointer; they erase to nothing in JVM descriptors (kotlinc's
-    /// erasure) but let the front end recover element/member types. Empty for a non-generic class.
+    /// so equal instantiations share a pointer and the front end can recover element/member types.
+    /// Empty for a non-generic class.
     Obj(&'static str, &'static [Ty]),
-    /// A JVM array type with the given element type (`IntArray` → `Array(&Int)`, `Array<String>` →
+    /// An array type with the given element type (`IntArray` → `Array(&Int)`, `Array<String>` →
     /// `Array(&String)`). Element `Ty`s are interned (`intern_ty`) so equal arrays share a pointer.
     Array(&'static Ty),
     /// The type of the `null` literal — assignable to any reference type.
@@ -107,20 +103,16 @@ pub enum Ty {
     Nothing,
     /// Placeholder after a type error, suppresses cascading diagnostics.
     Error,
-    /// A Kotlin function type `(A, B) -> R` — lowered to `kotlin/jvm/functions/FunctionN` (N = arity)
-    /// by the JVM backend, but the front end keeps the real parameter/return types (interned `FnSig`)
-    /// so a call through a `Fun` value recovers its return type instead of erasing to `Object`.
+    /// A Kotlin function type `(A, B) -> R`. The front end keeps the real parameter/return types
+    /// (interned `FnSig`) so a call through a `Fun` value recovers its return type.
     Fun(&'static FnSig),
     /// A nullable type `T?`. Wraps the interned non-null type. Kotlin has no `T??`, so the inner type
-    /// is never itself `Nullable` (the [`Ty::nullable`] constructor enforces this). Nullability is a
-    /// Kotlin-level fact: a nullable primitive (`Int?`) is a JVM *reference* (boxed `java/lang/Integer`)
-    /// — that representation choice lives in the JVM backend / [`Ty::descriptor`], not in the checker.
+    /// is never itself `Nullable` (the [`Ty::nullable`] constructor enforces this).
     Nullable(&'static Ty),
     /// A generic type-parameter reference (`T`), carrying its name and declared upper bound
     /// (`<T : CharSequence>` → bound `CharSequence`; unbounded `<T>` → bound `kotlin/Any`). The checker
-    /// reasons about `T` as `T` (subtyping against the bound, substitution at instantiation); JVM
-    /// **erasure** — collapsing `T` to its bound's class, or a primitive for a specialized `<T : Int>` —
-    /// is a backend concern that happens in [`Ty::descriptor`]/emit, never in the checker.
+    /// reasons about `T` as `T` (subtyping against the bound, substitution at instantiation); runtime
+    /// erasure is a backend concern.
     TyParam(&'static str, &'static Ty),
 }
 
@@ -184,6 +176,31 @@ impl Ty {
         }
     }
 
+    /// Kotlin class identity for types that have one in source-level member/subtype lookup.
+    ///
+    /// This is not a JVM descriptor mapping: it returns Kotlin internal names (`kotlin/Int`,
+    /// `kotlin/String`, user class names), and deliberately ignores backend wrapper/internal names.
+    /// Nullable and type-parameter forms delegate to their non-null/bound class identity.
+    pub fn kotlin_class_internal(self) -> Option<&'static str> {
+        match self {
+            Ty::Obj(i, _) => Some(i),
+            Ty::String => Some("kotlin/String"),
+            Ty::Boolean => Some("kotlin/Boolean"),
+            Ty::Byte => Some("kotlin/Byte"),
+            Ty::Short => Some("kotlin/Short"),
+            Ty::Int => Some("kotlin/Int"),
+            Ty::Long => Some("kotlin/Long"),
+            Ty::Char => Some("kotlin/Char"),
+            Ty::Float => Some("kotlin/Float"),
+            Ty::Double => Some("kotlin/Double"),
+            Ty::UInt => Some("kotlin/UInt"),
+            Ty::ULong => Some("kotlin/ULong"),
+            Ty::Nullable(inner) => inner.kotlin_class_internal(),
+            Ty::TyParam(_, bound) => bound.kotlin_class_internal(),
+            _ => None,
+        }
+    }
+
     /// The canonical **extension-receiver key**: the `Ty` two receivers must share for an extension
     /// declared on one to resolve on the other. A Kotlin-level erasure that reproduces the equivalence
     /// the old JVM descriptor key gave for *reference* receivers, without referencing the backend — it
@@ -209,7 +226,7 @@ impl Ty {
             Ty::Nullable(inner) => match *inner {
                 Ty::UInt => Ty::obj("kotlin/UInt"),
                 Ty::ULong => Ty::obj("kotlin/ULong"),
-                p if p.is_primitive() => p.boxed_ref().unwrap_or(p),
+                p if p.boxed_ref().is_some() => p.boxed_ref().unwrap_or(p),
                 other => other.erased_recv(),
             },
             Ty::TyParam(_, b) => b.erased_recv(),
@@ -253,7 +270,9 @@ impl Ty {
     /// "is this a boxed-wrapper `Obj`?" probe (`t.obj_internal().and_then(prim_of_wrapper)`).
     pub fn nullable_primitive(self) -> Option<Ty> {
         match self {
-            Ty::Nullable(inner) if inner.is_primitive() => Some(*inner),
+            Ty::Nullable(inner) if inner.boxed_ref().is_some() || inner.is_unsigned() => {
+                Some(*inner)
+            }
             _ => None,
         }
     }
@@ -262,7 +281,7 @@ impl Ty {
     /// non-primitive (already a reference) or the unsigned/value primitives, whose nullable boxing
     /// isn't supported yet (those stay rejected — never miscompiled).
     pub fn nullable_boxed(self) -> Option<Ty> {
-        (self.is_primitive() && !self.is_unsigned()).then(|| Ty::nullable(self))
+        self.boxed_ref().is_some().then(|| Ty::nullable(self))
     }
 
     /// A function type `(params) -> ret`.
@@ -407,19 +426,18 @@ impl Ty {
         }
     }
 
-    /// Internal name if this is a reference type.
+    /// Internal class name if this is an object type.
     pub fn obj_internal(self) -> Option<&'static str> {
         match self {
             Ty::Obj(n, _) => Some(n),
-            // A type parameter erases to its bound — report the bound's class (JVM erasure).
+            // A type parameter follows its bound for object identity queries.
             Ty::TyParam(_, b) => b.obj_internal(),
             _ => None,
         }
     }
 
-    /// True for JVM reference types (where `null` is a valid value). Any nullable type is a
-    /// reference: a nullable primitive (`Int?`) boxes to its wrapper. A type parameter follows its
-    /// bound (an unbounded `T` is a reference; a specialized `<T : Int>` is not).
+    /// True for values that can carry `null` in the language model. Any nullable type is reference-like;
+    /// a type parameter follows its bound.
     pub fn is_reference(self) -> bool {
         match self {
             Ty::TyParam(_, b) => b.is_reference(),
@@ -437,20 +455,19 @@ impl Ty {
         )
     }
 
-    pub fn is_primitive(self) -> bool {
-        matches!(
-            self,
-            Ty::Int
-                | Ty::Byte
-                | Ty::Short
-                | Ty::Long
-                | Ty::Float
-                | Ty::Double
-                | Ty::Boolean
-                | Ty::Char
-                | Ty::UInt
-                | Ty::ULong
-        )
+    pub fn is_numeric_or_char(self) -> bool {
+        self.is_numeric() || self == Ty::Char
+    }
+
+    /// True for a member/property read result that can be used as an expression value in the current
+    /// lowering model. `Unit`/`Error` entries are ignored when resolving zero-arg property-like reads.
+    pub fn is_read_value_result(self) -> bool {
+        !matches!(self, Ty::Unit | Ty::Error)
+    }
+
+    /// True for the signed integral types whose Kotlin range overload yields `IntRange`.
+    pub fn is_int_range_operand(self) -> bool {
+        matches!(self, Ty::Byte | Ty::Short | Ty::Int)
     }
 
     /// True for the unsigned integer types (inline classes over a signed primitive).
@@ -468,65 +485,6 @@ impl Ty {
             self,
             Ty::Int | Ty::Byte | Ty::Short | Ty::Long | Ty::Boolean | Ty::Char
         )
-    }
-
-    /// The signed primitive an unsigned type is represented by on the JVM (`UInt` → `Int`).
-    pub fn unsigned_repr(self) -> Option<Ty> {
-        match self {
-            Ty::UInt => Some(Ty::Int),
-            Ty::ULong => Some(Ty::Long),
-            _ => None,
-        }
-    }
-
-    /// JVM type descriptor for ABI (`I`, `J`, `D`, `Z`, `String`, `V`, `Lpkg/Name;`). Reference
-    /// descriptors run the (Kotlin) internal name through the JVM name mapping, so the `java/lang/…`
-    /// realization lives in the JVM part, not here — this method is the Ty→bytecode boundary.
-    pub fn descriptor(self) -> String {
-        use crate::jvm::jvm_class_map::to_jvm_internal;
-        let obj_desc = |internal: &str| format!("L{};", to_jvm_internal(internal));
-        match self {
-            Ty::Int => "I".into(),
-            Ty::Byte => "B".into(),
-            Ty::Short => "S".into(),
-            Ty::Long => "J".into(),
-            Ty::Float => "F".into(),
-            Ty::Double => "D".into(),
-            Ty::Boolean => "Z".into(),
-            Ty::Char => "C".into(),
-            // Unboxed inline-class erasure: `UInt` is a JVM `int`, `ULong` a `long`.
-            Ty::UInt => "I".into(),
-            Ty::ULong => "J".into(),
-            Ty::String => obj_desc("kotlin/String"),
-            Ty::Unit => "V".into(),
-            Ty::Obj(n, _) => obj_desc(n),
-            Ty::Null => obj_desc("kotlin/Any"),
-            Ty::Nothing => obj_desc("kotlin/Any"),
-            Ty::Array(elem) => format!("[{}", elem.descriptor()),
-            Ty::Error => obj_desc("kotlin/Any"),
-            // A `suspend` function type carries a trailing `Continuation` parameter, so its arity is one
-            // greater than the logical parameter count (`suspend () -> R` → `Function1`).
-            Ty::Fun(s) => format!(
-                "Lkotlin/jvm/functions/Function{};",
-                s.params.len() + usize::from(s.suspend)
-            ),
-            // `T?` is a reference: a nullable primitive boxes to its wrapper (`Int?` →
-            // `Ljava/lang/Integer;`, `UInt?` → `Lkotlin/UInt;`); a nullable reference keeps the same
-            // descriptor.
-            Ty::Nullable(inner) => match *inner {
-                Ty::UInt => obj_desc("kotlin/UInt"),
-                Ty::ULong => obj_desc("kotlin/ULong"),
-                other => other.boxed_ref().unwrap_or(other).descriptor(),
-            },
-            // JVM erasure: a type parameter `T` erases to its bound's descriptor (a `<T : Int>` bound
-            // specializes to the primitive `I`; an unbounded `T` bound is `kotlin/Any` → `Object`).
-            Ty::TyParam(_, bound) => bound.descriptor(),
-        }
-    }
-
-    /// The `kotlin/jvm/functions/FunctionN` interface internal name for a `Fun(n)` type.
-    pub fn fun_interface(n: u8) -> String {
-        format!("kotlin/jvm/functions/Function{n}")
     }
 
     /// Numeric promotion rank for binary arithmetic (Int < Long < Double).
@@ -570,19 +528,6 @@ mod tests {
     }
 
     #[test]
-    fn ty_param_descriptor_erases_to_its_bound() {
-        // Erasure is a JVM-emit concern: `descriptor()` (the Ty→bytecode boundary) erases `T` to its
-        // bound. An unbounded `T` (bound = `kotlin/Any`) erases to `java/lang/Object`.
-        let bounded = Ty::ty_param("T", Ty::obj("kotlin/CharSequence"));
-        assert_eq!(
-            bounded.descriptor(),
-            Ty::obj("kotlin/CharSequence").descriptor()
-        );
-        let unbounded = Ty::ty_param("T", Ty::obj("kotlin/Any"));
-        assert_eq!(unbounded.descriptor(), Ty::obj("kotlin/Any").descriptor());
-    }
-
-    #[test]
     fn ty_param_is_reference_follows_its_bound() {
         assert!(Ty::ty_param("T", Ty::obj("kotlin/Any")).is_reference());
         // A primitive-bounded `<T : Int>` is not a reference (it specializes to the primitive).
@@ -594,6 +539,25 @@ mod tests {
         assert!(!Ty::Int.is_ty_param());
         assert_eq!(Ty::Int.ty_param_name(), None);
         assert_eq!(Ty::Int.ty_param_bound(), None);
+    }
+
+    #[test]
+    fn kotlin_class_internal_is_source_class_identity() {
+        assert_eq!(Ty::Int.kotlin_class_internal(), Some("kotlin/Int"));
+        assert_eq!(Ty::String.kotlin_class_internal(), Some("kotlin/String"));
+        assert_eq!(
+            Ty::obj_args("demo/Box", &[Ty::Int]).kotlin_class_internal(),
+            Some("demo/Box")
+        );
+        assert_eq!(
+            Ty::nullable(Ty::UInt).kotlin_class_internal(),
+            Some("kotlin/UInt")
+        );
+        assert_eq!(
+            Ty::ty_param("T", Ty::obj("kotlin/CharSequence")).kotlin_class_internal(),
+            Some("kotlin/CharSequence")
+        );
+        assert_eq!(Ty::Null.kotlin_class_internal(), None);
     }
 
     #[test]
@@ -662,32 +626,6 @@ mod tests {
         // `Int?` boxes — it accepts `null`, unlike the unboxed `Int`.
         assert!(!Ty::Int.is_reference());
         assert!(Ty::nullable(Ty::Int).is_reference());
-    }
-
-    #[test]
-    fn nullable_signed_primitive_descriptor_boxes_to_jvm_wrapper() {
-        assert_eq!(Ty::nullable(Ty::Int).descriptor(), "Ljava/lang/Integer;");
-        assert_eq!(
-            Ty::nullable(Ty::Boolean).descriptor(),
-            "Ljava/lang/Boolean;"
-        );
-    }
-
-    #[test]
-    fn nullable_unsigned_primitive_descriptor_boxes_to_inline_class() {
-        // `UInt?`/`ULong?` box to their Kotlin inline-class type, NOT the unboxed `I`/`J`.
-        assert_eq!(Ty::nullable(Ty::UInt).descriptor(), "Lkotlin/UInt;");
-        assert_eq!(Ty::nullable(Ty::ULong).descriptor(), "Lkotlin/ULong;");
-    }
-
-    #[test]
-    fn nullable_reference_descriptor_matches_non_null() {
-        assert_eq!(
-            Ty::nullable(Ty::String).descriptor(),
-            Ty::String.descriptor()
-        );
-        let p = Ty::obj("demo/Point");
-        assert_eq!(Ty::nullable(p).descriptor(), p.descriptor());
     }
 
     #[test]

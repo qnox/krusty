@@ -3,7 +3,7 @@
 //! `java/util/List`. This is the foundation for distinguishing read-only vs mutable collections.
 
 use krusty::jvm::classpath::Classpath;
-use krusty::jvm::metadata::{builtins_supertypes, package_functions, return_types};
+use krusty::jvm::metadata::{builtins_supertypes, package_functions};
 use std::path::PathBuf;
 
 fn stdlib() -> Option<PathBuf> {
@@ -28,26 +28,25 @@ fn collection_factory_return_types_distinguish_mutable() {
     let ci = cp
         .find("kotlin/collections/CollectionsKt__CollectionsKt")
         .expect("CollectionsKt part on classpath");
-    let rets = return_types(&package_functions(&ci));
+    let fns = package_functions(&ci);
+    let ret = |name: &str| {
+        fns.iter()
+            .find(|f| f.kotlin_name == name)
+            .and_then(|f| f.ret_class.as_deref())
+    };
     assert_eq!(
-        rets.get("listOf").map(String::as_str),
+        ret("listOf"),
         Some("kotlin/collections/List"),
         "listOf must decode to the read-only List from @Metadata"
     );
     assert_eq!(
-        rets.get("mutableListOf").map(String::as_str),
+        ret("mutableListOf"),
         Some("kotlin/collections/MutableList"),
         "mutableListOf must decode to MutableList from @Metadata (JVM signature erases both to java/util/List)"
     );
-    assert_eq!(
-        rets.get("emptyList").map(String::as_str),
-        Some("kotlin/collections/List")
-    );
+    assert_eq!(ret("emptyList"), Some("kotlin/collections/List"));
     // A type stored directly in the d2 string table (not a predefined) still resolves.
-    assert_eq!(
-        rets.get("arrayListOf").map(String::as_str),
-        Some("java/util/ArrayList")
-    );
+    assert_eq!(ret("arrayListOf"), Some("java/util/ArrayList"));
 }
 
 /// The Kotlin collection hierarchy is read from `collections.kotlin_builtins` exactly as kotlinc stores

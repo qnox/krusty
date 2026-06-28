@@ -604,8 +604,9 @@ pub struct IrClass {
     /// of an abstract `@Serializable` type via a runtime `PolymorphicSerializer(<type>::class)` (open
     /// polymorphism), since an abstract base has no closed subclass set. Ignored by the core backend.
     pub is_abstract: bool,
-    /// JVM superclass internal name (`java/lang/Object` normally, `java/lang/Enum` for an enum, or a
-    /// user base class for `class B : A(args)`).
+    /// Semantic superclass internal name (`kotlin/Any` normally, or a user base class for
+    /// `class B : A(args)`). Target-specific representation classes such as JVM enum bases are chosen by
+    /// the backend.
     pub superclass: String,
     /// Arguments to the base-class constructor (`: A(args)`) — lowered IR value ids, evaluated with
     /// `this`=value 0 and the primary-constructor params as values `1..=ctor_param_count`. Empty

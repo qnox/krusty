@@ -27,4 +27,5 @@ pub mod symbol_source;
 pub mod synthetics;
 pub mod token;
 pub mod toolchain;
+pub mod trace;
 pub mod types;

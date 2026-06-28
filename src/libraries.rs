@@ -1,38 +1,294 @@
-//! The library-set abstraction — one half of a target *platform* (the other half is its emitter,
-//! e.g. `jvm::JvmBackend`). A `LibrarySet` is the common denominator a front end needs from a
-//! target's compiled libraries: the type universe and the *shape* of each type and top-level
-//! callable, whether the libraries are a JVM classpath (bytecode `.class` jars) or a klib (IR).
+//! Platform-neutral library data shared by [`crate::symbol_source::SymbolSource`] providers. A source is
+//! the common denominator a front end needs from compiled libraries: the type universe and the *shape* of
+//! each type and top-level callable, whether the libraries are a JVM classpath (bytecode `.class` jars)
+//! or a klib (IR).
 //!
 //! The resolver and IR lowering depend **only** on this trait, never on the JVM backend: every
 //! `java/lang/…` name, descriptor parse, and classpath read lives behind a concrete implementation
-//! (`jvm::jvm_libraries::JvmLibraries`). Swapping in a klib-backed `LibrarySet` would let the same
+//! (`jvm::jvm_libraries::JvmLibraries`). Swapping in a klib-backed `SymbolSource` would let the same
 //! front end target Kotlin/JS without touching `resolve`/`ir_lower`.
 //!
 //! The surface is deliberately Kotlin-semantic — there is no "static" (a `Type.foo()` call is a
 //! companion-object member; a top-level/extension call is a package-level callable). The JVM
 //! realization of those (invokestatic on a facade, `@JvmStatic`, descriptors) lives in the impl.
 
-use crate::symbol_source::SymbolSource;
 use crate::types::Ty;
 use std::collections::HashMap;
 
-/// The type universe the library set contributes, resolved to internal names: every importable
+/// A parsed generic-signature node, platform neutral. A backend parses its own signature format into
+/// this tree; call resolution unifies and substitutes over it without knowing which backend produced it.
+#[derive(Clone, Debug)]
+pub enum GSig {
+    Var(String),
+    Class(String, Vec<GSig>),
+    Function { params: Vec<GSig>, ret: Box<GSig> },
+    Arr(Box<GSig>),
+    Prim(Ty),
+}
+
+/// A parsed method generic signature: formal names, parameter signature nodes, and return signature.
+#[derive(Clone, Debug)]
+pub struct GenericSig {
+    pub formals: Vec<String>,
+    pub params: Vec<GSig>,
+    pub ret: GSig,
+}
+
+/// The type universe a symbol source contributes, resolved to internal names: every importable
 /// simple name → its internal name, plus type aliases (`alias` → target simple/internal name).
 #[derive(Default)]
 pub struct LibrarySeed {
     pub class_names: HashMap<String, String>,
     pub type_aliases: HashMap<String, String>,
+    /// Non-identity canonical internal-name aliases used for subtype identity checks
+    /// (`kotlin/collections/List` -> `java/util/List`). Missing means identity.
+    pub canonical_names: HashMap<String, String>,
 }
 
 /// One member (constructor, member function/property accessor, or companion member) of a library
 /// type, in Kotlin terms. `descriptor` is an opaque backend token (a JVM method descriptor) the
 /// matching emitter consumes verbatim — the front end matches on `params`/`ret`, never parsing it.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct LibraryMember {
+    /// The Kotlin/source name used for resolution (`CharSequence.get`, `Number.toInt`).
     pub name: String,
+    /// Concrete platform owner when it differs from the receiver's resolved type.
+    pub owner: Option<String>,
+    /// Physical method name when it differs from the Kotlin/source member name.
+    pub physical_name: Option<String>,
     pub params: Vec<Ty>,
     pub ret: Ty,
+    /// Kotlin metadata return nullability (`T?`). Descriptors erase this, but resolution needs it so
+    /// nullable generic/member returns remain boxed/reference-like until a use site demands unboxing.
+    pub ret_nullable: bool,
+    pub physical_ret: Ty,
     pub descriptor: String,
+    pub signature: Option<String>,
+    pub is_interface: bool,
+    pub inline: InlineKind,
+}
+
+/// Platform-provided accessor used by counted range/progression loop lowering. The name and descriptor
+/// are backend tokens; common lowering only emits them back to the same backend.
+#[derive(Clone, Debug)]
+pub struct PlatformAccessor {
+    pub name: String,
+    pub descriptor: String,
+}
+
+/// The platform/library shape of a range-like type that can be iterated as a counted loop. This keeps
+/// library class names, mangled value-class accessors, and backend descriptors out of common lowering.
+#[derive(Clone, Debug)]
+pub struct CountedLoopInfo {
+    pub elem: Ty,
+    pub first: PlatformAccessor,
+    pub last: PlatformAccessor,
+    /// `None` for unit-step ranges; `Some` for progressions whose step is read from the value.
+    pub step: Option<(PlatformAccessor, Ty)>,
+}
+
+/// Platform runtime class plus constructor descriptor used when common lowering must synthesize a
+/// library runtime object. Both fields are backend tokens owned by the provider.
+#[derive(Clone, Debug)]
+pub struct PlatformCtor {
+    pub internal: String,
+    pub ctor_desc: String,
+}
+
+/// Platform-owned static field access. Used for target-specific singleton/companion realizations.
+#[derive(Clone, Debug)]
+pub struct PlatformField {
+    pub owner: String,
+    pub name: String,
+    pub descriptor: String,
+}
+
+/// Platform construction plan for a Kotlin range value expression. `elem` is the semantic element
+/// type operands coerce to; `through` constructs `a..b`; `until` realizes `a..<b` when supported.
+#[derive(Clone, Debug)]
+pub struct RangeConstruction {
+    pub elem: Ty,
+    pub result: Ty,
+    pub through: PlatformRangeCtor,
+    pub until: Option<LibraryCallable>,
+}
+
+/// Platform-owned range constructor tokens. `trailing_nulls` covers synthetic marker arguments such as
+/// JVM unsigned range constructors without exposing those marker classes to common lowering.
+#[derive(Clone, Debug)]
+pub struct PlatformRangeCtor {
+    pub internal: String,
+    pub ctor_desc: String,
+    pub trailing_nulls: usize,
+}
+
+/// Platform-owned runtime helper. The common lowerer can request a semantic helper and emit the
+/// returned opaque callable without spelling target runtime classes or descriptors.
+#[derive(Clone, Copy, Debug)]
+pub enum RuntimeOp {
+    UnsignedBox,
+    UnsignedUnbox,
+    UnsignedCompare,
+    UnsignedDivide,
+    UnsignedRemainder,
+    UnsignedToString,
+    UIntToLong,
+    PrimitiveCompare,
+    HashCode,
+    ArrayToString,
+    ArrayCopyOf,
+    StartCoroutine,
+    ThrowOnFailure,
+    CoroutineSuspended,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum RuntimeCtor {
+    IllegalStateException,
+    AssertionError,
+}
+
+/// Target/runtime services used after resolution, mostly by common IR lowering. This is deliberately
+/// separate from [`crate::symbol_source::SymbolSource`]: the resolver should see declarations and
+/// semantic library metadata, while target runtime class names/descriptors live here.
+pub trait TargetRuntime {
+    /// Runtime interface/class used to represent a function value of `arity` on this platform.
+    fn function_type(&self, _arity: usize) -> Option<Ty> {
+        None
+    }
+
+    /// Runtime implementation class constructed for a property reference on this platform.
+    fn property_reference_impl(&self, _arity: usize, _mutable: bool) -> Option<PlatformCtor> {
+        None
+    }
+
+    /// Platform reflection signature stored in a synthesized property-reference object.
+    fn property_reference_signature(&self, _getter_name: &str, _ret: Ty) -> Option<String> {
+        None
+    }
+
+    /// Platform field/type descriptor for a lowered IR type.
+    fn type_descriptor(&self, _ty: Ty) -> Option<String> {
+        None
+    }
+
+    /// Platform field/type descriptor for a type already stored in IR representation. Most targets can
+    /// treat this like [`TargetRuntime::type_descriptor`], but the JVM maps IR spellings such as
+    /// `Obj("kotlin/Int")` back to primitive descriptor carriers in some ABI positions.
+    fn ir_type_descriptor(&self, ty: Ty) -> Option<String> {
+        self.type_descriptor(ty)
+    }
+
+    /// Platform method descriptor for lowered IR parameter and return types.
+    fn method_descriptor(&self, _params: &[Ty], _ret: Ty) -> Option<String> {
+        None
+    }
+
+    /// Runtime superclass used for synthesized function references on this platform.
+    fn function_reference_impl_type(&self) -> Option<Ty> {
+        None
+    }
+
+    /// Platform accessor used for built-in enum properties such as `ordinal` and `name`.
+    fn enum_member_accessor(&self, _name: &str) -> Option<PlatformAccessor> {
+        None
+    }
+
+    /// Platform static field for an object singleton value.
+    fn object_instance_field(&self, _internal: &str) -> Option<PlatformField> {
+        None
+    }
+
+    /// Platform static field for a class companion singleton value.
+    fn companion_instance_field(
+        &self,
+        _class_internal: &str,
+        _companion_internal: &str,
+        _field_name: &str,
+    ) -> Option<PlatformField> {
+        None
+    }
+
+    /// Platform runtime holder type used when a mutable local of `elem` is captured by a closure.
+    fn mutable_local_ref_type(&self, _elem: Ty) -> Option<Ty> {
+        None
+    }
+
+    /// The target's scalar carrier for a semantic value type, when it has one. Signed primitives usually
+    /// carry themselves; target-owned value primitives may carry another type (`UInt` as `Int` on JVM).
+    /// Common lowering uses this to decide boxing/coercion shape without spelling a backend primitive set.
+    fn scalar_value_repr(&self, _ty: Ty) -> Option<Ty> {
+        None
+    }
+
+    /// The boxed library value-class/object type for an unsigned integer semantic type, when the target has
+    /// such a representation (`UInt` -> `kotlin/UInt` on JVM). Common lowering uses this for box/unbox and
+    /// `is UInt` shapes without spelling target class names.
+    fn unsigned_integer_box_type(&self, _ty: Ty) -> Option<Ty> {
+        None
+    }
+
+    /// If `internal` is a platform range/progression type that can be emitted as a counted loop,
+    /// describe its source element type and platform accessors. The default keeps non-platform sources
+    /// on the ordinary iterator path.
+    fn counted_loop_info(&self, _internal: &str) -> Option<CountedLoopInfo> {
+        None
+    }
+
+    /// Platform construction shape for a Kotlin range expression with operands `lo` and `hi`.
+    /// The provider owns range runtime class names, constructor descriptors, synthetic marker slots,
+    /// and helper facades.
+    fn range_construction(&self, _lo: Ty, _hi: Ty) -> Option<RangeConstruction> {
+        None
+    }
+
+    /// Physical call descriptor for invoking a suspend callable whose current descriptor is still the
+    /// logical source signature. The provider owns continuation descriptors and return erasure.
+    fn suspend_cps_descriptor(&self, _logical_descriptor: &str) -> Option<String> {
+        None
+    }
+
+    /// Platform callable for a runtime helper. Common lowering selects the semantic helper; the
+    /// provider owns target runtime classes, method names, and descriptors.
+    fn runtime_callable(&self, _op: RuntimeOp, _ty: Ty) -> Option<LibraryCallable> {
+        None
+    }
+
+    /// Platform constructor for a runtime support object. Common lowering selects the semantic
+    /// constructor; the provider owns target runtime classes and descriptors.
+    fn runtime_ctor(&self, _ctor: RuntimeCtor) -> Option<PlatformCtor> {
+        None
+    }
+
+    /// Whether a selected library callable has the semantics of Kotlin's defaulted reified
+    /// `assertFailsWith<T> { ... }` helper. Such helpers cannot be called directly when their platform
+    /// realization is private inline-only bytecode; common lowering can still realize the semantic shape
+    /// as `try/catch` IR when the target identifies it.
+    fn is_reified_assert_fails_with_default(&self, _callable: &LibraryCallable) -> bool {
+        false
+    }
+}
+
+pub trait CompilerPlatform: crate::symbol_source::SymbolSource + TargetRuntime {}
+
+impl<T> CompilerPlatform for T where T: crate::symbol_source::SymbolSource + TargetRuntime {}
+
+impl LibraryMember {
+    pub fn new(name: String, params: Vec<Ty>, ret: Ty, descriptor: String) -> Self {
+        LibraryMember {
+            name,
+            owner: None,
+            physical_name: None,
+            params,
+            ret,
+            ret_nullable: false,
+            physical_ret: ret,
+            descriptor,
+            signature: None,
+            is_interface: false,
+            inline: InlineKind::None,
+        }
+    }
 }
 
 /// Which source a resolved callable came from — set by the source that resolves it, read by the
@@ -48,10 +304,9 @@ pub enum Origin {
     },
 }
 
-/// A package-level callable: a top-level function (`listOf`), or an extension (its receiver is the
 /// A resolved companion-object function on a classpath value class (`Result.success`). The call lowers
 /// to `getstatic <class>.<field>:L<companion>;` (the receiver) then an inline-splice of the companion
-/// INSTANCE method `<companion>.<jvm_name><descriptor>` (its `this` is the loaded singleton).
+/// INSTANCE method carried by `callable` (its `this` is the loaded singleton).
 #[derive(Clone, Debug)]
 pub struct CompanionFn {
     /// The value-class declaring the companion (`kotlin/Result`).
@@ -60,18 +315,17 @@ pub struct CompanionFn {
     pub companion_internal: String,
     /// The static field on `class_internal` holding the singleton (`Companion`).
     pub companion_field: String,
-    /// The JVM method name on the companion (`success`).
-    pub jvm_name: String,
-    /// The companion method's real (instance) JVM descriptor (`(Ljava/lang/Object;)Ljava/lang/Object;`).
-    pub descriptor: String,
-    /// The call's logical Kotlin return type (`Result<T>`).
-    pub ret: Ty,
+    /// Selected companion method. Its `owner` is `companion_internal`; its name/descriptor are backend
+    /// tokens, and its params/ret are the logical Kotlin call shape.
+    pub callable: LibraryCallable,
 }
 
+/// A package-level callable: a top-level function (`listOf`), or an extension (its receiver is the
 /// first parameter). `owner` is the internal name of the facade/declaring container for emit.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct LibraryCallable {
     pub owner: String,
+    /// Kotlin/source name used for selection.
     pub name: String,
     pub params: Vec<Ty>,
     /// The *logical* return type — for a generic callable, the substituted type (`listOf<Int>` →
@@ -132,6 +386,13 @@ pub struct CallSig {
     /// Per logical param: if it is a function type `(A, B) -> R`, its inner param types `[A, B]` (to type
     /// a lambda argument's `it`/params); otherwise empty. Parallel to the params.
     pub lambda_param_types: Vec<Vec<Ty>>,
+    /// Per logical param: `Some(receiver)` when the parameter is a receiver function type
+    /// `Receiver.(...) -> R`. The checker binds that receiver as lambda `this` while using
+    /// `lambda_param_types` for the receiver/value parameters recovered from the generic signature.
+    pub lambda_receivers: Vec<Option<Ty>>,
+    /// Per logical param: whether it is a receiver function type, even when metadata cannot name a
+    /// concrete receiver class because the receiver is a type parameter (`T.() -> R`).
+    pub lambda_receiver_params: Vec<bool>,
     /// Minimum arguments a caller must supply (params beyond this have defaults). 0 by default.
     pub required: usize,
     /// True if the last logical param is `vararg` (callers pack trailing args into its array).
@@ -148,6 +409,10 @@ pub struct FunctionInfo {
     pub receiver: Option<Ty>,
     /// Whether the Kotlin return type is nullable (`T?`) — the JVM signature erases this.
     pub ret_nullable: bool,
+    /// Kotlin metadata return type, when the platform descriptor/signature erases source identity
+    /// (notably read-only vs mutable collection returns). Kept on the overload so consumers do not
+    /// perform owner/name metadata probes after selection.
+    pub ret_class: Option<Ty>,
     /// `inline`, `@InlineOnly` (`inline_only`), and friends — from `@Metadata`.
     pub flags: FnFlags,
     /// The opaque platform callable (owner/name/descriptor on JVM) + its resolved `params`/`ret`. Reuses
@@ -163,6 +428,12 @@ pub struct FunctionInfo {
     /// `0` for members/top-level (precedence there is by [`FnKind`], not rung); `u32::MAX` marks a
     /// candidate that must never preempt a real rung (the `@OverloadResolutionByLambdaReturnType` family).
     pub receiver_rank: u32,
+    /// Provider-specific tie-break key within an otherwise applicable overload set. Lower is preferred.
+    /// Consumers treat it as opaque selection data.
+    pub overload_rank: u32,
+    /// Parsed generic signature, if the provider has one. Carries type-variable binding facts with the
+    /// overload instead of making consumers parse backend signature strings after selection.
+    pub generic_sig: Option<GenericSig>,
     /// The source-level call shape (defaults, named params, lambda param types, vararg) the checker needs
     /// beyond the erased descriptor. `Default` (empty) when the source doesn't provide it.
     pub call_sig: CallSig,
@@ -223,7 +494,7 @@ pub struct FnFlags {
 /// All overloads of one function name applicable to a call — members AND extensions AND top-level, in one
 /// query, each tagged with its [`FnKind`] so the caller applies Kotlin precedence and picks (e.g. by the
 /// lambda's return type for `@OverloadResolutionByLambdaReturnType`). The consolidation that replaces the
-/// scattered `resolve_callable` / `is_inline` / return-overload / nullable lookups.
+/// scattered callable / `is_inline` / return-overload / nullable lookups.
 #[derive(Clone, Default)]
 pub struct FunctionSet {
     pub overloads: Vec<FunctionInfo>,
@@ -245,12 +516,23 @@ pub struct LibraryType {
     pub members: Vec<LibraryMember>,
     /// Companion-object members — accessed as `Type.member(…)` (the JVM realizes these as statics).
     pub companion: Vec<LibraryMember>,
+    /// Compile-time constants exposed by the companion object (`Int.MAX_VALUE`, `Double.NaN`, …).
+    /// Stored on the type shape so lowering consumes already-resolved library facts instead of making
+    /// a platform-specific side query.
+    pub companion_consts: HashMap<String, LibraryConst>,
+    /// The single abstract method when this type is a functional interface. None for ordinary classes,
+    /// non-SAM interfaces, and sources that do not provide SAM metadata.
+    pub sam_method: Option<LibraryMember>,
     /// The companion-object INSTANCE, if this class has one: `(field_name, companion_type_internal)`.
     /// A Kotlin `class C { companion object [Name] }` compiles to a `public static final C$Name`
     /// field on `C` (default name `Companion`, e.g. `Json.Default: Json$Default`). A bare reference to
     /// `C` in value position is that companion instance — `getstatic C.field:LcompanionType;`. Lets the
     /// resolver resolve `Json.encodeToString(…)` (an instance method on the companion's type).
     pub companion_object: Option<(String, String)>,
+    /// Public inline companion functions on a classpath value class whose bytecode method is private but
+    /// callable per metadata (`Result.success`). Lowering loads the companion object and splices the
+    /// method body; ordinary companion members stay in `companion`.
+    pub value_companion_fns: Vec<CompanionFn>,
     /// For a classpath `@JvmInline value class`, the erased underlying type it represents on the JVM
     /// (`UInt` → `Int`, `Result` → `Any`); `None` for an ordinary class. The JVM backend erases the value
     /// class to this everywhere (like a user value class), reproducing kotlinc's unboxed representation.
@@ -346,7 +628,21 @@ impl LibraryType {
         let widened: Vec<Ty> = args
             .iter()
             .map(|t| {
-                if t.is_reference() || t.is_primitive() {
+                if t.is_reference()
+                    || matches!(
+                        t,
+                        Ty::Int
+                            | Ty::Byte
+                            | Ty::Short
+                            | Ty::Long
+                            | Ty::Float
+                            | Ty::Double
+                            | Ty::Boolean
+                            | Ty::Char
+                            | Ty::UInt
+                            | Ty::ULong
+                    )
+                {
                     Ty::obj("kotlin/Any")
                 } else {
                     *t
@@ -379,9 +675,8 @@ impl LibraryType {
     }
 }
 
-/// What the front end asks of the target's library set. Results are in Kotlin terms (`Ty`, internal
-/// names); any backend-specific encoding (a JVM method descriptor) is an opaque string the matching
-/// backend emitter consumes. Default methods resolve nothing, for an empty library set.
+/// A primitive constant value read from a library (a `const`/`static final` field's compile-time
+/// value), platform-agnostic so the front end can inline it like the reference compiler does.
 /// A primitive constant value read from a library (a `const`/`static final` field's compile-time
 /// value), platform-agnostic so the front end can inline it like the reference compiler does.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -392,14 +687,19 @@ pub enum LibConst {
     Double(f64),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LibraryConst {
+    pub ty: Ty,
+    pub value: LibConst,
+}
+
 /// A compiled-library source: a [`SymbolSource`] (its type universe, overloads, and type shapes) PLUS
-/// the JVM-emit extras the backend needs (mangled members, inline-body splice checks, companion
-/// constants, `@Metadata` queries). The federatable half is `SymbolSource`; these extras are consulted
-/// only by the JVM emitter, never across the source federation.
+/// the backend extras needed while deciding whether a selected call can be emitted. The federatable half
+/// is `SymbolSource`; these extras are consulted only after ordinary symbol selection, never across the
+/// source federation.
 /// A recognized `kotlin.coroutines` compiler intrinsic. These are `@InlineOnly` stdlib declarations the
 /// reference compiler replaces by name with dedicated codegen rather than calling/inlining (their stub
-/// bodies just `throw`). Platform-neutral language concept; the platform [`LibrarySet`] maps source names
-/// to it (the JVM FQ-name table + codegen live in `jvm::coroutine_intrinsics`).
+/// bodies just `throw`). Platform-neutral language concept; backend codegen is keyed on this variant.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CoroutineIntrinsic {
     /// `COROUTINE_SUSPENDED` — the suspension sentinel (typed `Any`).
@@ -414,211 +714,23 @@ pub enum CoroutineIntrinsic {
     CreateCoroutine,
 }
 
-pub trait LibrarySet: SymbolSource {
-    /// Recognize an unqualified `kotlin.coroutines` intrinsic source name (`COROUTINE_SUSPENDED`,
-    /// `suspendCoroutineUninterceptedOrReturn`, `startCoroutine`, `createCoroutine`). The checker types
-    /// it from `@Metadata` and the backend emits its dedicated codegen; `None` for an ordinary name.
-    fn coroutine_intrinsic(&self, _name: &str) -> Option<CoroutineIntrinsic> {
-        None
-    }
-
-    /// The compile-time value of a primitive companion constant (`Int.MAX_VALUE`, `Double.NaN`, …),
-    /// read from the library (e.g. the JVM `IntCompanionObject.MAX_VALUE` `ConstantValue`). The
-    /// front end inlines it at the use site, exactly as the reference compiler does. `None` if not a
-    /// known constant / not in the library.
-    fn prim_companion_const(&self, _prim: &str, _field: &str) -> Option<LibConst> {
-        None
-    }
-
-    /// Resolve a call `ClassName.fn(args)` to a function on `ClassName`'s COMPANION object, when
-    /// `ClassName` is a classpath value class (`Result.success`). The companion fn is `inline` (private in
-    /// bytecode, public per `@Metadata`); the JVM realizes the call as `getstatic ClassName.Companion`
-    /// then an inline-splice of the (instance) companion method. `None` unless it resolves.
-    fn value_companion_fn(
-        &self,
-        _class_internal: &str,
-        _name: &str,
-        _n_args: usize,
-    ) -> Option<CompanionFn> {
-        None
-    }
-
-    /// Resolve a package-level callable: a top-level function (`receiver == None`) or an extension
-    /// (`receiver == Some(t)`, passed as the callable's first argument). `type_args` are the call's
-    /// explicit type arguments (`emptyList<Int>()`), bound to the callable's formal type parameters
-    /// when the value arguments don't determine them; empty when none are written.
-    fn resolve_callable(
-        &self,
-        _name: &str,
-        _receiver: Option<Ty>,
-        _args: &[Ty],
-        _type_args: &[Ty],
-    ) -> Option<LibraryCallable> {
-        None
-    }
-
-    /// The substituted (non-erased) return type of instance member `name(args)` on a *parameterized*
-    /// receiver — `List<Int>.get(0)` → `Int`. Binds the receiver's type arguments through the generic
-    /// hierarchy and substitutes the member's generic return. `None` when the receiver carries no type
-    /// arguments, the member isn't generic, or the library can't resolve it (the caller then uses the
-    /// erased return). The physical descriptor is unchanged — only the *logical* type is recovered.
-    fn member_return(&self, _recv: Ty, _name: &str, _args: &[Ty]) -> Option<Ty> {
-        None
-    }
-
-    /// The substituted return of instance member `name(args)` whose type variable binds from the
-    /// ARGUMENTS rather than the receiver — `Json.decodeFromString(KSerializer<Foo>, String): T` → `Foo`.
-    /// Finds the member up `recv`'s class hierarchy (allowing a SUBTYPE argument where a supertype
-    /// parameter is declared — `KSerializer<Foo>` for a `DeserializationStrategy<? extends T>` param),
-    /// then unifies the member's generic parameter signatures against the actual argument types and
-    /// substitutes the generic return. `None` when no such generic member resolves (caller uses the
-    /// erased return). Complements [`member_return`] (which binds from the receiver's type arguments).
-    fn instance_call_return(&self, _recv: Ty, _name: &str, _args: &[Ty]) -> Option<Ty> {
-        None
-    }
-
-    /// The return `Ty` of a BUILTIN type's class member (`internal` e.g. `kotlin/String`), by name +
-    /// argument types, read from the type's builtins declarations rather than a hardcoded table. `None`
-    /// if the name isn't a declared member there (e.g. a `StringsKt` extension on `String`).
-    fn builtin_member_ret(&self, _internal: &str, _name: &str, _args: &[Ty]) -> Option<Ty> {
-        None
-    }
-
-    /// Canonicalize a type's internal name for identity/subtype comparison: collapse the platform-mapped
-    /// aliases (a Kotlin built-in and the JVM class it maps to, the read-only/mutable collection pairs)
-    /// to one representative so two names for the same runtime type compare equal. The default is
-    /// identity; the JVM backend folds via its `JavaToKotlinClassMap`. Keeps the checker's subtyping in
-    /// Kotlin terms without it naming the backend's name map. The identity default means a non-JVM /
-    /// empty `LibrarySet` does not fold these aliases — only classpath-backed checking relies on it
-    /// (alias subtyping arises solely from stdlib/classpath symbols).
-    fn canonical_internal<'a>(&self, internal: &'a str) -> std::borrow::Cow<'a, str> {
-        std::borrow::Cow::Borrowed(internal)
-    }
-
-    /// Resolve a BUILTIN member (`String.length`, `List.get`/`size`, `CharSequence.get`, …) to its
-    /// concrete JVM call — `(owner_internal, jvm_method_name, method_descriptor, return_ty, is_interface)`
-    /// — derived from the type's builtins metadata + the kotlin↔JVM class map (no per-member hardcode).
-    /// `jvm_method_name` differs from the Kotlin name where kotlinc renames it (`get` → `charAt`,
-    /// `toInt` → `intValue`). Lets a backend emit a member that the classpath's `resolve_instance` can't
-    /// (a Kotlin builtin property/method over a mapped JVM type). `None` if `internal.name(n_args)` isn't a
-    /// declared builtin member.
-    fn builtin_member_call(
-        &self,
-        _internal: &str,
-        _name: &str,
-        _n_args: usize,
-    ) -> Option<(String, String, String, Ty, bool)> {
-        None
-    }
-
-    /// The single abstract method of a functional interface (`Runnable.run`, `Comparator.compare`) —
-    /// its name and `LibraryMember` — for SAM conversion of a lambda. `None` if `internal` isn't an
-    /// interface with exactly one abstract (non-default, non-static, non-`Object`) method.
-    fn sam_method(&self, _internal: &str) -> Option<LibraryMember> {
-        None
-    }
-
-    /// Resolve a method on `internal` whose JVM name starts with `prefix`, returning `(name, descriptor)`.
-    /// Inline-class members carry a mangled name suffix (`getFirst-pVg5ArA` on `UIntRange`, where the
-    /// `-…` hash encodes the inline-class signature), so a call site can't name them directly — it looks
-    /// the real name up from the classpath instead of recomputing kotlinc's mangling. `None` if absent.
-    fn mangled_member(&self, _internal: &str, _prefix: &str) -> Option<(String, String)> {
-        None
-    }
-
-    /// For a generic extension `recv.name(args…)` taking function arguments, the *element-typed*
-    /// parameter types of each call argument that is a lambda — `List<Int>.map { … }` → `[[Int]]` (the
-    /// single lambda's parameter is the element `Int`). The type variables bind from the receiver and
-    /// from the already-typed non-lambda arguments (`fold(0) { acc, x -> … }` binds the accumulator `R`
-    /// from the `0`), so `arg_tys[i]` is `Some` for a typed non-lambda argument and `None` for a lambda
-    /// not yet typed. Lets the checker type lambda bodies before resolving the call. Empty inner vec for
-    /// a non-lambda argument; `None` if no such extension.
-    fn extension_lambda_param_types(
-        &self,
-        _recv: Ty,
-        _name: &str,
-        _arg_tys: &[Option<Ty>],
-    ) -> Option<Vec<Vec<Ty>>> {
-        None
-    }
-
-    /// The same as [`extension_lambda_param_types`](Self::extension_lambda_param_types) but for a
-    /// *receiver-less top-level* library function (`applyIt(5) { it + 1 }`): the lambda parameter types
-    /// come from the function's generic `Signature` (`it: Int` from `f: (Int) -> Int`), which the erased
-    /// `Function1` descriptor hides. Lets the checker type a lib fn's lambda argument before resolving.
-    fn toplevel_lambda_param_types(
-        &self,
-        _name: &str,
-        _arg_tys: &[Option<Ty>],
-    ) -> Option<Vec<Vec<Ty>>> {
-        None
-    }
-
-    /// Per parameter, `Some(receiver_ty)` when it is a RECEIVER function type `Recv.(…) -> R` (decoded
-    /// from the param Type's `@ExtensionFunctionType` annotation + first type argument in `@Metadata`). A
-    /// lambda passed to such a param binds its implicit `this` to that receiver. Unlike
-    /// [`toplevel_lambda_param_types`](Self::toplevel_lambda_param_types) this needs no JVM `Signature`
-    /// attribute (a krusty-emitted module omits it), so it drives the receiver binding on its own. `None`
-    /// when no receiver-lambda params.
-    fn toplevel_lambda_recvs(
-        &self,
-        _name: &str,
-        _arg_tys: &[Option<Ty>],
-    ) -> Option<Vec<Option<Ty>>> {
-        None
-    }
-
-    /// Whether the platform can splice (truly inline) the lambda-taking `inline fun` `owner.name desc`
-    /// at a call site — i.e. its compiled body is shaped for the lambda-argument splice. The front end
-    /// routes a call to the inliner only when this is true, so an un-spliceable (e.g. `@InlineOnly`,
-    /// uncallable) callee is never emitted as a broken call. `false` for non-JVM platforms.
-    fn can_inline_lambda(&self, _owner: &str, _name: &str, _descriptor: &str) -> bool {
-        false
-    }
-
-    /// Whether a NO-lambda `inline fun` body can be spliced at a call site (`String.uppercase()`). The
-    /// lowerer routes a private `@InlineOnly` extension call to the splicer only when this is true, so an
-    /// un-spliceable (e.g. branchy) private callee is never emitted as a broken `invokestatic`.
-    fn can_inline_call(&self, _owner: &str, _name: &str, _descriptor: &str) -> bool {
-        false
-    }
-
-    /// Resolve a scope-function extension call (`receiver.let { … }`) for the bytecode inliner — like
-    /// [`resolve_callable`](Self::resolve_callable) with a receiver, but ALSO matching `@InlineOnly`
-    /// package-private candidates (which `resolve_callable` hides, since they aren't callable). The
-    /// caller must inline the result, never emit a call. `None` for non-JVM platforms.
-    fn resolve_scope_inline(
-        &self,
-        _name: &str,
-        _receiver: Ty,
-        _args: &[Ty],
-    ) -> Option<LibraryCallable> {
-        None
-    }
-
-    /// Whether the Kotlin return type of `owner.name` is an unsigned type (`UByte`/`UShort`/`UInt`/
-    /// `ULong`), from `@Metadata`. The JVM signature erases these to a signed primitive, so krusty's `Ty`
-    /// can't tell `Int.toUShort(): UShort` (the value `40000`) from a signed `Short` (`-25536`). Used to
-    /// REJECT an `@InlineOnly` extension with an unsigned result rather than splice it to a wrong value
-    /// (krusty's unsigned support is incomplete). `false` for non-JVM platforms / non-unsigned returns.
-    fn metadata_return_unsigned(&self, _owner: &str, _name: &str) -> bool {
-        false
-    }
-
-    /// The lambda parameter types for a Kotlin-name call that resolves by lambda RETURN type
-    /// (`@OverloadResolutionByLambdaReturnType`, e.g. `Iterable<T>.sumOf(selector: (T) -> R)`): `[element]`
-    /// so the selector's `it` types as the receiver's element rather than the erased `Any`. `None` when
-    /// `name` isn't such a function on `receiver`. (Return-type independent — used before the body is typed.)
-    fn lambda_return_overload_param(&self, _receiver: Ty, _name: &str) -> Option<Vec<Ty>> {
-        None
+pub fn coroutine_intrinsic(name: &str) -> Option<CoroutineIntrinsic> {
+    match name {
+        "COROUTINE_SUSPENDED" => Some(CoroutineIntrinsic::CoroutineSuspended),
+        "suspendCoroutineUninterceptedOrReturn" => {
+            Some(CoroutineIntrinsic::SuspendCoroutineUninterceptedOrReturn)
+        }
+        "startCoroutine" => Some(CoroutineIntrinsic::StartCoroutine),
+        "createCoroutine" => Some(CoroutineIntrinsic::CreateCoroutine),
+        _ => None,
     }
 }
 
-/// A library set with no external libraries — compiling a self-contained source set with no classpath.
-pub struct EmptyLibrarySet;
+/// A symbol source with no external libraries — compiling a self-contained source set with no classpath.
+pub struct EmptySymbolSource;
 
-impl SymbolSource for EmptyLibrarySet {}
-impl LibrarySet for EmptyLibrarySet {}
+impl crate::symbol_source::SymbolSource for EmptySymbolSource {}
+impl TargetRuntime for EmptySymbolSource {}
 
 #[cfg(test)]
 mod tests {

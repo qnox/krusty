@@ -164,8 +164,8 @@ fn run() {
         if d.has_errors() {
             continue;
         }
-        let syms = collect_signatures(&f1, &mut d);
-        let info = check_file(&f1[0], &syms, &mut d);
+        let mut syms = collect_signatures(&f1, &mut d);
+        let info = check_file(&f1[0], &mut syms, &mut d);
         if d.has_errors() {
             continue;
         }

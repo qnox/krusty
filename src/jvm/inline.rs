@@ -1543,6 +1543,10 @@ fn source_class_index(src_cp: &[C], name: &str) -> Option<u16> {
         .map(|p| p as u16)
 }
 
+fn source_class_or_object_index(src_cp: &[C], name: &str) -> Option<u16> {
+    source_class_index(src_cp, name).or_else(|| source_class_index(src_cp, "java/lang/Object"))
+}
+
 /// Frame-0 locals of a *static* method: one [`VType`] per parameter (`long`/`double` are one entry). A
 /// reference/array parameter becomes `Object(<src_cp Class index>)` so its frame type survives (a
 /// `takeIf` receiver returned from the body), or `Top` if that class has no `Class` constant in the
@@ -1576,7 +1580,9 @@ fn param_vtypes_full(descriptor: &str, src_cp: &[C]) -> Option<Vec<VType>> {
                     i += 1;
                 }
                 let name = std::str::from_utf8(&b[start + 1..i]).ok()?;
-                out.push(source_class_index(src_cp, name).map_or(VType::Top, VType::Object));
+                out.push(
+                    source_class_or_object_index(src_cp, name).map_or(VType::Top, VType::Object),
+                );
                 i += 1;
             }
             b'[' => {
@@ -1592,7 +1598,62 @@ fn param_vtypes_full(descriptor: &str, src_cp: &[C]) -> Option<Vec<VType>> {
                 }
                 i += 1;
                 let name = std::str::from_utf8(&b[start..i]).ok()?;
-                out.push(source_class_index(src_cp, name).map_or(VType::Top, VType::Object));
+                out.push(
+                    source_class_or_object_index(src_cp, name).map_or(VType::Top, VType::Object),
+                );
+            }
+            _ => return None,
+        }
+    }
+    Some(out)
+}
+
+fn param_vtypes_target(descriptor: &str, cw: &mut ClassWriter) -> Option<Vec<VType>> {
+    let inner = descriptor.strip_prefix('(')?.split(')').next()?;
+    let b = inner.as_bytes();
+    let mut i = 0;
+    let mut out = Vec::new();
+    while i < b.len() {
+        match b[i] {
+            b'I' | b'B' | b'S' | b'C' | b'Z' => {
+                out.push(VType::Int);
+                i += 1;
+            }
+            b'J' => {
+                out.push(VType::Long);
+                i += 1;
+            }
+            b'D' => {
+                out.push(VType::Double);
+                i += 1;
+            }
+            b'F' => {
+                out.push(VType::Float);
+                i += 1;
+            }
+            b'L' => {
+                let start = i;
+                while *b.get(i)? != b';' {
+                    i += 1;
+                }
+                let name = std::str::from_utf8(&b[start + 1..i]).ok()?;
+                out.push(VType::Object(cw.class_ref(name)));
+                i += 1;
+            }
+            b'[' => {
+                let start = i;
+                i += 1;
+                while *b.get(i)? == b'[' {
+                    i += 1;
+                }
+                if *b.get(i)? == b'L' {
+                    while *b.get(i)? != b';' {
+                        i += 1;
+                    }
+                }
+                i += 1;
+                let name = std::str::from_utf8(&b[start..i]).ok()?;
+                out.push(VType::Object(cw.class_ref(name)));
             }
             _ => return None,
         }
@@ -1829,11 +1890,7 @@ pub fn splice_unified(
     // operand-stack height (mid-expression), exactly like the former `splice_branchless`. A branchy body
     // (`require`'s `ifne`) or a non-trailing return needs the join frame ⇒ an empty baseline.
     let host_has_branches = insns.iter().any(|i| !matches!(i, Insn::Plain { .. }));
-    // A branchy body needs a `StackMapTable` to relocate frames for its branch targets; without one we
-    // can't supply those frames (the emitter would leave a target frameless → `VerifyError`). Bail.
-    if host_has_branches && body.stackmap.is_none() {
-        return None;
-    }
+    let synthesize_empty_branch_frames = host_has_branches && body.stackmap.is_none();
     let last_idx = insns.len().saturating_sub(1);
     let join_pos = insns.len();
     let mut made_goto = false;
@@ -2002,6 +2059,38 @@ pub fn splice_unified(
             .map(|v| relocate_vtype(v, &body.source_cp, cw))
             .collect::<Option<Vec<_>>>()?;
         frames.push((offs[new_idx], locals, stack));
+    }
+    if synthesize_empty_branch_frames {
+        let locals = param_vtypes_target(descriptor, cw)?;
+        let mut targets = std::collections::BTreeSet::new();
+        for insn in &final_insns {
+            match insn {
+                Insn::Branch { target, .. } | Insn::BranchW { target, .. } => {
+                    targets.insert(*target);
+                }
+                Insn::TableSwitch {
+                    default,
+                    targets: ts,
+                    ..
+                } => {
+                    targets.insert(*default);
+                    targets.extend(ts.iter().copied());
+                }
+                Insn::LookupSwitch { default, pairs } => {
+                    targets.insert(*default);
+                    targets.extend(pairs.iter().map(|(_, t)| *t));
+                }
+                Insn::Plain { .. } => {}
+            }
+        }
+        for target in targets {
+            if target < final_insns.len() {
+                let off = offs[target];
+                if !frames.iter().any(|(existing, _, _)| *existing == off) {
+                    frames.push((off, locals.clone(), Vec::new()));
+                }
+            }
+        }
     }
     // A DIVERGING spliced lambda body ends in a `*return`/`athrow` (a non-local return — `repeat { return
     // … }`): the host's post-invoke continuation (e.g. a loop back-edge / exit) is then unreachable, and
@@ -2450,19 +2539,21 @@ mod tests {
     }
 
     #[test]
-    fn splice_unified_bails_on_branch_without_stackmap() {
-        // `iload_0; ifeq +4; iconst_1; ireturn` — a branch but no `StackMapTable` ⇒ can't relocate the
-        // target frame, so the unified splice bails (the call falls back / the file skips).
+    fn splice_unified_synthesizes_branch_frames_without_stackmap() {
+        // `if (x != 0) 1 else 0` as a tiny inline body without a source `StackMapTable`. The inliner
+        // synthesizes descriptor-based empty-stack frames for branch targets.
         let body = MethodCode {
             max_stack: 1,
             max_locals: 1,
-            code: vec![0x1a, 0x99, 0x00, 0x04, 0x04, 0xac],
+            code: vec![0x1a, 0x99, 0x00, 0x07, 0x04, 0xa7, 0x00, 0x04, 0x03, 0xac],
             source_cp: vec![C::Other],
             stackmap: None,
             handlers: vec![],
         };
         let mut cw = ClassWriter::new("T", "java/lang/Object");
-        assert!(splice_unified(&body, "(I)I", 1, &[], 0, &mut cw).is_none());
+        let out = splice_unified(&body, "(I)I", 1, &[], 0, &mut cw).expect("splice");
+        assert!(out.join_required);
+        assert!(!out.frames.is_empty());
     }
 
     #[test]

@@ -3,7 +3,7 @@
 //! A *source* answers the three arg-independent questions resolution needs about a body of code: the
 //! type universe it contributes (`seed`), the overloads of a name (`functions`), and the shape of a
 //! type (`resolve_type`). Both the current module (its AST decls) and a compiled library (a classpath)
-//! are sources; [`crate::libraries::LibrarySet`] is a `SymbolSource` plus the JVM-emit extras.
+//! are sources; [`crate::libraries::SymbolSource`] is a `SymbolSource` plus the JVM-emit extras.
 //!
 //! Sources COMPOSE: a [`CompositeSource`] holds an ordered list of children and is itself a
 //! `SymbolSource`, so `[current module, sibling modules, stdlib, extra jars]` federate uniformly with
@@ -14,9 +14,11 @@
 use crate::libraries::{FunctionSet, LibrarySeed, LibraryType};
 use crate::types::Ty;
 
-/// The shared-base form of a [`LibrarySeed`]: `(class_names, type_aliases)`, each behind an `Rc` so
-/// many files compiled against one library set share the (large) maps rather than cloning them.
+/// The shared-base form of a [`LibrarySeed`]: class names, type aliases, and canonical-name aliases,
+/// each behind an `Rc` so many files compiled against one provider share the large maps rather than
+/// cloning them.
 pub type SharedSeed = (
+    std::rc::Rc<std::collections::HashMap<String, String>>,
     std::rc::Rc<std::collections::HashMap<String, String>>,
     std::rc::Rc<std::collections::HashMap<String, String>>,
 );
@@ -31,7 +33,7 @@ pub trait SymbolSource {
     }
 
     /// The same type universe as [`seed`], but with the (large) base maps shared by `Rc` so a caller
-    /// that compiles many files against one library set does NOT clone the whole stdlib+JDK class-name
+    /// that compiles many files against one provider does NOT clone the whole stdlib+JDK class-name
     /// map per file. Returns `(class_names, type_aliases)`. The default just wraps `seed`; a heavy
     /// classpath-backed source (the JVM one) overrides this to cache and return a shared `Rc`.
     fn seed_shared(&self) -> SharedSeed {
@@ -39,6 +41,7 @@ pub trait SymbolSource {
         (
             std::rc::Rc::new(s.class_names),
             std::rc::Rc::new(s.type_aliases),
+            std::rc::Rc::new(s.canonical_names),
         )
     }
 
@@ -52,6 +55,56 @@ pub trait SymbolSource {
     /// The shape of the type named `internal` (constructors, members, companion, supertypes), or `None`
     /// if this source has no such type.
     fn resolve_type(&self, _internal: &str) -> Option<LibraryType> {
+        None
+    }
+
+    /// The value-class underlying type for a semantic type, when this source knows it. The default
+    /// handles ordinary reference-named value classes through `resolve_type`; platform providers can
+    /// add builtins whose source type is not represented as `Ty::Obj`.
+    fn value_underlying(&self, ty: Ty) -> Option<Ty> {
+        match ty {
+            Ty::Obj(internal, _) => self.resolve_type(internal).and_then(|t| t.value_underlying),
+            _ => None,
+        }
+    }
+
+    /// Whether this source recognizes `ty` as one of Kotlin's unsigned integer library types. The checker
+    /// uses this for the source-level unsigned arithmetic/equality rules without carrying a local list of
+    /// `UInt`/`ULong` in resolver code.
+    fn is_unsigned_integer_type(&self, _ty: Ty) -> bool {
+        false
+    }
+
+    /// If values of this type can be invoked like a Kotlin function, return their arity. Plain
+    /// `Ty::Fun` is handled here; platform providers can add callable runtime types such as property
+    /// references without the checker knowing their class names.
+    fn function_like_arity(&self, ty: Ty) -> Option<usize> {
+        ty.fun_arity().map(usize::from)
+    }
+
+    /// The platform/library type used for a property reference with the given arity and mutability.
+    /// Resolver needs this type so direct property-reference APIs (`get`, `name`) keep working, but the
+    /// actual class name is provider-owned.
+    fn property_reference_type(&self, _arity: usize, _mutable: bool) -> Option<Ty> {
+        None
+    }
+
+    /// The type produced by a class literal (`X::class`) on this target/platform.
+    fn class_literal_type(&self) -> Option<Ty> {
+        None
+    }
+
+    /// Additional default wildcard-import packages contributed by this platform, in dotted Kotlin
+    /// package syntax. Common Kotlin defaults live in the resolver; this hook is only for documented
+    /// target additions such as JVM's `java.lang` and `kotlin.jvm`.
+    fn platform_default_import_packages(&self) -> &'static [&'static str] {
+        &[]
+    }
+
+    /// Platform spelling for a physical zero-arg getter when Kotlin property metadata is unavailable.
+    /// Common resolution asks for a semantic property name first; this hook is a fallback owned by the
+    /// source because JVM uses JavaBean-style `getX`/`isX` while other targets need not.
+    fn physical_property_getter_name(&self, _property: &str) -> Option<String> {
         None
     }
 }
@@ -85,6 +138,7 @@ impl SymbolSource for CompositeSource {
             let s = child.seed();
             seed.class_names.extend(s.class_names);
             seed.type_aliases.extend(s.type_aliases);
+            seed.canonical_names.extend(s.canonical_names);
         }
         seed
     }
@@ -103,6 +157,44 @@ impl SymbolSource for CompositeSource {
 
     fn resolve_type(&self, internal: &str) -> Option<LibraryType> {
         self.children.iter().find_map(|c| c.resolve_type(internal))
+    }
+
+    fn value_underlying(&self, ty: Ty) -> Option<Ty> {
+        self.children.iter().find_map(|c| c.value_underlying(ty))
+    }
+
+    fn is_unsigned_integer_type(&self, ty: Ty) -> bool {
+        self.children.iter().any(|c| c.is_unsigned_integer_type(ty))
+    }
+
+    fn function_like_arity(&self, ty: Ty) -> Option<usize> {
+        self.children.iter().find_map(|c| c.function_like_arity(ty))
+    }
+
+    fn property_reference_type(&self, arity: usize, mutable: bool) -> Option<Ty> {
+        self.children
+            .iter()
+            .find_map(|c| c.property_reference_type(arity, mutable))
+    }
+
+    fn class_literal_type(&self) -> Option<Ty> {
+        self.children.iter().find_map(|c| c.class_literal_type())
+    }
+
+    fn platform_default_import_packages(&self) -> &'static [&'static str] {
+        self.children
+            .iter()
+            .find_map(|c| {
+                let imports = c.platform_default_import_packages();
+                (!imports.is_empty()).then_some(imports)
+            })
+            .unwrap_or(&[])
+    }
+
+    fn physical_property_getter_name(&self, property: &str) -> Option<String> {
+        self.children
+            .iter()
+            .find_map(|c| c.physical_property_getter_name(property))
     }
 }
 
@@ -153,8 +245,11 @@ mod tests {
                         kind: FnKind::TopLevel,
                         receiver: None,
                         ret_nullable: false,
+                        ret_class: None,
                         public: true,
                         receiver_rank: 0,
+                        overload_rank: 0,
+                        generic_sig: None,
                         call_sig: crate::libraries::CallSig::default(),
                         flags: FnFlags::default(),
                         callable: callable(&self.owner, name),
@@ -173,7 +268,10 @@ mod tests {
                     constructors: vec![],
                     members: vec![],
                     companion: vec![],
+                    companion_consts: std::collections::HashMap::new(),
+                    sam_method: None,
                     companion_object: None,
+                    value_companion_fns: Vec::new(),
                     value_underlying: None,
                 })
             } else {

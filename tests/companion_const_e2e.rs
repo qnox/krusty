@@ -35,3 +35,13 @@ fun box(): String = C.X + C.make()\n";
         "OK"
     );
 }
+
+#[test]
+fn user_type_shadows_builtin_companion_const() {
+    const SRC: &str = "class Int\n\
+fun box(): String = if (Int.MAX_VALUE == 0) \"bad\" else \"bad\"\n";
+    assert!(
+        run(SRC).is_none(),
+        "user class Int must not fall through to kotlin.Int.MAX_VALUE"
+    );
+}

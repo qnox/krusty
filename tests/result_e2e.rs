@@ -24,3 +24,13 @@ fn result_success_get_or_throw() {
     let out = run(SRC).expect("Result.success + getOrThrow should compile + run");
     assert_eq!(out, "OK");
 }
+
+#[test]
+fn result_success_get_or_null() {
+    const SRC: &str = "fun box(): String {\n\
+    val r = Result.success(42)\n\
+    return if (r.getOrNull() == 42) \"OK\" else \"FAIL\"\n\
+}\n";
+    let out = run(SRC).expect("Result.success + getOrNull should compile + run");
+    assert_eq!(out, "OK");
+}

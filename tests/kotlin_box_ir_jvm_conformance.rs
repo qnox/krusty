@@ -279,14 +279,14 @@ fn compile_source(
             .clone()
     });
     let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(cp.clone()));
-    let syms = collect_signatures_with_cp(&files, platform, &mut diags);
+    let mut syms = collect_signatures_with_cp(&files, platform, &mut diags);
     T_SIGS.fetch_add(t2.elapsed().as_nanos() as u64, Ordering::Relaxed);
     if diags.has_errors() {
         return None;
     }
     let file = &files[0];
     let t3 = std::time::Instant::now();
-    let info = check_file(file, &syms, &mut diags);
+    let info = check_file(file, &mut syms, &mut diags);
     T_CHECK.fetch_add(t3.elapsed().as_nanos() as u64, Ordering::Relaxed);
     if diags.has_errors() {
         return None;
@@ -486,7 +486,7 @@ fn compile_multifile(
 
     let mut all = Vec::new();
     for (i, file) in files.iter().enumerate() {
-        let info = check_file(file, &syms, &mut diags);
+        let info = check_file(file, &mut syms, &mut diags);
         if diags.has_errors() {
             return None;
         }

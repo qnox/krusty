@@ -17,10 +17,11 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use crate::jvm::classreader::{parse_class, read_method_code, ClassInfo, MethodCode};
+use crate::jvm::names::type_descriptor;
 use crate::types::Ty;
 
 /// Map a Kotlin internal type name (`kotlin/Int`, `kotlin/Char`, …) from builtins metadata to a `Ty`.
-fn kotlin_name_to_ty(name: &str) -> Ty {
+pub(super) fn kotlin_name_to_ty(name: &str) -> Ty {
     match name {
         "kotlin/Int" => Ty::Int,
         "kotlin/Char" => Ty::Char,
@@ -30,45 +31,29 @@ fn kotlin_name_to_ty(name: &str) -> Ty {
         "kotlin/Float" => Ty::Float,
         "kotlin/Byte" => Ty::Byte,
         "kotlin/Short" => Ty::Short,
+        "kotlin/UInt" => Ty::UInt,
+        "kotlin/ULong" => Ty::ULong,
         "kotlin/String" => Ty::String,
         "kotlin/Unit" => Ty::Unit,
+        "kotlin/Nothing" => Ty::Nothing,
         _ => Ty::obj(name),
     }
 }
 
 /// Map a `@Metadata` SOURCE value-parameter type internal name to a `Ty` for call matching. A function
-/// type (`kotlin/Function0`) maps to the JVM `kotlin/jvm/functions/FunctionN` namespace so a lambda arg
-/// fits via `arg_fits`; a type-parameter param (`None`) erases to `kotlin/Any` (accepts any arg).
+/// type (`kotlin/Function0`) stays a semantic function type; a type-parameter param (`None`) erases to
+/// `kotlin/Any` (accepts any arg).
 fn meta_param_ty(name: Option<&str>) -> Ty {
     let Some(n) = name else {
         return Ty::obj("kotlin/Any");
     };
     if let Some(arity) = n.strip_prefix("kotlin/Function") {
         if !arity.is_empty() && arity.bytes().all(|b| b.is_ascii_digit()) {
-            return Ty::obj(&format!("kotlin/jvm/functions/Function{arity}"));
+            let n = arity.parse::<usize>().unwrap_or(0);
+            return Ty::fun(vec![Ty::obj("kotlin/Any"); n], Ty::obj("kotlin/Any"));
         }
     }
     kotlin_name_to_ty(n)
-}
-
-/// The JVM method name of a Kotlin built-in member whose erased JVM method is named differently than its
-/// Kotlin declaration — kotlinc's `BuiltInMethodsWithDifferentJvmName`: `CharSequence.get` dispatches to
-/// `java.lang.CharSequence.charAt`, and `Number.toInt`/`toLong`/… to `intValue`/`longValue`/…. `None`
-/// when the Kotlin and JVM names coincide (`CharSequence.length`, `Comparable.compareTo`).
-fn jvm_builtin_method_name(internal: &str, kotlin_name: &str) -> Option<String> {
-    Some(
-        match (internal, kotlin_name) {
-            ("kotlin/CharSequence", "get") => "charAt",
-            ("kotlin/Number", "toByte") => "byteValue",
-            ("kotlin/Number", "toShort") => "shortValue",
-            ("kotlin/Number", "toInt") => "intValue",
-            ("kotlin/Number", "toLong") => "longValue",
-            ("kotlin/Number", "toFloat") => "floatValue",
-            ("kotlin/Number", "toDouble") => "doubleValue",
-            _ => return None,
-        }
-        .to_string(),
-    )
 }
 
 /// Whether `meta` (a `@Metadata` source value param `Ty`) aligns with `desc` (a JVM-descriptor param
@@ -79,6 +64,9 @@ fn jvm_builtin_method_name(internal: &str, kotlin_name: &str) -> Option<String> 
 fn ty_compat(meta: &Ty, desc: &Ty) -> bool {
     if meta == desc {
         return true;
+    }
+    if let (Some(ma), Some(da)) = (meta.fun_arity(), desc.fun_arity()) {
+        return ma == da;
     }
     let erased =
         |t: &Ty| matches!(t, Ty::Obj(n, _) if *n == "kotlin/Any" || *n == "java/lang/Object");
@@ -197,8 +185,8 @@ pub struct ExtCandidate {
     /// type of a generic top-level function (`listOf<T>` → `List<T>`).
     pub signature: Option<String>,
     /// `true` for a public method. A non-public static (an `@InlineOnly` stdlib scope fn) is indexed so
-    /// the bytecode inliner can splice it, but `resolve_callable` returns it only for inlining, never as
-    /// a callable (an `invokestatic` to a package-private method would `IllegalAccessError`).
+    /// the bytecode inliner can splice it, but the resolver admits it only for inline-only selection,
+    /// never as a callable (an `invokestatic` to a package-private method would `IllegalAccessError`).
     pub public: bool,
 }
 
@@ -226,29 +214,39 @@ pub struct TypeIndex {
 
 /// Per-class `@Metadata` cache: class internal name → every function decoded from its `Package` metadata
 /// (with the multifile-facade part classes merged in). This is the SINGLE decode of a class's `d1` for the
-/// function lookups below — `metadata_return_type`/`metadata_receiver_types`/`metadata_return_nullable`/
-/// `metadata_kept_params` all PROJECT over it instead of each re-decoding and re-merging.
+/// function lookups below — `metadata_return`, `metadata_receiver_types`, `metadata_kept_params`, and
+/// parameter metadata all project over it instead of each re-decoding and re-merging.
 type MetaFnsCache = RefCell<HashMap<String, std::rc::Rc<ClassMeta>>>;
 
-/// One overload's source signature shape, in declaration order: `(JVM name, has-extension-receiver,
-/// source value-param `Ty`s, source value-param NAMES, source value-param DECLARES-DEFAULT flags)`.
-type OverloadParam = (String, bool, Vec<Ty>, Vec<String>, Vec<bool>);
+/// One top-level callable decoded from `@Metadata`, with the fields classpath lookup needs kept
+/// together so return type, receiver, nullability, parameter names/defaults, and receiver-lambda
+/// annotations cannot drift across parallel maps.
+struct MetaCallable {
+    kotlin_name: String,
+    jvm_name: String,
+    ret_class: Option<String>,
+    receiver_class: Option<String>,
+    ret_nullable: bool,
+    value_param_types: Vec<Ty>,
+    value_param_names: Vec<String>,
+    value_param_has_default: Vec<bool>,
+    value_param_recv_fun_flags: Vec<bool>,
+    value_param_recv_funs: Vec<Option<String>>,
+}
+
+#[derive(Clone, Debug)]
+pub struct MetadataReturn {
+    pub class: String,
+    pub nullable: bool,
+}
 
 /// The per-function `@Metadata` lookups for one class, all derived from its single decoded function list
 /// (facade parts merged). Computed once per class in [`Classpath::class_meta`]; the public
 /// `metadata_*` methods just index these maps.
 struct ClassMeta {
-    /// function name → Kotlin return-type internal name (`mutableListOf` → `MutableList`).
-    return_types: HashMap<String, String>,
-    /// function name → all its Kotlin extension-RECEIVER internal names (a name is overloaded across
-    /// receivers, so the value is a list — `plusAssign` → `[MutableCollection, MutableMap]`).
-    receivers: HashMap<String, Vec<String>>,
-    /// function name → whether its Kotlin return type is nullable (`takeIf`/`takeUnless` → `T?`).
-    return_nullable: HashMap<String, bool>,
-    /// per OVERLOAD (a name repeats), in declaration order — see [`OverloadParam`]. The parallel `Vec`s'
-    /// length is the source arity (synthetic trailing params excluded). Names drive classpath
-    /// named-argument resolution; the default flags drive classpath default-argument OMISSION.
-    overload_params: Vec<OverloadParam>,
+    callables: Vec<MetaCallable>,
+    by_kotlin_name: HashMap<String, Vec<usize>>,
+    by_jvm_name: HashMap<String, Vec<usize>>,
     /// The full facade-merged [`MetaFn`] list this is projected from — exposed via
     /// [`Classpath::meta_functions`] for the lookups that need a whole `MetaFn` (return class by JVM
     /// name, receiver-function params) rather than one of the maps above, so they share THIS decode
@@ -285,9 +283,6 @@ pub struct Classpath {
     /// Cache of lazily-read method bodies (`(internal, name, descriptor) → MethodCode`), so the inline
     /// expander reads each inline function's body once even when it's called many times.
     bodies: RefCell<HashMap<(String, String, String), Option<MethodCode>>>,
-    /// Cache of the `inline` function names declared by a class (from its `@Metadata`), so inline
-    /// recognition at a call site doesn't re-decode the metadata per call.
-    inline_names: RefCell<HashMap<String, std::rc::Rc<std::collections::HashSet<String>>>>,
     /// Cache of the `suspend` function names declared by a class (from its `@Metadata` `IS_SUSPEND`
     /// flag), so suspension-point recognition at a call site doesn't re-decode the metadata per call.
     suspend_names: RefCell<HashMap<String, std::rc::Rc<std::collections::HashSet<String>>>>,
@@ -342,7 +337,6 @@ impl Classpath {
             types: RefCell::new(None),
             jimage: RefCell::new(None),
             bodies: RefCell::new(HashMap::new()),
-            inline_names: RefCell::new(HashMap::new()),
             suspend_names: RefCell::new(HashMap::new()),
             meta_fns: RefCell::new(HashMap::new()),
             meta_overloads: RefCell::new(HashMap::new()),
@@ -357,18 +351,27 @@ impl Classpath {
         self.id
     }
 
-    /// The Kotlin return-type internal name of function `fn_name` declared in class `internal`, decoded
-    /// from `@Metadata` (`mutableListOf` → `kotlin/collections/MutableList` vs `listOf` → `…/List`). The
-    /// JVM descriptor/`Signature` erase both to `java/util/List`; only `@Metadata` carries the distinction.
+    /// The Kotlin return metadata of function `fn_name` declared in class `internal`, decoded from the
+    /// same `@Metadata` callable record (`mutableListOf` → `MutableList`; `takeIf` → nullable `T`). The
+    /// JVM descriptor/`Signature` erase class identity and nullability; only `@Metadata` carries them.
     /// A multifile FACADE (`CollectionsKt`) has no function metadata of its own — its `@Metadata` `d1`
     /// lists the PART class names, which hold the functions; merge the parts.
-    pub fn metadata_return_type(&self, internal: &str, fn_name: &str) -> Option<String> {
-        self.class_meta(internal).return_types.get(fn_name).cloned()
+    pub fn metadata_return(&self, internal: &str, fn_name: &str) -> Option<MetadataReturn> {
+        let meta = self.class_meta(internal);
+        meta.by_kotlin_name.get(fn_name).and_then(|idxs| {
+            idxs.iter().rev().find_map(|&i| {
+                let c = &meta.callables[i];
+                Some(MetadataReturn {
+                    class: c.ret_class.clone()?,
+                    nullable: c.ret_nullable,
+                })
+            })
+        })
     }
 
     /// The decoded `@Metadata` function lookups for `internal` (facade parts merged), decoded once and
-    /// cached. The single `d1` decode that `metadata_return_type`/`metadata_receiver_types`/
-    /// `metadata_return_nullable`/`metadata_kept_params` all project over.
+    /// cached. The single `d1` decode that `metadata_return`/`metadata_receiver_types`/
+    /// `metadata_kept_params` all project over.
     fn class_meta(&self, internal: &str) -> std::rc::Rc<ClassMeta> {
         if let Some(m) = self.meta_fns.borrow().get(internal) {
             return m.clone();
@@ -389,28 +392,38 @@ impl Classpath {
                 }
             }
         }
-        let overload_params = fns
+        let callables: Vec<MetaCallable> = fns
             .iter()
-            .map(|f| {
-                let tys = f
+            .map(|f| MetaCallable {
+                kotlin_name: f.kotlin_name.clone(),
+                jvm_name: f.jvm_name.clone(),
+                ret_class: f.ret_class.clone(),
+                receiver_class: f.receiver_class.clone(),
+                ret_nullable: f.ret_nullable,
+                value_param_types: f
                     .value_param_types
                     .iter()
                     .map(|o| meta_param_ty(o.as_deref()))
-                    .collect();
-                (
-                    f.jvm_name.clone(),
-                    f.receiver_class.is_some(),
-                    tys,
-                    f.value_param_names.clone(),
-                    f.value_param_has_default.clone(),
-                )
+                    .collect(),
+                value_param_names: f.value_param_names.clone(),
+                value_param_has_default: f.value_param_has_default.clone(),
+                value_param_recv_fun_flags: f.value_param_recv_fun_flags.clone(),
+                value_param_recv_funs: f.value_param_recv_funs.clone(),
             })
             .collect();
+        let mut by_kotlin_name: HashMap<String, Vec<usize>> = HashMap::new();
+        let mut by_jvm_name: HashMap<String, Vec<usize>> = HashMap::new();
+        for (i, c) in callables.iter().enumerate() {
+            by_kotlin_name
+                .entry(c.kotlin_name.clone())
+                .or_default()
+                .push(i);
+            by_jvm_name.entry(c.jvm_name.clone()).or_default().push(i);
+        }
         let meta = std::rc::Rc::new(ClassMeta {
-            return_types: super::metadata::return_types(&fns),
-            receivers: super::metadata::receivers(&fns),
-            return_nullable: super::metadata::return_nullable(&fns),
-            overload_params,
+            callables,
+            by_kotlin_name,
+            by_jvm_name,
             fns: fns.into(),
         });
         self.meta_fns
@@ -426,26 +439,12 @@ impl Classpath {
         self.class_meta(internal).fns.clone()
     }
 
-    /// The LOGICAL Kotlin return type of `internal.fn_name` as a `Ty`, from `@Metadata`. Used for a
-    /// `suspend fun`, whose physical JVM method erases the return to `Object` (the resume value) — only
-    /// `@Metadata` carries the real return (`suspend fun helper(): Int` → `Ty::Int`). A nullable
-    /// primitive return (`Int?`) stays boxed, so it maps to its wrapper object type. `None` if the
-    /// metadata has no class return type recorded.
-    pub fn metadata_return_ty(&self, internal: &str, fn_name: &str) -> Option<Ty> {
-        let name = self.metadata_return_type(internal, fn_name)?;
-        let ty = kotlin_name_to_ty(&name);
-        if ty.is_primitive() && self.metadata_return_nullable(internal, fn_name) {
-            return super::jvm_class_map::wrapper_internal(ty).map(Ty::obj);
-        }
-        Some(ty)
-    }
-
     /// The SOURCE value-parameter types of `internal.fn_name` from `@Metadata`, as `Ty`s — the signature
     /// a CALL is matched against. `@Metadata` records only the source `value_parameter`s, so this DROPS
     /// the synthetic params the JVM descriptor appends (a `suspend` Continuation, a `@Composable`
     /// Composer/int) — the same role `strip_continuation_param` played for suspend, now generic. A
-    /// function-type param maps to its JVM `kotlin/jvm/functions/FunctionN` so a lambda arg fits via
-    /// `arg_fits`; a type-parameter param erases to `kotlin/Any` (accepts anything). `None` when the
+    /// function-type param maps to semantic `Ty::Fun` so a lambda arg fits structurally; a type-parameter
+    /// param erases to `kotlin/Any` (accepts anything). `None` when the
     /// class has no `@Metadata` entry for `fn_name` (a Java method, a synthetic) — the caller then keeps
     /// the descriptor params unchanged.
     /// The `@Metadata` SOURCE value-parameter count of the `internal.fn_name` OVERLOAD that the bytecode
@@ -463,7 +462,7 @@ impl Classpath {
         fn_name: &str,
         desc_params: &[Ty],
     ) -> Option<usize> {
-        let all = &self.class_meta(internal).overload_params;
+        let meta = self.class_meta(internal);
         // For each same-named overload, the descriptor's REAL leading params are its extension receiver
         // (one slot, if any) followed by its source value params; any params beyond that are synthetic
         // trailing ones the descriptor appends (a `@Composable` Composer/int). Align the overload by
@@ -471,15 +470,16 @@ impl Classpath {
         // return how many leading params are real (`receiver? + source arity`). Prefer the LONGEST such
         // alignment (the most-specific overload) when several fit; `None` if none align (truncate is then
         // skipped — a normal function whose arity already equals the descriptor's).
-        all.iter()
-            .filter_map(|(n, has_recv, vp, _, _)| {
-                if n != fn_name {
-                    return None;
-                }
-                let off = *has_recv as usize;
-                let end = off + vp.len();
-                (end <= desc_params.len() && compat_prefix(vp, &desc_params[off..end]))
-                    .then_some(end)
+        meta.by_jvm_name
+            .get(fn_name)?
+            .iter()
+            .filter_map(|&i| {
+                let c = &meta.callables[i];
+                let off = c.receiver_class.is_some() as usize;
+                let end = off + c.value_param_types.len();
+                (end <= desc_params.len()
+                    && compat_prefix(&c.value_param_types, &desc_params[off..end]))
+                .then_some(end)
             })
             .max()
     }
@@ -496,16 +496,21 @@ impl Classpath {
         desc_params: &[Ty],
     ) -> Option<Vec<String>> {
         let meta = self.class_meta(internal);
-        meta.overload_params
+        meta.by_jvm_name
+            .get(fn_name)?
             .iter()
-            .filter_map(|(n, has_recv, vp, names, _)| {
-                if n != fn_name || names.is_empty() || names.iter().any(String::is_empty) {
+            .filter_map(|&i| {
+                let c = &meta.callables[i];
+                if c.value_param_names.is_empty()
+                    || c.value_param_names.iter().any(String::is_empty)
+                {
                     return None;
                 }
-                let off = *has_recv as usize;
-                let end = off + vp.len();
-                (end <= desc_params.len() && compat_prefix(vp, &desc_params[off..end]))
-                    .then_some((end, names.clone()))
+                let off = c.receiver_class.is_some() as usize;
+                let end = off + c.value_param_types.len();
+                (end <= desc_params.len()
+                    && compat_prefix(&c.value_param_types, &desc_params[off..end]))
+                .then_some((end, c.value_param_names.clone()))
             })
             .max_by_key(|(end, _)| *end)
             .map(|(_, names)| names)
@@ -522,12 +527,30 @@ impl Classpath {
     /// such a param binds `this` to the receiver. `None` if the facade/function isn't found; an empty/all-
     /// `None` vec means no receiver-lambda params.
     pub fn metadata_param_recv_funs(&self, internal: &str, fn_name: &str) -> Vec<Option<String>> {
-        // Projects over the shared facade-merged decode (`meta_functions`) — the same multifile-facade
-        // part merge this used to do inline.
-        self.meta_functions(internal)
-            .iter()
-            .find(|f| f.kotlin_name == fn_name)
-            .map(|f| f.value_param_recv_funs.clone())
+        let meta = self.class_meta(internal);
+        meta.by_kotlin_name
+            .get(fn_name)
+            .and_then(|idxs| {
+                idxs.iter()
+                    .map(|&i| &meta.callables[i])
+                    .find(|c| c.value_param_recv_funs.iter().any(Option::is_some))
+                    .or_else(|| idxs.first().map(|&i| &meta.callables[i]))
+            })
+            .map(|c| c.value_param_recv_funs.clone())
+            .unwrap_or_default()
+    }
+
+    pub fn metadata_param_recv_fun_flags(&self, internal: &str, fn_name: &str) -> Vec<bool> {
+        let meta = self.class_meta(internal);
+        meta.by_kotlin_name
+            .get(fn_name)
+            .and_then(|idxs| {
+                idxs.iter()
+                    .map(|&i| &meta.callables[i])
+                    .find(|c| c.value_param_recv_fun_flags.iter().any(|b| *b))
+                    .or_else(|| idxs.first().map(|&i| &meta.callables[i]))
+            })
+            .map(|c| c.value_param_recv_fun_flags.clone())
             .unwrap_or_default()
     }
 
@@ -538,16 +561,19 @@ impl Classpath {
         desc_params: &[Ty],
     ) -> Option<Vec<bool>> {
         let meta = self.class_meta(internal);
-        meta.overload_params
+        meta.by_jvm_name
+            .get(fn_name)?
             .iter()
-            .filter_map(|(n, has_recv, vp, _, defs)| {
-                if n != fn_name || !defs.iter().any(|d| *d) {
+            .filter_map(|&i| {
+                let c = &meta.callables[i];
+                if !c.value_param_has_default.iter().any(|d| *d) {
                     return None;
                 }
-                let off = *has_recv as usize;
-                let end = off + vp.len();
-                (end <= desc_params.len() && compat_prefix(vp, &desc_params[off..end]))
-                    .then_some((end, defs.clone()))
+                let off = c.receiver_class.is_some() as usize;
+                let end = off + c.value_param_types.len();
+                (end <= desc_params.len()
+                    && compat_prefix(&c.value_param_types, &desc_params[off..end]))
+                .then_some((end, c.value_param_has_default.clone()))
             })
             .max_by_key(|(end, _)| *end)
             .map(|(_, defs)| defs)
@@ -583,22 +609,18 @@ impl Classpath {
     /// the receiver to its first parameter; only `@Metadata` keeps the read-only/mutable identity. Empty
     /// for a non-extension function.
     pub fn metadata_receiver_types(&self, internal: &str, fn_name: &str) -> Vec<String> {
-        self.class_meta(internal)
-            .receivers
-            .get(fn_name)
-            .cloned()
-            .unwrap_or_default()
-    }
-
-    /// Whether function `fn_name` in class `internal` has a NULLABLE Kotlin return type (`takeIf`/
-    /// `takeUnless` → `T?`), from `@Metadata`. The JVM descriptor/`Signature` erase nullability; only
-    /// `@Metadata` carries it. A multifile FACADE has no function metadata of its own — merge its parts.
-    pub fn metadata_return_nullable(&self, internal: &str, fn_name: &str) -> bool {
-        self.class_meta(internal)
-            .return_nullable
-            .get(fn_name)
-            .copied()
-            .unwrap_or(false)
+        let meta = self.class_meta(internal);
+        let mut out = Vec::new();
+        if let Some(idxs) = meta.by_kotlin_name.get(fn_name) {
+            for &i in idxs {
+                if let Some(cn) = &meta.callables[i].receiver_class {
+                    if !out.contains(cn) {
+                        out.push(cn.clone());
+                    }
+                }
+            }
+        }
+        out
     }
 
     /// A facade class's `@Metadata` Kotlin-name → `@JvmName` overloads, cached (part-merged for a multifile
@@ -619,8 +641,16 @@ impl Classpath {
                 break;
             }
             let Some(ci) = self.find(&cn) else { break };
-            for (k, v) in super::metadata::package_lambda_return_overloads(&ci) {
-                map.entry(k).or_default().extend(v);
+            for f in self.meta_functions(&cn).iter() {
+                if let (Some(jvm_desc), Some(ret_class)) = (&f.jvm_desc, &f.ret_class) {
+                    map.entry(f.kotlin_name.clone()).or_default().push(
+                        super::metadata::JvmOverload {
+                            jvm_name: f.jvm_name.clone(),
+                            jvm_desc: jvm_desc.clone(),
+                            ret_class: ret_class.clone(),
+                        },
+                    );
+                }
             }
             cur = ci.super_class.clone();
         }
@@ -690,82 +720,107 @@ impl Classpath {
         self.builtins_file("kotlin/collections/collections.kotlin_builtins")
     }
 
-    /// Resolve a builtin type's member return `Ty` by name + argument types, straight from its builtins
-    /// declarations (no per-type hardcoded table). `None` if no member of that name/arity is declared
-    /// there (e.g. a `StringsKt` EXTENSION on `String` lives in package metadata, resolved elsewhere).
-    pub fn builtin_member_ret(&self, internal: &str, name: &str, args: &[Ty]) -> Option<Ty> {
+    /// Kotlin BUILTIN members (`String.length`, `List.get`, `Number.toInt`, …) as regular
+    /// `LibraryMember` facts. The source name stays in `name`; JVM realization details stay in the JVM
+    /// backend/provider and descriptor data.
+    pub fn builtin_members(&self, internal: &str) -> Vec<crate::libraries::LibraryMember> {
         let path = Self::builtins_path_for(internal);
         let f = self.builtins_file(&path);
-        let m = f
-            .get(internal)?
+        let Some(class) = f.get(internal) else {
+            return Vec::new();
+        };
+        class
             .members
             .iter()
-            .find(|m| m.name == name && m.params.len() == args.len())?;
-        Some(kotlin_name_to_ty(&m.ret))
+            .map(|m| {
+                // A qualified Kotlin name (`kotlin/Int`, `kotlin/String`) → its JVM descriptor; a bare type
+                // parameter (`E`, `T` — no package) erases to `Object`.
+                let desc_of = |n: &str| -> String {
+                    if n.contains('/') {
+                        type_descriptor(kotlin_name_to_ty(n))
+                    } else {
+                        "Ljava/lang/Object;".to_string()
+                    }
+                };
+                let pdesc: String = m.params.iter().map(|p| desc_of(p)).collect();
+                let descriptor = format!("({pdesc}){}", desc_of(&m.ret));
+                let ret = kotlin_name_to_ty(&m.ret);
+                let physical_ret = if m.ret.contains('/') {
+                    ret
+                } else {
+                    Ty::obj("kotlin/Any")
+                };
+                // The owner's JVM class: the kotlin↔JVM map (`kotlin/String` → `java/lang/String`), and for the
+                // non-collection mapped builtins (`kotlin/CharSequence` → `java/lang/CharSequence`, …) the
+                // emit-only simple-name mapping — the member virtual-dispatches on that JVM type.
+                let mapped = crate::jvm::jvm_class_map::to_jvm_internal(internal);
+                let owner = if mapped != internal {
+                    mapped.to_string()
+                } else if let Some(j) = internal
+                    .strip_prefix("kotlin/")
+                    .filter(|s| !s.contains('/'))
+                    .and_then(crate::jvm::jvm_class_map::kotlin_builtin_to_jvm)
+                {
+                    j.to_string()
+                } else {
+                    internal.to_string()
+                };
+                // Interface dispatch: prefer the real class flag, but fall back to the curated mapped-builtin
+                // answer when the `.class` reader can't load the owner (a JDK jimage krusty can't decode).
+                let is_iface = self
+                    .find(&owner)
+                    .map(|ci| ci.is_interface())
+                    .or_else(|| crate::jvm::jvm_class_map::jvm_mapped_builtin_is_interface(&owner))
+                    .unwrap_or(false);
+                let member_name = if m.is_property {
+                    match m.name.as_str() {
+                        // Kotlin/JVM mapped builtins whose property accessor is a plain Java method.
+                        "length" | "size" | "values" => m.name.clone(),
+                        "keys" => "keySet".to_string(),
+                        "entries" => "entrySet".to_string(),
+                        n if n.starts_with("is")
+                            && n.as_bytes().get(2).is_some_and(|b| b.is_ascii_uppercase()) =>
+                        {
+                            n.to_string()
+                        }
+                        n => {
+                            let mut c = n.chars();
+                            format!(
+                                "get{}{}",
+                                c.next()
+                                    .map(|f| f.to_uppercase().to_string())
+                                    .unwrap_or_default(),
+                                c.as_str()
+                            )
+                        }
+                    }
+                } else {
+                    m.name.clone()
+                };
+                crate::libraries::LibraryMember {
+                    name: member_name,
+                    owner: Some(owner),
+                    physical_name: None,
+                    params: m.params.iter().map(|p| kotlin_name_to_ty(p)).collect(),
+                    ret,
+                    ret_nullable: false,
+                    physical_ret,
+                    descriptor,
+                    signature: None,
+                    is_interface: is_iface,
+                    inline: crate::libraries::InlineKind::None,
+                }
+            })
+            .collect()
     }
 
-    /// Resolve a Kotlin BUILTIN member (`String.length`, `List.get`, `List.size`, …) to its concrete JVM
-    /// call: the receiver's JVM class (`kotlin/String` → `java/lang/String`, `kotlin/collections/List` →
-    /// `java/util/List`), the member's JVM method descriptor (derived from the `.kotlin_builtins` metadata
-    /// param/return types, a type parameter erased to `Object`), the (erased) return `Ty`, and whether the
-    /// owner is an interface (`invokeinterface` vs `invokevirtual`). A mapped builtin's JVM method name is
-    /// its Kotlin member name. Generic — driven by the builtins metadata + the kotlin↔JVM class map, with
-    /// no per-member hardcoding. `None` when no such builtin member exists (caller falls back).
-    pub fn builtin_member_call(
-        &self,
-        internal: &str,
-        name: &str,
-        n_args: usize,
-    ) -> Option<(String, String, String, Ty, bool)> {
+    /// Direct supertypes declared in `.kotlin_builtins` for a Kotlin builtin class.
+    pub fn builtin_supertypes(&self, internal: &str) -> Vec<String> {
         let path = Self::builtins_path_for(internal);
-        let f = self.builtins_file(&path);
-        let m = f
-            .get(internal)?
-            .members
-            .iter()
-            .find(|m| m.name == name && m.params.len() == n_args)?;
-        // A qualified Kotlin name (`kotlin/Int`, `kotlin/String`) → its JVM descriptor; a bare type
-        // parameter (`E`, `T` — no package) erases to `Object`.
-        let desc_of = |n: &str| -> String {
-            if n.contains('/') {
-                kotlin_name_to_ty(n).descriptor()
-            } else {
-                "Ljava/lang/Object;".to_string()
-            }
-        };
-        let pdesc: String = m.params.iter().map(|p| desc_of(p)).collect();
-        let descriptor = format!("({pdesc}){}", desc_of(&m.ret));
-        let ret_ty = if m.ret.contains('/') {
-            kotlin_name_to_ty(&m.ret)
-        } else {
-            Ty::obj("kotlin/Any")
-        };
-        // The owner's JVM class: the kotlin↔JVM map (`kotlin/String` → `java/lang/String`), and for the
-        // non-collection mapped builtins (`kotlin/CharSequence` → `java/lang/CharSequence`, …) the
-        // emit-only simple-name mapping — the member virtual-dispatches on that JVM type.
-        let mapped = crate::jvm::jvm_class_map::to_jvm_internal(internal);
-        let owner = if mapped != internal {
-            mapped.to_string()
-        } else if let Some(j) = internal
-            .strip_prefix("kotlin/")
-            .filter(|s| !s.contains('/'))
-            .and_then(crate::jvm::jvm_class_map::kotlin_builtin_to_jvm)
-        {
-            j.to_string()
-        } else {
-            internal.to_string()
-        };
-        // The JVM method name: a Kotlin builtin member whose JVM method has a different name
-        // (`CharSequence.get` → `charAt`, `Number.toInt` → `intValue`), else the Kotlin name as-is.
-        let jvm_name = jvm_builtin_method_name(internal, name).unwrap_or_else(|| name.to_string());
-        // Interface dispatch: prefer the real class flag, but fall back to the curated mapped-builtin
-        // answer when the `.class` reader can't load the owner (a JDK jimage krusty can't decode).
-        let is_iface = self
-            .find(&owner)
-            .map(|ci| ci.is_interface())
-            .or_else(|| crate::jvm::jvm_class_map::jvm_mapped_builtin_is_interface(&owner))
-            .unwrap_or(false);
-        Some((owner, jvm_name, descriptor, ret_ty, is_iface))
+        self.builtins_file(&path)
+            .get(internal)
+            .map(|c| c.supertypes.clone())
+            .unwrap_or_default()
     }
 
     /// Whether `internal` names a type in the Kotlin collection hierarchy (`collections.kotlin_builtins`)
@@ -1013,45 +1068,40 @@ impl Classpath {
         code
     }
 
-    /// Whether `internal.name(...)` is a Kotlin `inline` function, per the class's `@Metadata` (the
-    /// inline-name set is decoded once per class and cached). The call site uses this to decide
-    /// whether to expand the body rather than emit a call.
-    pub fn is_inline_method(&self, internal: &str, name: &str) -> bool {
-        if let Some(set) = self.inline_names.borrow().get(internal) {
-            return set.contains(name);
-        }
-        let ci = self.find(internal);
-        let mut names = ci
-            .as_ref()
-            .map(super::metadata::inline_method_names)
-            .unwrap_or_default();
-        // A multifile facade has no function metadata — `inline` flags live in its part classes, which it
-        // *extends* (a superclass chain). Merge their inline names in.
-        let mut cur = ci.as_ref().and_then(|ci| ci.super_class.clone());
-        while let Some(s) = cur {
-            if s == "java/lang/Object" {
-                break;
+    /// Whether the selected JVM callable is `inline`, matching by `(jvm name, descriptor)` through the
+    /// decoded Kotlin metadata. Use this once overload resolution has selected a concrete descriptor; it
+    /// avoids a name-wide inline flag leaking from one overload to another.
+    pub fn is_inline_callable(
+        &self,
+        internal: &str,
+        name: &str,
+        descriptor: &str,
+        desc_params: &[Ty],
+    ) -> bool {
+        self.meta_functions(internal).iter().any(|f| {
+            if !f.is_inline || f.jvm_name != name {
+                return false;
             }
-            match self.find(&s) {
-                Some(pci) => {
-                    names.extend(super::metadata::inline_method_names(&pci));
-                    cur = pci.super_class.clone();
-                }
-                None => break,
+            if f.jvm_desc.as_deref() == Some(descriptor) {
+                return true;
             }
-        }
-        let set = std::rc::Rc::new(names);
-        let hit = set.contains(name);
-        self.inline_names
-            .borrow_mut()
-            .insert(internal.to_string(), set);
-        hit
+            if f.jvm_desc.is_some() {
+                return false;
+            }
+            let params: Vec<Ty> = f
+                .value_param_types
+                .iter()
+                .map(|o| meta_param_ty(o.as_deref()))
+                .collect();
+            let off = f.is_extension as usize;
+            let end = off + params.len();
+            end == desc_params.len() && compat_prefix(&params, &desc_params[off..end])
+        })
     }
 
     /// Whether `internal.name(...)` is a Kotlin `suspend` function, per the class's `@Metadata`
     /// `IS_SUSPEND` flag (decoded once per class and cached). A call to it is a coroutine suspension
-    /// point. Mirrors [`is_inline_method`](Self::is_inline_method), including the multifile-facade
-    /// part-class superclass walk.
+    /// point. Includes the multifile-facade part-class superclass walk.
     pub fn is_suspend_method(&self, internal: &str, name: &str) -> bool {
         if let Some(set) = self.suspend_names.borrow().get(internal) {
             return set.contains(name);
@@ -1137,9 +1187,10 @@ impl Classpath {
                 Entry::Jimage(_) => {}
             }
         }
-        // Pass 2: index the public static methods reachable from each PUBLIC class — its own and those
-        // inherited through its superclass chain (the multifile parts) — with owner = the public class
-        // (the facade), which is what an `invokestatic` resolves through, like kotlinc.
+        // Pass 2: index static methods reachable from each class. Public facade roots expose callable
+        // statics (owner = facade, like kotlinc); non-public roots are kept too so private `@InlineOnly`
+        // package-part functions can be selected as splice-only candidates. Those candidates are marked
+        // non-public, so normal resolution never emits an illegal `invokestatic` to them.
         // Global `(name)` sets: declared as a genuine top-level function vs as an extension anywhere on the
         // classpath. A name that is ever an extension is NEVER excluded from the ext index; a name that is
         // ONLY ever top-level is excluded (its first parameter is a real value parameter, not a receiver).
@@ -1155,9 +1206,6 @@ impl Classpath {
             .collect();
         let mut idx = ExtIndex::default();
         for (name, lite) in &all {
-            if !lite.is_public {
-                continue;
-            }
             let mut cur = Some(name.clone());
             let mut visited = std::collections::HashSet::new();
             while let Some(cn) = cur {
@@ -1166,6 +1214,9 @@ impl Classpath {
                 }
                 let Some(c) = all.get(&cn) else { break };
                 for (mname, mdesc, msig, public) in &c.statics {
+                    if !lite.is_public && *public {
+                        continue;
+                    }
                     let Some(ret_desc) = descriptor_ret(mdesc) else {
                         continue;
                     };
@@ -1175,7 +1226,7 @@ impl Classpath {
                         descriptor: mdesc.clone(),
                         ret_desc,
                         signature: msig.clone(),
-                        public: *public,
+                        public: lite.is_public && *public,
                     };
                     // A receiver-less top-level function (no first param, OR `@Metadata` marks the name as a
                     // genuine top-level fn that is NEVER an extension) is by_name-only — never keyed by its

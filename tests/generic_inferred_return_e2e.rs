@@ -1,11 +1,10 @@
 //! A SINGLE (non-overloaded) function with a reference-bounded type-parameter param and an inferred
-//! (unannotated, expression-body) return. Its inferred return is recorded in `fun_ret_overrides` keyed by
-//! `(name, parameter types)`; the key must use the SAME erasure at the insert, the call-site read, and
-//! codegen. The risk is a tparam param: `resolve_ty` (insert) erases `T : Number` to its bound, the
-//! resolved signature's `params` (read + codegen) likewise — but a key rebuilt from the raw AST in codegen
-//! (`ty_of`, which erases a bare type parameter to `Object`) would diverge, making codegen miss the
-//! override and emit the `Unit`-defaulted signature return for a body that returns a `String`
-//! (`-Xverify:all` failure). This pins the generic case the same-name-overload test doesn't reach.
+//! (unannotated, expression-body) return. The deeper checker inference must patch the canonical
+//! `Signature::ret` for the resolved overload before codegen. The risk is a tparam param:
+//! `resolve_ty` erases `T : Number` to its bound, while a key rebuilt from raw AST in codegen
+//! (`ty_of`, which erases a bare type parameter to `Object`) would diverge and emit the old
+//! `Unit`-defaulted return for a body that returns a `String` (`-Xverify:all` failure). This pins the
+//! generic case the same-name-overload test doesn't reach.
 
 mod common;
 

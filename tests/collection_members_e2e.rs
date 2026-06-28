@@ -36,3 +36,19 @@ fn list_extension_members() {
 }\n";
     assert_eq!(run(SRC).expect("list members compile + run"), "OK");
 }
+
+#[test]
+fn build_map_put_statement_discards_nullable_previous_value() {
+    const SRC: &str = "// WITH_STDLIB\n\
+fun box(): String {\n\
+    val map = buildMap {\n\
+        put(1, 1)\n\
+        for (v in values) {}\n\
+    }\n\
+    return if (map[1] == 1) \"OK\" else \"FAIL\"\n\
+}\n";
+    assert_eq!(
+        run(SRC).expect("buildMap put statement compiles + runs"),
+        "OK"
+    );
+}

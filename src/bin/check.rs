@@ -9,8 +9,8 @@ fn main() {
         let mut d = DiagSink::new();
         let toks = lex(&src, &mut d);
         let files = vec![parse(&src, &toks, &mut d)];
-        let syms = collect_signatures(&files, &mut d);
-        check_file(&files[0], &syms, &mut d);
+        let mut syms = collect_signatures(&files, &mut d);
+        check_file(&files[0], &mut syms, &mut d);
         if d.diags.is_empty() {
             println!("{path}: OK");
         } else {

@@ -16,7 +16,20 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 
 ## Tooling
 
-- Conformance gate: `cargo test --test kotlin_box_ir_jvm_conformance --profile gate` (box()=OK, FAIL=0).
+- Normal full-suite gate: `./run-tests.sh` (or `just test`). No parameters are normally needed: the
+  harness provisions the reference Kotlin compiler and box corpus when `just` is available, uses the
+  fast `gate` profile, builds test binaries once, runs the internally parallel conformance binary
+  alone, then runs the remaining binaries in parallel. Do not use `--release` for tests; the longer
+  build cycle costs more than the faster run saves. See `docs/TEST_HARNESS.md` for the canonical
+  agent-facing command reference.
+- Harness profiling: full `./run-tests.sh` prints the slowest test binaries. For compiler-only
+  conformance profiling, use
+  `KRUSTY_NO_RUN=1 KRUSTY_FLAMEGRAPH=1 ./run-tests.sh --test kotlin_box_ir_jvm_conformance -- --nocapture`;
+  it writes `target/flamegraph.svg` and prints phase timing. Avoid ad hoc JVM launchers in tests:
+  `tests/common::compile_and_run_box`, `tests/common::run_box`, and `tests/common::javac_run` already
+  reuse persistent JVM runners/servers.
+- Focused conformance gate: `cargo test --test kotlin_box_ir_jvm_conformance --profile gate`
+  (box()=OK, FAIL=0).
 - Bytecode diff: `cargo run --release --bin bytediff -- <box_dir> [limit] [--samples]` with
   `KRUSTY_KOTLINC` (`.kotlinc/2.4.0/kotlinc/bin/kotlinc`), `KRUSTY_SURVEY_STDLIB`,
   `KRUSTY_SURVEY_JDK_MODULES` (`$JAVA_HOME/lib/modules`), `JAVA_HOME`.
@@ -28,8 +41,9 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 
 ## Constraints / open items
 
-- **Test time < 60s** — posture: the correctness gate is already <60s; the full `cargo test` is not, by
-  design.
+- **Test time < 60s** — posture: the focused correctness gate is already <60s; the full self-provisioned
+  suite currently exceeds that budget and should be profiled through the harness output, not plain
+  `cargo test`.
   - Fast tier (the dev/pre-merge gate): `cargo test --test kotlin_box_ir_jvm_conformance --profile gate`
     = **~38s** (rayon-parallel, ONE persistent JVM runner per thread, ClassLoader+reflection — no
     per-test JVM/javac). Plus lib unit tests (~0.02s). Under 60s. ✓
@@ -59,15 +73,17 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
     (kotlinc differential). NOTE: `range_step`/`secondary_ctor_noprimary` previously hard-asserted krusty
     compile success; via the helper a compile failure now flows to the `None`-skip branch (consistent with
     the rest of the suite's "skip-on-unsupported"), a slight loosening to revisit if either regresses.
-  - Heavy tier — the full `cargo test`. PROFILED (2026-06-24, 4 cores): the cost is NOT kotlinc (1–6
-    spawns, compile-once-batched) but the ~57 JVM-bound e2e BINARIES, which `cargo test` runs
-    SEQUENTIALLY (~64s summed). `cargo nextest` is WORSE (~82s — its process-per-test model loses each
-    binary's shared persistent JVM). FIX (P23): `just test` (the pre-push tier) now builds once then runs
-    the binaries in PARALLEL (`xargs -P $(nproc)`), each keeping its per-binary shared JVM. The
-    conformance gate binary is internally rayon-parallel (saturates every core alone), so it runs
-    FIRST/alone — bundling it into the batch only contends; then the rest run in parallel. Wall-clock
-    **~57s (<60s ✓)**; any binary's non-zero exit fails the run and prints its captured log. (A filter
-    arg defers to plain `cargo test`.) The conformance/validation gate alone stays ~8–38s.
+  - Heavy tier — the full self-provisioned harness. PROFILED (2026-06-27, 4 cores): the cost is now
+    dominated by JVM-bound e2e binaries, especially `serialization_krusty_only_e2e`, `suspend_e2e`,
+    and `bytecode_parity_e2e`. `./run-tests.sh` / `just test` builds once, runs the internally
+    rayon-parallel conformance gate alone, then runs the remaining binaries in slow-first parallel
+    order (`KRUSTY_TEST_JOBS`, default `nproc`) with `--test-threads=1` per binary to reduce JVM
+    contention. The harness prints a slowest-binaries table after every full run; use that as the
+    profiling entrypoint. Current best observed no-op-build wall clock on this machine is **~91s**
+    after moving the serialization e2e back onto the shared JVM runner; `KRUSTY_TEST_JOBS=2` was worse
+    at **~151s**, so lower parallelism is not currently the fix. Any
+    binary's non-zero exit fails the run and prints its captured log. A filter arg defers to plain
+    `cargo test --profile gate` for focused runs.
 - kotlinc 2.4.0 runs on JRE 25 (verified). bytediff is slow (one kotlinc JVM launch per file) — sample.
 
 ## Phase log
@@ -600,7 +616,7 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   `kotlin/*` type over a non-kotlin one on a simple-name clash (kotlinc default-imports `kotlin.*`, so the
   kotlin type wins its bare name) — fixes the signature-collection resolver `ty_of_ref`; (2) the generic
   import machinery (`imported_type_internal`, used by `check_file`'s `resolve_ty`) now also consults
-  Kotlin's fixed DEFAULT_IMPORT_PACKAGES list + the file's wildcard imports, verifying existence via the
+  Kotlin's fixed default-import package list + the file's wildcard imports, verifying existence via the
   federated `resolve_type` — no global-index reliance. This unblocks coroutine-stdlib TYPE resolution (the
   first of the coroutine-cluster chain; `Result.success` companion + helper-source injection + `Continuation`
   impl remain). FOLLOW-UP (owner-directed): retire the index `kotlin/*`-precedence patch by making
@@ -858,10 +874,12 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   literal exceeding `UInt.MAX` is now a `ULong` (Kotlin's rule), not a truncated `UInt`
   (`0xffff_ffff_ffffU`). New `unsigned_toplevel_e2e`. (NOTE: broader unsigned support — `compareTo` on a
   primitive, unsigned ranges/`downTo`/`until`, unsigned division/shift — remains a separate workstream.)
-- **Phase P23 — parallelize the full test suite under 60s (test-time).** `just test` builds once then runs
-  the ~57 JVM-bound e2e binaries in parallel (`xargs -P $(nproc)`, each keeping its shared JVM); the rayon
-  conformance gate runs first/alone to avoid contention. ~99s → ~44s. Failure-aware (any binary's non-zero
-  exit fails the run + prints its log); a filter arg defers to plain `cargo test`. `nextest` was worse (82s).
+- **Phase P23 — parallelize the full test suite (test-time).** `just test` built once then ran the
+  JVM-bound e2e binaries in parallel (`xargs -P $(nproc)`, each keeping its shared JVM); the rayon
+  conformance gate ran first/alone to avoid contention. The suite has since grown/regressed; current
+  agents should use `./run-tests.sh` / `just test` and the printed slowest-binaries table as the live
+  profiling source. Failure-aware (any binary's non-zero exit fails the run + prints its log); a filter
+  arg defers to plain `cargo test --profile gate`. `nextest` was worse (82s).
 - **Phase P22 — expression-parser completeness: unary `+` and `return` in expression position (gate 1515 → 1528, +13, FAIL=0).**
   Chosen via a full-corpus `survey` skip histogram (no single big bucket left — a long tail; these are two
   clean, correct gaps). (1) Unary `+` (`+5`, `0.compareTo(+0.0f)`): new `UnOp::Plus`, identity on the

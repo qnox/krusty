@@ -17,6 +17,8 @@ use krusty::lexer::lex;
 use krusty::parser::parse;
 use krusty::resolve::{check_file, collect_signatures};
 
+mod common;
+
 const ACC_STATIC: u16 = 0x0008;
 
 #[test]
@@ -28,8 +30,8 @@ fn value_class_synthesizes_box_unbox_constructor_impl() {
     assert!(!d.has_errors(), "unexpected parse errors");
 
     // `check_file` accepts value-class files (use-site unboxing is wired); the file resolves clean.
-    let syms = collect_signatures(&files, &mut d);
-    let info = check_file(&files[0], &syms, &mut d);
+    let mut syms = collect_signatures(&files, &mut d);
+    let info = check_file(&files[0], &mut syms, &mut d);
     assert!(!d.has_errors(), "value-class file should check clean");
 
     let mut ir = lower_file(&files[0], &info, &syms).expect("value class should lower");
@@ -82,4 +84,94 @@ fn value_class_synthesizes_box_unbox_constructor_impl() {
             "box-impl must live on S, not the facade"
         );
     }
+}
+
+#[test]
+fn value_class_is_property_uses_javabean_getter_name() {
+    let src = "@JvmInline\nvalue class Flag(val isOpen: Boolean)\nfun box(): String = \"OK\"\n";
+    let mut d = DiagSink::new();
+    let toks = lex(src, &mut d);
+    let files = vec![parse(src, &toks, &mut d)];
+    assert!(!d.has_errors(), "unexpected parse errors");
+
+    let mut syms = collect_signatures(&files, &mut d);
+    let info = check_file(&files[0], &mut syms, &mut d);
+    assert!(!d.has_errors(), "value-class file should check clean");
+
+    let mut ir = lower_file(&files[0], &info, &syms).expect("value class should lower");
+    assert!(krusty::jvm::value_classes::lower_value_classes(&mut ir));
+    let facade = file_class_name("Flag", None);
+    let cp = Classpath::new(vec![]);
+    let classes = emit_all(&ir, &facade, &cp, None).expect("emit");
+
+    let (_, bytes) = classes
+        .iter()
+        .find(|(n, _)| n == "Flag")
+        .expect("Flag.class emitted");
+    let ci = parse_class(bytes).expect("parse Flag.class");
+
+    assert!(
+        ci.method("isOpen", "()Z").is_some(),
+        "isOpen boolean property getter"
+    );
+    assert!(
+        ci.method("getIsOpen", "()Z").is_none(),
+        "value-class is-property must not emit getIsOpen"
+    );
+}
+
+#[test]
+fn value_class_reference_underlying_eq_hash_to_string_runs() {
+    let Some(stdlib) = common::stdlib_jar() else {
+        return;
+    };
+    let Some(java_home) = common::java_home() else {
+        return;
+    };
+    let jdk = std::path::PathBuf::from(format!("{java_home}/lib/modules"));
+    let src = r#"
+@JvmInline
+value class Id(val raw: String)
+
+fun box(): String {
+    val a = Id("x")
+    if (a != Id("x")) return "f1"
+    if (a == Id("y")) return "f2"
+    if (a.hashCode() != Id("x").hashCode()) return "f3"
+    if (a.toString() != "Id(raw=x)") return "f4:$a"
+    return "OK"
+}
+"#;
+    assert_eq!(
+        common::compile_and_run_box(src, "IdBox", &[stdlib], Some(&jdk)).as_deref(),
+        Some("OK")
+    );
+}
+
+#[test]
+fn sized_array_of_value_class_uses_provider_value_underlying() {
+    let Some(stdlib) = common::stdlib_jar() else {
+        return;
+    };
+    let Some(java_home) = common::java_home() else {
+        return;
+    };
+    let jdk = std::path::PathBuf::from(format!("{java_home}/lib/modules"));
+    let src = r#"
+@JvmInline
+value class Vc(val v: Int)
+
+fun box(): String {
+    val arr = Array(3) { Vc(it + 1) }
+    var sum = 0
+    for (x in arr) sum += x.v
+    if (sum != 6) return "f1:$sum"
+    if (arr[2].v != 3) return "f2"
+    return "OK"
+}
+"#;
+    assert_eq!(
+        common::compile_and_run_box(src, "SizedValueClassArray", &[stdlib], Some(&jdk)).as_deref(),
+        Some("OK")
+    );
 }

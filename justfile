@@ -85,58 +85,11 @@ clippy-baseline-check:
     fi
     echo "clippy: no new findings beyond baseline"
 
-# Full test suite against the default toolchain (kotlinc-gated tests skip without KRUSTY_KOTLINC).
+# Full test suite through the canonical self-provisioning harness.
 test *ARGS:
     #!/usr/bin/env bash
     set -euo pipefail
-    v="$(just max-version)"
-    # Provision the reference toolchain + box corpus (cached, idempotent) and export them, so the
-    # conformance + box e2e tests run rather than fail on a missing env. Honor any ambient overrides.
-    export KRUSTY_KOTLINC="${KRUSTY_KOTLINC:-$(just kotlinc "$v")}"
-    export KRUSTY_KOTLIN_BOX_DIR="${KRUSTY_KOTLIN_BOX_DIR:-$(just box-corpus "$v")}"
-    # The `gate` profile (opt-level 0, but overflow-checks + debuginfo OFF) is the intended test profile:
-    # krusty relies on wrapping arithmetic, so overflow-checks are pure overhead on its (arithmetic-heavy)
-    # compile, and dropping debuginfo links faster. Same fast build as dev, ~1.5-2x faster run.
-    #
-    # `cargo test` runs the ~57 test BINARIES sequentially, so the full suite (JVM/kotlinc-bound e2e
-    # tests, each with its own per-binary persistent JVM runner) summed to ~64s — over the <60s budget.
-    # With a filter argument, defer to plain `cargo test` (a single binary gains nothing). For the full
-    # no-arg suite (what the pre-push hook runs), build once then run the binaries in PARALLEL (each
-    # binary keeps its shared-JVM optimization), bringing wall-clock under 60s. Any binary's non-zero
-    # exit fails the whole run and its captured output is printed.
-    if [ -n "{{ARGS}}" ]; then
-        cargo test --profile gate {{ARGS}}
-        exit $?
-    fi
-    cargo test --profile gate --no-run
-    # Portable array read (macOS ships bash 3.2 — no `mapfile`).
-    bins=()
-    while IFS= read -r line; do bins+=("$line"); done < <(cargo test --profile gate --no-run 2>&1 \
-        | sed -nE 's/.*[Ee]xecutable [^(]*\(([^)]+)\)/\1/p' | sort -u)
-    logdir="$(mktemp -d)"
-    run_one() { # $1=logdir $2=binary[:extra-args]
-        local b="${2%%::*}" extra="" name
-        [ "$2" != "$b" ] && extra="${2#*::}"
-        name="$(basename "$b")"
-        if "$b" $extra >"$1/$name.log" 2>&1; then :; else echo "$b" >>"$1/FAILED"; fi
-    }
-    export -f run_one
-    # The box conformance gate binary is internally rayon-parallel (saturates every core on its own),
-    # so run it FIRST/alone — bundling it into the parallel batch only contends. Match it by its exact
-    # name: other binaries (e.g. serialization_conformance) also contain "conformance" but are ordinary
-    # parallel-batch tests, so a loose `grep conformance` would garble the gate path and drop them.
-    gate="$(printf '%s\n' "${bins[@]}" | grep kotlin_box_ir_jvm_conformance || true)"
-    [ -n "$gate" ] && run_one "$logdir" "$gate"
-    printf '%s\n' "${bins[@]}" | grep -v kotlin_box_ir_jvm_conformance \
-        | xargs -P "$(nproc 2>/dev/null || sysctl -n hw.ncpu)" -I{} bash -c 'run_one "$0" "$1::--test-threads=2"' "$logdir" {}
-    if [ -f "$logdir/FAILED" ]; then
-        echo "=== FAILED TEST BINARIES ==="
-        while read -r b; do echo "----- $b -----"; cat "$logdir/$(basename "$b").log"; done <"$logdir/FAILED"
-        rm -rf "$logdir"
-        exit 1
-    fi
-    rm -rf "$logdir"
-    echo "all test binaries passed"
+    ./run-tests.sh {{ARGS}}
 
 # Download + unpack the reference Kotlin compiler distribution into one self-contained dir
 # (.kotlinc/<ver>/), and print the path to its `bin/kotlinc`. Idempotent — a no-op once unpacked
@@ -280,7 +233,7 @@ conformance:
     v="$(just max-version)"
     export KRUSTY_KOTLINC="${KRUSTY_KOTLINC:-$(just kotlinc "$v")}"
     export KRUSTY_KOTLIN_BOX_DIR="${KRUSTY_KOTLIN_BOX_DIR:-$(just box-corpus "$v")}"
-    out=$(cargo test --release --test kotlin_box_ir_jvm_conformance -- --nocapture 2>&1 || true)
+    out=$(cargo test --profile gate --test kotlin_box_ir_jvm_conformance -- --nocapture 2>&1 || true)
     line=$(printf '%s\n' "$out" | grep -E 'box\(\)=OK:' | tail -1)
     [ -n "$line" ] || { echo "no conformance summary — set KRUSTY_KOTLIN_BOX_DIR and JAVA_HOME" >&2; exit 1; }
     scanned=$(printf '%s' "$line" | sed -E 's/.*scanned: ([0-9]+).*/\1/')

@@ -5,12 +5,12 @@
 
 mod common;
 
+use krusty::call_resolver::CallResolver;
 use krusty::jvm::classpath::Classpath;
 use krusty::jvm::jvm_libraries::JvmLibraries;
 use krusty::jvm::metadata::{
     class_companion_name, class_functions, class_inline, package_functions,
 };
-use krusty::libraries::LibrarySet;
 use krusty::types::Ty;
 use std::rc::Rc;
 
@@ -113,8 +113,9 @@ fn result_get_or_throw_resolves_as_inline_extension() {
         return;
     };
     let libs = JvmLibraries::new(Rc::new(Classpath::new(vec![sl])));
-    let c = libs
-        .resolve_callable("getOrThrow", Some(Ty::obj("kotlin/Result")), &[], &[])
+    let resolver = CallResolver::new(&libs);
+    let c = resolver
+        .resolve_extension_inline_callable("getOrThrow", Ty::obj("kotlin/Result"), &[])
         .expect("getOrThrow resolves on a Result receiver via @Metadata");
     assert_eq!(c.owner, "kotlin/ResultKt");
     assert_eq!(c.name, "getOrThrow");
@@ -123,9 +124,37 @@ fn result_get_or_throw_resolves_as_inline_extension() {
     // The same name must NOT resolve on an unrelated receiver (the erased-Object candidate is gated by
     // the @Metadata receiver class).
     assert!(
-        libs.resolve_callable("getOrThrow", Some(Ty::obj("kotlin/String")), &[], &[])
+        resolver
+            .resolve_extension_inline_callable("getOrThrow", Ty::obj("kotlin/String"), &[])
             .is_none(),
         "getOrThrow must not bind a non-Result receiver"
+    );
+}
+
+#[test]
+fn result_get_or_null_resolves_as_nullable_metadata_member() {
+    let Some(sl) = common::stdlib_jar() else {
+        eprintln!("no stdlib jar; skipping");
+        return;
+    };
+    let libs = JvmLibraries::new(Rc::new(Classpath::new(vec![sl])));
+    let m = krusty::call_resolver::resolve_instance_member(
+        &libs,
+        Ty::obj("kotlin/Result"),
+        "getOrNull",
+        &[],
+    )
+    .expect("getOrNull resolves on Result via value-class @Metadata");
+    assert_eq!(m.member.owner.as_deref(), Some("kotlin/Result"));
+    assert_eq!(m.member.name, "getOrNull-impl");
+    assert_eq!(
+        m.member.descriptor,
+        "(Ljava/lang/Object;)Ljava/lang/Object;"
+    );
+    assert_eq!(m.member.physical_ret, Ty::obj("kotlin/Any"));
+    assert!(
+        m.ret.is_nullable(),
+        "getOrNull returns nullable T? at the Kotlin boundary"
     );
 }
 

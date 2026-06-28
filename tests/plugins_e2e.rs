@@ -32,11 +32,11 @@ fn lower(src: &str) -> Option<(krusty::ast::File, krusty::ir::IrFile)> {
         return None;
     }
     let platform = Box::new(JvmLibraries::new(cp.clone()));
-    let syms = collect_signatures_with_cp(&files, platform, &mut d);
+    let mut syms = collect_signatures_with_cp(&files, platform, &mut d);
     if d.has_errors() {
         return None;
     }
-    let info = check_file(&files[0], &syms, &mut d);
+    let info = check_file(&files[0], &mut syms, &mut d);
     if d.has_errors() {
         return None;
     }

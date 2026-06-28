@@ -1,29 +1,21 @@
-//! Call resolution — the binding layer that sits *above* a [`LibrarySet`].
+//! Call resolution — the binding layer that sits *above* a [`SymbolSource`].
 //!
-//! A [`LibrarySet`] is a pure, arg-INDEPENDENT metadata oracle: given a name (and optional receiver)
+//! A [`SymbolSource`] is a pure, arg-INDEPENDENT metadata oracle: given a name (and optional receiver)
 //! it returns every overload with its raw signature and flags ([`crate::libraries::FunctionSet`]). It
 //! does no overload selection and no type-variable binding.
 //!
 //! [`CallResolver`] is the arg-DEPENDENT layer on top: given the actual argument types at a call site
 //! it selects the right overload and binds the generic receiver/parameter/return types. It is platform
-//! agnostic — it only ever talks to the oracle through the [`LibrarySet`] trait, so the same binding
+//! agnostic — it only ever talks to the oracle through the [`SymbolSource`] trait, so the same binding
 //! logic serves every backend (JVM today, JS later). The platform-specific bits (parsing a backend's
 //! generic-signature string into [`GSig`]) live behind the trait; the binding *algorithm* over [`GSig`]
 //! lives here.
 
-use crate::libraries::{FnKind, LibraryCallable, LibraryMember, LibrarySet};
+use crate::libraries::{
+    FnKind, FunctionInfo, FunctionSet, GSig, InlineKind, LibraryCallable, LibraryMember,
+};
+use crate::symbol_source::SymbolSource;
 use crate::types::Ty;
-
-/// A parsed generic-signature node, platform neutral. A backend parses its own signature format into
-/// this tree (the JVM reads a `Signature` attribute); the binding algorithm below unifies and
-/// substitutes over it without knowing which backend produced it.
-#[derive(Clone, Debug)]
-pub(crate) enum GSig {
-    Var(String),
-    Class(String, Vec<GSig>),
-    Arr(Box<GSig>),
-    Prim(Ty),
-}
 
 /// Bind type variables by unifying a parameter signature node with an actual argument `Ty`.
 pub(crate) fn unify_gsig(
@@ -40,17 +32,15 @@ pub(crate) fn unify_gsig(
                 unify_gsig(inner, elem, binds);
             }
         }
-        GSig::Class(internal, args) if internal.starts_with("kotlin/jvm/functions/Function") => {
+        GSig::Function { params, ret } => {
             // A function parameter (`Function1<T, R>`) unifies against a lambda argument (`Ty::Fun`):
-            // the leading type arguments bind the lambda's parameters, the last binds its return —
-            // so `map`'s `R` binds from the lambda body's type (`{ it * 2 }` → `Int`).
+            // the parameter nodes bind the lambda's parameters and the return node binds its return, so
+            // `map`'s `R` binds from the lambda body's type (`{ it * 2 }` → `Int`).
             if let Ty::Fun(fsig) = actual {
-                if let Some((ret_sig, in_sigs)) = args.split_last() {
-                    for (a, p) in in_sigs.iter().zip(fsig.params.iter()) {
-                        unify_gsig(a, *p, binds);
-                    }
-                    unify_gsig(ret_sig, fsig.ret, binds);
+                for (a, p) in params.iter().zip(fsig.params.iter()) {
+                    unify_gsig(a, *p, binds);
                 }
+                unify_gsig(ret, fsig.ret, binds);
             }
         }
         GSig::Class(_, args) => {
@@ -75,6 +65,10 @@ pub(crate) fn gsig_to_ty(sig: &GSig, binds: &std::collections::HashMap<String, T
             .unwrap_or_else(|| Ty::obj("kotlin/Any")),
         GSig::Prim(t) => *t,
         GSig::Arr(inner) => Ty::array(gsig_to_ty(inner, binds)),
+        GSig::Function { params, ret } => {
+            let ps: Vec<Ty> = params.iter().map(|a| gsig_to_ty(a, binds)).collect();
+            Ty::fun(ps, gsig_to_ty(ret, binds))
+        }
         GSig::Class(internal, args) => {
             if args.is_empty() {
                 Ty::obj(internal)
@@ -86,41 +80,15 @@ pub(crate) fn gsig_to_ty(sig: &GSig, binds: &std::collections::HashMap<String, T
     }
 }
 
-/// If `sig` is a `kotlin/jvm/functions/FunctionN` type, the (substituted) types of its lambda
-/// parameters — its first N type arguments (the last is the return type). Empty for anything else.
+/// If `sig` is a function type, the substituted types of its lambda parameters. Empty for anything else.
 pub(crate) fn function_input_types(
     sig: &GSig,
     binds: &std::collections::HashMap<String, Ty>,
 ) -> Vec<Ty> {
-    if let GSig::Class(internal, targs) = sig {
-        if internal.starts_with("kotlin/jvm/functions/Function") && !targs.is_empty() {
-            // A `FunctionN` is generic, so a primitive-typed lambda parameter appears boxed in the
-            // signature (`(index: Int, …)` → `Function2<Integer, …>`). The Kotlin lambda parameter is
-            // the *unboxed* primitive, so map a known wrapper type argument back to it.
-            return targs[..targs.len() - 1]
-                .iter()
-                .map(|a| unbox_wrapper(gsig_to_ty(a, binds)))
-                .collect();
-        }
+    if let GSig::Function { params, .. } = sig {
+        return params.iter().map(|a| gsig_to_ty(a, binds)).collect();
     }
     Vec::new()
-}
-
-/// Map a JVM boxed-primitive wrapper type back to its primitive (`java/lang/Integer` → `Int`); a no-op
-/// for any other type. Recovers unboxed Kotlin lambda-parameter types from an erased `FunctionN`
-/// signature (whose type arguments are always boxed).
-pub(crate) fn unbox_wrapper(t: Ty) -> Ty {
-    match t.obj_internal() {
-        Some("java/lang/Integer") => Ty::Int,
-        Some("java/lang/Long") => Ty::Long,
-        Some("java/lang/Short") => Ty::Short,
-        Some("java/lang/Byte") => Ty::Byte,
-        Some("java/lang/Character") => Ty::Char,
-        Some("java/lang/Boolean") => Ty::Boolean,
-        Some("java/lang/Double") => Ty::Double,
-        Some("java/lang/Float") => Ty::Float,
-        _ => t,
-    }
 }
 
 /// Whether argument `a` can be passed where parameter `p` is expected, in erased Kotlin terms: an
@@ -130,39 +98,41 @@ pub(crate) fn arg_fits(p: &Ty, a: &Ty) -> bool {
     if p == a || *p == Ty::obj("kotlin/Any") {
         return true;
     }
-    // A lambda (`Ty::Fun`) is passed where a `kotlin/jvm/functions/FunctionN` is expected.
-    if let (Ty::Obj(pi, _), Ty::Fun(_)) = (p, a) {
-        return pi.starts_with("kotlin/jvm/functions/Function");
-    }
-    // A property reference (`C::n` → `KProperty1`, `obj::n` → `KProperty0`) is itself a function:
-    // `PropertyReference{1,0}Impl` implements the matching `FunctionN` (`invoke = get`). Accept it for
-    // a `FunctionN` parameter of the matching arity (`Function1` ← `KProperty1`, `Function0` ← `KProperty0`).
-    if let (Ty::Obj(pi, _), Ty::Obj(ai, _)) = (p, a) {
-        if let Some(arity) = pi
-            .strip_prefix("kotlin/jvm/functions/Function")
-            .and_then(|n| n.parse::<usize>().ok())
-        {
-            let prop_arity = match *ai {
-                "kotlin/reflect/KProperty1" | "kotlin/reflect/KMutableProperty1" => Some(1),
-                "kotlin/reflect/KProperty0" | "kotlin/reflect/KMutableProperty0" => Some(0),
-                _ => None,
-            };
-            if prop_arity == Some(arity) {
-                return true;
-            }
-        }
+    // A lambda value fits a function-typed parameter when arities agree; its body result is handled by
+    // the selected call's generic binding, not by erased descriptor matching.
+    if let (Some(pn), Some(an)) = (p.fun_arity(), a.fun_arity()) {
+        return pn == an;
     }
     matches!((p, a), (Ty::Obj(pi, _), Ty::Obj(ai, _)) if pi == ai)
 }
 
-/// The arg-dependent binding layer over a [`LibrarySet`]: it selects overloads and binds generics for
+fn is_function_param(t: &Ty) -> bool {
+    matches!(t, Ty::Fun(_))
+}
+
+fn metadata_ret_with_args(meta: Ty, fallback_args: &[Ty]) -> Ty {
+    match meta {
+        Ty::Obj(internal, args) if args.is_empty() && !fallback_args.is_empty() => {
+            Ty::obj_args(internal, fallback_args)
+        }
+        other => other,
+    }
+}
+
+fn logical_ret_from_metadata(ret_class: Option<Ty>, fallback: Ty) -> Ty {
+    ret_class
+        .map(|meta| metadata_ret_with_args(meta, fallback.type_args()))
+        .unwrap_or(fallback)
+}
+
+/// The arg-dependent binding layer over a [`SymbolSource`]: it selects overloads and binds generics for
 /// a specific call site. Holds the oracle by reference — cheap to construct per query.
 pub struct CallResolver<'a> {
-    lib: &'a dyn LibrarySet,
+    lib: &'a dyn SymbolSource,
 }
 
 impl<'a> CallResolver<'a> {
-    pub fn new(lib: &'a dyn LibrarySet) -> Self {
+    pub fn new(lib: &'a dyn SymbolSource) -> Self {
         CallResolver { lib }
     }
 
@@ -201,6 +171,605 @@ impl<'a> CallResolver<'a> {
             .overloads
             .iter()
             .any(|o| o.kind == FnKind::Extension && o.flags.suspend)
+    }
+
+    /// Resolve a receiver-less top-level library callable for a concrete call site. This is the
+    /// compatibility boundary for the older arg-dependent selector while checker/lowerer are moved to
+    /// `FunctionSet`-backed resolution.
+    pub fn resolve_top_level_callable(
+        &self,
+        name: &str,
+        args: &[Ty],
+        type_args: &[Ty],
+    ) -> Option<LibraryCallable> {
+        let fs = self.lib.functions(name, None);
+        let parsed: Vec<(&FunctionInfo, Vec<Ty>, Ty)> = fs
+            .overloads
+            .iter()
+            .filter(|o| o.kind == FnKind::TopLevel && o.public)
+            .map(|o| (o, o.callable.params.clone(), o.callable.ret))
+            .collect();
+
+        let pick = parsed
+            .iter()
+            .find(|(_, params, _)| {
+                params.len() == args.len()
+                    && params.iter().zip(args).all(|(p, a)| self.arg_fits(p, a))
+            })
+            .or_else(|| {
+                parsed.iter().find(|(_, params, _)| {
+                    if params.is_empty() {
+                        return args.is_empty();
+                    }
+                    let fixed = params.len() - 1;
+                    let Some(elem) = params[fixed].array_elem() else {
+                        return false;
+                    };
+                    args.len() >= fixed
+                        && params[..fixed]
+                            .iter()
+                            .zip(args)
+                            .all(|(p, a)| self.arg_fits(p, a))
+                        && args[fixed..].iter().all(|a| self.arg_fits(&elem, a))
+                })
+            });
+
+        if pick.is_none() {
+            if let Some(c) = self.resolve_top_level_default_callable(name, args, type_args) {
+                crate::trace_compiler!(
+                    "resolve",
+                    "top-level {name} args={args:?} -> {}.{}{} default inline={:?}",
+                    c.owner,
+                    c.name,
+                    c.descriptor,
+                    c.inline
+                );
+                return Some(c);
+            }
+        }
+
+        if let Some(c) = self.resolve_top_level_inline_only_callable(&fs, args, type_args) {
+            crate::trace_compiler!(
+                "resolve",
+                "top-level {name} args={args:?} -> {}.{}{} inline-only",
+                c.owner,
+                c.name,
+                c.descriptor
+            );
+            return Some(c);
+        }
+
+        let (o, params, ret) = pick?;
+        let c = &o.callable;
+        if ret.obj_internal() == Some("kotlin/reflect/KType") {
+            return None;
+        }
+
+        let mut vararg_elem = None;
+        let ret_ty = o
+            .generic_sig
+            .as_ref()
+            .map(|gsig| {
+                let mut binds = std::collections::HashMap::new();
+                for (f, t) in gsig.formals.iter().zip(type_args) {
+                    binds.insert(f.clone(), *t);
+                }
+                let vararg = params.len() != args.len();
+                if vararg && !gsig.params.is_empty() {
+                    let fixed = gsig.params.len() - 1;
+                    for (i, ps) in gsig.params.iter().take(fixed).enumerate() {
+                        if let Some(a) = args.get(i) {
+                            unify_gsig(ps, *a, &mut binds);
+                        }
+                    }
+                    if let GSig::Arr(inner) = &gsig.params[fixed] {
+                        for a in &args[fixed..] {
+                            unify_gsig(inner, *a, &mut binds);
+                        }
+                        vararg_elem = Some(gsig_to_ty(inner, &binds));
+                    }
+                } else {
+                    for (ps, a) in gsig.params.iter().zip(args) {
+                        unify_gsig(ps, *a, &mut binds);
+                    }
+                }
+                gsig_to_ty(&gsig.ret, &binds)
+            })
+            .unwrap_or(*ret);
+        let ret_ty = logical_ret_from_metadata(o.ret_class, ret_ty);
+        let ret_ty = if o.flags.suspend { c.ret } else { ret_ty };
+
+        crate::trace_compiler!(
+            "resolve",
+            "top-level {name} args={args:?} -> {}.{}{} inline={:?}",
+            c.owner,
+            c.name,
+            c.descriptor,
+            c.inline
+        );
+        Some(LibraryCallable {
+            owner: c.owner.clone(),
+            name: c.name.clone(),
+            params: params.clone(),
+            ret: ret_ty,
+            physical_ret: *ret,
+            descriptor: c.descriptor.clone(),
+            inline: c.inline,
+            default_call: false,
+            vararg_elem,
+            signature: c.signature.clone(),
+            origin: c.origin.clone(),
+        })
+    }
+
+    /// Resolve an extension library callable for a concrete receiver call site. The primary path uses
+    /// the receiver-aware [`FunctionSet`] overloads; the compatibility fallback preserves the old
+    /// descriptor/default-argument handling until those cases are represented directly in `FunctionInfo`.
+    pub fn resolve_extension_callable(
+        &self,
+        name: &str,
+        receiver: Ty,
+        args: &[Ty],
+        type_args: &[Ty],
+    ) -> Option<LibraryCallable> {
+        self.resolve_extension_callable_exact(name, receiver, args, type_args, false)
+            .or_else(|| self.resolve_extension_default_callable(name, receiver, args, type_args))
+    }
+
+    /// Resolve an extension callable for the bytecode inliner. This uses the same overload selection as
+    /// ordinary extension calls, but also admits non-public `@InlineOnly` candidates because callers must
+    /// splice the result and never emit it as a JVM call.
+    pub fn resolve_extension_inline_callable(
+        &self,
+        name: &str,
+        receiver: Ty,
+        args: &[Ty],
+    ) -> Option<LibraryCallable> {
+        self.resolve_extension_callable_exact(name, receiver, args, &[], true)
+    }
+
+    /// Resolve a classpath/library extension property getter for `receiver.property`.
+    /// The source supplies the platform getter spelling (`getProperty` on JVM); this layer then uses
+    /// the same extension-call selector as ordinary extension calls and returns only read-value results.
+    pub fn resolve_extension_property_getter(
+        &self,
+        property: &str,
+        receiver: Ty,
+    ) -> Option<LibraryCallable> {
+        let getter = self.lib.physical_property_getter_name(property)?;
+        self.resolve_extension_callable(&getter, receiver, &[], &[])
+            .filter(|c| c.ret.is_read_value_result())
+    }
+
+    fn resolve_extension_callable_exact(
+        &self,
+        name: &str,
+        receiver: Ty,
+        args: &[Ty],
+        type_args: &[Ty],
+        allow_must_inline: bool,
+    ) -> Option<LibraryCallable> {
+        let fs = self.lib.functions(name, Some(receiver));
+        let mut ranks: Vec<u32> = fs
+            .overloads
+            .iter()
+            .filter(|o| {
+                o.kind == FnKind::Extension
+                    && o.receiver_rank != u32::MAX
+                    && (o.public || (allow_must_inline && o.flags.inline.must_inline()))
+            })
+            .map(|o| o.receiver_rank)
+            .collect();
+        ranks.sort_unstable();
+        ranks.dedup();
+
+        for rank in ranks {
+            let mut matches: Vec<&FunctionInfo> = fs
+                .overloads
+                .iter()
+                .filter(|o| {
+                    o.kind == FnKind::Extension
+                        && o.receiver_rank != u32::MAX
+                        && (o.public || (allow_must_inline && o.flags.inline.must_inline()))
+                        && o.receiver_rank == rank
+                        && o.callable.params.len() == args.len() + 1
+                        && o.callable.params[1..]
+                            .iter()
+                            .zip(args)
+                            .all(|(p, a)| self.arg_fits_or_subtype(p, a))
+                })
+                .collect();
+            if matches.is_empty() {
+                continue;
+            }
+            matches.sort_by_key(|o| o.overload_rank);
+            let specific_over = |a: &[Ty], b: &[Ty]| -> bool {
+                a.iter()
+                    .zip(b)
+                    .all(|(pa, pb)| self.arg_fits_or_subtype(pb, pa))
+            };
+            let best = (0..matches.len())
+                .find(|&i| {
+                    (0..matches.len()).all(|j| {
+                        j == i
+                            || specific_over(
+                                &matches[i].callable.params[1..],
+                                &matches[j].callable.params[1..],
+                            )
+                    })
+                })
+                .unwrap_or(0);
+            let o = matches[best];
+            crate::trace_compiler!(
+                "resolve",
+                "extension {name} recv={receiver:?} args={args:?} inline={} -> {}.{}{} ret={:?}",
+                allow_must_inline,
+                o.callable.owner,
+                o.callable.name,
+                o.callable.descriptor,
+                o.callable.ret
+            );
+            return Some(self.bind_extension_callable(o, receiver, args, type_args));
+        }
+        crate::trace_compiler!(
+            "resolve",
+            "extension {name} recv={receiver:?} args={args:?} inline={} -> <none>",
+            allow_must_inline
+        );
+        None
+    }
+
+    fn bind_extension_callable(
+        &self,
+        o: &FunctionInfo,
+        receiver: Ty,
+        args: &[Ty],
+        type_args: &[Ty],
+    ) -> LibraryCallable {
+        let c = &o.callable;
+        let ret_ty = o
+            .generic_sig
+            .as_ref()
+            .map(|gsig| {
+                let mut binds = std::collections::HashMap::new();
+                for (f, t) in gsig.formals.iter().zip(type_args) {
+                    binds.insert(f.clone(), *t);
+                }
+                let actuals: Vec<Ty> = std::iter::once(receiver)
+                    .chain(args.iter().copied())
+                    .collect();
+                for (ps, a) in gsig.params.iter().zip(&actuals) {
+                    unify_gsig(ps, *a, &mut binds);
+                }
+                gsig_to_ty(&gsig.ret, &binds)
+            })
+            .unwrap_or(c.ret);
+        let ret_ty = match o.ret_class {
+            Some(meta) if self.lib.value_underlying(meta).is_some() => match meta {
+                Ty::Obj(class, _) => Ty::obj_args(class, ret_ty.type_args()),
+                _ => meta,
+            },
+            None => ret_ty,
+            _ => ret_ty,
+        };
+        let nullable_scope_filter = matches!(c.name.as_str(), "takeIf" | "takeUnless")
+            && c.descriptor
+                == "(Ljava/lang/Object;Lkotlin/jvm/functions/Function1;)Ljava/lang/Object;";
+        let ret_ty = if ret_ty.boxed_ref().is_some() && (o.ret_nullable || nullable_scope_filter) {
+            Ty::nullable(ret_ty)
+        } else {
+            ret_ty
+        };
+        LibraryCallable {
+            owner: c.owner.clone(),
+            name: c.name.clone(),
+            params: c.params.clone(),
+            ret: ret_ty,
+            physical_ret: c.physical_ret,
+            descriptor: c.descriptor.clone(),
+            inline: c.inline,
+            default_call: false,
+            vararg_elem: None,
+            signature: c.signature.clone(),
+            origin: c.origin.clone(),
+        }
+    }
+
+    fn resolve_extension_default_callable(
+        &self,
+        name: &str,
+        receiver: Ty,
+        args: &[Ty],
+        type_args: &[Ty],
+    ) -> Option<LibraryCallable> {
+        let fs = self
+            .lib
+            .functions(&format!("{name}$default"), Some(receiver));
+        let mut ranks: Vec<u32> = fs
+            .overloads
+            .iter()
+            .filter(|o| o.kind == FnKind::Extension && o.public)
+            .map(|o| o.receiver_rank)
+            .collect();
+        ranks.sort_unstable();
+        ranks.dedup();
+
+        let trailing_lambda = args.last().is_some_and(|a| matches!(a, Ty::Fun(_)));
+        for rank in ranks {
+            for o in fs
+                .overloads
+                .iter()
+                .filter(|o| o.kind == FnKind::Extension && o.public && o.receiver_rank == rank)
+            {
+                let c = &o.callable;
+                let params = &c.params;
+                if params.is_empty() {
+                    continue;
+                }
+                let real_count = params.len() - 1;
+                let fits = if trailing_lambda {
+                    let prefix_len = args.len() - 1;
+                    prefix_len < real_count
+                        && is_function_param(&params[real_count])
+                        && params[1..1 + prefix_len]
+                            .iter()
+                            .zip(&args[..prefix_len])
+                            .all(|(p, a)| self.arg_fits_or_subtype(p, a))
+                } else {
+                    args.len() <= real_count
+                        && params[1..1 + args.len()]
+                            .iter()
+                            .zip(args)
+                            .all(|(p, a)| self.arg_fits_or_subtype(p, a))
+                };
+                if !fits {
+                    continue;
+                }
+                let ret_ty = o
+                    .generic_sig
+                    .as_ref()
+                    .map(|gsig| {
+                        let mut binds = std::collections::HashMap::new();
+                        for (f, t) in gsig.formals.iter().zip(type_args) {
+                            binds.insert(f.clone(), *t);
+                        }
+                        let actuals: Vec<Ty> = std::iter::once(receiver)
+                            .chain(args.iter().copied())
+                            .collect();
+                        for (ps, a) in gsig.params.iter().zip(&actuals) {
+                            unify_gsig(ps, *a, &mut binds);
+                        }
+                        gsig_to_ty(&gsig.ret, &binds)
+                    })
+                    .unwrap_or(c.ret);
+                let ret_ty = logical_ret_from_metadata(o.ret_class, ret_ty);
+                return Some(LibraryCallable {
+                    owner: c.owner.clone(),
+                    name: c.name.clone(),
+                    params: params.clone(),
+                    ret: ret_ty,
+                    physical_ret: c.physical_ret,
+                    descriptor: c.descriptor.clone(),
+                    inline: c.inline,
+                    default_call: true,
+                    vararg_elem: None,
+                    signature: c.signature.clone(),
+                    origin: c.origin.clone(),
+                });
+            }
+        }
+        None
+    }
+
+    fn arg_fits_or_subtype(&self, param: &Ty, arg: &Ty) -> bool {
+        self.arg_fits(param, arg)
+            || self.value_class_arg_fits(param, arg)
+            || self.reference_subtype(arg, param)
+    }
+
+    fn arg_fits(&self, param: &Ty, arg: &Ty) -> bool {
+        arg_fits(param, arg)
+            || param
+                .fun_arity()
+                .zip(self.lib.function_like_arity(*arg))
+                .is_some_and(|(p, a)| usize::from(p) == a)
+    }
+
+    fn value_class_arg_fits(&self, param: &Ty, arg: &Ty) -> bool {
+        self.lib
+            .value_underlying(*arg)
+            .is_some_and(|underlying| *param == underlying)
+    }
+
+    fn reference_subtype(&self, arg: &Ty, param: &Ty) -> bool {
+        let Some(target) = param.kotlin_class_internal() else {
+            return false;
+        };
+        let Some(start) = arg.kotlin_class_internal() else {
+            return false;
+        };
+        if start == target {
+            return true;
+        }
+        let mut seen = std::collections::HashSet::new();
+        let mut queue = std::collections::VecDeque::new();
+        queue.push_back(start.to_string());
+        while let Some(internal) = queue.pop_front() {
+            if !seen.insert(internal.clone()) {
+                continue;
+            }
+            let Some(t) = self.lib.resolve_type(&internal) else {
+                continue;
+            };
+            for sup in t.supertypes {
+                if sup == target {
+                    return true;
+                }
+                queue.push_back(sup);
+            }
+        }
+        false
+    }
+
+    fn default_arg_mapping(
+        &self,
+        info: &FunctionInfo,
+        params: &[Ty],
+        args: &[Ty],
+    ) -> Option<Vec<(usize, usize)>> {
+        let real_count = params.len();
+        if args.len() > real_count {
+            return None;
+        }
+        let trailing_lambda = args.last().is_some_and(|a| matches!(a, Ty::Fun(_)));
+        if trailing_lambda && args.len() < real_count {
+            let last_param = real_count.checked_sub(1)?;
+            if !self.arg_fits(&params[last_param], args.last().unwrap()) {
+                return None;
+            }
+            let prefix_len = args.len() - 1;
+            if !params[..prefix_len]
+                .iter()
+                .zip(&args[..prefix_len])
+                .all(|(p, a)| self.arg_fits(p, a))
+            {
+                return None;
+            }
+            if !info.call_sig.param_defaults.is_empty()
+                && (prefix_len..last_param).any(|i| {
+                    !info
+                        .call_sig
+                        .param_defaults
+                        .get(i)
+                        .copied()
+                        .unwrap_or(false)
+                })
+            {
+                return None;
+            }
+            let mut mapping: Vec<(usize, usize)> = (0..prefix_len).map(|i| (i, i)).collect();
+            mapping.push((last_param, args.len() - 1));
+            return Some(mapping);
+        }
+        if !params[..args.len()]
+            .iter()
+            .zip(args)
+            .all(|(p, a)| self.arg_fits(p, a))
+        {
+            return None;
+        }
+        if !info.call_sig.param_defaults.is_empty()
+            && (args.len()..real_count).any(|i| {
+                !info
+                    .call_sig
+                    .param_defaults
+                    .get(i)
+                    .copied()
+                    .unwrap_or(false)
+            })
+        {
+            return None;
+        }
+        Some((0..args.len()).map(|i| (i, i)).collect())
+    }
+
+    fn resolve_top_level_default_callable(
+        &self,
+        name: &str,
+        args: &[Ty],
+        type_args: &[Ty],
+    ) -> Option<LibraryCallable> {
+        let fsd = self.lib.functions(&format!("{name}$default"), None);
+        for o in fsd.overloads.iter().filter(|o| o.kind == FnKind::TopLevel) {
+            let c = &o.callable;
+            if !o.public && !o.flags.inline.must_inline() {
+                continue;
+            }
+            let params = &c.params;
+            let Some(mapping) = self.default_arg_mapping(o, params, args) else {
+                continue;
+            };
+            let ret_ty = o
+                .generic_sig
+                .as_ref()
+                .map(|gsig| {
+                    let mut binds = std::collections::HashMap::new();
+                    for (f, t) in gsig.formals.iter().zip(type_args) {
+                        binds.insert(f.clone(), *t);
+                    }
+                    for (param_i, arg_i) in &mapping {
+                        if let Some(ps) = gsig.params.get(*param_i) {
+                            unify_gsig(ps, args[*arg_i], &mut binds);
+                        }
+                    }
+                    gsig_to_ty(&gsig.ret, &binds)
+                })
+                .unwrap_or(c.ret);
+            let ret_ty = logical_ret_from_metadata(o.ret_class, ret_ty);
+            return Some(LibraryCallable {
+                owner: c.owner.clone(),
+                name: c.name.clone(),
+                params: params.clone(),
+                ret: ret_ty,
+                physical_ret: c.physical_ret,
+                descriptor: c.descriptor.clone(),
+                inline: c.inline,
+                default_call: true,
+                vararg_elem: None,
+                signature: c.signature.clone(),
+                origin: c.origin.clone(),
+            });
+        }
+        None
+    }
+
+    fn resolve_top_level_inline_only_callable(
+        &self,
+        fs: &FunctionSet,
+        args: &[Ty],
+        type_args: &[Ty],
+    ) -> Option<LibraryCallable> {
+        for o in fs.overloads.iter().filter(|o| o.kind == FnKind::TopLevel) {
+            let c = &o.callable;
+            let params = &c.params;
+            if !c.inline.must_inline() {
+                continue;
+            }
+            if params.len() != args.len()
+                || !params.iter().zip(args).all(|(p, a)| self.arg_fits(p, a))
+            {
+                continue;
+            }
+            let recovered = o
+                .generic_sig
+                .as_ref()
+                .map(|gsig| {
+                    let mut binds = std::collections::HashMap::new();
+                    for (f, t) in gsig.formals.iter().zip(type_args) {
+                        binds.insert(f.clone(), *t);
+                    }
+                    for (ps, a) in gsig.params.iter().zip(args) {
+                        unify_gsig(ps, *a, &mut binds);
+                    }
+                    gsig_to_ty(&gsig.ret, &binds)
+                })
+                .unwrap_or(c.ret);
+            let logical_ret = logical_ret_from_metadata(o.ret_class, recovered);
+            return Some(LibraryCallable {
+                owner: c.owner.clone(),
+                name: c.name.clone(),
+                params: params.clone(),
+                ret: logical_ret,
+                physical_ret: c.physical_ret,
+                descriptor: c.descriptor.clone(),
+                inline: InlineKind::MustInline,
+                default_call: false,
+                vararg_elem: None,
+                signature: c.signature.clone(),
+                origin: c.origin.clone(),
+            });
+        }
+        None
     }
 
     /// Whether `name` has a top-level overload that MUST be inlined (`@InlineOnly`, no callable method).
@@ -242,7 +811,251 @@ impl<'a> CallResolver<'a> {
             .find(|o| {
                 matches!(o.kind, FnKind::Extension | FnKind::Member) && o.callable.ret == lambda_ret
             })
-            .map(|o| (o.callable, o.kind == FnKind::Member))
+            .map(|o| {
+                crate::trace_compiler!(
+                    "resolve",
+                    "lambda-return {name} recv={receiver:?} lambda_ret={lambda_ret:?} -> {}.{}{} kind={:?}",
+                    o.callable.owner,
+                    o.callable.name,
+                    o.callable.descriptor,
+                    o.kind
+                );
+                (o.callable, o.kind == FnKind::Member)
+            })
+    }
+
+    /// Parameter types for the lambda argument of a call selected by lambda return type
+    /// (`Iterable<T>.sumOf { … }`). The special candidate family is represented in `FunctionSet` with
+    /// `receiver_rank = u32::MAX`; bind the receiver into the generic signature and read the function
+    /// parameter's input types from that selected family instead of asking the provider a second time.
+    pub fn lambda_return_overload_param_types(&self, receiver: Ty, name: &str) -> Option<Vec<Ty>> {
+        self.lib
+            .functions(name, Some(receiver))
+            .overloads
+            .iter()
+            .filter(|o| o.kind == FnKind::Extension && o.receiver_rank == u32::MAX)
+            .find_map(|o| {
+                let gsig = o.generic_sig.as_ref()?;
+                let mut binds = std::collections::HashMap::new();
+                if let Some(recv_sig) = gsig.params.first() {
+                    unify_gsig(recv_sig, receiver, &mut binds);
+                }
+                gsig.params
+                    .get(1)
+                    .map(|selector| function_input_types(selector, &binds))
+                    .filter(|params| !params.is_empty())
+            })
+    }
+
+    /// Lambda parameter types for a receiver-less top-level call. This is arg-dependent because a
+    /// generic HOF can bind lambda parameter types from already-typed non-lambda arguments
+    /// (`applyIt(5) { it + 1 }`). Providers expose parsed generic signatures on `FunctionInfo`; this
+    /// resolver binds them for the concrete partial call.
+    pub fn top_level_lambda_param_types(
+        &self,
+        name: &str,
+        arg_tys: &[Option<Ty>],
+    ) -> Option<Vec<Vec<Ty>>> {
+        self.lib
+            .functions(name, None)
+            .overloads
+            .iter()
+            .filter(|o| o.kind == FnKind::TopLevel)
+            .find_map(|o| {
+                let gsig = o.generic_sig.as_ref()?;
+                if gsig.params.len() != arg_tys.len() {
+                    return None;
+                }
+                let mut binds = std::collections::HashMap::new();
+                for (ps, at) in gsig.params.iter().zip(arg_tys) {
+                    if let Some(t) = at {
+                        unify_gsig(ps, *t, &mut binds);
+                    }
+                }
+                let out: Vec<Vec<Ty>> = gsig
+                    .params
+                    .iter()
+                    .map(|ps| function_input_types(ps, &binds))
+                    .collect();
+                out.iter()
+                    .zip(arg_tys)
+                    .any(|(v, at)| at.is_none() && !v.is_empty())
+                    .then_some(out)
+            })
+    }
+
+    /// Receiver type for each top-level function parameter that is a receiver function type
+    /// (`Recv.(...) -> R`). This is source call-shape data stored on `CallSig`; the resolver only aligns
+    /// it with the concrete arity before the checker binds lambda `this`.
+    pub fn top_level_lambda_receivers(
+        &self,
+        name: &str,
+        arg_tys: &[Option<Ty>],
+    ) -> Option<Vec<Option<Ty>>> {
+        self.lib
+            .functions(name, None)
+            .overloads
+            .iter()
+            .filter(|o| o.kind == FnKind::TopLevel)
+            .find_map(|o| {
+                let recvs = &o.call_sig.lambda_receivers;
+                (recvs.len() == arg_tys.len() && recvs.iter().any(|o| o.is_some()))
+                    .then(|| recvs.clone())
+            })
+    }
+
+    /// Lambda parameter types for an extension call before lambda bodies are typed. This binds the
+    /// selected extension's generic signature from the receiver plus already-typed non-lambda args
+    /// (`fold(0) { acc, x -> ... }` binds the accumulator from `0`). Public candidates are preferred;
+    /// non-public `@InlineOnly` candidates are considered only as a fallback for scope functions.
+    pub fn extension_lambda_param_types(
+        &self,
+        receiver: Ty,
+        name: &str,
+        arg_tys: &[Option<Ty>],
+    ) -> Option<Vec<Vec<Ty>>> {
+        let fs = self.lib.functions(name, Some(receiver));
+        for allow_must_inline in [false, true] {
+            let mut ranks: Vec<u32> = fs
+                .overloads
+                .iter()
+                .filter(|o| {
+                    o.kind == FnKind::Extension
+                        && o.receiver_rank != u32::MAX
+                        && (o.public || (allow_must_inline && o.flags.inline.must_inline()))
+                })
+                .map(|o| o.receiver_rank)
+                .collect();
+            ranks.sort_unstable();
+            ranks.dedup();
+
+            for rank in ranks {
+                for o in fs.overloads.iter().filter(|o| {
+                    o.kind == FnKind::Extension
+                        && o.receiver_rank == rank
+                        && (o.public || (allow_must_inline && o.flags.inline.must_inline()))
+                }) {
+                    let Some(gsig) = o.generic_sig.as_ref() else {
+                        continue;
+                    };
+                    if gsig.params.is_empty() {
+                        continue;
+                    }
+                    let n_real = gsig.params.len() - 1;
+                    let k = arg_tys.len();
+                    let trailing_lambda = k >= 1 && arg_tys[k - 1].is_none();
+                    let mapped: Vec<&GSig> = if n_real == k {
+                        gsig.params[1..].iter().collect()
+                    } else if trailing_lambda && n_real > k && k >= 1 {
+                        let mut v: Vec<&GSig> = gsig.params[1..k].iter().collect();
+                        v.push(&gsig.params[n_real]);
+                        v
+                    } else {
+                        continue;
+                    };
+                    let mut binds = std::collections::HashMap::new();
+                    unify_gsig(&gsig.params[0], receiver, &mut binds);
+                    for (ps, at) in mapped.iter().zip(arg_tys) {
+                        if let Some(t) = at {
+                            unify_gsig(ps, *t, &mut binds);
+                        }
+                    }
+                    let out: Vec<Vec<Ty>> = mapped
+                        .iter()
+                        .map(|ps| function_input_types(ps, &binds))
+                        .collect();
+                    if out.iter().any(|v| !v.is_empty()) {
+                        return Some(out);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    pub fn extension_lambda_receivers(
+        &self,
+        receiver: Ty,
+        name: &str,
+        arg_tys: &[Option<Ty>],
+    ) -> Option<Vec<Option<Ty>>> {
+        let fs = self.lib.functions(name, Some(receiver));
+        for allow_must_inline in [false, true] {
+            let mut ranks: Vec<u32> = fs
+                .overloads
+                .iter()
+                .filter(|o| {
+                    o.kind == FnKind::Extension
+                        && o.receiver_rank != u32::MAX
+                        && (o.public || (allow_must_inline && o.flags.inline.must_inline()))
+                })
+                .map(|o| o.receiver_rank)
+                .collect();
+            ranks.sort_unstable();
+            ranks.dedup();
+
+            for rank in ranks {
+                for o in fs.overloads.iter().filter(|o| {
+                    o.kind == FnKind::Extension
+                        && o.receiver_rank == rank
+                        && (o.public || (allow_must_inline && o.flags.inline.must_inline()))
+                }) {
+                    let Some(gsig) = o.generic_sig.as_ref() else {
+                        continue;
+                    };
+                    if gsig.params.is_empty() {
+                        continue;
+                    }
+                    let n_real = gsig.params.len() - 1;
+                    let k = arg_tys.len();
+                    let trailing_lambda = k >= 1 && arg_tys[k - 1].is_none();
+                    let mapped: Vec<(usize, &GSig)> = if n_real == k {
+                        gsig.params[1..].iter().enumerate().collect()
+                    } else if trailing_lambda && n_real > k && k >= 1 {
+                        let mut v: Vec<(usize, &GSig)> =
+                            gsig.params[1..k].iter().enumerate().collect();
+                        v.push((n_real - 1, &gsig.params[n_real]));
+                        v
+                    } else {
+                        continue;
+                    };
+                    let mut binds = std::collections::HashMap::new();
+                    unify_gsig(&gsig.params[0], receiver, &mut binds);
+                    for ((_, ps), at) in mapped.iter().zip(arg_tys) {
+                        if let Some(t) = at {
+                            unify_gsig(ps, *t, &mut binds);
+                        }
+                    }
+                    let out: Vec<Option<Ty>> = mapped
+                        .iter()
+                        .map(|(logical_idx, ps)| {
+                            if let Some(recv) = o
+                                .call_sig
+                                .lambda_receivers
+                                .get(*logical_idx)
+                                .copied()
+                                .flatten()
+                            {
+                                return Some(recv);
+                            }
+                            if o.call_sig
+                                .lambda_receiver_params
+                                .get(*logical_idx)
+                                .copied()
+                                .unwrap_or(false)
+                            {
+                                return function_input_types(ps, &binds).first().copied();
+                            }
+                            None
+                        })
+                        .collect();
+                    if out.iter().any(Option::is_some) {
+                        return Some(out);
+                    }
+                }
+            }
+        }
+        None
     }
 }
 
@@ -252,7 +1065,7 @@ impl<'a> CallResolver<'a> {
 
 /// Resolve a constructor on a library type by argument types (with the type's own widening).
 pub fn resolve_constructor(
-    lib: &dyn LibrarySet,
+    lib: &dyn SymbolSource,
     internal: &str,
     args: &[Ty],
 ) -> Option<LibraryMember> {
@@ -261,7 +1074,7 @@ pub fn resolve_constructor(
 
 /// Resolve a companion member `Type.name(args)` (the receiver type must be public).
 pub fn resolve_companion(
-    lib: &dyn LibrarySet,
+    lib: &dyn SymbolSource,
     internal: &str,
     name: &str,
     args: &[Ty],
@@ -278,11 +1091,122 @@ pub fn resolve_companion(
 /// `functions` query, whose Member overloads carry the breadth-first `receiver_rank`; the closest rung's
 /// best overload wins (most-derived first), exactly the inherited-member walk this used to do by hand.
 pub fn resolve_instance(
-    lib: &dyn LibrarySet,
+    lib: &dyn SymbolSource,
     internal: &str,
     name: &str,
     args: &[Ty],
 ) -> Option<LibraryMember> {
+    select_instance_info(lib, Ty::obj(internal), name, args).map(|o| {
+        let ret = nullable_return_type(
+            o.callable.ret,
+            o.ret_nullable || is_nullable_map_put_return(&o.callable),
+        );
+        let mut member = LibraryMember::new(
+            o.callable.name,
+            o.callable.params,
+            ret,
+            o.callable.descriptor,
+        );
+        member.owner = Some(o.callable.owner);
+        member.physical_ret = o.callable.physical_ret;
+        member.signature = o.callable.signature;
+        member.ret_nullable = o.ret_nullable;
+        member.inline = o.flags.inline;
+        member
+    })
+}
+
+#[derive(Clone, Debug)]
+pub struct ResolvedMember {
+    pub member: LibraryMember,
+    pub ret: Ty,
+}
+
+/// Resolve an instance member and carry the logical return selected for this call. Generic member
+/// returns may bind from the receiver (`List<Int>.get(Int): Int`) or, for erased-`Any` returns, from
+/// the call arguments (`decodeFromString(serializer, text): T`).
+pub fn resolve_instance_member(
+    lib: &dyn SymbolSource,
+    recv: Ty,
+    name: &str,
+    args: &[Ty],
+) -> Option<ResolvedMember> {
+    let o = select_instance_info(lib, recv, name, args)?;
+    let mut member = LibraryMember::new(
+        o.callable.name.clone(),
+        o.callable.params.clone(),
+        o.callable.ret,
+        o.callable.descriptor.clone(),
+    );
+    member.owner = Some(o.callable.owner.clone());
+    member.physical_ret = o.callable.physical_ret;
+    member.signature = o.callable.signature.clone();
+    member.ret_nullable = o.ret_nullable;
+    member.inline = o.flags.inline;
+    let ret = if o.callable.physical_ret == Ty::obj("kotlin/Any") {
+        o.generic_sig
+            .as_ref()
+            .map(|gsig| {
+                let mut binds = std::collections::HashMap::new();
+                for (ps, a) in gsig.params.iter().zip(args) {
+                    unify_gsig(ps, *a, &mut binds);
+                }
+                let arg_bound = gsig_to_ty(&gsig.ret, &binds);
+                if arg_bound == Ty::obj("kotlin/Any") && o.callable.ret != Ty::obj("kotlin/Any") {
+                    o.callable.ret
+                } else {
+                    arg_bound
+                }
+            })
+            .unwrap_or(o.callable.ret)
+    } else {
+        o.callable.ret
+    };
+    let ret = nullable_return_type(
+        ret,
+        o.ret_nullable || is_nullable_map_put_return(&o.callable),
+    );
+    Some(ResolvedMember { ret, member })
+}
+
+fn is_nullable_map_put_return(c: &LibraryCallable) -> bool {
+    c.name == "put" && c.descriptor == "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;"
+}
+
+fn nullable_return_type(ret: Ty, ret_nullable: bool) -> Ty {
+    if !ret_nullable || ret.is_nullable() {
+        return ret;
+    }
+    if ret.boxed_ref().is_some() || ret.is_reference() {
+        Ty::nullable(ret)
+    } else {
+        ret
+    }
+}
+
+/// Resolve a zero-arg property read on `recv`. The semantic Kotlin property name is tried first; if
+/// the source has only a physical getter method, the source supplies that fallback spelling.
+pub fn resolve_property_member(
+    lib: &dyn SymbolSource,
+    recv: Ty,
+    property: &str,
+) -> Option<ResolvedMember> {
+    resolve_instance_member(lib, recv, property, &[])
+        .filter(|m| m.ret.is_read_value_result())
+        .or_else(|| {
+            let getter = lib.physical_property_getter_name(property)?;
+            resolve_instance_member(lib, recv, &getter, &[])
+                .filter(|m| m.ret.is_read_value_result())
+        })
+}
+
+fn select_instance_info(
+    lib: &dyn SymbolSource,
+    recv: Ty,
+    name: &str,
+    args: &[Ty],
+) -> Option<FunctionInfo> {
+    let internal = recv.kotlin_class_internal()?;
     if !lib.resolve_type(internal)?.is_public {
         return None;
     }
@@ -298,51 +1222,66 @@ pub fn resolve_instance(
             }
         })
         .collect();
-    // Group the Member overloads by their BFS rung; `BTreeMap` iterates ranks ascending (closest type
-    // first), so the first rung with a best-overload match is the most-derived declaring type.
-    let fs = lib.functions(name, Some(Ty::obj(internal)));
-    let mut by_rank: std::collections::BTreeMap<u32, Vec<LibraryMember>> =
+    let fs = lib.functions(name, Some(recv));
+    let mut by_rank: std::collections::BTreeMap<u32, Vec<&FunctionInfo>> =
         std::collections::BTreeMap::new();
     for o in fs.overloads.iter().filter(|o| o.kind == FnKind::Member) {
-        by_rank
-            .entry(o.receiver_rank)
-            .or_default()
-            .push(LibraryMember {
-                name: o.callable.name.clone(),
-                params: o.callable.params.clone(),
-                ret: o.callable.ret,
-                descriptor: o.callable.descriptor.clone(),
-            });
+        by_rank.entry(o.receiver_rank).or_default().push(o);
     }
     for members in by_rank.values() {
-        if let Some(m) = crate::libraries::best_overload(members.iter(), name, args)
-            .or_else(|| crate::libraries::best_overload(members.iter(), name, &widened))
+        if let Some(o) = best_member_overload(members.iter().copied(), name, args)
+            .or_else(|| best_member_overload(members.iter().copied(), name, &widened))
         {
-            return Some(m.clone());
+            return Some(o.clone());
         }
     }
     // Third pass — SUBTYPE-aware: an argument whose supertype closure includes the parameter type
     // (e.g. a `KSerializer` passed where `SerializationStrategy` is expected — `KSerializer<T> :
-    // SerializationStrategy<T>`). The exact/widened passes above miss this because `arg_assignable`
-    // only accepts an exact type or an erased `Any`. A pure fallback (runs only after both fail), so it
-    // never changes an existing match — it just resolves calls that were previously unresolvable.
+    // SerializationStrategy<T>`). The exact/widened passes above miss this because ordinary member
+    // assignability only accepts an exact type or an erased `Any`.
     for members in by_rank.values() {
-        if let Some(m) = members.iter().filter(|m| m.name == name).find(|m| {
-            m.params.len() == args.len()
-                && m.params
+        if let Some(o) = members.iter().copied().find(|o| {
+            o.callable.params.len() == args.len()
+                && o.callable
+                    .params
                     .iter()
                     .zip(args)
                     .all(|(p, a)| arg_subtype_assignable(lib, p, a))
         }) {
-            return Some(m.clone());
+            return Some(o.clone());
         }
     }
     None
 }
 
+fn best_member_overload<'a>(
+    candidates: impl Iterator<Item = &'a FunctionInfo> + Clone,
+    _name: &str,
+    args: &[Ty],
+) -> Option<&'a FunctionInfo> {
+    candidates
+        .clone()
+        .find(|o| o.callable.params == *args)
+        .or_else(|| {
+            candidates.clone().find(|o| {
+                o.callable.params.len() == args.len()
+                    && o.callable
+                        .params
+                        .iter()
+                        .zip(args)
+                        .all(|(p, a)| p == a || *p == Ty::obj("kotlin/Any"))
+            })
+        })
+        .or_else(|| {
+            candidates.clone().find(|o| {
+                o.callable.params.len() >= args.len() && o.callable.params[..args.len()] == *args
+            })
+        })
+}
+
 /// Whether `arg` is assignable to `param` allowing a reference SUBTYPE (`arg`'s classpath supertype
 /// closure contains `param`). Falls back to exact / `Any` for the trivial cases.
-fn arg_subtype_assignable(lib: &dyn LibrarySet, param: &Ty, arg: &Ty) -> bool {
+fn arg_subtype_assignable(lib: &dyn SymbolSource, param: &Ty, arg: &Ty) -> bool {
     if param == arg || *param == Ty::obj("kotlin/Any") {
         return true;
     }
@@ -355,7 +1294,7 @@ fn arg_subtype_assignable(lib: &dyn LibrarySet, param: &Ty, arg: &Ty) -> bool {
 /// `sub` is `super_` or transitively extends/implements it (via the classpath supertype walk). `depth`
 /// bounds the recursion: real class hierarchies are shallow, and the bound also guarantees termination
 /// on a malformed (cyclic) classpath rather than overflowing the stack.
-fn is_classpath_subtype(lib: &dyn LibrarySet, sub: &str, super_: &str, depth: u32) -> bool {
+fn is_classpath_subtype(lib: &dyn SymbolSource, sub: &str, super_: &str, depth: u32) -> bool {
     if sub == super_ {
         return true;
     }
@@ -369,4 +1308,91 @@ fn is_classpath_subtype(lib: &dyn LibrarySet, sub: &str, super_: &str, depth: u3
             .any(|s| is_classpath_subtype(lib, s, super_, depth + 1));
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::libraries::{CallSig, FnFlags, FunctionSet, LibraryCallable, Origin, TypeKind};
+
+    struct FakeSource {
+        name: &'static str,
+        info: FunctionInfo,
+    }
+
+    impl SymbolSource for FakeSource {
+        fn functions(&self, name: &str, receiver: Option<Ty>) -> FunctionSet {
+            if receiver.is_none() && name == self.name {
+                FunctionSet {
+                    overloads: vec![self.info.clone()],
+                }
+            } else {
+                FunctionSet::default()
+            }
+        }
+
+        fn resolve_type(&self, internal: &str) -> Option<crate::libraries::LibraryType> {
+            (internal == "kotlin/UInt").then(|| crate::libraries::LibraryType {
+                is_public: true,
+                kind: TypeKind::Class,
+                supertypes: vec!["kotlin/Any".to_string()],
+                constructors: vec![],
+                members: vec![],
+                companion: vec![],
+                companion_consts: std::collections::HashMap::new(),
+                sam_method: None,
+                companion_object: None,
+                value_companion_fns: Vec::new(),
+                value_underlying: Some(Ty::Int),
+            })
+        }
+    }
+
+    fn top_level_default_uint_info() -> FunctionInfo {
+        let callable = LibraryCallable {
+            owner: "kotlin/UIntKt".to_string(),
+            name: "make$default".to_string(),
+            params: vec![Ty::Int],
+            ret: Ty::Int,
+            physical_ret: Ty::Int,
+            descriptor: "(I)I".to_string(),
+            inline: InlineKind::None,
+            default_call: true,
+            vararg_elem: None,
+            signature: None,
+            origin: Origin::Library,
+        };
+        FunctionInfo {
+            kind: FnKind::TopLevel,
+            receiver: None,
+            ret_nullable: false,
+            ret_class: Some(Ty::UInt),
+            flags: FnFlags::default(),
+            callable,
+            public: true,
+            receiver_rank: 0,
+            overload_rank: 0,
+            generic_sig: None,
+            call_sig: CallSig {
+                required: 0,
+                param_defaults: vec![true],
+                ..Default::default()
+            },
+        }
+    }
+
+    #[test]
+    fn top_level_default_callable_preserves_metadata_return_type() {
+        let source = FakeSource {
+            name: "make$default",
+            info: top_level_default_uint_info(),
+        };
+        let resolver = CallResolver::new(&source);
+        let call = resolver
+            .resolve_top_level_callable("make", &[], &[])
+            .expect("default callable should resolve");
+        assert!(call.default_call);
+        assert_eq!(call.ret, Ty::UInt);
+        assert_eq!(call.physical_ret, Ty::Int);
+    }
 }

@@ -28,6 +28,8 @@ pub fn parse_with_features(
         diags,
         name_based_destructuring: features.has("NameBasedDestructuring"),
         no_trailing_lambda: false,
+        lexical_type_params: Vec::new(),
+        lexical_type_param_bounds: Vec::new(),
         pending_annotations: Vec::new(),
         pending_annotation_args: Vec::new(),
     };
@@ -482,6 +484,11 @@ struct Parser<'a> {
     /// used where a following `{` belongs to an enclosing construct (a `: I by Impl()` delegate, whose
     /// `{` opens the class body, not a lambda on the delegate call).
     no_trailing_lambda: bool,
+    /// Type parameters in the current lexical parser context. Synthetic anonymous classes are hoisted
+    /// to file-level declarations, so they must carry the generic names they mention in supertypes or
+    /// member signatures; otherwise checking the hoisted class reports `T` as unresolved.
+    lexical_type_params: Vec<String>,
+    lexical_type_param_bounds: Vec<(String, TypeRef)>,
     /// Simple names of annotations consumed by the most recent `skip_decl_prefix`, awaiting attachment
     /// to the declaration that follows (e.g. `@Serializable` → `["Serializable"]`). A `parse_X` reads
     /// it via `take_pending_annotations()` *before* parsing members (member prefixes overwrite it).
@@ -493,6 +500,43 @@ struct Parser<'a> {
 }
 
 impl<'a> Parser<'a> {
+    fn push_lexical_type_params(
+        &mut self,
+        params: &[String],
+        bounds: &[(String, TypeRef)],
+    ) -> (usize, usize) {
+        let old_params_len = self.lexical_type_params.len();
+        let old_bounds_len = self.lexical_type_param_bounds.len();
+        self.lexical_type_params.extend(params.iter().cloned());
+        self.lexical_type_param_bounds
+            .extend(bounds.iter().cloned());
+        (old_params_len, old_bounds_len)
+    }
+
+    fn pop_lexical_type_params(&mut self, old_lens: (usize, usize)) {
+        self.lexical_type_params.truncate(old_lens.0);
+        self.lexical_type_param_bounds.truncate(old_lens.1);
+    }
+
+    fn current_lexical_type_params(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        for p in &self.lexical_type_params {
+            if !out.iter().any(|existing| existing == p) {
+                out.push(p.clone());
+            }
+        }
+        out
+    }
+
+    fn current_lexical_type_param_bounds(&self) -> Vec<(String, TypeRef)> {
+        let params = self.current_lexical_type_params();
+        self.lexical_type_param_bounds
+            .iter()
+            .filter(|(name, _)| params.iter().any(|p| p == name))
+            .cloned()
+            .collect()
+    }
+
     // ---- cursor helpers ----
     fn kind(&self) -> TokenKind {
         self.t[self.i].kind
@@ -1474,7 +1518,21 @@ impl<'a> Parser<'a> {
             }
             if self.eat(TokenKind::Colon) {
                 let bound = self.parse_type();
-                if crate::types::Ty::from_name(&bound.name).map_or(false, |t| t.is_primitive()) {
+                if crate::types::Ty::from_name(&bound.name).is_some_and(|t| {
+                    matches!(
+                        t,
+                        crate::types::Ty::Int
+                            | crate::types::Ty::Byte
+                            | crate::types::Ty::Short
+                            | crate::types::Ty::Long
+                            | crate::types::Ty::Float
+                            | crate::types::Ty::Double
+                            | crate::types::Ty::Boolean
+                            | crate::types::Ty::Char
+                            | crate::types::Ty::UInt
+                            | crate::types::Ty::ULong
+                    )
+                }) {
                     self.diags.error(
                         bound.span,
                         "krusty: type parameter with a primitive upper bound is not supported"
@@ -1565,6 +1623,8 @@ impl<'a> Parser<'a> {
                     Vec::new(),
                 )
             };
+        let lexical_type_param_lens =
+            self.push_lexical_type_params(&type_params, &type_param_bounds);
         // Parse either `Name` (regular function) or `ReceiverType . Name` (extension function).
         // Receiver type may itself be parameterized (`List<T>.foo`) or nullable (`String?.foo`).
         let first_name = if self.at(TokenKind::Ident) {
@@ -1640,6 +1700,7 @@ impl<'a> Parser<'a> {
             FunBody::None
         };
         let end = self.t[self.i.saturating_sub(1)].span;
+        self.pop_lexical_type_params(lexical_type_param_lens);
         FunDecl {
             name,
             receiver,
@@ -1758,6 +1819,8 @@ impl<'a> Parser<'a> {
                 Vec::new(),
             )
         };
+        let lexical_type_param_lens =
+            self.push_lexical_type_params(&type_params, &type_param_bounds);
         // An explicit primary-constructor `constructor` keyword (`class A private constructor(...)`,
         // possibly preceded by modifiers/annotations) marks a primary ctor even before the params.
         if (self.at(TokenKind::At) || (self.at(TokenKind::Ident) && is_modifier(self.text())))
@@ -2017,6 +2080,7 @@ impl<'a> Parser<'a> {
             self.expect(TokenKind::RBrace, "'}'");
         }
         let end = self.t[self.i.saturating_sub(1)].span;
+        self.pop_lexical_type_params(lexical_type_param_lens);
         ClassDecl {
             name,
             annotations,
@@ -2353,8 +2417,8 @@ impl<'a> Parser<'a> {
             name: name.clone(),
             annotations: Vec::new(),
             annotation_args: Vec::new(),
-            type_params: Vec::new(),
-            type_param_bounds: Vec::new(),
+            type_params: self.current_lexical_type_params(),
+            type_param_bounds: self.current_lexical_type_param_bounds(),
             props: Vec::new(),
             methods,
             companion_methods: Vec::new(),
@@ -2827,8 +2891,21 @@ impl<'a> Parser<'a> {
                 // NON-specializable primitive bound (floating `Double`/`Float`, unsigned, value) is still
                 // rejected — krusty would otherwise miscompile the boxed/primitive `==` or unsigned path.
                 if !bound.nullable
-                    && crate::types::Ty::from_name(&bound.name)
-                        .is_some_and(|t| t.is_primitive() && !t.is_specializable_bound())
+                    && crate::types::Ty::from_name(&bound.name).is_some_and(|t| {
+                        matches!(
+                            t,
+                            crate::types::Ty::Int
+                                | crate::types::Ty::Byte
+                                | crate::types::Ty::Short
+                                | crate::types::Ty::Long
+                                | crate::types::Ty::Float
+                                | crate::types::Ty::Double
+                                | crate::types::Ty::Boolean
+                                | crate::types::Ty::Char
+                                | crate::types::Ty::UInt
+                                | crate::types::Ty::ULong
+                        ) && !t.is_specializable_bound()
+                    })
                 {
                     self.diags.error(
                         bound.span,
@@ -3668,6 +3745,7 @@ impl<'a> Parser<'a> {
                 },
                 Span::new(lspan.lo, rspan.hi),
             );
+            self.file.infix_calls.insert(recv.0);
         }
         recv
     }
@@ -3998,6 +4076,7 @@ impl<'a> Parser<'a> {
                         },
                         Span::new(lspan.lo, rspan.hi),
                     );
+                    self.file.infix_calls.insert(lhs.0);
                     continue;
                 }
             }

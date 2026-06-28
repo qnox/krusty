@@ -29,6 +29,12 @@ boundary.
 - **Backends** (`jvm`, later `wasm`/`js`): consume the checked program and lower it to the target.
   Each owns its representation decisions — e.g. on the JVM a `kotlin.Int` is an `int` or a boxed
   `java.lang.Integer` depending on context; that choice is the JVM backend's, made at its emit sites.
+- **Lowering split:** common `ir_lower` may desugar Kotlin semantics only. Target/runtime-dependent
+  rewrites (JVM callable-reference classes, captured-var `Ref$*Ref` holders, counted-loop range
+  optimizations, primitive/boxed ABI choices, value-class erasure, suspend CPS) belong in named
+  backend lowering passes. If a temporary common-lowering hook is needed while the IR lacks a neutral
+  node, keep the hook narrow, backend-owned, and record it as migration debt rather than adding JVM
+  spelling or platform policy to core lowering.
 
 ## Invariants
 

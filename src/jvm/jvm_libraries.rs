@@ -1,4 +1,4 @@
-//! The JVM implementation of the [`LibrarySet`] abstraction: resolves symbols from a `.class`-jar
+//! The JVM implementation of the [`SymbolSource`] abstraction: resolves symbols from a `.class`-jar
 //! classpath (the bytecode target). All classpath reads, JVM method-descriptor parsing, and
 //! `java/lang ↔ kotlin` name normalization live here — the front end (`resolve`, `ir_lower`) sees
 //! only Kotlin-level `Ty`s and opaque descriptor tokens through the trait.
@@ -7,53 +7,177 @@ use super::classpath::Classpath;
 use super::jvm_class_map::{
     kotlin_builtin_to_internal, to_jvm_internal, to_kotlin_internal, BUILTIN_MAPPED_NAMES,
 };
-use crate::call_resolver::{arg_fits, function_input_types, gsig_to_ty, unify_gsig, GSig};
+use crate::call_resolver::{arg_fits, function_input_types, gsig_to_ty, unify_gsig};
+use crate::jvm::names::{method_descriptor, property_getter_name, type_descriptor};
 use crate::libraries::{
-    FnFlags, FnKind, FunctionInfo, FunctionSet, InlineKind, LibraryCallable, LibraryMember,
-    LibrarySeed, LibrarySet, LibraryType,
+    CountedLoopInfo, FnFlags, FnKind, FunctionInfo, FunctionSet, GSig, GenericSig, InlineKind,
+    LibConst, LibraryCallable, LibraryConst, LibraryMember, LibrarySeed, LibraryType, Origin,
+    PlatformAccessor, PlatformCtor, PlatformField, PlatformRangeCtor, RangeConstruction,
+    RuntimeCtor, RuntimeOp,
 };
 use crate::symbol_source::SymbolSource;
 use crate::types::Ty;
 
+trait JvmScalarTy {
+    fn is_jvm_scalar(&self) -> bool;
+}
+
+impl JvmScalarTy for Ty {
+    fn is_jvm_scalar(&self) -> bool {
+        matches!(
+            *self,
+            Ty::Int
+                | Ty::Byte
+                | Ty::Short
+                | Ty::Long
+                | Ty::Float
+                | Ty::Double
+                | Ty::Boolean
+                | Ty::Char
+                | Ty::UInt
+                | Ty::ULong
+        )
+    }
+}
+
 /// A platform backed by a JVM classpath (dirs + jars + the JDK jimage). The classpath is shared
 /// (`Rc`) with the JVM backend/emitter so the bytecode inliner reads inline-function bodies through
-/// the same lazily-populated caches — all within the `jvm` module, never through the `LibrarySet`
+/// the same lazily-populated caches — all within the `jvm` module, never through the `SymbolSource`
 /// abstraction.
 pub struct JvmLibraries {
     cp: std::rc::Rc<Classpath>,
+    functions_cache:
+        std::cell::RefCell<std::collections::HashMap<(String, Option<Ty>), FunctionSet>>,
 }
 
 impl JvmLibraries {
     pub fn new(cp: std::rc::Rc<Classpath>) -> JvmLibraries {
-        JvmLibraries { cp }
-    }
-
-    /// Whether reference argument `arg`'s erased class is `param`'s erased class or a classpath subtype
-    /// of it — `KSerializer<Foo>` is assignable to a `DeserializationStrategy<…>` parameter.
-    fn erased_subtype(&self, arg: &Ty, param: &Ty) -> bool {
-        match (arg.obj_internal(), param.obj_internal()) {
-            (Some(a), Some(p)) => self.is_cp_subtype(a, p, 0),
-            _ => false,
+        JvmLibraries {
+            cp,
+            functions_cache: std::cell::RefCell::new(std::collections::HashMap::new()),
         }
     }
 
-    /// `sub` equals or transitively extends/implements `super_` on the classpath. Depth-bounded to
-    /// terminate on a malformed (cyclic) hierarchy.
-    fn is_cp_subtype(&self, sub: &str, super_: &str, depth: u32) -> bool {
-        if sub == super_ {
-            return true;
+    fn primitive_companion_consts_for_type(
+        &self,
+        internal: &str,
+    ) -> std::collections::HashMap<String, LibraryConst> {
+        use crate::jvm::classreader::ConstVal;
+
+        let prim = match internal {
+            "java/lang/Integer" | "kotlin/Int" => "Int",
+            "java/lang/Long" | "kotlin/Long" => "Long",
+            "java/lang/Short" | "kotlin/Short" => "Short",
+            "java/lang/Byte" | "kotlin/Byte" => "Byte",
+            "java/lang/Character" | "kotlin/Char" => "Char",
+            "java/lang/Double" | "kotlin/Double" => "Double",
+            "java/lang/Float" | "kotlin/Float" => "Float",
+            "java/lang/Boolean" | "kotlin/Boolean" => "Boolean",
+            _ => return std::collections::HashMap::new(),
+        };
+        let internal = format!("kotlin/jvm/internal/{prim}CompanionObject");
+        let Some(ci) = self.cp.find(&internal) else {
+            return std::collections::HashMap::new();
+        };
+        ci.fields
+            .iter()
+            .filter_map(|f| {
+                let value = match f.const_value.as_ref()? {
+                    ConstVal::Int(v) => LibConst::Int(*v),
+                    ConstVal::Long(v) => LibConst::Long(*v),
+                    ConstVal::Float(v) => LibConst::Float(*v),
+                    ConstVal::Double(v) => LibConst::Double(*v),
+                    ConstVal::Str(_) => return None,
+                };
+                Some((
+                    f.name.clone(),
+                    LibraryConst {
+                        ty: field_desc_to_ty(&f.descriptor),
+                        value,
+                    },
+                ))
+            })
+            .collect()
+    }
+
+    fn builtin_members_for_type(&self, internal: &str) -> Vec<LibraryMember> {
+        let kotlin = crate::jvm::jvm_class_map::jvm_to_kotlin_builtin_with_members(internal)
+            .unwrap_or(internal);
+        self.cp.builtin_members(kotlin)
+    }
+
+    fn range_accessor(name: &str, descriptor: &str) -> PlatformAccessor {
+        PlatformAccessor {
+            name: name.to_string(),
+            descriptor: descriptor.to_string(),
         }
-        if depth > 64 {
-            return false;
+    }
+
+    fn member_accessor_by_prefix(&self, internal: &str, prefix: &str) -> Option<PlatformAccessor> {
+        let mut seen = std::collections::HashSet::new();
+        let mut q = std::collections::VecDeque::new();
+        q.push_back(internal.to_string());
+        while let Some(cur) = q.pop_front() {
+            if !seen.insert(cur.clone()) {
+                continue;
+            }
+            let t = <Self as SymbolSource>::resolve_type(self, &cur)?;
+            if let Some(m) = t.members.iter().find(|m| m.name.starts_with(prefix)) {
+                return Some(PlatformAccessor {
+                    name: m.name.clone(),
+                    descriptor: m.descriptor.clone(),
+                });
+            }
+            q.extend(t.supertypes);
         }
-        match self.cp.find(sub) {
-            Some(ci) => ci
-                .interfaces
-                .iter()
-                .chain(ci.super_class.iter())
-                .any(|s| self.is_cp_subtype(s, super_, depth + 1)),
-            None => false,
-        }
+        None
+    }
+
+    fn counted_loop_info_for_type(&self, internal: &str) -> Option<CountedLoopInfo> {
+        let unit_step = |elem, first_desc, last_desc| CountedLoopInfo {
+            elem,
+            first: Self::range_accessor("getFirst", first_desc),
+            last: Self::range_accessor("getLast", last_desc),
+            step: None,
+        };
+        let progression = |elem, first_desc, last_desc, step_desc, step_ty| CountedLoopInfo {
+            elem,
+            first: Self::range_accessor("getFirst", first_desc),
+            last: Self::range_accessor("getLast", last_desc),
+            step: Some((Self::range_accessor("getStep", step_desc), step_ty)),
+        };
+        Some(match internal {
+            "kotlin/ranges/IntRange" => unit_step(Ty::Int, "()I", "()I"),
+            "kotlin/ranges/LongRange" => unit_step(Ty::Long, "()J", "()J"),
+            "kotlin/ranges/IntProgression" => progression(Ty::Int, "()I", "()I", "()I", Ty::Int),
+            "kotlin/ranges/LongProgression" => progression(Ty::Long, "()J", "()J", "()J", Ty::Long),
+            "kotlin/ranges/CharProgression" => progression(Ty::Char, "()C", "()C", "()I", Ty::Int),
+            "kotlin/ranges/UIntRange" => CountedLoopInfo {
+                elem: Ty::UInt,
+                first: self.member_accessor_by_prefix(internal, "getFirst-")?,
+                last: self.member_accessor_by_prefix(internal, "getLast-")?,
+                step: None,
+            },
+            "kotlin/ranges/ULongRange" => CountedLoopInfo {
+                elem: Ty::ULong,
+                first: self.member_accessor_by_prefix(internal, "getFirst-")?,
+                last: self.member_accessor_by_prefix(internal, "getLast-")?,
+                step: None,
+            },
+            "kotlin/ranges/UIntProgression" => CountedLoopInfo {
+                elem: Ty::UInt,
+                first: self.member_accessor_by_prefix(internal, "getFirst-")?,
+                last: self.member_accessor_by_prefix(internal, "getLast-")?,
+                step: Some((Self::range_accessor("getStep", "()I"), Ty::Int)),
+            },
+            "kotlin/ranges/ULongProgression" => CountedLoopInfo {
+                elem: Ty::ULong,
+                first: self.member_accessor_by_prefix(internal, "getFirst-")?,
+                last: self.member_accessor_by_prefix(internal, "getLast-")?,
+                step: Some((Self::range_accessor("getStep", "()J"), Ty::Long)),
+            },
+            _ => return None,
+        })
     }
 
     /// The erased JVM descriptor of a classpath value class's underlying (`kotlin/UInt` → `"I"`,
@@ -78,364 +202,176 @@ impl JvmLibraries {
         })
     }
 
-    /// The logical Kotlin return type of a value-class extension identified by its MANGLED JVM method name
-    /// (`coerceAtMost-J1ME1BU` → `UInt`), from `@Metadata` (facade parts merged). The descriptor return is
-    /// the erased underlying; this recovers the unsigned/value-class type. `None` if not found.
-    fn metadata_ext_return_ty(&self, owner: &str, jvm_name: &str) -> Option<Ty> {
-        let rc = self
-            .cp
-            .meta_functions(owner)
-            .iter()
-            .find(|m| m.jvm_name == jvm_name)?
-            .ret_class
-            .clone()?;
-        Some(match rc.as_str() {
-            "kotlin/Boolean" => Ty::Boolean,
-            "kotlin/Byte" => Ty::Byte,
-            "kotlin/Short" => Ty::Short,
-            "kotlin/Int" => Ty::Int,
-            "kotlin/Long" => Ty::Long,
-            "kotlin/Char" => Ty::Char,
-            "kotlin/Float" => Ty::Float,
-            "kotlin/Double" => Ty::Double,
-            "kotlin/UInt" => Ty::UInt,
-            "kotlin/ULong" => Ty::ULong,
-            other => Ty::obj(other),
-        })
-    }
-
-    /// Whether a value-class argument `a` (`3u: UInt`) fits a parameter `p` that is the value class's
-    /// ERASED underlying (`Int`) — a mangled value-class extension carries erased params in its descriptor.
-    fn value_class_arg_fits(&self, p: &Ty, a: &Ty) -> bool {
-        let under_ty = match a {
-            Ty::UInt => Ty::Int,
-            Ty::ULong => Ty::Long,
-            Ty::Obj(internal, _) => {
-                let under = self
-                    .cp
-                    .find(internal)
-                    .and_then(|ci| crate::jvm::metadata::class_inline(&ci))
-                    .and_then(|ic| ic.underlying_class);
-                match under.as_deref() {
-                    Some("kotlin/Boolean") => Ty::Boolean,
-                    Some("kotlin/Byte") => Ty::Byte,
-                    Some("kotlin/Short") => Ty::Short,
-                    Some("kotlin/Int") => Ty::Int,
-                    Some("kotlin/Long") => Ty::Long,
-                    Some("kotlin/Char") => Ty::Char,
-                    Some("kotlin/Float") => Ty::Float,
-                    Some("kotlin/Double") => Ty::Double,
-                    Some(other) => Ty::obj(other),
-                    None => return false,
-                }
-            }
-            _ => return false,
+    fn member_return(&self, recv: Ty, name: &str, args: &[Ty]) -> Option<Ty> {
+        let Ty::Obj(start, start_args) = recv else {
+            return None;
         };
-        *p == under_ty
-    }
-
-    /// Resolve an extension `receiver.name(args)` to a `LibraryCallable` (exact-arity match, generic
-    /// return recovered from the signature). `allow_non_public` includes `@InlineOnly` package-private
-    /// candidates — used ONLY by the inline route (which splices, emitting no call); normal resolution
-    /// passes `false`, so it never resolves a non-callable method (an `IllegalAccessError`).
-    fn extension_callable(
-        &self,
-        name: &str,
-        receiver: Ty,
-        args: &[Ty],
-        type_args: &[Ty],
-        allow_non_public: bool,
-    ) -> Option<LibraryCallable> {
-        // Enumerate candidates through the consolidated `functions` query (the single source of truth for
-        // every overload + its metadata) instead of hitting the classpath index directly. Each Extension
-        // overload carries the receiver-MRO RUNG (`receiver_rank`) it was found at; walking the rungs
-        // most-specific-first and returning the first with a match reproduces the classpath lookup's
-        // receiver precedence (a `List` extension before an `Iterable` one) — `recv_desc` for each rung is
-        // recovered locally from the same supertype walk, so no JVM descriptor leaks into `FunctionInfo`.
-        let descs = supertype_descriptors(&self.cp, receiver);
-        let fs = self.functions(name, Some(receiver));
-        let exts: Vec<&FunctionInfo> = fs
-            .overloads
-            .iter()
-            .filter(|o| o.kind == FnKind::Extension)
-            .collect();
-        for (rank, recv_desc) in descs.iter().enumerate() {
-            let rank = rank as u32;
-            // Collect every candidate at THIS rung that fits the arguments, then pick the MOST SPECIFIC by
-            // its parameter types — `Iterable.plus(element: T)` and `Iterable.plus(elements: Iterable<T>)`
-            // both accept a `List` argument (the first via the erased `Object` parameter), but Kotlin selects
-            // the more specific `Iterable` overload. Without this, first-match would resolve `list + list` to
-            // the element overload (a nested list).
-            let mut matches: Vec<(&FunctionInfo, Vec<Ty>, Ty)> = Vec::new();
-            for o in exts.iter().copied().filter(|o| o.receiver_rank == rank) {
-                let c = &o.callable;
-                if !o.public && !allow_non_public {
-                    continue;
-                }
-                // A non-public candidate matched via the ERASED `Object` key must have a type-variable
-                // receiver (`T.takeIf`) — a concrete value-class receiver (`Result.map`, erased to
-                // `Object`) must not match an unrelated receiver this way. (A concrete non-value-class
-                // receiver keys under its own descriptor, so this only affects the `Object` key.)
-                if !o.public
-                    && recv_desc == "Ljava/lang/Object;"
-                    && !nonpublic_ext_receiver_is_typevar(c.signature.as_deref())
-                {
-                    continue;
-                }
-                // Kotlin-receiver applicability: the candidate matched on the JVM-erased lookup key, but
-                // the read-only/mutable distinction survives only in Kotlin types. When the receiver is a
-                // Kotlin collection type, consult this name's `@Metadata` receiver types: among those that
-                // are themselves Kotlin collection types, the receiver must be a subtype of at least one.
-                // A name is overloaded across receivers (`plus` on `Collection`/`Map`/`Set`), so "any" is
-                // correct — `list + x` keeps the `Collection.plus` overload, while `MutableCollection.
-                // plusAssign` (receivers all `Mutable*`) has NONE applicable to a read-only `List`, so it
-                // is rejected and `list += x` falls through to `list = list.plus(x)`. Exactly kotlinc's
-                // overload resolution; no erased type makes the decision.
-                if let Ty::Obj(recv_internal, _) = &receiver {
-                    if self.cp.is_kotlin_collection(recv_internal) {
-                        let krs = self.cp.metadata_receiver_types(&c.owner, &c.name);
-                        let coll: Vec<&String> = krs
-                            .iter()
-                            .filter(|kr| self.cp.is_kotlin_collection(kr))
-                            .collect();
-                        if !coll.is_empty()
-                            && !coll
-                                .iter()
-                                .any(|kr| self.cp.kotlin_subtype(recv_internal, kr))
-                        {
-                            continue;
-                        }
-                    }
-                }
-                let (params, ret) = parse_method_desc(&c.descriptor);
-                // params[0] is the receiver (keyed by `recv_desc`); the rest are the call arguments.
-                if params.len() != args.len() + 1 {
-                    continue;
-                }
-                // Subtype-aware fit so a `List` argument matches an `Iterable` parameter (`list + list`
-                // selects the `Iterable` concat overload); the most-specific pick below then disambiguates
-                // against the erased-`Object` element overload. A value-class argument (`3u: UInt`) also fits
-                // a parameter of its ERASED underlying (`Int`), since a mangled value-class extension's
-                // descriptor carries the erased params (`coerceAtMost-<hash>(II)`).
-                if !params[1..].iter().zip(args).all(|(p, a)| {
-                    arg_fits_subtype(&self.cp, p, a) || self.value_class_arg_fits(p, a)
-                }) {
-                    continue;
-                }
-                // Disambiguate by the receiver's type arguments: reject an overload whose declared
-                // receiver type argument conflicts (`Iterable<Double>.maxOrNull` for a `List<Int>`).
-                if !receiver.type_args().is_empty() {
-                    if let Some((_, psigs, _)) =
-                        c.signature.as_ref().and_then(|sig| parse_method_gsig(sig))
-                    {
-                        if let Some(recv_sig) = psigs.first() {
-                            if !sig_compatible(recv_sig, receiver) {
-                                continue;
-                            }
-                        }
-                    }
-                }
-                matches.push((o, params, ret));
-            }
-            if matches.is_empty() {
+        if start_args.is_empty() {
+            return None; // no type arguments to propagate — the erased return is already correct
+        }
+        // Walk the generic hierarchy carrying each class's type arguments, substituting them through
+        // each `extends`/`implements` edge. Stop at the first class declaring `name`; substitute that
+        // member's generic return under the bindings reached there.
+        let mut seen = std::collections::HashSet::new();
+        let mut q = std::collections::VecDeque::new();
+        q.push_back((to_jvm_internal(start).to_string(), start_args.to_vec()));
+        while let Some((internal, targs)) = q.pop_front() {
+            if !seen.insert(internal.clone()) {
                 continue;
             }
-            // krusty collapses `Byte`/`Short`/`Int` → `Ty::Int`, so numeric overloads differing only in a
-            // `Byte`/`Short` vs `Int` parameter (`until(Int,Byte)` vs `until(Int,Int)`) are
-            // indistinguishable here. Prefer the WIDEST (fewest narrowing params): kotlinc resolves an
-            // `Int` argument to the `Int` overload, and only that one carries the `MIN_VALUE`/`MAX_VALUE`
-            // overflow guard (`2 until Int.MIN_VALUE` must be empty, not wrap to `2..MAX_VALUE`).
-            matches.sort_by_key(|(o, _, _)| descriptor_narrowing(&o.callable.descriptor));
-            // Pick the candidate whose non-receiver parameters are at least as specific as every other's
-            // (each parameter a subtype of the corresponding one). When two are incomparable, keep the
-            // first — stable, and good enough for the stdlib's overload sets.
-            let specific_over = |a: &[Ty], b: &[Ty]| -> bool {
-                a.iter()
-                    .zip(b)
-                    .all(|(pa, pb)| arg_fits_subtype(&self.cp, pb, pa))
+            let Some(ci) = self.cp.find(&internal) else {
+                continue;
             };
-            let best = (0..matches.len())
-                .find(|&i| {
-                    (0..matches.len())
-                        .all(|j| j == i || specific_over(&matches[i].1[1..], &matches[j].1[1..]))
-                })
-                .unwrap_or(0);
-            let (o, params, ret) = matches.swap_remove(best);
-            let c = &o.callable;
-            // Recover a generic extension's parameterized return (`to` → `Pair<A, B>`): the type variables
-            // bind from the receiver (the first parameter) and the arguments.
-            let ret_ty = c
-                .signature
-                .as_ref()
-                .and_then(|sig| parse_method_gsig(sig))
-                .map(|(formals, psigs, rsig)| {
-                    let mut binds = std::collections::HashMap::new();
-                    for (f, t) in formals.iter().zip(type_args) {
-                        binds.insert(f.clone(), *t);
-                    }
-                    let actuals: Vec<Ty> = std::iter::once(receiver)
-                        .chain(args.iter().copied())
-                        .collect();
-                    for (ps, a) in psigs.iter().zip(&actuals) {
-                        unify_gsig(ps, *a, &mut binds);
-                    }
-                    gsig_to_ty(&rsig, &binds)
-                })
-                .unwrap_or(ret);
-            // A nullable Kotlin return (`takeIf`/`takeUnless`: `T?`) over a PRIMITIVE receiver is the
-            // first-class `Ty::Nullable(prim)` (the JVM signature drops nullability; `@Metadata` keeps it).
-            // Keeping it nullable preserves a `?:`/null-check on it (a bare primitive `Ty` is never-null and
-            // would fold the elvis away, then unbox a possibly-null value → NPE); the emit boxes it.
-            let ret_ty =
-                if ret_ty.is_primitive() && self.cp.metadata_return_nullable(&c.owner, &c.name) {
-                    crate::types::Ty::nullable(ret_ty)
-                } else {
-                    ret_ty
-                };
-            // A mangled value-class extension's descriptor return is the ERASED underlying (`coerceAtMost-
-            // <hash>(II)I`); recover the LOGICAL value-class return from `@Metadata` (by the mangled JVM
-            // name, part-merged) so `b: UInt`, not `Int`. Only override TO a value-class type (leaves an
-            // ordinary extension untouched).
-            let ret_ty = match self.metadata_ext_return_ty(&c.owner, &c.name) {
-                Some(mt)
-                    if matches!(mt, Ty::UInt | Ty::ULong)
-                        || matches!(&mt, Ty::Obj(i, _) if self.value_class_underlying_desc(i).is_some()) =>
-                {
-                    mt
+            let (formals, supers) = ci.signature.as_deref().and_then(parse_class_gsig).unzip();
+            let formals = formals.unwrap_or_default();
+            let binds: std::collections::HashMap<String, Ty> =
+                formals.iter().cloned().zip(targs.iter().copied()).collect();
+            let found = ci
+                .methods
+                .iter()
+                .filter(|m| m.is_public() && !m.is_static() && m.name == name)
+                .find(|m| {
+                    let (params, _) = parse_method_desc(&m.descriptor);
+                    params.len() == args.len()
+                        && params.iter().zip(args).all(|(p, a)| arg_fits(p, a))
+                });
+            if let Some(m) = found {
+                let sig = m.signature.as_deref()?;
+                let gsig = parse_method_gsig(sig)?;
+                let mut binds = binds;
+                for f in &gsig.formals {
+                    binds.remove(f);
                 }
-                _ => ret_ty,
-            };
-            return Some(LibraryCallable {
-                owner: c.owner.clone(),
-                name: c.name.clone(),
-                params,
-                ret: ret_ty,
-                physical_ret: ret,
-                descriptor: c.descriptor.clone(),
-                // A NON-public (`@InlineOnly`) extension has no callable method, so a failed splice must
-                // skip the file (never an `IllegalAccessError`) → `MustInline`; a PUBLIC one can fall back
-                // to a real call.
-                inline: InlineKind::from_flags(
-                    self.cp.is_inline_method(&c.owner, &c.name),
-                    !o.public,
-                ),
-                default_call: false,
-                vararg_elem: None,
-                signature: c.signature.clone(),
-                origin: crate::libraries::Origin::Library,
-            });
+                return Some(gsig_to_ty(&gsig.ret, &binds));
+            }
+            if let Some(supers) = supers {
+                for sup in supers {
+                    if let GSig::Class(sup_internal, sup_args) = sup {
+                        let sup_targs: Vec<Ty> =
+                            sup_args.iter().map(|a| gsig_to_ty(a, &binds)).collect();
+                        q.push_back((to_jvm_internal(&sup_internal).to_string(), sup_targs));
+                    }
+                }
+            } else {
+                for i in ci.interfaces.iter().chain(ci.super_class.iter()) {
+                    q.push_back((i.clone(), vec![]));
+                }
+            }
         }
         None
     }
 
-    /// If `owner.name`'s `@Metadata` return type is a Kotlin collection interface (`mutableListOf` →
-    /// `kotlin/collections/MutableList`), rebuild the logical `ret` with that class (keeping the element
-    /// type arguments recovered from the JVM signature). The JVM signature erased it to `java/util/List`,
-    /// dropping the read-only/mutable distinction; this restores it. Non-collection returns are unchanged.
-    fn meta_collection_ret(&self, owner: &str, name: &str, ret: Ty) -> Ty {
-        if let Some(meta) = self.cp.metadata_return_type(owner, name) {
-            if meta.starts_with("kotlin/collections/") {
-                return Ty::obj_args(&meta, ret.type_args());
+    fn sam_method_for_class(&self, internal: &str) -> Option<LibraryMember> {
+        let ci = self.cp.find(internal)?;
+        if !ci.is_interface() {
+            return None;
+        }
+        // The single public abstract instance method that isn't an `Object` method (`equals`/`hashCode`
+        // /`toString`, which a functional interface may redeclare). `default`/`static` methods aren't
+        // abstract (0x0400).
+        let mut sam = None;
+        for m in &ci.methods {
+            if m.access & 0x0400 == 0 || m.is_static() || !m.is_public() {
+                continue;
             }
-        }
-        ret
-    }
-}
-
-/// Count the `Byte`/`Short` primitive parameters in a JVM method descriptor — the "narrowing" measure
-/// used to prefer the widest among overloads krusty's `Byte`/`Short`/`Int` → `Int` collapse made
-/// indistinguishable. Object (`L…;`) and array (`[`) params are skipped (a `B`/`S` inside a class name
-/// must not count).
-fn descriptor_narrowing(desc: &str) -> usize {
-    let end = desc.find(')').unwrap_or(desc.len());
-    let params = desc.get(1..end).unwrap_or("");
-    let b = params.as_bytes();
-    let mut i = 0;
-    let mut n = 0;
-    while i < b.len() {
-        match b[i] {
-            b'L' => {
-                while i < b.len() && b[i] != b';' {
-                    i += 1;
-                }
-                i += 1;
+            if matches!(m.name.as_str(), "equals" | "hashCode" | "toString") {
+                continue;
             }
-            b'[' => i += 1,
-            b'B' | b'S' => {
-                n += 1;
-                i += 1;
+            if sam.is_some() {
+                return None;
             }
-            _ => i += 1,
+            let (params, ret) = parse_method_desc(&m.descriptor);
+            let mut member = LibraryMember::new(m.name.clone(), params, ret, m.descriptor.clone());
+            member.signature = m.signature.clone();
+            sam = Some(member);
         }
+        sam
     }
-    n
-}
 
-/// Parse a JVM field/return descriptor to a `Ty`, normalizing a JVM built-in name to its Kotlin
-/// identity (`java/lang/Object` → `kotlin/Any`) so the front end compares types in Kotlin terms.
-pub fn desc_to_ty(d: &str) -> Ty {
-    match d {
-        "I" | "B" | "S" => Ty::Int,
-        "J" => Ty::Long,
-        "F" => Ty::Float,
-        "D" => Ty::Double,
-        "Z" => Ty::Boolean,
-        "C" => Ty::Char,
-        "V" => Ty::Unit,
-        s if s == Ty::String.descriptor() => Ty::String,
-        s if s.starts_with('[') => Ty::array(desc_to_ty(&s[1..])),
-        s if s.starts_with('L') && s.ends_with(';') => {
-            Ty::obj(to_kotlin_internal(&s[1..s.len() - 1]))
+    fn value_companion_fns_for_class(&self, internal: &str) -> Vec<crate::libraries::CompanionFn> {
+        let Some(ci) = self.cp.find(internal) else {
+            return Vec::new();
+        };
+        if crate::jvm::metadata::class_inline(&ci).is_none() {
+            return Vec::new();
         }
-        _ => Ty::Error,
+        let Some(companion_field) = crate::jvm::metadata::class_companion_name(&ci) else {
+            return Vec::new();
+        };
+        let companion_internal = format!("{internal}${companion_field}");
+        let Some(comp_ci) = self.cp.find(&companion_internal) else {
+            return Vec::new();
+        };
+        crate::jvm::metadata::class_functions(&comp_ci)
+            .into_iter()
+            .filter(|m| m.is_public)
+            .filter_map(|m| {
+                let descriptor = m.jvm_desc?;
+                let (params, _) = parse_method_desc(&descriptor);
+                Some(crate::libraries::CompanionFn {
+                    class_internal: internal.to_string(),
+                    companion_internal: companion_internal.clone(),
+                    companion_field: companion_field.clone(),
+                    callable: LibraryCallable {
+                        owner: companion_internal.clone(),
+                        name: m.jvm_name,
+                        params,
+                        // The logical return is the value class itself (`Result`); its type argument
+                        // stays erased, matching kotlinc (a generic companion result flows as the
+                        // erased underlying).
+                        ret: Ty::obj(internal),
+                        physical_ret: Ty::obj("kotlin/Any"),
+                        descriptor,
+                        inline: InlineKind::MustInline,
+                        default_call: false,
+                        vararg_elem: None,
+                        signature: None,
+                        origin: Origin::Library,
+                    },
+                })
+            })
+            .collect()
     }
-}
 
-/// Split one JVM field descriptor off the front of `s`, returning `(descriptor, rest)`.
-fn split_one(s: &str) -> Option<(&str, &str)> {
-    let b = s.as_bytes();
-    let mut i = 0;
-    while i < b.len() && b[i] == b'[' {
-        i += 1;
-    }
-    if i >= b.len() {
-        return None;
-    }
-    match b[i] {
-        b'L' => {
-            let end = s[i..].find(';')? + i + 1;
-            Some((&s[..end], &s[end..]))
+    fn value_class_metadata_members_for_class(
+        &self,
+        ci: &crate::jvm::classreader::ClassInfo,
+    ) -> Vec<LibraryMember> {
+        if crate::jvm::metadata::class_inline(ci).is_none() {
+            return Vec::new();
         }
-        _ => Some((&s[..i + 1], &s[i + 1..])),
+        crate::jvm::metadata::class_functions(ci)
+            .into_iter()
+            .filter(|m| m.is_public && !m.is_extension)
+            .filter_map(|m| {
+                crate::trace_compiler!(
+                    "resolve",
+                    "value-class member metadata {}.{} jvm={} desc={:?} ret={:?}",
+                    ci.this_class,
+                    m.kotlin_name,
+                    m.jvm_name,
+                    m.jvm_desc,
+                    m.ret_class
+                );
+                let descriptor = m.jvm_desc?;
+                let (params, physical_ret) = parse_method_desc(&descriptor);
+                // Value-class implementation methods are static and take the erased receiver as their
+                // first JVM parameter. Source member resolution sees only the value parameters.
+                let logical_params = params.get(1..).unwrap_or(&[]).to_vec();
+                let ret = metadata_return_ty(m.ret_class.as_deref()).unwrap_or(physical_ret);
+                let mut member = LibraryMember::new(m.kotlin_name, logical_params, ret, descriptor);
+                member.owner = Some(ci.this_class.clone());
+                member.physical_name = Some(m.jvm_name);
+                member.physical_ret = physical_ret;
+                member.ret_nullable = m.ret_nullable;
+                member.inline = InlineKind::from_flags(m.is_inline, m.is_inline);
+                Some(member)
+            })
+            .collect()
     }
 }
 
-/// Whether a non-public (`@InlineOnly`) extension's generic-signature RECEIVER is a type variable
-/// (`<T> T.takeIf(…)`) — the scope-fn family that applies to ANY receiver. A concrete-class receiver
-/// (a value class like `Result.map`, erased to `Object`) would otherwise wrongly match an unrelated
-/// receiver through the erased lookup key, so only a type-variable receiver may match this way.
-/// The Kotlin simple type name of a numeric primitive `Ty` (`Int` → `"Int"`), used to derive the
-/// `@OverloadResolutionByLambdaReturnType` `@JvmName` (`sumOf` + `Int` → `sumOfInt`). `None` for unsigned
-/// (`UInt`/`ULong`) and non-numeric types — krusty can't model an unsigned `sumOf` result, so it bails.
-fn kotlin_simple_name_of_ty(t: Ty) -> Option<&'static str> {
-    Some(match t {
-        Ty::Int => "Int",
-        Ty::Long => "Long",
-        Ty::Double => "Double",
-        Ty::Float => "Float",
-        Ty::Byte => "Byte",
-        Ty::Short => "Short",
-        _ => return None,
-    })
-}
-
-fn nonpublic_ext_receiver_is_typevar(signature: Option<&str>) -> bool {
-    signature
-        .and_then(parse_method_gsig)
-        .is_some_and(|(_, psigs, _)| matches!(psigs.first(), Some(GSig::Var(_))))
-}
-
-/// Parse one type signature off the front of `s`, returning `(node, rest)`.
+/// Parse one JVM generic-signature type off the front of `s`, returning `(node, rest)`.
 fn parse_gsig(s: &str) -> Option<(GSig, &str)> {
     let b = s.as_bytes();
     match *b.first()? {
@@ -448,7 +384,6 @@ fn parse_gsig(s: &str) -> Option<(GSig, &str)> {
             Some((GSig::Arr(Box::new(inner)), rest))
         }
         b'L' => {
-            // Class name up to `<` (type args) or `;`. Type args (if any) are parsed, then `;`.
             let lt = s.find('<');
             let semi = s.find(';')?;
             let name_end = match lt {
@@ -460,7 +395,6 @@ fn parse_gsig(s: &str) -> Option<(GSig, &str)> {
                 let mut rest = &s[i + 1..];
                 let mut args = Vec::new();
                 while !rest.starts_with('>') {
-                    // A wildcard prefix (`+`/`-`) or unbounded `*` argument — treat as opaque (`Any`).
                     if let Some(stripped) = rest.strip_prefix('*') {
                         args.push(GSig::Class("kotlin/Any".to_string(), vec![]));
                         rest = stripped;
@@ -475,7 +409,14 @@ fn parse_gsig(s: &str) -> Option<(GSig, &str)> {
                     rest = tail;
                 }
                 let after = rest.strip_prefix('>')?.strip_prefix(';')?;
-                Some((GSig::Class(internal, args), after))
+                let node = if internal.starts_with("kotlin/jvm/functions/Function") {
+                    let ret = Box::new(gsig_unbox_wrapper(args.pop()?));
+                    let params = args.into_iter().map(gsig_unbox_wrapper).collect();
+                    GSig::Function { params, ret }
+                } else {
+                    GSig::Class(internal, args)
+                };
+                Some((node, after))
             } else {
                 Some((GSig::Class(internal, vec![]), &s[semi + 1..]))
             }
@@ -496,8 +437,25 @@ fn parse_gsig(s: &str) -> Option<(GSig, &str)> {
     }
 }
 
-/// Parse a leading `<Name:Bound…>` formal-type-parameter block, returning the formal names and the
-/// remaining signature. No block → empty names, input unchanged.
+fn gsig_unbox_wrapper(g: GSig) -> GSig {
+    match g {
+        GSig::Class(internal, args) => match internal.as_str() {
+            "java/lang/Integer" | "kotlin/Int" => GSig::Prim(Ty::Int),
+            "java/lang/Long" | "kotlin/Long" => GSig::Prim(Ty::Long),
+            "java/lang/Short" | "kotlin/Short" => GSig::Prim(Ty::Short),
+            "java/lang/Byte" | "kotlin/Byte" => GSig::Prim(Ty::Byte),
+            "java/lang/Character" | "kotlin/Char" => GSig::Prim(Ty::Char),
+            "java/lang/Boolean" | "kotlin/Boolean" => GSig::Prim(Ty::Boolean),
+            "java/lang/Double" | "kotlin/Double" => GSig::Prim(Ty::Double),
+            "java/lang/Float" | "kotlin/Float" => GSig::Prim(Ty::Float),
+            _ => GSig::Class(internal, args),
+        },
+        other => other,
+    }
+}
+
+/// Parse a leading `<Name:Bound...>` formal-type-parameter block, returning the formal names and the
+/// remaining signature. No block means empty names and unchanged input.
 fn parse_formals(s: &str) -> (Vec<String>, &str) {
     let Some(rest) = s.strip_prefix('<') else {
         return (Vec::new(), s);
@@ -538,9 +496,8 @@ fn parse_formals(s: &str) -> (Vec<String>, &str) {
     (formals, &rest[i..])
 }
 
-/// Parse a method generic signature `<formals>(params)ret` into the formal type-parameter names, the
-/// parameter nodes, and the return node.
-fn parse_method_gsig(sig: &str) -> Option<(Vec<String>, Vec<GSig>, GSig)> {
+/// Parse a JVM method generic signature `<formals>(params)ret`.
+fn parse_method_gsig(sig: &str) -> Option<GenericSig> {
     let (formals, s) = parse_formals(sig);
     let inner = s.strip_prefix('(')?;
     let close = inner.find(')')?;
@@ -552,7 +509,147 @@ fn parse_method_gsig(sig: &str) -> Option<(Vec<String>, Vec<GSig>, GSig)> {
         params_s = rest;
     }
     let (ret, _) = parse_gsig(&inner[close + 1..])?;
-    Some((formals, params, ret))
+    Some(GenericSig {
+        formals,
+        params,
+        ret,
+    })
+}
+
+/// Count the `Byte`/`Short` primitive parameters in a JVM method descriptor — the "narrowing" measure
+/// used to prefer the widest among overloads krusty's `Byte`/`Short`/`Int` → `Int` collapse made
+/// indistinguishable. Object (`L…;`) and array (`[`) params are skipped (a `B`/`S` inside a class name
+/// must not count).
+pub(crate) fn descriptor_narrowing(desc: &str) -> usize {
+    let end = desc.find(')').unwrap_or(desc.len());
+    let params = desc.get(1..end).unwrap_or("");
+    let b = params.as_bytes();
+    let mut i = 0;
+    let mut n = 0;
+    while i < b.len() {
+        match b[i] {
+            b'L' => {
+                while i < b.len() && b[i] != b';' {
+                    i += 1;
+                }
+                i += 1;
+            }
+            b'[' => i += 1,
+            b'B' | b'S' => {
+                n += 1;
+                i += 1;
+            }
+            _ => i += 1,
+        }
+    }
+    n
+}
+
+/// Parse a JVM field/return descriptor to a `Ty`, normalizing a JVM built-in name to its Kotlin
+/// identity (`java/lang/Object` → `kotlin/Any`) so the front end compares types in Kotlin terms.
+pub fn desc_to_ty(d: &str) -> Ty {
+    match d {
+        "I" | "B" | "S" => Ty::Int,
+        "J" => Ty::Long,
+        "F" => Ty::Float,
+        "D" => Ty::Double,
+        "Z" => Ty::Boolean,
+        "C" => Ty::Char,
+        "V" => Ty::Unit,
+        s if s == type_descriptor(Ty::String) => Ty::String,
+        s if s.starts_with('[') => Ty::array(desc_to_ty(&s[1..])),
+        s if s.starts_with('L') && s.ends_with(';') => {
+            let internal = to_kotlin_internal(&s[1..s.len() - 1]);
+            if let Some(n) = function_iface_arity(internal) {
+                Ty::fun(vec![Ty::obj("kotlin/Any"); n], Ty::obj("kotlin/Any"))
+            } else {
+                Ty::obj(internal)
+            }
+        }
+        _ => Ty::Error,
+    }
+}
+
+fn field_desc_to_ty(d: &str) -> Ty {
+    match d {
+        "B" => Ty::Byte,
+        "S" => Ty::Short,
+        s if s.starts_with('[') => Ty::array(field_desc_to_ty(&s[1..])),
+        _ => desc_to_ty(d),
+    }
+}
+
+fn function_iface_arity(internal: &str) -> Option<usize> {
+    internal
+        .strip_prefix("kotlin/jvm/functions/Function")
+        .and_then(|n| n.parse::<usize>().ok())
+}
+
+/// Split one JVM field descriptor off the front of `s`, returning `(descriptor, rest)`.
+fn split_one(s: &str) -> Option<(&str, &str)> {
+    let b = s.as_bytes();
+    let mut i = 0;
+    while i < b.len() && b[i] == b'[' {
+        i += 1;
+    }
+    if i >= b.len() {
+        return None;
+    }
+    match b[i] {
+        b'L' => {
+            let end = s[i..].find(';')? + i + 1;
+            Some((&s[..end], &s[end..]))
+        }
+        _ => Some((&s[..i + 1], &s[i + 1..])),
+    }
+}
+
+/// Whether a non-public (`@InlineOnly`) extension's generic-signature RECEIVER is a type variable
+/// (`<T> T.takeIf(…)`) — the scope-fn family that applies to ANY receiver. A concrete-class receiver
+/// (a value class like `Result.map`, erased to `Object`) would otherwise wrongly match an unrelated
+/// receiver through the erased lookup key, so only a type-variable receiver may match this way.
+/// The Kotlin simple type name of a numeric primitive `Ty` (`Int` → `"Int"`), used to derive the
+/// `@OverloadResolutionByLambdaReturnType` `@JvmName` (`sumOf` + `Int` → `sumOfInt`). `None` for unsigned
+/// (`UInt`/`ULong`) and non-numeric types — krusty can't model an unsigned `sumOf` result, so it bails.
+fn kotlin_simple_name_of_ty(t: Ty) -> Option<&'static str> {
+    Some(match t {
+        Ty::Int => "Int",
+        Ty::Long => "Long",
+        Ty::Double => "Double",
+        Ty::Float => "Float",
+        Ty::Byte => "Byte",
+        Ty::Short => "Short",
+        _ => return None,
+    })
+}
+
+fn source_internal_of_ty(t: Ty) -> Option<&'static str> {
+    Some(match t {
+        Ty::Boolean => "kotlin/Boolean",
+        Ty::Byte => "kotlin/Byte",
+        Ty::Short => "kotlin/Short",
+        Ty::Int => "kotlin/Int",
+        Ty::Long => "kotlin/Long",
+        Ty::Char => "kotlin/Char",
+        Ty::Float => "kotlin/Float",
+        Ty::Double => "kotlin/Double",
+        Ty::UInt => "kotlin/UInt",
+        Ty::ULong => "kotlin/ULong",
+        Ty::String => "kotlin/String",
+        Ty::Obj(internal, _) => internal,
+        Ty::Nullable(inner) | Ty::TyParam(_, inner) => return source_internal_of_ty(*inner),
+        _ => return None,
+    })
+}
+
+fn nonpublic_ext_receiver_is_typevar(signature: Option<&str>) -> bool {
+    signature
+        .and_then(parse_method_gsig)
+        .is_some_and(|gsig| matches!(gsig.params.first(), Some(GSig::Var(_))))
+}
+
+fn metadata_return_ty(class: Option<&str>) -> Option<Ty> {
+    class.map(super::classpath::kotlin_name_to_ty)
 }
 
 /// Parse a class generic signature into its formal type-parameter names and its supertypes (the
@@ -569,94 +666,6 @@ fn parse_class_gsig(sig: &str) -> Option<(Vec<String>, Vec<GSig>)> {
         s = rest;
     }
     Some((formals, supers))
-}
-
-/// Parameter indices whose descriptor type is a `kotlin/jvm/functions/FunctionN` — the lambda parameters
-/// the unified splicer inlines (`require`'s `lazyMessage: () -> Any`, `let`'s `block: (T) -> R`, …).
-fn function_param_indices(descriptor: &str) -> Vec<usize> {
-    let Some(inner) = descriptor
-        .strip_prefix('(')
-        .and_then(|s| s.split(')').next())
-    else {
-        return Vec::new();
-    };
-    let b = inner.as_bytes();
-    let mut i = 0;
-    let mut idx = 0;
-    let mut out = Vec::new();
-    while i < b.len() {
-        match b[i] {
-            b'L' => {
-                let start = i;
-                while i < b.len() && b[i] != b';' {
-                    i += 1;
-                }
-                if inner[start + 1..i].starts_with("kotlin/jvm/functions/Function") {
-                    out.push(idx);
-                }
-                i += 1;
-                idx += 1;
-            }
-            b'[' => {
-                while i < b.len() && b[i] == b'[' {
-                    i += 1;
-                }
-                if i < b.len() && b[i] == b'L' {
-                    while i < b.len() && b[i] != b';' {
-                        i += 1;
-                    }
-                }
-                i += 1;
-                idx += 1;
-            }
-            _ => {
-                i += 1;
-                idx += 1;
-            }
-        }
-    }
-    out
-}
-
-/// Whether a parameter signature node is compatible with an actual `Ty`, used to disambiguate
-/// overloads by the receiver's type arguments — `Iterable<Double>` is rejected for a `List<Int>`
-/// receiver while `Iterable<T>` (a type variable) and `Iterable<Int>` are accepted. A type variable
-/// accepts anything; a concrete class type-argument must match the actual's (a primitive matches only
-/// its boxed wrapper). Conservative: anything it can't compare is accepted.
-fn sig_compatible(sig: &GSig, actual: Ty) -> bool {
-    match sig {
-        GSig::Var(_) => true,
-        GSig::Prim(t) => *t == actual,
-        GSig::Arr(inner) => actual
-            .array_elem()
-            .map_or(true, |e| sig_compatible(inner, e)),
-        GSig::Class(name, args) => match actual {
-            Ty::Obj(_, targs) => args
-                .iter()
-                .zip(targs.iter())
-                .all(|(s, t)| sig_compatible(s, *t)),
-            t if t.is_primitive() => {
-                name == "kotlin/Any"
-                    || super::jvm_class_map::wrapper_internal(t).map_or(false, |w| w == name)
-            }
-            _ => true,
-        },
-    }
-}
-
-/// Like [`arg_fits`], but also accepts a reference argument that is a *subtype* of a reference
-/// parameter (`String` into a `CharSequence` parameter) by walking the classpath supertype chain.
-/// Used where overload selection must distinguish a real subtype from an unrelated type (a `Char`
-/// argument must NOT match a `CharSequence` parameter).
-fn arg_fits_subtype(cp: &Classpath, p: &Ty, a: &Ty) -> bool {
-    if arg_fits(p, a) {
-        return true;
-    }
-    if a.is_reference() && matches!(p, Ty::Obj(..) | Ty::String) {
-        let pd = p.descriptor();
-        return supertype_descriptors(cp, *a).iter().any(|d| *d == pd);
-    }
-    false
 }
 
 /// Parse a method descriptor `(p…)ret` into parameter `Ty`s and the return `Ty`.
@@ -686,6 +695,17 @@ pub(crate) fn parse_method_desc(desc: &str) -> (Vec<Ty>, Ty) {
     (params, desc_to_ty(&desc[close + 1..]))
 }
 
+fn parse_method_desc_with_field_params(desc: &str) -> (Vec<Ty>, Ty) {
+    let close = desc.find(')').unwrap_or(0);
+    let mut rest = &desc[1..close];
+    let mut params = Vec::new();
+    while let Some((one, tail)) = split_one(rest) {
+        params.push(field_desc_to_ty(one));
+        rest = tail;
+    }
+    (params, desc_to_ty(&desc[close + 1..]))
+}
+
 /// The receiver type's descriptor and those of its supertypes (superclass chain + interfaces),
 /// breadth-first so a more specific receiver is tried before a more general one.
 fn supertype_descriptors(cp: &Classpath, receiver: Ty) -> Vec<String> {
@@ -695,7 +715,7 @@ fn supertype_descriptors(cp: &Classpath, receiver: Ty) -> Vec<String> {
     let start = match receiver {
         Ty::Obj(i, _) => to_jvm_internal(i).to_string(),
         Ty::String => to_jvm_internal("kotlin/String").to_string(),
-        _ => return vec![receiver.descriptor(), object],
+        _ => return vec![type_descriptor(receiver), object],
     };
     let mut out = Vec::new();
     let mut seen = std::collections::HashSet::new();
@@ -721,12 +741,30 @@ fn supertype_descriptors(cp: &Classpath, receiver: Ty) -> Vec<String> {
     out
 }
 
+fn member_matches_query(member_name: &str, query: &str) -> bool {
+    member_name == query
+        || matches!(
+            (member_name, query),
+            ("keySet", "keys") | ("entrySet", "entries")
+        )
+}
+
 impl SymbolSource for JvmLibraries {
+    fn platform_default_import_packages(&self) -> &'static [&'static str] {
+        &["java.lang", "kotlin.jvm"]
+    }
+
+    fn physical_property_getter_name(&self, property: &str) -> Option<String> {
+        let getter = property_getter_name(property);
+        (getter != property).then_some(getter)
+    }
+
     fn seed(&self) -> LibrarySeed {
-        let (class_names, type_aliases) = self.seed_shared();
+        let (class_names, type_aliases, canonical_names) = self.seed_shared();
         LibrarySeed {
             class_names: (*class_names).clone(),
             type_aliases: (*type_aliases).clone(),
+            canonical_names: (*canonical_names).clone(),
         }
     }
 
@@ -747,11 +785,16 @@ impl SymbolSource for JvmLibraries {
         }
         let idx = self.cp.scan_types();
         let mut class_names = idx.class_names.clone();
+        let mut canonical_names = std::collections::HashMap::new();
         // Seed the Kotlin built-in → JVM class mapping (ported `JavaToKotlinClassMap`): intrinsic
         // mapped types (`Comparable`, `Throwable`, `List`, …), not `.class` files. Classpath types
         // above take precedence (`or_insert`).
         for name in BUILTIN_MAPPED_NAMES {
             if let Some(internal) = kotlin_builtin_to_internal(name) {
+                let canonical = to_jvm_internal(internal);
+                if canonical != internal {
+                    canonical_names.insert(internal.to_string(), canonical.to_string());
+                }
                 if internal.starts_with("kotlin/collections/") {
                     // FORCE the Kotlin collection type (read-only vs mutable) over any classpath
                     // `java/util/List` — the front end must keep the distinction; emit erases it.
@@ -761,6 +804,22 @@ impl SymbolSource for JvmLibraries {
                         .entry(name.to_string())
                         .or_insert_with(|| internal.to_string());
                 }
+            }
+        }
+        for internal in [
+            "kotlin/Boolean",
+            "kotlin/Byte",
+            "kotlin/Short",
+            "kotlin/Int",
+            "kotlin/Long",
+            "kotlin/Char",
+            "kotlin/Float",
+            "kotlin/Double",
+            "kotlin/Throwable",
+        ] {
+            let canonical = to_jvm_internal(internal);
+            if canonical != internal {
+                canonical_names.insert(internal.to_string(), canonical.to_string());
             }
         }
         // `Pair`/`Triple` are auto-imported `kotlin.*` classes constructed directly (`Pair(a, b)`), but
@@ -774,9 +833,48 @@ impl SymbolSource for JvmLibraries {
         let pair = (
             std::rc::Rc::new(class_names),
             std::rc::Rc::new(idx.type_aliases.clone()),
+            std::rc::Rc::new(canonical_names),
         );
         CACHE.with(|c| c.borrow_mut().insert(key, pair.clone()));
         pair
+    }
+
+    fn value_underlying(&self, ty: Ty) -> Option<Ty> {
+        match ty {
+            Ty::UInt => Some(Ty::Int),
+            Ty::ULong => Some(Ty::Long),
+            _ => <Self as SymbolSource>::resolve_type(self, ty.obj_internal()?)
+                .and_then(|t| t.value_underlying),
+        }
+    }
+
+    fn is_unsigned_integer_type(&self, ty: Ty) -> bool {
+        matches!(ty, Ty::UInt | Ty::ULong)
+    }
+
+    fn function_like_arity(&self, ty: Ty) -> Option<usize> {
+        ty.fun_arity()
+            .map(usize::from)
+            .or_else(|| match ty.obj_internal()? {
+                "kotlin/reflect/KProperty1" | "kotlin/reflect/KMutableProperty1" => Some(1),
+                "kotlin/reflect/KProperty0" | "kotlin/reflect/KMutableProperty0" => Some(0),
+                _ => None,
+            })
+    }
+
+    fn property_reference_type(&self, arity: usize, mutable: bool) -> Option<Ty> {
+        let internal = match (arity, mutable) {
+            (0, false) => "kotlin/reflect/KProperty0",
+            (0, true) => "kotlin/reflect/KMutableProperty0",
+            (1, false) => "kotlin/reflect/KProperty1",
+            (1, true) => "kotlin/reflect/KMutableProperty1",
+            _ => return None,
+        };
+        Some(Ty::obj(internal))
+    }
+
+    fn class_literal_type(&self) -> Option<Ty> {
+        Some(Ty::obj("java/lang/Class"))
     }
 
     fn resolve_type(&self, internal: &str) -> Option<LibraryType> {
@@ -805,12 +903,8 @@ impl SymbolSource for JvmLibraries {
                 continue;
             }
             let (params, ret) = parse_method_desc(&m.descriptor);
-            let member = LibraryMember {
-                name: m.name.clone(),
-                params,
-                ret,
-                descriptor: m.descriptor.clone(),
-            };
+            let mut member = LibraryMember::new(m.name.clone(), params, ret, m.descriptor.clone());
+            member.signature = m.signature.clone();
             if m.name == "<init>" {
                 constructors.push(member);
             } else if m.is_static() {
@@ -823,22 +917,27 @@ impl SymbolSource for JvmLibraries {
         // Every JDK `Throwable` has a no-arg and a single-message constructor; synthesize those two
         // shapes when the classpath reader can't surface the jimage constructor descriptors.
         if constructors.is_empty() && super::jvm_class_map::is_throwable_internal(internal) {
-            constructors.push(LibraryMember {
-                name: "<init>".into(),
-                params: vec![],
-                ret: Ty::Unit,
-                descriptor: "()V".into(),
-            });
-            constructors.push(LibraryMember {
-                name: "<init>".into(),
-                params: vec![Ty::String],
-                ret: Ty::Unit,
-                descriptor: format!("({})V", Ty::String.descriptor()),
-            });
+            constructors.push(LibraryMember::new(
+                "<init>".into(),
+                vec![],
+                Ty::Unit,
+                "()V".into(),
+            ));
+            constructors.push(LibraryMember::new(
+                "<init>".into(),
+                vec![Ty::String],
+                Ty::Unit,
+                format!("({})V", type_descriptor(Ty::String)),
+            ));
         }
         let mut supertypes = ci.interfaces.clone();
         if let Some(s) = &ci.super_class {
             supertypes.push(s.clone());
+        }
+        for s in self.cp.builtin_supertypes(internal) {
+            if !supertypes.iter().any(|existing| existing == &s) {
+                supertypes.push(s);
+            }
         }
         // A companion object compiles to a `public static final C$Name` field on `C` (default name
         // `Companion`; e.g. `Json.Default: Json$Default`). Detect it by the descriptor pattern
@@ -887,19 +986,30 @@ impl SymbolSource for JvmLibraries {
                 None => Ty::obj("kotlin/Any"),
             }
         });
+        let value_class_metadata_members = self.value_class_metadata_members_for_class(&ci);
         Some(LibraryType {
             is_public: ci.is_public(),
             kind,
             supertypes,
             constructors,
-            members,
+            members: members
+                .into_iter()
+                .chain(value_class_metadata_members)
+                .chain(self.builtin_members_for_type(internal))
+                .collect(),
             companion,
+            companion_consts: self.primitive_companion_consts_for_type(&ci.this_class),
+            sam_method: self.sam_method_for_class(&ci.this_class),
             companion_object,
+            value_companion_fns: self.value_companion_fns_for_class(&ci.this_class),
             value_underlying,
         })
     }
-
     fn functions(&self, name: &str, receiver: Option<Ty>) -> FunctionSet {
+        let key = (name.to_string(), receiver);
+        if let Some(cached) = self.functions_cache.borrow().get(&key) {
+            return cached.clone();
+        }
         let mut overloads = Vec::new();
         // Slice 1 of the `FunctionSet` consolidation: the `@OverloadResolutionByLambdaReturnType` family
         // (`sumOf` → `sumOfInt`/`sumOfLong`/…). One query returns every numeric-return overload applicable
@@ -937,9 +1047,9 @@ impl SymbolSource for JvmLibraries {
                             // return is the wanted primitive.
                             if params.len() != 2
                                 || !c.descriptor.contains("Lkotlin/jvm/functions/Function")
-                                || params.first().map(|p| p.descriptor()).as_deref()
+                                || params.first().map(|p| type_descriptor(*p)).as_deref()
                                     != Some(recv_desc.as_str())
-                                || pret.descriptor() != ret.descriptor()
+                                || type_descriptor(pret) != type_descriptor(ret)
                             {
                                 continue;
                             }
@@ -947,16 +1057,16 @@ impl SymbolSource for JvmLibraries {
                             // `([I, Function1)I`) by the SELECTOR parameter type from the generic signature
                             // == the receiver's element type — so an `Int` lambda never binds a `UInt` body.
                             if let Some(elem) = want_elem {
-                                let Some((_, psigs, _)) =
-                                    c.signature.as_deref().and_then(parse_method_gsig)
+                                let Some(gsig) = c.signature.as_deref().and_then(parse_method_gsig)
                                 else {
                                     continue;
                                 };
                                 let mut binds = std::collections::HashMap::new();
-                                if let Some(recv_sig) = psigs.first() {
+                                if let Some(recv_sig) = gsig.params.first() {
                                     unify_gsig(recv_sig, receiver, &mut binds);
                                 }
-                                let selector_matches = psigs
+                                let selector_matches = gsig
+                                    .params
                                     .get(1)
                                     .map(|sel| function_input_types(sel, &binds) == vec![elem])
                                     .unwrap_or(false);
@@ -968,10 +1078,13 @@ impl SymbolSource for JvmLibraries {
                                 kind: FnKind::Extension,
                                 receiver: Some(receiver),
                                 ret_nullable: false,
+                                ret_class: None,
                                 public: c.public,
                                 // The lambda-return family is resolved by return type, never through the
                                 // arg-binding extension selector — mark it so it can't preempt a real rung.
                                 receiver_rank: u32::MAX,
+                                overload_rank: descriptor_narrowing(&c.descriptor) as u32,
+                                generic_sig: c.signature.as_deref().and_then(parse_method_gsig),
                                 call_sig: crate::libraries::CallSig::default(),
                                 flags: FnFlags {
                                     inline: InlineKind::from_flags(true, !c.public),
@@ -1004,6 +1117,43 @@ impl SymbolSource for JvmLibraries {
                 .enumerate()
             {
                 for c in self.cp.find_extensions(&recv_desc, name) {
+                    // Metadata-primary visibility for a value-class extension. An `inline` extension on a
+                    // value class (`Result.getOrThrow`) is PRIVATE in bytecode but PUBLIC per @Metadata —
+                    // kotlinc resolves it, then inlines (no legal `invokestatic`). ONLY consider a
+                    // bytecode-private candidate here (the public ones already resolve unchanged); among
+                    // those, accept only the metadata-public `inline` extension whose @Metadata receiver is
+                    // EXACTLY this value class (the candidate was found at the erased Object/underlying
+                    // rung, so an unrelated receiver must not bind it). `must_inline` stays on the bytecode
+                    // visibility (no callable `invokestatic` → must splice).
+                    let mut public = c.public;
+                    if !c.public {
+                        let value_recv_match = self
+                            .cp
+                            .meta_functions(&c.owner)
+                            .iter()
+                            .find(|m| m.jvm_name == c.name && m.kotlin_name == name)
+                            .filter(|m| m.is_public && m.is_inline)
+                            .and_then(|m| m.receiver_class.as_ref())
+                            .is_some_and(|rc| {
+                                receiver.obj_internal() == Some(rc.as_str())
+                                    && self.cp.find(rc).is_some_and(|ci| {
+                                        crate::jvm::metadata::class_inline(&ci).is_some()
+                                    })
+                            });
+                        if value_recv_match {
+                            public = true;
+                        }
+                    }
+                    // A non-public candidate matched via erased `Object` must have a type-variable
+                    // receiver (`T.let`/`takeIf`). Concrete value-class receivers such as `Result.map`
+                    // also erase to `Object`, but must not become candidates for unrelated receivers like
+                    // `List.map`; value-class-specific mangled lookup below handles the real receiver.
+                    if !public
+                        && recv_desc == "Ljava/lang/Object;"
+                        && !nonpublic_ext_receiver_is_typevar(c.signature.as_deref())
+                    {
+                        continue;
+                    }
                     // A value-class receiver erases to a primitive descriptor (`UInt`→`"I"`), so a SIGNED
                     // primitive extension (`Int.coerceAtMost`) matches at the erased rung. Reject a
                     // candidate whose `@Metadata` receivers are concrete and EXCLUDE this value class (it is
@@ -1027,68 +1177,71 @@ impl SymbolSource for JvmLibraries {
                             continue;
                         }
                     }
-                    let (params, pret) = parse_method_desc(&c.descriptor);
-                    let inline = self.cp.is_inline_method(&c.owner, &c.name);
-                    let ret_nullable = self.cp.metadata_return_nullable(&c.owner, &c.name);
-                    // Metadata-primary visibility for a value-class extension. An `inline` extension on a
-                    // value class (`Result.getOrThrow`) is PRIVATE in bytecode but PUBLIC per @Metadata —
-                    // kotlinc resolves it, then inlines (no legal `invokestatic`). ONLY consider a
-                    // bytecode-private candidate here (the public ones already resolve unchanged); among
-                    // those, accept only the metadata-public `inline` extension whose @Metadata receiver is
-                    // EXACTLY this value class (the candidate was found at the erased Object/underlying
-                    // rung, so an unrelated receiver must not bind it). `must_inline` stays on the bytecode
-                    // visibility (no callable `invokestatic` → must splice).
-                    let mut public = c.public;
-                    if !c.public {
-                        let meta_fn = self
-                            .cp
-                            .meta_functions(&c.owner)
-                            .iter()
-                            .find(|m| m.jvm_name == c.name && m.kotlin_name == name)
-                            .cloned();
-                        let value_recv_match = meta_fn
-                            .as_ref()
-                            .filter(|m| m.is_public && m.is_inline)
-                            .and_then(|m| m.receiver_class.as_ref())
-                            .is_some_and(|rc| {
-                                receiver.obj_internal() == Some(rc.as_str())
-                                    && self.cp.find(rc).is_some_and(|ci| {
-                                        crate::jvm::metadata::class_inline(&ci).is_some()
-                                    })
-                            });
-                        if value_recv_match {
-                            public = true;
+                    if let Ty::Obj(recv_internal, _) = &receiver {
+                        if self.cp.is_kotlin_collection(recv_internal) {
+                            let recvs = self.cp.metadata_receiver_types(&c.owner, &c.name);
+                            let collection_recvs: Vec<&String> = recvs
+                                .iter()
+                                .filter(|r| self.cp.is_kotlin_collection(r))
+                                .collect();
+                            if !collection_recvs.is_empty()
+                                && !collection_recvs
+                                    .iter()
+                                    .any(|r| self.cp.kotlin_subtype(recv_internal, r))
+                            {
+                                continue;
+                            }
                         }
                     }
+                    let (mut params, pret) = parse_method_desc_with_field_params(&c.descriptor);
+                    let is_default = c.name.ends_with("$default");
+                    let meta_name = c.name.strip_suffix("$default").unwrap_or(&c.name);
+                    if is_default && params.len() >= 2 {
+                        params.truncate(params.len() - 2);
+                    }
+                    let inline =
+                        self.cp
+                            .is_inline_callable(&c.owner, &c.name, &c.descriptor, &params);
+                    let meta_ret = self.cp.metadata_return(&c.owner, meta_name);
+                    let ret_nullable = meta_ret.as_ref().is_some_and(|r| r.nullable);
+                    let ret_class = metadata_return_ty(meta_ret.as_ref().map(|r| r.class.as_str()));
                     // Logical return, recovered RECEIVER-substituted (arg-independent): `<T> T.takeIf(…): T?`
                     // → `receiver`. A type var the receiver doesn't bind (`fold`'s `R`) stays as the erased
-                    // physical type — an arg-binding selector (`resolve_callable`) refines that.
+                    // physical type — arg-binding selection in `CallResolver` refines that.
                     let ret = c
                         .signature
                         .as_deref()
                         .and_then(parse_method_gsig)
-                        .map(|(_, psigs, rsig)| {
+                        .map(|gsig| {
                             let mut binds = std::collections::HashMap::new();
-                            if let Some(recv_sig) = psigs.first() {
+                            if let Some(recv_sig) = gsig.params.first() {
                                 unify_gsig(recv_sig, receiver, &mut binds);
                             }
-                            gsig_to_ty(&rsig, &binds)
+                            gsig_to_ty(&gsig.ret, &binds)
                         })
                         .unwrap_or(pret);
                     // A nullable Kotlin return over a PRIMITIVE receiver is the first-class
                     // `Ty::Nullable(prim)`, so a `?:`/null-check on the result is preserved (see
                     // `extension_callable`); the emit boxes it.
-                    let ret = if ret.is_primitive() && ret_nullable {
+                    let ret = if ret.is_jvm_scalar() && ret_nullable {
                         crate::types::Ty::nullable(ret)
                     } else {
                         ret
+                    };
+                    let ret = match ret_class {
+                        Some(meta) if self.value_underlying(meta).is_some() => match meta {
+                            Ty::Obj(class, _) => Ty::obj_args(class, ret.type_args()),
+                            _ => meta,
+                        },
+                        _ => ret,
                     };
                     // Source value-parameter NAMES (from `@Metadata`) for named-argument resolution. An
                     // extension's `callable.params` PREPENDS the receiver, but `CallSig.param_names` is the
                     // LOGICAL list (receiver excluded) — `metadata_param_names` returns exactly that (it
                     // aligns past the receiver via the metadata `has_recv` offset), so the names are
                     // `c.params.len() - 1` long. Defaults aren't recovered (named call supplies all).
-                    let call_sig = match self.cp.metadata_param_names(&c.owner, &c.name, &params) {
+                    let call_sig = match self.cp.metadata_param_names(&c.owner, meta_name, &params)
+                    {
                         Some(names) if names.len() + 1 == params.len() => {
                             crate::libraries::CallSig {
                                 required: names.len(),
@@ -1102,8 +1255,11 @@ impl SymbolSource for JvmLibraries {
                         kind: FnKind::Extension,
                         receiver: Some(receiver),
                         ret_nullable,
+                        ret_class,
                         public,
                         receiver_rank: rank as u32,
+                        overload_rank: descriptor_narrowing(&c.descriptor) as u32,
+                        generic_sig: c.signature.as_deref().and_then(parse_method_gsig),
                         call_sig,
                         flags: FnFlags {
                             inline: InlineKind::from_flags(inline, inline && !c.public),
@@ -1117,7 +1273,7 @@ impl SymbolSource for JvmLibraries {
                             physical_ret: pret,
                             descriptor: c.descriptor.clone(),
                             inline: InlineKind::from_flags(inline, inline && !c.public),
-                            default_call: false,
+                            default_call: is_default,
                             vararg_elem: None,
                             signature: c.signature.clone(),
                             origin: crate::libraries::Origin::Library,
@@ -1159,19 +1315,22 @@ impl SymbolSource for JvmLibraries {
                                 }
                                 for c in self.cp.find_extensions(&recv_desc, &mf.jvm_name) {
                                     let (params, pret) = parse_method_desc(&c.descriptor);
-                                    let ret = self
-                                        .cp
-                                        .metadata_return_ty(&c.owner, &c.name)
-                                        .unwrap_or(pret);
+                                    let ret_nullable = mf.ret_nullable;
+                                    let ret_class = metadata_return_ty(mf.ret_class.as_deref());
+                                    let ret = ret_class.unwrap_or(pret);
                                     overloads.push(FunctionInfo {
                                         kind: FnKind::Extension,
                                         receiver: Some(receiver),
-                                        ret_nullable: self
-                                            .cp
-                                            .metadata_return_nullable(&c.owner, &c.name),
+                                        ret_nullable,
+                                        ret_class,
                                         public: true,
                                         // The value class is the most-specific receiver rung.
                                         receiver_rank: 0,
+                                        overload_rank: descriptor_narrowing(&c.descriptor) as u32,
+                                        generic_sig: c
+                                            .signature
+                                            .as_deref()
+                                            .and_then(parse_method_gsig),
                                         call_sig: crate::libraries::CallSig::default(),
                                         flags: FnFlags {
                                             inline: InlineKind::from_flags(
@@ -1208,7 +1367,7 @@ impl SymbolSource for JvmLibraries {
             // member walk is BREADTH-FIRST (a subtype's override before a supertype's), and each member
             // carries its visit rung in `receiver_rank` so an arg-binding consumer (`resolve_instance`) can
             // pick the closest type's overload — the same most-derived-first precedence the BFS gives.
-            if let Ty::Obj(internal, _) = receiver {
+            if let Some(internal) = source_internal_of_ty(receiver) {
                 let mut seen = std::collections::HashSet::new();
                 let mut queue = std::collections::VecDeque::new();
                 queue.push_back(internal.to_string());
@@ -1221,7 +1380,11 @@ impl SymbolSource for JvmLibraries {
                         continue;
                     };
                     for m in &t.members {
-                        if m.name == name {
+                        if member_matches_query(&m.name, name) {
+                            let generic_sig = m.signature.as_deref().and_then(parse_method_gsig);
+                            let ret = self
+                                .member_return(receiver, &m.name, &m.params)
+                                .unwrap_or(m.ret);
                             // Source parameter NAMES (from the class's `@Metadata`) for named-argument
                             // resolution. A member's `params` are the logical params (no receiver), so the
                             // names align 1:1 when present. Defaults aren't recovered here (named call
@@ -1241,22 +1404,28 @@ impl SymbolSource for JvmLibraries {
                             overloads.push(FunctionInfo {
                                 kind: FnKind::Member,
                                 receiver: Some(receiver),
-                                ret_nullable: false,
+                                ret_nullable: m.ret_nullable,
+                                ret_class: None,
                                 public: true,
                                 receiver_rank: rung,
+                                overload_rank: descriptor_narrowing(&m.descriptor) as u32,
+                                generic_sig,
                                 call_sig,
-                                flags: FnFlags::default(),
+                                flags: FnFlags {
+                                    inline: m.inline,
+                                    ..Default::default()
+                                },
                                 callable: LibraryCallable {
-                                    name: m.name.clone(),
-                                    owner: cn.clone(),
+                                    name: m.physical_name.clone().unwrap_or_else(|| m.name.clone()),
+                                    owner: m.owner.clone().unwrap_or_else(|| cn.clone()),
                                     params: m.params.clone(),
-                                    ret: m.ret,
-                                    physical_ret: m.ret,
+                                    ret,
+                                    physical_ret: m.physical_ret,
                                     descriptor: m.descriptor.clone(),
-                                    inline: InlineKind::None,
+                                    inline: m.inline,
                                     default_call: false,
                                     vararg_elem: None,
-                                    signature: None,
+                                    signature: m.signature.clone(),
                                     origin: crate::libraries::Origin::Library,
                                 },
                             });
@@ -1279,7 +1448,12 @@ impl SymbolSource for JvmLibraries {
                 } else {
                     c.descriptor.clone()
                 };
-                let (mut params, physical_ret) = parse_method_desc(&descriptor);
+                let (mut params, physical_ret) = parse_method_desc_with_field_params(&descriptor);
+                let is_default = c.name.ends_with("$default");
+                let meta_name = c.name.strip_suffix("$default").unwrap_or(&c.name);
+                if is_default && params.len() >= 2 {
+                    params.truncate(params.len() - 2);
+                }
                 // Drop any SYNTHETIC trailing params the JVM descriptor appends beyond the `@Metadata`
                 // SOURCE signature — a `@Composable` method's trailing `(Composer, int)` (a `suspend`
                 // Continuation is already removed above). `@Metadata` records only the source
@@ -1287,54 +1461,97 @@ impl SymbolSource for JvmLibraries {
                 // leading params (their exact types — an extension receiver, a vararg array) and
                 // truncate the trailing synthetics. A normal function's metadata count equals the
                 // descriptor's param count, so this is a no-op for it (no regression).
-                if let Some(keep) = self.cp.metadata_kept_params(&c.owner, &c.name, &params) {
+                if let Some(keep) = self.cp.metadata_kept_params(&c.owner, meta_name, &params) {
                     if keep < params.len() {
                         params.truncate(keep);
                     }
                 }
-                // A suspend method's physical return is erased to `Object`; recover the LOGICAL Kotlin
-                // return type from `@Metadata` (`helper(): Int`), so the call types correctly. The
-                // physical (erased) return stays `Object` for the emit.
-                let ret = if suspend {
-                    self.cp
-                        .metadata_return_ty(&c.owner, &c.name)
-                        .unwrap_or(physical_ret)
+                let inline_desc = if is_default {
+                    method_descriptor(&params, physical_ret)
                 } else {
-                    physical_ret
+                    c.descriptor.clone()
                 };
-                let inline = self.cp.is_inline_method(&c.owner, &c.name);
+                let inline = self
+                    .cp
+                    .is_inline_callable(&c.owner, meta_name, &inline_desc, &params);
                 // Source value-parameter NAMES (from `@Metadata`) for named-argument resolution, and the
                 // REQUIRED arity (non-defaulted param count) so a call may OMIT trailing defaulted args.
                 // A top-level function has no receiver, so the logical params equal the (truncated) source
                 // params — only wire names when the count aligns.
                 let param_defaults = self
                     .cp
-                    .metadata_param_defaults(&c.owner, &c.name, &params)
+                    .metadata_param_defaults(&c.owner, meta_name, &params)
                     .unwrap_or_default();
                 let required = if param_defaults.is_empty() {
                     params.len()
                 } else {
                     param_defaults.iter().filter(|d| !**d).count()
                 };
-                let call_sig = match self.cp.metadata_param_names(&c.owner, &c.name, &params) {
+                let lambda_receivers = {
+                    let recvs = self.cp.metadata_param_recv_funs(&c.owner, meta_name);
+                    if recvs.len() == params.len() {
+                        recvs
+                            .into_iter()
+                            .map(|o| o.map(|internal| Ty::obj(&internal)))
+                            .collect()
+                    } else {
+                        Vec::new()
+                    }
+                };
+                let lambda_receiver_params = {
+                    let flags = self.cp.metadata_param_recv_fun_flags(&c.owner, meta_name);
+                    if flags.len() == params.len() {
+                        flags
+                    } else {
+                        Vec::new()
+                    }
+                };
+                let call_sig = match self.cp.metadata_param_names(&c.owner, meta_name, &params) {
                     Some(names) if names.len() == params.len() => crate::libraries::CallSig {
                         required,
                         param_names: names,
                         param_defaults,
+                        lambda_receivers,
+                        lambda_receiver_params,
                         ..Default::default()
                     },
                     _ => crate::libraries::CallSig {
                         required,
                         param_defaults,
+                        lambda_receivers,
+                        lambda_receiver_params,
                         ..Default::default()
                     },
+                };
+                let meta_ret = self.cp.metadata_return(&c.owner, meta_name);
+                let ret_class = metadata_return_ty(meta_ret.as_ref().map(|r| r.class.as_str()));
+                // A suspend method's physical return is erased to `Object`; recover the LOGICAL Kotlin
+                // return type from the selected metadata return class (`helper(): Int`), so the call types
+                // correctly. The physical (erased) return stays `Object` for the emit.
+                let ret = if suspend {
+                    ret_class
+                        .map(|ty| {
+                            if ty.is_jvm_scalar() && meta_ret.as_ref().is_some_and(|r| r.nullable) {
+                                super::jvm_class_map::wrapper_internal(ty)
+                                    .map(Ty::obj)
+                                    .unwrap_or(ty)
+                            } else {
+                                ty
+                            }
+                        })
+                        .unwrap_or(physical_ret)
+                } else {
+                    physical_ret
                 };
                 overloads.push(FunctionInfo {
                     kind: FnKind::TopLevel,
                     receiver: None,
                     ret_nullable: false,
+                    ret_class,
                     public: c.public,
                     receiver_rank: 0,
+                    overload_rank: descriptor_narrowing(&c.descriptor) as u32,
+                    generic_sig: c.signature.as_deref().and_then(parse_method_gsig),
                     call_sig,
                     flags: FnFlags {
                         inline: InlineKind::from_flags(inline, inline && !c.public),
@@ -1348,7 +1565,7 @@ impl SymbolSource for JvmLibraries {
                         physical_ret,
                         descriptor,
                         inline: InlineKind::from_flags(inline, inline && !c.public),
-                        default_call: false,
+                        default_call: is_default,
                         vararg_elem: None,
                         signature: c.signature.clone(),
                         origin: crate::libraries::Origin::Library,
@@ -1356,821 +1573,442 @@ impl SymbolSource for JvmLibraries {
                 });
             }
         }
-        FunctionSet { overloads }
+        let set = FunctionSet { overloads };
+        self.functions_cache.borrow_mut().insert(key, set.clone());
+        set
     }
 }
 
-impl LibrarySet for JvmLibraries {
-    fn coroutine_intrinsic(&self, name: &str) -> Option<crate::libraries::CoroutineIntrinsic> {
-        crate::jvm::coroutine_intrinsics::recognize_unqualified(name)
+impl crate::libraries::TargetRuntime for JvmLibraries {
+    fn function_type(&self, arity: usize) -> Option<Ty> {
+        Some(Ty::obj(&format!("kotlin/jvm/functions/Function{arity}")))
     }
 
-    fn value_companion_fn(
-        &self,
-        class_internal: &str,
-        name: &str,
-        n_args: usize,
-    ) -> Option<crate::libraries::CompanionFn> {
-        let ci = self.cp.find(class_internal)?;
-        // Only a classpath value class has its companion fns realized this way (`Result.success`).
-        crate::jvm::metadata::class_inline(&ci)?;
-        let companion_field = crate::jvm::metadata::class_companion_name(&ci)?;
-        let companion_internal = format!("{class_internal}${companion_field}");
-        let comp_ci = self.cp.find(&companion_internal)?;
-        let mf = crate::jvm::metadata::class_functions(&comp_ci)
-            .into_iter()
-            .find(|m| {
-                m.kotlin_name == name
-                    && m.is_public
-                    && m.jvm_desc
-                        .as_deref()
-                        .map(|d| parse_method_desc(d).0.len() == n_args)
-                        .unwrap_or(false)
-            })?;
-        let descriptor = mf.jvm_desc?;
-        Some(crate::libraries::CompanionFn {
-            class_internal: class_internal.to_string(),
-            companion_internal,
-            companion_field,
-            jvm_name: mf.jvm_name,
-            // The logical return is the value class itself (`Result`); its type argument stays erased,
-            // matching kotlinc (a generic companion result flows as the erased underlying).
-            ret: Ty::obj(class_internal),
-            descriptor,
+    fn property_reference_impl(&self, arity: usize, mutable: bool) -> Option<PlatformCtor> {
+        let internal = match (arity, mutable) {
+            (0, false) => "kotlin/jvm/internal/PropertyReference0Impl",
+            (0, true) => "kotlin/jvm/internal/MutablePropertyReference0Impl",
+            (1, false) => "kotlin/jvm/internal/PropertyReference1Impl",
+            _ => return None,
+        };
+        Some(PlatformCtor {
+            internal: internal.to_string(),
+            ctor_desc: "(Ljava/lang/Class;Ljava/lang/String;Ljava/lang/String;I)V".to_string(),
         })
     }
 
-    fn prim_companion_const(&self, prim: &str, field: &str) -> Option<crate::libraries::LibConst> {
-        use crate::jvm::classreader::ConstVal;
-        use crate::libraries::LibConst;
-        // The JVM realizes a primitive's companion as `kotlin/jvm/internal/<Prim>CompanionObject`,
-        // whose `MAX_VALUE`/`MIN_VALUE`/… are `static final` with a `ConstantValue` (kotlinc inlines it).
-        let internal = format!("kotlin/jvm/internal/{prim}CompanionObject");
-        let ci = self.cp.find(&internal)?;
-        let f = ci.fields.iter().find(|f| f.name == field)?;
-        match f.const_value.as_ref()? {
-            ConstVal::Int(v) => Some(LibConst::Int(*v)),
-            ConstVal::Long(v) => Some(LibConst::Long(*v)),
-            ConstVal::Float(v) => Some(LibConst::Float(*v)),
-            ConstVal::Double(v) => Some(LibConst::Double(*v)),
-            ConstVal::Str(_) => None,
+    fn property_reference_signature(&self, getter_name: &str, ret: Ty) -> Option<String> {
+        Some(format!("{getter_name}(){}", type_descriptor(ret)))
+    }
+
+    fn type_descriptor(&self, ty: Ty) -> Option<String> {
+        Some(type_descriptor(ty))
+    }
+
+    fn ir_type_descriptor(&self, ty: Ty) -> Option<String> {
+        Some(type_descriptor(crate::jvm::ir_emit::ir_ty_to_jvm(&ty)))
+    }
+
+    fn method_descriptor(&self, params: &[Ty], ret: Ty) -> Option<String> {
+        Some(method_descriptor(params, ret))
+    }
+
+    fn function_reference_impl_type(&self) -> Option<Ty> {
+        Some(Ty::obj("kotlin/jvm/internal/FunctionReferenceImpl"))
+    }
+
+    fn enum_member_accessor(&self, name: &str) -> Option<PlatformAccessor> {
+        match name {
+            "ordinal" => Some(PlatformAccessor {
+                name: "ordinal".to_string(),
+                descriptor: "()I".to_string(),
+            }),
+            "name" => Some(PlatformAccessor {
+                name: "name".to_string(),
+                descriptor: "()Ljava/lang/String;".to_string(),
+            }),
+            _ => None,
         }
     }
 
-    fn sam_method(&self, internal: &str) -> Option<LibraryMember> {
-        let ci = self.cp.find(internal)?;
-        if !ci.is_interface() {
-            return None;
-        }
-        // The single public abstract instance method that isn't an `Object` method (`equals`/`hashCode`
-        // /`toString`, which a functional interface may redeclare). `default`/`static` methods aren't
-        // abstract (0x0400).
-        let mut sam = None;
-        for m in &ci.methods {
-            if m.access & 0x0400 == 0 || m.is_static() || !m.is_public() {
-                continue;
+    fn object_instance_field(&self, internal: &str) -> Option<PlatformField> {
+        Some(PlatformField {
+            owner: internal.to_string(),
+            name: "INSTANCE".to_string(),
+            descriptor: format!("L{internal};"),
+        })
+    }
+
+    fn companion_instance_field(
+        &self,
+        class_internal: &str,
+        companion_internal: &str,
+        field_name: &str,
+    ) -> Option<PlatformField> {
+        Some(PlatformField {
+            owner: class_internal.to_string(),
+            name: field_name.to_string(),
+            descriptor: format!("L{companion_internal};"),
+        })
+    }
+
+    fn mutable_local_ref_type(&self, elem: Ty) -> Option<Ty> {
+        let internal = match elem {
+            Ty::Int | Ty::UInt => "kotlin/jvm/internal/Ref$IntRef",
+            Ty::Long | Ty::ULong => "kotlin/jvm/internal/Ref$LongRef",
+            Ty::Float => "kotlin/jvm/internal/Ref$FloatRef",
+            Ty::Double => "kotlin/jvm/internal/Ref$DoubleRef",
+            Ty::Boolean => "kotlin/jvm/internal/Ref$BooleanRef",
+            Ty::Char => "kotlin/jvm/internal/Ref$CharRef",
+            Ty::Byte => "kotlin/jvm/internal/Ref$ByteRef",
+            Ty::Short => "kotlin/jvm/internal/Ref$ShortRef",
+            _ => "kotlin/jvm/internal/Ref$ObjectRef",
+        };
+        Some(Ty::obj(internal))
+    }
+
+    fn scalar_value_repr(&self, ty: Ty) -> Option<Ty> {
+        Some(match ty {
+            Ty::Int
+            | Ty::Byte
+            | Ty::Short
+            | Ty::Long
+            | Ty::Float
+            | Ty::Double
+            | Ty::Boolean
+            | Ty::Char => ty,
+            Ty::UInt => Ty::Int,
+            Ty::ULong => Ty::Long,
+            _ => return None,
+        })
+    }
+
+    fn unsigned_integer_box_type(&self, ty: Ty) -> Option<Ty> {
+        Some(Ty::obj(match ty {
+            Ty::UInt => "kotlin/UInt",
+            Ty::ULong => "kotlin/ULong",
+            _ => return None,
+        }))
+    }
+
+    fn counted_loop_info(&self, internal: &str) -> Option<CountedLoopInfo> {
+        self.counted_loop_info_for_type(internal)
+    }
+
+    fn range_construction(&self, lo: Ty, hi: Ty) -> Option<RangeConstruction> {
+        let (internal, elem, trailing_nulls) = match (lo, hi) {
+            (Ty::Char, Ty::Char) => ("kotlin/ranges/CharRange", Ty::Char, 0),
+            (Ty::UInt, Ty::UInt) => ("kotlin/ranges/UIntRange", Ty::UInt, 1),
+            (Ty::ULong, Ty::ULong) => ("kotlin/ranges/ULongRange", Ty::ULong, 1),
+            (l, r) if l.is_int_range_operand() && r.is_int_range_operand() => {
+                ("kotlin/ranges/IntRange", Ty::Int, 0)
             }
-            if matches!(m.name.as_str(), "equals" | "hashCode" | "toString") {
-                continue;
+            (l, r)
+                if (l.is_int_range_operand() || l == Ty::Long)
+                    && (r.is_int_range_operand() || r == Ty::Long) =>
+            {
+                ("kotlin/ranges/LongRange", Ty::Long, 0)
             }
-            if sam.is_some() {
-                return None; // more than one abstract method — not a SAM interface
-            }
-            let (params, ret) = parse_method_desc(&m.descriptor);
-            sam = Some(LibraryMember {
-                name: m.name.clone(),
+            _ => return None,
+        };
+        let prim = type_descriptor(elem);
+        let marker = "Lkotlin/jvm/internal/DefaultConstructorMarker;";
+        let marker_suffix = marker.repeat(trailing_nulls);
+        let through = PlatformRangeCtor {
+            internal: internal.to_string(),
+            ctor_desc: format!("({prim}{prim}{marker_suffix})V"),
+            trailing_nulls,
+        };
+        let until = match elem {
+            Ty::UInt => Some(LibraryCallable {
+                owner: "kotlin/ranges/URangesKt".to_string(),
+                name: "until-J1ME1BU".to_string(),
+                params: vec![elem, elem],
+                ret: Ty::obj(internal),
+                physical_ret: Ty::obj(internal),
+                descriptor: format!("({prim}{prim})L{internal};"),
+                inline: InlineKind::None,
+                default_call: false,
+                vararg_elem: None,
+                signature: None,
+                origin: Origin::Library,
+            }),
+            Ty::ULong => Some(LibraryCallable {
+                owner: "kotlin/ranges/URangesKt".to_string(),
+                name: "until-eb3DHEI".to_string(),
+                params: vec![elem, elem],
+                ret: Ty::obj(internal),
+                physical_ret: Ty::obj(internal),
+                descriptor: format!("({prim}{prim})L{internal};"),
+                inline: InlineKind::None,
+                default_call: false,
+                vararg_elem: None,
+                signature: None,
+                origin: Origin::Library,
+            }),
+            _ if trailing_nulls == 0 => Some(LibraryCallable {
+                owner: "kotlin/ranges/RangesKt".to_string(),
+                name: "until".to_string(),
+                params: vec![elem, elem],
+                ret: Ty::obj(internal),
+                physical_ret: Ty::obj(internal),
+                descriptor: format!("({prim}{prim})L{internal};"),
+                inline: InlineKind::None,
+                default_call: false,
+                vararg_elem: None,
+                signature: None,
+                origin: Origin::Library,
+            }),
+            _ => None,
+        };
+        Some(RangeConstruction {
+            elem,
+            result: Ty::obj(internal),
+            through,
+            until,
+        })
+    }
+
+    fn suspend_cps_descriptor(&self, logical_descriptor: &str) -> Option<String> {
+        let close = logical_descriptor.rfind(')')?;
+        Some(format!(
+            "{}Lkotlin/coroutines/Continuation;)Ljava/lang/Object;",
+            &logical_descriptor[..close]
+        ))
+    }
+
+    fn runtime_callable(&self, op: RuntimeOp, ty: Ty) -> Option<LibraryCallable> {
+        let callable = |owner: &str,
+                        name: &str,
+                        params: Vec<Ty>,
+                        ret: Ty,
+                        physical_ret: Ty,
+                        descriptor: String| {
+            Some(LibraryCallable {
+                owner: owner.to_string(),
+                name: name.to_string(),
                 params,
                 ret,
-                descriptor: m.descriptor.clone(),
-            });
-        }
-        sam
-    }
-
-    fn mangled_member(&self, internal: &str, prefix: &str) -> Option<(String, String)> {
-        // The first public instance method whose name starts with `prefix` (`getFirst-…`), searching the
-        // class and its superclass chain — an inline-range getter is declared on the `…Progression`
-        // superclass and inherited by the `…Range`. A mangled member has one such name per logical member,
-        // so the prefix is unambiguous.
-        let mut cur = Some(internal.to_string());
-        let mut seen = std::collections::HashSet::new();
-        while let Some(name) = cur {
-            if !seen.insert(name.clone()) {
-                break;
-            }
-            let ci = self.cp.find(&name)?;
-            if let Some(m) = ci
-                .methods
-                .iter()
-                .find(|m| m.is_public() && !m.is_static() && m.name.starts_with(prefix))
-            {
-                return Some((m.name.clone(), m.descriptor.clone()));
-            }
-            cur = ci.super_class.clone();
-        }
-        None
-    }
-
-    fn member_return(&self, recv: Ty, name: &str, args: &[Ty]) -> Option<Ty> {
-        let Ty::Obj(start, start_args) = recv else {
-            return None;
-        };
-        if start_args.is_empty() {
-            return None; // no type arguments to propagate — the erased return is already correct
-        }
-        // Walk the generic hierarchy carrying each class's type arguments, substituting them through
-        // each `extends`/`implements` edge. Stop at the first class declaring `name`; substitute that
-        // member's generic return under the bindings reached there.
-        let mut seen = std::collections::HashSet::new();
-        let mut q = std::collections::VecDeque::new();
-        q.push_back((to_jvm_internal(start).to_string(), start_args.to_vec()));
-        while let Some((internal, targs)) = q.pop_front() {
-            if !seen.insert(internal.clone()) {
-                continue;
-            }
-            let Some(ci) = self.cp.find(&internal) else {
-                continue;
-            };
-            let (formals, supers) = ci.signature.as_deref().and_then(parse_class_gsig).unzip();
-            let formals = formals.unwrap_or_default();
-            let binds: std::collections::HashMap<String, Ty> =
-                formals.iter().cloned().zip(targs.iter().copied()).collect();
-            // A member declared here whose parameters match the call.
-            let found = ci
-                .methods
-                .iter()
-                .filter(|m| m.is_public() && !m.is_static() && m.name == name)
-                .find(|m| {
-                    let (params, _) = parse_method_desc(&m.descriptor);
-                    params.len() == args.len()
-                        && params.iter().zip(args).all(|(p, a)| arg_fits(p, a))
-                });
-            if let Some(m) = found {
-                let sig = m.signature.as_deref()?;
-                let (m_formals, _, rsig) = parse_method_gsig(sig)?;
-                // A method type parameter that SHADOWS a class one (`<T> T m()` inside `class C<T>`) is
-                // INDEPENDENT of the receiver's type argument — drop the class binding for every name
-                // the method re-declares, so its return erases to the method param's bound instead of
-                // mis-substituting the receiver's argument (which would `checkcast` a wrong type → CCE).
-                let mut binds = binds;
-                for f in &m_formals {
-                    binds.remove(f);
-                }
-                return Some(gsig_to_ty(&rsig, &binds));
-            }
-            // Propagate type arguments up each supertype edge (substituting this class's bindings).
-            if let Some(supers) = supers {
-                for sup in supers {
-                    if let GSig::Class(sup_internal, sup_args) = sup {
-                        let sup_targs: Vec<Ty> =
-                            sup_args.iter().map(|a| gsig_to_ty(a, &binds)).collect();
-                        q.push_back((to_jvm_internal(&sup_internal).to_string(), sup_targs));
-                    }
-                }
-            } else {
-                // No generic class signature — follow raw supertypes (members there are non-generic).
-                for i in ci.interfaces.iter().chain(ci.super_class.iter()) {
-                    q.push_back((i.clone(), vec![]));
-                }
-            }
-        }
-        None
-    }
-
-    fn instance_call_return(&self, recv: Ty, name: &str, args: &[Ty]) -> Option<Ty> {
-        let Ty::Obj(start, _) = recv else {
-            return None;
-        };
-        // Walk `recv`'s class hierarchy for a public instance method `name` whose arity matches and whose
-        // every parameter ACCEPTS the actual argument — exact/erased (`arg_fits`) OR a reference subtype
-        // (`KSerializer<Foo>` where `DeserializationStrategy<? extends T>` is declared). Then bind the
-        // method's type variables by unifying its generic parameter signatures against the argument types
-        // (positional type-arg unify ignores the parameter's class name, so the subtype's `<Foo>` still
-        // binds `T`), and substitute the generic return.
-        let mut seen = std::collections::HashSet::new();
-        let mut q = std::collections::VecDeque::new();
-        q.push_back(to_jvm_internal(start).to_string());
-        while let Some(internal) = q.pop_front() {
-            if !seen.insert(internal.clone()) {
-                continue;
-            }
-            let Some(ci) = self.cp.find(&internal) else {
-                continue;
-            };
-            let found = ci
-                .methods
-                .iter()
-                .filter(|m| m.is_public() && !m.is_static() && m.name == name)
-                .find(|m| {
-                    let (params, _) = parse_method_desc(&m.descriptor);
-                    params.len() == args.len()
-                        && params
-                            .iter()
-                            .zip(args)
-                            .all(|(p, a)| arg_fits(p, a) || self.erased_subtype(a, p))
-                });
-            if let Some(m) = found {
-                let sig = m.signature.as_deref()?;
-                let (_, psigs, rsig) = parse_method_gsig(sig)?;
-                let mut binds = std::collections::HashMap::new();
-                for (ps, a) in psigs.iter().zip(args) {
-                    unify_gsig(ps, *a, &mut binds);
-                }
-                return Some(gsig_to_ty(&rsig, &binds));
-            }
-            for s in ci.interfaces.iter().chain(ci.super_class.iter()) {
-                q.push_back(s.clone());
-            }
-        }
-        None
-    }
-
-    fn builtin_member_ret(&self, internal: &str, name: &str, args: &[Ty]) -> Option<Ty> {
-        self.cp
-            .builtin_member_ret(internal, name, args)
-            .or_else(|| {
-                // A Kotlin built-in member over a JVM-mapped receiver (`CharSequence.length`, `Number.toInt`)
-                // is declared in `.kotlin_builtins` under the KOTLIN name, while the receiver here may carry
-                // the mapped JVM name — retry under the Kotlin built-in identity.
-                crate::jvm::jvm_class_map::jvm_to_kotlin_builtin_with_members(internal)
-                    .and_then(|kotlin| self.cp.builtin_member_ret(kotlin, name, args))
-            })
-    }
-
-    fn canonical_internal<'a>(&self, internal: &'a str) -> std::borrow::Cow<'a, str> {
-        std::borrow::Cow::Borrowed(crate::jvm::jvm_class_map::to_jvm_internal(internal))
-    }
-
-    fn builtin_member_call(
-        &self,
-        internal: &str,
-        name: &str,
-        n_args: usize,
-    ) -> Option<(String, String, String, Ty, bool)> {
-        self.cp.builtin_member_call(internal, name, n_args)
-    }
-
-    fn can_inline_lambda(&self, owner: &str, name: &str, descriptor: &str) -> bool {
-        // Dry-run the ONE splicer with each `FunctionN` parameter as a lambda site — branchless
-        // (`let`/`also`) AND branchy (`takeIf`/`takeUnless`) hosts; `splice_unified` relocates host AND
-        // lambda-body frames, so what it accepts here it emits correctly (else it returns `None` and the
-        // call falls back / the file skips — never a miscompile).
-        self.cp
-            .method_code(owner, name, descriptor)
-            .map_or(false, |body| {
-                let lambdas: Vec<crate::jvm::inline::LambdaSplice> =
-                    function_param_indices(descriptor)
-                        .into_iter()
-                        .map(|param_index| crate::jvm::inline::LambdaSplice {
-                            param_index,
-                            body: Vec::new(),
-                        })
-                        .collect();
-                let mut dummy =
-                    crate::jvm::classfile::ClassWriter::new("Dummy", "java/lang/Object");
-                crate::jvm::inline::splice_unified(&body, descriptor, 1, &lambdas, 0, &mut dummy)
-                    .is_some()
-            })
-    }
-
-    fn can_inline_call(&self, owner: &str, name: &str, descriptor: &str) -> bool {
-        self.cp
-            .method_code(owner, name, descriptor)
-            .map_or(false, |body| {
-                // Dry-run the ONE splicer the emitter uses (`splice_unified`) into a throwaway
-                // `ClassWriter`, with each descriptor `Function0` parameter as a zero-arg lambda site.
-                // It covers branchless, branchy, and lambda-bearing hosts, and exercises constant-pool
-                // relocation — so an un-relocatable body (`invokedynamic`, a pool entry `relocate_const`
-                // rejects, …) fails the gate and stays unresolved rather than falling back to an
-                // `invokestatic` on a private method (an `IllegalAccessError`). A branchy body still needs
-                // an empty operand-stack baseline at the call site; a non-empty one skips the file
-                // (`must_inline`), never miscompiles.
-                let lambdas: Vec<crate::jvm::inline::LambdaSplice> =
-                    function_param_indices(descriptor)
-                        .into_iter()
-                        .map(|param_index| crate::jvm::inline::LambdaSplice {
-                            param_index,
-                            body: Vec::new(),
-                        })
-                        .collect();
-                let mut dummy =
-                    crate::jvm::classfile::ClassWriter::new("Dummy", "java/lang/Object");
-                crate::jvm::inline::splice_unified(&body, descriptor, 1, &lambdas, 0, &mut dummy)
-                    .is_some()
-            })
-    }
-
-    fn resolve_scope_inline(
-        &self,
-        name: &str,
-        receiver: Ty,
-        args: &[Ty],
-    ) -> Option<LibraryCallable> {
-        // The arg-binding RESOLUTION layer over the same candidate metadata `functions` exposes: it binds a
-        // generic return from the ARGUMENTS (`let`'s `R` from the lambda), which the arg-independent
-        // `functions` query can't recover — so it stays its own selector (see the redesign layering note).
-        self.extension_callable(name, receiver, args, &[], true)
-    }
-
-    fn metadata_return_unsigned(&self, owner: &str, name: &str) -> bool {
-        matches!(
-            self.cp.metadata_return_type(owner, name).as_deref(),
-            Some("kotlin/UByte" | "kotlin/UShort" | "kotlin/UInt" | "kotlin/ULong")
-        )
-    }
-
-    fn lambda_return_overload_param(&self, receiver: Ty, name: &str) -> Option<Vec<Ty>> {
-        // `name` resolves by lambda return type iff some facade for the receiver has `@JvmName` overloads
-        // under this Kotlin name. The selector's `it` is the receiver's element type.
-        let is_overloaded = supertype_descriptors(&self.cp, receiver).iter().any(|d| {
-            self.cp
-                .find_extension_owners(d)
-                .iter()
-                .any(|o| self.cp.lambda_return_overloads(o).contains_key(name))
-        });
-        if !is_overloaded {
-            return None;
-        }
-        let elem = receiver
-            .array_elem()
-            .or_else(|| receiver.type_args().first().copied())?;
-        Some(vec![elem])
-    }
-
-    fn toplevel_lambda_param_types(
-        &self,
-        name: &str,
-        arg_tys: &[Option<Ty>],
-    ) -> Option<Vec<Vec<Ty>>> {
-        for c in self.cp.find_top_level(name) {
-            let Some(sig) = c.signature.as_deref() else {
-                continue;
-            };
-            let Some((_, psigs, _)) = parse_method_gsig(sig) else {
-                continue;
-            };
-            if psigs.len() != arg_tys.len() {
-                continue;
-            }
-            let mut binds = std::collections::HashMap::new();
-            for (ps, at) in psigs.iter().zip(arg_tys) {
-                if let Some(t) = at {
-                    unify_gsig(ps, *t, &mut binds);
-                }
-            }
-            let out: Vec<Vec<Ty>> = psigs
-                .iter()
-                .map(|ps| function_input_types(ps, &binds))
-                .collect();
-            // Accept this overload only if a *lambda* position (an untyped `None` argument) actually
-            // recovered parameter types — so an overload whose lambda is elsewhere isn't mis-picked.
-            if out
-                .iter()
-                .zip(arg_tys)
-                .any(|(v, at)| at.is_none() && !v.is_empty())
-            {
-                return Some(out);
-            }
-        }
-        None
-    }
-
-    fn toplevel_lambda_recvs(&self, name: &str, arg_tys: &[Option<Ty>]) -> Option<Vec<Option<Ty>>> {
-        // A top-level fn's source params equal its JVM params (no receiver slot), so the per-source-param
-        // receiver-function-type receivers from `@Metadata` align positionally with `arg_tys`. Reads ONLY
-        // `@Metadata` — no JVM `Signature` attribute needed (a krusty-emitted module omits it).
-        for c in self.cp.find_top_level(name) {
-            let recvs = self.cp.metadata_param_recv_funs(&c.owner, name);
-            if recvs.len() == arg_tys.len() && recvs.iter().any(|o| o.is_some()) {
-                return Some(
-                    recvs
-                        .into_iter()
-                        .map(|o| o.map(|internal| Ty::obj(&internal)))
-                        .collect(),
-                );
-            }
-        }
-        None
-    }
-
-    fn extension_lambda_param_types(
-        &self,
-        recv: Ty,
-        name: &str,
-        arg_tys: &[Option<Ty>],
-    ) -> Option<Vec<Vec<Ty>>> {
-        // Find a generic extension named `name` on the receiver (or a supertype) that takes a function
-        // argument; bind its type variables from the receiver and the already-typed non-lambda
-        // arguments, then report each lambda argument's element-typed parameters (`Function1<? super
-        // T, …>` on `List<Int>` → `[Int]`; `fold(0) { acc, x -> }` binds the accumulator from `0`).
-        // Pass 1 prefers a PUBLIC candidate (a non-public `@InlineOnly` one must not shadow a real generic
-        // overload — it would type `it` as the erased `Any`). Pass 2 falls back to non-public, for a scope
-        // fn with NO public overload (`takeIf`/`takeUnless`: `<T> T.takeIf((T) -> Boolean): T?`, inlined
-        // from its real body). Either way the lambda's parameter types come from the generic signature.
-        for allow_non_public in [false, true] {
-            for recv_desc in supertype_descriptors(&self.cp, recv) {
-                for c in self.cp.find_extensions(&recv_desc, name) {
-                    if !c.public && !allow_non_public {
-                        continue;
-                    }
-                    let Some(sig) = c.signature.as_deref() else {
-                        continue;
-                    };
-                    // A non-public candidate matched via the erased `Object` key must have a type-variable
-                    // receiver (the scope-fn family) — never a concrete value-class receiver (`Result.map`).
-                    if !c.public
-                        && recv_desc == "Ljava/lang/Object;"
-                        && !nonpublic_ext_receiver_is_typevar(Some(sig))
-                    {
-                        continue;
-                    }
-                    let Some((_, psigs, _)) = parse_method_gsig(sig) else {
-                        continue;
-                    };
-                    if psigs.is_empty() {
-                        continue;
-                    }
-                    let n_real = psigs.len() - 1; // value parameters (psigs[0] is the receiver)
-                    let k = arg_tys.len();
-                    // Map each ARGUMENT to a value parameter. Exact arity → positional. A TRAILING LAMBDA
-                    // with fewer args than params (`list.joinToString { it }` — the lambda fills the LAST
-                    // param `transform`, the middle defaulted) → the leading args fill a prefix and the
-                    // trailing lambda binds the LAST parameter (`(T) -> CharSequence`).
-                    let trailing_lambda = k >= 1 && arg_tys[k - 1].is_none();
-                    let mapped: Vec<&_> = if n_real == k {
-                        psigs[1..].iter().collect()
-                    } else if trailing_lambda && n_real > k && k >= 1 {
-                        let mut v: Vec<&_> = psigs[1..k].iter().collect();
-                        v.push(&psigs[n_real]); // last value parameter (the trailing-lambda slot)
-                        v
-                    } else {
-                        continue;
-                    };
-                    let mut binds = std::collections::HashMap::new();
-                    unify_gsig(&psigs[0], recv, &mut binds); // bind from the receiver parameter
-                    for (ps, at) in mapped.iter().zip(arg_tys) {
-                        if let Some(t) = at {
-                            unify_gsig(ps, *t, &mut binds); // bind from each typed non-lambda argument
-                        }
-                    }
-                    let out: Vec<Vec<Ty>> = mapped
-                        .iter()
-                        .map(|ps| function_input_types(ps, &binds))
-                        .collect();
-                    if out.iter().any(|v| !v.is_empty()) {
-                        return Some(out);
-                    }
-                }
-            }
-        }
-        None
-    }
-
-    fn resolve_callable(
-        &self,
-        name: &str,
-        receiver: Option<Ty>,
-        args: &[Ty],
-        type_args: &[Ty],
-    ) -> Option<LibraryCallable> {
-        let Some(receiver) = receiver else {
-            // Receiver-less top-level function (`listOf(…)`): find every static method of this name
-            // and pick the overload matching `args` — an exact-arity match (boxing-aware), else a
-            // vararg match (the final reference-array parameter absorbs the trailing arguments).
-            // Public-only: normal resolution emits an `invokestatic`, so a non-public (`@InlineOnly`)
-            // candidate must never be picked here — it would fault with `IllegalAccessError` at runtime.
-            // (The inline route reaches non-public scope fns through `resolve_scope_inline`, not this.)
-            // Candidates come from the consolidated `functions` query (one source of truth), not a direct
-            // index read; the non-public `@InlineOnly` branch below reuses the same set.
-            let fs = self.functions(name, None);
-            let parsed: Vec<(&FunctionInfo, Vec<Ty>, Ty)> = fs
-                .overloads
-                .iter()
-                .filter(|o| o.kind == FnKind::TopLevel && o.public)
-                // Reuse the params the `functions` query already built — one source of truth. They
-                // carry the `@Metadata` source signature (synthetic trailing params dropped); re-parsing
-                // the descriptor here would reinstate a `@Composable` callee's `(Composer, int)`.
-                .map(|o| (o, o.callable.params.clone(), o.callable.ret))
-                .collect();
-            // Exact arity first.
-            let pick = parsed
-                .iter()
-                .find(|(_, params, _)| {
-                    params.len() == args.len()
-                        && params.iter().zip(args).all(|(p, a)| arg_fits(p, a))
-                })
-                .or_else(|| {
-                    parsed.iter().find(|(_, params, _)| {
-                        // Vararg: fixed leading params match positionally, the last (array) param's element
-                        // type absorbs the rest.
-                        if params.is_empty() {
-                            return args.len() == 0;
-                        }
-                        let fixed = params.len() - 1;
-                        let Some(elem) = params[fixed].array_elem() else {
-                            return false;
-                        };
-                        args.len() >= fixed
-                            && params[..fixed]
-                                .iter()
-                                .zip(args)
-                                .all(|(p, a)| arg_fits(p, a))
-                            && args[fixed..].iter().all(|a| arg_fits(&elem, a))
-                    })
-                });
-            // No exact/vararg match — try the `name$default` synthetic for a top-level function with
-            // default parameters (`assertEquals(a, b)` → `assertEquals$default(a, b, null, mask, null)`).
-            // Its descriptor is `(real…, int mask, Object marker)ret`; the call fills a prefix of the real
-            // parameters and the backend defaults the rest. A trailing lambda interacts with defaulted
-            // middle parameters in a way the prefix-fill doesn't model — leave those unresolved.
-            // A trailing lambda interacts with `$default`'s defaulted middle parameters in a way the
-            // prefix-fill doesn't model, so skip the `$default` attempt for it — but still fall through
-            // to the non-public `@InlineOnly` branch below (a `require(cond) { lazyMessage }` is spliced).
-            let trailing_lambda = args.last().map_or(false, |a| matches!(a, Ty::Fun(_)));
-            let fsd = if pick.is_none() && !trailing_lambda {
-                self.functions(&format!("{name}$default"), None)
-            } else {
-                FunctionSet::default()
-            };
-            if pick.is_none() && !trailing_lambda {
-                for o in fsd.overloads.iter().filter(|o| o.kind == FnKind::TopLevel) {
-                    let c = &o.callable;
-                    if !o.public {
-                        continue;
-                    }
-                    let (params, ret) = parse_method_desc(&c.descriptor);
-                    if params.len() < 2 {
-                        continue; // need at least int mask + Object marker
-                    }
-                    let real_count = params.len() - 2;
-                    if args.len() > real_count {
-                        continue;
-                    }
-                    if !params[..args.len()]
-                        .iter()
-                        .zip(args)
-                        .all(|(p, a)| arg_fits(p, a))
-                    {
-                        continue;
-                    }
-                    let kept: Vec<Ty> = params[..real_count].to_vec();
-                    let ret_ty = c
-                        .signature
-                        .as_ref()
-                        .and_then(|sig| parse_method_gsig(sig))
-                        .map(|(formals, psigs, rsig)| {
-                            let mut binds = std::collections::HashMap::new();
-                            for (f, t) in formals.iter().zip(type_args) {
-                                binds.insert(f.clone(), *t);
-                            }
-                            for (ps, a) in psigs.iter().zip(args) {
-                                unify_gsig(ps, *a, &mut binds);
-                            }
-                            gsig_to_ty(&rsig, &binds)
-                        })
-                        .unwrap_or(ret);
-                    return Some(LibraryCallable {
-                        owner: c.owner.clone(),
-                        name: c.name.clone(),
-                        params: kept,
-                        ret: ret_ty,
-                        physical_ret: ret,
-                        descriptor: c.descriptor.clone(),
-                        inline: InlineKind::from_flags(
-                            self.cp.is_inline_method(&c.owner, &c.name),
-                            false,
-                        ),
-                        default_call: true,
-                        vararg_elem: None,
-                        signature: c.signature.clone(),
-                        origin: crate::libraries::Origin::Library,
-                    });
-                }
-            }
-            // No public / `$default` match — try a NON-PUBLIC `@InlineOnly` top-level function
-            // (`error`/`require`/`check`/…): kotlinc emits no callable method for these, so they MUST be
-            // inlined. Return one as `is_inline` so the backend splices its real body; gated by
-            // `can_inline_call` (dry-runs the splice) so an un-spliceable body simply stays unresolved
-            // rather than falling back to an `invokestatic` on the private method.
-            if pick.is_none() {
-                for o in fs.overloads.iter().filter(|o| o.kind == FnKind::TopLevel) {
-                    let c = &o.callable;
-                    if o.public || !self.cp.is_inline_method(&c.owner, &c.name) {
-                        continue;
-                    }
-                    let (params, ret) = parse_method_desc(&c.descriptor);
-                    if params.len() != args.len()
-                        || !params.iter().zip(args).all(|(p, a)| arg_fits(p, a))
-                    {
-                        continue;
-                    }
-                    if !self.can_inline_call(&c.owner, &c.name, &c.descriptor) {
-                        continue;
-                    }
-                    // Recover the generic logical return (`run`/`with`'s `R` binds from the lambda's return
-                    // type) — the JVM descriptor erases it to `Object`. Without this the call types as a
-                    // reference and a primitive result (`run { 2 + 3 }: Int`) miscompiles (a boxed value in
-                    // a primitive slot). Mirrors the `$default` and extension paths.
-                    let recovered = c
-                        .signature
-                        .as_ref()
-                        .and_then(|sig| parse_method_gsig(sig))
-                        .map(|(formals, psigs, rsig)| {
-                            let mut binds = std::collections::HashMap::new();
-                            for (f, t) in formals.iter().zip(type_args) {
-                                binds.insert(f.clone(), *t);
-                            }
-                            for (ps, a) in psigs.iter().zip(args) {
-                                unify_gsig(ps, *a, &mut binds);
-                            }
-                            gsig_to_ty(&rsig, &binds)
-                        })
-                        .unwrap_or(ret);
-                    // A kotlin `Nothing` return compiles to a `java/lang/Void` JVM descriptor; type the
-                    // call `Nothing` so the backend treats it as diverging (no value, no post-call pop).
-                    let logical_ret = if c.descriptor.ends_with(")Ljava/lang/Void;") {
-                        Ty::Nothing
-                    } else {
-                        recovered
-                    };
-                    return Some(LibraryCallable {
-                        owner: c.owner.clone(),
-                        name: c.name.clone(),
-                        params,
-                        ret: logical_ret,
-                        physical_ret: ret,
-                        descriptor: c.descriptor.clone(),
-                        inline: InlineKind::MustInline,
-                        default_call: false,
-                        vararg_elem: None,
-                        signature: c.signature.clone(),
-                        origin: crate::libraries::Origin::Library,
-                    });
-                }
-            }
-            let (o, params, ret) = pick?;
-            let c = &o.callable;
-            // A reified reflection intrinsic (`typeOf` → `KType`) is implemented by inlining + reified
-            // substitution; called as a plain static it throws at runtime. krusty doesn't inline it —
-            // leave it unresolved (the file skips) rather than emit a call that fails.
-            if ret.obj_internal() == Some("kotlin/reflect/KType") {
-                return None;
-            }
-            // Recover the parameterized return from the generic signature: bind the type variables
-            // from the actual arguments (the vararg element unifies with each trailing arg) and
-            // substitute into the return node. Falls back to the erased return when absent.
-            // Bind the type variables from the explicit type arguments and the actuals, then realize the
-            // parameterized return — and, for a generic vararg, the bound *element* type the trailing
-            // arguments adapt to (`listOf<Long>(…)` → `Long`), which the backend uses for literal
-            // adaptation (the JVM array element is erased to `Object`).
-            let mut vararg_elem = None;
-            let ret_ty = c
-                .signature
-                .as_ref()
-                .and_then(|sig| parse_method_gsig(sig))
-                .map(|(formals, psigs, rsig)| {
-                    let mut binds = std::collections::HashMap::new();
-                    // Explicit type arguments (`emptyList<Int>()`) bind the formals positionally first, so
-                    // a call with no value arguments still parameterizes the return.
-                    for (f, t) in formals.iter().zip(type_args) {
-                        binds.insert(f.clone(), *t);
-                    }
-                    let vararg = params.len() != args.len();
-                    if vararg && !psigs.is_empty() {
-                        let fixed = psigs.len() - 1;
-                        for (i, ps) in psigs.iter().take(fixed).enumerate() {
-                            if let Some(a) = args.get(i) {
-                                unify_gsig(ps, *a, &mut binds);
-                            }
-                        }
-                        if let GSig::Arr(inner) = &psigs[fixed] {
-                            for a in &args[fixed..] {
-                                unify_gsig(inner, *a, &mut binds);
-                            }
-                            vararg_elem = Some(gsig_to_ty(inner, &binds));
-                        }
-                    } else {
-                        for (ps, a) in psigs.iter().zip(args) {
-                            unify_gsig(ps, *a, &mut binds);
-                        }
-                    }
-                    gsig_to_ty(&rsig, &binds)
-                })
-                .unwrap_or(*ret);
-            // Restore the Kotlin read-only/mutable collection type from `@Metadata` (the JVM signature
-            // erased `mutableListOf`'s `MutableList<T>` to `java/util/List<T>`).
-            let ret_ty = self.meta_collection_ret(&c.owner, &c.name, ret_ty);
-            // A `suspend fun`'s physical return is erased to `Object`; the overload already carries the
-            // LOGICAL return recovered from `@Metadata` (`helper(): Int`) — use it.
-            let ret_ty = if o.flags.suspend { c.ret } else { ret_ty };
-            return Some(LibraryCallable {
-                owner: c.owner.clone(),
-                name: c.name.clone(),
-                params: params.clone(),
-                ret: ret_ty,
-                physical_ret: *ret,
-                descriptor: c.descriptor.clone(),
-                inline: InlineKind::from_flags(self.cp.is_inline_method(&c.owner, &c.name), false),
+                physical_ret,
+                descriptor,
+                inline: InlineKind::None,
                 default_call: false,
-                vararg_elem,
-                signature: c.signature.clone(),
+                vararg_elem: None,
+                signature: None,
                 origin: crate::libraries::Origin::Library,
-            });
+            })
         };
-        // Try the receiver type and its supertypes, most specific first — the extension's declared
-        // receiver may be a supertype (kotlinc's `String.repeat` is a `CharSequence` extension), or a
-        // generic `T` erased to `Object` (`fun <T> T.to(…)`). Match by boxing-aware parameter
-        // assignability (an `Any` parameter accepts any argument), not exact descriptor prefix.
-        if let Some(lc) = self.extension_callable(name, receiver, args, type_args, false) {
-            return Some(lc);
-        }
-        // No exact-arity match — try the `name$default` synthetic for an extension with default
-        // parameters (`list.joinToString(",")` → `joinToString$default(list, ",", …, mask, null)`).
-        // Its descriptor is `(recv, real…, int mask, Object marker)ret`; the call fills a prefix of the
-        // real parameters, the backend defaults the rest.
-        // A trailing lambda binds to the *last* value parameter (`transform`), with the middle parameters
-        // defaulted — `list.joinToString { it }` → `joinToString$default(list, …defaults…, transform,
-        // mask, null)`. The leading non-lambda args fill a prefix; the lambda fills the last real param.
-        let trailing_lambda = args.last().is_some_and(|a| matches!(a, Ty::Fun(_)));
-        let default_name = format!("{name}$default");
-        for recv_desc in supertype_descriptors(&self.cp, receiver) {
-            for c in self.cp.find_extensions(&recv_desc, &default_name) {
-                // Public-only, like the exact-arity path: never emit an `invokestatic` to a non-public
-                // `$default` synthetic (`IllegalAccessError`).
-                if !c.public {
-                    continue;
-                }
-                let (params, ret) = parse_method_desc(&c.descriptor);
-                if params.len() < 3 {
-                    continue; // need at least receiver + mask + marker
-                }
-                let real_count = params.len() - 3; // exclude receiver, int mask, Object marker
-                let param_is_fun = |t: &Ty| {
-                    matches!(t, Ty::Fun(_))
-                        || t.obj_internal()
-                            .is_some_and(|i| i.starts_with("kotlin/jvm/functions/Function"))
+
+        match op {
+            RuntimeOp::UnsignedBox | RuntimeOp::UnsignedUnbox => {
+                let (owner, prim, repr) = match ty {
+                    Ty::UInt => ("kotlin/UInt", "I", Ty::Int),
+                    Ty::ULong => ("kotlin/ULong", "J", Ty::Long),
+                    _ => return None,
                 };
-                // Validate the fit. Non-lambda: the args fill a prefix of the real parameters (each fits,
-                // subtype-aware, so a wrong overload is rejected). Trailing lambda: the prefix (all but the
-                // lambda) fits, AND the LAST real parameter is a function type (the `transform` slot).
-                let fits = if trailing_lambda {
-                    let prefix_len = args.len() - 1;
-                    prefix_len < real_count
-                        && param_is_fun(&params[real_count])
-                        && params[1..1 + prefix_len]
-                            .iter()
-                            .zip(&args[..prefix_len])
-                            .all(|(p, a)| arg_fits_subtype(&self.cp, p, a))
-                } else {
-                    args.len() <= real_count
-                        && params[1..1 + args.len()]
-                            .iter()
-                            .zip(args)
-                            .all(|(p, a)| arg_fits_subtype(&self.cp, p, a))
-                };
-                if !fits {
-                    continue;
-                }
-                // Keep the receiver + real parameters (drop the trailing mask + marker), like the
-                // non-`$default` case — the backend appends the placeholders, mask, and marker.
-                let kept: Vec<Ty> = params[..params.len() - 2].to_vec();
-                let ret_ty = c
-                    .signature
-                    .as_ref()
-                    .and_then(|sig| parse_method_gsig(sig))
-                    .map(|(formals, psigs, rsig)| {
-                        let mut binds = std::collections::HashMap::new();
-                        for (f, t) in formals.iter().zip(type_args) {
-                            binds.insert(f.clone(), *t);
-                        }
-                        // psigs for `$default` are `[recv, real…, int, Object]`; unify the receiver + provided.
-                        let actuals: Vec<Ty> = std::iter::once(receiver)
-                            .chain(args.iter().copied())
-                            .collect();
-                        for (ps, a) in psigs.iter().zip(&actuals) {
-                            unify_gsig(ps, *a, &mut binds);
-                        }
-                        gsig_to_ty(&rsig, &binds)
-                    })
-                    .unwrap_or(ret);
-                return Some(LibraryCallable {
-                    owner: c.owner.clone(),
-                    name: c.name.clone(),
-                    params: kept,
-                    ret: ret_ty,
-                    physical_ret: ret,
-                    descriptor: c.descriptor.clone(),
-                    inline: InlineKind::from_flags(
-                        self.cp.is_inline_method(&c.owner, &c.name),
-                        false,
+                match op {
+                    RuntimeOp::UnsignedBox => callable(
+                        owner,
+                        "box-impl",
+                        vec![ty],
+                        Ty::obj(owner),
+                        Ty::obj(owner),
+                        format!("({prim})L{owner};"),
                     ),
-                    default_call: true,
-                    vararg_elem: None,
-                    signature: c.signature.clone(),
-                    origin: crate::libraries::Origin::Library,
-                });
+                    RuntimeOp::UnsignedUnbox => callable(
+                        owner,
+                        "unbox-impl",
+                        vec![Ty::obj(owner)],
+                        ty,
+                        repr,
+                        format!("(){prim}"),
+                    ),
+                    _ => unreachable!(),
+                }
             }
+            RuntimeOp::UnsignedCompare
+            | RuntimeOp::UnsignedDivide
+            | RuntimeOp::UnsignedRemainder
+            | RuntimeOp::UnsignedToString => {
+                let (owner, prim, repr) = match ty {
+                    Ty::UInt => ("java/lang/Integer", "I", Ty::Int),
+                    Ty::ULong => ("java/lang/Long", "J", Ty::Long),
+                    _ => return None,
+                };
+                let (name, params, ret, descriptor) = match op {
+                    RuntimeOp::UnsignedCompare => (
+                        "compareUnsigned",
+                        vec![ty, ty],
+                        Ty::Int,
+                        format!("({prim}{prim})I"),
+                    ),
+                    RuntimeOp::UnsignedDivide => (
+                        "divideUnsigned",
+                        vec![ty, ty],
+                        ty,
+                        format!("({prim}{prim}){prim}"),
+                    ),
+                    RuntimeOp::UnsignedRemainder => (
+                        "remainderUnsigned",
+                        vec![ty, ty],
+                        ty,
+                        format!("({prim}{prim}){prim}"),
+                    ),
+                    RuntimeOp::UnsignedToString => (
+                        "toUnsignedString",
+                        vec![ty],
+                        Ty::String,
+                        format!("({prim})Ljava/lang/String;"),
+                    ),
+                    _ => unreachable!(),
+                };
+                callable(owner, name, params, ret, repr, descriptor)
+            }
+            RuntimeOp::UIntToLong if ty == Ty::UInt => callable(
+                "java/lang/Integer",
+                "toUnsignedLong",
+                vec![Ty::UInt],
+                Ty::Long,
+                Ty::Long,
+                "(I)J".to_string(),
+            ),
+            RuntimeOp::UIntToLong => None,
+            RuntimeOp::PrimitiveCompare if ty != Ty::Boolean => {
+                let cmp_ty = match ty {
+                    Ty::Byte | Ty::Short | Ty::Char => Ty::Int,
+                    t => t,
+                };
+                let (cmp_owner, cmp_prim) = match cmp_ty {
+                    Ty::Int => ("java/lang/Integer", "I"),
+                    Ty::Long => ("java/lang/Long", "J"),
+                    Ty::Float => ("java/lang/Float", "F"),
+                    Ty::Double => ("java/lang/Double", "D"),
+                    _ => return None,
+                };
+                callable(
+                    cmp_owner,
+                    "compare",
+                    vec![cmp_ty, cmp_ty],
+                    Ty::Int,
+                    Ty::Int,
+                    format!("({cmp_prim}{cmp_prim})I"),
+                )
+            }
+            RuntimeOp::PrimitiveCompare => None,
+            RuntimeOp::HashCode => {
+                let (owner, desc, param) = match ty {
+                    Ty::Int => ("java/lang/Integer", "(I)I", Ty::Int),
+                    Ty::Short => ("java/lang/Short", "(S)I", Ty::Short),
+                    Ty::Byte => ("java/lang/Byte", "(B)I", Ty::Byte),
+                    Ty::Char => ("java/lang/Character", "(C)I", Ty::Char),
+                    Ty::Boolean => ("java/lang/Boolean", "(Z)I", Ty::Boolean),
+                    Ty::Long => ("java/lang/Long", "(J)I", Ty::Long),
+                    Ty::Double => ("java/lang/Double", "(D)I", Ty::Double),
+                    Ty::Float => ("java/lang/Float", "(F)I", Ty::Float),
+                    _ => (
+                        "java/util/Objects",
+                        "(Ljava/lang/Object;)I",
+                        Ty::obj("kotlin/Any"),
+                    ),
+                };
+                callable(
+                    owner,
+                    "hashCode",
+                    vec![param],
+                    Ty::Int,
+                    Ty::Int,
+                    desc.to_string(),
+                )
+            }
+            RuntimeOp::ArrayToString => {
+                let desc = match ty.non_null().obj_internal()? {
+                    "kotlin/BooleanArray" => "([Z)Ljava/lang/String;",
+                    "kotlin/CharArray" => "([C)Ljava/lang/String;",
+                    "kotlin/ByteArray" => "([B)Ljava/lang/String;",
+                    "kotlin/ShortArray" => "([S)Ljava/lang/String;",
+                    "kotlin/IntArray" => "([I)Ljava/lang/String;",
+                    "kotlin/LongArray" => "([J)Ljava/lang/String;",
+                    "kotlin/FloatArray" => "([F)Ljava/lang/String;",
+                    "kotlin/DoubleArray" => "([D)Ljava/lang/String;",
+                    "kotlin/Array" => "([Ljava/lang/Object;)Ljava/lang/String;",
+                    _ => return None,
+                };
+                callable(
+                    "java/util/Arrays",
+                    "toString",
+                    vec![ty],
+                    Ty::String,
+                    Ty::String,
+                    desc.to_string(),
+                )
+            }
+            RuntimeOp::ArrayCopyOf => {
+                let desc = match ty.non_null().obj_internal()? {
+                    "kotlin/BooleanArray" => "([ZI)[Z",
+                    "kotlin/CharArray" => "([CI)[C",
+                    "kotlin/ByteArray" => "([BI)[B",
+                    "kotlin/ShortArray" => "([SI)[S",
+                    "kotlin/IntArray" => "([II)[I",
+                    "kotlin/LongArray" => "([JI)[J",
+                    "kotlin/FloatArray" => "([FI)[F",
+                    "kotlin/DoubleArray" => "([DI)[D",
+                    "kotlin/Array" => "([Ljava/lang/Object;I)[Ljava/lang/Object;",
+                    _ => return None,
+                };
+                callable(
+                    "java/util/Arrays",
+                    "copyOf",
+                    vec![ty, Ty::Int],
+                    ty,
+                    ty,
+                    desc.to_string(),
+                )
+            }
+            RuntimeOp::StartCoroutine => callable(
+                "kotlin/coroutines/ContinuationKt",
+                "startCoroutine",
+                vec![
+                    Ty::obj("kotlin/Function1"),
+                    Ty::obj("kotlin/coroutines/Continuation"),
+                ],
+                Ty::Unit,
+                Ty::Unit,
+                "(Lkotlin/jvm/functions/Function1;Lkotlin/coroutines/Continuation;)V".to_string(),
+            ),
+            RuntimeOp::ThrowOnFailure => callable(
+                "kotlin/ResultKt",
+                "throwOnFailure",
+                vec![Ty::obj("kotlin/Any")],
+                Ty::Unit,
+                Ty::Unit,
+                "(Ljava/lang/Object;)V".to_string(),
+            ),
+            RuntimeOp::CoroutineSuspended => callable(
+                "kotlin/coroutines/intrinsics/IntrinsicsKt",
+                "getCOROUTINE_SUSPENDED",
+                vec![],
+                Ty::obj("kotlin/Any"),
+                Ty::obj("kotlin/Any"),
+                "()Ljava/lang/Object;".to_string(),
+            ),
         }
-        None
+    }
+
+    fn runtime_ctor(&self, ctor: RuntimeCtor) -> Option<PlatformCtor> {
+        match ctor {
+            RuntimeCtor::IllegalStateException => Some(PlatformCtor {
+                internal: "java/lang/IllegalStateException".to_string(),
+                ctor_desc: "(Ljava/lang/String;)V".to_string(),
+            }),
+            RuntimeCtor::AssertionError => Some(PlatformCtor {
+                internal: "java/lang/AssertionError".to_string(),
+                ctor_desc: "(Ljava/lang/String;)V".to_string(),
+            }),
+        }
+    }
+
+    fn is_reified_assert_fails_with_default(&self, callable: &LibraryCallable) -> bool {
+        callable.owner == "kotlin/test/AssertionsKt__AssertionsKt"
+            && callable.name == "assertFailsWith$default"
     }
 }

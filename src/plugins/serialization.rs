@@ -17,6 +17,7 @@
 //!     PoC keeps them as `return` so the surface — not the runtime — is what is under test.
 
 use crate::ir::{Callee, ExprId, IrConst, IrCtorArg, IrExpr, IrFile, IrFunction, IrTypeOp};
+use crate::jvm::names::property_getter_name;
 use crate::libraries::InlineKind;
 use crate::plugins::{synthetic_class, IrPlugin, PluginContext};
 use crate::types::Ty;
@@ -124,15 +125,6 @@ fn unit() -> Ty {
 
 fn class_ty(fq: &str) -> Ty {
     Ty::obj(fq)
-}
-
-/// The JVM getter name for a Kotlin property (`a` → `getA`).
-fn getter_name(prop: &str) -> String {
-    let mut c = prop.chars();
-    match c.next() {
-        Some(f) => format!("get{}{}", f.to_uppercase(), c.as_str()),
-        None => "get".to_string(),
-    }
 }
 
 /// The boxed reference descriptor for a primitive fq name, or `None` if it isn't a primitive.
@@ -1506,7 +1498,7 @@ impl IrPlugin for SerializationPlugin {
                         let v = ir.add_expr(IrExpr::Call {
                             callee: Callee::Virtual {
                                 owner: class_internal.clone(),
-                                name: getter_name(&pname),
+                                name: property_getter_name(&pname),
                                 descriptor: format!("(){}", ty_descriptor(&uty)),
                                 interface: false,
                             },
@@ -1571,7 +1563,7 @@ impl IrPlugin for SerializationPlugin {
                             let v = ir.add_expr(IrExpr::Call {
                                 callee: Callee::Virtual {
                                     owner: class_internal.clone(),
-                                    name: getter_name(pname),
+                                    name: property_getter_name(pname),
                                     descriptor: format!("(){}", ty_descriptor(ty)),
                                     interface: false,
                                 },
@@ -1727,7 +1719,7 @@ impl IrPlugin for SerializationPlugin {
                                     let cur = ir.add_expr(IrExpr::Call {
                                         callee: Callee::Virtual {
                                             owner: class_internal.clone(),
-                                            name: getter_name(pname),
+                                            name: property_getter_name(pname),
                                             descriptor: format!("(){}", ty_descriptor(ty)),
                                             interface: false,
                                         },

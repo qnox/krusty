@@ -56,8 +56,8 @@ fn serializer_object_emits_wellformed_bytecode() {
     let toks = lex(src, &mut d);
     let files = vec![parse(src, &toks, &mut d)];
     let platform = Box::new(JvmLibraries::new(cp.clone()));
-    let syms = collect_signatures_with_cp(&files, platform, &mut d);
-    let info = check_file(&files[0], &syms, &mut d);
+    let mut syms = collect_signatures_with_cp(&files, platform, &mut d);
+    let info = check_file(&files[0], &mut syms, &mut d);
     if d.has_errors() {
         eprintln!("skipping: krusty could not lower Foo (front-end gap)");
         return;

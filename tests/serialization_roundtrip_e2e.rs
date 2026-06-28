@@ -125,8 +125,8 @@ fn serializable_class_encode_round_trips() {
         let toks = lex(src, &mut d);
         let files = vec![parse(src, &toks, &mut d)];
         let platform = Box::new(JvmLibraries::new(cp.clone()));
-        let syms = collect_signatures_with_cp(&files, platform, &mut d);
-        let info = check_file(&files[0], &syms, &mut d);
+        let mut syms = collect_signatures_with_cp(&files, platform, &mut d);
+        let info = check_file(&files[0], &mut syms, &mut d);
         assert!(!d.has_errors(), "krusty front-end could not handle Foo");
         let mut ir = lower_file(&files[0], &info, &syms).expect("lower Foo");
         let ctx = PluginContext::from_source(&files[0], &ir);
