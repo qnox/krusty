@@ -2690,3 +2690,83 @@ cargo check --profile gate
 cargo run --profile gate --bin survey -- target/cache/box-corpus/2.4.0/compiler/testData/codegen/box --samples "unresolved method 'apply' on 'Buildee'"
 cargo run --profile gate --bin survey -- target/cache/box-corpus/2.4.0/compiler/testData/codegen/box --samples "unresolved method 'instructions' on 'Buildee'"
 ```
+
+Hundred-thirty-ninth-pass current-state audit after the platform-provider cleanup found the next
+systemic blocker: nullable generic return semantics are still not represented as first-class overload
+data. The green fixes for `takeIf`/`takeUnless` and `MutableMap.put` required descriptor/name checks in
+`call_resolver.rs`:
+
+```text
+takeIf/takeUnless + (Object, Function1)Object => T?
+put + (Object, Object)Object => V?
+```
+
+That is evidence that the metadata/generic-signature model still loses nullability on type-variable
+returns (`T?`, `V?`). When lost, lowering sees a logical `Int`/`String` instead of `Int?`/`String?` and
+either unboxes null (`takeIf`, `Map.put`) or returns raw `Object` from a lambda that declares `String`.
+The runtime failures were:
+
+```text
+TakeIfNullableResultKt: NullPointerException from unboxing null Integer
+buildMap/kt64066.kt: NullPointerException from Map.put returning null previous value
+withoutAnnotation.kt: VerifyError, lambda returning Object where String was declared
+```
+
+The local fixes are intentionally documented as temporary compatibility patches, not as a desired
+architecture:
+
+- `CallResolver::bind_extension_callable` hardcodes nullable scope filters by name and descriptor.
+- `is_nullable_map_put_return` hardcodes `put(Object,Object):Object`.
+- `Lower::coerce_erased_call_result` now correctly unboxes erased non-null scalar returns at use sites.
+- Lambda synthesis now casts reference returns to the lambda signature return type before `areturn`.
+
+The generic fix should be to carry return nullability in `GSig`, not to add more descriptor exceptions.
+`GenericSig.ret` currently stores only a type tree, so `T` and `T?` collapse. Replace it with a
+`GType { kind, nullable }` (or equivalent) and propagate that through `gsig_to_ty` / return binding:
+
+```rust
+pub struct GType {
+    pub kind: GKind,
+    pub nullable: bool,
+}
+```
+
+Then `FunctionInfo`/`LibraryCallable` can expose the selected return as:
+
+```rust
+logical_ret: Ty,
+logical_ret_nullable: bool,
+physical_ret: Ty,
+```
+
+or a single `ReturnShape { logical: Ty, nullable: bool, physical: Ty }`. After that:
+
+- delete `nullable_scope_filter`;
+- delete `is_nullable_map_put_return`;
+- stop using JVM descriptors to recover source-level nullability;
+- make lambda return coercion consume `ReturnShape` instead of guessing from `Ty`;
+- add a grep gate that rejects new descriptor strings in `call_resolver.rs`.
+
+This is a high-value deletion target because it generalizes beyond the three failing cases. Any stdlib
+or Java/Kotlin metadata member returning `T?` should then work through the same path.
+
+Current verified conformance metric:
+
+```text
+scanned: 7351 | krusty-compiled: 2024 | box()=OK: 2024 | skipped(unsupported): 5327 | FAIL: 0
+```
+
+Verification:
+
+```sh
+just clippy-baseline-check
+./run-tests.sh
+./run-tests.sh --test kotlin_box_ir_jvm_conformance -- --nocapture
+git push origin master
+```
+
+The pushed commit after rebasing onto `origin/master` was:
+
+```text
+bdc7422 compiler: move platform facts behind providers
+```
