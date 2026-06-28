@@ -138,6 +138,21 @@ fun box(): String {
 }
 "#,
     ),
+    // Kotlin `a(args)` is an `invoke` operator call, not a special case limited to function types.
+    (
+        "ObjectInvokeOperator",
+        r#"
+class Joiner(val prefix: String) {
+    operator fun invoke(suffix: String): String = prefix + suffix
+}
+fun box(): String {
+    val join = Joiner("O")
+    if (join("K") != "OK") return "direct"
+    if (join.invoke("K") != "OK") return "member"
+    return "OK"
+}
+"#,
+    ),
     // Generic stdlib extensions (`T.let`) must select using receiver-bound logical parameters from
     // metadata, not the erased `Function1` descriptor. A callable reference argument typed as
     // `(Value) -> Unit` then fits `block: (T) -> R` when `T` is the value-class receiver.

@@ -79,7 +79,7 @@ unless the requested category is enabled.
 Latest verified codegen/box metric (2026-06-28):
 
 ```text
-scanned: 7351 | krusty-compiled: 2024 | box()=OK: 2024 | skipped(unsupported): 5327 | FAIL: 0
+scanned: 7351 | krusty-compiled: 2078 | box()=OK: 2078 | skipped(unsupported): 5273 | FAIL: 0
 ```
 
 Only compare `box()=OK` numbers when `FAIL: 0`. The historical `1842 -> 1585` cliff in
@@ -87,7 +87,7 @@ Only compare `box()=OK` numbers when `FAIL: 0`. The historical `1842 -> 1585` cl
 not the current metric. That cleanup stopped counting unsupported shapes as compiled support
 (builder-inference directives, JS-runtime-only files, advanced `Result<T>`/value-class cases, and
 unsupported `UByte`/`UShort` value-class paths). Later passes recovered past both plateaus; this checkout
-is currently at `2024 OK / 0 FAIL`. Likewise, `KRUSTY_NO_RUN=1` is for compile/emit profiling only; it
+is currently at `2078 OK / 0 FAIL`. Likewise, `KRUSTY_NO_RUN=1` is for compile/emit profiling only; it
 skips JVM execution and must not be reported as runtime conformance.
 
 For corpus triage, use the survey binary through the gate profile:
