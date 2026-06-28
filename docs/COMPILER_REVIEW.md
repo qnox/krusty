@@ -2816,3 +2816,22 @@ JVM bit pattern in `ULongLit`. The official conformance metric increased without
 ```text
 scanned: 7351 | krusty-compiled: 2056 | box()=OK: 2056 | skipped(unsupported): 5295 | FAIL: 0
 ```
+
+The next resolver cleanup modeled Kotlin callable-value invocation as an operator convention instead of
+as a JVM `FunctionN.invoke` member lookup. The checker now records a semantic
+`ExprLowering::CallableInvoke` for both `f(args)` and `f.invoke(args)`, including arbitrary function
+expressions such as `make()(x)`. Common lowering consumes that selected operation and emits the existing
+target-neutral `IrExpr::InvokeFunction`; it no longer rediscover direct function-value calls by AST
+shape. Inline lambda parameters still splice through the same recorded operation before falling back to
+runtime function invocation.
+
+The pass deliberately keeps callable invocations with value-class parameters or returns unsupported for
+now. Those require value-class-aware callable-reference bridge generation; allowing them through produced
+runtime `NoSuchMethodError`/`VerifyError`, so the checker preserves the zero-fail invariant until that
+bridge model is implemented generically.
+
+Current verified conformance metric:
+
+```text
+scanned: 7351 | krusty-compiled: 2070 | box()=OK: 2070 | skipped(unsupported): 5281 | FAIL: 0
+```

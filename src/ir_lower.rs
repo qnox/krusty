@@ -13321,6 +13321,39 @@ impl<'a> Lower<'a> {
                 }
                 self.expr(body)?
             }
+            Expr::Call { args, .. }
+                if matches!(
+                    self.info.expr_lowers.get(&e),
+                    Some(ExprLowering::CallableInvoke { .. })
+                ) =>
+            {
+                let ExprLowering::CallableInvoke {
+                    function,
+                    params,
+                    ret,
+                } = self.info.expr_lowers.get(&e).cloned()?
+                else {
+                    return None;
+                };
+                if params.len() != args.len() {
+                    return None;
+                }
+                if let Expr::Name(fname) = self.afile.expr(function).clone() {
+                    if let Some(idx) = self.inline_lambdas.iter().rposition(|(n, ..)| *n == fname) {
+                        return self.lower_inline_lambda_invoke(idx, &args);
+                    }
+                }
+                let func = self.expr(function)?;
+                let mut ir_args = Vec::with_capacity(args.len());
+                for (&arg, param) in args.iter().zip(&params) {
+                    ir_args.push(self.lower_arg(arg, &ty_to_ir(*param))?);
+                }
+                self.ir.add_expr(IrExpr::InvokeFunction {
+                    func,
+                    args: ir_args,
+                    ret: ty_to_ir(ret),
+                })
+            }
             Expr::Call { .. }
                 if matches!(
                     self.info.expr_lowers.get(&e),
@@ -13530,44 +13563,6 @@ impl<'a> Lower<'a> {
                                 .map_or(false, |ci| ci.fields.iter().any(|(n, _)| *n == fname))
                             {
                                 return None;
-                            }
-                        }
-                    }
-                    // `f(args)` where `f` is a function-typed local/parameter → invoke through the
-                    // `kotlin/jvm/functions/FunctionN.invoke` interface method (args boxed to Object,
-                    // the Object result cast/unboxed to the function's return type).
-                    if let Some((v, Ty::Fun(sig))) = self.lookup(&fname) {
-                        if sig.params.len() != args.len() {
-                            return None;
-                        }
-                        let func = self.ir.add_expr(IrExpr::GetValue(v));
-                        let mut a = Vec::new();
-                        for arg in &args {
-                            a.push(self.expr(*arg)?);
-                        }
-                        let ret = ty_to_ir(sig.ret);
-                        return Some(self.ir.add_expr(IrExpr::InvokeFunction {
-                            func,
-                            args: a,
-                            ret,
-                        }));
-                    }
-                    // `x(args)` where `x` is a TOP-LEVEL property of function type (`val x = ::foo; x()`):
-                    // read the property (the facade getter / cross-file read), then invoke it through
-                    // `FunctionN.invoke`. Locals are handled above; this is the not-a-local case.
-                    if self.lookup(&fname).is_none() {
-                        if let Some(Ty::Fun(sig)) = self.syms.props.get(&fname).map(|p| p.0) {
-                            if sig.params.len() == args.len() {
-                                let func = self.expr(callee)?;
-                                let mut a = Vec::new();
-                                for arg in &args {
-                                    a.push(self.expr(*arg)?);
-                                }
-                                return Some(self.ir.add_expr(IrExpr::InvokeFunction {
-                                    func,
-                                    args: a,
-                                    ret: ty_to_ir(sig.ret),
-                                }));
                             }
                         }
                     }
@@ -15302,27 +15297,7 @@ impl<'a> Lower<'a> {
                         return None;
                     }
                 }
-                // The callee is an arbitrary expression that evaluates to a function value — an
-                // immediately-invoked call result (`mk()()`), an indexed/selected function, etc. Lower it
-                // to the `FunctionN` and invoke it through `FunctionN.invoke` (same path as a function-typed
-                // local `f(args)`).
-                _ => {
-                    if let Ty::Fun(sig) = self.info.ty(callee) {
-                        if sig.params.len() == args.len() {
-                            let func = self.expr(callee)?;
-                            let mut a = Vec::new();
-                            for arg in &args {
-                                a.push(self.expr(*arg)?);
-                            }
-                            return Some(self.ir.add_expr(IrExpr::InvokeFunction {
-                                func,
-                                args: a,
-                                ret: ty_to_ir(sig.ret),
-                            }));
-                        }
-                    }
-                    return None;
-                }
+                _ => return None,
             },
         })
     }
