@@ -76,3 +76,25 @@ fun box(): String {\n\
         "OK"
     );
 }
+
+#[test]
+fn safe_cast_to_type_param_is_erased() {
+    if !toolchain_ready() {
+        return;
+    }
+    // `x as? T` (safe cast to a type parameter). `T` is erased, so the runtime cannot actually test it
+    // (the bound is `Object` for an unbounded `T`); a non-null value keeps its identity, `null` stays
+    // `null`. Modeled like kotlinc's `unchecked_cast1`: the cast is used INSIDE the generic function so
+    // no generic-return checkcast is inserted at the call site.
+    const SRC: &str = "// WITH_STDLIB\n\
+val sb = StringBuilder()\n\
+fun <T> bar(x: Any?) { val y = x as? T; sb.append(y.toString()) }\n\
+fun box(): String {\n\
+    bar<String>(\"hi\")\n\
+    bar<String>(42)\n\
+    bar<String>(null)\n\
+    val s = sb.toString()\n\
+    return if (s == \"hi42null\") \"OK\" else s\n\
+}\n";
+    assert_eq!(run(SRC).expect("`as? T` should compile + run"), "OK");
+}
