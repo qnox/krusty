@@ -2479,6 +2479,8 @@ fn is_builtin_operator_method(name: &str) -> bool {
     )
 }
 
+const CALLABLE_INVOKE_OPERATOR: &str = "invoke";
+
 /// The augmented-assignment operator name for a binary op (`+=` → `plusAssign`, etc.). Only the five
 /// arithmetic compound operators have an `…Assign` form.
 fn assign_op_name(op: BinOp) -> Option<&'static str> {
@@ -3088,6 +3090,12 @@ pub enum ExprLowering {
     /// A property-read `recv.name` resolved to a classpath extension property getter.
     ExtensionPropertyGet {
         getter: Box<crate::libraries::LibraryCallable>,
+    },
+    /// A Kotlin callable-value invocation (`f(args)` or `f.invoke(args)`) selected by the checker.
+    CallableInvoke {
+        function: ExprId,
+        params: Vec<Ty>,
+        ret: Ty,
     },
 }
 
@@ -3836,6 +3844,70 @@ impl<'a> Checker<'a> {
     fn mark_local_function_expr(&mut self, e: ExprId, stmt_id: StmtId) {
         self.expr_lowers
             .insert(e, ExprLowering::LocalFunction { stmt_id });
+    }
+    fn record_callable_invoke(
+        &mut self,
+        call: ExprId,
+        function: ExprId,
+        sig: &crate::types::FnSig,
+        args: &[ExprId],
+        arg_tys: &[Ty],
+        span: Span,
+    ) -> Ty {
+        if !self.callable_invoke_signature_supported(sig) {
+            self.diags.error(
+                span,
+                "krusty: callable invoke with value-class signature is not supported".to_string(),
+            );
+            return Ty::Error;
+        }
+        if sig.params.len() != arg_tys.len() {
+            self.diags.error(
+                span,
+                format!(
+                    "function value expects {} args, got {}",
+                    sig.params.len(),
+                    arg_tys.len()
+                ),
+            );
+        } else {
+            for (i, (p, a)) in sig.params.iter().zip(arg_tys).enumerate() {
+                self.expect_assignable(*p, *a, self.span(args[i]), "argument");
+            }
+            self.expr_lowers.insert(
+                call,
+                ExprLowering::CallableInvoke {
+                    function,
+                    params: sig.params.clone(),
+                    ret: sig.ret,
+                },
+            );
+        }
+        sig.ret
+    }
+    fn callable_invoke_signature_supported(&self, sig: &crate::types::FnSig) -> bool {
+        sig.params
+            .iter()
+            .chain(std::iter::once(&sig.ret))
+            .all(|t| !self.ty_needs_callable_value_bridge(*t))
+    }
+    fn ty_needs_callable_value_bridge(&self, ty: Ty) -> bool {
+        match ty {
+            Ty::Obj(internal, _) => {
+                self.syms
+                    .class_by_internal(internal)
+                    .is_some_and(|c| c.value_field.is_some())
+                    || self
+                        .syms
+                        .libraries
+                        .resolve_type(internal)
+                        .is_some_and(|t| t.value_underlying.is_some())
+            }
+            Ty::Nullable(inner) | Ty::TyParam(_, inner) => {
+                self.ty_needs_callable_value_bridge(*inner)
+            }
+            _ => false,
+        }
     }
     fn local_function_expr_count(&self) -> usize {
         self.expr_lowers
@@ -7926,6 +7998,12 @@ impl<'a> Checker<'a> {
                         return c.ret;
                     }
                 }
+                if name == CALLABLE_INVOKE_OPERATOR {
+                    if let Ty::Fun(sig) = rt {
+                        return self
+                            .record_callable_invoke(call, receiver, sig, args, &arg_tys, span);
+                    }
+                }
                 // A non-public (`@InlineOnly`) extension the backend SPLICES (no callable method to call):
                 // a lambda-bearing scope fn (`takeIf`/`takeUnless`/…), recovering the receiver-bound return.
                 if args.len() == 1 && matches!(self.file.expr(args[0]), Expr::Lambda { .. }) {
@@ -8142,12 +8220,8 @@ impl<'a> Checker<'a> {
                 // Calling a local variable of function type: `val f: () -> String = { "OK" }; f()`.
                 if let Some(local) = self.lookup(&fname) {
                     if let Ty::Fun(s) = local.ty {
-                        let ret = s.ret;
                         let arg_tys: Vec<Ty> = args.iter().map(|a| self.expr(*a)).collect();
-                        let _ = arg_tys;
-                        // The call yields the function type's real return type (erased to `Object` only
-                        // at the JVM level by `FunctionN.invoke`, which the backend unboxes/casts).
-                        return ret;
+                        return self.record_callable_invoke(call, callee, s, args, &arg_tys, span);
                     }
                 }
                 // Calling a TOP-LEVEL property of function type: `val x: () -> Int = ...; x()` (e.g. a
@@ -8156,8 +8230,8 @@ impl<'a> Checker<'a> {
                 // calls `FunctionN.invoke`.
                 if self.lookup(&fname).is_none() {
                     if let Some(&(Ty::Fun(s), _, _)) = self.syms.props.get(&fname) {
-                        let _: Vec<Ty> = args.iter().map(|a| self.expr(*a)).collect();
-                        return s.ret;
+                        let arg_tys: Vec<Ty> = args.iter().map(|a| self.expr(*a)).collect();
+                        return self.record_callable_invoke(call, callee, s, args, &arg_tys, span);
                     }
                 }
                 // Local function call — resolved before top-level funs and constructors.
@@ -8934,9 +9008,8 @@ impl<'a> Checker<'a> {
                 // Check if callee is a Fun type (any expression, e.g. a local variable).
                 let callee_ty = self.expr(callee);
                 let arg_tys: Vec<Ty> = args.iter().map(|a| self.expr(*a)).collect();
-                let _ = arg_tys;
                 if let Ty::Fun(s) = callee_ty {
-                    return s.ret;
+                    return self.record_callable_invoke(call, callee, s, args, &arg_tys, span);
                 }
                 if callee_ty != Ty::Error {
                     self.diags.error(span, "expression is not callable");

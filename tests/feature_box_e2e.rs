@@ -107,6 +107,22 @@ fun box(): String {
 }
 "#,
     ),
+    // Callable values use Kotlin's `invoke` operator convention. Direct calls and the member spelling
+    // both resolve to the same semantic callable invocation before JVM lowering.
+    (
+        "FunctionValueInvokeOperator",
+        r#"
+fun make(): (String) -> String = { s -> s + "K" }
+fun box(): String {
+    val suffix: (String) -> String = { s -> "O" + s }
+    if (suffix("K") != "OK") return "f0"
+    if (suffix.invoke("K") != "OK") return "f1"
+    if (make().invoke("O") != "OK") return "f2"
+    val maybe: (() -> String)? = { "OK" }
+    return maybe!!.invoke()
+}
+"#,
+    ),
     // A valueless `return@lambda` in a `() -> Unit` lambda: the closure method's JVM `invoke` returns
     // the `kotlin/Unit` SINGLETON (a reference, since the generic `R` erases to `Object`), so the local
     // return must `areturn Unit.INSTANCE`, not a `void` `return` (which the verifier rejects). The
