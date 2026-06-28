@@ -41,6 +41,15 @@ fn subsystem_corpus_cases_box_ok() {
     assert_corpus_cases_box_ok(SUBSYSTEM_CASES);
 }
 
+/// `removeLastOrNull() ?: throw ...` inside `buildList` exposes nullable generic extension returns:
+/// Elvis with a diverging RHS must produce the non-null LHS type, not keep `Any?` and lose conformance.
+const ELVIS_NOTHING_GENERIC_CASES: &[&str] = &["inference/pcla/issues/kt49887.kt"];
+
+#[test]
+fn elvis_nothing_generic_corpus_cases_box_ok() {
+    assert_corpus_cases_box_ok(ELVIS_NOTHING_GENERIC_CASES);
+}
+
 /// Representative cases from the primitive-member regression: source-level primitive methods lower from
 /// Kotlin semantics, not as virtual calls on raw primitive stack values.
 const PRIMITIVE_MEMBER_CASES: &[&str] = &[

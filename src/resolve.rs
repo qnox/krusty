@@ -5243,7 +5243,12 @@ impl<'a> Checker<'a> {
                         "krusty: elvis with a Unit right-hand side is not supported".to_string(),
                     );
                 }
-                if lt == Ty::Null {
+                if rt == Ty::Nothing {
+                    match lt0 {
+                        Ty::Nullable(inner) => *inner,
+                        _ => lt,
+                    }
+                } else if lt == Ty::Null {
                     rt
                 } else if rt == Ty::Null {
                     lt

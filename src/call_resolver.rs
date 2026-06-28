@@ -451,19 +451,10 @@ impl<'a> CallResolver<'a> {
                 gsig_to_ty(&gsig.ret, &binds)
             })
             .unwrap_or(c.ret);
-        let ret_ty = match o.ret_class {
-            Some(meta) if self.lib.value_underlying(meta).is_some() => match meta {
-                Ty::Obj(class, _) => Ty::obj_args(class, ret_ty.type_args()),
-                _ => meta,
-            },
-            None => ret_ty,
-            _ => ret_ty,
-        };
-        let ret_ty = if ret_ty.boxed_ref().is_some() && o.ret_nullable {
-            Ty::nullable(ret_ty)
-        } else {
-            ret_ty
-        };
+        let ret_class = o
+            .ret_class
+            .filter(|meta| self.lib.value_underlying(*meta).is_some());
+        let ret_ty = selected_return_type(ret_class, o.ret_nullable, ret_ty);
         LibraryCallable {
             owner: c.owner.clone(),
             name: c.name.clone(),
@@ -1311,12 +1302,13 @@ mod tests {
 
     struct FakeSource {
         name: &'static str,
+        receiver: Option<Ty>,
         info: FunctionInfo,
     }
 
     impl SymbolSource for FakeSource {
         fn functions(&self, name: &str, receiver: Option<Ty>) -> FunctionSet {
-            if receiver.is_none() && name == self.name {
+            if receiver == self.receiver && name == self.name {
                 FunctionSet {
                     overloads: vec![self.info.clone()],
                 }
@@ -1404,10 +1396,41 @@ mod tests {
         }
     }
 
+    fn extension_nullable_string_info() -> FunctionInfo {
+        let receiver = Ty::String;
+        let callable = LibraryCallable {
+            owner: "kotlin/text/StringsKt".to_string(),
+            name: "maybeSuffix".to_string(),
+            params: vec![receiver],
+            ret: Ty::String,
+            physical_ret: Ty::String,
+            descriptor: "(Ljava/lang/String;)Ljava/lang/String;".to_string(),
+            inline: InlineKind::None,
+            default_call: false,
+            vararg_elem: None,
+            signature: None,
+            origin: Origin::Library,
+        };
+        FunctionInfo {
+            kind: FnKind::Extension,
+            receiver: Some(receiver),
+            ret_nullable: true,
+            ret_class: None,
+            flags: FnFlags::default(),
+            callable,
+            public: true,
+            receiver_rank: 0,
+            overload_rank: 0,
+            generic_sig: None,
+            call_sig: CallSig::default(),
+        }
+    }
+
     #[test]
     fn top_level_default_callable_preserves_metadata_return_type() {
         let source = FakeSource {
             name: "make$default",
+            receiver: None,
             info: top_level_default_uint_info(),
         };
         let resolver = CallResolver::new(&source);
@@ -1423,12 +1446,28 @@ mod tests {
     fn top_level_callable_preserves_nullable_metadata_return() {
         let source = FakeSource {
             name: "maybe",
+            receiver: None,
             info: top_level_nullable_string_info(),
         };
         let resolver = CallResolver::new(&source);
         let call = resolver
             .resolve_top_level_callable("maybe", &[], &[])
             .expect("nullable callable should resolve");
+        assert_eq!(call.ret, Ty::nullable(Ty::String));
+        assert_eq!(call.physical_ret, Ty::String);
+    }
+
+    #[test]
+    fn extension_callable_preserves_nullable_metadata_return() {
+        let source = FakeSource {
+            name: "maybeSuffix",
+            receiver: Some(Ty::String),
+            info: extension_nullable_string_info(),
+        };
+        let resolver = CallResolver::new(&source);
+        let call = resolver
+            .resolve_extension_callable("maybeSuffix", Ty::String, &[], &[])
+            .expect("nullable extension callable should resolve");
         assert_eq!(call.ret, Ty::nullable(Ty::String));
         assert_eq!(call.physical_ret, Ty::String);
     }
