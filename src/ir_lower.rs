@@ -6712,14 +6712,7 @@ impl<'a> Lower<'a> {
                 );
             }
         }
-        let op = match name {
-            "plus" => BinOp::Add,
-            "minus" => BinOp::Sub,
-            "times" => BinOp::Mul,
-            "div" => BinOp::Div,
-            "rem" => BinOp::Rem,
-            _ => return None,
-        };
+        let op = BinOp::from_arith_operator_name(name)?;
         let (lt, rt) = (self.info.ty(recv), self.info.ty(arg));
         if !self.has_scalar_value_repr(lt)
             || !self.has_scalar_value_repr(rt)
@@ -12856,14 +12849,7 @@ impl<'a> Lower<'a> {
                     };
                 }
                 // A user `operator fun LhsType.plus(…)` (etc.) extension overrides the builtin operator.
-                let op_name = match op {
-                    BinOp::Add => Some("plus"),
-                    BinOp::Sub => Some("minus"),
-                    BinOp::Mul => Some("times"),
-                    BinOp::Div => Some("div"),
-                    BinOp::Rem => Some("rem"),
-                    _ => None,
-                };
+                let op_name = op.arith_operator_name();
                 if let Some(opn) = op_name {
                     let recv_key = self.recv_ty(lhs).erased_recv();
                     if let Some(&fid) = self.ext_fun_ids.get(&(recv_key, opn.to_string())) {
