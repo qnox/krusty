@@ -101,6 +101,10 @@ pub fn lower_suspend(ir: &mut IrFile, facade: &str) -> bool {
             ir.functions[fid as usize].params.len() as u32 - 1 + if is_static { 0 } else { 1 };
         if let Some(b) = body {
             shift_locals(ir, b, p_old);
+            // `suspendCoroutineUninterceptedOrReturn { c -> … }` bound `c` to a `CurrentContinuation`
+            // placeholder; now that the trailing `Continuation` parameter exists at value-index `p_old`,
+            // resolve the placeholder to read it.
+            rewrite_current_continuation(ir, b, p_old);
         }
 
         if !has_susp {
@@ -344,9 +348,45 @@ fn hoist_expr(
             ir.exprs[e as usize] = IrExpr::SetValue { var, value: nv };
             e
         }
+        // A write to a captured `var` (a `Ref`-cell field) or any object field whose right-hand side
+        // suspends (`result = await(…)`): hoist the receiver then the value so the suspension becomes a
+        // preceding bound temp (`val tmp = await(…); ref.element = tmp`), which the flattener handles.
+        IrExpr::SetField {
+            receiver,
+            class,
+            index,
+            value,
+        } => {
+            let nr = hoist_expr(ir, receiver, suspend_set, orig_rets, prelude);
+            let nv = hoist_expr(ir, value, suspend_set, orig_rets, prelude);
+            ir.exprs[e as usize] = IrExpr::SetField {
+                receiver: nr,
+                class,
+                index,
+                value: nv,
+            };
+            e
+        }
         IrExpr::Return(Some(v)) => {
             let nv = hoist_expr(ir, v, suspend_set, orig_rets, prelude);
             ir.exprs[e as usize] = IrExpr::Return(Some(nv));
+            e
+        }
+        // A write to a captured `var` (a `Ref`-cell holder) whose right-hand side suspends
+        // (`result = await(…)` for a captured `result`): hoist the holder then the value, so the
+        // suspension becomes a preceding bound temp (`val tmp = await(…); ref.element = tmp`).
+        IrExpr::RefSet {
+            holder,
+            elem,
+            value,
+        } => {
+            let nh = hoist_expr(ir, holder, suspend_set, orig_rets, prelude);
+            let nv = hoist_expr(ir, value, suspend_set, orig_rets, prelude);
+            ir.exprs[e as usize] = IrExpr::RefSet {
+                holder: nh,
+                elem,
+                value: nv,
+            };
             e
         }
         // A leaf or a conditional/unhandled node: leave it (any suspension inside surfaces to the
@@ -448,17 +488,27 @@ fn normalize_block_inits(ir: &mut IrFile, b: ExprId) {
         {
             if let IrExpr::Block {
                 stmts: pre,
-                value: Some(inner),
+                value: inner_val,
             } = ir.exprs[init as usize].clone()
             {
-                out.extend(pre);
-                let nv = ir.add_expr(IrExpr::Variable {
-                    index,
-                    ty: ty.clone(),
-                    init: Some(inner),
-                });
-                out.push(nv);
-                continue;
+                // Bind to the block's value; a value-less `Unit` block (`val x: Unit = { …stmts… }`, e.g.
+                // a lambda whose tail expression is an assignment) runs its statements then binds the
+                // `Unit` singleton — so the binding always leaves a value for its `astore`.
+                let inner = match inner_val {
+                    Some(inner) => Some(inner),
+                    None if *ty == Ty::Unit => Some(ir.add_expr(IrExpr::UnitInstance)),
+                    None => None,
+                };
+                if let Some(inner) = inner {
+                    out.extend(pre);
+                    let nv = ir.add_expr(IrExpr::Variable {
+                        index,
+                        ty: ty.clone(),
+                        init: Some(inner),
+                    });
+                    out.push(nv);
+                    continue;
+                }
             }
         }
         out.push(s);
@@ -500,6 +550,9 @@ fn build_state_machine(ir: &mut IrFile, facade: &str, fid: u32, b: ExprId) -> bo
         return false; // a block trailing-value body isn't modeled (suspend bodies use `return`)
     }
     let suspend_set: HashSet<u32> = ir.suspend_funs.iter().copied().collect();
+    if binds_value_class_suspension(ir, b, &suspend_set) {
+        return false; // an inline-class suspension result across the CPS boundary isn't modeled
+    }
 
     // Spilled locals: any local read at or after the first statement that contains a suspension — a
     // sound over-approximation of "live across a suspension point". Each maps to its declared type.
@@ -538,7 +591,7 @@ fn build_state_machine(ir: &mut IrFile, facade: &str, fid: u32, b: ExprId) -> bo
     let mut spilled: Vec<(u32, Ty)> = Vec::new();
     for idx in reads {
         if let Some(ty) = param_ty(idx).or_else(|| find_local_ty(ir, b, idx)) {
-            spilled.push((idx, ty));
+            spilled.push((idx, spill_field_ty(ty)));
         }
     }
     // The spilled value parameters — captured at continuation construction (in spilled order).
@@ -773,15 +826,32 @@ fn build_lambda_state_machine(
         return false;
     };
     let suspend_set: HashSet<u32> = ir.suspend_funs.iter().copied().collect();
-    // Lift a suspension nested in an expression (`res = foo().a`) into a preceding `val tmp = foo()`,
-    // exactly as the function path does — so the flattener meets it as a bound-local suspension (and its
-    // result is typed by the callee's logical return, not left inline where it would be mis-emitted).
-    hoist_suspensions(ir, b, &suspend_set, orig_rets);
+    // Flatten a block-valued statement (`{ val g = …; res = g() }` whose tail assignment is wrapped as a
+    // `Unit`-valued `Variable { init: Block { … } }`) into the top-level statement list FIRST, so the
+    // hoist below sees the in-block declarations and the suspension in their real order — then lift a
+    // suspension nested in an expression (`res = foo().a`) into a preceding `val tmp = foo()`, so the
+    // flattener meets it as a bound-local suspension typed by the callee's logical return.
     normalize_block_inits(ir, b);
+    hoist_suspensions(ir, b, &suspend_set, orig_rets);
+    if binds_value_class_suspension(ir, b, &suspend_set) {
+        crate::trace_compiler!(
+            "suspend",
+            "build_lambda_sm fid={fid} SKIP: value-class suspension result not modeled"
+        );
+        return false;
+    }
     let IrExpr::Block { stmts, value } = ir.exprs[b as usize].clone() else {
+        crate::trace_compiler!(
+            "suspend",
+            "build_lambda_sm fid={fid} BAIL: body not a Block"
+        );
         return false;
     };
     if value.is_some() {
+        crate::trace_compiler!(
+            "suspend",
+            "build_lambda_sm fid={fid} BAIL: block has a trailing value"
+        );
         return false;
     }
     crate::trace_compiler!(
@@ -793,6 +863,10 @@ fn build_lambda_state_machine(
         .iter()
         .position(|&s| expr_calls_suspend(ir, s, &suspend_set))
     else {
+        crate::trace_compiler!(
+            "suspend",
+            "build_lambda_sm fid={fid} BAIL: no suspend call in any stmt"
+        );
         return false;
     };
     let mut reads: Vec<u32> = Vec::new();
@@ -809,7 +883,7 @@ fn build_lambda_state_machine(
             continue;
         }
         if let Some(ty) = find_local_ty(ir, b, idx) {
-            spilled.push((idx, ty));
+            spilled.push((idx, spill_field_ty(ty)));
         }
     }
 
@@ -847,10 +921,26 @@ fn build_lambda_state_machine(
         next_local: base + 2,
         failed: false,
     };
+    for (n, &s) in stmts.iter().enumerate() {
+        crate::trace_compiler!(
+            "suspend",
+            "lambda stmt[{n}] = {:?}",
+            flat.ir.exprs[s as usize]
+        );
+    }
     flat.flatten(&stmts, 0, None);
     if flat.failed {
+        crate::trace_compiler!(
+            "suspend",
+            "build_lambda_sm fid={fid} BAIL: flattener failed"
+        );
         return false;
     }
+    crate::trace_compiler!(
+        "suspend",
+        "build_lambda_sm fid={fid} spilled={:?}",
+        flat.spilled
+    );
     let states = std::mem::take(&mut flat.states);
 
     let k = |ir: &mut IrFile, e: IrExpr| ir.add_expr(e);
@@ -1081,9 +1171,15 @@ impl Flat<'_> {
         self.setfield(out, 1, v);
     }
     fn spill_all(&mut self, out: &mut Vec<ExprId>) {
-        for (l, _) in self.spilled.clone() {
+        for (l, ty) in self.spilled.clone() {
             let f = self.spill_field(l);
-            let v = self.gv(l);
+            // A `Unit`-typed local has no on-stack value (`gv` would underflow) — its live value across
+            // the suspension is always the `Unit` singleton, so store that directly.
+            let v = if ty == Ty::obj("kotlin/Unit") {
+                self.add(IrExpr::UnitInstance)
+            } else {
+                self.gv(l)
+            };
             self.setfield(out, f, v);
         }
     }
@@ -1420,6 +1516,27 @@ impl Flat<'_> {
                 }
             }
             if expr_calls_suspend(self.ir, stmt, self.suspend) {
+                if let IrExpr::Variable { init: Some(i), .. } = self.ir.exprs[stmt as usize] {
+                    crate::trace_compiler!(
+                        "suspend",
+                        "flatten BAIL: Variable init node = {:?}",
+                        self.ir.exprs[i as usize]
+                    );
+                    if let IrExpr::Block { stmts: bs, .. } = &self.ir.exprs[i as usize] {
+                        for &bsi in bs {
+                            crate::trace_compiler!(
+                                "suspend",
+                                "flatten BAIL: block stmt = {:?}",
+                                self.ir.exprs[bsi as usize]
+                            );
+                        }
+                    }
+                }
+                crate::trace_compiler!(
+                    "suspend",
+                    "flatten BAIL: unhandled suspending stmt {:?}",
+                    self.ir.exprs[stmt as usize]
+                );
                 self.failed = true;
                 self.states[cur] = out;
                 return;
@@ -1889,6 +2006,45 @@ fn ensure_tail_return(ir: &mut IrFile, body: ExprId, unit_ret: bool) {
     ir.exprs[body as usize] = IrExpr::Block { stmts, value: None };
 }
 
+/// The continuation-field type for a spilled local. A `Unit`-typed local spills as the `kotlin/Unit`
+/// object reference — a JVM field cannot carry the `void` ("V") descriptor that `Ty::Unit` produces, and
+/// the live value across the suspension is the `Unit` singleton.
+fn spill_field_ty(ty: Ty) -> Ty {
+    if ty == Ty::Unit {
+        Ty::obj("kotlin/Unit")
+    } else {
+        ty
+    }
+}
+
+/// True if `e`'s subtree binds the result of a suspension to a value(inline)-class-typed local. An
+/// inline-class value returned across the `Object`-typed CPS resume boundary needs box-impl/unbox-impl
+/// handling that the state-machine restore doesn't model yet, so such a suspend body is SKIPPED (the file
+/// cleanly falls back to unsupported — never a miscompile). The common (non-value-class) result path is
+/// unaffected.
+fn binds_value_class_suspension(ir: &IrFile, e: ExprId, suspend_set: &HashSet<u32>) -> bool {
+    if let IrExpr::Variable {
+        ty: Ty::Obj(internal, _),
+        init: Some(init),
+        ..
+    } = &ir.exprs[e as usize]
+    {
+        if is_suspend_call(ir, *init, suspend_set)
+            && ir
+                .classes
+                .iter()
+                .any(|c| c.fq_name == *internal && c.is_value)
+        {
+            return true;
+        }
+    }
+    let mut found = false;
+    for_each_child(&ir.exprs, e, &mut |c| {
+        found = found || binds_value_class_suspension(ir, c, suspend_set);
+    });
+    found
+}
+
 fn box_returns(ir: &mut IrFile, e: ExprId) -> bool {
     match ir.exprs[e as usize].clone() {
         IrExpr::Return(None) => true,
@@ -1923,6 +2079,8 @@ fn box_returns(ir: &mut IrFile, e: ExprId) -> bool {
         IrExpr::PrimitiveBinOp { lhs, rhs, .. } => box_returns(ir, lhs) && box_returns(ir, rhs),
         IrExpr::SetValue { value, .. } => box_returns(ir, value),
         IrExpr::SetField { value, .. } => box_returns(ir, value),
+        IrExpr::RefGet { holder, .. } => box_returns(ir, holder),
+        IrExpr::RefSet { holder, value, .. } => box_returns(ir, holder) && box_returns(ir, value),
         IrExpr::Variable { init, .. } => init.is_none_or(|i| box_returns(ir, i)),
         IrExpr::GetField { receiver, .. } => box_returns(ir, receiver),
         IrExpr::Call { args, .. } => args.into_iter().all(|a| box_returns(ir, a)),
@@ -1958,6 +2116,20 @@ fn shift_locals(ir: &mut IrFile, e: ExprId, threshold: u32) {
     for_each_child(&ir.exprs, e, &mut |c| kids.push(c));
     for c in kids {
         shift_locals(ir, c, threshold);
+    }
+}
+
+/// Resolve every `CurrentContinuation` placeholder in `e` to read the continuation value at `slot` (the
+/// trailing `Continuation` parameter's value-index). Emitted by `ir_lower` for the lambda parameter of
+/// `suspendCoroutineUninterceptedOrReturn { c -> … }`.
+fn rewrite_current_continuation(ir: &mut IrFile, e: ExprId, slot: u32) {
+    if matches!(ir.exprs[e as usize], IrExpr::CurrentContinuation) {
+        ir.exprs[e as usize] = IrExpr::GetValue(slot);
+    }
+    let mut kids = Vec::new();
+    for_each_child(&ir.exprs, e, &mut |c| kids.push(c));
+    for c in kids {
+        rewrite_current_continuation(ir, c, slot);
     }
 }
 

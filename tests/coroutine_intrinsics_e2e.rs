@@ -57,6 +57,56 @@ fun box(): String { builder { }; return \"OK\" }\n";
     );
 }
 
+/// A reusable `builder { … }` over a named `Continuation` completion (anonymous-object completions hit a
+/// separate property-override gap). Each `box()` declares a LOCAL `var res` the lambda captures and
+/// writes — the pattern the coroutine box corpus uses to observe a coroutine's effect.
+const BUILDER: &str = "import kotlin.coroutines.*\n\
+import kotlin.coroutines.intrinsics.*\n\
+class Done : Continuation<Unit> {\n\
+  override val context: CoroutineContext = EmptyCoroutineContext\n\
+  override fun resumeWith(result: Result<Unit>) {}\n\
+}\n\
+fun builder(c: suspend () -> Unit) { c.startCoroutine(Done()) }\n";
+
+#[test]
+fn suspend_lambda_writes_captured_var_with_state_machine_result() {
+    // A suspend lambda assigns the result of a state-machine suspend fn (`simple` calls `dummy` twice)
+    // to a captured local `var` (`res = simple()`). Exercises hoisting a suspension out of a captured-var
+    // write and the lambda state machine. Round-tripped on the JVM.
+    let src = format!(
+        "{BUILDER}\
+suspend fun dummy() {{}}\n\
+suspend fun simple(): String {{ dummy(); dummy(); return \"OK\" }}\n\
+fun box(): String {{ var res = \"FAIL\"; builder {{ res = simple() }}; return res }}\n"
+    );
+    assert_eq!(run(&src).expect("captured-var suspend result runs"), "OK");
+}
+
+#[test]
+fn suspend_operator_invoke_with_local_receiver() {
+    // `g()` is a `suspend operator fun invoke()` on a local receiver — the receiver must be live (spilled)
+    // across the suspension; it is constructed before the suspension, not after. Round-tripped on the JVM.
+    let src = format!(
+        "{BUILDER}\
+class GetResult {{ suspend operator fun invoke(): String = \"OK\" }}\n\
+fun box(): String {{ var res = \"FAIL\"; builder {{ val g = GetResult(); res = g() }}; return res }}\n"
+    );
+    assert_eq!(run(&src).expect("suspend operator invoke runs"), "OK");
+}
+
+#[test]
+fn suspend_coroutine_unintercepted_reads_its_continuation() {
+    // `suspendCoroutineUninterceptedOrReturn { c -> c.resume(t); COROUTINE_SUSPENDED }` reads its
+    // continuation `c` (bound via the `CurrentContinuation` placeholder, resolved by the CPS pass) and
+    // resumes synchronously. Round-tripped on the JVM.
+    let src = format!(
+        "{BUILDER}\
+suspend fun <T> await(t: T): T = suspendCoroutineUninterceptedOrReturn {{ c -> c.resume(t); COROUTINE_SUSPENDED }}\n\
+fun box(): String {{ var res = \"FAIL\"; builder {{ res = await(\"OK\") }}; return res }}\n"
+    );
+    assert_eq!(run(&src).expect("suspendCoroutine reading c runs"), "OK");
+}
+
 #[test]
 fn coroutine_suspended_as_a_plain_value() {
     const SRC: &str = "import kotlin.coroutines.intrinsics.*\n\

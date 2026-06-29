@@ -294,6 +294,11 @@ pub enum IrExpr {
     /// kotlin/Unit.INSTANCE:Lkotlin/Unit;` — what a `Unit`-returning lambda body yields so its
     /// `FunctionN.invoke` returns an `Object`. Another backend realizes the unit value differently.
     UnitInstance,
+    /// The enclosing suspend function's own `Continuation` — the receiver bound to the lambda parameter
+    /// of `suspendCoroutineUninterceptedOrReturn { c -> … }`. A placeholder emitted by `ir_lower` that the
+    /// CPS pass (`jvm/suspend.rs`) rewrites to the real continuation value (`GetValue(<cont slot>)`) once
+    /// the trailing `Continuation` parameter exists. It must never survive to the emitter.
+    CurrentContinuation,
     /// Invoke a function value (`f(args)` where `f: (A,…) -> R`) via the `FunctionN.invoke` interface
     /// method. Arguments are boxed to `Object`; the `Object` result is cast/unboxed to `ret`.
     InvokeFunction {
@@ -993,7 +998,8 @@ pub fn for_each_child(exprs: &[IrExpr], e: ExprId, f: &mut impl FnMut(ExprId)) {
         | IrExpr::ExternalStaticInstance { .. }
         | IrExpr::StaticInstance { .. }
         | IrExpr::EnumValues { .. }
-        | IrExpr::UnitInstance => {}
+        | IrExpr::UnitInstance
+        | IrExpr::CurrentContinuation => {}
     }
 }
 
