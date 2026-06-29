@@ -3038,3 +3038,30 @@ The WITH_COROUTINES corpus uses an injected helper block (`helpers.*`: `runBlock
 Order to land green: (1) Continuation-factory resolution → helper block compiles; (2) general
 suspend-lambda SM with captures → `builder { res = ok() }` runs; (3) re-apply suspendCoroutine lowering;
 (4) verify a coroutine box() round-trip under `-Xverify:all`; commit each verified increment.
+
+### Coroutine blocker #1 root cause (Continuation factory) — precise mechanism
+
+`Continuation(ctx) { resumeWith }` is the stdlib `@InlineOnly inline fun <T> Continuation(context, crossinline
+resumeWith): Continuation<T>`. In `kotlin-stdlib` bytecode this is a `private static final` synthetic method
+on `kotlin.coroutines.ContinuationKt` (verified via javap) — `@InlineOnly` funs have no public method.
+krusty's classpath member construction filters to PUBLIC methods, so the factory is invisible →
+`unresolved function 'Continuation'`. (`EmptyCoroutineContext` resolves fine with a real classpath; the
+factory is the only gap there.)
+
+A manual `object : Continuation<T> { override val context = ctx; override fun resumeWith(r) {…} }` DOES
+compile in krusty today, so the target shape is supported. Two implementation paths:
+1. Generic: resolve `@InlineOnly` top-level inline funs from `@Metadata` (krusty already does this for
+   `error`/`require`/`check` via `MustInline`) and splice the factory body — but its body creates an
+   anonymous `Continuation` object, so the bytecode splicer must handle an object literal inside the
+   inlined body (advanced).
+2. Coroutine-primitive desugar: extend the existing `coroutine_intrinsic` registry (already a curated set
+   of coroutine primitives: `suspendCoroutineUninterceptedOrReturn`/`startCoroutine`/`COROUTINE_SUSPENDED`)
+   to recognize `Continuation`, and desugar `Continuation(ctx){lambda}` to the anonymous-object shape
+   above. Caveat: krusty's anon-object machinery runs at PARSE time (synthetic class decl +
+   `rewrite_anon_captures`), so synthesizing it post-parse in the checker/lowerer is awkward — the desugar
+   likely belongs in the parser keyed on the `Continuation(args){lambda}` shape, or the anon-object
+   synthesis must be made callable post-parse.
+
+Either path is real work; path 2 is the more self-contained and consistent with how krusty already treats
+coroutine primitives. This is the first of the three interlocking coroutine blockers (then suspend-lambda
+state machine with captures, then re-apply the suspendCoroutine lowering).
