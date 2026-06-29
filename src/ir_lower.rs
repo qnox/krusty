@@ -4098,9 +4098,32 @@ impl<'a> Lower<'a> {
     fn stmt_diverges(&self, s: crate::ast::StmtId) -> bool {
         match self.afile.stmt(s) {
             Stmt::Return(..) | Stmt::Break(_) | Stmt::Continue(_) => true,
-            Stmt::Expr(e) => self.info.ty(*e) == Ty::Nothing,
+            Stmt::Expr(e) => self.expr_diverges(*e),
             _ => false,
         }
+    }
+
+    /// True for an expression that transfers control away unconditionally. A `Nothing`-typed expression
+    /// (`throw`, `return`, a never-returning call) qualifies; so does a constant-condition `if` whose
+    /// taken branch diverges (`if (true) return`) — the lowerer const-folds it to just that branch
+    /// (see the `Expr::BoolLit` fold in the `Expr::If` arm), so the trailing code is dead and must drop.
+    fn expr_diverges(&self, e: AstExprId) -> bool {
+        if self.info.ty(e) == Ty::Nothing {
+            return true;
+        }
+        if let Expr::If {
+            cond,
+            then_branch,
+            else_branch,
+        } = self.afile.expr(e)
+        {
+            return match self.afile.expr(*cond) {
+                Expr::BoolLit(true) => self.expr_diverges(*then_branch),
+                Expr::BoolLit(false) => else_branch.is_some_and(|eb| self.expr_diverges(eb)),
+                _ => false,
+            };
+        }
+        false
     }
 
     /// The underlying type of a `@JvmInline value class` (`Z(val v: Int)` → `Int`), or `None` for an
@@ -11479,7 +11502,9 @@ impl<'a> Lower<'a> {
                 // a reference OR a nullable-primitive (`s?.length` : `Int?`) — the assembly below boxes the
                 // primitive member value into the wrapper (`null` in the other branch).
                 if !rty.is_reference()
-                    || (!result_ty.is_reference() && result_ty.nullable_primitive().is_none())
+                    || (!result_ty.is_reference()
+                        && result_ty.nullable_primitive().is_none()
+                        && result_ty != Ty::Unit)
                 {
                     return None;
                 }
@@ -11645,6 +11670,14 @@ impl<'a> Lower<'a> {
                         op: IrTypeOp::ImplicitCoercion,
                         arg: member,
                         type_operand: mark_nullable(ty_to_ir(result_ty)),
+                    })
+                } else if result_ty == Ty::Unit {
+                    // A `Unit` result (`x?.let { for … }`): run the member for effect, then yield
+                    // `Unit.INSTANCE` so this branch matches the `null` branch (both references).
+                    let unit = self.ir.add_expr(IrExpr::UnitInstance);
+                    self.ir.add_expr(IrExpr::Block {
+                        stmts: vec![member],
+                        value: Some(unit),
                     })
                 } else {
                     member

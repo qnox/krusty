@@ -5536,6 +5536,12 @@ impl<'a> Checker<'a> {
                 // (`s?.length`); the member value is boxed (or `null`) in lowering. A non-boxable
                 // primitive (unsigned/value) stays unsupported.
                 if !result.is_reference() && result != Ty::Error {
+                    if result == Ty::Unit {
+                        // `x?.let { … }` whose lambda body is `Unit` (a `for`/statement body): the safe call
+                        // is `Unit?` — `null` when the receiver is null, else `Unit`. The lowerer runs the
+                        // member for effect and yields `Unit.INSTANCE`/`null` (both references).
+                        return self.set(e, Ty::Unit);
+                    }
                     if let Some(nb) = result.nullable_boxed() {
                         return self.set(e, nb);
                     }
