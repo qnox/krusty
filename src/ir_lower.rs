@@ -12868,7 +12868,14 @@ impl<'a> Lower<'a> {
                     let recv_key = self.recv_ty(lhs).erased_recv();
                     if let Some(&fid) = self.ext_fun_ids.get(&(recv_key, opn.to_string())) {
                         let params = self.ir.functions[fid as usize].params.clone();
-                        if params.len() == 2 {
+                        // Only route to the extension when the RIGHT operand matches its parameter —
+                        // `Int + Int` inside an `Int.plus(V)` body is the builtin op, not a re-entry into
+                        // the extension (the checker types it `Int`; the lowerer must agree).
+                        let rt = self.info.ty(rhs);
+                        let arg_ok = params.len() == 2
+                            && (ty_to_ir(rt) == params[1]
+                                || (rt.is_reference() && ir_type_is_reference(&params[1])));
+                        if arg_ok {
                             let l = self.lower_arg(lhs, &params[0])?;
                             let r = self.lower_arg(rhs, &params[1])?;
                             return Some(self.ir.add_expr(IrExpr::Call {

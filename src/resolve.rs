@@ -5846,8 +5846,25 @@ impl<'a> Checker<'a> {
                             })
                         {
                             // logical params (receiver is `callable.params[0]`) — operators take one arg.
+                            // Only apply the extension when the RIGHT operand actually matches its
+                            // parameter type; otherwise this is the builtin (`Int * Int` inside the body
+                            // of a `Int.times(V)` extension must NOT re-pick that extension and infer `V`).
                             if fi.callable.params.len() == 2 {
-                                return self.set(e, fi.callable.ret);
+                                // Match the lowerer's guard (ir_lower Binary extension path): an exact
+                                // operand/param match, or a reference subtype. No loose cross-numeric
+                                // clause — a numeric-param operator on a primitive is the builtin's job
+                                // (and `p == rt` already covers a same-type numeric param).
+                                let p = fi.callable.params[1];
+                                let arg_ok = p == rt
+                                    || (p.is_reference()
+                                        && rt.is_reference()
+                                        && match (p.obj_internal(), rt.obj_internal()) {
+                                            (Some(ps), Some(rs)) => self.obj_is_subtype(rs, ps),
+                                            _ => true,
+                                        });
+                                if arg_ok {
+                                    return self.set(e, fi.callable.ret);
+                                }
                             }
                         }
                     }
@@ -8103,7 +8120,14 @@ impl<'a> Checker<'a> {
                 // directly to the equivalent operator bytecode (see the mirror in `emit_call`); the
                 // rest (`mod` floor-semantics, `rangeTo`, `inc`/`dec`) aren't modeled → reject rather
                 // than dispatch to a user extension, which would miscompile.
-                if rt.is_numeric_or_char() && is_builtin_operator_method(&name) {
+                // The builtin only applies when every argument is itself a numeric/char primitive (the
+                // operand types a builtin operator accepts). A non-numeric argument (`2 * V(3)` with a
+                // user `operator fun Int.times(v: V)`) means this is an EXTENSION operator — fall through
+                // to extension resolution rather than forcing (and rejecting) the builtin.
+                if rt.is_numeric_or_char()
+                    && is_builtin_operator_method(&name)
+                    && arg_tys.iter().all(|a| a.is_numeric_or_char())
+                {
                     // A user `infix`/`operator` extension with this name shadows the builtin for the
                     // *infix* form (`a rem b`) while the dot form (`a.rem(b)`) keeps the builtin.
                     let user_ext = crate::module_symbols::ModuleSymbols::new(self.syms)
