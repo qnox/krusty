@@ -6646,7 +6646,13 @@ impl<'a> Lower<'a> {
     /// (`a.plus(b)`, `a.times(b)`, … — valid Kotlin, identical to `a + b`). The checker already typed it;
     /// lower it to the same `PrimitiveBinOp` the operator form produces (with mixed-operand promotion and
     /// the unsigned `div`/`rem` intrinsics). Returns `None` for a name/receiver this doesn't model.
-    fn lower_prim_op_method(&mut self, recv: AstExprId, name: &str, arg: AstExprId) -> Option<u32> {
+    fn lower_prim_op_method(
+        &mut self,
+        recv: AstExprId,
+        name: &str,
+        arg: AstExprId,
+        result_ty: Ty,
+    ) -> Option<u32> {
         let lt = self.info.ty(recv);
         // Bitwise/shift operator-methods (`a.and(b)`, `a shl b`, …) are stdlib intrinsics on `Int`/`Long`
         // only — kotlinc maps them to `iand`/`ishl`/… . `and`/`or`/`xor` take the receiver's own type;
@@ -6736,56 +6742,42 @@ impl<'a> Lower<'a> {
         let irop = bin_to_ir(op)?;
         let mut l = self.expr(recv)?;
         let mut r = self.expr(arg)?;
-        // `Char` arithmetic (`'a'.plus(1)`): operate on ints (no promotion between Char/Int), then
-        // truncate back to `Char` if the result is a `Char` — mirrors the `Expr::Binary` Char path.
-        if lt == Ty::Char
-            && matches!(op, BinOp::Add | BinOp::Sub)
-            && (rt == Ty::Int || rt == Ty::Char)
-        {
-            let int_ir = ty_to_ir(Ty::Int);
+        // Compute in the operands' common stack representation — the numeric-promoted type, or plain
+        // `Int` for the int-category types (`Char`/`Byte`/`Short`) that share the int stack but have no
+        // promotion rule. Then coerce the result to whatever type the resolver assigned the call:
+        // `Char.plus(Int)` → `Char` (i2c), `Int.plus(Long)` → `Long`, `UInt.plus(UInt)` → `UInt`
+        // (same int rep, a no-op). One generic flow driven by the resolved types — no per-type case.
+        let lrep = self.scalar_value_repr(lt)?;
+        let rrep = self.scalar_value_repr(rt)?;
+        let op_ty = Ty::promote(lrep, rrep).unwrap_or(Ty::Int);
+        let op_ir = ty_to_ir(op_ty);
+        if lrep != op_ty {
             l = self.ir.add_expr(IrExpr::TypeOp {
                 op: IrTypeOp::ImplicitCoercion,
                 arg: l,
-                type_operand: int_ir.clone(),
+                type_operand: op_ir,
             });
-            if rt == Ty::Char {
-                r = self.ir.add_expr(IrExpr::TypeOp {
-                    op: IrTypeOp::ImplicitCoercion,
-                    arg: r,
-                    type_operand: int_ir,
-                });
-            }
-            let raw = self.ir.add_expr(IrExpr::PrimitiveBinOp {
-                op: irop,
-                lhs: l,
-                rhs: r,
+        }
+        if rrep != op_ty {
+            r = self.ir.add_expr(IrExpr::TypeOp {
+                op: IrTypeOp::ImplicitCoercion,
+                arg: r,
+                type_operand: op_ir,
             });
-            return Some(raw);
         }
-        // Mixed numeric operands (`1L.plus(2)`): promote both to the common type before the op.
-        if lt != rt {
-            let p = Ty::promote(lt, rt)?;
-            let pir = ty_to_ir(p);
-            if lt != p {
-                l = self.ir.add_expr(IrExpr::TypeOp {
-                    op: IrTypeOp::ImplicitCoercion,
-                    arg: l,
-                    type_operand: pir.clone(),
-                });
-            }
-            if rt != p {
-                r = self.ir.add_expr(IrExpr::TypeOp {
-                    op: IrTypeOp::ImplicitCoercion,
-                    arg: r,
-                    type_operand: pir,
-                });
-            }
-        }
-        Some(self.ir.add_expr(IrExpr::PrimitiveBinOp {
+        let raw = self.ir.add_expr(IrExpr::PrimitiveBinOp {
             op: irop,
             lhs: l,
             rhs: r,
-        }))
+        });
+        Some(match self.scalar_value_repr(result_ty) {
+            Some(rep) if rep != op_ty => self.ir.add_expr(IrExpr::TypeOp {
+                op: IrTypeOp::ImplicitCoercion,
+                arg: raw,
+                type_operand: ty_to_ir(result_ty),
+            }),
+            _ => raw,
+        })
     }
 
     /// Resolve a field by name, walking the superclass chain. Returns the *owning* class id, the
@@ -11683,7 +11675,9 @@ impl<'a> Lower<'a> {
                 if !rty.is_reference() {
                     if let Some(args) = &args {
                         if args.len() == 1 {
-                            if let Some(r) = self.lower_prim_op_method(receiver, &name, args[0]) {
+                            if let Some(r) =
+                                self.lower_prim_op_method(receiver, &name, args[0], self.info.ty(e))
+                            {
                                 return Some(r);
                             }
                         }
@@ -13288,9 +13282,9 @@ impl<'a> Lower<'a> {
                     if ty.nullable {
                         None
                     } else {
-                        Ty::from_name(&ty.name).filter(|t| {
-                            self.has_scalar_value_repr(*t) && !matches!(t, Ty::Double | Ty::Float)
-                        })
+                        // `x is Int`/`x is Double` → `instanceof` the boxed wrapper. Float/Double are
+                        // allowed: a boxed-FP `==` reached after the test conforms with IEEE semantics.
+                        Ty::from_name(&ty.name).filter(|t| self.has_scalar_value_repr(*t))
                     }
                 })?;
                 // An unsigned target tests against its inline-class object (`kotlin/UInt`), not the
@@ -14924,7 +14918,9 @@ impl<'a> Lower<'a> {
                                 name.clone(),
                             )))
                     {
-                        if let Some(r) = self.lower_prim_op_method(receiver, &name, args[0]) {
+                        if let Some(r) =
+                            self.lower_prim_op_method(receiver, &name, args[0], self.info.ty(e))
+                        {
                             return Some(r);
                         }
                     }
