@@ -1735,6 +1735,20 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     lo.cur_fn_name = m.name.clone();
                     lo.cur_fn_suspend = m.is_suspend;
                     lo.lambda_seq = 0;
+                    // This method's own type params (`fun <R> m()`) plus the class's (`class C<T>`) are
+                    // the `as T` cast targets in scope. The method's go FIRST so a same-named method
+                    // param shadows the class one (`.find` takes the first match).
+                    lo.cur_tparams = collect_tparams(
+                        file,
+                        &m.type_params,
+                        &m.type_param_bounds,
+                        &m.non_null_type_params,
+                    );
+                    for ct in class_tparams(file, c) {
+                        if !lo.cur_tparams.iter().any(|(n, _, _)| *n == ct.0) {
+                            lo.cur_tparams.push(ct);
+                        }
+                    }
                     // `this` is value 0.
                     let this_v = lo.fresh_value();
                     lo.scope
@@ -1772,6 +1786,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     lo.next_value = 0;
                     lo.cur_class = Some(internal.clone());
                     lo.cur_fn_name = gname;
+                    lo.cur_tparams = class_tparams(file, c);
                     lo.lambda_seq = 0;
                     let this_v = lo.fresh_value();
                     lo.scope
@@ -1800,6 +1815,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                         lo.cur_class = Some(internal.clone());
                         lo.cur_field = Some((class_id, fidx, fty_ir.clone()));
                         lo.cur_fn_name = gname;
+                        lo.cur_tparams = class_tparams(file, c);
                         lo.lambda_seq = 0;
                         let this_v = lo.fresh_value();
                         lo.scope
@@ -1820,6 +1836,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                             lo.cur_class = Some(internal.clone());
                             lo.cur_field = Some((class_id, fidx, fty_ir.clone()));
                             lo.cur_fn_name = sname;
+                            lo.cur_tparams = class_tparams(file, c);
                             lo.lambda_seq = 0;
                             let this_v = lo.fresh_value();
                             lo.scope
@@ -2138,6 +2155,9 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     lo.scope.clear();
                     lo.next_value = 0;
                     lo.cur_class = Some(internal.clone());
+                    // Property initializers run here (`var s: T = x as T`), so class type params are
+                    // in scope as `as T` cast targets.
+                    lo.cur_tparams = class_tparams(file, c);
                     let this_v = lo.fresh_value();
                     lo.scope
                         .push(("this".to_string(), this_v, Ty::obj(&internal)));
@@ -2375,6 +2395,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                         lo.scope.clear();
                         lo.next_value = 0;
                         lo.cur_class = Some(internal.clone());
+                        lo.cur_tparams = class_tparams(file, c);
                         let this_v = lo.fresh_value();
                         lo.scope
                             .push(("this".to_string(), this_v, Ty::obj(&internal)));
@@ -2940,6 +2961,24 @@ fn collect_tparams(
             (name.clone(), bound, non_null)
         })
         .collect()
+}
+
+/// Class-level type parameters (`class C<T : B>`) as cast targets, so an `x as T` in a member body or
+/// property initializer erases to its bound (`Object` for an unbounded `T`) exactly like kotlinc —
+/// rather than falling through to `ty_ref` (which rejects a bare `T`) and bailing the whole file.
+fn class_tparams(file: &ast::File, c: &ast::ClassDecl) -> Vec<(String, Ty, bool)> {
+    // A value/inline class's generic underlying (`value class Foo<T : String>(val x: T)`) has a
+    // box/unbox erasure krusty doesn't model — an `as T` there must keep bailing (skip the file),
+    // not lower to a checkcast against the bound (which would store the wrong runtime type).
+    if c.is_value {
+        return Vec::new();
+    }
+    collect_tparams(
+        file,
+        &c.type_params,
+        &c.type_param_bounds,
+        &std::collections::HashSet::new(),
+    )
 }
 
 /// block-bodied) without an extension receiver.
