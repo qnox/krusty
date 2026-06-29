@@ -131,6 +131,7 @@ impl<'a> Lexer<'a> {
             b'|' if self.peek2() == b'|' => self.two(TokenKind::OrOr),
             b'"' => return self.string(lo),
             b'\'' => return self.char_lit(lo),
+            b'`' => return self.backtick_ident(),
             b'0'..=b'9' => return self.number(lo),
             b'.' => return self.number(lo), // .5
             c if is_ident_start(c) => return self.ident(lo),
@@ -200,6 +201,32 @@ impl<'a> Lexer<'a> {
                 }
                 _ => break,
             }
+        }
+    }
+
+    /// A backtick-quoted identifier (`` `in` ``, `` `is` ``, `` `name with spaces` ``) — Kotlin's escape
+    /// for using a keyword or an otherwise-illegal name as an identifier. The token is always an `Ident`
+    /// (never re-mapped to a keyword) and its span/text is the CONTENT between the backticks.
+    fn backtick_ident(&mut self) -> Token {
+        self.i += 1; // opening backtick
+        let start = self.i as u32;
+        while self.i < self.b.len() && self.b[self.i] != b'`' && self.b[self.i] != b'\n' {
+            self.i += 1;
+        }
+        let end = self.i as u32;
+        if self.peek() == b'`' {
+            self.i += 1; // closing backtick
+        } else {
+            // No closing backtick before a newline/EOF — malformed source; report it (the token still
+            // becomes the content read so far, so parsing can continue).
+            self.diags.error(
+                Span::new(start.saturating_sub(1), end),
+                "unterminated backtick-quoted identifier".to_string(),
+            );
+        }
+        Token {
+            kind: TokenKind::Ident,
+            span: Span::new(start, end),
         }
     }
 
