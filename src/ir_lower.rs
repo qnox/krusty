@@ -1971,6 +1971,12 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                         if matches!(m.body, FunBody::None) {
                             continue;
                         }
+                        // A `tailrec` companion method isn't loop-transformed (only top-level functions
+                        // are) — skip the file rather than emit stack-overflowing recursion (mirrors the
+                        // instance-method guard).
+                        if m.is_tailrec {
+                            return None;
+                        }
                         let (_, fid, _) = lo.classes[&comp_fq].methods[&m.name];
                         lo.scope.clear();
                         lo.next_value = 0;
@@ -9055,6 +9061,20 @@ impl<'a> Lower<'a> {
                 self.scope.truncate(depth);
                 return None;
             }
+            // In a `tailrec` body the trailing expr is in TAIL position: a self-call there must become
+            // update+continue (via `lower_tail_expr`), not plain (stack-overflowing) recursion — and a
+            // NON-tail self-call there makes `lower_tail_expr` bail, so the file is skipped rather than
+            // miscompiled. (`block_as_body` also lowers ordinary non-`tailrec` block bodies — those keep
+            // the plain return path below.)
+            if self.cur_tailrec.is_some() && *ret_ty != Ty::Unit {
+                let tail = self.lower_tail_expr(t, ret_ty)?;
+                out.push(tail);
+                self.scope.truncate(depth);
+                return Some(self.ir.add_expr(IrExpr::Block {
+                    stmts: out,
+                    value: None,
+                }));
+            }
             let ve = self.expr(t)?;
             if *ret_ty == Ty::Unit || diverges {
                 out.push(ve); // Unit trailing, or a diverging one (returns/throws itself — no wrap)
@@ -9091,6 +9111,17 @@ impl<'a> Lower<'a> {
             param_tys,
             label: label.clone(),
         });
+        // A `try`/`finally` in a `tailrec` body isn't soundly loop-transformable (a tail call in a
+        // `finally` can't be optimized — kotlinc rejects it too), and krusty's try-with-return codegen
+        // would miscompile under the transform — skip the file rather than emit bad bytecode.
+        let has_try = match &f.body {
+            FunBody::Block(b) | FunBody::Expr(b) => body_has_try(self.afile, *b),
+            FunBody::None => false,
+        };
+        if has_try {
+            self.cur_tailrec = None;
+            return None;
+        }
         let unit = *ret_ty == Ty::Unit;
         let loop_body = match &f.body {
             // A `Unit` body recurses with a bare expression STATEMENT (`if (c) f(args)`), not
@@ -16004,6 +16035,16 @@ fn body_has_return(file: &ast::File, e: AstExprId) -> bool {
     file.any_child_expr(e, &mut |x| body_has_return(file, x), &mut |s| {
         stmt_has_return(file, s)
     })
+}
+
+/// Whether `e` or any descendant is a `try` expression — used to keep the `tailrec` loop transform off
+/// a body with a `try`/`finally` (a tail call in a `finally` isn't loop-optimizable, and the
+/// try-with-return codegen would miscompile under the transform).
+fn body_has_try(file: &ast::File, e: AstExprId) -> bool {
+    matches!(file.expr(e), Expr::Try { .. })
+        || file.any_child_expr(e, &mut |x| body_has_try(file, x), &mut |s| {
+            file.any_child_stmt(s, &mut |x| body_has_try(file, x))
+        })
 }
 
 fn stmt_has_return(file: &ast::File, s: ast::StmtId) -> bool {
