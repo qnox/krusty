@@ -4641,6 +4641,21 @@ impl<'a> Parser<'a> {
             TokenKind::Ident => {
                 let n = self.text().to_string();
                 self.bump();
+                // A LABELED `this`/`super` (`this@Outer`, `super@Base`): the `@label` qualifies which
+                // enclosing receiver / supertype it denotes. Capture it on the name (`this@Outer`) so the
+                // checker/lowerer can resolve the label; a bare `this`/`super` stays unchanged.
+                if (n == "this" || n == "super")
+                    && self.at(TokenKind::At)
+                    && self
+                        .t
+                        .get(self.i + 1)
+                        .is_some_and(|t| t.kind == TokenKind::Ident)
+                {
+                    self.bump(); // '@'
+                    let label = self.text().to_string();
+                    self.bump(); // label
+                    return self.file.add_expr(Expr::Name(format!("{n}@{label}")), span);
+                }
                 self.file.add_expr(Expr::Name(n), span)
             }
             TokenKind::LParen => {

@@ -5502,6 +5502,25 @@ impl<'a> Checker<'a> {
                     Ty::Error
                 }
             },
+            // `this@C` where `C` is the CURRENT class (a self-label, e.g. `this@C.h()` inside `C`'s own
+            // method, often redundant): resolve to the current `this`. Outer-class / receiver-lambda /
+            // accessor labels need a receiver-label stack krusty doesn't track yet — those stay
+            // unresolved (the file skips; never miscompiled).
+            Expr::Name(n) if n.starts_with("this@") => {
+                let label = &n["this@".len()..];
+                match self.this_ty {
+                    Some(t @ Ty::Obj(internal, _))
+                        if internal.rsplit(['/', '$']).next() == Some(label) =>
+                    {
+                        t
+                    }
+                    _ => {
+                        self.diags
+                            .error(self.span(e), format!("unresolved reference '{n}'."));
+                        Ty::Error
+                    }
+                }
+            }
             Expr::Name(n) => match self.lookup(&n) {
                 Some(l) => l.ty,
                 // `field` inside an accessor body → the property's backing field. `field` is a soft

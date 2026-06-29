@@ -11793,6 +11793,13 @@ impl<'a> Lower<'a> {
                 );
             }
             Expr::Name(n) => {
+                // A self-labeled `this@C` (the checker resolved it to the current class) reads the same
+                // receiver as a bare `this`; normalize so the `this`/scope handling below applies.
+                let n = if n.starts_with("this@") {
+                    "this".to_string()
+                } else {
+                    n
+                };
                 // `COROUTINE_SUSPENDED` (a `kotlin.coroutines` intrinsic, recognized via the registry) —
                 // read the sentinel through the target runtime. A local of the same name shadows it
                 // (resolved through the scope below).
