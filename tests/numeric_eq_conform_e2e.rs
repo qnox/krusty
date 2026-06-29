@@ -46,3 +46,21 @@ fn mixed_nullable_int_double_ieee() {
 }\n";
     assert_eq!(run(SRC).expect("Int?/Double? IEEE conform"), "OK");
 }
+
+#[test]
+fn smartcast_chain_then_numeric_eq() {
+    // The smart-cast form (the ieee754 cluster): `x is Double? && y is Int? && x == y` narrows BOTH x and
+    // y across the `&&` chain, then conforms. IEEE: `-0.0 == 0` true; both-null equal; `0.0 == 1` false.
+    const SRC: &str = "fun eqDI(x: Any?, y: Any?) = x is Double? && y is Int? && x == y\n\
+fun box(): String {\n\
+    if (!eqDI(null, null)) return \"f1\"\n\
+    if (eqDI(null, 0)) return \"f2\"\n\
+    if (!eqDI(-0.0, 0)) return \"f3\"\n\
+    if (eqDI(0.0, 1)) return \"f4\"\n\
+    return \"OK\"\n\
+}\n";
+    assert_eq!(
+        run(SRC).expect("smart-cast chain numeric == conforms"),
+        "OK"
+    );
+}

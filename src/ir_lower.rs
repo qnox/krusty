@@ -13184,15 +13184,12 @@ impl<'a> Lower<'a> {
                     let mut base_ref = ty.clone();
                     base_ref.nullable = false;
                     // A non-reference base resolves to a primitive whose wrapper the `instanceof` tests
-                    // (`x is Int?` → `x == null || x instanceof Integer`). Float/Double and unsigned stay
-                    // excluded: a smart-cast of those reaches a boxed numeric `==` that needs the conform
-                    // path AND chained-`&&` smart-cast narrowing (not yet wired) — without it they would
-                    // route to a (wrong) `areEqual`. Integral/boolean/char are safe here.
+                    // (`x is Int?` → `x == null || x instanceof Integer`). Float/Double are now allowed: a
+                    // smart-cast of them reaches the IEEE-correct numeric `==` conform. Unsigned stays
+                    // excluded (its conform / value-box unbox isn't modeled).
                     let base = self.ty_ref(&base_ref).or_else(|| {
                         Ty::from_name(&base_ref.name).filter(|t| {
-                            self.has_scalar_value_repr(*t)
-                                && !matches!(t, Ty::Double | Ty::Float)
-                                && !self.is_unsigned_integer_type(*t)
+                            self.has_scalar_value_repr(*t) && !self.is_unsigned_integer_type(*t)
                         })
                     });
                     if let Some(target) = base {

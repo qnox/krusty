@@ -4469,9 +4469,6 @@ impl<'a> Checker<'a> {
         if negated != for_else {
             return None;
         }
-        if ty.nullable {
-            return None;
-        }
         let Expr::Name(n) = self.file.expr(operand).clone() else {
             return None;
         };
@@ -4480,10 +4477,33 @@ impl<'a> Checker<'a> {
             return None;
         }
         let tt = self.resolve_ty_no_diag(&ty);
-        if tt.is_reference() {
-            Some((n, tt))
+        // Narrow `x` to the tested type. A non-null `is T` → a reference `T`. A nullable `is T?` is only
+        // narrowed for a PRIMITIVE (`is Double?` → `Double?`, which the numeric `==` conform compares;
+        // `resolve_ty_no_diag` drops the `?`, so re-wrap with `Ty::nullable`). A nullable REFERENCE
+        // (`is String?`) is NOT narrowed: `is String?` is true for `null` too, so asserting the non-null
+        // erased type would be unsound for a later use.
+        if ty.nullable {
+            tt.boxed_ref().is_some().then(|| (n, Ty::nullable(tt)))
         } else {
-            None
+            tt.is_reference().then_some((n, tt))
+        }
+    }
+
+    /// Collect every smart-cast narrowing established by a `&&`-chain condition (`a && b && c`), recursing
+    /// through nested `&&` so the operand to the right of the whole chain sees ALL of them (`x is Double?
+    /// && y is Int? && x == y` narrows BOTH `x` and `y` for the `==`). A non-`&&` leaf contributes its own
+    /// (positive) narrowing, if any.
+    fn collect_and_narrowings(&self, cond: ExprId, out: &mut Vec<(String, Ty)>) {
+        if let Expr::Binary {
+            op: BinOp::And,
+            lhs,
+            rhs,
+        } = self.file.expr(cond).clone()
+        {
+            self.collect_and_narrowings(lhs, out);
+            self.collect_and_narrowings(rhs, out);
+        } else if let Some(b) = self.smartcast_binding(cond, false) {
+            out.push(b);
         }
     }
 
@@ -5746,9 +5766,17 @@ impl<'a> Checker<'a> {
                 if matches!(op, BinOp::And | BinOp::Or) {
                     let for_else = matches!(op, BinOp::Or);
                     let lt = self.expr(lhs);
-                    let cast = self.smartcast_binding(lhs, for_else);
+                    // `&&`: the RHS sees EVERY narrowing from the (possibly compound) left chain
+                    // (`x is Double? && y is Int? && x == y`). `||`: a single negated narrowing.
+                    let casts: Vec<(String, Ty)> = if op == BinOp::And {
+                        let mut v = Vec::new();
+                        self.collect_and_narrowings(lhs, &mut v);
+                        v
+                    } else {
+                        self.smartcast_binding(lhs, for_else).into_iter().collect()
+                    };
                     self.push_scope();
-                    if let Some((n, t)) = &cast {
+                    for (n, t) in &casts {
                         // Don't narrow to a VALUE class: it's erased to its underlying type, and a
                         // smart-cast use in the same boolean expr (`x is V && x == …`) would take the
                         // unboxed-equals path the `&&`-narrowing lowering doesn't model — miscompile.
