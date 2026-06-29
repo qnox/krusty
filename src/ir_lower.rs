@@ -666,6 +666,20 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 // class's pass-2 body sees that it has defaults; the real default exprs are lowered in
                 // pass 2 and overwrite this marker. (>31 parameters — kotlinc's multi-`int` mask — aren't
                 // modeled; leaving them unmarked makes an omitted-arg call bail, so the file is skipped.)
+                if !m.params.iter().any(|p| p.default.is_some())
+                    && !m.params.is_empty()
+                    && m.params.len() <= 31
+                {
+                    // No OWN defaults: an override may still inherit the base method's defaults.
+                    if let Some(defaults) =
+                        lo.base_const_defaults(file, c.base_class.as_deref(), &m.name, &sig.params)
+                    {
+                        lo.ir
+                            .fn_param_names
+                            .insert(fid, m.params.iter().map(|p| p.name.clone()).collect());
+                        lo.ir.fn_param_defaults.insert(fid, defaults);
+                    }
+                }
                 if m.params.iter().any(|p| p.default.is_some()) && m.params.len() <= 31 {
                     lo.ir.fn_param_defaults.insert(fid, Vec::new());
                     lo.ir
@@ -5218,6 +5232,49 @@ impl<'a> Lower<'a> {
     /// `fun m(args) = this.delegate.m(args)` (an `invokeinterface` on the delegate field). Only
     /// user-interface delegation with a simple `val`-parameter delegate is modeled; anything else
     /// (classpath interface, missing field) returns `None` so the file is skipped, never miscompiled.
+    /// Default-argument INHERITANCE: an override declared without defaults reuses the nearest base
+    /// class's same-named method's defaults (Kotlin forbids re-declaring defaults on an override;
+    /// kotlinc keeps the `$default` stub on the declaring class). Walk the same-module base-class chain
+    /// for a method matching `name` + arity whose params carry CONSTANT defaults, and lower them so an
+    /// omitted-argument call to the override can fill them. Returns `None` (the call then bails/skips)
+    /// when no base default is found, a base is not a module class, or any base default is non-constant.
+    fn base_const_defaults(
+        &mut self,
+        file: &ast::File,
+        base_class: Option<&str>,
+        name: &str,
+        param_tys: &[Ty],
+    ) -> Option<Vec<Option<u32>>> {
+        let mut cur = base_class.map(str::to_string);
+        while let Some(bn) = cur {
+            let bc = file.decls.iter().find_map(|&d| match file.decl(d) {
+                Decl::Class(c) if c.name == bn => Some(c),
+                _ => None,
+            })?;
+            if let Some(bm) = bc
+                .methods
+                .iter()
+                .find(|m| m.name == name && m.params.len() == param_tys.len())
+            {
+                if bm.params.iter().any(|p| p.default.is_some()) {
+                    let mut defaults = Vec::with_capacity(param_tys.len());
+                    for (p, t) in bm.params.iter().zip(param_tys) {
+                        match p.default {
+                            None => defaults.push(None),
+                            Some(d) if is_const_literal(file, d) => {
+                                defaults.push(Some(self.lower_arg(d, &ty_to_ir(*t))?));
+                            }
+                            Some(_) => return None, // a non-constant base default isn't modeled
+                        }
+                    }
+                    return Some(defaults);
+                }
+            }
+            cur = bc.base_class.clone();
+        }
+        None
+    }
+
     fn synth_delegation_forwarders(
         &mut self,
         file: &ast::File,
