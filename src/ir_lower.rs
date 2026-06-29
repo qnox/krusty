@@ -13561,9 +13561,22 @@ impl<'a> Lower<'a> {
                         },
                     };
                     let target_ir = ty_to_ir(target);
-                    let v = self.expr(operand)?;
+                    let mut v = self.expr(operand)?;
+                    // A PRIMITIVE operand (`1 as? Int`, `1.0 as? Double`) carries a scalar value, but
+                    // `instanceof`/`checkcast` need a reference — box it to `Any` first, then the var
+                    // holds (and the cast keeps) the wrapper, exactly like a reference operand.
+                    let operand_ty = self.info.ty(operand);
+                    let mut oty = ty_to_ir(operand_ty);
+                    if self.has_scalar_value_repr(operand_ty) {
+                        let any = ty_to_ir(Ty::obj("kotlin/Any"));
+                        v = self.ir.add_expr(IrExpr::TypeOp {
+                            op: IrTypeOp::ImplicitCoercion,
+                            arg: v,
+                            type_operand: any,
+                        });
+                        oty = any;
+                    }
                     let ov = self.fresh_value();
-                    let oty = ty_to_ir(self.info.ty(operand));
                     let var_t = self.ir.add_expr(IrExpr::Variable {
                         index: ov,
                         ty: oty,
