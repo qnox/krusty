@@ -4315,11 +4315,7 @@ impl<'a> Lower<'a> {
                     &comp,
                     &[],
                 ) {
-                    let is_iface = self
-                        .syms
-                        .libraries
-                        .resolve_type(&internal)
-                        .map_or(false, |t| t.is_interface());
+                    let is_iface = self.library_type_is_interface(&internal);
                     let c = self.ir.add_expr(IrExpr::Call {
                         callee: Callee::Virtual {
                             owner: internal.clone(),
@@ -4352,11 +4348,7 @@ impl<'a> Lower<'a> {
                         "get",
                         &[Ty::Int],
                     )?;
-                    let is_iface = self
-                        .syms
-                        .libraries
-                        .resolve_type(&internal)
-                        .map_or(false, |t| t.is_interface());
+                    let is_iface = self.library_type_is_interface(&internal);
                     let i = self.ir.add_expr(IrExpr::Const(IrConst::Int(idx as i32)));
                     let c = self.ir.add_expr(IrExpr::Call {
                         callee: Callee::Virtual {
@@ -7754,16 +7746,8 @@ impl<'a> Lower<'a> {
             .copied()
             .or_else(|| it_ty.type_args().first().copied())
             .unwrap_or_else(|| Ty::obj("kotlin/Any"));
-        let it_iface = self
-            .syms
-            .libraries
-            .resolve_type(internal)
-            .map_or(false, |t| t.is_interface());
-        let iter_iface = self
-            .syms
-            .libraries
-            .resolve_type(&iter_internal)
-            .map_or(false, |t| t.is_interface());
+        let it_iface = self.library_type_is_interface(internal);
+        let iter_iface = self.library_type_is_interface(&iter_internal);
         let depth = self.scope.len();
         // `forEachIndexed`: an `Int` index counter, declared before the loop and bound to the lambda's
         // first parameter, incremented at the end of each iteration.
@@ -10041,11 +10025,7 @@ impl<'a> Lower<'a> {
                                     return None;
                                 }
                             }
-                            let is_iface = self
-                                .syms
-                                .libraries
-                                .resolve_type(internal)
-                                .map_or(false, |t| t.is_interface());
+                            let is_iface = self.library_type_is_interface(internal);
                             let a = self.expr(array)?;
                             let i = self.lower_arg(
                                 index,
@@ -12389,11 +12369,7 @@ impl<'a> Lower<'a> {
                             "get",
                             &[it],
                         ) {
-                            let is_iface = self
-                                .syms
-                                .libraries
-                                .resolve_type(internal)
-                                .map_or(false, |t| t.is_interface());
+                            let is_iface = self.library_type_is_interface(internal);
                             let a = self.expr(array)?;
                             let i = self.lower_arg(
                                 index,
@@ -15648,11 +15624,7 @@ impl<'a> Lower<'a> {
                             // (`invokevirtual`/`invokeinterface`), NOT an argument. `c.params` are the
                             // value parameters only (no receiver). Emitting it static would leave the
                             // receiver on the operand stack → `VerifyError`.
-                            let interface = self
-                                .syms
-                                .libraries
-                                .resolve_type(&c.owner)
-                                .is_some_and(|t| t.is_interface());
+                            let interface = self.library_type_is_interface(&c.owner);
                             let recv = self.expr(receiver)?;
                             let mut a = Vec::new();
                             for (i, &arg) in args.iter().enumerate() {
