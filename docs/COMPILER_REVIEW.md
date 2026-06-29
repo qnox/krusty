@@ -3016,3 +3016,25 @@ LAMBDA that calls a suspend fn — fails independently with `lower: suspend-func
 state machine / `startCoroutine` path, NOT `suspendCoroutine`. A coroutine box() needs BOTH working. So
 the order for the next session: (1) fix the suspend-lambda-in-builder shape so `builder { ok() }` runs,
 (2) re-apply the `suspendCoroutine` lowering above, (3) verify a green box() round-trip, (4) commit both.
+
+### Coroutine cluster: full blocker map (why no box() flips yet)
+
+The WITH_COROUTINES corpus uses an injected helper block (`helpers.*`: `runBlocking`, `EmptyContinuation`,
+…). Three INTERLOCKING gaps must all be closed before any coroutine box() runs green:
+
+1. **`Continuation(ctx) { … }` factory resolution.** The helper's `runBlocking` calls the stdlib
+   `Continuation(context, crossinline resumeWith)` factory function — but `Continuation` is also the
+   interface TYPE, so krusty resolves the name as the type and reports `unresolved function
+   'Continuation'`. The checker must resolve `Continuation(args){lambda}` (a call, with args) to the
+   factory function, not the interface. This blocks the helper block from compiling at all.
+2. **`suspendCoroutine` lowering** — drafted/documented above (SafeContinuation + CurrentContinuation),
+   emits cleanly; re-apply once the chain is unblocked.
+3. **General suspend-lambda state machine with captures.** `lower_suspend_lambda` (ir_lower.rs:4496)
+   currently models only a SINGLE TAIL suspend call with NO captures (`{ ok() }`); the builder pattern
+   `builder { res = ok() }` (captures `res`, non-tail) bails (`suspend-function shape not lowered`).
+   This is the real gate for almost every coroutine box() (they assign the suspended result to a
+   captured var). Needs the general lambda continuation/state-machine with capture spilling.
+
+Order to land green: (1) Continuation-factory resolution → helper block compiles; (2) general
+suspend-lambda SM with captures → `builder { res = ok() }` runs; (3) re-apply suspendCoroutine lowering;
+(4) verify a coroutine box() round-trip under `-Xverify:all`; commit each verified increment.
