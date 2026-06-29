@@ -174,6 +174,30 @@ impl<'a> Lexer<'a> {
                     }
                     self.i = (self.i + 2).min(self.b.len()); // consume */
                 }
+                // Diagnostic-test markers `<!DIAGNOSTIC_NAME!>` (open) and `<!>` (close) that wrap an
+                // expression/declaration in kotlinc's test corpus — strip them as trivia. The close
+                // `<!>` is unambiguous. An open marker is only recognized when an UPPER-snake-case name
+                // follows AND a closing `!>` exists on the same line — so a real `a < !b` (`<` then
+                // unary `!`) is left intact (lowercase/expr operand, no `!>`), never eaten to EOF.
+                b'<' if self.peek2() == b'!' && self.peek3() == b'>' => {
+                    self.i += 3; // `<!>`
+                }
+                b'<' if self.peek2() == b'!'
+                    && (self.peek3().is_ascii_uppercase() || self.peek3() == b'_') =>
+                {
+                    let mut j = self.i + 2;
+                    while j + 1 < self.b.len()
+                        && self.b[j] != b'\n'
+                        && !(self.b[j] == b'!' && self.b[j + 1] == b'>')
+                    {
+                        j += 1;
+                    }
+                    if j + 1 < self.b.len() && self.b[j] == b'!' && self.b[j + 1] == b'>' {
+                        self.i = j + 2; // consume through `!>`
+                    } else {
+                        break; // not a marker — a real `<` token follows
+                    }
+                }
                 _ => break,
             }
         }
