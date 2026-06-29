@@ -49,11 +49,37 @@ fn fun_body_root(body: &FunBody) -> Option<ExprId> {
 }
 
 /// Whether `t` (or any of its type arguments / function-type parts) names one of `tps`.
-fn type_ref_mentions(t: &TypeRef, tps: &std::collections::HashSet<String>) -> bool {
-    tps.contains(&t.name)
-        || t.arg.as_deref().is_some_and(|a| type_ref_mentions(a, tps))
-        || t.targs.iter().any(|a| type_ref_mentions(a, tps))
-        || t.fun_params.iter().any(|a| type_ref_mentions(a, tps))
+/// Replace every enclosing type-parameter name in `t` with `Any` (its erased upper bound), recursing
+/// through type arguments and function-type parameter/return positions. A captured value whose declared
+/// type mentions an enclosing type parameter (`x: (T) -> Unit`) becomes a synth-class field of the erased
+/// type (`(Any) -> Unit`, i.e. `Function1`) — sound because krusty erases generics to `Any`/`Object`
+/// throughout, so the field, constructor argument, and body use all agree on the erased type.
+fn erase_type_params(t: &TypeRef, tps: &std::collections::HashSet<String>) -> TypeRef {
+    if tps.contains(&t.name) {
+        return TypeRef {
+            name: "Any".to_string(),
+            nullable: t.nullable,
+            arg: None,
+            targs: Vec::new(),
+            span: t.span,
+            fun_params: Vec::new(),
+            fun_has_receiver: false,
+            fun_suspend: false,
+        };
+    }
+    TypeRef {
+        arg: t
+            .arg
+            .as_deref()
+            .map(|a| Box::new(erase_type_params(a, tps))),
+        targs: t.targs.iter().map(|a| erase_type_params(a, tps)).collect(),
+        fun_params: t
+            .fun_params
+            .iter()
+            .map(|a| erase_type_params(a, tps))
+            .collect(),
+        ..t.clone()
+    }
 }
 
 /// Names BOUND inside the anonymous class `did` (its constructor properties, body properties, and the
@@ -269,10 +295,11 @@ fn collect_anon_calls(
 /// and emits the field.
 ///
 /// Captured types must be known WITHOUT inference: a parameter's declared type, or a local's explicit
-/// annotation / literal-inferred type. These stay unresolved (→ the file cleanly skips, never a
-/// miscompile) and are NOT captured: a name WRITTEN inside the anon (needs a shared `Ref` cell); a
-/// captured type that mentions an enclosing type parameter; an outer local with a non-literal,
-/// unannotated initializer.
+/// annotation / literal-inferred type. A captured type that mentions an enclosing type parameter
+/// (`x: (T) -> Unit`) is captured with that type parameter erased to `Any` (see `erase_type_params`).
+/// These stay unresolved (→ the file cleanly skips, never a miscompile) and are NOT captured: a name
+/// WRITTEN inside the anon (needs a shared `Ref` cell); an outer local with a non-literal, unannotated
+/// initializer.
 fn rewrite_anon_captures(file: &mut File) {
     // anon class simple name -> its DeclId
     let mut anon_by_name: std::collections::HashMap<String, DeclId> =
@@ -350,7 +377,7 @@ fn rewrite_anon_captures(file: &mut File) {
             let bound = anon_bound_names(file, did);
             let mut caps: Vec<(String, TypeRef)> = Vec::new();
             for (pn, pty) in params {
-                if bound.contains(pn) || type_ref_mentions(pty, tps) {
+                if bound.contains(pn) {
                     continue;
                 }
                 if caps.iter().any(|(n, _)| n == pn) {
@@ -363,7 +390,10 @@ fn rewrite_anon_captures(file: &mut File) {
                     continue;
                 }
                 if anon_body_uses(file, did, pn) {
-                    caps.push((pn.clone(), pty.clone()));
+                    // A captured type that mentions an enclosing type parameter (`x: (T) -> Unit`) is
+                    // captured with the type parameter erased to `Any` — the synth-class field/ctor/use
+                    // all agree on the erased type, matching krusty's generic erasure.
+                    caps.push((pn.clone(), erase_type_params(pty, tps)));
                 }
             }
             if caps.is_empty() {

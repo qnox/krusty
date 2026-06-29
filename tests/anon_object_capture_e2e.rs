@@ -60,6 +60,39 @@ fun box(): String {\n\
 }
 
 #[test]
+fn captures_param_of_enclosing_type_parameter_type() {
+    // A captured parameter whose type IS an enclosing type parameter (`x: T`), into an anon object
+    // implementing a generic interface. The capture's field type erases the type parameter to `Any`
+    // (krusty's generic erasure), so field/ctor/use agree. Round-tripped on the JVM.
+    const SRC: &str = "interface Box2<T> { fun unwrap(): T }\n\
+fun <T> wrap(x: T): Box2<T> = object : Box2<T> { override fun unwrap(): T = x }\n\
+fun box(): String = wrap(\"OK\").unwrap()\n";
+    assert_eq!(run(SRC).expect("type-param capture compiles + runs"), "OK");
+}
+
+#[test]
+fn captures_function_typed_param_mentioning_type_parameter() {
+    // A captured parameter of a FUNCTION type mentioning an enclosing type parameter (`f: (T) -> String`)
+    // — the shape the coroutine `helpers` package uses (`x: (T) -> Unit` captured into `object :
+    // Continuation<T>`). Erases to `(Any) -> String` (`Function1`). The interface has a second abstract
+    // member (like `Continuation`'s `context`) so it is NOT a single-abstract-method interface — keeping
+    // the test focused on the capture, not on call-site SAM conversion. Round-tripped on the JVM.
+    const SRC: &str = "interface Consumer<T> { val tag: String; fun accept(v: T): String }\n\
+fun <T> mk(f: (T) -> String): Consumer<T> = object : Consumer<T> {\n\
+    override val tag: String = \"c\"\n\
+    override fun accept(v: T): String = f(v)\n\
+}\n\
+fun box(): String {\n\
+    val c: Consumer<String> = mk { it }\n\
+    return c.accept(\"OK\")\n\
+}\n";
+    assert_eq!(
+        run(SRC).expect("fn-typed type-param capture compiles + runs"),
+        "OK"
+    );
+}
+
+#[test]
 fn noncapturing_anon_still_works() {
     const SRC: &str = "interface I { fun f(): String }\n\
 fun box(): String = (object : I { override fun f() = \"OK\" }).f()\n";
