@@ -2824,9 +2824,11 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Skip a leading `out`/`in` variance modifier inside a type-argument list.
+    /// Skip a leading `out`/`in` use-site variance modifier inside a type-argument list (`Array<in T>`,
+    /// `List<out T>`). Variance is JVM-erased, so the projection is dropped and the bare type kept.
+    /// `out` is a soft keyword (`Ident`); `in` is the real keyword `KwIn`.
     fn skip_variance(&mut self) {
-        if self.at(TokenKind::Ident) && matches!(self.text(), "out" | "in") {
+        if self.at(TokenKind::KwIn) || (self.at(TokenKind::Ident) && self.text() == "out") {
             self.bump();
         }
     }
