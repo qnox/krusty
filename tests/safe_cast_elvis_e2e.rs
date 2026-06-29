@@ -29,3 +29,31 @@ fn nullable_type_still_parses() {
     const SRC: &str = "fun f(x: String?): String = x ?: \"OK\"\nfun box(): String = f(null)\n";
     assert_eq!(run(SRC).expect("nullable type unaffected"), "OK");
 }
+
+#[test]
+fn safe_cast_to_primitive_then_elvis() {
+    // `x as? Int` (safe cast to a PRIMITIVE): the result is the boxed wrapper `Int?` — `instanceof`/
+    // `checkcast` against `Integer`, `null` on a mismatch, then the elvis unboxes. Round-tripped.
+    const SRC: &str = "fun pick(a: Any): Int = a as? Int ?: 16\n\
+fun box(): String {\n\
+    if (pick(42) != 42) return \"f1\"\n\
+    if (pick(\"x\") != 16) return \"f2\"\n\
+    return \"OK\"\n\
+}\n";
+    assert_eq!(run(SRC).expect("as? Int compiles + runs"), "OK");
+}
+
+#[test]
+fn safe_cast_to_reference_expression_body() {
+    // `fun f(a: Any): A? = a as? A` — the `as?` result type `A?` is assignable to the declared `A?`
+    // return (nullability-insensitive in a return position). Round-tripped on the JVM.
+    const SRC: &str = "open class A\nclass B : A()\nclass C\n\
+fun f(a: Any): A? = a as? A\n\
+fun box(): String {\n\
+    val b = B()\n\
+    if (f(b) !== b) return \"f1\"\n\
+    if (f(C()) != null) return \"f2\"\n\
+    return \"OK\"\n\
+}\n";
+    assert_eq!(run(SRC).expect("as? reference body compiles + runs"), "OK");
+}

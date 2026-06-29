@@ -13348,7 +13348,13 @@ impl<'a> Lower<'a> {
                     // reference types, so the type-parameter case is resolved here first.
                     let target = match self.cur_tparams.iter().find(|(n, _, _)| *n == ty.name) {
                         Some((name, bound, _)) => Ty::ty_param(name, *bound),
-                        None => self.ty_ref(&ty)?,
+                        // A PRIMITIVE target (`x as? Int`) tests/keeps the boxed wrapper — `instanceof`/
+                        // `checkcast` run against `Integer` and the result is the nullable wrapper `Int?`.
+                        // `ty_ref` yields only reference targets, so resolve the primitive here.
+                        None => match Ty::from_name(&ty.name) {
+                            Some(p) if !p.is_reference() => p.nullable_boxed()?,
+                            _ => self.ty_ref(&ty)?,
+                        },
                     };
                     let target_ir = ty_to_ir(target);
                     let v = self.expr(operand)?;
