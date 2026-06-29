@@ -3065,3 +3065,26 @@ compile in krusty today, so the target shape is supported. Two implementation pa
 Either path is real work; path 2 is the more self-contained and consistent with how krusty already treats
 coroutine primitives. This is the first of the three interlocking coroutine blockers (then suspend-lambda
 state machine with captures, then re-apply the suspendCoroutine lowering).
+
+### Coroutine blocker #1b (Continuation factory splice) — precise, post-resolution
+
+Subtype-aware inline-only resolution (commit `9dfcf21`) makes `Continuation(ctx){lambda}` RESOLVE; it now
+fails at `emit: inline splice failed for kotlin/coroutines/ContinuationKt.Continuation`. The factory's
+`@InlineOnly` bytecode body is simply `new kotlin/coroutines/ContinuationKt$Continuation$1(context,
+resumeWith)` (then checkcast) — i.e. it STORES the `resumeWith` lambda as a `Function1` VALUE into the
+stdlib anon class `ContinuationKt$Continuation$1`. krusty's inline splicer can splice an *invoked* inline
+lambda parameter but cannot materialize a lambda-arg as a `Function1` object when the body passes it as a
+value (the documented "lambda-arg splicing" gap). Two paths:
+
+1. Splicer: materialize the lambda-arg as a real `Function1` (krusty's normal lambda lowering) and
+   substitute it where the spliced body expects the `Function1` local. Then the splice constructs the
+   stdlib `$Continuation$1` directly. (General splicer capability — also unblocks other value-use inline
+   lambdas.)
+2. Desugar (cleaner, matches crossinline): recognize `Continuation` as a coroutine primitive and produce
+   `object : Continuation<T> { override val context = ctx; override fun resumeWith(r) { <lambda body, it=r> } }`.
+   krusty's anon-object machinery already compiles that shape. Caveat: anon-object synthesis is parse-time,
+   so the desugar belongs in the parser (keyed on the `Continuation(args){lambda}` shape) or the anon-class
+   builder must be made callable post-parse.
+
+Path 2 avoids the splicer and the stdlib `$Continuation$1` dependency. Either unblocks the universal
+coroutine helper block; then blocker #2 (suspend-lambda state machine with captures) gates the box() run.
