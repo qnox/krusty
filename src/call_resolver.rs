@@ -745,7 +745,10 @@ impl<'a> CallResolver<'a> {
                 continue;
             }
             if params.len() != args.len()
-                || !params.iter().zip(args).all(|(p, a)| self.arg_fits(p, a))
+                || !params
+                    .iter()
+                    .zip(args)
+                    .all(|(p, a)| self.arg_fits_or_subtype(p, a))
             {
                 continue;
             }
