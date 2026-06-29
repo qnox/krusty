@@ -7090,6 +7090,36 @@ impl<'a> Lower<'a> {
             }
         };
         let internal = recv_ty.obj_internal()?.to_string();
+        // An UNBOUND reference to a same-module extension function (`A::foo`): the lifted static
+        // `foo(recv, args…)` is the impl — emit a `FunctionReferenceImpl` calling `invokestatic
+        // <facade>.foo(recv, args)` (equatable, same shape as a top-level `::foo` ref). The receiver is
+        // the first parameter, not captured. (A member of the same name, resolved below, wins; a BOUND
+        // `obj::ext` is handled by `lower_bound_expr_ref`. A value-class receiver is skipped.)
+        if capture.is_none()
+            && self.resolve_method(&internal, name).is_none()
+            && !self.is_value_class(&internal)
+            && self
+                .ext_fun_ids
+                .contains_key(&(recv_ty.erased_recv(), name.to_string()))
+        {
+            let param_tys: Vec<Ty> = params.iter().map(|t| ty_to_ir(*t)).collect();
+            return self.make_func_ref(
+                e.0,
+                false,
+                params.len() as u8,
+                String::new(),
+                name.to_string(),
+                1,
+                crate::ir::FrDispatch::Static,
+                String::new(),
+                name.to_string(),
+                false,
+                param_tys,
+                ty_to_ir(ret),
+                None,
+                None,
+            );
+        }
         // Only a user-class method is modeled (the invoke does `invokevirtual`/`invokeinterface
         // internal.name`); a classpath/library receiver fails here → bail (skip), never miscompile.
         self.resolve_method(&internal, name)?;
@@ -7119,6 +7149,7 @@ impl<'a> Lower<'a> {
             param_tys,
             ty_to_ir(ret),
             capture,
+            None,
         )
     }
 
@@ -7144,6 +7175,35 @@ impl<'a> Lower<'a> {
         // ref). `arity` = the extension's declared params (the receiver is bound, not a parameter). A
         // `Unit` return is wrapped so `invoke` yields the `Unit` singleton.
         if let Some(&fid) = self.ext_fun_ids.get(&(rty.erased_recv(), name.to_string())) {
+            // A BOUND extension reference on a REFERENCE receiver (`obj::ext`) → a `FunctionReferenceImpl`
+            // whose captured receiver is passed as the first `invokestatic <facade>.ext(recv, args)`
+            // argument (`StaticBound`) — real reference equality (two `obj::ext` on the same receiver are
+            // equal), unlike an `invokedynamic` lambda. The target signature leads with the receiver type.
+            if rty.obj_internal().is_some_and(|i| !self.is_value_class(i)) {
+                let cap = self.expr(recv)?;
+                let param_tys: Vec<Ty> = params.iter().map(|t| ty_to_ir(*t)).collect();
+                let mut target = vec![ty_to_ir(rty)];
+                target.extend(param_tys.iter().copied());
+                return self.make_func_ref(
+                    e.0,
+                    true,
+                    params.len() as u8,
+                    String::new(),
+                    name.to_string(),
+                    1,
+                    crate::ir::FrDispatch::StaticBound,
+                    String::new(),
+                    name.to_string(),
+                    false,
+                    param_tys,
+                    ty_to_ir(ret),
+                    Some(cap),
+                    Some(target),
+                );
+            }
+            // A PRIMITIVE-receiver bound extension (`1::plusFour`): the captured receiver boxes into the
+            // `FunctionN` and unboxes at the call — the `invokedynamic` lambda form models that (and its
+            // reference equality isn't exercised, unlike the reference-receiver case above).
             let cap = self.expr(recv)?;
             let impl_fn = if ret == Ty::Unit {
                 self.unit_ref_wrapper(fid, e.0)
@@ -7224,6 +7284,9 @@ impl<'a> Lower<'a> {
         param_tys: Vec<Ty>,
         ret_ty: Ty,
         capture: Option<u32>,
+        // For `StaticBound` the physical target call takes the captured receiver as a leading argument,
+        // so its signature has one more entry than the (invoke) `param_tys`. `None` ⇒ same as `param_tys`.
+        target_override: Option<Vec<Ty>>,
     ) -> Option<u32> {
         let synth_fq = class_internal(self.afile, &format!("{}$fnref${}", self.cur_fn_name, uniq));
         let superclass = self
@@ -7269,8 +7332,10 @@ impl<'a> Lower<'a> {
                 call_owner,
                 call_name,
                 call_interface,
-                target_param_tys: param_tys.clone(),
+                target_param_tys: target_override.unwrap_or_else(|| param_tys.clone()),
                 target_ret_ty: ret_ty,
+                // Per-INVOKE-parameter (indexed by the invoke arg `k`), so always `param_tys.len()` —
+                // independent of `target_param_tys` (which may lead with a `StaticBound` receiver).
                 unbox_params: vec![None; param_tys.len()],
                 unbox_param_nullable: vec![false; param_tys.len()],
                 param_tys,
@@ -12180,6 +12245,7 @@ impl<'a> Lower<'a> {
                         fn_params,
                         ret,
                         None,
+                        None,
                     );
                 }
                 // A CLASSPATH top-level function reference (`::greet` from a jar/dependency module): the
@@ -12215,6 +12281,7 @@ impl<'a> Lower<'a> {
                     false,
                     param_tys,
                     ty_to_ir(c.ret),
+                    None,
                     None,
                 );
             }

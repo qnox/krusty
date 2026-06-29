@@ -672,6 +672,10 @@ pub enum FrDispatch {
     /// Bound member `obj::m`: the receiver is captured (`this.receiver`); `invokevirtual` on it. All
     /// invoke params are the call arguments.
     VirtualBound,
+    /// Bound extension `obj::ext`: the receiver is captured (`this.receiver`) and passed as the FIRST
+    /// argument of `invokestatic call_owner.call_name(receiver, args…)`. `target_param_tys` leads with
+    /// the receiver type; `param_tys` (the invoke args) map to `target_param_tys[1..]`.
+    StaticBound,
 }
 
 /// A synthesized function-reference subclass of `kotlin/jvm/internal/FunctionReferenceImpl`. See
