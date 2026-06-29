@@ -13325,10 +13325,12 @@ impl<'a> Lower<'a> {
                 // Bail on shapes the flat IR can't emit safely: branches that mix `Unit` with real
                 // values (only valid as a discarded statement, indistinguishable here from a value
                 // use → inconsistent frames), and a subject `==` comparison that mixes a primitive
-                // with a reference (e.g. `when (i: Int) { null -> … }` → bad-typed compare).
+                // with a reference (e.g. `when (i: Int) { null -> … }` → bad-typed compare). A `Nothing`
+                // (diverging `throw`/`return`) branch is exempt: it pushes nothing at the merge, so a
+                // statement `when` with a throwing `else` (`is A -> r = …; else -> throw`) is fine.
                 let body_tys: Vec<Ty> = arms.iter().map(|a| self.info.ty(a.body)).collect();
                 let any_unit = body_tys.iter().any(|t| *t == Ty::Unit);
-                if any_unit && !body_tys.iter().all(|t| *t == Ty::Unit) {
+                if any_unit && !body_tys.iter().all(|t| *t == Ty::Unit || *t == Ty::Nothing) {
                     return None;
                 }
                 // An unsigned subject compares its arms with unsigned `==` (bit-equal, same as signed),
