@@ -11793,17 +11793,24 @@ impl<'a> Lower<'a> {
                 );
             }
             Expr::Name(n) => {
-                // A `this@Label` the checker resolved to the INNERMOST receiver (`LabeledThisInner`) reads
-                // the same receiver as a bare `this`; normalize so the `this`/scope handling below applies.
-                // An outer-label `this@Label` (no marker) can't be reached yet — bail (skip).
+                // `this@Label` the checker resolved: `LabeledThisInner` (the current receiver) reads as a
+                // bare `this`; `LabeledThisOuter` (the immediate enclosing class of an `inner class`) reads
+                // the captured outer instance `this.this$0` (field index 0). Any other (unmarked) label
+                // can't be reached yet — bail (skip).
                 let n = if n.starts_with("this@") {
-                    if matches!(
-                        self.info.expr_lowers.get(&e),
-                        Some(ExprLowering::LabeledThisInner)
-                    ) {
-                        "this".to_string()
-                    } else {
-                        return None;
+                    match self.info.expr_lowers.get(&e) {
+                        Some(ExprLowering::LabeledThisInner) => "this".to_string(),
+                        Some(ExprLowering::LabeledThisOuter) => {
+                            let internal = self.cur_class.clone()?;
+                            let class = self.classes.get(&internal)?.id;
+                            let this0 = self.ir.add_expr(IrExpr::GetValue(0));
+                            return Some(self.ir.add_expr(IrExpr::GetField {
+                                receiver: this0,
+                                class,
+                                index: 0,
+                            }));
+                        }
+                        _ => return None,
                     }
                 } else {
                     n

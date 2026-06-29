@@ -3090,6 +3090,9 @@ pub enum ExprLowering {
     /// A `this@Label` that denotes the INNERMOST receiver (the current `this`), so it lowers as a bare
     /// `this`. Only recorded for the innermost match; an outer-receiver label is left unresolved/skipped.
     LabeledThisInner,
+    /// A `this@Outer` denoting the IMMEDIATE enclosing class of an `inner class` — one class level up —
+    /// so it lowers as the inner class's captured outer instance (`this.this$0`).
+    LabeledThisOuter,
     /// A property-read `recv.name` resolved to a classpath extension property getter.
     ExtensionPropertyGet {
         getter: Box<crate::libraries::LibraryCallable>,
@@ -3316,9 +3319,30 @@ pub fn check_file(file: &File, syms: &mut SymbolTable, diags: &mut DiagSink) -> 
                     }
                 }
                 c.this_ty = syms.classes.get(&cl.name).map(|s| Ty::obj(&s.internal));
-                // Push the class's own labeled receiver (`this@C`) for the duration of its member checks.
+                // Push the enclosing-class labels for the duration of this class's member checks: the
+                // OUTER chain first (`this@Outer` for an `inner class`, resolved via `this$0`), then the
+                // class's own label (`this@C`) innermost. Walk `inner_of` outward.
+                let mut label_depth = 0usize;
+                {
+                    let mut chain: Vec<(String, Ty)> = Vec::new();
+                    let mut outer = cl.inner_of.clone();
+                    while let Some(o) = outer {
+                        let key = o.rsplit(['/', '$']).next().unwrap_or(&o).to_string();
+                        if let Some(s) = syms.classes.get(&key) {
+                            chain.push((key, Ty::obj(&s.internal)));
+                            outer = s.inner_of.clone();
+                        } else {
+                            break;
+                        }
+                    }
+                    for (n, ty) in chain.into_iter().rev() {
+                        c.this_labels.push((n, ty, true));
+                        label_depth += 1;
+                    }
+                }
                 if let Some(ty) = c.this_ty {
-                    c.this_labels.push((cl.name.clone(), ty));
+                    c.this_labels.push((cl.name.clone(), ty, true));
+                    label_depth += 1;
                 }
                 let methods: Vec<&FunDecl> = cl.methods.iter().collect();
                 c.check_no_erased_clash(&methods, false);
@@ -3591,7 +3615,7 @@ pub fn check_file(file: &File, syms: &mut SymbolTable, diags: &mut DiagSink) -> 
                     }
                 }
                 c.pop_scope();
-                if c.this_ty.is_some() {
+                for _ in 0..label_depth {
                     c.this_labels.pop();
                 }
                 c.this_ty = None;
@@ -3787,12 +3811,13 @@ struct Checker<'a> {
     tparams: TParams,
     /// The type of `this` when checking class members (`None` at top level).
     this_ty: Option<Ty>,
-    /// Stack of labeled receivers in scope, innermost LAST: a class body pushes `(ClassName, ty)`, a
-    /// receiver lambda / scope function pushes `(fnName, receiverTy)`, an extension function pushes
-    /// `(fnName, receiverTy)`. Resolves `this@Label`. The innermost entry is the current `this`; only a
-    /// `this@Label` matching it can be lowered as a bare `this` (an outer label needs an outer-receiver
-    /// walk the lowerer can't yet emit, so it skips).
-    this_labels: Vec<(String, Ty)>,
+    /// Stack of labeled receivers in scope, innermost LAST. Each entry is `(label, ty, is_class)`:
+    /// a class body pushes `(ClassName, ty, true)`; a receiver lambda / scope function pushes
+    /// `(fnName, receiverTy, false)`. Resolves `this@Label`. The innermost entry is the current `this`
+    /// (lowered as a bare `this`); a `this@Label` matching the IMMEDIATE outer CLASS (one class level up,
+    /// nothing but classes between) lowers via the inner class's `this$0`. Anything else type-checks but
+    /// the lowerer skips it (it can't yet reach a captured / multi-level outer receiver).
+    this_labels: Vec<(String, Ty, bool)>,
     /// The backing-field type while checking a property accessor body — makes the `field`
     /// soft-keyword resolve to the property's backing field. `None` outside an accessor.
     field_ty: Option<Ty>,
@@ -5520,16 +5545,23 @@ impl<'a> Checker<'a> {
                 }
             },
             // `this@Label` — a labeled receiver. Resolve from the receiver-label stack (innermost last):
-            // the matching entry's type is the result. When it matches the INNERMOST entry (the current
-            // `this`), record `LabeledThisInner` so the lowerer emits a bare `this`; an OUTER-label match
-            // type-checks but is left for the lowerer to skip (it can't yet walk to an outer receiver).
+            // the matching entry's type is the result. The INNERMOST match (the current `this`) records
+            // `LabeledThisInner` (lowered as a bare `this`); a match exactly ONE class level up, with
+            // both ends classes, records `LabeledThisOuter` (lowered via the inner class's `this$0`).
+            // Any other (captured / multi-level / cross-lambda) match type-checks but the lowerer skips.
             Expr::Name(n) if n.starts_with("this@") => {
                 let label = &n["this@".len()..];
-                match self.this_labels.iter().rposition(|(l, _)| l == label) {
+                match self.this_labels.iter().rposition(|(l, _, _)| l == label) {
                     Some(idx) => {
                         let ty = self.this_labels[idx].1;
-                        if idx + 1 == self.this_labels.len() {
+                        let top = self.this_labels.len() - 1;
+                        if idx == top {
                             self.expr_lowers.insert(e, ExprLowering::LabeledThisInner);
+                        } else if idx + 1 == top
+                            && self.this_labels[idx].2
+                            && self.this_labels[top].2
+                        {
+                            self.expr_lowers.insert(e, ExprLowering::LabeledThisOuter);
                         }
                         ty
                     }
@@ -6486,7 +6518,7 @@ impl<'a> Checker<'a> {
         let prev_this = self.this_ty;
         self.this_ty = Some(recv);
         let pushed = label.map(|l| {
-            self.this_labels.push((l.to_string(), recv));
+            self.this_labels.push((l.to_string(), recv, false));
         });
         let r = self.check_with_receiver_body(recv, body);
         if pushed.is_some() {
@@ -6870,7 +6902,7 @@ impl<'a> Checker<'a> {
             self.mark_receiver_lambda(e, recv);
             let prev_this = self.this_ty;
             self.this_ty = Some(recv);
-            let pushed = label.map(|l| self.this_labels.push((l.to_string(), recv)));
+            let pushed = label.map(|l| self.this_labels.push((l.to_string(), recv, false)));
             self.push_scope();
             if let Ty::Obj(internal, _) = recv {
                 if let Some(cs) = self.syms.class_by_internal(internal) {

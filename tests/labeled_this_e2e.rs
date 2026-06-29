@@ -29,3 +29,23 @@ fn self_labeled_this_in_lambda() {
 fun box(): String = C(\"OK\").foo()\n";
     assert_eq!(run(SRC).expect("self-labeled this compiles + runs"), "OK");
 }
+
+/// `this@Outer` from an `inner class` — the immediate enclosing class, reached via the captured
+/// `this$0`. Both the bare member (`v`) and the qualified `this@B.v` must read the outer instance.
+#[test]
+fn inner_class_outer_labeled_this() {
+    if !ready() {
+        return;
+    }
+    const SRC: &str = "class B {\n\
+    val v = \"OK\"\n\
+    inner class C {\n\
+        fun g(): String = this@B.v\n\
+    }\n\
+}\n\
+fun box(): String = B().C().g()\n";
+    assert_eq!(
+        run(SRC).expect("this@Outer from inner class compiles + runs"),
+        "OK"
+    );
+}
