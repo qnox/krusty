@@ -4484,8 +4484,15 @@ impl<'a> Checker<'a> {
         // erased type would be unsound for a later use.
         if ty.nullable {
             tt.boxed_ref().is_some().then(|| (n, Ty::nullable(tt)))
+        } else if tt.is_reference() {
+            Some((n, tt))
         } else {
-            tt.is_reference().then_some((n, tt))
+            // A non-null primitive (`is Int`/`is Double`/`is Char`): narrow to the primitive so a
+            // later USE unboxes — the lowerer's `Name` path coerces a reference slot to the narrowed
+            // primitive (checkcast wrapper + unbox), and a boxed-FP `==` reached this way conforms
+            // with IEEE semantics. Unsigned (`is UInt`) stays unnarrowed: its value-box unbox to the
+            // `kotlin.UInt` type isn't modeled (krusty erases unsigned to `int`).
+            (tt.is_numeric_or_char() || tt == Ty::Boolean).then_some((n, tt))
         }
     }
 
@@ -5262,7 +5269,14 @@ impl<'a> Checker<'a> {
                 let tt_known = tt.is_reference()
                     || matches!(
                         tt,
-                        Ty::Int | Ty::Byte | Ty::Short | Ty::Long | Ty::Boolean | Ty::Char
+                        Ty::Int
+                            | Ty::Byte
+                            | Ty::Short
+                            | Ty::Long
+                            | Ty::Boolean
+                            | Ty::Char
+                            | Ty::Float
+                            | Ty::Double
                     );
                 // A nullable target is allowed only for a REFERENCE type (`x is A?` lowers to
                 // `x == null || x is A`); a nullable primitive (`x is Int?`) would mix box/unbox
