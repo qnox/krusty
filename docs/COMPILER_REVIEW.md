@@ -2987,3 +2987,32 @@ line ~88), so the threading belongs in the suspend pass, not `ir_lower`. Real (a
 needs the state machine to store the continuation and return `COROUTINE_SUSPENDED`; synchronous-resume
 files (`suspendCoroutine { it.resume(v) }`) still go through `SafeContinuation.getOrThrow()`. This is a
 multi-step suspend-pass feature — implement it with commit gated on a green box() round-trip + full suite.
+
+### suspendCoroutine progress (checker landed; lowering drafted, NOT yet committed)
+
+Checker resolution landed (commit `dda7993`): `suspendCoroutine` is a `CoroutineIntrinsic`, typed like
+`...UninterceptedOrReturn` (block param `Continuation`, result = enclosing ret). Files now bail at
+lowering, not the checker.
+
+The LOWERING was drafted and emits without crash (verified `EMIT=ok` on `suspend fun ok() =
+suspendCoroutine { it.resume("OK") }` compiled in isolation) but is NOT committed because it is not yet
+box()-run-verified — blocked by a SEPARATE gap (below). Design that worked through the suspend pass:
+
+- New leaf node `IrExpr::CurrentContinuation` (placeholder for the enclosing continuation; `for_each_child`
+  treats it as a no-child leaf).
+- `ir_lower` arm for `suspendCoroutine { c -> body }`: emit
+  `Block { stmts: [ var safe = NewExternal SafeContinuation (ctor "(Lkotlin/coroutines/Continuation;)V")
+  with arg CurrentContinuation ], <body with c bound to `safe` (slot typed SafeContinuation, scope-typed
+  Continuation so `c.resume` resolves)> ], value: Some(Virtual SafeContinuation.getOrThrow ()Ljava/lang/Object;) }`.
+  (`intercepted()` is identity for the corpus's un-intercepted `EmptyContinuation`, so the raw 1-arg ctor
+  suffices; a real interceptor is a later refinement.)
+- suspend pass `lower_suspend`, after `shift_locals`: for a LEAF fn replace `CurrentContinuation` →
+  `GetValue(p_old)` (the trailing continuation parameter); for a state-machine fn, bail if a placeholder
+  is present (the SM continuation is the instance, not yet wired).
+
+NEXT BLOCKER (why no coroutine file flips yet): the builder pattern `builder { res = ok() }` — a suspend
+LAMBDA that calls a suspend fn — fails independently with `lower: suspend-function shape not lowered`
+(and a bare `builder { ok() }` hits `unresolved function 'Continuation'`). This is the suspend-lambda
+state machine / `startCoroutine` path, NOT `suspendCoroutine`. A coroutine box() needs BOTH working. So
+the order for the next session: (1) fix the suspend-lambda-in-builder shape so `builder { ok() }` runs,
+(2) re-apply the `suspendCoroutine` lowering above, (3) verify a green box() round-trip, (4) commit both.
