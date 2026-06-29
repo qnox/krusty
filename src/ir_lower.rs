@@ -13073,10 +13073,23 @@ impl<'a> Lower<'a> {
                 // yields false for null. Lower to `x == null || x is A` (and the De Morgan dual for
                 // `x !is A?` → `x != null && x !is A`), binding the operand to a temp so it runs once.
                 if ty.nullable {
-                    // `ty_ref` returns `None` for any nullable type; resolve the non-null base reference.
+                    // `ty_ref` returns `None` for any nullable type; resolve the non-null base — a
+                    // reference, OR a boxable primitive (`x is Int?` → `x == null || x instanceof Integer`).
                     let mut base_ref = ty.clone();
                     base_ref.nullable = false;
-                    if let Some(target) = self.ty_ref(&base_ref) {
+                    // A non-reference base resolves to a primitive whose wrapper the `instanceof` tests.
+                    // Float/Double AND unsigned are excluded (matching the non-null `is` rejections): a
+                    // smart-cast of those reaches a boxed IEEE `==` / an unsigned-box unbox the backend
+                    // doesn't model. So only integral/boolean/char nullable `is` lowers here.
+                    let base = self.ty_ref(&base_ref).or_else(|| {
+                        Ty::from_name(&base_ref.name).filter(|t| {
+                            self.has_scalar_value_repr(*t)
+                                && !matches!(t, Ty::Double | Ty::Float)
+                                && !self.is_unsigned_integer_type(*t)
+                        })
+                    });
+                    if let Some(target) = base {
+                        let inst_operand = ty_to_ir(target);
                         let arg = self.expr(operand)?;
                         let v = self.fresh_value();
                         // The temp only feeds `== null` and `instanceof`, so an `Object` slot always
@@ -13102,7 +13115,7 @@ impl<'a> Lower<'a> {
                                 IrTypeOp::InstanceOf
                             },
                             arg: g2,
-                            type_operand: ty_to_ir(target),
+                            type_operand: inst_operand,
                         });
                         let combined = self.ir.add_expr(IrExpr::PrimitiveBinOp {
                             op: if negated { IrBinOp::And } else { IrBinOp::Or },
