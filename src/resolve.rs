@@ -5827,14 +5827,7 @@ impl<'a> Checker<'a> {
                 // Only applies to primitive receivers (reference receivers can't distinguish nullable vs
                 // non-null at the krusty type level, risking infinite self-recursion in the body).
                 if lt != Ty::Error && rt != Ty::Error && !lt.is_reference() {
-                    let op_name = match op {
-                        BinOp::Add => Some("plus"),
-                        BinOp::Sub => Some("minus"),
-                        BinOp::Mul => Some("times"),
-                        BinOp::Div => Some("div"),
-                        BinOp::Rem => Some("rem"),
-                        _ => None,
-                    };
+                    let op_name = op.arith_operator_name();
                     if let Some(fname) = op_name {
                         if let Some(fi) = crate::module_symbols::ModuleSymbols::new(self.syms)
                             .functions(fname, Some(lt))
@@ -5873,14 +5866,7 @@ impl<'a> Checker<'a> {
                 // `a.plus(b)`. The body's own arithmetic is on the field types (no self-recursion). The
                 // lowering re-resolves the member, so only the result type is recorded here.
                 if let Ty::Obj(internal, _) = &lt {
-                    let op_name = match op {
-                        BinOp::Add => Some("plus"),
-                        BinOp::Sub => Some("minus"),
-                        BinOp::Mul => Some("times"),
-                        BinOp::Div => Some("div"),
-                        BinOp::Rem => Some("rem"),
-                        _ => None,
-                    };
+                    let op_name = op.arith_operator_name();
                     if let Some(fname) = op_name {
                         if let Some(sig) = self.syms.method_of(internal, fname) {
                             if sig.params.len() == 1 && rt != Ty::Error {
@@ -5914,14 +5900,7 @@ impl<'a> Checker<'a> {
                     // A library operator function on a reference receiver: `a + b` desugars to `a.plus(b)`,
                     // resolved as a stdlib member/extension (`List + element` → `CollectionsKt.plus`). Use
                     // its (parameterized) return type. The lowering re-resolves to emit the call.
-                    let op_name = match op {
-                        BinOp::Add => Some("plus"),
-                        BinOp::Sub => Some("minus"),
-                        BinOp::Mul => Some("times"),
-                        BinOp::Div => Some("div"),
-                        BinOp::Rem => Some("rem"),
-                        _ => None,
-                    };
+                    let op_name = op.arith_operator_name();
                     // Resolve `a + b` (etc.) as `a.plus(b)` through the library set. Overload selection
                     // picks the most specific candidate (`list + list` → the `Iterable` concat overload,
                     // `list + element` → the element overload), so a reference right operand is fine.
@@ -8140,14 +8119,7 @@ impl<'a> Checker<'a> {
                     let infix_user_ext = self.file.infix_calls.contains(&call.0) && user_ext;
                     if !infix_user_ext && rt.is_numeric() {
                         // Binary arithmetic methods: `a.plus(b)` ≡ `a + b` (same numeric promotion).
-                        let bin = match name.as_str() {
-                            "plus" => Some(BinOp::Add),
-                            "minus" => Some(BinOp::Sub),
-                            "times" => Some(BinOp::Mul),
-                            "div" => Some(BinOp::Div),
-                            "rem" => Some(BinOp::Rem),
-                            _ => None,
-                        };
+                        let bin = BinOp::from_arith_operator_name(&name);
                         if let (Some(op), [at]) = (bin, arg_tys.as_slice()) {
                             return self.check_binary(op, rt, *at, span);
                         }
@@ -8169,11 +8141,9 @@ impl<'a> Checker<'a> {
                     // `Char` isn't `is_numeric` (no promotion), but these map to the operator form, which
                     // `check_binary` types with the correct `Char`/`Int` operand rules.
                     if !infix_user_ext && rt == Ty::Char {
-                        let bin = match name.as_str() {
-                            "plus" => Some(BinOp::Add),
-                            "minus" => Some(BinOp::Sub),
-                            _ => None,
-                        };
+                        // `Char` has only `plus`/`minus` operator overloads (no `times`/`div`/`rem`).
+                        let bin = BinOp::from_arith_operator_name(&name)
+                            .filter(|o| matches!(o, BinOp::Add | BinOp::Sub));
                         if let (Some(op), [at]) = (bin, arg_tys.as_slice()) {
                             return self.check_binary(op, rt, *at, span);
                         }
