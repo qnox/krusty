@@ -723,6 +723,12 @@ pub struct File {
     /// records the simple names here; a plugin recovers them via the type's span (e.g. to detect a
     /// composable function type) without bloating every `TypeRef`. Absent ⇒ the type had no annotations.
     pub type_annotations: std::collections::HashMap<u32, Vec<String>>,
+    /// `// ASSERTIONS_MODE: always-enable` — `assert(...)` is emitted UNGUARDED (always checks + throws),
+    /// not behind the per-class `desiredAssertionStatus()` guard. From the test directive / `-Xassertions`.
+    pub assert_always_enabled: bool,
+    /// `// ASSERTIONS_MODE: always-disable` — `assert(...)` is elided entirely (the condition is not even
+    /// evaluated). Mutually exclusive with `assert_always_enabled`; both unset ⇒ the per-class guard.
+    pub assert_always_disabled: bool,
 }
 
 impl File {
