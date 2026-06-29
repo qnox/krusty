@@ -6407,14 +6407,11 @@ impl<'a> Checker<'a> {
                 // operand and calls null-safe equality (`Any? == 5`, `x.getOrNull() == 42`). Ordering and
                 // arithmetic remain stricter.
                 let any = Ty::obj("kotlin/Any");
-                // A nullable-primitive wrapper (`Int?` = `Integer`) compares with its primitive (`a == 5`):
-                // the primitive operand is boxed at the emit site for structural equality. Excludes
-                // Float/Double — their `0.0 == -0.0` IEEE-754 semantics differ between primitive `==` and
-                // boxed `equals`, which needs a dedicated comparison krusty doesn't emit yet.
-                let wrapper_vs_prim = |w: Ty, p: Ty| {
-                    w.nullable_primitive()
-                        .map_or(false, |pw| pw == p && !matches!(pw, Ty::Float | Ty::Double))
-                };
+                // A nullable-primitive wrapper (`Int?`/`Double?`) compares with its primitive (`a == 5.0`):
+                // the lowerer null-checks the wrapper, then UNBOXES it and does a primitive `==` (`dcmp`/
+                // `fcmp` for Float/Double — IEEE-754, so `-0.0 == 0.0`, `NaN != NaN`), never boxed `equals`.
+                let wrapper_vs_prim =
+                    |w: Ty, p: Ty| w.nullable_primitive().map_or(false, |pw| pw == p);
                 let is_any_ref = |t: Ty| t.non_null() == Ty::obj("kotlin/Any");
                 let has_boxable_value_equality = |t: Ty| {
                     matches!(
