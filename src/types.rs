@@ -270,16 +270,14 @@ impl Ty {
     /// "is this a boxed-wrapper `Obj`?" probe (`t.obj_internal().and_then(prim_of_wrapper)`).
     pub fn nullable_primitive(self) -> Option<Ty> {
         match self {
-            Ty::Nullable(inner) if inner.boxed_ref().is_some() || inner.is_unsigned() => {
-                Some(*inner)
-            }
+            Ty::Nullable(inner) if inner.boxed_ref().is_some() => Some(*inner),
             _ => None,
         }
     }
 
-    /// The nullable form `T?` of a primitive that krusty can box (`Int` → `Int?`). `None` for a
-    /// non-primitive (already a reference) or the unsigned/value primitives, whose nullable boxing
-    /// isn't supported yet (those stay rejected — never miscompiled).
+    /// The nullable form `T?` of a primitive that krusty can box (`Int` → `Int?`, `UInt` → `UInt?` boxed
+    /// as `kotlin/UInt`). `None` for a non-primitive (already a reference). Unsigned boxes via its wrapper,
+    /// so it is supported (parallel to [`Ty::nullable_primitive`], which already admits unsigned).
     pub fn nullable_boxed(self) -> Option<Ty> {
         self.boxed_ref().is_some().then(|| Ty::nullable(self))
     }
@@ -381,6 +379,10 @@ impl Ty {
             Ty::Double => "kotlin/Double",
             Ty::Boolean => "kotlin/Boolean",
             Ty::Char => "kotlin/Char",
+            // Unsigned types box to their OWN inline-class wrapper (`UInt` → `kotlin/UInt`), not a
+            // `java/lang/*`; `kotlin_prim_to_wrapper` maps the wrapper to itself.
+            Ty::UInt => "kotlin/UInt",
+            Ty::ULong => "kotlin/ULong",
             _ => return None,
         }))
     }
@@ -661,8 +663,9 @@ mod tests {
     fn nullable_boxed_is_the_supported_nullable_form_of_a_primitive() {
         assert_eq!(Ty::Int.nullable_boxed(), Some(Ty::nullable(Ty::Int)));
         assert_eq!(Ty::Char.nullable_boxed(), Some(Ty::nullable(Ty::Char)));
-        // Unsigned/value primitives: nullable boxing not supported yet.
-        assert_eq!(Ty::UInt.nullable_boxed(), None);
+        // Unsigned boxes to its inline-class wrapper (`UInt?` → boxed `kotlin/UInt`).
+        assert_eq!(Ty::UInt.nullable_boxed(), Some(Ty::nullable(Ty::UInt)));
+        assert_eq!(Ty::ULong.nullable_boxed(), Some(Ty::nullable(Ty::ULong)));
         // Already a reference → not a primitive to box.
         assert_eq!(Ty::String.nullable_boxed(), None);
     }

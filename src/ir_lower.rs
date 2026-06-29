@@ -11475,9 +11475,12 @@ impl<'a> Lower<'a> {
                         }
                     }
                 }
-                // Only reference receiver + reference result are modeled (a nullable-primitive result
-                // would need boxing the member value, which the checker rejects anyway).
-                if !rty.is_reference() || !result_ty.is_reference() {
+                // The receiver must be a reference (the `?.` null-check is on an object). The result may be
+                // a reference OR a nullable-primitive (`s?.length` : `Int?`) — the assembly below boxes the
+                // primitive member value into the wrapper (`null` in the other branch).
+                if !rty.is_reference()
+                    || (!result_ty.is_reference() && result_ty.nullable_primitive().is_none())
+                {
                     return None;
                 }
                 // The receiver internal comes from the NON-null form (`Int?` in a chained `?.let` unwraps

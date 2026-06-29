@@ -1672,20 +1672,24 @@ fn emit_bridges(c: &crate::ir::IrClass, cw: &mut ClassWriter) {
     }
 }
 
-/// Box a primitive on the stack to its wrapper (free-function form for the bridge emitter).
+/// Box a primitive on the stack to its wrapper (free-function form for the bridge emitter). A signed
+/// primitive boxes via its `java/lang/*` `valueOf`; an UNSIGNED type via its inline-class wrapper's
+/// `box-impl` (`kotlin/UInt.box-impl(I)Lkotlin/UInt;`) — both are rows in the one table.
 fn box_prim_free(cw: &mut ClassWriter, code: &mut CodeBuilder, t: Ty) {
-    let (cls, desc) = match t {
-        Ty::Int => ("java/lang/Integer", "(I)Ljava/lang/Integer;"),
-        Ty::Long => ("java/lang/Long", "(J)Ljava/lang/Long;"),
-        Ty::Double => ("java/lang/Double", "(D)Ljava/lang/Double;"),
-        Ty::Float => ("java/lang/Float", "(F)Ljava/lang/Float;"),
-        Ty::Boolean => ("java/lang/Boolean", "(Z)Ljava/lang/Boolean;"),
-        Ty::Char => ("java/lang/Character", "(C)Ljava/lang/Character;"),
-        Ty::Byte => ("java/lang/Byte", "(B)Ljava/lang/Byte;"),
-        Ty::Short => ("java/lang/Short", "(S)Ljava/lang/Short;"),
+    let (cls, meth, desc) = match t {
+        Ty::Int => ("java/lang/Integer", "valueOf", "(I)Ljava/lang/Integer;"),
+        Ty::Long => ("java/lang/Long", "valueOf", "(J)Ljava/lang/Long;"),
+        Ty::Double => ("java/lang/Double", "valueOf", "(D)Ljava/lang/Double;"),
+        Ty::Float => ("java/lang/Float", "valueOf", "(F)Ljava/lang/Float;"),
+        Ty::Boolean => ("java/lang/Boolean", "valueOf", "(Z)Ljava/lang/Boolean;"),
+        Ty::Char => ("java/lang/Character", "valueOf", "(C)Ljava/lang/Character;"),
+        Ty::Byte => ("java/lang/Byte", "valueOf", "(B)Ljava/lang/Byte;"),
+        Ty::Short => ("java/lang/Short", "valueOf", "(S)Ljava/lang/Short;"),
+        Ty::UInt => ("kotlin/UInt", "box-impl", "(I)Lkotlin/UInt;"),
+        Ty::ULong => ("kotlin/ULong", "box-impl", "(J)Lkotlin/ULong;"),
         _ => return,
     };
-    let m = cw.methodref(cls, "valueOf", desc);
+    let m = cw.methodref(cls, meth, desc);
     code.invokestatic(m, slot_words(t) as i32, 1);
 }
 
@@ -1700,6 +1704,9 @@ fn unbox_prim(cw: &mut ClassWriter, code: &mut CodeBuilder, t: Ty) {
         Ty::Char => ("java/lang/Character", "charValue", "()C"),
         Ty::Byte => ("java/lang/Byte", "byteValue", "()B"),
         Ty::Short => ("java/lang/Short", "shortValue", "()S"),
+        // An unsigned wrapper unboxes via its inline-class `unbox-impl` (a row, not a special case).
+        Ty::UInt => ("kotlin/UInt", "unbox-impl", "()I"),
+        Ty::ULong => ("kotlin/ULong", "unbox-impl", "()J"),
         _ => return,
     };
     let ci = cw.class_ref(cls);
@@ -4141,10 +4148,23 @@ impl<'a> Emitter<'a> {
                     IrTypeOp::ImplicitCoercion => {
                         let at = self.value_ty(*arg);
                         let target = ir_ty_to_jvm(type_operand);
+                        crate::trace_compiler!(
+                            "value_classes",
+                            "coerce at={at:?} target={target:?} type_operand={type_operand:?}"
+                        );
                         if at.is_jvm_scalar() && target.is_reference() {
                             box_prim_free(self.cw, code, at);
                         } else if at.is_reference() && target.is_jvm_scalar() {
-                            unbox_prim(self.cw, code, target);
+                            // The unbox method comes from the SOURCE wrapper on the stack: a boxed UNSIGNED
+                            // value is `kotlin/UInt` (unboxed via its inline-class `unbox-impl` row in
+                            // `unbox_prim`), while `target` was erased to the signed `Int`. Recover the
+                            // unsigned type from `at` so the right `unbox_prim` row is hit.
+                            let src = match at.obj_internal() {
+                                Some("kotlin/UInt") => Ty::UInt,
+                                Some("kotlin/ULong") => Ty::ULong,
+                                _ => target,
+                            };
+                            unbox_prim(self.cw, code, src);
                         } else if at.is_jvm_scalar() && target.is_jvm_scalar() && at != target {
                             emit_num_conv(at, target, code);
                         }
@@ -6417,7 +6437,8 @@ fn ir_ty_nullable(t: &Ty) -> bool {
 
 fn slot_words(t: Ty) -> u16 {
     match t {
-        Ty::Long | Ty::Double => 2,
+        // `ULong` is a `long` on the JVM — two words, like `Long`/`Double` (`UInt` is one, like `Int`).
+        Ty::Long | Ty::Double | Ty::ULong => 2,
         Ty::Unit | Ty::Nothing => 0,
         _ => 1,
     }
