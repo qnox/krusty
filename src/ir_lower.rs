@@ -4308,99 +4308,110 @@ impl<'a> Lower<'a> {
             }
             let comp = format!("component{}", idx + 1);
             let recv = self.ir.add_expr(IrExpr::GetValue(tmp));
-            let (call, log_ty) =
-                if let Some((class, index, _, _)) = self.resolve_method(&internal, &comp) {
-                    let ret = self
-                        .syms
-                        .method_of(&internal, &comp)
-                        .map(|s| s.ret)
-                        .unwrap_or_else(|| Ty::obj("kotlin/Any"));
-                    (
-                        self.ir.add_expr(IrExpr::MethodCall {
-                            class,
-                            index,
-                            receiver: recv,
-                            args: vec![],
-                        }),
-                        ret,
-                    )
-                } else if self.class_of(it_ty).is_none()
-                    && self.syms.class_by_internal(&internal).is_some_and(|cs| {
-                        cs.value_field.is_none()
-                            && cs.methods.get(&comp).is_some_and(|s| s.params.is_empty())
-                    })
-                {
-                    // `componentN` of a class defined in ANOTHER file of this compilation → `CrossFileVirtual`
-                    // (mirrors a cross-file instance call), so a destructure of a sibling-file value resolves.
-                    let (ret, interface) = {
-                        let cs = self.syms.class_by_internal(&internal).unwrap();
-                        (cs.methods[&comp].ret, cs.is_interface)
-                    };
-                    let c = self.ir.add_expr(IrExpr::Call {
-                        callee: Callee::CrossFileVirtual {
-                            owner: internal.clone(),
-                            name: comp.clone(),
-                            params: vec![],
-                            ret: ty_to_ir(ret),
-                            interface,
-                        },
-                        dispatch_receiver: Some(recv),
+            let (call, log_ty) = if let Some((class, index, _, _)) =
+                self.resolve_method(&internal, &comp)
+            {
+                let ret = self
+                    .syms
+                    .method_of(&internal, &comp)
+                    .map(|s| s.ret)
+                    .unwrap_or_else(|| Ty::obj("kotlin/Any"));
+                (
+                    self.ir.add_expr(IrExpr::MethodCall {
+                        class,
+                        index,
+                        receiver: recv,
                         args: vec![],
-                    });
-                    (c, ret)
-                } else if let Some(m) = crate::call_resolver::resolve_instance_member(
+                    }),
+                    ret,
+                )
+            } else if self.class_of(it_ty).is_none()
+                && self.syms.class_by_internal(&internal).is_some_and(|cs| {
+                    cs.value_field.is_none()
+                        && cs.methods.get(&comp).is_some_and(|s| s.params.is_empty())
+                })
+            {
+                // `componentN` of a class defined in ANOTHER file of this compilation → `CrossFileVirtual`
+                // (mirrors a cross-file instance call), so a destructure of a sibling-file value resolves.
+                let (ret, interface) = {
+                    let cs = self.syms.class_by_internal(&internal).unwrap();
+                    (cs.methods[&comp].ret, cs.is_interface)
+                };
+                let c = self.ir.add_expr(IrExpr::Call {
+                    callee: Callee::CrossFileVirtual {
+                        owner: internal.clone(),
+                        name: comp.clone(),
+                        params: vec![],
+                        ret: ty_to_ir(ret),
+                        interface,
+                    },
+                    dispatch_receiver: Some(recv),
+                    args: vec![],
+                });
+                (c, ret)
+            } else if let Some(m) = crate::call_resolver::resolve_instance_member(
+                &*self.syms.libraries,
+                it_ty,
+                &comp,
+                &[],
+            ) {
+                let is_iface = self.library_type_is_interface(&internal);
+                let c = self.ir.add_expr(IrExpr::Call {
+                    callee: Callee::Virtual {
+                        owner: internal.clone(),
+                        name: comp.clone(),
+                        descriptor: m.member.descriptor.clone(),
+                        interface: is_iface,
+                    },
+                    dispatch_receiver: Some(recv),
+                    args: vec![],
+                });
+                (self.coerce_erased(c, m.ret, m.member.physical_ret), m.ret)
+            } else if let Some(c) = self.library_extension_callable(&comp, it_ty, &[], &[]) {
+                // `List.component1()` etc. are stdlib extensions: `invokestatic facade.componentN(recv)`.
+                let call = self.ir.add_expr(IrExpr::Call {
+                    callee: Callee::Static {
+                        owner: c.owner,
+                        name: c.name,
+                        descriptor: c.descriptor,
+                        inline: c.inline,
+                    },
+                    dispatch_receiver: None,
+                    args: vec![recv],
+                });
+                (self.coerce_erased(call, c.ret, c.physical_ret), c.ret)
+            } else if let Some(&fid) = self.ext_fun_ids.get(&(it_ty.erased_recv(), comp.clone())) {
+                // A USER-defined `operator fun Recv.componentN()` extension → `invokestatic` it with
+                // the receiver as the sole argument (its lowered first param).
+                let ret = self.ir.functions[fid as usize].ret;
+                let c = self.ir.add_expr(IrExpr::Call {
+                    callee: Callee::Local(fid),
+                    dispatch_receiver: None,
+                    args: vec![recv],
+                });
+                (c, ret)
+            } else {
+                // An indexable type: `componentN` is the inline `get(N-1)`.
+                let m = crate::call_resolver::resolve_instance_member(
                     &*self.syms.libraries,
                     it_ty,
-                    &comp,
-                    &[],
-                ) {
-                    let is_iface = self.library_type_is_interface(&internal);
-                    let c = self.ir.add_expr(IrExpr::Call {
-                        callee: Callee::Virtual {
-                            owner: internal.clone(),
-                            name: comp.clone(),
-                            descriptor: m.member.descriptor.clone(),
-                            interface: is_iface,
-                        },
-                        dispatch_receiver: Some(recv),
-                        args: vec![],
-                    });
-                    (self.coerce_erased(c, m.ret, m.member.physical_ret), m.ret)
-                } else if let Some(c) = self.library_extension_callable(&comp, it_ty, &[], &[]) {
-                    // `List.component1()` etc. are stdlib extensions: `invokestatic facade.componentN(recv)`.
-                    let call = self.ir.add_expr(IrExpr::Call {
-                        callee: Callee::Static {
-                            owner: c.owner,
-                            name: c.name,
-                            descriptor: c.descriptor,
-                            inline: c.inline,
-                        },
-                        dispatch_receiver: None,
-                        args: vec![recv],
-                    });
-                    (self.coerce_erased(call, c.ret, c.physical_ret), c.ret)
-                } else {
-                    // An indexable type: `componentN` is the inline `get(N-1)`.
-                    let m = crate::call_resolver::resolve_instance_member(
-                        &*self.syms.libraries,
-                        it_ty,
-                        "get",
-                        &[Ty::Int],
-                    )?;
-                    let is_iface = self.library_type_is_interface(&internal);
-                    let i = self.ir.add_expr(IrExpr::Const(IrConst::Int(idx as i32)));
-                    let c = self.ir.add_expr(IrExpr::Call {
-                        callee: Callee::Virtual {
-                            owner: internal.clone(),
-                            name: "get".to_string(),
-                            descriptor: m.member.descriptor.clone(),
-                            interface: is_iface,
-                        },
-                        dispatch_receiver: Some(recv),
-                        args: vec![i],
-                    });
-                    (self.coerce_erased(c, m.ret, m.member.physical_ret), m.ret)
-                };
+                    "get",
+                    &[Ty::Int],
+                )?;
+                let is_iface = self.library_type_is_interface(&internal);
+                let i = self.ir.add_expr(IrExpr::Const(IrConst::Int(idx as i32)));
+                let c = self.ir.add_expr(IrExpr::Call {
+                    callee: Callee::Virtual {
+                        owner: internal.clone(),
+                        name: "get".to_string(),
+                        descriptor: m.member.descriptor.clone(),
+                        interface: is_iface,
+                    },
+                    dispatch_receiver: Some(recv),
+                    args: vec![i],
+                });
+                (self.coerce_erased(c, m.ret, m.member.physical_ret), m.ret)
+            };
             // A `var` component captured AND written by a closure is boxed into a `Ref$XxxRef`, exactly
             // like a plain mutable local (see the `Stmt::Local` path) — without this the closure mutates
             // a private copy and the outer read misses it (e.g. `var [a,b]=A(); { a=3 }()`).
