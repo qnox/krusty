@@ -2934,3 +2934,56 @@ classpath/library metadata still legitimately surfaces. Removing them outright r
 `java/lang/Object` arrival; the principled fix is to canonicalize JVM→Kotlin names where metadata
 *enters* core (provider `resolve_type`/`desc_to_ty`/metadata decode), after which these checks can drop
 the JVM arm. That is the next core-decoupling slice.
+
+## Session handoff (labeled-this + feature fills; coroutine blocker pinned)
+
+Conformance moved 2078 → 2098 (FAIL: 0 throughout, all pushed green). Commits this session, each
+root-caused + TDD + reviewed:
+
+- Invoke-operator unification: one `ExprLowering::Invoke { receiver, params, kind }` (Function|Operator),
+  one `Checker::record_invoke`, one `Lower::lower_invoke` — replaced two parallel checker/lowerer paths.
+- `java/lang` removed from common lowering: `String.length`/`hashCode` resolve via the provider
+  (`mapped_builtin_fallback`, a JDK-less mapped-builtin ABI); builtin type-refs normalized to Kotlin
+  names via `to_kotlin_internal`. The constant-pool boundary (`classfile::class`) maps to JVM names.
+- `as? T` (safe cast to a type parameter) erases to the bound, mirroring the non-null `as T` path.
+- Safe call to a same-module extension (`recv?.ext()`): checker + lowerer.
+- Class delegation forwards INHERITED super-interface methods (`Second : First`), via a BFS over the
+  module `ClassSig` super-interface graph; bails (skips) if any interface is a non-module classpath type.
+- Default-argument INHERITANCE: an override without defaults reuses the nearest base method's CONSTANT
+  defaults (`Lower::base_const_defaults`, registered on the override's fid).
+- `when` STATEMENT with a diverging (`throw`/`return`, `Nothing`) branch no longer bails: the
+  `Unit`-mixed guard exempts `Nothing` (it pushes nothing at the merge).
+- Nullable-receiver callable ref / class literal (`A?::foo`, `A?::class`): parser postfix arm.
+- Labeled `this` via a generic RECEIVER-LABEL STACK (`Checker.this_labels: Vec<(label, Ty, is_class)>`):
+  a class body pushes its `inner_of` chain then itself (class entries); any receiver-lambda call pushes
+  `(calleeFnName, receiverTy, false)` — the label is derived ONCE in `check_call` from the callee and
+  applied uniformly (run/apply/with are NOT special-cased — they are just functions). `this@Label`
+  resolves to the matching entry's type; the INNERMOST match records `ExprLowering::LabeledThisInner`
+  (lowers as bare `this`), an immediate-outer-CLASS match records `LabeledThisOuter` (lowers as
+  `this.this$0`). Any other (captured / multi-level / cross-lambda) match type-checks but the lowerer
+  skips it — never miscompiles. This replaced an earlier ad-hoc blanket `this@X → this` normalization
+  that was a latent miscompile for non-innermost receivers.
+
+### Pinned next target: coroutine `suspendCoroutine` (the largest skip cluster, ~230 files)
+
+`suspendCoroutine` is NOT in `libraries::coroutine_intrinsic` (only `suspendCoroutineUninterceptedOrReturn`
+/`startCoroutine`/`createCoroutine` are), so the checker reports `unresolved function 'suspendCoroutine'`.
+It is the stdlib inline definition:
+
+```kotlin
+suspend inline fun <T> suspendCoroutine(crossinline block: (Continuation<T>) -> Unit): T =
+    suspendCoroutineUninterceptedOrReturn { c -> val s = SafeContinuation(c.intercepted()); block(s); s.getOrThrow() }
+```
+
+Verified stdlib API (kotlin-stdlib 2.0.21): `kotlin.coroutines.SafeContinuation(Continuation)` ctor +
+`getOrThrow(): Object`; `intercepted` is `kotlin.coroutines.intrinsics.IntrinsicsKt.intercepted(Continuation)`.
+
+THE BLOCKER: the existing `...UninterceptedOrReturn` lowering at `src/ir_lower.rs:13529` explicitly bails
+when the block READS its continuation parameter — *"block reads its continuation — not modeled (skip,
+never miscompile)... needs the post-CPS continuation slot threaded in."* `suspendCoroutine`'s desugared
+block must read `c` (to build `SafeContinuation`), so it requires implementing that continuation-threading.
+The continuation slot only exists AFTER the CPS transform (`jvm/suspend.rs`: slot = `params + (this?1:0)`,
+line ~88), so the threading belongs in the suspend pass, not `ir_lower`. Real (asynchronous) resume also
+needs the state machine to store the continuation and return `COROUTINE_SUSPENDED`; synchronous-resume
+files (`suspendCoroutine { it.resume(v) }`) still go through `SafeContinuation.getOrThrow()`. This is a
+multi-step suspend-pass feature — implement it with commit gated on a green box() round-trip + full suite.
