@@ -5310,8 +5310,20 @@ impl<'a> Checker<'a> {
                                         || self.obj_is_subtype(bw, t)
                                 })
                         }));
-                if !(tt.is_reference() || prim_unbox)
-                    || (!ot.is_reference() && !prim_box && ot != Ty::Error)
+                // A SAFE cast of a PRIMITIVE operand (`1 as? Byte`, `1.0 as? Int`): box the operand to its
+                // wrapper, then `instanceof` the target wrapper/class — `null` on a mismatch (an `Int` box
+                // is not a `Byte`). Sound for any known target (reference or boxable primitive).
+                let prim_operand_safe_cast = nullable
+                    && ot.boxed_ref().is_some()
+                    // A value/unsigned-class operand (`1U as? Int`) boxes to its OWN wrapper
+                    // (`kotlin/UInt`, not `Integer`) — its `instanceof` against the target wrapper
+                    // is not the plain-primitive shape the lowerer boxes, so leave it skipped.
+                    && !self.syms.libraries.is_unsigned_integer_type(ot)
+                    && !self.ty_is_value_class(ot)
+                    && (tt.is_reference() || tt.boxed_ref().is_some());
+                if (!(tt.is_reference() || prim_unbox)
+                    || (!ot.is_reference() && !prim_box && ot != Ty::Error))
+                    && !prim_operand_safe_cast
                 {
                     self.diags.error(
                         self.span(e),

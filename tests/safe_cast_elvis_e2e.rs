@@ -57,3 +57,21 @@ fun box(): String {\n\
 }\n";
     assert_eq!(run(SRC).expect("as? reference body compiles + runs"), "OK");
 }
+
+#[test]
+fn safe_cast_primitive_operand() {
+    // `1 as? Int` / `1.0 as? Double` — a PRIMITIVE operand: box it to its wrapper, then `instanceof`
+    // the target. An `Int` box IS an `Int` (→ itself) but is NOT a `Byte`/`Long` (→ null). Round-tripped.
+    const SRC: &str = "fun box(): String {\n\
+    if ((1 as? Int) != 1) return \"f1\"\n\
+    if ((1 as? Byte) != null) return \"f2\"\n\
+    if ((1.0 as? Double) != 1.0) return \"f3\"\n\
+    if ((1.0 as? Int) != null) return \"f4\"\n\
+    if ((1L as? Long) != 1L) return \"f5\"\n\
+    return \"OK\"\n\
+}\n";
+    assert_eq!(
+        run(SRC).expect("primitive-operand as? compiles + runs"),
+        "OK"
+    );
+}
