@@ -231,6 +231,7 @@ struct MetaCallable {
     value_param_types: Vec<Ty>,
     value_param_names: Vec<String>,
     value_param_has_default: Vec<bool>,
+    value_param_materialized: Vec<bool>,
     value_param_recv_fun_flags: Vec<bool>,
     value_param_recv_funs: Vec<Option<String>>,
 }
@@ -417,6 +418,7 @@ impl Classpath {
                     .collect(),
                 value_param_names: f.value_param_names.clone(),
                 value_param_has_default: f.value_param_has_default.clone(),
+                value_param_materialized: f.value_param_materialized.clone(),
                 value_param_recv_fun_flags: f.value_param_recv_fun_flags.clone(),
                 value_param_recv_funs: f.value_param_recv_funs.clone(),
             })
@@ -561,6 +563,23 @@ impl Classpath {
                     .or_else(|| idxs.first().map(|&i| &meta.callables[i]))
             })
             .map(|c| c.value_param_recv_fun_flags.clone())
+            .unwrap_or_default()
+    }
+
+    /// Per SOURCE value parameter of `fn_name`: whether it is `crossinline`/`noinline` (its lambda
+    /// argument is MATERIALIZED, so a mutable local it captures must be `Ref`-boxed). Empty when the
+    /// function is absent or carries no such parameter.
+    pub fn metadata_param_materialized(&self, internal: &str, fn_name: &str) -> Vec<bool> {
+        let meta = self.class_meta(internal);
+        meta.by_kotlin_name
+            .get(fn_name)
+            .and_then(|idxs| {
+                idxs.iter()
+                    .map(|&i| &meta.callables[i])
+                    .find(|c| c.value_param_materialized.iter().any(|b| *b))
+                    .or_else(|| idxs.first().map(|&i| &meta.callables[i]))
+            })
+            .map(|c| c.value_param_materialized.clone())
             .unwrap_or_default()
     }
 

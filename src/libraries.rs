@@ -393,6 +393,10 @@ pub struct CallSig {
     /// Per logical param: whether it is a receiver function type, even when metadata cannot name a
     /// concrete receiver class because the receiver is a type parameter (`T.() -> R`).
     pub lambda_receiver_params: Vec<bool>,
+    /// Per logical param: whether it is `crossinline`/`noinline` — its lambda argument is MATERIALIZED
+    /// (a real `FunctionN`/nested class) rather than inline-spliced, so a mutable local it captures must
+    /// be `Ref`-boxed like an ordinary closure. Parallel to the params; all-false for a non-inline fn.
+    pub lambda_materialized: Vec<bool>,
     /// Minimum arguments a caller must supply (params beyond this have defaults). 0 by default.
     pub required: usize,
     /// True if the last logical param is `vararg` (callers pack trailing args into its array).

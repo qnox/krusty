@@ -3088,3 +3088,28 @@ value (the documented "lambda-arg splicing" gap). Two paths:
 
 Path 2 avoids the splicer and the stdlib `$Continuation$1` dependency. Either unblocks the universal
 coroutine helper block; then blocker #2 (suspend-lambda state machine with captures) gates the box() run.
+
+### Coroutine blocker #1b SOLVED (generic) but gated by downstream value-class miscompiles
+
+The generic fix for the `Continuation` factory splice (value-use inline lambda) is found and VERIFIED:
+in `ir_emit::try_inline_static_as`, route a lambda arg to `try_inline_unified` ONLY when the body
+actually INVOKES the lambda (`function_invoke_sites` non-empty); when the lambda is used as a VALUE
+(no invoke site — e.g. `new …$Continuation$1(ctx, resumeWith)`), fall through to the no-lambda path,
+which `emit_operands`-materializes the lambda as a `Function1` and `splice_unified`s the body verbatim
+(binding the param slot to that object). No `Continuation` hardcode — `$Continuation$1` comes from the
+spliced bytecode. Verified: `Continuation(ctx){}` + read `.context` → box() == "OK".
+
+BUT this fix CANNOT land alone: it makes 4 coroutine files COMPILE that previously skipped, and they then
+MISCOMPILE downstream (regression FAIL:0 → FAIL:4, zero green gain):
+- `coroutines/kt44781.kt` — `Continuation(...){ result = it.getOrThrow() }`: ClassCastException
+  `Result cannot be cast to String` (value-class `Result.getOrThrow()` in the lambda body mis-lowered).
+- `coroutines/inlineClasses/direct/createMangling.kt` — VerifyError: Bad type on operand stack.
+- `coroutines/inlineClasses/kt47129.kt` — NullPointerException.
+- `coroutines/inlineClasses/direct/invokeOperator.kt` — wrong box() result.
+
+All four are value-class / inline-class interacting with the coroutine/CPS Object boundary — PRE-EXISTING
+lowering bugs the factory fix merely unmasks. They must be fixed (or made to bail cleanly) BEFORE the
+factory fix can land at FAIL:0. So the order is: (a) fix/bail value-class-through-suspend lowering
+(starting with `Result.getOrThrow()` in a lambda), (b) apply the `try_inline_static_as` value-use-lambda
+fix, (c) the suspend-lambda state machine with captures (blocker #2). The factory-splice code change is
+exact and re-appliable from this note.

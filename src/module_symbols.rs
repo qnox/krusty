@@ -137,6 +137,9 @@ fn fn_info(
                 })
                 .collect(),
             lambda_receiver_params: sig.lambda_recv.clone(),
+            // Same-file functions: per-param crossinline/noinline isn't tracked in the AST Signature yet,
+            // so leave empty (a same-file `Continuation`-style factory is not a current case).
+            lambda_materialized: Vec::new(),
             required: sig.required,
             vararg: sig.vararg,
         },

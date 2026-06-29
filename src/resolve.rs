@@ -3051,6 +3051,11 @@ pub struct TypeInfo {
     pub expr_lowers: HashMap<ExprId, ExprLowering>,
     /// Selected statement lowerings that differ from the parser's generic statement shape.
     pub stmt_lowers: HashMap<StmtId, StmtLowering>,
+    /// The RESOLVED type of a `val`/`var` local that carries an explicit type annotation, keyed by the
+    /// `Stmt::Local`. The lowerer reuses this instead of re-resolving the annotation — so a library type
+    /// the checker resolves through imports (`var res: Result<T>? = null`) keeps its (value-)class type
+    /// instead of collapsing to the initializer's type. Absent for an inferred (no-annotation) local.
+    pub local_decl_types: HashMap<StmtId, Ty>,
 }
 
 /// How to inline a receiver-lambda scope-function call (see [`InlineCall::ReceiverLambda`]).
@@ -3112,8 +3117,10 @@ pub enum ExprLowering {
 /// object whose member `invoke` operator is called.
 #[derive(Clone, Debug)]
 pub enum InvokeKind {
-    /// Receiver is a function value (`Ty::Fun`); lowering emits a direct function invocation.
-    Function { ret: Ty },
+    /// Receiver is a function value (`Ty::Fun`); lowering emits a direct function invocation. `suspend`
+    /// is the function type's suspend-ness: a `suspend (A)->R` value implements `Function{N+1}` (the
+    /// trailing `Continuation`), so the call must thread the continuation and invoke `Function{N+1}`.
+    Function { ret: Ty, suspend: bool },
     /// Receiver carries a member `operator fun invoke`; lowering calls that member.
     Operator { receiver_ty: Ty },
 }
@@ -3205,6 +3212,7 @@ fn make_checker<'a>(file: &'a File, syms: &'a SymbolTable, diags: &'a mut DiagSi
         inferred_ext_fun_rets: HashMap::new(),
         inferred_method_rets: HashMap::new(),
         stmt_lowers: HashMap::new(),
+        local_decl_types: HashMap::new(),
         fn_reassigned: std::collections::HashSet::new(),
         expr_depth: 0,
         allow_lambda_mutation: false,
@@ -3766,6 +3774,7 @@ pub fn check_file(file: &File, syms: &mut SymbolTable, diags: &mut DiagSink) -> 
         inferred_ext_fun_rets,
         inferred_method_rets,
         stmt_lowers,
+        local_decl_types,
         ..
     } = c;
     for ((name, params), ret) in inferred_fun_rets {
@@ -3795,6 +3804,7 @@ pub fn check_file(file: &File, syms: &mut SymbolTable, diags: &mut DiagSink) -> 
         expr_types,
         expr_lowers,
         stmt_lowers,
+        local_decl_types,
     }
 }
 
@@ -3834,6 +3844,7 @@ struct Checker<'a> {
     inferred_ext_fun_rets: HashMap<(Ty, String), Ty>,
     inferred_method_rets: HashMap<(String, String, Vec<Ty>), Ty>,
     stmt_lowers: HashMap<StmtId, StmtLowering>,
+    local_decl_types: HashMap<StmtId, Ty>,
     /// Names reassigned anywhere in the function body currently being checked (including inside its
     /// closures). A captured `var` is boxed only if it's in here — kotlinc treats a captured-but-never-
     /// reassigned `var` as effectively final (passed by value).
@@ -3917,7 +3928,10 @@ impl<'a> Checker<'a> {
             Ty::Fun(sig) => (
                 sig.params.clone(),
                 sig.ret,
-                InvokeKind::Function { ret: sig.ret },
+                InvokeKind::Function {
+                    ret: sig.ret,
+                    suspend: sig.suspend,
+                },
             ),
             _ => {
                 let (params, ret) = crate::module_symbols::ModuleSymbols::new(self.syms)
@@ -8535,6 +8549,16 @@ impl<'a> Checker<'a> {
                     .and_then(|partial| {
                         self.resolver().top_level_lambda_receivers(&fname, partial)
                     });
+                // Per-param `crossinline`/`noinline`: such a lambda argument is MATERIALIZED (a real
+                // closure, e.g. the `Continuation(ctx){…}` factory's `resumeWith`), so a mutable local it
+                // captures must be `Ref`-boxed — DON'T treat it as an inline splice.
+                let toplevel_lambda_materialized: Option<Vec<bool>> = toplevel_partial
+                    .as_ref()
+                    .filter(|_| known_sig.is_none())
+                    .and_then(|partial| {
+                        self.resolver()
+                            .top_level_lambda_materialized(&fname, partial)
+                    });
                 // A top-level NON-public (`@InlineOnly`) inline fn (`require`/`check`) inlines its lambda
                 // argument (or the file is skipped), so a mutable capture is an inline capture — type the
                 // lambda body with mutation allowed (don't `Ref`-box the captured var).
@@ -8563,10 +8587,17 @@ impl<'a> Checker<'a> {
                                 && !pts[i].is_empty()
                             {
                                 // A top-level INLINE fn (`repeat`/`run`/…) splices its lambda, so a mutable
-                                // variable the lambda captures is an inline capture (no `Ref` box).
+                                // variable the lambda captures is an inline capture (no `Ref` box). EXCEPT a
+                                // `crossinline`/`noinline` param materializes the lambda into a real closure,
+                                // where a mutable capture IS `Ref`-boxed (e.g. `Continuation(ctx){ res = it }`).
+                                let materialized = toplevel_lambda_materialized
+                                    .as_ref()
+                                    .and_then(|m| m.get(i))
+                                    .copied()
+                                    .unwrap_or(false);
                                 let prev = self.allow_lambda_mutation;
                                 self.allow_lambda_mutation =
-                                    self.resolver().toplevel_is_inline(&fname);
+                                    self.resolver().toplevel_is_inline(&fname) && !materialized;
                                 // A RECEIVER function-type param: bind `pts[i][0]` (the Signature-derived
                                 // receiver) as the lambda's `this`; the rest are value params.
                                 let t = if recv_i.is_some() {
@@ -9349,6 +9380,11 @@ impl<'a> Checker<'a> {
                     }
                     None => it,
                 };
+                // Record the resolved ANNOTATION type so the lowerer reuses it (a library type resolved
+                // through imports survives even when the initializer is `null`/less specific).
+                if let Some(d) = declared {
+                    self.local_decl_types.insert(s, d);
+                }
                 self.declare(&name, bind, is_var);
             }
             Stmt::LocalDelegate {

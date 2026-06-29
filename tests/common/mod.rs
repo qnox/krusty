@@ -72,6 +72,11 @@ pub fn compile_in_process(
     if !krusty::jvm::value_classes::lower_value_classes(&mut ir) {
         return None; // value-class shape not lowered — skip, don't miscompile
     }
+    // The CPS (suspend) transform — the real backend (jvm/backend.rs) runs it right after the value-class
+    // pass. Without it here, a `suspend` snippet compiled in-process would diverge from the gate.
+    if !krusty::jvm::suspend::lower_suspend(&mut ir, &facade) {
+        return None; // suspend shape not lowered — skip, don't miscompile
+    }
     let outputs = krusty::jvm::ir_emit::emit_all(&ir, &facade, &*cp, None)?;
     if outputs.is_empty() {
         None

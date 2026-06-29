@@ -307,6 +307,13 @@ fn compile_source(
         T_EMIT.fetch_add(t4.elapsed().as_nanos() as u64, Ordering::Relaxed);
         return None; // value-class shape not yet lowered — skip, don't miscompile
     }
+    // The CPS (suspend) transform — the real backend (jvm/backend.rs) runs it after the value-class pass.
+    // Without it the gate would compile `suspend` code with the wrong ABI (no continuation), diverging
+    // from what ships; an unsupported suspend shape returns false → skip (don't miscompile).
+    if !krusty::jvm::suspend::lower_suspend(&mut ir, &facade_name) {
+        T_EMIT.fetch_add(t4.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        return None;
+    }
     let outputs: Vec<(String, Vec<u8>)> = match ir_emit::emit_all(&ir, &facade_name, &*cp, None) {
         Some(o) => o,
         None => {
@@ -494,6 +501,9 @@ fn compile_multifile(
         let mut ir = lower_file(file, &info, &syms)?;
         if !krusty::jvm::value_classes::lower_value_classes(&mut ir) {
             return None;
+        }
+        if !krusty::jvm::suspend::lower_suspend(&mut ir, &facade) {
+            return None; // suspend shape not yet lowered — skip, don't miscompile
         }
         let out = ir_emit::emit_all(&ir, &facade, &*cp, None)?;
         all.extend(out);
