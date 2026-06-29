@@ -5020,6 +5020,11 @@ impl<'a> Checker<'a> {
                 return;
             }
         }
+        // `Array<T>` reference-element covariance (JVM: `Integer[]` is-a `Object[]`): `Array<Array<Int>>`
+        // → `Array<Array<*>>` (a `*`/`out` element erases to `Any?`). Recurse on the element type.
+        if self.array_covariant_assignable(expected, actual) {
+            return;
+        }
         if expected != actual {
             // Match kotlinc 2.4.0's phrasing. A return position (an expression body or a getter body)
             // reads as "return type mismatch: expected 'T', actual 'U'."; every other context keeps the
@@ -5038,6 +5043,47 @@ impl<'a> Checker<'a> {
                 )
             };
             self.diags.error(span, msg);
+        }
+    }
+
+    /// `Array<A>` is assignable to `Array<E>` when the elements are — JVM reference arrays are covariant
+    /// (`Integer[]` is-a `Object[]`), and a `*`/`out` projection erases the expected element to `Any?`.
+    /// Returns `false` for non-array types (the caller's other rules decide those).
+    fn array_covariant_assignable(&self, expected: Ty, actual: Ty) -> bool {
+        let (Ty::Array(e), Ty::Array(a)) = (expected, actual) else {
+            return false;
+        };
+        self.elem_covariant_assignable(*e, *a)
+    }
+
+    /// Element-level covariance for [`array_covariant_assignable`]: equal types, nested arrays, an `Any`/
+    /// `Any?` (star) expected element accepting anything, or a reference-subtype element.
+    fn elem_covariant_assignable(&self, expected: Ty, actual: Ty) -> bool {
+        if expected == actual {
+            return true;
+        }
+        if let (Ty::Array(e), Ty::Array(a)) = (expected, actual) {
+            return self.elem_covariant_assignable(*e, *a);
+        }
+        // A star projection (`*`) or `in`/`out` variance erases the element to `Any?` on whichever side
+        // it appears; either way the array assignment is JVM-sound (reference-array covariance), so a
+        // `kotlin/Any` element on EITHER side accepts the other.
+        let exp = expected.non_null();
+        let act = actual.non_null();
+        if exp.obj_internal() == Some("kotlin/Any") || act.obj_internal() == Some("kotlin/Any") {
+            return true;
+        }
+        // Otherwise require the actual element to be a reference subtype of the expected element.
+        match (
+            exp.obj_internal(),
+            actual
+                .non_null()
+                .boxed_ref()
+                .and_then(|b| b.obj_internal())
+                .or_else(|| actual.non_null().obj_internal()),
+        ) {
+            (Some(e), Some(a)) => self.obj_is_subtype(a, e),
+            _ => false,
         }
     }
 
