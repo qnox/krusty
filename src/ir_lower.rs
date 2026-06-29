@@ -8176,6 +8176,97 @@ impl<'a> Lower<'a> {
         }))
     }
 
+    /// `a == b` / `a != b` where BOTH operands are nullable boxed numbers (`Double?`, `Int?`, … — e.g.
+    /// smart-cast from `Any?`). Kotlin compares them by VALUE with numeric promotion and IEEE-754
+    /// semantics, not by `equals` (which is type-specific: `Integer.equals(Double)` is always false).
+    /// Conform the two numbers — promote both to the wider primitive, IEEE-compare — with null handling:
+    /// `==` is `(a == null) ? (b == null) : (b != null && a~ == b~)`. `lp`/`rp` are the operand underlying
+    /// primitives. Returns `None` (fall through to the generic path) if the pair has no numeric promotion.
+    fn lower_numeric_eq_conform(
+        &mut self,
+        lhs: AstExprId,
+        rhs: AstExprId,
+        lp: Ty,
+        rp: Ty,
+        negated: bool,
+    ) -> Option<u32> {
+        let common = Ty::promote(lp, rp)?;
+        let cir = ty_to_ir(common);
+        let av = self.expr(lhs)?;
+        let bv = self.expr(rhs)?;
+        let any = ty_to_ir(Ty::nullable(Ty::obj("kotlin/Any")));
+        let avar_i = self.fresh_value();
+        let bvar_i = self.fresh_value();
+        let avar = self.ir.add_expr(IrExpr::Variable {
+            index: avar_i,
+            ty: any,
+            init: Some(av),
+        });
+        let bvar = self.ir.add_expr(IrExpr::Variable {
+            index: bvar_i,
+            ty: any,
+            init: Some(bv),
+        });
+        let is_null = |this: &mut Self, slot: u32| {
+            let g = this.ir.add_expr(IrExpr::GetValue(slot));
+            let n = this.ir.add_expr(IrExpr::Const(IrConst::Null));
+            this.ir.add_expr(IrExpr::PrimitiveBinOp {
+                op: IrBinOp::RefEq,
+                lhs: g,
+                rhs: n,
+            })
+        };
+        // Both non-null: unbox each to its own primitive, promote to the common type, primitive-compare
+        // (IEEE for Float/Double — `dcmpl`/`fcmpl`, so `-0.0 == 0.0` and `NaN != NaN`).
+        let unbox_to_common = |this: &mut Self, slot: u32, p: Ty| {
+            let g = this.ir.add_expr(IrExpr::GetValue(slot));
+            let prim = this.ir.add_expr(IrExpr::TypeOp {
+                op: IrTypeOp::ImplicitCoercion,
+                arg: g,
+                type_operand: ty_to_ir(p),
+            });
+            if p == common {
+                prim
+            } else {
+                this.ir.add_expr(IrExpr::TypeOp {
+                    op: IrTypeOp::ImplicitCoercion,
+                    arg: prim,
+                    type_operand: cir,
+                })
+            }
+        };
+        let a_unb = unbox_to_common(self, avar_i, lp);
+        let b_unb = unbox_to_common(self, bvar_i, rp);
+        let cmp = self.ir.add_expr(IrExpr::PrimitiveBinOp {
+            op: IrBinOp::Eq,
+            lhs: a_unb,
+            rhs: b_unb,
+        });
+        // `if (b == null) false else cmp` (reached only when `a` is non-null).
+        let b_null2 = is_null(self, bvar_i);
+        let false_c = self.ir.add_expr(IrExpr::Const(IrConst::Boolean(false)));
+        let inner = self.ir.add_expr(IrExpr::When {
+            branches: vec![(Some(b_null2), false_c), (None, cmp)],
+        });
+        // `if (a == null) (b == null) else <inner>`.
+        let a_null = is_null(self, avar_i);
+        let b_null1 = is_null(self, bvar_i);
+        let mut eq = self.ir.add_expr(IrExpr::When {
+            branches: vec![(Some(a_null), b_null1), (None, inner)],
+        });
+        if negated {
+            let t = self.ir.add_expr(IrExpr::Const(IrConst::Boolean(true)));
+            let f = self.ir.add_expr(IrExpr::Const(IrConst::Boolean(false)));
+            eq = self.ir.add_expr(IrExpr::When {
+                branches: vec![(Some(eq), f), (None, t)],
+            });
+        }
+        Some(self.ir.add_expr(IrExpr::Block {
+            stmts: vec![avar, bvar],
+            value: Some(eq),
+        }))
+    }
+
     fn coerce_erased(&mut self, read: u32, logical: Ty, physical: Ty) -> u32 {
         if logical == physical {
             return read;
@@ -12877,6 +12968,21 @@ impl<'a> Lower<'a> {
                     }
                     acc
                 } else {
+                    // Both operands are nullable boxed numbers (`Double? == Int?`, e.g. smart-cast from
+                    // `Any?`): compare by value with numeric promotion + IEEE — `equals` is type-specific
+                    // and would be wrong. The generic path below would route these to a (false) `areEqual`.
+                    if matches!(op, BinOp::Eq | BinOp::Ne) {
+                        if let (Some(lp), Some(rp)) = (
+                            self.info.ty(lhs).nullable_primitive(),
+                            self.info.ty(rhs).nullable_primitive(),
+                        ) {
+                            if let Some(res) =
+                                self.lower_numeric_eq_conform(lhs, rhs, lp, rp, op == BinOp::Ne)
+                            {
+                                return Some(res);
+                            }
+                        }
+                    }
                     let irop = bin_to_ir(op)?;
                     // A primitive op needs both operands in one type. For mixed numeric operands
                     // (`Double < Int`, `1 + 2L`) coerce both to the promoted type; the backend emits
@@ -13077,10 +13183,11 @@ impl<'a> Lower<'a> {
                     // reference, OR a boxable primitive (`x is Int?` → `x == null || x instanceof Integer`).
                     let mut base_ref = ty.clone();
                     base_ref.nullable = false;
-                    // A non-reference base resolves to a primitive whose wrapper the `instanceof` tests.
-                    // Float/Double AND unsigned are excluded (matching the non-null `is` rejections): a
-                    // smart-cast of those reaches a boxed IEEE `==` / an unsigned-box unbox the backend
-                    // doesn't model. So only integral/boolean/char nullable `is` lowers here.
+                    // A non-reference base resolves to a primitive whose wrapper the `instanceof` tests
+                    // (`x is Int?` → `x == null || x instanceof Integer`). Float/Double and unsigned stay
+                    // excluded: a smart-cast of those reaches a boxed numeric `==` that needs the conform
+                    // path AND chained-`&&` smart-cast narrowing (not yet wired) — without it they would
+                    // route to a (wrong) `areEqual`. Integral/boolean/char are safe here.
                     let base = self.ty_ref(&base_ref).or_else(|| {
                         Ty::from_name(&base_ref.name).filter(|t| {
                             self.has_scalar_value_repr(*t)
