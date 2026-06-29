@@ -165,6 +165,9 @@ pub fn kotlin_prim_to_wrapper(internal: &str) -> Option<&'static str> {
         "kotlin/Float" => "java/lang/Float",
         "kotlin/Boolean" => "java/lang/Boolean",
         "kotlin/Char" => "java/lang/Character",
+        // An unsigned type's boxed form is its own inline-class wrapper (`kotlin/UInt`), not a `java/lang/*`.
+        "kotlin/UInt" => "kotlin/UInt",
+        "kotlin/ULong" => "kotlin/ULong",
         _ => return None,
     })
 }
@@ -219,8 +222,8 @@ pub fn to_kotlin_internal(internal: &str) -> &str {
 /// non-primitive. The single source of truth for boxing owners shared by codegen and the front end.
 pub fn wrapper_internal(t: Ty) -> Option<&'static str> {
     // Route through the single primitive→wrapper table: `boxed_ref` carries a primitive as its Kotlin
-    // internal name (`Ty::Int` → `Obj("kotlin/Int")`), which `kotlin_prim_to_wrapper` boxes. `None`
-    // for a non-primitive (or the unsigned inline-class primitives, which `boxed_ref` excludes).
+    // internal name (`Ty::Int` → `Obj("kotlin/Int")`, `Ty::UInt` → `Obj("kotlin/UInt")`), which
+    // `kotlin_prim_to_wrapper` boxes (`kotlin/Int` → `java/lang/Integer`, `kotlin/UInt` → `kotlin/UInt`).
     kotlin_prim_to_wrapper(t.boxed_ref()?.obj_internal()?)
 }
 
@@ -248,11 +251,15 @@ mod tests {
             assert_eq!(to_jvm_internal(internal), wrapper);
             assert_eq!(wrapper_internal(prim), Some(wrapper));
         }
+        // Unsigned boxes to its own inline-class wrapper (`kotlin/UInt`), not a `java/lang/*`.
+        assert_eq!(kotlin_prim_to_wrapper("kotlin/UInt"), Some("kotlin/UInt"));
+        assert_eq!(kotlin_prim_to_wrapper("kotlin/ULong"), Some("kotlin/ULong"));
+        assert_eq!(wrapper_internal(Ty::UInt), Some("kotlin/UInt"));
+        assert_eq!(wrapper_internal(Ty::ULong), Some("kotlin/ULong"));
         // Non-primitives have no wrapper.
         assert_eq!(kotlin_prim_to_wrapper("kotlin/String"), None);
         assert_eq!(kotlin_prim_to_wrapper("demo/Foo"), None);
         assert_eq!(wrapper_internal(Ty::String), None);
-        assert_eq!(wrapper_internal(Ty::UInt), None);
     }
 
     #[test]
