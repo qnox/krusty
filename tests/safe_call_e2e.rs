@@ -23,6 +23,29 @@ fn safe_calls_run() {
     assert_eq!(out, "OK");
 }
 
+/// A safe call on a statically-`null` receiver (`null?.member()`): the receiver is always null, so the
+/// member is never invoked and the call yields `null` — the whole expression folds to `null`.
+/// Round-tripped on the JVM.
+#[test]
+fn safe_call_on_null_literal_yields_null() {
+    let Some(java_home) = common::java_home() else {
+        return;
+    };
+    let Some(stdlib) = common::stdlib_jar() else {
+        return;
+    };
+    let src = "fun box(): String {\n\
+    val r: String? = null?.toString()\n\
+    if (r != null) return \"f1\"\n\
+    try { return \"OK\" } finally { null?.toString() }\n\
+}\n";
+    let jdk = std::path::PathBuf::from(format!("{java_home}/lib/modules"));
+    let Some(out) = common::compile_and_run_box(src, "S", &[stdlib], Some(&jdk)) else {
+        return;
+    };
+    assert_eq!(out, "OK");
+}
+
 /// A safe call to a SAME-MODULE extension function (`recv?.ext()`): the checker resolves the module
 /// extension on the non-null receiver and the lowerer emits the static extension call guarded by the
 /// null check. Member/classpath lookups don't see module extensions, so this is its own path.

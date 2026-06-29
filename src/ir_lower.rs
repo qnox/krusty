@@ -11449,6 +11449,17 @@ impl<'a> Lower<'a> {
             } => {
                 let rty = self.info.ty(receiver);
                 let result_ty = self.info.ty(e);
+                // A statically-`null` receiver (`null?.toString()`): the receiver is always null, so the
+                // member is never invoked and the whole safe call is `null`. Run the receiver for any side
+                // effects (a bare `null` literal has none), then yield `null`.
+                if rty == Ty::Null {
+                    let recv = self.expr(receiver)?;
+                    let nullc = self.ir.add_expr(IrExpr::Const(IrConst::Null));
+                    return Some(self.ir.add_expr(IrExpr::Block {
+                        stmts: vec![recv],
+                        value: Some(nullc),
+                    }));
+                }
                 // A primitive receiver can never be null, so `a?.foo(b)` is a vacuous safe call (kotlinc
                 // warns "unnecessary safe call") ≡ `a.foo(b)`. Fold an arithmetic operator-method call to
                 // the plain primitive op — `var a = 10; a?.plus(10)` works like `a.plus(10)`.
