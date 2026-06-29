@@ -916,6 +916,25 @@ impl<'a> CallResolver<'a> {
             })
     }
 
+    /// Per-param `crossinline`/`noinline` flags for a top-level function (its lambda argument is
+    /// MATERIALIZED, so a mutable capture must be `Ref`-boxed rather than inline-spliced). `None` when
+    /// no matching overload carries such a parameter.
+    pub fn top_level_lambda_materialized(
+        &self,
+        name: &str,
+        arg_tys: &[Option<Ty>],
+    ) -> Option<Vec<bool>> {
+        self.lib
+            .functions(name, None)
+            .overloads
+            .iter()
+            .filter(|o| o.kind == FnKind::TopLevel)
+            .find_map(|o| {
+                let m = &o.call_sig.lambda_materialized;
+                (m.len() == arg_tys.len() && m.iter().any(|b| *b)).then(|| m.clone())
+            })
+    }
+
     /// Lambda parameter types for an extension call before lambda bodies are typed. This binds the
     /// selected extension's generic signature from the receiver plus already-typed non-lambda args
     /// (`fold(0) { acc, x -> ... }` binds the accumulator from `0`). Public candidates are preferred;

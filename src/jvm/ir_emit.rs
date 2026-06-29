@@ -3309,16 +3309,27 @@ impl<'a> Emitter<'a> {
         // Route (b): a literal lambda argument → splice its body at the host's `FunctionN.invoke` site
         // (the unified host+lambda splice handles both the branchy `require(c){m}` and the branchless
         // `let`/`also`/… shapes).
-        if args.iter().any(|&a| {
+        let has_lambda_arg = args.iter().any(|&a| {
             matches!(self.ir.expr(a), IrExpr::Lambda { .. })
                 || self.function_ref_class_and_captures(a).is_some()
                 || self.property_ref_class_and_captures(a).is_some()
-        }) {
-            return self.try_inline_unified(descriptor, args, &body, base, code);
-        }
-        // A function-typed parameter whose argument isn't a literal lambda (a passed `Function`) is a
-        // current inline-splice gap.
-        if descriptor.contains("Lkotlin/jvm/functions/Function") {
+        });
+        if has_lambda_arg {
+            // If the body INVOKES the lambda parameter (`FunctionN.invoke`), splice the lambda body at
+            // those sites. If the lambda is used only as a VALUE — passed to a call/constructor, as in the
+            // `Continuation(ctx){…}` fake-constructor's `new …$Continuation$1(ctx, resumeWith)` — there is
+            // no invoke site to splice into, so fall through to MATERIALIZE the lambda as a `Function1`
+            // object (`emit_operands`) and splice the body verbatim (the param slot binds to that object).
+            let body_invokes_lambda =
+                crate::jvm::inline::disassemble(&body.code).is_some_and(|insns| {
+                    !crate::jvm::inline::function_invoke_sites(&insns, &body.source_cp).is_empty()
+                });
+            if body_invokes_lambda {
+                return self.try_inline_unified(descriptor, args, &body, base, code);
+            }
+        } else if descriptor.contains("Lkotlin/jvm/functions/Function") {
+            // A function-typed parameter whose argument isn't a literal lambda (a passed `Function`) is a
+            // current inline-splice gap — can't materialize an unknown `Function` value here.
             return false;
         }
         // A genuinely `void` (`)V`) method leaves NOTHING on the stack; `ty_from_descriptor_ret` maps

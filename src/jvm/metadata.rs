@@ -404,6 +404,12 @@ const IS_SUSPEND_BIT: u64 = 1 << 13;
 
 /// `ValueParameter.flags` bit for `DECLARES_DEFAULT_VALUE` (bit 1; `HAS_ANNOTATIONS` is bit 0).
 const DECLARES_DEFAULT_VALUE_BIT: u64 = 1 << 1;
+/// `ValueParameter.flags` bits for `IS_CROSSINLINE` (bit 2) and `IS_NOINLINE` (bit 3) of an inline
+/// function's functional parameter. Either one means the lambda argument is MATERIALIZED into a real
+/// `FunctionN` object / nested class (not spliced into the caller frame), so a mutable local it captures
+/// must be boxed in a `Ref` holder — the same as an ordinary closure.
+const IS_CROSSINLINE_BIT: u64 = 1 << 2;
+const IS_NOINLINE_BIT: u64 = 1 << 3;
 
 /// `Visibility` enum value from a Function/Class `flags` word: `hasAnnotations` is bit 0, then
 /// `Visibility` occupies the next 3 bits (kotlin metadata `Flags.VISIBILITY`). Enum order:
@@ -443,6 +449,9 @@ struct ParsedFunction {
     /// parallel to `value_param_classes`. Lets a classpath CALL omit a defaulted argument (resolved via
     /// the count of NON-defaulted params; the omitted call lowers to the `<name>$default` synthetic).
     value_param_has_default: Vec<bool>,
+    /// Whether each SOURCE value parameter is `crossinline`/`noinline` (`ValueParameter.flags` bits 2/3)
+    /// — i.e. its lambda argument is MATERIALIZED, not inline-spliced. Parallel to `value_param_classes`.
+    value_param_materialized: Vec<bool>,
     /// Per SOURCE value parameter: `(type_annotation_id, first_type_argument_class_id)` — for a RECEIVER
     /// function-type param (`Recv.() -> R`), the `@ExtensionFunctionType` annotation id and the receiver
     /// class id. Resolved downstream: when the annotation is `kotlin/ExtensionFunctionType`, the param is
@@ -464,6 +473,7 @@ fn parse_function(body: &[u8]) -> Option<ParsedFunction> {
     let mut value_param_classes: Vec<Option<u64>> = Vec::new();
     let mut value_param_names: Vec<u64> = Vec::new();
     let mut value_param_has_default: Vec<bool> = Vec::new();
+    let mut value_param_materialized: Vec<bool> = Vec::new();
     #[allow(clippy::type_complexity)]
     let mut value_param_recv_ids: Vec<(Option<u64>, Option<u64>)> = Vec::new();
     while !pb.at_end() {
@@ -519,6 +529,7 @@ fn parse_function(body: &[u8]) -> Option<ParsedFunction> {
                 value_param_recv_ids.push(recv_ids);
                 // `DECLARES_DEFAULT_VALUE` is bit 1 of the ValueParameter flags (HAS_ANNOTATIONS is bit 0).
                 value_param_has_default.push(vflags & DECLARES_DEFAULT_VALUE_BIT != 0);
+                value_param_materialized.push(vflags & (IS_CROSSINLINE_BIT | IS_NOINLINE_BIT) != 0);
             }
             (100, 2) => {
                 // method_signature extension
@@ -542,6 +553,7 @@ fn parse_function(body: &[u8]) -> Option<ParsedFunction> {
         value_param_classes,
         value_param_names,
         value_param_has_default,
+        value_param_materialized,
         value_param_recv_ids,
     })
 }
@@ -604,6 +616,10 @@ pub struct MetaFn {
     /// A classpath call may omit a trailing run of these; the resolver counts the NON-defaulted params as
     /// the required arity, and the omitted call lowers to the `<name>$default` synthetic.
     pub value_param_has_default: Vec<bool>,
+    /// Whether each SOURCE value parameter is `crossinline`/`noinline` — its lambda argument is
+    /// MATERIALIZED (a real `FunctionN`/nested class), not inline-spliced. Parallel to `value_param_types`.
+    /// A mutable local captured by such a lambda must be `Ref`-boxed (ordinary-closure capture).
+    pub value_param_materialized: Vec<bool>,
     /// Per SOURCE value parameter: whether it is a RECEIVER function-type param, carrying
     /// `@ExtensionFunctionType`. This is true even when the receiver is generic and has no class id.
     pub value_param_recv_fun_flags: Vec<bool>,
@@ -719,6 +735,7 @@ fn decode_functions(ci: &ClassInfo, fn_field: u64) -> Vec<MetaFn> {
                         value_param_types,
                         value_param_names,
                         value_param_has_default: pf.value_param_has_default,
+                        value_param_materialized: pf.value_param_materialized,
                         value_param_recv_fun_flags,
                         value_param_recv_funs,
                     });

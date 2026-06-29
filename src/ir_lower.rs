@@ -120,6 +120,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
         lambda_seq: 0,
         shared_cell_vars: std::collections::HashSet::new(),
         boxed_elem: HashMap::new(),
+        boxed_vc_param_slots: std::collections::HashSet::new(),
         local_fun_ids: HashMap::new(),
         cur_ret_ty: Ty::Unit,
         cur_method_returns_unit_ref: false,
@@ -2885,8 +2886,15 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
             note(&s.ty, &mut referenced);
         }
         for e in &lo.ir.exprs {
-            if let IrExpr::Variable { ty, .. } = e {
-                note(ty, &mut referenced);
+            match e {
+                IrExpr::Variable { ty, .. } => note(ty, &mut referenced),
+                // A mutable local captured by a closure holds its value in a `Ref` box; the boxed value's
+                // type (`var res: Result<T>?` → `Result`) appears ONLY on the `Ref` node, not the holder's
+                // `Variable.ty`. Note it so a captured value-class local still erases like any other.
+                IrExpr::RefNew { elem, .. }
+                | IrExpr::RefGet { elem, .. }
+                | IrExpr::RefSet { elem, .. } => note(elem, &mut referenced),
+                _ => {}
             }
         }
         for fq in referenced {
@@ -3313,6 +3321,11 @@ pub(crate) struct Lower<'a> {
     /// A boxed mutable-capture local's name → its element (unboxed) type. The scope holds the name
     /// bound to the `Ref$XxxRef` HOLDER value; reads/writes go through `RefGet`/`RefSet` with this type.
     boxed_elem: HashMap<String, Ty>,
+    /// Value-indices of the CURRENT lambda's parameters whose declared type is a reference-underlying
+    /// value class. A `FunctionN` parameter is a generic position, so such a value class arrives BOXED —
+    /// when used as a value-class extension receiver (`it.getOrThrow()`) it must be unboxed first. Saved
+    /// and restored around each lambda body (value-indices are local to the lambda's lowering).
+    boxed_vc_param_slots: std::collections::HashSet<u32>,
     /// A local function's `StmtId` → its lifted static `FunId` (a private method on the facade). A
     /// selected `ExprLowering::LocalFunction` lowers to `Callee::Local(fid)`.
     local_fun_ids: HashMap<crate::ast::StmtId, u32>,
@@ -3428,6 +3441,89 @@ impl<'a> Lower<'a> {
 
     fn mutable_local_ref_type(&self, elem: Ty) -> Option<Ty> {
         self.syms.libraries.mutable_local_ref_type(elem)
+    }
+
+    /// Unbox a BOXED reference-underlying value-class receiver flowing into a value-class extension whose
+    /// `-impl` receiver param is the UNBOXED underlying. A nullable value class (`Result<T>?`) is boxed,
+    /// so `res!!.getOrThrow()` holds a boxed `Result` while `getOrThrow`'s spliced body operates on the
+    /// underlying `Any?` — emit `((Result)recv).unbox-impl()` and coerce to the underlying so the value-
+    /// class pass treats it as the plain underlying (no re-box at the erased reference param). The boxed
+    /// case is recognised by the receiver being a `!!` (`NotNullAssert`) over the boxed nullable value
+    /// class; a non-null receiver is already unboxed and returned unchanged. `descriptor` is the callee's
+    /// (the first param is the value class's underlying erasure — the `unbox-impl` return descriptor).
+    fn unbox_boxed_vc_ext_receiver(&mut self, recv: u32, recv_ty: Ty, descriptor: &str) -> u32 {
+        crate::trace_compiler!(
+            "value_classes",
+            "vc ext receiver check recv_ty={recv_ty:?} under={:?} recv_expr={:?}",
+            self.value_class_underlying(recv_ty),
+            self.ir.expr(recv)
+        );
+        // The underlying comes from a USER value class or a classpath one (`kotlin/Result` → `Any?`).
+        // `external_value_classes` isn't populated until lowering finishes, so resolve a classpath value
+        // class's underlying from the library directly (a reference underlying only — a scalar one keeps
+        // its dedicated unsigned handling and is excluded below).
+        let under = self.value_class_underlying(recv_ty).or_else(|| {
+            self.syms
+                .libraries
+                .resolve_type(recv_ty.obj_internal()?)
+                .and_then(|t| t.value_underlying)
+                .map(Ty::nullable)
+        });
+        let Some(under) = under else {
+            return recv;
+        };
+        // The receiver is BOXED when it is `x!!` over a boxed nullable value class, OR a lambda parameter
+        // typed as a value class (a `FunctionN` generic position boxes it). A plain non-null local is
+        // already unboxed and needs nothing.
+        let boxed_receiver = matches!(self.ir.expr(recv), IrExpr::NotNullAssert { .. })
+            || matches!(self.ir.expr(recv), IrExpr::GetValue(v) if self.boxed_vc_param_slots.contains(v));
+        if self.has_scalar_value_repr(recv_ty) || !boxed_receiver {
+            return recv;
+        }
+        let Some(internal) = recv_ty.obj_internal().map(str::to_string) else {
+            return recv;
+        };
+        crate::trace_compiler!(
+            "value_classes",
+            "unbox boxed vc ext receiver {internal} (recv expr {recv})"
+        );
+        let under_desc =
+            first_param_descriptor(descriptor).unwrap_or_else(|| "Ljava/lang/Object;".to_string());
+        let cast = self.ir.add_expr(IrExpr::TypeOp {
+            op: IrTypeOp::Cast,
+            arg: recv,
+            type_operand: recv_ty,
+        });
+        let unboxed = self.ir.add_expr(IrExpr::Call {
+            callee: Callee::Virtual {
+                owner: internal,
+                name: "unbox-impl".to_string(),
+                descriptor: format!("(){under_desc}"),
+                interface: false,
+            },
+            dispatch_receiver: Some(cast),
+            args: vec![],
+        });
+        self.ir.add_expr(IrExpr::TypeOp {
+            op: IrTypeOp::ImplicitCoercion,
+            arg: unboxed,
+            type_operand: ty_to_ir(under),
+        })
+    }
+
+    /// The `Ref` element type for a mutable value-class local captured by a closure. A value class is
+    /// stored UNBOXED as its underlying (a primitive `Z(Int)` → `Ref$IntRef`; a non-null reference value
+    /// class holds its underlying) — EXCEPT a NULLABLE reference-underlying value class (`Result<T>?`),
+    /// which is represented BOXED: keep its value-class type so the box/unbox pass recognises the boxed
+    /// value through the `Ref` (and `x!!` unboxes it).
+    fn shared_cell_elem_ty(&self, kty: Ty) -> Ty {
+        match self.value_class_underlying(kty) {
+            Some(u) if kty.is_nullable() && self.syms.libraries.scalar_value_repr(u).is_none() => {
+                kty
+            }
+            Some(u) => u,
+            None => kty,
+        }
     }
 
     fn property_reference_impl(&self, arity: usize, mutable: bool) -> Option<PlatformCtor> {
@@ -4255,7 +4351,7 @@ impl<'a> Lower<'a> {
             // like a plain mutable local (see the `Stmt::Local` path) — without this the closure mutates
             // a private copy and the outer read misses it (e.g. `var [a,b]=A(); { a=3 }()`).
             if self.shared_cell_vars.contains(name) {
-                let elem_ty = self.value_class_underlying(log_ty).unwrap_or(log_ty);
+                let elem_ty = self.shared_cell_elem_ty(log_ty);
                 let elem = ty_to_ir(elem_ty);
                 let holder = self.fresh_value();
                 let holder_ty = self.mutable_local_ref_type(elem_ty)?;
@@ -4385,8 +4481,25 @@ impl<'a> Lower<'a> {
         } else {
             &sig.params
         };
+        // A lambda parameter is a `FunctionN` generic position, so a reference-underlying value-class
+        // parameter (`Result<T>`) arrives BOXED — record its slot so a value-class extension call on it
+        // (`it.getOrThrow()`) unboxes it. Saved/restored (value-indices are local to this lambda body).
+        let saved_boxed_vc = std::mem::take(&mut self.boxed_vc_param_slots);
         for (name, pty) in bind_names.iter().zip(value_params.iter()) {
             let v = self.fresh_value();
+            if self
+                .value_class_underlying(*pty)
+                .is_some_and(|u| self.syms.libraries.scalar_value_repr(u).is_none())
+                || pty.obj_internal().is_some_and(|i| {
+                    self.syms
+                        .libraries
+                        .resolve_type(i)
+                        .and_then(|t| t.value_underlying)
+                        .is_some_and(|u| self.syms.libraries.scalar_value_repr(u).is_none())
+                })
+            {
+                self.boxed_vc_param_slots.insert(v);
+            }
             self.scope.push((name.clone(), v, *pty));
         }
         // The closure method returns the `kotlin/Unit` SINGLETON (a reference) when the lambda is
@@ -4401,6 +4514,7 @@ impl<'a> Lower<'a> {
         self.cur_method_returns_unit_ref = saved_unit_ref;
         self.scope = saved_scope;
         self.next_value = saved_next;
+        self.boxed_vc_param_slots = saved_boxed_vc;
         let ve = ve?;
         let diverges = self.info.ty(body) == Ty::Nothing;
         // The SAM's `invoke` returns `Object`, so the impl method returns a reference. A `Unit` lambda
@@ -4537,9 +4651,56 @@ impl<'a> Lower<'a> {
         let call_names_cell = std::cell::RefCell::new(Vec::new());
         collect_call_names(self.afile, body, &call_names_cell);
         let call_names = call_names_cell.into_inner();
-        let body_suspends = call_names
-            .iter()
-            .any(|n| susp_names.contains(n) || self.resolver().toplevel_is_suspend(n));
+        // A MEMBER / invoke-operator suspend call (`getResult()` = `GetResult.suspend operator fun
+        // invoke()`, `x.m()` where `m` is `suspend`) is invisible to the top-level-name check above —
+        // resolve each callee's type + method `is_suspend` so the lambda isn't misclassified as a leaf.
+        let suspend_member_call = {
+            let callees = std::cell::RefCell::new(Vec::new());
+            collect_calls(self.afile, body, &callees);
+            callees.into_inner().into_iter().any(|call| {
+                let method_suspends = |internal: &str, name: &str| {
+                    self.syms
+                        .class_by_internal(internal)
+                        .and_then(|c| c.methods.get(name))
+                        .is_some_and(|s| s.is_suspend)
+                };
+                // The checker's `Invoke` lowering carries suspend-ness reliably (the receiver's static
+                // type may be `Error` at the call site): a suspend function VALUE, or a suspend `invoke`
+                // operator on a class receiver.
+                if let Some(crate::resolve::ExprLowering::Invoke { kind, .. }) =
+                    self.info.expr_lowers.get(&call)
+                {
+                    match kind {
+                        crate::resolve::InvokeKind::Function { suspend, .. } if *suspend => {
+                            return true
+                        }
+                        crate::resolve::InvokeKind::Operator { receiver_ty }
+                            if receiver_ty
+                                .obj_internal()
+                                .is_some_and(|i| method_suspends(i, "invoke")) =>
+                        {
+                            return true
+                        }
+                        _ => {}
+                    }
+                }
+                // A plain member call `recv.m(args)` to a suspend method.
+                if let ast::Expr::Call { callee, .. } = self.afile.expr(call) {
+                    if let ast::Expr::Member { receiver, name } = self.afile.expr(*callee) {
+                        return self
+                            .info
+                            .ty(*receiver)
+                            .obj_internal()
+                            .is_some_and(|i| method_suspends(i, name));
+                    }
+                }
+                false
+            })
+        };
+        let body_suspends = suspend_member_call
+            || call_names
+                .iter()
+                .any(|n| susp_names.contains(n) || self.resolver().toplevel_is_suspend(n));
         let jvm_arity = arity + 1; // + the trailing continuation
         let function_iface = self
             .syms
@@ -4737,9 +4898,10 @@ impl<'a> Lower<'a> {
                     .filter(|n| susp_names.contains(*n) || self.resolver().toplevel_is_suspend(n))
                     .count()
             };
-            // A clean SINGLE tail/bound suspension uses the inline two-state machine here; anything else
-            // (a second suspension, control flow) gets the general lambda-mode machine from the pass.
-            let handroll = is_susp && n_susp == 1 && n_cap == 0 && arity == 0;
+            // All suspend lambdas use the general lambda-mode machine from the coroutine pass; the inline
+            // two-state hand-roll is retired (it duplicated the state machine and miscompiled frames).
+            let _ = (is_susp, n_susp);
+            let handroll = false;
             if !handroll {
                 needs_pass_sm = true;
                 // `tmp` goes ABOVE the body's locals (next_value still points past them here).
@@ -8227,6 +8389,12 @@ impl<'a> Lower<'a> {
         } else {
             recv_ir
         };
+        // A BOXED reference-underlying value-class receiver (`res!!.getOrThrow()` where `res: Result<T>?`
+        // is boxed) flowing into a value-class extension whose `-impl` receiver param is the UNBOXED
+        // underlying: unbox it (`((Result)res!!).unbox-impl()`), then coerce to the underlying type so the
+        // value-class pass treats it as the plain underlying and does NOT re-box it back at the (erased,
+        // reference) param. A non-null receiver is already unboxed and needs nothing.
+        let recv = self.unbox_boxed_vc_ext_receiver(recv, rt, &c.descriptor);
         let mut a = vec![recv];
         for (i, &arg) in args.iter().enumerate() {
             match c.params.get(i + 1) {
@@ -9242,6 +9410,13 @@ impl<'a> Lower<'a> {
                     Some(r) if self.catch_internal(&r.name).is_some() => {
                         Ty::obj(&self.catch_internal(&r.name).unwrap())
                     }
+                    // A declared reference type whose simple name isn't in the lowerer's local index
+                    // (`Result<T>?` — pruned/auto-imported) — reuse the type the CHECKER already resolved
+                    // for this local (through imports), so a `null`-initialized local keeps its declared
+                    // (value-)class type instead of collapsing to the initializer's `Any?`.
+                    Some(_) if self.info.local_decl_types.contains_key(&s) => {
+                        self.info.local_decl_types[&s]
+                    }
                     _ => init_ty,
                 };
                 // A mutable local captured (and written) by a closure is boxed into a `Ref$XxxRef`:
@@ -9249,9 +9424,9 @@ impl<'a> Lower<'a> {
                 // captures the shared holder (so its writes are visible here and vice versa).
                 if self.shared_cell_vars.contains(&name) {
                     // A `@JvmInline value class` var is represented UNBOXED as its underlying type, so its
-                    // `Ref` holder + element must use that underlying type (`var z: Z(Int)` → `Ref.IntRef`,
-                    // not `Ref.ObjectRef` of an erased object — that mismatches the unboxed `int` value).
-                    let elem_ty = self.value_class_underlying(kty).unwrap_or(kty);
+                    // `Ref` holder + element use that underlying type (`var z: Z(Int)` → `Ref.IntRef`) —
+                    // except a nullable reference value class (`Result<T>?`) stays BOXED (see helper).
+                    let elem_ty = self.shared_cell_elem_ty(kty);
                     let elem = ty_to_ir(elem_ty);
                     let it = self.lower_arg(init, &ty_to_ir(kty))?;
                     let holder = self.fresh_value();
@@ -10851,22 +11026,35 @@ impl<'a> Lower<'a> {
         args: &[AstExprId],
     ) -> Option<u32> {
         match kind {
-            InvokeKind::Function { ret } => {
+            InvokeKind::Function { ret, suspend } => {
                 if let Expr::Name(fname) = self.afile.expr(receiver).clone() {
                     if let Some(idx) = self.inline_lambdas.iter().rposition(|(n, ..)| *n == fname) {
                         return self.lower_inline_lambda_invoke(idx, args);
                     }
                 }
+                crate::trace_compiler!(
+                    "suspend",
+                    "lower_invoke Function: recv_ty={:?} params={params:?} ret={ret:?} nargs={} suspend={suspend}",
+                    self.info.ty(receiver),
+                    args.len()
+                );
                 let func = self.expr(receiver)?;
                 let mut ir_args = Vec::with_capacity(args.len());
                 for (&arg, param) in args.iter().zip(params) {
                     ir_args.push(self.lower_arg(arg, &ty_to_ir(*param))?);
                 }
-                Some(self.ir.add_expr(IrExpr::InvokeFunction {
+                let invoke = self.ir.add_expr(IrExpr::InvokeFunction {
                     func,
                     args: ir_args,
                     ret: ty_to_ir(ret),
-                }))
+                });
+                // A SUSPEND function value (`block: suspend (A)->R`) implements `Function{N+1}` and is a
+                // suspension point — record it so the coroutine pass threads the `Continuation` into its
+                // args (then `Function{N+1}.invoke` is selected by arg count) and does the SUSPENDED check.
+                if suspend {
+                    self.ir.suspend_calls.insert(invoke, ret);
+                }
+                Some(invoke)
             }
             InvokeKind::Operator { receiver_ty: rt } => {
                 // A user class with a member `operator fun invoke`: a direct method call.
@@ -15316,8 +15504,9 @@ impl<'a> Lower<'a> {
                     } {
                         // Coerce the receiver + arguments to the extension's parameter types so a
                         // primitive flowing into a generic `Object` parameter (`fun <T> T.to(…)`) boxes.
-                        let recv =
-                            self.lower_arg(receiver, &ty_to_ir(*c.params.first().unwrap_or(&rt)))?;
+                        let p0 = *c.params.first().unwrap_or(&rt);
+                        let recv = self.lower_arg(receiver, &ty_to_ir(p0))?;
+                        let recv = self.unbox_boxed_vc_ext_receiver(recv, rt, &c.descriptor);
                         let mut a = vec![recv];
                         // A `$default` call with a TRAILING LAMBDA: the lambda fills the LAST real parameter
                         // (`transform`), the leading args a prefix, the MIDDLE parameters default. Place the
@@ -15428,8 +15617,9 @@ impl<'a> Lower<'a> {
                             })
                         } else {
                             // Extension: a static method whose receiver is the FIRST argument.
-                            let recv = self
-                                .lower_arg(receiver, &ty_to_ir(*c.params.first().unwrap_or(&rt)))?;
+                            let p0 = *c.params.first().unwrap_or(&rt);
+                            let recv = self.lower_arg(receiver, &ty_to_ir(p0))?;
+                            let recv = self.unbox_boxed_vc_ext_receiver(recv, rt, &c.descriptor);
                             let mut a = vec![recv];
                             for (i, &arg) in args.iter().enumerate() {
                                 match c.params.get(i + 1) {
@@ -15469,8 +15659,9 @@ impl<'a> Lower<'a> {
                                 c.inline.can_inline()
                             })
                     } {
-                        let recv =
-                            self.lower_arg(receiver, &ty_to_ir(*c.params.first().unwrap_or(&rt)))?;
+                        let p0 = *c.params.first().unwrap_or(&rt);
+                        let recv = self.lower_arg(receiver, &ty_to_ir(p0))?;
+                        let recv = self.unbox_boxed_vc_ext_receiver(recv, rt, &c.descriptor);
                         let mut a = vec![recv];
                         for (i, &arg) in args.iter().enumerate() {
                             match c.params.get(i + 1) {
@@ -16222,6 +16413,29 @@ fn outer_local_access_stmt(
 
 /// Collect the simple (`Name`-callee) function-call names anywhere in `e`'s subtree — used to decide
 /// whether a lambda body calls a `suspend` function (same-file or classpath).
+/// Collect every `Call` expr in `e` (incl. nested) — to resolve a call's suspend-ness via its `Invoke`
+/// lowering (a suspend function VALUE / invoke operator) or its callee (a member suspend method), none of
+/// which `collect_call_names` (top-level `Call{Name}` only) can see.
+fn collect_calls(file: &ast::File, e: AstExprId, out: &std::cell::RefCell<Vec<AstExprId>>) {
+    if matches!(file.expr(e), ast::Expr::Call { .. }) {
+        out.borrow_mut().push(e);
+    }
+    file.any_child_expr(
+        e,
+        &mut |c| {
+            collect_calls(file, c, out);
+            false
+        },
+        &mut |s| {
+            file.any_child_stmt(s, &mut |c| {
+                collect_calls(file, c, out);
+                false
+            });
+            false
+        },
+    );
+}
+
 fn collect_call_names(file: &ast::File, e: AstExprId, out: &std::cell::RefCell<Vec<String>>) {
     if let ast::Expr::Call { callee, .. } = file.expr(e) {
         if let ast::Expr::Name(n) = file.expr(*callee) {
@@ -16242,6 +16456,28 @@ fn collect_call_names(file: &ast::File, e: AstExprId, out: &std::cell::RefCell<V
             false
         },
     );
+}
+
+/// The JVM descriptor of a method descriptor's FIRST parameter (`(Ljava/lang/Object;I)V` → `Ljava/lang/
+/// Object;`), or `None` for a no-arg descriptor. Used to recover a value class's underlying descriptor
+/// from its `-impl` receiver param without re-deriving it.
+fn first_param_descriptor(desc: &str) -> Option<String> {
+    let inner = desc.strip_prefix('(')?;
+    let bytes = inner.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() && bytes[i] == b'[' {
+        i += 1;
+    }
+    if i >= bytes.len() || bytes[i] == b')' {
+        return None;
+    }
+    match bytes[i] {
+        b'L' => {
+            let end = inner[i..].find(';')? + i;
+            Some(inner[..=end].to_string())
+        }
+        _ => Some(inner[..=i].to_string()),
+    }
 }
 
 fn class_internal(file: &ast::File, name: &str) -> String {

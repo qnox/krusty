@@ -63,6 +63,11 @@ pub fn lower_suspend(ir: &mut IrFile, facade: &str) -> bool {
     // by the callee's logical result type even after the callee has itself been CPS-rewritten to `Object`.
     let orig_rets: Vec<Ty> = ir.functions.iter().map(|f| f.ret.clone()).collect();
     let fids = ir.suspend_funs.clone();
+    crate::trace_compiler!(
+        "suspend",
+        "lower_suspend facade={facade} suspend_funs={fids:?} suspend_lambda_sm={}",
+        ir.suspend_lambda_sm.len()
+    );
     for fid in fids {
         let body = ir.functions[fid as usize].body;
         // Hoist a suspension nested at an unconditional position in an expression (`foo() + 2`) into a
@@ -78,6 +83,11 @@ pub fn lower_suspend(ir: &mut IrFile, facade: &str) -> bool {
             desugar_tail_suspend(ir, b, &suspend_set, &ret_ty);
         }
         let has_susp = body.is_some_and(|b| expr_calls_suspend(ir, b, &suspend_set));
+        crate::trace_compiler!(
+            "suspend",
+            "fn fid={fid} name={} has_susp={has_susp}",
+            ir.functions[fid as usize].name
+        );
         let is_static = ir.functions[fid as usize].is_static;
         // CPS signature: append the continuation parameter, erase the return to Object.
         let f = &mut ir.functions[fid as usize];
@@ -94,11 +104,15 @@ pub fn lower_suspend(ir: &mut IrFile, facade: &str) -> bool {
         }
 
         if !has_susp {
-            // Leaf: just box the returns (no state machine).
+            // Leaf: box the returns (no state machine). The CPS method returns `Object`, so an expression
+            // / statement body that falls through (no `return`) must get a terminal return — a value body
+            // returns its boxed value, a `Unit` body runs for effect then returns `Unit.INSTANCE`.
             if let Some(b) = body {
                 if !box_returns(ir, b) {
                     return false;
                 }
+                let unit_ret = orig_rets[fid as usize] == Ty::Unit;
+                ensure_tail_return(ir, b, unit_ret);
             }
         } else if !build_state_machine(ir, facade, fid, body.unwrap()) {
             return false;
@@ -107,7 +121,7 @@ pub fn lower_suspend(ir: &mut IrFile, facade: &str) -> bool {
     // Suspend LAMBDAS with multiple suspensions / control flow: their `invokeSuspend` is a state machine
     // whose continuation is the lambda instance itself (ir_lower handled the single-suspension shapes).
     for (fid, class_id, field_base) in ir.suspend_lambda_sm.clone() {
-        if !build_lambda_state_machine(ir, fid, class_id, field_base) {
+        if !build_lambda_state_machine(ir, fid, class_id, field_base, &orig_rets) {
             return false;
         }
     }
@@ -408,6 +422,9 @@ fn append_continuation(ir: &mut IrFile, call_e: ExprId, cont: ExprId) -> ExprId 
         }
         IrExpr::Call { args, .. } => args.push(cont),
         IrExpr::MethodCall { args, .. } => args.push(Some(cont)),
+        // A suspend function VALUE call (`block(a)`): the value implements `Function{N+1}`, so append the
+        // continuation — the emitter picks `Function{N+1}.invoke` from the arg count.
+        IrExpr::InvokeFunction { args, .. } => args.push(cont),
         _ => {}
     }
     call_e
@@ -750,10 +767,16 @@ fn build_lambda_state_machine(
     fid: u32,
     class_id: ClassId,
     field_base: u32,
+    orig_rets: &[Ty],
 ) -> bool {
     let Some(b) = ir.functions[fid as usize].body else {
         return false;
     };
+    let suspend_set: HashSet<u32> = ir.suspend_funs.iter().copied().collect();
+    // Lift a suspension nested in an expression (`res = foo().a`) into a preceding `val tmp = foo()`,
+    // exactly as the function path does — so the flattener meets it as a bound-local suspension (and its
+    // result is typed by the callee's logical return, not left inline where it would be mis-emitted).
+    hoist_suspensions(ir, b, &suspend_set, orig_rets);
     normalize_block_inits(ir, b);
     let IrExpr::Block { stmts, value } = ir.exprs[b as usize].clone() else {
         return false;
@@ -761,7 +784,11 @@ fn build_lambda_state_machine(
     if value.is_some() {
         return false;
     }
-    let suspend_set: HashSet<u32> = ir.suspend_funs.iter().copied().collect();
+    crate::trace_compiler!(
+        "suspend",
+        "build_lambda_sm fid={fid} ({} stmts)",
+        stmts.len()
+    );
     let Some(first) = stmts
         .iter()
         .position(|&s| expr_calls_suspend(ir, s, &suspend_set))
@@ -1068,6 +1095,11 @@ impl Flat<'_> {
     /// `resume` on synchronous completion; on `COROUTINE_SUSPENDED` the function returns and a later
     /// resume re-enters at `resume`).
     fn emit_call(&mut self, out: &mut Vec<ExprId>, call: ExprId, resume: usize) {
+        crate::trace_compiler!(
+            "suspend",
+            "emit_call {call}:{:?}",
+            &self.ir.exprs[call as usize]
+        );
         self.spill_all(out);
         self.set_label(out, resume);
         let cont_arg = {
@@ -1117,6 +1149,11 @@ impl Flat<'_> {
     }
     /// Bind a suspension result from `cont.result` (loaded into `r`) at a resume state's entry.
     fn bind_from_r(&mut self, out: &mut Vec<ExprId>, local: u32, ty: &Ty) {
+        crate::trace_compiler!(
+            "suspend",
+            "bind_from_r local={local} ty={ty:?} spilled={}",
+            self.is_spilled(local)
+        );
         let rg = self.gv(self.r_v);
         let unb = unbox(self.ir, rg, ty);
         if self.is_spilled(local) {
@@ -1810,6 +1847,48 @@ fn unbox(ir: &mut IrFile, value: ExprId, target: &Ty) -> ExprId {
 }
 
 /// Wrap the value of every `Return` reachable from `e` in an `ImplicitCoercion` to `Object`.
+/// Ensure a leaf suspend fn's body ends with a `return` (its CPS method returns `Object`; without this a
+/// fall-through body verifies as "control flow falls through code end"). Idempotent: a body already
+/// ending in `return`/`throw` is left alone. A trailing VALUE becomes `return box(value)`; a statement
+/// body / a `Unit` fn runs the body for effect and returns `Unit.INSTANCE`.
+fn ensure_tail_return(ir: &mut IrFile, body: ExprId, unit_ret: bool) {
+    let IrExpr::Block { stmts, value } = ir.exprs[body as usize].clone() else {
+        return;
+    };
+    let mut stmts = stmts;
+    match value {
+        Some(v) if !unit_ret => {
+            let boxed = ir.add_expr(IrExpr::TypeOp {
+                op: IrTypeOp::ImplicitCoercion,
+                arg: v,
+                type_operand: object_ty(),
+            });
+            stmts.push(ir.add_expr(IrExpr::Return(Some(boxed))));
+        }
+        Some(v) => {
+            // `Unit` fn: run the trailing value for effect, then return the `Unit` singleton.
+            stmts.push(v);
+            let unit = ir.add_expr(IrExpr::UnitInstance);
+            stmts.push(ir.add_expr(IrExpr::Return(Some(unit))));
+        }
+        None => {
+            // Statement body. If it doesn't already terminate, return `Unit.INSTANCE` (a leaf suspend fn
+            // with a `Unit`/no-value body).
+            let terminates = stmts.last().is_some_and(|&s| {
+                matches!(
+                    ir.exprs[s as usize],
+                    IrExpr::Return(_) | IrExpr::Throw { .. }
+                )
+            });
+            if !terminates {
+                let unit = ir.add_expr(IrExpr::UnitInstance);
+                stmts.push(ir.add_expr(IrExpr::Return(Some(unit))));
+            }
+        }
+    }
+    ir.exprs[body as usize] = IrExpr::Block { stmts, value: None };
+}
+
 fn box_returns(ir: &mut IrFile, e: ExprId) -> bool {
     match ir.exprs[e as usize].clone() {
         IrExpr::Return(None) => true,

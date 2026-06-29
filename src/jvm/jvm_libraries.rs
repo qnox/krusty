@@ -1599,6 +1599,14 @@ impl SymbolSource for JvmLibraries {
                         Vec::new()
                     }
                 };
+                let lambda_materialized = {
+                    let flags = self.cp.metadata_param_materialized(&c.owner, meta_name);
+                    if flags.len() == params.len() {
+                        flags
+                    } else {
+                        Vec::new()
+                    }
+                };
                 let call_sig = match self.cp.metadata_param_names(&c.owner, meta_name, &params) {
                     Some(names) if names.len() == params.len() => crate::libraries::CallSig {
                         required,
@@ -1606,6 +1614,7 @@ impl SymbolSource for JvmLibraries {
                         param_defaults,
                         lambda_receivers,
                         lambda_receiver_params,
+                        lambda_materialized,
                         ..Default::default()
                     },
                     _ => crate::libraries::CallSig {
@@ -1613,6 +1622,7 @@ impl SymbolSource for JvmLibraries {
                         param_defaults,
                         lambda_receivers,
                         lambda_receiver_params,
+                        lambda_materialized,
                         ..Default::default()
                     },
                 };
