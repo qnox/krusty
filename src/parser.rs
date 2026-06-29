@@ -34,6 +34,8 @@ pub fn parse_with_features(
         pending_annotation_args: Vec::new(),
     };
     p.parse_file();
+    p.file.assert_always_enabled = features.has("AssertionsAlwaysEnable");
+    p.file.assert_always_disabled = features.has("AssertionsAlwaysDisable");
     hoist_local_classes(&mut p.file);
     fixup_parenless_base_classes(&mut p.file);
     rewrite_anon_captures(&mut p.file);

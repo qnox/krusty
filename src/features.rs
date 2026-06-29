@@ -52,6 +52,15 @@ impl LangFeatures {
             if let Some(rest) = l.strip_prefix("// LANGUAGE:") {
                 f.apply_directive(rest);
             }
+            // `// ASSERTIONS_MODE: always-enable|always-disable` — kotlinc's `-Xassertions` mode for the
+            // `assert(...)` intrinsic (modeled as pseudo-features so it flows like any other directive).
+            if let Some(rest) = l.strip_prefix("// ASSERTIONS_MODE:") {
+                match rest.trim() {
+                    "always-enable" => f.enable("AssertionsAlwaysEnable"),
+                    "always-disable" => f.enable("AssertionsAlwaysDisable"),
+                    _ => {}
+                }
+            }
         }
         f
     }

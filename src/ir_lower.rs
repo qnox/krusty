@@ -8089,6 +8089,93 @@ impl<'a> Lower<'a> {
         }))
     }
 
+    /// The `kotlin.assert` codegen intrinsic. kotlinc does NOT inline the stdlib body (which reads
+    /// `kotlin/_Assertions.ENABLED`); it guards on the JVM's per-class assertion status and skips even
+    /// evaluating the condition when disabled. Lower `assert(cond)` / `assert(cond) { msg }` to
+    /// `if (<ThisClass>.class.desiredAssertionStatus()) { if (!cond) throw AssertionError([msg]) }` — the
+    /// enclosing-class `Class` literal is the `ClassConst` facade sentinel; the outer guard short-circuits
+    /// so `cond` (and the message lambda) run only when assertions are enabled.
+    fn lower_assert(
+        &mut self,
+        callable: &crate::libraries::LibraryCallable,
+        args: &[AstExprId],
+    ) -> Option<u32> {
+        if callable.name != "assert" || !callable.owner.contains("PreconditionsKt") {
+            return None;
+        }
+        // `// ASSERTIONS_MODE: always-disable` — the call is elided entirely; the condition (and message
+        // lambda) are not even evaluated, matching kotlinc. Yield an empty `Unit` statement.
+        if self.afile.assert_always_disabled {
+            return Some(self.ir.add_expr(IrExpr::Block {
+                stmts: vec![],
+                value: None,
+            }));
+        }
+        let cond = self.lower_arg(*args.first()?, &ty_to_ir(Ty::Boolean))?;
+        // The thrown `AssertionError`: no-arg for `assert(cond)`; for `assert(cond) { msg }` invoke the
+        // message lambda and pass its value to `AssertionError(Object)`.
+        let assertion = if args.len() >= 2 {
+            let lambda_param = callable
+                .params
+                .last()
+                .copied()
+                .or_else(|| self.syms.libraries.function_type(0))
+                .unwrap_or_else(|| Ty::fun(Vec::new(), Ty::obj("kotlin/Any")));
+            let lambda = self.lower_arg(args[1], &lambda_param)?;
+            let msg = self.ir.add_expr(IrExpr::InvokeFunction {
+                func: lambda,
+                args: Vec::new(),
+                ret: Ty::obj("kotlin/Any"),
+            });
+            self.ir.add_expr(IrExpr::NewExternal {
+                internal: "java/lang/AssertionError".to_string(),
+                ctor_desc: "(Ljava/lang/Object;)V".to_string(),
+                args: vec![msg],
+            })
+        } else {
+            self.ir.add_expr(IrExpr::NewExternal {
+                internal: "java/lang/AssertionError".to_string(),
+                ctor_desc: "()V".to_string(),
+                args: vec![],
+            })
+        };
+        let throw = self.ir.add_expr(IrExpr::Throw { operand: assertion });
+        let throw_block = self.ir.add_expr(IrExpr::Block {
+            stmts: vec![throw],
+            value: None,
+        });
+        let empty = self.ir.add_expr(IrExpr::Block {
+            stmts: vec![],
+            value: None,
+        });
+        // `if (cond) {} else { throw }` ≡ `if (!cond) throw`.
+        let check = self.ir.add_expr(IrExpr::When {
+            branches: vec![(Some(cond), empty), (None, throw_block)],
+        });
+        // `// ASSERTIONS_MODE: always-enable` — the check runs UNCONDITIONALLY (no per-class guard).
+        if self.afile.assert_always_enabled {
+            return Some(check);
+        }
+        // `<ThisClass>.class.desiredAssertionStatus()` — the per-class JVM assertion flag.
+        let cls = self.ir.add_expr(IrExpr::ClassConst {
+            internal: String::new(),
+        });
+        let enabled = self.ir.add_expr(IrExpr::Call {
+            callee: Callee::Virtual {
+                owner: "java/lang/Class".to_string(),
+                name: "desiredAssertionStatus".to_string(),
+                descriptor: "()Z".to_string(),
+                interface: false,
+            },
+            dispatch_receiver: Some(cls),
+            args: vec![],
+        });
+        // `if (enabled) { <check> }` — no else; the whole `assert` is a `Unit` statement.
+        Some(self.ir.add_expr(IrExpr::When {
+            branches: vec![(Some(enabled), check)],
+        }))
+    }
+
     fn coerce_erased(&mut self, read: u32, logical: Ty, physical: Ty) -> u32 {
         if logical == physical {
             return read;
@@ -14167,6 +14254,9 @@ impl<'a> Lower<'a> {
                             (c.inline.can_inline(), c.ret, c.physical_ret);
                         if let Some(intrinsic) = self.lower_assert_fails_with_default(e, &c, &args)
                         {
+                            return Some(intrinsic);
+                        }
+                        if let Some(intrinsic) = self.lower_assert(&c, &args) {
                             return Some(intrinsic);
                         }
                         // Is the callee a `suspend fun`? Ask the resolver (the flag flows uniformly from
