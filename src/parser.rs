@@ -4311,6 +4311,37 @@ impl<'a> Parser<'a> {
                         Span::new(lspan.lo, end.hi),
                     );
                 }
+                // `Recv?::name` / `Recv?::class` — a callable reference / class literal on a NULLABLE
+                // receiver type. The `?` only marks the receiver type nullable; the reference is the same
+                // callable, so parse it as the bound reference (krusty's `CallableRef` ignores the `?`).
+                TokenKind::Question
+                    if self
+                        .t
+                        .get(self.i + 1)
+                        .map_or(false, |t| t.kind == TokenKind::ColonColon) =>
+                {
+                    let lspan = self.file.expr_spans[lhs.0 as usize];
+                    self.bump(); // '?'
+                    self.bump(); // '::'
+                    let name = if self.at(TokenKind::Ident) {
+                        let n = self.text().to_string();
+                        self.bump();
+                        n
+                    } else if self.at(TokenKind::KwClass) {
+                        self.bump();
+                        "class".to_string()
+                    } else {
+                        "<error>".to_string()
+                    };
+                    let end = self.t[self.i.saturating_sub(1)].span;
+                    lhs = self.file.add_expr(
+                        Expr::CallableRef {
+                            receiver: Some(lhs),
+                            name,
+                        },
+                        Span::new(lspan.lo, end.hi),
+                    );
+                }
                 TokenKind::Dot => {
                     self.bump();
                     let name = self.ident_or_error("member name");

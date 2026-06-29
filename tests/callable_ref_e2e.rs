@@ -110,3 +110,29 @@ return if (c.name.endsWith(\"C\")) \"OK\" else c.name\n\
     };
     assert_eq!(out, "OK");
 }
+
+/// A callable reference / class literal on a NULLABLE receiver type (`A?::foo`, `A?::class`). The `?`
+/// only marks the receiver type nullable; the reference is the same callable. Previously the parser
+/// emitted "expected an expression" at `?::`.
+#[test]
+fn nullable_receiver_callable_ref_runs() {
+    let Some(java_home) = common::java_home() else {
+        return;
+    };
+    let Some(stdlib) = common::stdlib_jar() else {
+        return;
+    };
+    const SRC: &str = "class A { fun foo(): String = \"OK\" }\n\
+fun box(): String {\n\
+    val r: (A) -> String = A?::foo\n\
+    val a = A()\n\
+    if (r(a) != \"OK\") return \"f1\"\n\
+    if (A?::class.simpleName != \"A\") return \"f2\"\n\
+    return \"OK\"\n\
+}\n";
+    let jdk = std::path::PathBuf::from(format!("{java_home}/lib/modules"));
+    let Some(out) = common::compile_and_run_box(SRC, "CR", &[stdlib], Some(&jdk)) else {
+        return;
+    };
+    assert_eq!(out, "OK");
+}
