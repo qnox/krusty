@@ -9591,6 +9591,19 @@ impl<'a> Checker<'a> {
                         })
                         // `List.component1()`, … are stdlib *extensions* — try those too.
                         .or_else(|| self.library_extension_return(&comp, it, &[], &[]))
+                        // A USER-defined `operator fun Recv.componentN()` extension (same module).
+                        .or_else(|| {
+                            crate::module_symbols::ModuleSymbols::new(self.syms)
+                                .functions(&comp, Some(it))
+                                .overloads
+                                .into_iter()
+                                .find(|o| {
+                                    o.kind == crate::libraries::FnKind::Extension
+                                        && o.receiver_rank == 0
+                                        && o.callable.params.len() == 1
+                                })
+                                .map(|o| o.callable.ret)
+                        })
                         // An indexable type (`List`): `componentN` is the inline `get(N-1)` — use the
                         // element type from `get(Int)` (which kotlinc inlines the component to).
                         .or_else(|| {
