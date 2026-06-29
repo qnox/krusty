@@ -3303,10 +3303,16 @@ impl<'a> Emitter<'a> {
             splice_desc,
         } = target;
         let Some(body) = self.bodies.body(owner, name, descriptor) else {
+            crate::trace_compiler!("splice", "no body for {owner}.{name}{descriptor}");
             return false;
         };
         if !allow_owner_bridge && owner != methodref_owner(&body, name, descriptor).unwrap_or(owner)
         {
+            crate::trace_compiler!(
+                "splice",
+                "owner-bridge mismatch for {owner}.{name}{descriptor} (real owner {:?})",
+                methodref_owner(&body, name, descriptor)
+            );
             return false;
         }
         // Splice the body's locals above BOTH the slot allocator's next free slot and the code's
@@ -3355,6 +3361,10 @@ impl<'a> Emitter<'a> {
         let Some(probe) =
             crate::jvm::inline::splice_unified(&body, splice_desc, base, &[], 0, self.cw)
         else {
+            crate::trace_compiler!(
+                "splice",
+                "splice_unified probe failed for {owner}.{name}{descriptor} (splice_desc={splice_desc})"
+            );
             return false;
         };
         let arg_words: i32 = args

@@ -4163,6 +4163,22 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// The non-null form of a nullable REFERENCE type (`A?` → `A`), for nullability-insensitive
+    /// assignability — the checker erases `?` and a nullable reference shares its non-null JVM
+    /// representation. A value/inline class (file or classpath, e.g. `kotlin/Result`) is LEFT nullable:
+    /// like a primitive it has a distinct boxed-vs-unboxed representation that must stay distinguished.
+    fn strip_nullable_ref(&self, t: Ty) -> Ty {
+        let nn = t.non_null();
+        if nn.is_reference()
+            && !self.ty_is_value_class(nn)
+            && self.syms.libraries.value_underlying(nn).is_none()
+        {
+            nn
+        } else {
+            t
+        }
+    }
+
     /// True if `t` is a `@JvmInline value class` reference type (carries a `value_field`).
     fn ty_is_value_class(&self, t: Ty) -> bool {
         matches!(t, Ty::Obj(n, _) if self.syms.class_by_internal(n).is_some_and(|c| c.value_field.is_some()))
@@ -4881,6 +4897,24 @@ impl<'a> Checker<'a> {
         if actual == Ty::Null && expected.is_reference() {
             return;
         }
+        // The checker erases nullability (`resolve_ty` drops the `?`), so most types are already non-null;
+        // a nullable REFERENCE that DOES reach here (an `as?` result, a nullable member return) shares the
+        // JVM representation of its non-null form, so compare the non-null forms — runtime null-safety is
+        // enforced by lowering (`!!`/`?.`), not here. A nullable PRIMITIVE (`Int?`) is NOT stripped: it
+        // boxes to a wrapper, a real representation difference the dedicated `nullable_primitive` rule
+        // below (and the emit coercion site) must keep distinct from the bare primitive.
+        // Only in a RETURN position (an expression body / getter): a body like `= x as? A` yields a
+        // nullable reference assignable to the declared non-null-erased return. Elsewhere keep the strict
+        // comparison so a genuinely distinct nullable assignment isn't silently accepted.
+        let (expected, actual) =
+            if matches!(ctx, "function body" | "getter body" | "local function body") {
+                (
+                    self.strip_nullable_ref(expected),
+                    self.strip_nullable_ref(actual),
+                )
+            } else {
+                (expected, actual)
+            };
         // An erased generic reference array (`Array<Any>`, e.g. `emptyArray<T>()` → `Object[]`) is
         // assignable to any specific reference array — `Array` is invariant, but the erased value
         // really is the target type at runtime, so kotlinc inserts a `checkcast` at the use site.
@@ -5226,7 +5260,7 @@ impl<'a> Checker<'a> {
             Expr::As {
                 operand,
                 ty,
-                nullable: _,
+                nullable,
             } => {
                 let ot = self.expr(operand);
                 let tt = self.resolve_ty(&ty);
@@ -5265,7 +5299,17 @@ impl<'a> Checker<'a> {
                     );
                     return Ty::Error;
                 }
-                tt
+                // A safe cast `x as? T` has type `T?` — `null` on a runtime mismatch. For a primitive `T`
+                // (`as? Int`) that nullable form is the boxed wrapper (`Int?`). A plain `x as T` keeps `T`.
+                // A value/inline-class target keeps `T` (non-null): its nullable boxed form isn't modeled,
+                // and a member access on the cast result must see the unboxed value-class type.
+                let is_value = self.ty_is_value_class(tt)
+                    || self.syms.libraries.value_underlying(tt).is_some();
+                if nullable && !is_value {
+                    Ty::nullable(tt)
+                } else {
+                    tt
+                }
             }
             Expr::InRange {
                 value, start, end, ..
