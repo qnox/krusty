@@ -13751,9 +13751,29 @@ impl<'a> Lower<'a> {
                 };
                 let cont_name = params.first().cloned().unwrap_or_else(|| "it".to_string());
                 if name_used_as_value(self.afile, body, &cont_name) {
-                    return None; // block reads its continuation — not modeled (skip, never miscompile)
+                    // The block reads its continuation (`c.resume(t)`): bind `c` to the enclosing suspend
+                    // function's own `Continuation` via the `CurrentContinuation` placeholder — the CPS
+                    // pass rewrites it to the real continuation value once the trailing parameter exists.
+                    let slot = self.fresh_value();
+                    let cont = self.ir.add_expr(IrExpr::CurrentContinuation);
+                    let cont_ty = Ty::obj("kotlin/coroutines/Continuation");
+                    let var = self.ir.add_expr(IrExpr::Variable {
+                        index: slot,
+                        ty: ty_to_ir(cont_ty),
+                        init: Some(cont),
+                    });
+                    let depth = self.scope.len();
+                    self.scope.push((cont_name, slot, cont_ty));
+                    let body_val = self.expr(body);
+                    self.scope.truncate(depth);
+                    let body_val = body_val?;
+                    self.ir.add_expr(IrExpr::Block {
+                        stmts: vec![var],
+                        value: Some(body_val),
+                    })
+                } else {
+                    self.expr(body)?
                 }
-                self.expr(body)?
             }
             Expr::Call { args, .. }
                 if matches!(

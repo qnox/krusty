@@ -4361,6 +4361,12 @@ impl<'a> Emitter<'a> {
                 let f = self.cw.fieldref("kotlin/Unit", "INSTANCE", "Lkotlin/Unit;");
                 code.getstatic(f, 1);
             }
+            IrExpr::CurrentContinuation => {
+                // The CPS pass (`jvm/suspend.rs`) rewrites every `CurrentContinuation` to a `GetValue` of
+                // the continuation slot before emit; reaching here means it was emitted outside a suspend
+                // function, which the front end forbids.
+                unreachable!("CurrentContinuation must be resolved by the CPS pass before emit")
+            }
             IrExpr::NotNullAssert { operand } => {
                 self.emit_value(*operand, code);
                 code.dup();
@@ -6130,6 +6136,7 @@ impl<'a> Emitter<'a> {
             IrExpr::Vararg { element_type, .. } => Ty::array(ir_ty_to_jvm(element_type)),
             IrExpr::NewArray { element_type, .. } => Ty::array(ir_ty_to_jvm(element_type)),
             IrExpr::UnitInstance => Ty::obj("kotlin/Unit"),
+            IrExpr::CurrentContinuation => Ty::obj("kotlin/coroutines/Continuation"),
             IrExpr::Try { result, .. } => ir_ty_to_jvm(result),
             _ => Ty::Error,
         }
