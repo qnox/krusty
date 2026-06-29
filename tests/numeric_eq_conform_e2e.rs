@@ -64,3 +64,21 @@ fun box(): String {\n\
         "OK"
     );
 }
+
+#[test]
+fn nullable_double_equals_primitive_ieee() {
+    // A nullable-FP wrapper compared with its primitive (`Double? == Double`, `Double? == Double?`):
+    // null-check then UNBOX + primitive `==` (`dcmp`, IEEE — `0.0 == 0.0`, null handling). Was wrongly
+    // rejected as "operator cannot be applied to Double and Double".
+    const SRC: &str = "fun eq(a: Double?, b: Double?) = a == b\n\
+fun eqP(a: Double?, b: Double) = a == b\n\
+fun box(): String {\n\
+    if (!eq(null, null)) return \"f1\"\n\
+    if (eq(null, 0.0)) return \"f2\"\n\
+    if (!eq(0.0, 0.0)) return \"f3\"\n\
+    if (eqP(null, 0.0)) return \"f4\"\n\
+    if (!eqP(0.0, 0.0)) return \"f5\"\n\
+    return \"OK\"\n\
+}\n";
+    assert_eq!(run(SRC).expect("nullable Double == compiles + runs"), "OK");
+}
