@@ -1270,6 +1270,12 @@ fn emit_func_ref_class(c: &crate::ir::IrClass, facade: &str) -> Vec<u8> {
         FrDispatch::VirtualUnbound => 1usize,
         _ => 0,
     };
+    // For `StaticBound` the captured receiver is target arg 0, so invoke arg `k` maps to
+    // `target_param_tys[k + 1]`.
+    let target_offset = match fr.dispatch {
+        FrDispatch::StaticBound => 1usize,
+        _ => 0,
+    };
     let ret_jvm = ir_ty_to_jvm(&fr.ret_ty);
     let returns_void = matches!(fr.ret_ty, Ty::Unit | Ty::Nothing);
     // The Kotlin reference metadata signature stays logical; the target JVM call descriptor follows
@@ -1378,9 +1384,32 @@ fn emit_func_ref_class(c: &crate::ir::IrClass, facade: &str) -> Vec<u8> {
             inv.checkcast(owner_ref);
         }
         FrDispatch::Static => {}
+        FrDispatch::StaticBound => {
+            // The captured receiver is the FIRST static argument: load `this.receiver`, cast to the
+            // target receiver type (`target_param_tys[0]`).
+            inv.aload(0);
+            let recv_f = cw.fieldref(&c.superclass, "receiver", "Ljava/lang/Object;");
+            inv.getfield(recv_f, 1);
+            if let Some(internal) = fr
+                .target_param_tys
+                .first()
+                .map(ir_ty_to_jvm)
+                .and_then(checkcast_internal)
+            {
+                let cref = cw.class_ref(&internal);
+                inv.checkcast(cref);
+            }
+        }
     };
     // Push the call arguments (cast/unbox each erased `Object`).
-    let mut call_arg_words = 0i32;
+    let mut call_arg_words = match fr.dispatch {
+        // The captured receiver already pushed above occupies one (reference) target slot.
+        FrDispatch::StaticBound => fr
+            .target_param_tys
+            .first()
+            .map_or(0, |t| slot_words(ir_ty_to_jvm(t)) as i32),
+        _ => 0,
+    };
     for (k, pt) in fr.param_tys.iter().enumerate().skip(first_arg) {
         inv.aload(1 + k as u16);
         let jt = ir_ty_to_jvm(pt);
@@ -1394,7 +1423,11 @@ fn emit_func_ref_class(c: &crate::ir::IrClass, facade: &str) -> Vec<u8> {
             let cref = cw.class_ref(&internal);
             inv.checkcast(cref);
         }
-        let target_jt = fr.target_param_tys.get(k).map(ir_ty_to_jvm).unwrap_or(jt);
+        let target_jt = fr
+            .target_param_tys
+            .get(k + target_offset)
+            .map(ir_ty_to_jvm)
+            .unwrap_or(jt);
         if let Some(vc) = fr.unbox_params.get(k).and_then(|v| v.as_ref()) {
             let locals = func_ref_invoke_locals(&mut cw, &fq, arity);
             let stack_prefix = func_ref_call_stack_prefix(&mut cw, &fr.dispatch, call_owner);
@@ -1417,7 +1450,7 @@ fn emit_func_ref_class(c: &crate::ir::IrClass, facade: &str) -> Vec<u8> {
         slot_words(target_ret_jvm) as i32
     };
     match fr.dispatch {
-        FrDispatch::Static => {
+        FrDispatch::Static | FrDispatch::StaticBound => {
             let m = cw.methodref(call_owner, &fr.call_name, &call_desc);
             inv.invokestatic(m, call_arg_words, ret_words);
         }
@@ -1458,7 +1491,9 @@ fn func_ref_call_stack_prefix(
 ) -> Vec<VerifType> {
     match dispatch {
         crate::ir::FrDispatch::Static => Vec::new(),
-        crate::ir::FrDispatch::VirtualBound | crate::ir::FrDispatch::VirtualUnbound => {
+        crate::ir::FrDispatch::VirtualBound
+        | crate::ir::FrDispatch::VirtualUnbound
+        | crate::ir::FrDispatch::StaticBound => {
             vec![VerifType::Object(cw.class_ref(call_owner))]
         }
     }
@@ -3103,6 +3138,11 @@ impl<'a> Emitter<'a> {
             crate::ir::FrDispatch::VirtualUnbound => 1usize,
             _ => 0usize,
         };
+        // `StaticBound`: invoke arg `k` maps to `target_param_tys[k + 1]` (slot 0 is the receiver).
+        let target_offset = match fr.dispatch {
+            crate::ir::FrDispatch::StaticBound => 1usize,
+            _ => 0usize,
+        };
         if fr.param_tys.len() != fr.arity as usize {
             return None;
         }
@@ -3141,12 +3181,35 @@ impl<'a> Emitter<'a> {
                 let (slot, jt) = *param_slots.first()?;
                 load(jt, slot, scratch);
             }
+            crate::ir::FrDispatch::StaticBound => {
+                // The captured receiver is the first static argument: push it, cast to the receiver type.
+                let [capture] = captures else { return None };
+                self.emit_value(*capture, scratch);
+                if let Some(internal) = target_param_tys
+                    .first()
+                    .copied()
+                    .and_then(checkcast_internal)
+                {
+                    let cref = self.cw.class_ref(&internal);
+                    scratch.checkcast(cref);
+                }
+            }
         }
 
         let mut call_desc = String::from("(");
-        let mut call_arg_words = 0i32;
+        // `StaticBound` leads the target descriptor with the (already pushed) receiver.
+        let mut call_arg_words = if target_offset == 1 {
+            let recv_jt = target_param_tys.first().copied().unwrap_or(Ty::Error);
+            call_desc.push_str(&type_descriptor(recv_jt));
+            slot_words(recv_jt) as i32
+        } else {
+            0i32
+        };
         for (k, (slot, jt)) in param_slots.iter().enumerate().skip(first_call_arg) {
-            let target_jt = target_param_tys.get(k).copied().unwrap_or(*jt);
+            let target_jt = target_param_tys
+                .get(k + target_offset)
+                .copied()
+                .unwrap_or(*jt);
             load(*jt, *slot, scratch);
             if let Some(vc) = fr.unbox_params.get(k).and_then(|v| v.as_ref()) {
                 let locals = self.verif_locals_with(&param_slots);
@@ -3183,7 +3246,7 @@ impl<'a> Emitter<'a> {
             slot_words(ret_jvm) as i32
         };
         match fr.dispatch {
-            crate::ir::FrDispatch::Static => {
+            crate::ir::FrDispatch::Static | crate::ir::FrDispatch::StaticBound => {
                 let call_owner = if fr.call_owner.is_empty() {
                     self.facade.as_str()
                 } else {

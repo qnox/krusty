@@ -6335,6 +6335,26 @@ impl<'a> Checker<'a> {
                                         return self.set(e, Ty::fun(params, sig.ret));
                                     }
                                 }
+                                // Unbound reference to a same-module EXTENSION function (`A::foo` where
+                                // `fun A.foo()` is top-level): the function type prepends the receiver to
+                                // the extension's own args — `(A, ext-args…) -> ext-ret`. (A member of
+                                // the same name, checked above, takes precedence.)
+                                let recv_ty = Ty::obj(&cls.internal);
+                                if let Some(sig) = self
+                                    .syms
+                                    .ext_funs
+                                    .get(&(recv_ty.erased_recv(), name.clone()))
+                                    .cloned()
+                                {
+                                    if !sig.vararg
+                                        && sig.params.len() == sig.required
+                                        && sig.ret != Ty::Nothing
+                                    {
+                                        let mut params = vec![recv_ty];
+                                        params.extend(sig.params.iter().copied());
+                                        return self.set(e, Ty::fun(params, sig.ret));
+                                    }
+                                }
                                 // unbound property reference `Type::prop` keeps property-reference APIs.
                                 if let Some(is_var) = cls
                                     .props
