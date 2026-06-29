@@ -11256,24 +11256,7 @@ impl<'a> Lower<'a> {
                 })
             }
         } else {
-            let m = crate::call_resolver::resolve_property_member(
-                &*self.syms.libraries,
-                recv_ty,
-                name,
-            )?
-            .member;
-            let owner = m.owner.clone().unwrap_or_else(|| internal.clone());
-            let is_iface = self.library_type_is_interface(&owner);
-            self.ir.add_expr(IrExpr::Call {
-                callee: Callee::Virtual {
-                    owner,
-                    name: m.name,
-                    descriptor: m.descriptor,
-                    interface: is_iface,
-                },
-                dispatch_receiver: Some(recv2),
-                args: vec![],
-            })
+            self.lower_library_property_read_on(recv2, recv_ty, name)?
         };
         Some((var, cond, member))
     }
@@ -11606,25 +11589,7 @@ impl<'a> Lower<'a> {
                                 read
                             } else {
                                 // A classpath property (`list?.size`) — a zero-arg accessor.
-                                let recv_ty = nn;
-                                let m = crate::call_resolver::resolve_property_member(
-                                    &*self.syms.libraries,
-                                    recv_ty,
-                                    &name,
-                                )
-                                .map(|r| r.member)?;
-                                let owner = m.owner.clone().unwrap_or_else(|| internal.clone());
-                                let is_iface = self.library_type_is_interface(&owner);
-                                self.ir.add_expr(IrExpr::Call {
-                                    callee: Callee::Virtual {
-                                        owner,
-                                        name: m.name,
-                                        descriptor: m.descriptor,
-                                        interface: is_iface,
-                                    },
-                                    dispatch_receiver: Some(recv2),
-                                    args: vec![],
-                                })
+                                self.lower_library_property_read_on(recv2, nn, &name)?
                             }
                         }
                     }
