@@ -1553,23 +1553,23 @@ impl Flat<'_> {
 
 /// Collect the value-indices read (`GetValue`) anywhere in `e`'s subtree.
 fn collect_reads(ir: &IrFile, e: ExprId, out: &mut Vec<u32>) {
-    if let IrExpr::GetValue(i) = ir.exprs[e as usize] {
-        out.push(i);
-    }
-    for_each_child(&ir.exprs, e, &mut |c| collect_reads(ir, c, out));
+    visit_subtree(&ir.exprs, e, &mut |node| {
+        if let IrExpr::GetValue(i) = node {
+            out.push(*i);
+        }
+    });
 }
 
-/// The declared type of local `idx`, from its `Variable` declaration somewhere in `b`'s subtree.
+/// The declared type of local `idx`, from its (first, pre-order) `Variable` declaration in `b`'s subtree.
 fn find_local_ty(ir: &IrFile, b: ExprId, idx: u32) -> Option<Ty> {
-    if let IrExpr::Variable { index, ty, .. } = &ir.exprs[b as usize] {
-        if *index == idx {
-            return Some(ty.clone());
-        }
-    }
     let mut found = None;
-    for_each_child(&ir.exprs, b, &mut |c| {
+    visit_subtree(&ir.exprs, b, &mut |node| {
         if found.is_none() {
-            found = find_local_ty(ir, c, idx);
+            if let IrExpr::Variable { index, ty, .. } = node {
+                if *index == idx {
+                    found = Some(*ty);
+                }
+            }
         }
     });
     found
@@ -2101,36 +2101,47 @@ fn box_returns(ir: &mut IrFile, e: ExprId) -> bool {
     }
 }
 
+/// Apply `f` to the node at `e` and every node in its subtree (pre-order). Children are snapshotted
+/// before recursing, so `f` may freely mutate the current node (the mutable borrow of `ir.exprs[e]` is
+/// released before the child walk). The single home for every in-place IR subtree rewrite in this pass.
+fn rewrite_subtree(ir: &mut IrFile, e: ExprId, f: &mut impl FnMut(&mut IrExpr)) {
+    f(&mut ir.exprs[e as usize]);
+    let mut kids = Vec::new();
+    for_each_child(&ir.exprs, e, &mut |c| kids.push(c));
+    for c in kids {
+        rewrite_subtree(ir, c, f);
+    }
+}
+
+/// Apply `f` to the node at `e` and every node in its subtree (pre-order), read-only. The single home
+/// for every read traversal (collect / find) in this pass.
+fn visit_subtree(exprs: &[IrExpr], e: ExprId, f: &mut impl FnMut(&IrExpr)) {
+    f(&exprs[e as usize]);
+    for_each_child(exprs, e, &mut |c| visit_subtree(exprs, c, f));
+}
+
 /// Increment every value-index `>= threshold` in `e`'s subtree (a `GetValue`/`SetValue` read-write or a
 /// `Variable` declaration). Used to make room at index `threshold` for the CPS continuation parameter
 /// without aliasing a body local. `GetStatic` holds a static-field index (a different namespace) and is
 /// left untouched.
 fn shift_locals(ir: &mut IrFile, e: ExprId, threshold: u32) {
-    match &mut ir.exprs[e as usize] {
+    rewrite_subtree(ir, e, &mut |node| match node {
         IrExpr::GetValue(i) if *i >= threshold => *i += 1,
         IrExpr::SetValue { var, .. } if *var >= threshold => *var += 1,
         IrExpr::Variable { index, .. } if *index >= threshold => *index += 1,
         _ => {}
-    }
-    let mut kids = Vec::new();
-    for_each_child(&ir.exprs, e, &mut |c| kids.push(c));
-    for c in kids {
-        shift_locals(ir, c, threshold);
-    }
+    });
 }
 
 /// Resolve every `CurrentContinuation` placeholder in `e` to read the continuation value at `slot` (the
 /// trailing `Continuation` parameter's value-index). Emitted by `ir_lower` for the lambda parameter of
 /// `suspendCoroutineUninterceptedOrReturn { c -> … }`.
 fn rewrite_current_continuation(ir: &mut IrFile, e: ExprId, slot: u32) {
-    if matches!(ir.exprs[e as usize], IrExpr::CurrentContinuation) {
-        ir.exprs[e as usize] = IrExpr::GetValue(slot);
-    }
-    let mut kids = Vec::new();
-    for_each_child(&ir.exprs, e, &mut |c| kids.push(c));
-    for c in kids {
-        rewrite_current_continuation(ir, c, slot);
-    }
+    rewrite_subtree(ir, e, &mut |node| {
+        if matches!(node, IrExpr::CurrentContinuation) {
+            *node = IrExpr::GetValue(slot);
+        }
+    });
 }
 
 /// The maximum value-index referenced anywhere in the arena (params, locals). New state-machine locals
