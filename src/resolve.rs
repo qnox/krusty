@@ -8425,10 +8425,13 @@ impl<'a> Checker<'a> {
                     && self.lookup(&fname).is_none()
                     && !self.module_declares(&fname)
                     && matches!(self.file.expr(args[0]), Expr::Lambda { .. })
-                    && crate::libraries::coroutine_intrinsic(&fname)
-                        == Some(
-                            crate::libraries::CoroutineIntrinsic::SuspendCoroutineUninterceptedOrReturn,
+                    && matches!(
+                        crate::libraries::coroutine_intrinsic(&fname),
+                        Some(
+                            crate::libraries::CoroutineIntrinsic::SuspendCoroutineUninterceptedOrReturn
+                                | crate::libraries::CoroutineIntrinsic::SuspendCoroutine
                         )
+                    )
                 {
                     let cont = Ty::obj("kotlin/coroutines/Continuation");
                     self.check_lambda_with_types(args[0], &[cont]);

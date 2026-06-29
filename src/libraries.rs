@@ -707,6 +707,9 @@ pub enum CoroutineIntrinsic {
     /// `suspendCoroutineUninterceptedOrReturn { c -> … }` — inline the block with the enclosing
     /// function's own continuation bound as the parameter; its `Any?` result becomes the result.
     SuspendCoroutineUninterceptedOrReturn,
+    /// `suspendCoroutine { c -> … }` — the stdlib inline wrapper: build a `SafeContinuation` over the
+    /// enclosing continuation, run the block with it, return `safe.getOrThrow()`.
+    SuspendCoroutine,
     /// `startCoroutine` — start a coroutine with a completion continuation (extension on a suspend
     /// function type).
     StartCoroutine,
@@ -720,6 +723,7 @@ pub fn coroutine_intrinsic(name: &str) -> Option<CoroutineIntrinsic> {
         "suspendCoroutineUninterceptedOrReturn" => {
             Some(CoroutineIntrinsic::SuspendCoroutineUninterceptedOrReturn)
         }
+        "suspendCoroutine" => Some(CoroutineIntrinsic::SuspendCoroutine),
         "startCoroutine" => Some(CoroutineIntrinsic::StartCoroutine),
         "createCoroutine" => Some(CoroutineIntrinsic::CreateCoroutine),
         _ => None,
