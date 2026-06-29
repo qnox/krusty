@@ -3087,6 +3087,9 @@ pub enum ExprLowering {
     Lambda(LambdaInfo),
     /// A classpath `object` used as a value. Lowering emits `getstatic <internal>.INSTANCE`.
     ObjectValue { internal: String },
+    /// A `this@Label` that denotes the INNERMOST receiver (the current `this`), so it lowers as a bare
+    /// `this`. Only recorded for the innermost match; an outer-receiver label is left unresolved/skipped.
+    LabeledThisInner,
     /// A property-read `recv.name` resolved to a classpath extension property getter.
     ExtensionPropertyGet {
         getter: Box<crate::libraries::LibraryCallable>,
@@ -3190,6 +3193,7 @@ fn make_checker<'a>(file: &'a File, syms: &'a SymbolTable, diags: &'a mut DiagSi
         import_wildcards,
         tparams: Default::default(),
         this_ty: None,
+        this_labels: Vec::new(),
         field_ty: None,
         companion_of: None,
         local_funs: Vec::new(),
@@ -3312,6 +3316,10 @@ pub fn check_file(file: &File, syms: &mut SymbolTable, diags: &mut DiagSink) -> 
                     }
                 }
                 c.this_ty = syms.classes.get(&cl.name).map(|s| Ty::obj(&s.internal));
+                // Push the class's own labeled receiver (`this@C`) for the duration of its member checks.
+                if let Some(ty) = c.this_ty {
+                    c.this_labels.push((cl.name.clone(), ty));
+                }
                 let methods: Vec<&FunDecl> = cl.methods.iter().collect();
                 c.check_no_erased_clash(&methods, false);
                 if let Some(internal) = syms.classes.get(&cl.name).map(|s| s.internal.clone()) {
@@ -3583,6 +3591,9 @@ pub fn check_file(file: &File, syms: &mut SymbolTable, diags: &mut DiagSink) -> 
                     }
                 }
                 c.pop_scope();
+                if c.this_ty.is_some() {
+                    c.this_labels.pop();
+                }
                 c.this_ty = None;
                 // Enum entry constructor arguments (e.g. `RED(0xff0000)`) are type-checked in a
                 // fresh scope — they're emitted in the static `<clinit>` and cannot access `this`.
@@ -3776,6 +3787,12 @@ struct Checker<'a> {
     tparams: TParams,
     /// The type of `this` when checking class members (`None` at top level).
     this_ty: Option<Ty>,
+    /// Stack of labeled receivers in scope, innermost LAST: a class body pushes `(ClassName, ty)`, a
+    /// receiver lambda / scope function pushes `(fnName, receiverTy)`, an extension function pushes
+    /// `(fnName, receiverTy)`. Resolves `this@Label`. The innermost entry is the current `this`; only a
+    /// `this@Label` matching it can be lowered as a bare `this` (an outer label needs an outer-receiver
+    /// walk the lowerer can't yet emit, so it skips).
+    this_labels: Vec<(String, Ty)>,
     /// The backing-field type while checking a property accessor body — makes the `field`
     /// soft-keyword resolve to the property's backing field. `None` outside an accessor.
     field_ty: Option<Ty>,
@@ -5502,19 +5519,21 @@ impl<'a> Checker<'a> {
                     Ty::Error
                 }
             },
-            // `this@C` where `C` is the CURRENT class (a self-label, e.g. `this@C.h()` inside `C`'s own
-            // method, often redundant): resolve to the current `this`. Outer-class / receiver-lambda /
-            // accessor labels need a receiver-label stack krusty doesn't track yet — those stay
-            // unresolved (the file skips; never miscompiled).
+            // `this@Label` — a labeled receiver. Resolve from the receiver-label stack (innermost last):
+            // the matching entry's type is the result. When it matches the INNERMOST entry (the current
+            // `this`), record `LabeledThisInner` so the lowerer emits a bare `this`; an OUTER-label match
+            // type-checks but is left for the lowerer to skip (it can't yet walk to an outer receiver).
             Expr::Name(n) if n.starts_with("this@") => {
                 let label = &n["this@".len()..];
-                match self.this_ty {
-                    Some(t @ Ty::Obj(internal, _))
-                        if internal.rsplit(['/', '$']).next() == Some(label) =>
-                    {
-                        t
+                match self.this_labels.iter().rposition(|(l, _)| l == label) {
+                    Some(idx) => {
+                        let ty = self.this_labels[idx].1;
+                        if idx + 1 == self.this_labels.len() {
+                            self.expr_lowers.insert(e, ExprLowering::LabeledThisInner);
+                        }
+                        ty
                     }
-                    _ => {
+                    None => {
                         self.diags
                             .error(self.span(e), format!("unresolved reference '{n}'."));
                         Ty::Error
@@ -6456,14 +6475,28 @@ impl<'a> Checker<'a> {
     /// Recognize stdlib precondition intrinsics: `require`/`check`/`assert(cond)` (→ `Unit`),
     /// `error(msg)` (→ `Nothing`), and `TODO()`/`TODO(msg)` (→ `Nothing`). Returns the result type,
     /// or `None` if `fname` isn't one of these.
-    /// Type-check a `run`/`with`/`apply` lambda body with `recv` as its implicit receiver: `this` is
-    /// `recv`, and the receiver's properties resolve unqualified. Returns the body's type.
-    fn check_with_receiver(&mut self, recv: Ty, body: ExprId, _span: Span) -> Ty {
+    /// Type-check a receiver-lambda / scope-function body with `recv` as its implicit receiver: `this`
+    /// is `recv`, and the receiver's properties resolve unqualified. `label` (the callee's name, e.g.
+    /// `run`/`apply`/`with` or a user HOF) is pushed onto the receiver-label stack so `this@label`
+    /// resolves inside the body. Returns the body's type.
+    fn check_with_receiver_labeled(&mut self, recv: Ty, body: ExprId, label: Option<&str>) -> Ty {
         if recv == Ty::Error {
             return Ty::Error;
         }
         let prev_this = self.this_ty;
         self.this_ty = Some(recv);
+        let pushed = label.map(|l| {
+            self.this_labels.push((l.to_string(), recv));
+        });
+        let r = self.check_with_receiver_body(recv, body);
+        if pushed.is_some() {
+            self.this_labels.pop();
+        }
+        self.this_ty = prev_this;
+        r
+    }
+
+    fn check_with_receiver_body(&mut self, recv: Ty, body: ExprId) -> Ty {
         self.push_scope();
         // A user class receiver's own properties are visible unqualified inside the body; for builtin
         // and library receivers (`String`, `StringBuilder`, …) a bare member resolves through the
@@ -6477,7 +6510,6 @@ impl<'a> Checker<'a> {
         }
         let bt = self.expr(body);
         self.pop_scope();
-        self.this_ty = prev_this;
         bt
     }
 
@@ -6504,7 +6536,7 @@ impl<'a> Checker<'a> {
         let rt = rt.nullable_primitive().unwrap_or(rt);
         match name {
             "run" | "apply" if params.is_empty() => {
-                let bt = self.check_with_receiver(rt, body, self.span(a[0]));
+                let bt = self.check_with_receiver_labeled(rt, body, Some(name));
                 Some(if name == "apply" { rt } else { bt })
             }
             "let" | "also" => {
@@ -6815,7 +6847,15 @@ impl<'a> Checker<'a> {
     /// parameters bind `value_types`. Records the lambda expr → `recv` so the backend binds the closure's
     /// first parameter as `this`. Returns the lambda's `Fun` type (the receiver folded back in as the
     /// leading parameter, matching how `lambda_param_types` was built).
-    fn check_lambda_with_receiver(&mut self, e: ExprId, recv: Ty, value_types: &[Ty]) -> Ty {
+    /// `label` (the enclosing HOF's name) is pushed on the receiver-label stack so `this@label`
+    /// resolves to this lambda's receiver inside the body.
+    fn check_lambda_with_receiver_labeled(
+        &mut self,
+        e: ExprId,
+        recv: Ty,
+        value_types: &[Ty],
+        label: Option<&str>,
+    ) -> Ty {
         if self.allow_lambda_mutation {
             self.mark_inline_lambda(e);
         }
@@ -6830,6 +6870,7 @@ impl<'a> Checker<'a> {
             self.mark_receiver_lambda(e, recv);
             let prev_this = self.this_ty;
             self.this_ty = Some(recv);
+            let pushed = label.map(|l| self.this_labels.push((l.to_string(), recv)));
             self.push_scope();
             if let Ty::Obj(internal, _) = recv {
                 if let Some(cs) = self.syms.class_by_internal(internal) {
@@ -6846,6 +6887,9 @@ impl<'a> Checker<'a> {
             let bret = self.expr(body);
             self.field_ty = saved_field;
             self.pop_scope();
+            if pushed.is_some() {
+                self.this_labels.pop();
+            }
             self.this_ty = prev_this;
             let mut pts = vec![recv];
             pts.extend_from_slice(value_types);
@@ -7090,6 +7134,14 @@ impl<'a> Checker<'a> {
     }
 
     fn check_call(&mut self, call: ExprId, callee: ExprId, args: &[ExprId], span: Span) -> Ty {
+        // The called function's name (`foo` / `recv.method`) — a `Recv.() -> R` lambda argument to it
+        // binds `this@<name>`, so this is the label pushed when checking any receiver-lambda argument.
+        // Uniform across every function: scope functions (`run`/`apply`/`with`) are not special here.
+        let call_fn_name: Option<String> = match self.file.expr(callee) {
+            Expr::Name(n) => Some(n.clone()),
+            Expr::Member { name, .. } => Some(name.clone()),
+            _ => None,
+        };
         // Named arguments map onto parameter positions for a top-level function or a method whose
         // signature records parameter names (e.g. a data-class `copy`). Elsewhere the labels would be
         // silently ignored — reject instead.
@@ -7310,7 +7362,8 @@ impl<'a> Checker<'a> {
                     if let Expr::Lambda { params, body } = self.file.expr(args[0]).clone() {
                         if params.is_empty() {
                             let rt = self.expr(receiver);
-                            let bt = self.check_with_receiver(rt, body, self.span(args[0]));
+                            let bt =
+                                self.check_with_receiver_labeled(rt, body, call_fn_name.as_deref());
                             let returns_receiver = name == "apply";
                             self.expr_lowers.insert(
                                 call,
@@ -7686,7 +7739,12 @@ impl<'a> Checker<'a> {
                                 {
                                     let pt = &pts[i];
                                     let value_types = pt.get(1..).unwrap_or(&[]);
-                                    return self.check_lambda_with_receiver(a, recv, value_types);
+                                    return self.check_lambda_with_receiver_labeled(
+                                        a,
+                                        recv,
+                                        value_types,
+                                        call_fn_name.as_deref(),
+                                    );
                                 }
                                 let pt = pts[i].clone();
                                 return self.check_lambda_with_types(a, &pt);
@@ -8309,7 +8367,8 @@ impl<'a> Checker<'a> {
                     if let Expr::Lambda { params, body } = self.file.expr(args[1]).clone() {
                         if params.is_empty() {
                             let rt = self.expr(args[0]);
-                            let bt = self.check_with_receiver(rt, body, self.span(args[1]));
+                            let bt =
+                                self.check_with_receiver_labeled(rt, body, call_fn_name.as_deref());
                             self.expr_lowers.insert(
                                 call,
                                 ExprLowering::InlineCall(InlineCall::ReceiverLambda(
@@ -8476,7 +8535,12 @@ impl<'a> Checker<'a> {
                                 // A RECEIVER function-type param: bind `pts[i][0]` (the Signature-derived
                                 // receiver) as the lambda's `this`; the rest are value params.
                                 let t = if recv_i.is_some() {
-                                    self.check_lambda_with_receiver(a, pts[i][0], &pts[i][1..])
+                                    self.check_lambda_with_receiver_labeled(
+                                        a,
+                                        pts[i][0],
+                                        &pts[i][1..],
+                                        call_fn_name.as_deref(),
+                                    )
                                 } else {
                                     self.check_lambda_with_types(a, &pts[i])
                                 };
@@ -8489,7 +8553,12 @@ impl<'a> Checker<'a> {
                         // `@Metadata` (a `Recv.() -> R` param has no value params).
                         if let Some(recv) = recv_i {
                             if matches!(self.file.expr(a), Expr::Lambda { .. }) {
-                                return self.check_lambda_with_receiver(a, recv, &[]);
+                                return self.check_lambda_with_receiver_labeled(
+                                    a,
+                                    recv,
+                                    &[],
+                                    call_fn_name.as_deref(),
+                                );
                             }
                         }
                         // A zero-arg lambda to a NON-public (`@InlineOnly`) inline fn (`require(c){m}`):
@@ -8529,7 +8598,12 @@ impl<'a> Checker<'a> {
                                 let t = if sig.lambda_recv.get(i).copied().unwrap_or(false)
                                     && !pt.is_empty()
                                 {
-                                    self.check_lambda_with_receiver(a, pt[0], &pt[1..])
+                                    self.check_lambda_with_receiver_labeled(
+                                        a,
+                                        pt[0],
+                                        &pt[1..],
+                                        call_fn_name.as_deref(),
+                                    )
                                 } else {
                                     self.check_lambda_with_types(a, &pt)
                                 };

@@ -11793,10 +11793,18 @@ impl<'a> Lower<'a> {
                 );
             }
             Expr::Name(n) => {
-                // A self-labeled `this@C` (the checker resolved it to the current class) reads the same
-                // receiver as a bare `this`; normalize so the `this`/scope handling below applies.
+                // A `this@Label` the checker resolved to the INNERMOST receiver (`LabeledThisInner`) reads
+                // the same receiver as a bare `this`; normalize so the `this`/scope handling below applies.
+                // An outer-label `this@Label` (no marker) can't be reached yet — bail (skip).
                 let n = if n.starts_with("this@") {
-                    "this".to_string()
+                    if matches!(
+                        self.info.expr_lowers.get(&e),
+                        Some(ExprLowering::LabeledThisInner)
+                    ) {
+                        "this".to_string()
+                    } else {
+                        return None;
+                    }
                 } else {
                     n
                 };
