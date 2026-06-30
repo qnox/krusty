@@ -14074,8 +14074,24 @@ impl<'a> Lower<'a> {
                 // (diverging `throw`/`return`) branch is exempt: it pushes nothing at the merge, so a
                 // statement `when` with a throwing `else` (`is A -> r = …; else -> throw`) is fine.
                 let body_tys: Vec<Ty> = arms.iter().map(|a| self.info.ty(a.body)).collect();
+                // A `Nothing`-typed arm (a `throw`/`return`, or a CALL to a `Nothing`-returning function)
+                // pushes nothing at the merge — it's exempt from the "mixes Unit with a value" bail. The
+                // checker represents `Nothing` as the bottom variant for `throw`/`return` but as the mapped
+                // object (whose JVM erasure is `java/lang/Void`) for a declared `fun … : Nothing` result.
+                // Use the SAME `Void`-mapping test the emitter's `norm_nothing` uses, so the lowerer and
+                // emitter agree on which arms diverge (the emitter terminates them via
+                // `KotlinNothingValueException`).
+                let is_diverging_arm = |t: &Ty| -> bool {
+                    *t == Ty::Nothing
+                        || matches!(t, Ty::Obj(n, _)
+                            if crate::jvm::jvm_class_map::to_jvm_internal(n) == "java/lang/Void")
+                };
                 let any_unit = body_tys.iter().any(|t| *t == Ty::Unit);
-                if any_unit && !body_tys.iter().all(|t| *t == Ty::Unit || *t == Ty::Nothing) {
+                if any_unit
+                    && !body_tys
+                        .iter()
+                        .all(|t| *t == Ty::Unit || is_diverging_arm(t))
+                {
                     return None;
                 }
                 // An unsigned subject compares its arms with unsigned `==` (bit-equal, same as signed),
