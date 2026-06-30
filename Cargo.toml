@@ -10,6 +10,14 @@ zip = { version = "8", default-features = false, features = ["deflate"] }
 # Inflate zlib-compressed JDK jimage resources (JetBrains Runtime / `jlink --compress` images).
 flate2 = "1"
 
+[features]
+# Opt-in compiler tracing (`trace_compiler!`). OFF by default so release/gate/conformance builds pay
+# ZERO cost — every trace site compiles to nothing. Build with `--features trace`, then set
+# `KRUSTY_TRACE=all` or a category list (`KRUSTY_TRACE=resolve,suspend`) to emit diagnostics on stderr.
+# No logging crate is used on purpose (the project is dependency-lean; a compile-time-elided macro beats
+# any crate's runtime level check on the "no penalty when disabled" axis). See `src/trace.rs`.
+trace = []
+
 [dev-dependencies]
 rayon = "1"
 libc = "0.2"
