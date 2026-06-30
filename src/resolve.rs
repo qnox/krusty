@@ -2706,6 +2706,23 @@ fn infer_lit_ty_p(
                     if let Some(t) = resolved_ret(src, n, None) {
                         return t;
                     }
+                    // A GENERIC top-level function whose return type depends on its arguments
+                    // (`arrayOf("a","b")` → `Array<String>`, `mapOf(1 to "x")` → `Map<Int,String>`):
+                    // the return-agreement probe above can't decide it (the erased return is the same
+                    // for every call), so resolve through the SAME federated `CallResolver` the full
+                    // checker uses, binding the type parameters from the inferred argument types. Only
+                    // reached when the simpler probe returned `None`, so it never overrides an inference.
+                    let arg_tys: Vec<Ty> = args
+                        .iter()
+                        .map(|a| infer_lit_ty_p(file, *a, class_names, fun_rets, props, src))
+                        .collect();
+                    if !arg_tys.contains(&Ty::Error) {
+                        if let Some(c) = crate::call_resolver::CallResolver::new(src)
+                            .resolve_top_level_callable(n, &arg_tys, &[])
+                        {
+                            return c.ret;
+                        }
+                    }
                 }
                 // A method/extension call (`n.toLong()`, `s.uppercase()`, `r shl 8` → `r.shl(8)`,
                 // `x.toString()`): resolve the return type through the FEDERATED symbol source (the same
