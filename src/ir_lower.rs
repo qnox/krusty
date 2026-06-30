@@ -9082,6 +9082,11 @@ impl<'a> Lower<'a> {
         if r.nullable {
             return None;
         }
+        // `Unit` as a type is the reference class `kotlin/Unit` (a cast target / checkcast operand),
+        // not the `Ty::Unit` control-flow marker (which isn't a reference).
+        if r.name == "Unit" {
+            return Some(Ty::obj("kotlin/Unit"));
+        }
         let t = if let Some(p) = Ty::from_name(&r.name) {
             p
         } else if let Some(elem) = Ty::primitive_array_element(&r.name) {
@@ -13741,6 +13746,47 @@ impl<'a> Lower<'a> {
             } => {
                 // A reified type parameter (`x as T` in a `<reified T>` inline body) → the bound type.
                 let ty = self.subst_type_ref(&ty);
+                // A `Unit`-typed OPERAND (`println() as Any`, `foo() as Unit`, `foo() as? Int`): run it
+                // for effect, then its value is the `Unit.INSTANCE` singleton (a reference) — cast that.
+                if self.info.ty(operand) == Ty::Unit {
+                    let eff = self.expr(operand)?;
+                    let non_null_ref = ast::TypeRef {
+                        nullable: false,
+                        ..ty.clone()
+                    };
+                    let value = if !nullable {
+                        // `as T`: `checkcast` the singleton (only `Any`/`Unit` succeed; an impossible
+                        // target was already rejected by the checker).
+                        let target = self.ty_ref(&non_null_ref)?;
+                        let unit = self.ir.add_expr(IrExpr::UnitInstance);
+                        self.ir.add_expr(IrExpr::TypeOp {
+                            op: IrTypeOp::Cast,
+                            arg: unit,
+                            type_operand: ty_to_ir(target),
+                        })
+                    } else if let Some(target) = self.ty_ref(&non_null_ref) {
+                        // `as? T` (reference target): the singleton is-a `T` (true for `Any`/`Unit`) →
+                        // keep it, else `null`.
+                        let u1 = self.ir.add_expr(IrExpr::UnitInstance);
+                        let is_t = self.ir.add_expr(IrExpr::TypeOp {
+                            op: IrTypeOp::InstanceOf,
+                            arg: u1,
+                            type_operand: ty_to_ir(target),
+                        });
+                        let u2 = self.ir.add_expr(IrExpr::UnitInstance);
+                        let nullc = self.ir.add_expr(IrExpr::Const(IrConst::Null));
+                        self.ir.add_expr(IrExpr::When {
+                            branches: vec![(Some(is_t), u2), (None, nullc)],
+                        })
+                    } else {
+                        // `as? Prim` (`Unit` is never a primitive wrapper) → always `null`.
+                        self.ir.add_expr(IrExpr::Const(IrConst::Null))
+                    };
+                    return Some(self.ir.add_expr(IrExpr::Block {
+                        stmts: vec![eff],
+                        value: Some(value),
+                    }));
+                }
                 // `x as? T` (safe cast): `{ val t = x; if (t is T) t as T else null }` — `instanceof`
                 // then `checkcast` on the non-null branch, `null` on a mismatch (never throws). The
                 // target must be a reference (a primitive `as? Int` yields the boxed `Int?` wrapper —
@@ -13754,11 +13800,13 @@ impl<'a> Lower<'a> {
                         Some((name, bound, _)) => Ty::ty_param(name, *bound),
                         // A PRIMITIVE target (`x as? Int`) tests/keeps the boxed wrapper — `instanceof`/
                         // `checkcast` run against `Integer` and the result is the nullable wrapper `Int?`.
-                        // `ty_ref` yields only reference targets, so resolve the primitive here.
-                        None => match Ty::from_name(&ty.name) {
+                        // `ty_ref` yields only reference targets, so resolve the primitive here. `Unit` is
+                        // a reference (`kotlin/Unit`), not a primitive — resolve it via `ty_ref`.
+                        None if ty.name != "Unit" => match Ty::from_name(&ty.name) {
                             Some(p) if !p.is_reference() => p.nullable_boxed()?,
                             _ => self.ty_ref(&ty)?,
                         },
+                        None => self.ty_ref(&ty)?,
                     };
                     let target_ir = ty_to_ir(target);
                     let mut v = self.expr(operand)?;

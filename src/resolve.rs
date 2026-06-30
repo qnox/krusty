@@ -5389,6 +5389,19 @@ impl<'a> Checker<'a> {
             } => {
                 let ot = self.expr(operand);
                 let tt = self.resolve_ty(&ty);
+                // `Unit` is the reference type `kotlin/Unit` at the JVM — normalize so a cast to/from it
+                // (`println() as Any`, `x as Unit`, `4 as? Unit`, `foo() as? Int`) uses the reference-cast
+                // paths below rather than being rejected (`Ty::Unit.is_reference()` is false).
+                let ot = if ot == Ty::Unit {
+                    Ty::obj("kotlin/Unit")
+                } else {
+                    ot
+                };
+                let tt = if tt == Ty::Unit {
+                    Ty::obj("kotlin/Unit")
+                } else {
+                    tt
+                };
                 // `checkcast` needs a reference operand. The target is either a *known* reference type (an
                 // unresolved one erases to a no-op `Object` cast — rejected), or a non-unsigned primitive:
                 // `x as Int` on a reference operand is an unbox (`checkcast Integer; intValue()`).
