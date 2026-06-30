@@ -1109,13 +1109,12 @@ pub fn resolve_constructor(
     // single underlying value `u`; synthesize that constructor so the call type-checks. The
     // value-classes lowering pass realizes it as the unboxed underlying / `constructor-impl`.
     if let Some(underlying) = t.value_underlying {
-        // Only a REFERENCE-underlying value class (the common String/UUID-backed id types) is modeled
-        // unboxed end-to-end (it joins `external_value_classes`). A SCALAR underlying (`value class
-        // Count(val n: Int)`) lacks that erasure wiring, so leaving construction unresolved keeps the file
-        // a SOUND skip rather than miscompiling an `int` into a reference slot.
+        // `X(u)` over the single underlying value — reference (`RoleId(String)`) or scalar
+        // (`Count(Int)`); both erase to the underlying through the value-classes pass. (`null` only fits a
+        // reference underlying.)
         let fits = args.len() == 1
-            && underlying.is_reference()
-            && (args[0] == underlying || matches!(args[0], Ty::Null));
+            && (args[0] == underlying
+                || (matches!(args[0], Ty::Null) && underlying.is_reference()));
         crate::trace_compiler!(
             "value_classes",
             "resolve_constructor {internal} value-class underlying={underlying:?} args={args:?} fits={fits}"

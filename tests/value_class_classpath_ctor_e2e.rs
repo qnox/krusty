@@ -42,7 +42,8 @@ fn classpath_value_class_constructed_by_name() {
     let lib_kt = work.join("Ids.kt");
     fs::write(
         &lib_kt,
-        "package ids\n@JvmInline\nvalue class RoleId(val v: String)\n",
+        "package ids\n@JvmInline\nvalue class RoleId(val v: String)\n\
+         @JvmInline\nvalue class Count(val n: Int)\n",
     )
     .unwrap();
     let kc_args = vec![
@@ -59,11 +60,17 @@ fn classpath_value_class_constructed_by_name() {
     }
 
     // 2. A consumer constructing the classpath value class by name and reading its sole property.
-    let main_src = "import ids.RoleId\n\
+    // Constructs both a REFERENCE-underlying (String) and a SCALAR-underlying (Int) classpath value
+    // class by name, reads the sole property of each, and uses a derived value — exercising the unboxed
+    // representation (identity property access, no illegal private-`<init>` call) for both underlyings.
+    let main_src = "import ids.RoleId\nimport ids.Count\n\
         fun box(): String {\n\
         \x20   val r = RoleId(\"ok\")\n\
         \x20   val s = RoleId(\"\" + r.v + r.v)\n\
-        \x20   return if (r.v == \"ok\" && s.v == \"okok\") \"OK\" else \"fail:\" + s.v\n\
+        \x20   val c = Count(42)\n\
+        \x20   val d = Count(c.n + 1)\n\
+        \x20   val ok = r.v == \"ok\" && s.v == \"okok\" && c.n == 42 && d.n == 43\n\
+        \x20   return if (ok) \"OK\" else \"fail\"\n\
         }\n";
     let cp = vec![libout.clone(), stdlib_path.clone()];
     let classes = common::compile_in_process(main_src, "Main", &cp, Some(&jdk_modules))
