@@ -2934,17 +2934,25 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
             }
         }
         for fq in referenced {
-            if let Some(under) = lo
-                .syms
-                .libraries
-                .resolve_type(&fq)
-                .and_then(|t| t.value_underlying)
-            {
+            let Some(t) = lo.syms.libraries.resolve_type(&fq) else {
+                continue;
+            };
+            if let Some(under) = t.value_underlying {
                 if lo.syms.libraries.scalar_value_repr(under).is_none() {
                     // The underlying reference is null-capable (`Result`'s `Any?`), mirroring how the pass
                     // marks a type-parameter value-class field.
                     let ir_under = Ty::nullable(ty_to_ir(under));
-                    lo.ir.external_value_classes.insert(fq, ir_under);
+                    lo.ir.external_value_classes.insert(fq.clone(), ir_under);
+                    // The sole-property getter (`getV`) — the no-arg member returning the underlying — so
+                    // the value-class pass can rewrite `x.v` (emitted as `invokevirtual X.getV()`) to
+                    // identity on the unboxed value.
+                    if let Some(getter) = t.members.iter().find(|m| {
+                        m.params.is_empty() && m.ret == under && m.name.starts_with("get")
+                    }) {
+                        lo.ir
+                            .external_value_class_getters
+                            .insert(fq, getter.name.clone());
+                    }
                 }
             }
         }
@@ -4056,6 +4064,34 @@ impl<'a> Lower<'a> {
             return None; // sibling-file user class but arity/defaults/secondary not modeled cross-file
         }
         let arg_tys: Vec<Ty> = args.iter().map(|a| self.info.ty(*a)).collect();
+        // A classpath `@JvmInline value class` is constructed via its static `constructor-impl(U): U`,
+        // which returns the UNBOXED underlying value — kotlinc's unboxed representation (the real `<init>`
+        // is private, so a plain `new`/`invokespecial` would be an IllegalAccessError). The value-classes
+        // pass holds the value as its underlying everywhere, so the result flows on as `U`.
+        if let Some(under) = self
+            .syms
+            .libraries
+            .resolve_type(internal)
+            .and_then(|t| t.value_underlying)
+        {
+            // Reference-underlying only — a scalar underlying isn't erased through the value-class pass, so
+            // its construction stays unresolved (the file skips) rather than miscompiling (see
+            // `resolve_constructor`).
+            if args.len() == 1 && self.syms.libraries.scalar_value_repr(under).is_none() {
+                let desc = self.syms.libraries.method_descriptor(&[under], under)?;
+                let arg = self.lower_arg(args[0], &ty_to_ir(under))?;
+                return Some(self.ir.add_expr(IrExpr::Call {
+                    callee: Callee::Static {
+                        owner: internal.to_string(),
+                        name: "constructor-impl".to_string(),
+                        descriptor: desc,
+                        inline: crate::libraries::InlineKind::None,
+                    },
+                    dispatch_receiver: None,
+                    args: vec![arg],
+                }));
+            }
+        }
         let ctor =
             crate::call_resolver::resolve_constructor(&*self.syms.libraries, internal, &arg_tys)?;
         if ctor.params.len() != args.len() {

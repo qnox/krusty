@@ -873,6 +873,10 @@ pub struct IrFile {
     /// (which has the classpath); only REFERENCE-underlying ones are recorded (a primitive-underlying
     /// `UInt`/`ULong` keeps its existing dedicated handling).
     pub external_value_classes: std::collections::HashMap<String, Ty>,
+    /// Getter method name (`getV`) for each classpath `@JvmInline value class` in
+    /// [`Self::external_value_classes`] — lets the value-class pass recognize a sole-property read emitted
+    /// as `invokevirtual X.getV()` and rewrite it to identity (the receiver IS the unboxed underlying).
+    pub external_value_class_getters: std::collections::HashMap<String, String>,
 }
 
 /// Backend-agnostic generic-signature shape of a declaration (the data a JVM `Signature` / a future

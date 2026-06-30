@@ -128,7 +128,7 @@ pub fn lower_value_classes(ir: &mut IrFile) -> bool {
 
     // Each value class's getter name keyed by its internal name (`A2` → `getValue`) — to recognize a
     // sole-property access emitted as a resolved `invokevirtual X.getV()`.
-    let vc_getters: HashMap<String, String> = ir
+    let mut vc_getters: HashMap<String, String> = ir
         .classes
         .iter()
         .filter(|c| c.is_value)
@@ -138,6 +138,13 @@ pub fn lower_value_classes(ir: &mut IrFile) -> bool {
                 .map(|f| (c.fq_name.clone(), property_getter_name(&f.name)))
         })
         .collect();
+    // A classpath value class's sole-property getter (`ids/RoleId` → `getV`), so `r.v` (an
+    // `invokevirtual X.getV()`) on an unboxed external value is rewritten to identity like a user one.
+    vc_getters.extend(
+        ir.external_value_class_getters
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone())),
+    );
 
     // Interfaces that value classes implement — a function returning one of these (or `Any`) boxes a
     // value-class tail so virtual/interface dispatch works.

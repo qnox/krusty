@@ -1100,7 +1100,38 @@ pub fn resolve_constructor(
     internal: &str,
     args: &[Ty],
 ) -> Option<LibraryMember> {
-    lib.resolve_type(internal)?.ctor(args).cloned()
+    let t = lib.resolve_type(internal)?;
+    if let Some(m) = t.ctor(args) {
+        return Some(m.clone());
+    }
+    // A classpath `@JvmInline value class` exposes only a PRIVATE `<init>` (its public surface is the
+    // static `box-impl`/`constructor-impl`), so `ctor` finds nothing. Construction is `X(u)` over the
+    // single underlying value `u`; synthesize that constructor so the call type-checks. The
+    // value-classes lowering pass realizes it as the unboxed underlying / `constructor-impl`.
+    if let Some(underlying) = t.value_underlying {
+        // Only a REFERENCE-underlying value class (the common String/UUID-backed id types) is modeled
+        // unboxed end-to-end (it joins `external_value_classes`). A SCALAR underlying (`value class
+        // Count(val n: Int)`) lacks that erasure wiring, so leaving construction unresolved keeps the file
+        // a SOUND skip rather than miscompiling an `int` into a reference slot.
+        let fits = args.len() == 1
+            && underlying.is_reference()
+            && (args[0] == underlying || matches!(args[0], Ty::Null));
+        crate::trace_compiler!(
+            "value_classes",
+            "resolve_constructor {internal} value-class underlying={underlying:?} args={args:?} fits={fits}"
+        );
+        if fits {
+            // Descriptor is unused on this path (the checker only needs the type; the lowerer lowers the
+            // construction itself), so it stays empty — no JVM detail leaks into the resolver.
+            return Some(LibraryMember::new(
+                "<init>".to_string(),
+                vec![underlying],
+                Ty::obj(internal),
+                String::new(),
+            ));
+        }
+    }
+    None
 }
 
 /// Resolve a companion member `Type.name(args)` (the receiver type must be public).
