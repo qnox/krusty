@@ -36,3 +36,29 @@ fn destructure_single_map_entry() {
     }\n";
     assert_eq!(run(SRC).expect("destructuring a single Map.Entry"), "OK");
 }
+
+#[test]
+fn for_destructure_directly_over_map() {
+    // `for ((k, v) in map)` (no `.entries`) — the `Map<K,V>.iterator()` `@InlineOnly` extension
+    // inlines to `entries.iterator()`.
+    const SRC: &str = "fun box(): String {\n\
+        val m = linkedMapOf(\"O\" to \"K\")\n\
+        var s = \"\"\n\
+        for ((k, v) in m) { s += \"$k$v\" }\n\
+        return s\n\
+    }\n";
+    assert_eq!(run(SRC).expect("destructuring directly over a Map"), "OK");
+}
+
+#[test]
+fn discarded_map_put_does_not_unbox_null() {
+    // `map.put(k, v)` returns the previous value (`V?`, null for a fresh key); as a discarded statement
+    // its result must NOT be unboxed (an `Integer.intValue()` on null NPEs).
+    const SRC: &str = "fun box(): String {\n\
+        val m = HashMap<String, Int>()\n\
+        m.put(\"a\", 1)\n\
+        m.put(\"b\", 2)\n\
+        return if (m.size == 2) \"OK\" else \"fail\"\n\
+    }\n";
+    assert_eq!(run(SRC).expect("discarded put doesn't unbox null"), "OK");
+}

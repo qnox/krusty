@@ -10062,11 +10062,9 @@ impl<'a> Checker<'a> {
                                     .map(|m| m.ret)
                                 })
                         })
-                        // `List.component1()`, … are stdlib *extensions* — try those too.
-                        .or_else(|| self.library_extension_return(&comp, it, &[], &[]))
-                        // `Map.Entry.component1`/`component2` are `@InlineOnly` extensions (they inline
-                        // to `getKey()`/`getValue()`), resolved only through the inline-callable path —
-                        // the same one a qualified `entry.component1()` uses.
+                        // `componentN` as a stdlib *extension* — a public one (`List.component1()`) or
+                        // an `@InlineOnly` one (`Map.Entry.component1` → `getKey()`). The inline-admitting
+                        // resolver covers both (the same path a qualified `entry.component1()` uses).
                         .or_else(|| self.library_extension_inline_return(&comp, it, &[]))
                         // A USER-defined `operator fun Recv.componentN()` extension (same module).
                         .or_else(|| {
@@ -10438,7 +10436,11 @@ impl<'a> Checker<'a> {
                                     .copied()
                                     .unwrap_or_else(|| Ty::obj("kotlin/Any"))
                             } else {
-                                match self.library_extension_return("iterator", it, &[], &[]) {
+                                // The `iterator` operator is a member (handled above) OR an extension —
+                                // public (an `Iterable`-shaped receiver) or `@InlineOnly` (`Map<K,V>
+                                // .iterator()` → `Iterator<Map.Entry>`). The inline-admitting resolver
+                                // covers both.
+                                match self.library_extension_inline_return("iterator", it, &[]) {
                                     Some(ret) => ret
                                         .type_args()
                                         .first()
