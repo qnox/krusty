@@ -3027,6 +3027,33 @@ impl<'a> Parser<'a> {
                     ps.push(synth.clone());
                     param_types.push(None);
                     destructures.push((synth, entries, sp));
+                } else if self.name_based_destructuring && self.at(TokenKind::LBracket) {
+                    // The short-form bracket destructuring `{ [a, b] -> … }` (NameBasedDestructuring) —
+                    // identical to the `(a, b)` form, just with `[ ]`.
+                    let sp = self.tok().span;
+                    self.bump();
+                    let mut entries = Vec::new();
+                    loop {
+                        let n = self.ident_or_error("variable name");
+                        if self.eat(TokenKind::Colon) {
+                            let _ = self.parse_type();
+                        }
+                        entries.push((n, false));
+                        if !self.eat(TokenKind::Comma) {
+                            break;
+                        }
+                        if self.at(TokenKind::RBracket) {
+                            break; // trailing comma
+                        }
+                    }
+                    self.expect(TokenKind::RBracket, "']'");
+                    if self.eat(TokenKind::Colon) {
+                        let _ = self.parse_type();
+                    }
+                    let synth = format!("$dstr{}", destructures.len());
+                    ps.push(synth.clone());
+                    param_types.push(None);
+                    destructures.push((synth, entries, sp));
                 } else if self.at(TokenKind::Ident) {
                     ps.push(self.text().to_string());
                     self.bump();
