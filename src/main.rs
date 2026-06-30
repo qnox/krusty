@@ -100,9 +100,15 @@ fn main() {
     );
 
     if diags.has_errors() {
-        for (path, src) in opts.sources.iter().zip(&sources) {
-            print!("{}", diags.render(path, src));
-        }
+        // Render each diagnostic against ITS OWN source file (by `Diagnostic::file`), once — not the
+        // whole list against every file, which mis-attributed multi-file errors to the wrong source.
+        let rendered: Vec<(&str, &str)> = opts
+            .sources
+            .iter()
+            .zip(&sources)
+            .map(|(p, s)| (p.as_str(), s.as_str()))
+            .collect();
+        print!("{}", diags.render_all(&rendered));
         eprintln!("krusty: {} error(s)", diags.diags.len());
         std::process::exit(1);
     }

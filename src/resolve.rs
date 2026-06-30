@@ -682,7 +682,8 @@ pub fn collect_signatures_with_cp(
     // (legal Kotlin — the JDK one would need an explicit import). Only a duplicate among the
     // user's own declarations is a conflict, so track which names the user has defined.
     let mut user_defined: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for file in files {
+    for (i, file) in files.iter().enumerate() {
+        diags.set_file(i as u32);
         for &d in &file.decls {
             if let Decl::Class(c) = file.decl(d) {
                 let internal = class_internal(file, &c.name);
@@ -801,7 +802,8 @@ pub fn collect_signatures_with_cp(
     // Top-level function return types (explicit annotations only), collected first so a property
     // initializer `val v = f()` can infer its type from `f`'s return type regardless of decl order.
     let mut fun_rets: HashMap<String, Ty> = HashMap::new();
-    for file in files {
+    for (i, file) in files.iter().enumerate() {
+        diags.set_file(i as u32);
         for &d in &file.decls {
             if let Decl::Fun(f) = file.decl(d) {
                 if f.receiver.is_none() {
@@ -819,7 +821,8 @@ pub fn collect_signatures_with_cp(
 
     // Pass 2: resolve signatures/properties against the now-complete type universe.
     let mut table = SymbolTable::default();
-    for file in files {
+    for (i, file) in files.iter().enumerate() {
+        diags.set_file(i as u32);
         for &d in &file.decls {
             match file.decl(d) {
                 Decl::Fun(f) => {

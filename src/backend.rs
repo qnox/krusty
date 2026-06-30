@@ -49,6 +49,7 @@ pub fn compile<B: Backend>(
     let mut outputs = Vec::new();
     let mut state = B::State::default();
     for (i, file) in files.iter().enumerate() {
+        diags.set_file(i as u32); // stamp this file's index onto its check/lower diagnostics
         let info = check_file(file, syms, diags); // front-end: type-check
         if diags.has_errors() {
             continue; // collect all diagnostics before bailing; emit nothing
