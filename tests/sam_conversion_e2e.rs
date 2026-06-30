@@ -19,6 +19,24 @@ fun box(): String = call { \"OK\" }\n";
 }
 
 #[test]
+fn fun_interface_with_param() {
+    // The lambda's parameter is typed from the SAM method; the lowered impl matches the SAM descriptor.
+    const SRC: &str = "fun interface Transform { fun apply(x: String): String }\n\
+fun run2(t: Transform): String = t.apply(\"O\")\n\
+fun box(): String = run2 { s -> s + \"K\" }\n";
+    assert_eq!(run(SRC).expect("fun interface with param"), "OK");
+}
+
+#[test]
+fn generic_fun_interface() {
+    // A generic SAM erases to Object; the erased descriptor matches.
+    const SRC: &str = "fun interface C<T> { fun f(x: T): T }\n\
+fun r(c: C<String>): String = c.f(\"O\")\n\
+fun box(): String = r { it + \"K\" }\n";
+    assert_eq!(run(SRC).expect("generic fun interface"), "OK");
+}
+
+#[test]
 fn actual_interface_instance_still_passes() {
     // A real implementing class passed where the fun interface is expected must NOT be SAM-converted.
     const SRC: &str = "fun interface Foo { fun get(): String }\n\
