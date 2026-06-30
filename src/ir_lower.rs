@@ -2934,25 +2934,45 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
             }
         }
         for fq in referenced {
+            // Skip the native unsigned builtins (`UInt`/`ULong`): their BOXED form (`kotlin/UInt`) reaches
+            // here through a nullable `UInt?`, but krusty models them as primitive `Ty` variants with their
+            // own nullable-boxing codegen — erasing them to `int`/`long` would break it. Derived from the
+            // unsigned `Ty` variants (their box-type internal names), not a hardcoded class-name list.
+            let native_unsigned = [Ty::UInt, Ty::ULong].into_iter().any(|u| {
+                lo.syms
+                    .libraries
+                    .unsigned_integer_box_type(u)
+                    .and_then(|b| b.obj_internal())
+                    == Some(fq.as_str())
+            });
+            if native_unsigned {
+                continue;
+            }
             let Some(t) = lo.syms.libraries.resolve_type(&fq) else {
                 continue;
             };
             if let Some(under) = t.value_underlying {
-                if lo.syms.libraries.scalar_value_repr(under).is_none() {
-                    // The underlying reference is null-capable (`Result`'s `Any?`), mirroring how the pass
-                    // marks a type-parameter value-class field.
-                    let ir_under = Ty::nullable(ty_to_ir(under));
-                    lo.ir.external_value_classes.insert(fq.clone(), ir_under);
-                    // The sole-property getter (`getV`) — the no-arg member returning the underlying — so
-                    // the value-class pass can rewrite `x.v` (emitted as `invokevirtual X.getV()`) to
-                    // identity on the unboxed value.
-                    if let Some(getter) = t.members.iter().find(|m| {
-                        m.params.is_empty() && m.ret == under && m.name.starts_with("get")
-                    }) {
-                        lo.ir
-                            .external_value_class_getters
-                            .insert(fq, getter.name.clone());
-                    }
+                // Erase the value-class type to its underlying. A REFERENCE underlying is held boxed and
+                // null-capable (`Result`'s `Any?`, mirroring a type-parameter value-class field); a SCALAR
+                // underlying stays the unboxed primitive (`value class Count(val n: Int)` → `int`). The
+                // unsigned builtins (`UInt`/`ULong`) never reach here — they are `Ty` variants, not `Obj`,
+                // so `referenced` (obj-internal names only) excludes them, keeping their dedicated handling.
+                let ir_under = match lo.syms.libraries.scalar_value_repr(under) {
+                    Some(scalar) => ty_to_ir(scalar),
+                    None => Ty::nullable(ty_to_ir(under)),
+                };
+                lo.ir.external_value_classes.insert(fq.clone(), ir_under);
+                // The sole-property getter (`getV`) — the no-arg member returning the underlying — so
+                // the value-class pass can rewrite `x.v` (emitted as `invokevirtual X.getV()`) to
+                // identity on the unboxed value.
+                if let Some(getter) = t
+                    .members
+                    .iter()
+                    .find(|m| m.params.is_empty() && m.ret == under && m.name.starts_with("get"))
+                {
+                    lo.ir
+                        .external_value_class_getters
+                        .insert(fq, getter.name.clone());
                 }
             }
         }
@@ -4074,10 +4094,7 @@ impl<'a> Lower<'a> {
             .resolve_type(internal)
             .and_then(|t| t.value_underlying)
         {
-            // Reference-underlying only — a scalar underlying isn't erased through the value-class pass, so
-            // its construction stays unresolved (the file skips) rather than miscompiling (see
-            // `resolve_constructor`).
-            if args.len() == 1 && self.syms.libraries.scalar_value_repr(under).is_none() {
+            if args.len() == 1 {
                 let desc = self.syms.libraries.method_descriptor(&[under], under)?;
                 let arg = self.lower_arg(args[0], &ty_to_ir(under))?;
                 return Some(self.ir.add_expr(IrExpr::Call {
