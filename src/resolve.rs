@@ -4135,7 +4135,22 @@ impl<'a> Checker<'a> {
         }
         let ty = Ty::from_name(n)
             .or_else(|| self.syms.classes.get(n).map(|cs| Ty::obj(&cs.internal)))?;
-        (ty != Ty::Error && ty.is_reference()).then_some(ty)
+        if ty == Ty::Error {
+            return None;
+        }
+        if ty.is_reference() {
+            return Some(ty);
+        }
+        // A primitive type literal (`Int::class`) is modeled by its boxed wrapper class (`Integer`), so it
+        // compares equal to a bound literal on a value of that type (`42::class` → `Integer.getClass()`).
+        // (Like the reference case, this is a `Class`-not-`KClass` approximation: `==`/`!=` agree with
+        // kotlinc, but `.java.isPrimitive` would observe `Integer` where kotlinc's `KClass<Int>` reports
+        // the primitive `int` — no corpus file exercises that, and the gate would flag it as a FAIL.)
+        // Unsigned types box to an inline-class wrapper (`kotlin/UInt`), not a plain `java/lang/*` — skip.
+        if matches!(ty, Ty::UInt | Ty::ULong) {
+            return None;
+        }
+        ty.boxed_ref()
     }
 
     fn obj_with_targs(&mut self, internal: &str, r: &TypeRef) -> Ty {
@@ -6340,8 +6355,14 @@ impl<'a> Checker<'a> {
                     } else {
                         None
                     };
-                    if unbound.is_none() && !self.expr(recv).is_reference() {
-                        return unsupported(self);
+                    if unbound.is_none() {
+                        // Bound: a reference receiver, or a boxable primitive (boxed then `getClass`).
+                        let rt = self.expr(recv);
+                        let boxable =
+                            !matches!(rt, Ty::UInt | Ty::ULong) && rt.boxed_ref().is_some();
+                        if !rt.is_reference() && !boxable {
+                            return unsupported(self);
+                        }
                     }
                     if let Some(ty) = self.syms.libraries.class_literal_type() {
                         self.expr_lowers
