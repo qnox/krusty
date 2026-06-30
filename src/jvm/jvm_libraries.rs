@@ -747,10 +747,6 @@ fn metadata_return_ty(class: Option<&str>) -> Option<Ty> {
     class.map(super::classpath::kotlin_name_to_ty)
 }
 
-fn kotlin_mapped_member_return_is_nullable(internal: &str, name: &str) -> bool {
-    matches!(internal, "kotlin/collections/MutableMap" | "java/util/Map") && name == "put"
-}
-
 /// Parse a class generic signature into its formal type-parameter names and its supertypes (the
 /// superclass followed by interfaces) as signature nodes, e.g. `java/util/List`'s
 /// `<E:Ljava/lang/Object;>Ljava/lang/Object;Ljava/util/Collection<TE;>;` → (`[E]`, `[Object,
@@ -838,6 +834,29 @@ fn supertype_descriptors(cp: &Classpath, receiver: Ty) -> Vec<String> {
         out.push(object);
     }
     out
+}
+
+/// Whether `internal` is, transitively, a subtype of `target` (a superclass or implemented interface,
+/// at any depth). Names are normalized to their JVM spelling so a Kotlin built-in (`kotlin/collections/
+/// MutableMap`) and its `java/util/Map` realization compare equal.
+fn class_implements(cp: &Classpath, internal: &str, target: &str) -> bool {
+    let mut seen = std::collections::HashSet::new();
+    let mut q = std::collections::VecDeque::new();
+    q.push_back(to_jvm_internal(internal).to_string());
+    while let Some(name) = q.pop_front() {
+        if name == target {
+            return true;
+        }
+        if !seen.insert(name.clone()) {
+            continue;
+        }
+        if let Some(ci) = cp.find(&name) {
+            for s in ci.interfaces.iter().chain(ci.super_class.iter()) {
+                q.push_back(to_jvm_internal(s).to_string());
+            }
+        }
+    }
+    false
 }
 
 fn member_matches_query(member_name: &str, query: &str) -> bool {
@@ -1020,6 +1039,10 @@ impl SymbolSource for JvmLibraries {
         let mut constructors = Vec::new();
         let mut members = Vec::new();
         let mut companion = Vec::new();
+        // `Map.put` returns the PREVIOUS value (`V?`, null for a fresh key) — Kotlin enhances this Java
+        // method's nullability. It applies to ANY `Map` subtype (`HashMap`, `TreeMap`, …), since a call
+        // resolves the member on the concrete class, not on `Map` itself.
+        let is_map = class_implements(&self.cp, internal, "java/util/Map");
         for m in &ci.methods {
             // Only public members are callable from generated code.
             if !m.is_public() {
@@ -1028,7 +1051,7 @@ impl SymbolSource for JvmLibraries {
             let (params, ret) = parse_method_desc(&m.descriptor);
             let mut member = LibraryMember::new(m.name.clone(), params, ret, m.descriptor.clone());
             member.signature = m.signature.clone();
-            if kotlin_mapped_member_return_is_nullable(internal, &member.name) {
+            if is_map && member.name == "put" {
                 member.ret_nullable = true;
             }
             if m.name == "<init>" {
