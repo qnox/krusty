@@ -5066,6 +5066,14 @@ impl<'a> Checker<'a> {
         if actual == Ty::obj("kotlin/Any") && expected != Ty::Unit {
             return;
         }
+        // `Unit` (the non-reference modeling) and `kotlin/Unit` (its singleton reference form) are the same
+        // type — `fun f(): Unit? = unitExpr` assigns a `Unit` value to a `kotlin/Unit` slot. The lowerer's
+        // arg/return coercion materializes `Unit.INSTANCE`.
+        if (actual == Ty::Unit && expected == Ty::obj("kotlin/Unit"))
+            || (expected == Ty::Unit && actual == Ty::obj("kotlin/Unit"))
+        {
+            return;
+        }
         // A primitive flowing into a reference supertype is checked through its boxed source type; the
         // provider's type hierarchy decides whether that box implements `Number`, `Comparable`, etc.
         if let (Some(Ty::Obj(b, _)), Ty::Obj(e, _)) = (actual.boxed_ref(), expected) {
@@ -6620,6 +6628,11 @@ impl<'a> Checker<'a> {
                 let wrapper_vs_prim =
                     |w: Ty, p: Ty| w.nullable_primitive().map_or(false, |pw| pw == p);
                 let is_any_ref = |t: Ty| t.non_null() == Ty::obj("kotlin/Any");
+                // `Unit` and its singleton reference `kotlin/Unit` are the same value, comparable with
+                // `==`/`!=` (`bar() == Unit`, `h.u != Unit`): the non-reference `Ty::Unit` and the
+                // `kotlin/Unit` object the `Unit` literal / a Unit-typed field carry.
+                let is_unit =
+                    |t: Ty| t.non_null() == Ty::Unit || t.non_null() == Ty::obj("kotlin/Unit");
                 let has_boxable_value_equality = |t: Ty| {
                     matches!(
                         t,
@@ -6642,6 +6655,7 @@ impl<'a> Checker<'a> {
                     || rt == any
                     || wrapper_vs_prim(lt, rt)
                     || wrapper_vs_prim(rt, lt)
+                    || (is_unit(lt) && is_unit(rt))
                 {
                     Ty::Boolean
                 } else {
