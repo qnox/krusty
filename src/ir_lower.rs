@@ -8172,7 +8172,16 @@ impl<'a> Lower<'a> {
         if at.is_reference() && self.unsigned_integer_box_type(target.non_null()).is_some() {
             return None;
         }
-        if self.has_scalar_value_repr(at) && target_ref {
+        if at == Ty::Unit && target_ref {
+            // A `Unit` value flowing into a reference target (`fun f(): Any? = unitExpr`, `Unit?`): run the
+            // expression for its effect, then materialize the `kotlin/Unit` singleton (the JVM value of
+            // `Unit`) — `Unit` itself leaves nothing on the stack.
+            let unit_val = self.ir.add_expr(IrExpr::UnitInstance);
+            Some(self.ir.add_expr(IrExpr::Block {
+                stmts: vec![e],
+                value: Some(unit_val),
+            }))
+        } else if self.has_scalar_value_repr(at) && target_ref {
             Some(self.ir.add_expr(IrExpr::TypeOp {
                 op: IrTypeOp::ImplicitCoercion,
                 arg: e,
@@ -10479,7 +10488,11 @@ impl<'a> Lower<'a> {
                 }
                 let a = self.expr(array)?;
                 let i = self.expr(index)?;
-                let v = self.expr(value)?;
+                // Coerce the element to the array's element type (boxing/unboxing, and materializing
+                // `Unit.INSTANCE` for a `Unit` value into an `Array<Any>`) — same as the user-`set`/
+                // collection paths above, rather than storing the raw value.
+                let elem = at.array_elem().unwrap_or_else(|| Ty::obj("kotlin/Any"));
+                let v = self.lower_arg(value, &ty_to_ir(elem))?;
                 Some(self.ir.add_expr(IrExpr::Call {
                     callee: Callee::External("kotlin/Array.set".to_string()),
                     dispatch_receiver: Some(a),

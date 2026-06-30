@@ -5058,8 +5058,9 @@ impl<'a> Checker<'a> {
         // In Kotlin every type is a subtype of `Any`/`Object`, and the top type narrows back to a
         // specific type by an unchecked cast. Both directions are assignable; the primitive-vs-boxed
         // *representation* (and any box/unbox or checkcast) is the backend's concern, decided at the
-        // emit coercion site — not the type checker's. (`Unit` is excluded: it has no JVM value here.)
-        if expected == Ty::obj("kotlin/Any") && actual != Ty::Unit {
+        // emit coercion site — not the type checker's. `Unit` IS a subtype of `Any` (`Unit.INSTANCE`);
+        // the lowerer's arg/return coercion materializes the singleton.
+        if expected == Ty::obj("kotlin/Any") {
             return;
         }
         if actual == Ty::obj("kotlin/Any") && expected != Ty::Unit {
