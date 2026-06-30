@@ -530,9 +530,12 @@ pub struct ClassDecl {
     pub inner_of: Option<String>,
     /// Implemented interface names from a supertype list (`class C : I1, I2`).
     pub supertypes: Vec<String>,
-    /// Interface delegation `: Iface by delegate` — `(iface simple name, delegate variable name)`. The
-    /// class forwards each of `Iface`'s methods to `delegate` (a `val` constructor-parameter field).
-    pub delegations: Vec<(String, String)>,
+    /// Interface delegation `: Iface by delegate` — `(iface simple name, delegate variable name,
+    /// has_primitive_targ)`. The class forwards each of `Iface`'s methods to `delegate` (a `val`
+    /// constructor-parameter field). `has_primitive_targ` is true when the delegated interface is
+    /// instantiated with a non-nullable primitive type argument (`A<Long>`): such a forwarder needs
+    /// substituted-type bridges a raw (erased-`Object`) forward mis-coerces, so it is skipped.
+    pub delegations: Vec<(String, String, bool)>,
     /// Interface delegation to an EXPRESSION `: Iface by <expr>` (`by Impl()`) — `(iface simple name,
     /// delegate expression)`. The expression is evaluated once into a synthesized `$$delegate_e<j>`
     /// field (stored in the constructor); each of `Iface`'s methods forwards to that field.

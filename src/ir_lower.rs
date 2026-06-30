@@ -365,8 +365,8 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 .delegations
                 .iter()
                 .enumerate()
-                .filter(|(_, (_, d))| !ctor_prop_names.contains(d.as_str()))
-                .filter_map(|(i, (_, d))| {
+                .filter(|(_, (_, d, _))| !ctor_prop_names.contains(d.as_str()))
+                .filter_map(|(i, (_, d, _))| {
                     c.props
                         .iter()
                         .find(|p| &p.name == d)
@@ -2144,7 +2144,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 let has_iface_synth_delegate = c
                     .delegations
                     .iter()
-                    .any(|(_, d)| !c.props.iter().any(|p| p.is_property && &p.name == d))
+                    .any(|(_, d, _)| !c.props.iter().any(|p| p.is_property && &p.name == d))
                     || !c.delegation_exprs.is_empty();
                 // Run whenever there is ANY ctor body to lower OR any primary-constructor `val`/`var`
                 // param (or inner `this$0`) to store: the param→field stores are desugared explicitly
@@ -2219,7 +2219,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     }
                     // Interface-delegation `$$delegate_<i>` stores (`this.$$delegate_i = <delegate param>`),
                     // first in the ctor body (kotlinc stores them right after `super()`).
-                    for (di, (_iface, dname)) in c.delegations.iter().enumerate() {
+                    for (di, (_iface, dname, _)) in c.delegations.iter().enumerate() {
                         if c.props.iter().any(|p| p.is_property && &p.name == dname) {
                             continue; // a `val`-param delegate has its own auto-stored field
                         }
@@ -5539,10 +5539,18 @@ impl<'a> Lower<'a> {
         internal: &str,
         class_id: ClassId,
     ) -> Option<()> {
-        for (di, (iface_name, delegate)) in c.delegations.iter().enumerate() {
+        for (di, (iface_name, delegate, has_primitive_targ)) in c.delegations.iter().enumerate() {
             // A `val`-param delegate has its own field (`a`); a non-`val` param uses the synthesized
             // `$$delegate_<di>` (see field synthesis + the ctor store).
             let is_synth = !c.props.iter().any(|p| p.is_property && &p.name == delegate);
+            // A SYNTHESIZED-field delegation to a primitive-instantiated generic interface (`A<Long> by a`
+            // where `a` is a non-`val` param) needs the substituted-type bridges that a raw erased-`Object`
+            // forward mis-coerces (an `int` literal boxed as `Integer` reaches a `Long` parameter) — skip
+            // rather than miscompile. A `val`-param delegate forwards through its own typed field and is
+            // handled correctly, so it is not affected.
+            if is_synth && *has_primitive_targ {
+                return None;
+            }
             let synth_name = format!("$$delegate_{di}");
             let delegate_idx =
                 self.classes
@@ -5597,20 +5605,18 @@ impl<'a> Lower<'a> {
         internal: &str,
         is_synth: bool,
     ) -> Option<()> {
-        if is_synth {
-            if self
+        // A synthesized-field delegation to a PROPERTY interface (`getX`/`setX`) would go un-forwarded
+        // (an `AbstractMethodError`) — skip. A generic interface instantiated with REFERENCE type
+        // arguments (`A<String> by a`) forwards correctly at the erased (`Object`) level; only a PRIMITIVE
+        // instantiation needs bridges, and that is rejected at the delegation site.
+        if is_synth
+            && self
                 .syms
                 .classes
                 .get(iface_name)
                 .is_some_and(|s| !s.props.is_empty())
-            {
-                return None;
-            }
-            if file.decls.iter().any(|&d| {
-                matches!(file.decl(d), Decl::Class(ic) if ic.name == *iface_name && !ic.type_params.is_empty())
-            }) {
-                return None;
-            }
+        {
+            return None;
         }
         let iface_internal = class_internal(file, iface_name);
         // Collect the delegated interface's methods AND those inherited from its super-interfaces

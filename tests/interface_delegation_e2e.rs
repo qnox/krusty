@@ -55,3 +55,39 @@ fun box(): String {\n\
         "OK"
     );
 }
+
+/// Delegation to a generic interface instantiated with a REFERENCE type argument (`A<String> by a`):
+/// the interface method `foo(): T` erases to `Object`, so a raw forward through the synthesized field
+/// is correct (the unbox/checkcast happens at the call site). The non-`val` param uses a `$$delegate_N`.
+#[test]
+fn generic_reference_arg_delegation_forwards() {
+    const SRC: &str = "interface A<T> { fun foo(): T }\n\
+class B : A<String> { override fun foo() = \"OK\" }\n\
+class C(a: A<String>) : A<String> by a\n\
+fun box(): String {\n\
+    val c = C(B())\n\
+    val a: A<String> = c\n\
+    if (c.foo() != \"OK\") return \"f1 ${c.foo()}\"\n\
+    if (a.foo() != \"OK\") return \"f2 ${a.foo()}\"\n\
+    return \"OK\"\n\
+}\n";
+    assert_eq!(
+        run(SRC).expect("generic reference-arg delegation compiles + runs"),
+        "OK"
+    );
+}
+
+/// A `val`-param delegate to a PRIMITIVE-instantiated generic interface (`A<Long> by a`) forwards
+/// through its own typed field and is handled correctly. (A non-`val`-param primitive instantiation is
+/// skipped — the erased forwarder mis-boxes an `int` literal as `Integer` for a `Long` parameter.)
+#[test]
+fn generic_primitive_valparam_delegation_forwards() {
+    const SRC: &str = "interface A<T> { fun foo(t: T): String }\n\
+class B : A<Long> { override fun foo(t: Long) = if (t == 42L) \"OK\" else \"fail $t\" }\n\
+class C(val a: A<Long>) : A<Long> by a\n\
+fun box(): String = C(B()).foo(42L)\n";
+    assert_eq!(
+        run(SRC).expect("val-param primitive generic delegation compiles + runs"),
+        "OK"
+    );
+}

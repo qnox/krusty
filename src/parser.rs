@@ -2157,7 +2157,7 @@ impl<'a> Parser<'a> {
         Vec<String>,
         Option<String>,
         Vec<ExprId>,
-        Vec<(String, String)>,
+        Vec<(String, String, bool)>,
         Vec<(String, ExprId)>,
     ) {
         let mut ifaces = Vec::new();
@@ -2176,9 +2176,29 @@ impl<'a> Parser<'a> {
                 } else {
                     simple.clone()
                 };
-                // Skip optional type arguments (e.g. `A<Int, Number>`); they are erased on JVM.
+                // Type arguments (e.g. `A<Int, Number>`) are erased on JVM, but record whether any is a
+                // non-nullable primitive: a delegation to `A<Long>` needs bridges a raw forward mishandles.
+                // Syntactic (a `typealias` to a primitive is not seen here) — sufficient for the direct
+                // primitive spellings the corpus uses; a non-primitive arg is always erased-`Object`-safe.
+                let mut has_primitive_targ = false;
                 if self.at(TokenKind::Lt) {
-                    self.parse_type_args();
+                    for ta in self.parse_type_args() {
+                        if !ta.nullable
+                            && matches!(
+                                ta.name.as_str(),
+                                "Int"
+                                    | "Long"
+                                    | "Short"
+                                    | "Byte"
+                                    | "Char"
+                                    | "Boolean"
+                                    | "Double"
+                                    | "Float"
+                            )
+                        {
+                            has_primitive_targ = true;
+                        }
+                    }
                 }
                 if self.eat(TokenKind::LParen) {
                     // constructor call → base class
@@ -2215,7 +2235,7 @@ impl<'a> Parser<'a> {
                                 | Some(TokenKind::Newline)
                         ) {
                             self.bump();
-                            delegations.push((effective.clone(), delegate));
+                            delegations.push((effective.clone(), delegate, has_primitive_targ));
                         } else {
                             // A following `{` opens the CLASS BODY, not a lambda on the delegate call.
                             let saved = self.no_trailing_lambda;
