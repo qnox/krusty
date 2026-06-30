@@ -836,7 +836,64 @@ impl<'a> Parser<'a> {
                 _ => {
                     self.diags
                         .error(self.tok().span, "expected a top-level declaration");
-                    self.bump(); // recover
+                    // Skip the whole unparseable construct to the next declaration, rather than one
+                    // token at a time — else an unsupported construct (a context receiver, an exotic
+                    // modifier) mis-tokens keyword-by-keyword and can drift INTO a sibling declaration,
+                    // poisoning its type (the reported `unresolved reference 'private'/'suspend'` cascade).
+                    self.recover_to_decl_boundary();
+                }
+            }
+        }
+    }
+
+    /// Whether the current token can START a top-level declaration — a declaration keyword, an
+    /// annotation `@`, or a soft-keyword/modifier identifier. Used by error recovery to resync.
+    fn at_decl_start(&self) -> bool {
+        use TokenKind::*;
+        match self.kind() {
+            KwFun | KwClass | KwVal | KwVar | KwImport | KwPackage | At => true,
+            Ident => {
+                is_modifier(self.text())
+                    || matches!(
+                        self.text(),
+                        "object"
+                            | "interface"
+                            | "enum"
+                            | "annotation"
+                            | "typealias"
+                            | "data"
+                            | "companion"
+                    )
+            }
+            _ => false,
+        }
+    }
+
+    /// Skip an unparseable top-level construct to the next declaration boundary, descending through
+    /// balanced `{}` so a declaration keyword inside a body isn't mistaken for a boundary. Always makes
+    /// progress (the current token is not a declaration start — that is why recovery was invoked).
+    fn recover_to_decl_boundary(&mut self) {
+        // Always consume the offending token first — it reached recovery precisely because no
+        // declaration arm could parse it (it may even LOOK like a declaration start, e.g. `object`
+        // with no name), so returning on it without progress would loop the caller forever.
+        if !self.at(TokenKind::Eof) {
+            self.bump();
+        }
+        let mut depth = 0i32;
+        loop {
+            match self.kind() {
+                TokenKind::Eof => return,
+                TokenKind::LBrace => {
+                    depth += 1;
+                    self.bump();
+                }
+                TokenKind::RBrace => {
+                    depth -= 1;
+                    self.bump();
+                }
+                _ if depth <= 0 && self.at_decl_start() => return,
+                _ => {
+                    self.bump();
                 }
             }
         }
@@ -5485,6 +5542,28 @@ mod tests {
             d.render("test", src)
         );
         file.debug_tree()
+    }
+
+    #[test]
+    fn unparseable_construct_does_not_poison_siblings() {
+        // An unsupported top-level construct (here a context receiver) must produce ONE error and skip
+        // to the next declaration — NOT mis-token keyword-by-keyword and drift into / swallow the
+        // sibling declaration (the reported `unresolved reference 'private'/'suspend'` cascade).
+        let mut d = DiagSink::new();
+        let src = "context(String)\nfun f() = 1\nclass ServiceRegistry(val n: String)\n";
+        let toks = lex(src, &mut d);
+        let file = parse(src, &toks, &mut d);
+        let sibling_survives = file
+            .decls
+            .iter()
+            .any(|&id| matches!(file.decl(id), Decl::Class(c) if c.name == "ServiceRegistry"));
+        assert!(sibling_survives, "recovery swallowed the sibling class");
+        let errors = d
+            .diags
+            .iter()
+            .filter(|x| x.severity == crate::diag::Severity::Error)
+            .count();
+        assert_eq!(errors, 1, "cascade: {}", d.render("t", src));
     }
 
     #[test]
