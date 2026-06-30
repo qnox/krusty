@@ -180,14 +180,16 @@ fn b_empty(_syn: &'static Synthetic, lw: &mut Lower<'_>, c: &SynthCall<'_>) -> O
     vararg_of(lw, elem, &[])
 }
 
-/// `arrayOfNulls<T>(n)` → `new T[n]` (a reference array of nulls).
+/// `arrayOfNulls<T>(n)` → `new T[n]` (a reference array of nulls; a boxed primitive `Array<Int?>` =
+/// `Integer[]`).
 fn b_arr_nulls(_syn: &'static Synthetic, lw: &mut Lower<'_>, c: &SynthCall<'_>) -> Option<ExprId> {
     if c.args.len() != 1 {
         return None;
     }
     let elem = lw
         .synth_array_elem(c.call)
-        .filter(|t| t.is_reference() && t.unboxed_primitive().is_none())?;
+        .map(|t| t.boxed_ref().unwrap_or(t))
+        .filter(|t| t.is_reference())?;
     let size = lw.lower_arg(c.args[0], &ty_to_ir(Ty::Int))?;
     Some(lw.emit(IrExpr::NewArray {
         array_type: ty_to_ir(Ty::array(elem)),

@@ -9097,9 +9097,10 @@ impl<'a> Checker<'a> {
                     // user-defined function of the same name shadows them (as in kotlinc), so only treat
                     // the name as the intrinsic when it isn't a user-declared top-level function.
                     if !self.module_declares(&fname) {
-                        // `arrayOfNulls<T>(n): Array<T?>` — a reified intrinsic; the element is the
-                        // explicit type argument (a reference; a primitive would need a boxed `Integer[]`,
-                        // not modeled → fall through to skip). Codegen allocates `new T[n]` (`b_arr_nulls`).
+                        // `arrayOfNulls<T>(n): Array<T?>` — a reified intrinsic. The element is the explicit
+                        // type argument: a reference (`Array<String?>`), or a boxed primitive `Array<Int?>` =
+                        // `Integer[]` of nulls (`Obj("kotlin/Array",[Int])`, unsigned excluded). Codegen
+                        // allocates `new T[n]` (`b_arr_nulls`).
                         if fname == "arrayOfNulls" && args.len() == 1 {
                             self.expect_assignable(
                                 Ty::Int,
@@ -9116,6 +9117,12 @@ impl<'a> Checker<'a> {
                                 .unwrap_or_else(|| Ty::obj("kotlin/Any"));
                             if elem.is_reference() {
                                 return Ty::array(elem);
+                            } else if elem.boxed_ref().is_some()
+                                && !matches!(elem, Ty::UInt | Ty::ULong)
+                            {
+                                // `Array<Int?>` = `Integer[]` of nulls — the element is the NULLABLE
+                                // primitive (so `arr[i] == null` type-checks), allocated boxed.
+                                return Ty::obj_args("kotlin/Array", &[Ty::nullable(elem)]);
                             }
                         }
                         let explicit_elem = self

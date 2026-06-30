@@ -52,6 +52,18 @@ fun box(): String {\n\
 }
 
 #[test]
+fn array_of_nulls_primitive() {
+    // `arrayOfNulls<Int>(n)` is `Array<Int?>` = `Integer[]` of nulls; the element is nullable.
+    const SRC: &str = "fun box(): String {\n\
+    val a = arrayOfNulls<Int>(3)\n\
+    if (a.size != 3 || a[0] != null) return \"f1\"\n\
+    a[0] = 7\n\
+    return if (a[0] == 7 && a[1] == null) \"OK\" else \"f2\"\n\
+}\n";
+    assert_eq!(run(SRC).expect("arrayOfNulls<Int>"), "OK");
+}
+
+#[test]
 fn explicit_type_argument_byte() {
     const SRC: &str = "fun box(): String {\n\
     val a = arrayOf<Byte>(1, 2)\n\
