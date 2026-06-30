@@ -1577,6 +1577,13 @@ fn emit_bridges(c: &crate::ir::IrClass, cw: &mut ClassWriter) {
         let cp: Vec<Ty> = b.concrete_params.iter().map(ir_ty_to_jvm).collect();
         let er = ir_ty_to_jvm(&b.erased_ret);
         let cr = ir_ty_to_jvm(&b.concrete_ret);
+        // A bridge whose (name, descriptor) already names a REAL method on this class would be a
+        // duplicate (`ClassFormatError`) — e.g. an interface getter `getX()T` overridden with the SAME
+        // type differs from the impl only by a spurious nullability/representation detail. Skip it; the
+        // real method already satisfies the interface. (Real methods are emitted before `emit_bridges`.)
+        if cw.has_method(&b.name, &method_descriptor(&ep, er)) {
+            continue;
+        }
         let pw: u16 = ep.iter().map(|t| slot_words(*t)).sum();
         let mut code = CodeBuilder::new(1 + pw);
         code.aload(0);
@@ -3610,8 +3617,20 @@ impl<'a> Emitter<'a> {
                 let fty = c.fields[index as usize].ty.clone();
                 let jt = ir_ty_to_jvm(&fty);
                 let owner = c.fq_name.clone();
-                self.emit_value(receiver, code);
-                self.emit_value(value, code);
+                // A branchy value emits a merge frame; with the receiver already on the stack the
+                // verifier sees a non-empty baseline it can't reconcile (krusty's frames carry no stack
+                // prefix). Spill the value to a temp first — its branches then run on a clean stack —
+                // then load the receiver and the temp. (Plain values keep the direct receiver,value order.)
+                if self.records_frame(value) {
+                    let temps = self.spill_to_temps(&[value], code);
+                    self.emit_value(receiver, code);
+                    let (slot, t, key) = temps[0];
+                    load(t, slot, code);
+                    self.slots.remove(&key);
+                } else {
+                    self.emit_value(receiver, code);
+                    self.emit_value(value, code);
+                }
                 let fref = self.cw.fieldref(&owner, &name, &type_descriptor(jt));
                 code.putfield(fref, slot_words(jt) as i32);
             }
@@ -4481,7 +4500,16 @@ impl<'a> Emitter<'a> {
                         )
                     }
                 };
-                let facade = self.facade.clone();
+                // The impl method lives on whichever class owns it (a class-member lambda's impl is a
+                // method of the enclosing class, so it can access that class's privates); top-level
+                // lambdas keep theirs on the file facade.
+                let impl_owner = self
+                    .ir
+                    .classes
+                    .iter()
+                    .find(|c| c.methods.contains(impl_fn))
+                    .map(|c| c.fq_name.clone())
+                    .unwrap_or_else(|| self.facade.clone());
                 let meta = self.cw.method_handle_static(
                     "java/lang/invoke/LambdaMetafactory",
                     "metafactory",
@@ -4490,7 +4518,7 @@ impl<'a> Emitter<'a> {
                 let sam_mt = self.cw.method_type(&sam_desc);
                 let impl_mh = self
                     .cw
-                    .method_handle_static(&facade, &impl_name, &impl_desc);
+                    .method_handle_static(&impl_owner, &impl_name, &impl_desc);
                 let inst_mt = self.cw.method_type(&inst_desc);
                 let bsm = self.cw.add_bootstrap(meta, vec![sam_mt, impl_mh, inst_mt]);
                 // The `invokedynamic` takes the captured values and yields the interface instance.

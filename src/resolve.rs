@@ -1292,10 +1292,21 @@ pub fn collect_signatures_with_cp(
                                 ctp.extended_with(&m.type_params, &m.type_param_bounds, &|n| {
                                     class_names.get(n).cloned()
                                 });
+                            // A `vararg` parameter's runtime type is `Array<elem>` (mirrors the
+                            // top-level-function path) — without this a member `vararg s: String`
+                            // erases to a single `String` and a call passes the element where the
+                            // `String[]` is expected (a `ClassCastException`).
                             let params: Vec<Ty> = m
                                 .params
                                 .iter()
-                                .map(|p| ty_of_ref(&p.ty, &class_names, &mtp, diags))
+                                .map(|p| {
+                                    let t = ty_of_ref(&p.ty, &class_names, &mtp, diags);
+                                    if p.is_vararg {
+                                        Ty::array(t)
+                                    } else {
+                                        t
+                                    }
+                                })
                                 .collect();
                             let ret = m
                                 .ret
@@ -1362,7 +1373,7 @@ pub fn collect_signatures_with_cp(
                                 Signature {
                                     params,
                                     ret,
-                                    vararg: false,
+                                    vararg: m.params.last().is_some_and(|p| p.is_vararg),
                                     required: m
                                         .params
                                         .iter()
@@ -1512,10 +1523,21 @@ pub fn collect_signatures_with_cp(
                                 ctp.extended_with(&m.type_params, &m.type_param_bounds, &|n| {
                                     class_names.get(n).cloned()
                                 });
+                            // A `vararg` parameter's runtime type is `Array<elem>` (mirrors the
+                            // top-level-function path) — without this a member `vararg s: String`
+                            // erases to a single `String` and a call passes the element where the
+                            // `String[]` is expected (a `ClassCastException`).
                             let params: Vec<Ty> = m
                                 .params
                                 .iter()
-                                .map(|p| ty_of_ref(&p.ty, &class_names, &mtp, diags))
+                                .map(|p| {
+                                    let t = ty_of_ref(&p.ty, &class_names, &mtp, diags);
+                                    if p.is_vararg {
+                                        Ty::array(t)
+                                    } else {
+                                        t
+                                    }
+                                })
                                 .collect();
                             let ret = m
                                 .ret
@@ -1557,7 +1579,7 @@ pub fn collect_signatures_with_cp(
                                 Signature {
                                     params,
                                     ret,
-                                    vararg: false,
+                                    vararg: m.params.last().is_some_and(|p| p.is_vararg),
                                     required: m
                                         .params
                                         .iter()
@@ -5161,6 +5183,36 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Check call arguments against a parameter list. For a `vararg`, the fixed parameters match
+    /// positionally and every trailing argument matches the vararg array's ELEMENT type (`f(vararg s:
+    /// T)` accepts `f(a, b)` with `a, b: T`); a single array argument is also accepted (a spread). For a
+    /// non-`vararg` list the arguments match positionally.
+    fn expect_call_args(&mut self, params: &[Ty], vararg: bool, args: &[ExprId], arg_tys: &[Ty]) {
+        if vararg && !params.is_empty() {
+            let n_fixed = params.len() - 1;
+            let array_param = params[n_fixed];
+            let elem = array_param.array_elem().unwrap_or(array_param);
+            for (i, a) in arg_tys.iter().enumerate() {
+                if i >= args.len() {
+                    break;
+                }
+                // A lone argument already OF the array type is a spread/pass-through, not an element.
+                let expected = if i < n_fixed {
+                    params[i]
+                } else if arg_tys.len() - n_fixed == 1 && *a == array_param {
+                    array_param
+                } else {
+                    elem
+                };
+                self.expect_assignable(expected, *a, self.span(args[i]), "argument");
+            }
+        } else {
+            for (i, (p, a)) in params.iter().zip(arg_tys).enumerate() {
+                self.expect_assignable(*p, *a, self.span(args[i]), "argument");
+            }
+        }
+    }
+
     fn expect_assignable(&mut self, expected: Ty, actual: Ty, span: Span, ctx: &str) {
         if expected == Ty::Error || actual == Ty::Error {
             return;
@@ -7175,6 +7227,21 @@ impl<'a> Checker<'a> {
             .map(|m| m.ret)
             {
                 return Some(ret);
+            }
+        }
+        if let Ty::Obj(internal, _) = &rt {
+            // A `vararg` member (`fun f(vararg s: T)`) accepts any number of trailing `T` arguments,
+            // packed into the array parameter — element-type them rather than matching the single array
+            // parameter positionally (which would reject `f(x)` as "T but Array<T> expected").
+            if let Some(sig) = self.syms.method_of(internal, name).filter(|s| s.vararg) {
+                let n_fixed = sig.params.len().saturating_sub(1);
+                if arg_tys.len() >= n_fixed {
+                    self.expect_call_args(&sig.params, true, args, arg_tys);
+                    return Some(
+                        self.inferred_member_ret(rt, name, &sig.params)
+                            .unwrap_or(sig.ret),
+                    );
+                }
             }
         }
         if let Ty::Obj(_, _) = rt {
@@ -9497,9 +9564,14 @@ impl<'a> Checker<'a> {
                                         .map(|s| (s.params, s.ret))
                                 });
                         if let Some((params, ret)) = resolved {
-                            for (i, (p, a)) in params.iter().zip(&arg_tys).enumerate() {
-                                self.expect_assignable(*p, *a, self.span(args[i]), "argument");
-                            }
+                            // A `vararg` sibling method (`fun f(vararg s: T)`) accepts trailing `T` args
+                            // packed into the array param — element-type them, don't match the array
+                            // positionally.
+                            let vararg = self
+                                .syms
+                                .method_of(internal, &fname)
+                                .is_some_and(|s| s.vararg);
+                            self.expect_call_args(&params, vararg, args, &arg_tys);
                             return ret;
                         }
                     }
