@@ -4418,6 +4418,24 @@ impl<'a> Lower<'a> {
                     args: vec![recv],
                 });
                 (self.coerce_erased(call, c.ret, c.physical_ret), c.ret)
+            } else if let Some(c) =
+                self.resolver()
+                    .resolve_extension_inline_callable(&comp, it_ty, &[])
+            {
+                // `Map.Entry.component1`/`component2` are `@InlineOnly` extensions (they inline to
+                // `getKey()`/`getValue()`), resolved only via the inline-callable path — mirror the
+                // checker's destructure resolution; the splicer inlines the `invokestatic`.
+                let call = self.ir.add_expr(IrExpr::Call {
+                    callee: Callee::Static {
+                        owner: c.owner,
+                        name: c.name,
+                        descriptor: c.descriptor,
+                        inline: c.inline,
+                    },
+                    dispatch_receiver: None,
+                    args: vec![recv],
+                });
+                (self.coerce_erased(call, c.ret, c.physical_ret), c.ret)
             } else if let Some(&fid) = self.ext_fun_ids.get(&(it_ty.erased_recv(), comp.clone())) {
                 // A USER-defined `operator fun Recv.componentN()` extension → `invokestatic` it with
                 // the receiver as the sole argument (its lowered first param).

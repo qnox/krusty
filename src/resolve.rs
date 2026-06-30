@@ -10047,6 +10047,10 @@ impl<'a> Checker<'a> {
                         })
                         // `List.component1()`, … are stdlib *extensions* — try those too.
                         .or_else(|| self.library_extension_return(&comp, it, &[], &[]))
+                        // `Map.Entry.component1`/`component2` are `@InlineOnly` extensions (they inline
+                        // to `getKey()`/`getValue()`), resolved only through the inline-callable path —
+                        // the same one a qualified `entry.component1()` uses.
+                        .or_else(|| self.library_extension_inline_return(&comp, it, &[]))
                         // A USER-defined `operator fun Recv.componentN()` extension (same module).
                         .or_else(|| {
                             crate::module_symbols::ModuleSymbols::new(self.syms)
