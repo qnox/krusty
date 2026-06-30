@@ -3132,6 +3132,11 @@ pub enum ExprLowering {
         params: Vec<Ty>,
         kind: InvokeKind,
     },
+    /// A class literal `T::class` / `expr::class`. `unbound = Some(ty)` is an UNBOUND literal on a
+    /// reference type name (`String::class`) — lowers to `ldc <ty>.class`. `unbound = None` is a BOUND
+    /// literal on a value expression (`x::class`, `this::class`) — lowers to `expr.getClass()`. krusty
+    /// models the result as `java/lang/Class` (its identity makes `==` agree with kotlinc's `KClass`).
+    ClassLiteral { unbound: Option<Ty> },
 }
 
 /// How a selected [`ExprLowering::Invoke`] is realized: the receiver is either a function value or an
@@ -4117,6 +4122,20 @@ impl<'a> Checker<'a> {
             }
         }
         None
+    }
+
+    /// If a bare type name `n` denotes a reference type usable as an UNBOUND class literal `n::class`,
+    /// its `Ty`. Resolves the same way [`Self::resolve_ty_no_diag`] does (built-in `from_name` types + user
+    /// classes) — deliberately NOT via the global simple-name index, which falsely collides names like
+    /// `IntArray` with unrelated JDK classes. A primitive (`Int::class` needs `Integer.TYPE`-style
+    /// lowering) or unknown name returns `None` so the literal is skipped rather than miscompiled.
+    fn class_literal_unbound_ty(&self, n: &str) -> Option<Ty> {
+        if self.tparams.contains(n) {
+            return None;
+        }
+        let ty = Ty::from_name(n)
+            .or_else(|| self.syms.classes.get(n).map(|cs| Ty::obj(&cs.internal)))?;
+        (ty != Ty::Error && ty.is_reference()).then_some(ty)
     }
 
     fn obj_with_targs(&mut self, internal: &str, r: &TypeRef) -> Ty {
@@ -6297,20 +6316,39 @@ impl<'a> Checker<'a> {
                 }
             }
             Expr::CallableRef { receiver, name } => {
-                // Class literal `UserType::class`. Restricted to a declared class name: primitive
-                // `Int::class` and bound `obj::class` need target-specific lowering that is not modeled.
+                // Class literal. UNBOUND on a reference type name (`String::class`, `UserType::class`)
+                // lowers to `ldc <ty>.class`; BOUND on a value expression (`x::class`, `this::class`)
+                // lowers to `expr.getClass()`. A primitive receiver (`Int::class`, `42::class`) needs the
+                // `Integer.TYPE`/box-then-getClass form and is not modeled.
                 if name == "class" {
-                    let is_user_type = matches!(receiver.map(|r| self.file.expr(r)), Some(Expr::Name(n)) if self.syms.classes.contains_key(n) && self.lookup(n).is_none());
-                    if is_user_type {
-                        if let Some(ty) = self.syms.libraries.class_literal_type() {
-                            return self.set(e, ty);
-                        }
+                    let unsupported = |s: &mut Self| {
+                        s.diags.error(
+                            s.span(e),
+                            "krusty: this class-literal form is not supported".to_string(),
+                        );
+                        Ty::Error
+                    };
+                    let Some(recv) = receiver else {
+                        return unsupported(self);
+                    };
+                    // A bare name that resolves to a reference TYPE is an UNBOUND literal (`String::class`).
+                    // Otherwise it's a BOUND literal on a value (`x::class`, `this::class`): type-check the
+                    // receiver — a non-reference receiver (a primitive `Int::class`, an unresolved name) is
+                    // skipped, not mis-read.
+                    let unbound = if let Expr::Name(n) = self.file.expr(recv).clone() {
+                        self.class_literal_unbound_ty(&n)
+                    } else {
+                        None
+                    };
+                    if unbound.is_none() && !self.expr(recv).is_reference() {
+                        return unsupported(self);
                     }
-                    self.diags.error(
-                        self.span(e),
-                        "krusty: this class-literal form is not supported".to_string(),
-                    );
-                    return Ty::Error;
+                    if let Some(ty) = self.syms.libraries.class_literal_type() {
+                        self.expr_lowers
+                            .insert(e, ExprLowering::ClassLiteral { unbound });
+                        return self.set(e, ty);
+                    }
+                    return unsupported(self);
                 }
                 // Object-method callable references (`Any::equals`, `obj::toString`). A receiver that
                 // names a value is *bound* (captures it, arity = method args); one that names a type
