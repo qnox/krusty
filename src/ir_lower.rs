@@ -8062,10 +8062,11 @@ impl<'a> Lower<'a> {
                         );
                     }
                 }
-                // A non-literal FUNCTION value (`fnVal`, `expr::ref`) SAM-converted to the interface
-                // needs a wrapper that forwards to its `invoke` — not modeled, so skip rather than pass a
-                // raw `FunctionN` where the interface is expected. (A value already OF the interface type
-                // is not a `Ty::Fun` and passes through the normal path below.)
+                // A non-literal FUNCTION value (`fnVal`, `expr::ref`) SAM-converted to the interface needs
+                // a wrapper forwarding to its `invoke`. A naive wrapper miscompiles a NULLABLE value
+                // (wrapping `null` into a non-null instance changes `r == null`), a contravariant
+                // intersection type, and a suspend value — so skip rather than miscompile. (A value already
+                // OF the interface type is not a `Ty::Fun` and passes through below.)
                 if matches!(self.info.ty(arg), Ty::Fun(_)) {
                     return None;
                 }
