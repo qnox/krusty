@@ -12139,6 +12139,26 @@ impl<'a> Lower<'a> {
                 if lty == Ty::Null {
                     return self.lower_arg(rhs, &ty_to_ir(result_ty));
                 }
+                // A `Nothing`/`Nothing?` lhs (the checker erases the `?`, so both surface as the mapped
+                // `Void` object or `Ty::Nothing`). A DIVERGING lhs (`throw`/`return`/a `Nothing` call) makes
+                // the elvis just the lhs (the rhs is dead). A non-diverging one is a `Nothing?`-returning
+                // call — always `null` at runtime (`Nothing` has no non-null value) — so the elvis takes the
+                // rhs; evaluate the lhs first for its side effects (its non-null branch, a `Void` used as the
+                // result type, would otherwise break the merge frame).
+                let lty_is_nothing = lty == Ty::Nothing
+                    || matches!(lty.non_null(), Ty::Obj(n, _)
+                        if crate::jvm::jvm_class_map::to_jvm_internal(n) == "java/lang/Void");
+                if lty_is_nothing {
+                    if self.expr_diverges(lhs) {
+                        return self.expr(lhs);
+                    }
+                    let lv = self.expr(lhs)?;
+                    let rv = self.lower_arg(rhs, &ty_to_ir(result_ty))?;
+                    return Some(self.ir.add_expr(IrExpr::Block {
+                        stmts: vec![lv],
+                        value: Some(rv),
+                    }));
+                }
                 if !lty.is_reference() {
                     return self.lower_arg(lhs, &ty_to_ir(result_ty));
                 }
