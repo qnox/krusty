@@ -17641,30 +17641,14 @@ fn field_ty_with_args(file: &ast::File, tr: &ast::TypeRef) -> Ty {
 }
 
 fn ty_of(file: &ast::File, r: &ast::TypeRef) -> Ty {
-    // Function type `(A, B) -> R` (parsed with `fun_params` non-empty / `name == "<fun>"`).
-    if !r.fun_params.is_empty() || r.name == "<fun>" {
-        let params: Vec<Ty> = r.fun_params.iter().map(|p| ty_of(file, p)).collect();
-        let ret = r.arg.as_ref().map(|a| ty_of(file, a)).unwrap_or(Ty::Unit);
-        return if r.fun_suspend {
-            Ty::fun_suspend(params, ret)
-        } else {
-            Ty::fun(params, ret)
-        };
-    }
-    if let Some(t) = Ty::from_name(&r.name) {
+    // Function type, builtin scalar, or primitive array — the leaf shared by every type resolver.
+    if let Some(t) = crate::resolve::typeref_leaf(r, &mut |x| ty_of(file, x)) {
         // A nullable primitive is `Nullable(prim)`, a reference slot consistent with the checker —
         // otherwise a boxed value would be stored in a primitive field and unboxed wrong.
         if r.nullable && !t.is_reference() {
-            if let Some(nb) = t.nullable_boxed() {
-                return nb;
-            }
+            return t.nullable_boxed().unwrap_or(t);
         }
         return t;
-    }
-    // A specialized primitive array (`IntArray` → `int[]`), or a reference `Array<T>` (element from the
-    // type argument). Without this an array-typed field/param would erase to `Object`.
-    if let Some(elem) = Ty::primitive_array_element(&r.name) {
-        return Ty::array(elem);
     }
     if r.name == "Array" {
         let elem = r

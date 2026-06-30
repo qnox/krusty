@@ -3036,6 +3036,28 @@ fn member_signature(
     }
 }
 
+/// The phase-independent leaf of a `TypeRef`, resolved identically by every type resolver (signature
+/// collection's [`ty_of_ref_with`], the checker's `resolve_ty`, and the lowerer's `ty_of`): a function
+/// type `(A)->R`, a builtin scalar/`String`/`Unit`, or a primitive array (`IntArray`). Returns `None`
+/// for a class / `Array<T>` / type-parameter reference — each phase resolves those against its own class
+/// table — and does NOT apply nullability (the boxable-vs-error policy is phase-specific). `recurse`
+/// resolves nested refs (a function type's parameters/return) through the caller's own resolver.
+pub(crate) fn typeref_leaf(r: &TypeRef, recurse: &mut dyn FnMut(&TypeRef) -> Ty) -> Option<Ty> {
+    if !r.fun_params.is_empty() || r.name == "<fun>" {
+        let params: Vec<Ty> = r.fun_params.iter().map(&mut *recurse).collect();
+        let ret = r.arg.as_ref().map(|a| recurse(a)).unwrap_or(Ty::Unit);
+        return Some(if r.fun_suspend {
+            Ty::fun_suspend(params, ret)
+        } else {
+            Ty::fun(params, ret)
+        });
+    }
+    if let Some(t) = Ty::from_name(&r.name) {
+        return Some(t);
+    }
+    Ty::primitive_array_element(&r.name).map(Ty::array)
+}
+
 /// Resolve a syntactic type reference to a `Ty`: a primitive/String/Unit, a declared class
 /// (→ `Ty::Obj`), or a generic type parameter (erased per `TParams`, normally `Any`).
 fn ty_of_ref(r: &TypeRef, classes: &ClassNames, tparams: &TParams, diags: &mut DiagSink) -> Ty {
@@ -3049,28 +3071,12 @@ fn ty_of_ref_with(
     ctx: &TypeRefCtx,
     diags: &mut DiagSink,
 ) -> Ty {
-    // Function type: `(A, B) -> R` — parsed with `fun_params` non-empty.
-    if !r.fun_params.is_empty() || r.name == "<fun>" {
-        let params: Vec<Ty> = r
-            .fun_params
-            .iter()
-            .map(|p| ty_of_ref_with(p, classes, tparams, ctx, diags))
-            .collect();
-        let ret = r
-            .arg
-            .as_ref()
-            .map(|a| ty_of_ref_with(a, classes, tparams, ctx, diags))
-            .unwrap_or(Ty::Unit);
-        return if r.fun_suspend {
-            Ty::fun_suspend(params, ret)
-        } else {
-            Ty::fun(params, ret)
-        };
-    }
-    let base = if let Some(t) = Ty::from_name(&r.name) {
+    // Function type, builtin scalar, or primitive array — the leaf shared by every type resolver. A
+    // function type is reference-typed, so the nullability handling below is a no-op for it.
+    let base = if let Some(t) =
+        typeref_leaf(r, &mut |x| ty_of_ref_with(x, classes, tparams, ctx, diags))
+    {
         t
-    } else if let Some(elem) = Ty::primitive_array_element(&r.name) {
-        Ty::array(elem)
     } else if r.name == "Array" {
         match &r.arg {
             Some(a) => {
@@ -4251,24 +4257,9 @@ impl<'a> Checker<'a> {
     /// Nullability doesn't change the `Ty` for reference types (same JVM descriptor), but a nullable
     /// *primitive* (`Char?`, `Int?`, …) would need boxing — rejected (the file is skipped).
     fn resolve_ty(&mut self, r: &TypeRef) -> Ty {
-        // Function type: `(A, B) -> R` — parsed with `fun_params` non-empty.
-        if !r.fun_params.is_empty() || r.name == "<fun>" {
-            let params: Vec<Ty> = r.fun_params.iter().map(|p| self.resolve_ty(p)).collect();
-            let ret = r
-                .arg
-                .as_ref()
-                .map(|a| self.resolve_ty(a))
-                .unwrap_or(Ty::Unit);
-            return if r.fun_suspend {
-                Ty::fun_suspend(params, ret)
-            } else {
-                Ty::fun(params, ret)
-            };
-        }
-        let base = if let Some(t) = Ty::from_name(&r.name) {
+        // Function type, builtin scalar, or primitive array — the leaf shared by every type resolver.
+        let base = if let Some(t) = typeref_leaf(r, &mut |x| self.resolve_ty(x)) {
             t
-        } else if let Some(elem) = Ty::primitive_array_element(&r.name) {
-            Ty::array(elem)
         } else if r.name == "Array" {
             match &r.arg {
                 Some(a) => {
