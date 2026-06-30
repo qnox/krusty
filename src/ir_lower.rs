@@ -9079,6 +9079,12 @@ impl<'a> Lower<'a> {
     /// consult imports). Keeps the field decl, constructor parameter and getter agreeing on the real type.
     fn field_ty(&self, file: &ast::File, r: &ast::TypeRef) -> Ty {
         let base = ty_of(file, r);
+        // A property of type `Unit` holds the `kotlin/Unit` singleton (its value), so its field, ctor
+        // parameter, and getter return are the `kotlin/Unit` REFERENCE — not the 0-word `Ty::Unit` whose
+        // descriptor `V` is illegal for a field/parameter. (Only a `Unit` *return position* erases to void.)
+        if base == Ty::Unit {
+            return Ty::obj("kotlin/Unit");
+        }
         if base == Ty::obj("kotlin/Any") {
             // Resolve the NON-nullable form (`ty_ref` bails on a nullable type); the caller re-applies
             // the field's nullability to the IrType, so `Uuid` and `Uuid?` recover the same base type.
@@ -13317,6 +13323,25 @@ impl<'a> Lower<'a> {
                     let (lt, rt) = (self.info.ty(lhs), self.info.ty(rhs));
                     let mut l = self.expr(lhs)?;
                     let mut r = self.expr(rhs)?;
+                    // A `Unit` operand of `==`/`!=` is the `Unit.INSTANCE` singleton — a `Unit` expression
+                    // leaves nothing on the stack, so run it for effect then push the singleton, giving the
+                    // structural `areEqual` an `Object` (`foo() != bar()` where `bar(): Unit`).
+                    if matches!(op, BinOp::Eq | BinOp::Ne) {
+                        if lt == Ty::Unit {
+                            let u = self.ir.add_expr(IrExpr::UnitInstance);
+                            l = self.ir.add_expr(IrExpr::Block {
+                                stmts: vec![l],
+                                value: Some(u),
+                            });
+                        }
+                        if rt == Ty::Unit {
+                            let u = self.ir.add_expr(IrExpr::UnitInstance);
+                            r = self.ir.add_expr(IrExpr::Block {
+                                stmts: vec![r],
+                                value: Some(u),
+                            });
+                        }
+                    }
                     // `Char` arithmetic (`'a' + 1`, `c - 1`, `c1 - c2`): `Char`/`Int` share the int stack
                     // representation, but there is no numeric *promotion* between them. Do the op on ints
                     // (coerce the `Char` operands to `Int` — a no-op on the stack, but it types the result
