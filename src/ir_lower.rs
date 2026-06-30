@@ -4120,6 +4120,30 @@ impl<'a> Lower<'a> {
     /// verifies (`asSeq<String>(x).length`); the wrapper is unboxed to a primitive only at a use site
     /// that needs it, by the normal coercion path — never eagerly here (an `Int?` consumer keeps it
     /// boxed, and `null` must not be unboxed).
+    /// If `v` is the compiler-inserted unbox of a CALL result (an `ImplicitCoercion` of a `Call`/
+    /// `MethodCall` to a primitive — `map.put(k,v): V?` typed as a primitive), return the inner call;
+    /// otherwise `v` unchanged. Used to drop the pointless, null-NPE-prone unbox of a DISCARDED statement
+    /// value. Restricted to call results so it never strips a user `as`-to-primitive (whose operand is
+    /// not a call), which has an observable `ClassCastException` side effect.
+    fn strip_discarded_unbox(&self, v: u32) -> u32 {
+        if let IrExpr::TypeOp {
+            op: IrTypeOp::ImplicitCoercion,
+            arg,
+            type_operand,
+        } = self.ir.expr(v)
+        {
+            if !ir_type_is_reference(type_operand)
+                && matches!(
+                    self.ir.expr(*arg),
+                    IrExpr::Call { .. } | IrExpr::MethodCall { .. }
+                )
+            {
+                return *arg;
+            }
+        }
+        v
+    }
+
     fn coerce_erased_call_result(
         &mut self,
         e: AstExprId,
@@ -4405,26 +4429,13 @@ impl<'a> Lower<'a> {
                     args: vec![],
                 });
                 (self.coerce_erased(c, m.ret, m.member.physical_ret), m.ret)
-            } else if let Some(c) = self.library_extension_callable(&comp, it_ty, &[], &[]) {
-                // `List.component1()` etc. are stdlib extensions: `invokestatic facade.componentN(recv)`.
-                let call = self.ir.add_expr(IrExpr::Call {
-                    callee: Callee::Static {
-                        owner: c.owner,
-                        name: c.name,
-                        descriptor: c.descriptor,
-                        inline: c.inline,
-                    },
-                    dispatch_receiver: None,
-                    args: vec![recv],
-                });
-                (self.coerce_erased(call, c.ret, c.physical_ret), c.ret)
             } else if let Some(c) =
                 self.resolver()
                     .resolve_extension_inline_callable(&comp, it_ty, &[])
             {
-                // `Map.Entry.component1`/`component2` are `@InlineOnly` extensions (they inline to
-                // `getKey()`/`getValue()`), resolved only via the inline-callable path — mirror the
-                // checker's destructure resolution; the splicer inlines the `invokestatic`.
+                // `componentN` as a stdlib extension: a public one (`List.component1()`) or an
+                // `@InlineOnly` one (`Map.Entry.component1` → `getKey()`). The inline-admitting resolver
+                // covers both; `c.inline` drives whether the emit splices the `invokestatic` or calls it.
                 let call = self.ir.add_expr(IrExpr::Call {
                     callee: Callee::Static {
                         owner: c.owner,
@@ -7985,12 +7996,24 @@ impl<'a> Lower<'a> {
         // The iterator comes from a member `iterator()` (`List`), or — when there is none — the stdlib
         // `iterator` *extension* (`for (e in map)` uses `Map.iterator()` → `Iterator<Map.Entry<K,V>>`).
         // `iter_ret` is the (possibly parameterized) iterator type; `ext_iter` flags the static call.
-        let (iter_ret, iter_desc, iter_owner, iter_ext) = if let Some(m) =
+        let (iter_ret, iter_desc, iter_owner, iter_ext, iter_inline) = if let Some(m) =
             crate::call_resolver::resolve_instance(&*self.syms.libraries, internal, "iterator", &[])
         {
-            (m.ret, m.descriptor, internal.to_string(), false)
-        } else if let Some(c) = self.library_extension_callable("iterator", it_ty, &[], &[]) {
-            (c.ret, c.descriptor, c.owner, true)
+            (
+                m.ret,
+                m.descriptor,
+                internal.to_string(),
+                false,
+                InlineKind::None,
+            )
+        } else if let Some(c) =
+            self.resolver()
+                .resolve_extension_inline_callable("iterator", it_ty, &[])
+        {
+            // `iterator` is an EXTENSION — public (an `Iterable`-shaped receiver) or `@InlineOnly`
+            // (`Map<K,V>.iterator()` inlines to `entries.iterator()`). The inline-admitting resolver
+            // covers both; `c.inline` then drives whether the emit splices it or calls it.
+            (c.ret, c.descriptor, c.owner, true, c.inline)
         } else {
             return None;
         };
@@ -8045,7 +8068,7 @@ impl<'a> Lower<'a> {
                 owner: iter_owner,
                 name: "iterator".to_string(),
                 descriptor: iter_desc,
-                inline: InlineKind::None,
+                inline: iter_inline,
             }
         } else {
             Callee::Virtual {
@@ -9845,7 +9868,15 @@ impl<'a> Lower<'a> {
             }
         }
         match self.afile.stmt(s).clone() {
-            Stmt::Expr(e) => self.expr(e),
+            Stmt::Expr(e) => {
+                let v = self.expr(e)?;
+                // A statement's value is DISCARDED. If it is an unbox of an erased reference result
+                // (`map.put(k, v)` returns `V?` but is typed as a primitive, so the call result is
+                // coerced `Object` → `int`), drop the unbox: kotlinc pops the reference, and unboxing a
+                // null result would NPE. A statement top is never a numeric widening (no target type),
+                // so a coercion to a non-reference here is always that unbox.
+                Some(self.strip_discarded_unbox(v))
+            }
             Stmt::Return(e, ret_label) => {
                 // Inside a `tailrec` function (no spliced-lambda label): a `return f(args)` to the same
                 // function is a tail call — reassign the params and `continue` the loop. A `return` whose
