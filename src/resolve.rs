@@ -1296,18 +1296,6 @@ pub fn collect_signatures_with_cp(
                             // top-level-function path) — without this a member `vararg s: String`
                             // erases to a single `String` and a call passes the element where the
                             // `String[]` is expected (a `ClassCastException`).
-                            let params: Vec<Ty> = m
-                                .params
-                                .iter()
-                                .map(|p| {
-                                    let t = ty_of_ref(&p.ty, &class_names, &mtp, diags);
-                                    if p.is_vararg {
-                                        Ty::array(t)
-                                    } else {
-                                        t
-                                    }
-                                })
-                                .collect();
                             let ret = m
                                 .ret
                                 .as_ref()
@@ -1355,47 +1343,10 @@ pub fn collect_signatures_with_cp(
                                     }
                                     Ty::Unit
                                 });
-                            (m.name.clone(), {
-                                let lambda_param_types: Vec<Vec<Ty>> = m
-                                    .params
-                                    .iter()
-                                    .map(|p| {
-                                        if !p.ty.fun_params.is_empty() || p.ty.name == "<fun>" {
-                                            p.ty.fun_params
-                                                .iter()
-                                                .map(|r| ty_of_ref(r, &class_names, &mtp, diags))
-                                                .collect()
-                                        } else {
-                                            Vec::new()
-                                        }
-                                    })
-                                    .collect();
-                                Signature {
-                                    params,
-                                    ret,
-                                    vararg: m.params.last().is_some_and(|p| p.is_vararg),
-                                    required: m
-                                        .params
-                                        .iter()
-                                        .take_while(|p| p.default.is_none())
-                                        .count(),
-                                    param_defaults: m
-                                        .params
-                                        .iter()
-                                        .map(|p| p.default.is_some())
-                                        .collect(),
-                                    param_names: m.params.iter().map(|p| p.name.clone()).collect(),
-                                    lambda_param_types,
-                                    lambda_recv: m
-                                        .params
-                                        .iter()
-                                        .map(|p| p.ty.fun_has_receiver)
-                                        .collect(),
-                                    is_inline: false,
-                                    is_final: m.is_final,
-                                    is_suspend: m.is_suspend,
-                                }
-                            })
+                            (
+                                m.name.clone(),
+                                member_signature(m, ret, &class_names, &mtp, diags),
+                            )
                         })
                         .collect();
                     // Record the un-erased shape of each generic higher-order method (a function-typed
@@ -1527,18 +1478,6 @@ pub fn collect_signatures_with_cp(
                             // top-level-function path) — without this a member `vararg s: String`
                             // erases to a single `String` and a call passes the element where the
                             // `String[]` is expected (a `ClassCastException`).
-                            let params: Vec<Ty> = m
-                                .params
-                                .iter()
-                                .map(|p| {
-                                    let t = ty_of_ref(&p.ty, &class_names, &mtp, diags);
-                                    if p.is_vararg {
-                                        Ty::array(t)
-                                    } else {
-                                        t
-                                    }
-                                })
-                                .collect();
                             let ret = m
                                 .ret
                                 .as_ref()
@@ -1561,47 +1500,10 @@ pub fn collect_signatures_with_cp(
                                         Ty::Unit
                                     }
                                 });
-                            (m.name.clone(), {
-                                let lambda_param_types: Vec<Vec<Ty>> = m
-                                    .params
-                                    .iter()
-                                    .map(|p| {
-                                        if !p.ty.fun_params.is_empty() || p.ty.name == "<fun>" {
-                                            p.ty.fun_params
-                                                .iter()
-                                                .map(|r| ty_of_ref(r, &class_names, &mtp, diags))
-                                                .collect()
-                                        } else {
-                                            Vec::new()
-                                        }
-                                    })
-                                    .collect();
-                                Signature {
-                                    params,
-                                    ret,
-                                    vararg: m.params.last().is_some_and(|p| p.is_vararg),
-                                    required: m
-                                        .params
-                                        .iter()
-                                        .take_while(|p| p.default.is_none())
-                                        .count(),
-                                    param_defaults: m
-                                        .params
-                                        .iter()
-                                        .map(|p| p.default.is_some())
-                                        .collect(),
-                                    param_names: m.params.iter().map(|p| p.name.clone()).collect(),
-                                    lambda_param_types,
-                                    lambda_recv: m
-                                        .params
-                                        .iter()
-                                        .map(|p| p.ty.fun_has_receiver)
-                                        .collect(),
-                                    is_inline: false,
-                                    is_final: m.is_final,
-                                    is_suspend: m.is_suspend,
-                                }
-                            })
+                            (
+                                m.name.clone(),
+                                member_signature(m, ret, &class_names, &mtp, diags),
+                            )
                         })
                         .collect();
                     // PLUGIN SIGNATURE PHASE (kotlinx.serialization): a `@Serializable class C` gains a
@@ -3080,6 +2982,58 @@ fn tparam_bound_erasure(b: Option<&TypeRef>, resolve: &dyn Fn(&str) -> Option<St
 #[derive(Clone, Copy, Default)]
 struct TypeRefCtx {
     class_literal_ty: Option<Ty>,
+}
+
+/// Build a member method's [`Signature`] from its declaration, given an already-resolved return type
+/// `ret` (the two call sites differ only in how they infer `ret`). A `vararg` parameter's runtime type
+/// is its `Array<elem>`; the `vararg` flag, defaults, names, and lambda-parameter shapes follow the
+/// declaration. Member methods are never `inline`.
+fn member_signature(
+    m: &FunDecl,
+    ret: Ty,
+    classes: &ClassNames,
+    mtp: &TParams,
+    diags: &mut DiagSink,
+) -> Signature {
+    let params: Vec<Ty> = m
+        .params
+        .iter()
+        .map(|p| {
+            let t = ty_of_ref(&p.ty, classes, mtp, diags);
+            if p.is_vararg {
+                Ty::array(t)
+            } else {
+                t
+            }
+        })
+        .collect();
+    let lambda_param_types: Vec<Vec<Ty>> = m
+        .params
+        .iter()
+        .map(|p| {
+            if !p.ty.fun_params.is_empty() || p.ty.name == "<fun>" {
+                p.ty.fun_params
+                    .iter()
+                    .map(|r| ty_of_ref(r, classes, mtp, diags))
+                    .collect()
+            } else {
+                Vec::new()
+            }
+        })
+        .collect();
+    Signature {
+        params,
+        ret,
+        vararg: m.params.last().is_some_and(|p| p.is_vararg),
+        required: m.params.iter().take_while(|p| p.default.is_none()).count(),
+        param_defaults: m.params.iter().map(|p| p.default.is_some()).collect(),
+        param_names: m.params.iter().map(|p| p.name.clone()).collect(),
+        lambda_param_types,
+        lambda_recv: m.params.iter().map(|p| p.ty.fun_has_receiver).collect(),
+        is_inline: false,
+        is_final: m.is_final,
+        is_suspend: m.is_suspend,
+    }
 }
 
 /// Resolve a syntactic type reference to a `Ty`: a primitive/String/Unit, a declared class

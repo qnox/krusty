@@ -8992,17 +8992,7 @@ impl<'a> Lower<'a> {
                     .syms
                     .method_of(internal, name)
                     .is_some_and(|s| s.vararg);
-                let n_fixed = if vararg {
-                    params.len().saturating_sub(1)
-                } else {
-                    params.len()
-                };
-                let arity_ok = if vararg {
-                    args.len() >= n_fixed
-                } else {
-                    args.len() == params.len()
-                };
-                if arity_ok {
+                if let Some(n_fixed) = vararg_arity(vararg, params.len(), args.len()) {
                     let recv = self.ir.add_expr(IrExpr::GetValue(this_v));
                     let a = self.lower_call_args_vararg(args, &params, vararg, n_fixed)?;
                     return Some(self.ir.add_expr(IrExpr::MethodCall {
@@ -15289,19 +15279,7 @@ impl<'a> Lower<'a> {
                         // Unqualified instance method call inside a class body: `foo()` → `this.foo()`.
                         let params = self.ir.functions[mfid as usize].params.clone();
                         let vararg = self.syms.method_of(&cur, &fname).is_some_and(|s| s.vararg);
-                        let n_fixed = if vararg {
-                            params.len().saturating_sub(1)
-                        } else {
-                            params.len()
-                        };
-                        let arity_ok = if vararg {
-                            args.len() >= n_fixed
-                        } else {
-                            args.len() == params.len()
-                        };
-                        if !arity_ok {
-                            return None;
-                        }
+                        let n_fixed = vararg_arity(vararg, params.len(), args.len())?;
                         let this = self.ir.add_expr(IrExpr::GetValue(0));
                         let a = self.lower_call_args_vararg(&args, &params, vararg, n_fixed)?;
                         self.ir.add_expr(IrExpr::MethodCall {
@@ -17026,6 +17004,18 @@ fn lambda_info(info: &TypeInfo, e: AstExprId) -> crate::resolve::LambdaInfo {
     match info.expr_lowers.get(&e) {
         Some(ExprLowering::Lambda(li)) => *li,
         _ => Default::default(),
+    }
+}
+
+/// The fixed-parameter count for a (possibly `vararg`) call, or `None` when the argument count doesn't
+/// fit: a `vararg` accepts `>= params.len() - 1` arguments (the rest pack into the trailing array); a
+/// non-`vararg` requires an exact match.
+fn vararg_arity(vararg: bool, n_params: usize, n_args: usize) -> Option<usize> {
+    if vararg {
+        let n_fixed = n_params.saturating_sub(1);
+        (n_args >= n_fixed).then_some(n_fixed)
+    } else {
+        (n_args == n_params).then_some(n_params)
     }
 }
 
