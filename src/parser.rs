@@ -612,6 +612,33 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// Kotlin treats a newline before `||`, `&&`, or `?:` as a line CONTINUATION, not a statement
+    /// terminator (`cond\n  && other`, `x\n  ?: default`): the operator cannot begin a statement, so
+    /// the expression keeps going. Peek past the newline(s); if such an operator follows, consume them
+    /// so the binary/elvis loop sees the operator on the same logical line. (`+`/`-`/`*` deliberately do
+    /// NOT continue — kotlinc parses a leading `-x` as a fresh unary-prefix statement, per the grammar
+    /// which allows `NL*` before `||`/`&&`/elvis but not before the additive/multiplicative operators.)
+    fn skip_newlines_before_continuation_op(&mut self) {
+        if !self.at(TokenKind::Newline) {
+            return;
+        }
+        let mut j = self.i;
+        while self.t.get(j).is_some_and(|t| t.kind == TokenKind::Newline) {
+            j += 1;
+        }
+        let continues = match self.t.get(j).map(|t| t.kind) {
+            Some(TokenKind::OrOr | TokenKind::AndAnd) => true,
+            Some(TokenKind::Question) => self
+                .t
+                .get(j + 1)
+                .is_some_and(|t| t.kind == TokenKind::Colon),
+            _ => false,
+        };
+        if continues {
+            self.skip_newlines();
+        }
+    }
+
     /// Consume a `{ … }` block, balancing nested braces. Assumes the opening `{` is the current token.
 
     // ---- file / decls ----
@@ -4052,6 +4079,9 @@ impl<'a> Parser<'a> {
     fn parse_bp(&mut self, min_bp: u8) -> ExprId {
         let mut lhs = self.parse_prefix();
         loop {
+            // A newline before `||`/`&&`/`?:` is a line continuation, not a terminator — consume it so
+            // the operator below (or the enclosing elvis loop, for `?:`) sees it on this logical line.
+            self.skip_newlines_before_continuation_op();
             // `is` / `!is` type test — a "named check" at comparison precedence (binding power 7).
             if min_bp <= 7 {
                 let negated = if self.at(TokenKind::Ident) && self.text() == "is" {
