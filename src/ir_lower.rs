@@ -9006,10 +9006,7 @@ impl<'a> Lower<'a> {
         if let Some(internal) = this_ty.obj_internal() {
             if let Some((class, index, mfid, _)) = self.resolve_method(internal, name) {
                 let params = self.ir.functions[mfid as usize].params.clone();
-                let vararg = self
-                    .syms
-                    .method_of(internal, name)
-                    .is_some_and(|s| s.vararg);
+                let vararg = self.syms.method_is_vararg(internal, name);
                 if let Some(n_fixed) = vararg_arity(vararg, params.len(), args.len()) {
                     let recv = self.ir.add_expr(IrExpr::GetValue(this_v));
                     let a = self.lower_call_args_vararg(args, &params, vararg, n_fixed)?;
@@ -15296,7 +15293,7 @@ impl<'a> Lower<'a> {
                     {
                         // Unqualified instance method call inside a class body: `foo()` → `this.foo()`.
                         let params = self.ir.functions[mfid as usize].params.clone();
-                        let vararg = self.syms.method_of(&cur, &fname).is_some_and(|s| s.vararg);
+                        let vararg = self.syms.method_is_vararg(&cur, &fname);
                         let n_fixed = vararg_arity(vararg, params.len(), args.len())?;
                         let this = self.ir.add_expr(IrExpr::GetValue(0));
                         let a = self.lower_call_args_vararg(&args, &params, vararg, n_fixed)?;
