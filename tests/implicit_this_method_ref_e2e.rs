@@ -1,0 +1,38 @@
+//! An unqualified member-function reference `::m` inside a class is a BOUND reference to the enclosing
+//! receiver — `this::m`. It captures `this` and lowers to the same `FunctionReferenceImpl` as `obj::m`.
+//! Round-tripped on the JVM.
+
+mod common;
+
+fn run(src: &str) -> Option<String> {
+    let jh = common::java_home()?;
+    let sl = common::stdlib_jar()?;
+    let jdk = std::path::PathBuf::from(format!("{jh}/lib/modules"));
+    common::compile_and_run_box(src, "Main", &[sl], Some(&jdk))
+}
+
+#[test]
+fn implicit_this_member_function_reference() {
+    const SRC: &str = "class A {\n\
+    var r = \"\"\n\
+    fun mf() { r += \"O\" }\n\
+    fun test(): String {\n\
+        val f = ::mf\n\
+        f()\n\
+        r += \"K\"\n\
+        return r\n\
+    }\n\
+}\n\
+fun box(): String = A().test()\n";
+    assert_eq!(run(SRC).expect("::memberFn = this::memberFn"), "OK");
+}
+
+#[test]
+fn implicit_this_member_function_with_arg() {
+    const SRC: &str = "class B {\n\
+    fun add(s: String): String = \"O\" + s\n\
+    fun test(): String = (::add)(\"K\")\n\
+}\n\
+fun box(): String = B().test()\n";
+    assert_eq!(run(SRC).expect("::memberFn with arg"), "OK");
+}

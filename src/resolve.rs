@@ -6284,6 +6284,22 @@ impl<'a> Checker<'a> {
                             return self.set(e, Ty::fun(sig.params.clone(), sig.ret));
                         }
                     }
+                    // An unqualified `::m` inside a class is a BOUND reference to the enclosing receiver's
+                    // member FUNCTION — `this::m`. Resolved before the top-level fallbacks (a member takes
+                    // precedence over a same-named top-level decl), exactly matching the lowerer's
+                    // `lower_implicit_this_method_ref` (member functions only, non-`Nothing` return — a
+                    // member-property implicit ref isn't lowered, so it's NOT resolved here either, to keep
+                    // the checker and lowerer in agreement).
+                    if let Some(Ty::Obj(internal, _)) = self.this_ty.clone() {
+                        if let Some(sig) = self.syms.method_of(&internal, &name) {
+                            if !sig.vararg
+                                && sig.params.len() == sig.required
+                                && sig.ret != Ty::Nothing
+                            {
+                                return self.set(e, Ty::fun(sig.params.clone(), sig.ret));
+                            }
+                        }
+                    }
                     // Top-level property reference `::foo` keeps its property-reference API (`get`,
                     // `name`) while the provider marks it callable-like for function-typed positions.
                     if let Some((_, is_var, _)) = self.syms.props.get(&name) {

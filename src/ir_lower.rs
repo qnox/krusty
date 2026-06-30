@@ -7153,6 +7153,43 @@ impl<'a> Lower<'a> {
         )
     }
 
+    /// An unqualified member-function reference `::m` inside a class — a BOUND ref to the enclosing
+    /// receiver (`this::m`): capture `this` (value 0) and emit the same `FunctionReferenceImpl` the
+    /// `obj::m` form does. Member-property and extension implicit refs aren't modeled here (the type
+    /// isn't `Ty::Fun` / there's no member method), so they fall through.
+    fn lower_implicit_this_method_ref(&mut self, e: AstExprId, name: &str) -> Option<u32> {
+        let internal = self.cur_class.clone()?;
+        self.resolve_method(&internal, name)?;
+        let Ty::Fun(sig) = self.info.ty(e) else {
+            return None;
+        };
+        if sig.ret == Ty::Nothing {
+            return None;
+        }
+        let call_interface = self
+            .classes
+            .get(&internal)
+            .is_some_and(|ci| self.ir.classes[ci.id as usize].is_interface);
+        let this_e = self.ir.add_expr(IrExpr::GetValue(0));
+        let param_tys: Vec<Ty> = sig.params.iter().map(|t| ty_to_ir(*t)).collect();
+        self.make_func_ref(
+            e.0,
+            true,
+            sig.params.len() as u8,
+            internal.clone(),
+            name.to_string(),
+            0,
+            crate::ir::FrDispatch::VirtualBound,
+            internal,
+            name.to_string(),
+            call_interface,
+            param_tys,
+            ty_to_ir(sig.ret),
+            Some(this_e),
+            None,
+        )
+    }
+
     /// Bound callable reference on an arbitrary EXPRESSION receiver (`"abc"::get`, `1::foo`, `mk()::m`):
     /// the receiver is evaluated once and captured into the closure. Handles a bound extension function
     /// (`expr::extFun` → the lifted static `extFun(recv, args…)`, captured receiver) and a bound member
@@ -12157,6 +12194,13 @@ impl<'a> Lower<'a> {
                 if let Some(recv) = receiver {
                     if let Some(pr) = self.lower_prop_ref(e, recv, &name) {
                         return Some(pr);
+                    }
+                }
+                // An unqualified `::m` inside a class binds to the enclosing receiver (`this::m`) — a
+                // member function takes precedence over a same-named top-level decl (matches the checker).
+                if receiver.is_none() {
+                    if let Some(r) = self.lower_implicit_this_method_ref(e, &name) {
+                        return Some(r);
                     }
                 }
                 // Top-level property reference `::foo` lowers to a `(Mutable)PropertyReference0Impl`
