@@ -130,6 +130,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
         local_delegated: HashMap::new(),
         cur_tailrec: None,
         expr_depth: 0,
+        index_subst: HashMap::new(),
         inline_lambdas: Vec::new(),
         inline_active: Vec::new(),
         reified_subst: Vec::new(),
@@ -3405,6 +3406,12 @@ pub(crate) struct Lower<'a> {
     /// deep expression (a stress test with thousands of nested operators): past the limit, lowering
     /// bails (the file is skipped, never miscompiled or crashed).
     expr_depth: u32,
+    /// Substitution of an AST expr id → an already-lowered IR value, consulted at the top of [`Self::expr`].
+    /// Used for a compound index-assign (`a[i] op= v`): the parser desugars it to `a[i] = a[i] op v`
+    /// REUSING the `array`/`index` expr ids, so a side-effecting receiver/index would be evaluated twice.
+    /// The store spills each to a temp once and maps the shared id to a `GetValue(temp)` for the duration,
+    /// so the embedded read and the write both load the temp (idempotent) instead of re-evaluating.
+    index_subst: HashMap<AstExprId, u32>,
     /// Active inlined-lambda parameters while expanding an `inline fun` body, as a stack so nested
     /// inline calls compose: a call `param(args)` in the inline body inlines the lambda body in place.
     inline_lambdas: Vec<InlineLambda>,
@@ -10425,104 +10432,44 @@ impl<'a> Lower<'a> {
                 index,
                 value,
             } => {
-                let at = self.info.ty(array);
-                // `m[i] = v` on a USER class with an `operator fun set(index, value)` → `m.set(i, v)`
-                // (walks supers, so an inherited operator resolves — consistent with the checker).
-                if let Ty::Obj(internal, _) = at {
-                    if at.array_elem().is_none() {
-                        let setm = self
-                            .resolve_method(internal, "set")
-                            .map(|(class, midx, fid, _)| (class, midx, fid));
-                        if let Some((class, midx, fid)) = setm {
-                            let ptys = self.ir.functions[fid as usize].params.clone();
-                            let ity = ty_to_ir(self.info.ty(index));
-                            let vty = ty_to_ir(self.info.ty(value));
-                            let a = self.expr(array)?;
-                            let i = self.lower_arg(index, ptys.first().unwrap_or(&ity))?;
-                            let v = self.lower_arg(value, ptys.get(1).unwrap_or(&vty))?;
-                            return Some(self.ir.add_expr(IrExpr::MethodCall {
-                                class,
-                                index: midx,
-                                receiver: a,
-                                args: vec![Some(i), Some(v)],
-                            }));
+                // A compound index-assign (`a[i] op= v`) desugars (in the parser) to `value = a[i] op v`,
+                // REUSING the `array`/`index` expr ids — so lowering the store and the embedded read would
+                // evaluate a side-effecting receiver/index twice (`a[f()] += v` calls `f()` twice). Spill
+                // each non-pure operand to a temp once, mapping its shared id to a `GetValue(temp)` for the
+                // duration of the store (a bare name/literal is left to re-evaluate — pure, and matches
+                // kotlinc's bytecode). The substitution is consulted at the top of [`Self::expr`].
+                let mut prelude = Vec::new();
+                if self.is_compound_index_assign(array, index, value) {
+                    for sub in [array, index] {
+                        if !self.index_subst.contains_key(&sub) && !self.is_pure_index_operand(sub)
+                        {
+                            let lowered = self.expr(sub)?;
+                            let slot = self.fresh_value();
+                            let ty = ty_to_ir(self.info.ty(sub));
+                            let var = self.ir.add_expr(IrExpr::Variable {
+                                index: slot,
+                                ty,
+                                init: Some(lowered),
+                            });
+                            let getv = self.ir.add_expr(IrExpr::GetValue(slot));
+                            self.index_subst.insert(sub, getv);
+                            prelude.push(var);
                         }
                     }
                 }
-                // `coll[i] = v` on a library type → its `set(index, value)` operator member, discarding
-                // the returned previous element (an array set stays the `kotlin/Array.set` intrinsic).
-                if let Ty::Obj(internal, _) = at {
-                    if at.array_elem().is_none() {
-                        let (it, vt) = (self.info.ty(index), self.info.ty(value));
-                        // `MutableList.set(Int, E)`, or `MutableMap.put(K, V)` — Kotlin's `m[k] = v`
-                        // operator maps to `put` on a map.
-                        let resolved = crate::call_resolver::resolve_instance(
-                            &*self.syms.libraries,
-                            internal,
-                            "set",
-                            &[it, vt],
-                        )
-                        .map(|m| ("set", m))
-                        .or_else(|| {
-                            crate::call_resolver::resolve_instance(
-                                &*self.syms.libraries,
-                                internal,
-                                "put",
-                                &[it, vt],
-                            )
-                            .map(|m| ("put", m))
-                        });
-                        if let Some((mname, m)) = resolved {
-                            // A narrowing store into a primitive-element collection (`List<Byte>[i] = intVal`)
-                            // needs `(value).toByte()` before boxing as the element wrapper — not yet modeled.
-                            // Bail (skip the file) rather than box the wrong wrapper type.
-                            if let Some(elem) = crate::call_resolver::resolve_instance_member(
-                                &*self.syms.libraries,
-                                at,
-                                "get",
-                                &[it],
-                            )
-                            .map(|m| m.ret)
-                            {
-                                if self.has_scalar_value_repr(elem) && elem != vt {
-                                    return None;
-                                }
-                            }
-                            let is_iface = self.library_type_is_interface(internal);
-                            let a = self.expr(array)?;
-                            let i = self.lower_arg(
-                                index,
-                                &ty_to_ir(m.params.first().copied().unwrap_or(it)),
-                            )?;
-                            let v = self.lower_arg(
-                                value,
-                                &ty_to_ir(m.params.get(1).copied().unwrap_or(vt)),
-                            )?;
-                            return Some(self.ir.add_expr(IrExpr::Call {
-                                callee: Callee::Virtual {
-                                    owner: internal.to_string(),
-                                    name: mname.to_string(),
-                                    descriptor: m.descriptor.clone(),
-                                    interface: is_iface,
-                                },
-                                dispatch_receiver: Some(a),
-                                args: vec![i, v],
-                            }));
-                        }
-                    }
+                let store = self.lower_index_store(array, index, value);
+                self.index_subst.remove(&array);
+                self.index_subst.remove(&index);
+                let store = store?;
+                if prelude.is_empty() {
+                    Some(store)
+                } else {
+                    prelude.push(store);
+                    Some(self.ir.add_expr(IrExpr::Block {
+                        stmts: prelude,
+                        value: None,
+                    }))
                 }
-                let a = self.expr(array)?;
-                let i = self.expr(index)?;
-                // Coerce the element to the array's element type (boxing/unboxing, and materializing
-                // `Unit.INSTANCE` for a `Unit` value into an `Array<Any>`) — same as the user-`set`/
-                // collection paths above, rather than storing the raw value.
-                let elem = at.array_elem().unwrap_or_else(|| Ty::obj("kotlin/Any"));
-                let v = self.lower_arg(value, &ty_to_ir(elem))?;
-                Some(self.ir.add_expr(IrExpr::Call {
-                    callee: Callee::External("kotlin/Array.set".to_string()),
-                    dispatch_receiver: Some(a),
-                    args: vec![i, v],
-                }))
             }
             Stmt::While { cond, body, label } => {
                 let c = self.expr(cond)?;
@@ -10944,6 +10891,149 @@ impl<'a> Lower<'a> {
         }
         self.afile
             .any_child_stmt(s, &mut |x| self.expr_reassigns_name(x, name))
+    }
+
+    /// Whether a `Stmt::AssignIndex` is a desugared compound assign (`a[i] op= v`): the parser emits
+    /// `value = (a[i]) op v` reusing the SAME `array`/`index` expr ids, so the embedded `Index` matches.
+    fn is_compound_index_assign(
+        &self,
+        array: AstExprId,
+        index: AstExprId,
+        value: AstExprId,
+    ) -> bool {
+        if let Expr::Binary { lhs, .. } = self.afile.expr(value) {
+            if let Expr::Index {
+                array: a2,
+                index: i2,
+            } = self.afile.expr(*lhs)
+            {
+                return *a2 == array && *i2 == index;
+            }
+        }
+        false
+    }
+
+    /// Whether an index-assign receiver/index operand is side-effect-free, so re-evaluating it (rather
+    /// than spilling to a temp) is sound and keeps bytecode parity with kotlinc. A bare `Name` qualifies
+    /// ONLY when it is a local variable: a property `Name` may be a getter call with side effects (kotlinc
+    /// evaluates the index once), so it is spilled.
+    fn is_pure_index_operand(&self, e: AstExprId) -> bool {
+        match self.afile.expr(e) {
+            Expr::Name(n) => self.lookup(n).is_some(),
+            Expr::IntLit(_)
+            | Expr::LongLit(_)
+            | Expr::UIntLit(_)
+            | Expr::ULongLit(_)
+            | Expr::CharLit(_)
+            | Expr::BoolLit(_)
+            | Expr::NullLit => true,
+            _ => false,
+        }
+    }
+
+    /// Lower the STORE of an index-assign `array[index] = value` (the receiver/index already spilled by
+    /// the caller when compound). Dispatches to a user `operator fun set`, a library `set`/`put`, or the
+    /// `kotlin/Array.set` intrinsic.
+    fn lower_index_store(
+        &mut self,
+        array: AstExprId,
+        index: AstExprId,
+        value: AstExprId,
+    ) -> Option<u32> {
+        let at = self.info.ty(array);
+        // `m[i] = v` on a USER class with an `operator fun set(index, value)` → `m.set(i, v)`
+        // (walks supers, so an inherited operator resolves — consistent with the checker).
+        if let Ty::Obj(internal, _) = at {
+            if at.array_elem().is_none() {
+                let setm = self
+                    .resolve_method(internal, "set")
+                    .map(|(class, midx, fid, _)| (class, midx, fid));
+                if let Some((class, midx, fid)) = setm {
+                    let ptys = self.ir.functions[fid as usize].params.clone();
+                    let ity = ty_to_ir(self.info.ty(index));
+                    let vty = ty_to_ir(self.info.ty(value));
+                    let a = self.expr(array)?;
+                    let i = self.lower_arg(index, ptys.first().unwrap_or(&ity))?;
+                    let v = self.lower_arg(value, ptys.get(1).unwrap_or(&vty))?;
+                    return Some(self.ir.add_expr(IrExpr::MethodCall {
+                        class,
+                        index: midx,
+                        receiver: a,
+                        args: vec![Some(i), Some(v)],
+                    }));
+                }
+            }
+        }
+        // `coll[i] = v` on a library type → its `set(index, value)` operator member, discarding
+        // the returned previous element (an array set stays the `kotlin/Array.set` intrinsic).
+        if let Ty::Obj(internal, _) = at {
+            if at.array_elem().is_none() {
+                let (it, vt) = (self.info.ty(index), self.info.ty(value));
+                // `MutableList.set(Int, E)`, or `MutableMap.put(K, V)` — Kotlin's `m[k] = v`
+                // operator maps to `put` on a map.
+                let resolved = crate::call_resolver::resolve_instance(
+                    &*self.syms.libraries,
+                    internal,
+                    "set",
+                    &[it, vt],
+                )
+                .map(|m| ("set", m))
+                .or_else(|| {
+                    crate::call_resolver::resolve_instance(
+                        &*self.syms.libraries,
+                        internal,
+                        "put",
+                        &[it, vt],
+                    )
+                    .map(|m| ("put", m))
+                });
+                if let Some((mname, m)) = resolved {
+                    // A narrowing store into a primitive-element collection (`List<Byte>[i] = intVal`)
+                    // needs `(value).toByte()` before boxing as the element wrapper — not yet modeled.
+                    // Bail (skip the file) rather than box the wrong wrapper type.
+                    if let Some(elem) = crate::call_resolver::resolve_instance_member(
+                        &*self.syms.libraries,
+                        at,
+                        "get",
+                        &[it],
+                    )
+                    .map(|m| m.ret)
+                    {
+                        if self.has_scalar_value_repr(elem) && elem != vt {
+                            return None;
+                        }
+                    }
+                    let is_iface = self.library_type_is_interface(internal);
+                    let a = self.expr(array)?;
+                    let i =
+                        self.lower_arg(index, &ty_to_ir(m.params.first().copied().unwrap_or(it)))?;
+                    let v =
+                        self.lower_arg(value, &ty_to_ir(m.params.get(1).copied().unwrap_or(vt)))?;
+                    return Some(self.ir.add_expr(IrExpr::Call {
+                        callee: Callee::Virtual {
+                            owner: internal.to_string(),
+                            name: mname.to_string(),
+                            descriptor: m.descriptor.clone(),
+                            interface: is_iface,
+                        },
+                        dispatch_receiver: Some(a),
+                        args: vec![i, v],
+                    }));
+                }
+            }
+        }
+        let a = self.expr(array)?;
+        let i = self.expr(index)?;
+        // Coerce the element to the array's element type (boxing/unboxing, and materializing
+        // `Unit.INSTANCE` for a `Unit` value into an `Array<Any>`) — same as the user-`set`/
+        // collection paths above, rather than storing the raw value.
+        let elem = at.array_elem().unwrap_or_else(|| Ty::obj("kotlin/Any"));
+        let v = self.lower_arg(value, &ty_to_ir(elem))?;
+        Some(self.ir.add_expr(IrExpr::Call {
+            callee: Callee::External("kotlin/Array.set".to_string()),
+            dispatch_receiver: Some(a),
+            args: vec![i, v],
+        }))
     }
 
     /// Substitute a reified type-parameter reference (`is T`/`as T`/`T::class` inside an expanded
@@ -11761,6 +11851,11 @@ impl<'a> Lower<'a> {
     }
 
     fn expr(&mut self, e: AstExprId) -> Option<u32> {
+        // A compound index-assign spilled this expr to a temp — reuse the temp load instead of
+        // re-evaluating (see [`Self::index_subst`]).
+        if let Some(&v) = self.index_subst.get(&e) {
+            return Some(v);
+        }
         // Guard against a stack overflow on a pathologically deep expression (a stress test with
         // thousands of nested operators): bail past the limit so the file is skipped, not crashed.
         self.expr_depth += 1;
