@@ -9818,6 +9818,19 @@ impl<'a> Lower<'a> {
                     {
                         Ty::from_name(&r.name).unwrap().nullable_boxed().unwrap()
                     }
+                    // `Unit?` is a nullable `kotlin/Unit` reference (1-slot), not the 0-slot `Ty::Unit`
+                    // — a `Ty::Unit` slot is untracked in frames, so a `val x: Unit? = null` local would
+                    // be dropped from a branch-target frame ("Bad local variable type"). Guard against a
+                    // file-local class also named `Unit` (it takes the class arm below).
+                    Some(r)
+                        if r.nullable
+                            && r.name == "Unit"
+                            && !self
+                                .classes
+                                .contains_key(&class_internal(self.afile, &r.name)) =>
+                    {
+                        Ty::obj("kotlin/Unit")
+                    }
                     Some(r) if Ty::from_name(&r.name).is_some() => Ty::from_name(&r.name).unwrap(),
                     Some(r)
                         if self
