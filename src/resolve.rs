@@ -1970,8 +1970,15 @@ fn expr_has_finally(file: &File, e: ExprId) -> bool {
 /// emitter doesn't do), inside a `try` (the jump must cross exception regions / run `finally`), or
 /// inside a lambda (a non-local jump). `forbidden` is true once the walk is in such a context.
 /// Plain `break`/`continue` *statements* in a loop body or `if`/`when` statement branch are fine.
-fn bc_complex_e(file: &File, e: ExprId, forbidden: bool) -> bool {
-    let v = |x: ExprId| bc_complex_e(file, x, true);
+// A `break`/`continue` is emit-able only as a loop jump in the CURRENT function reached by a plain goto:
+// in statement position or as a direct `if`/`when` BRANCH, and NOT crossing a lambda/`try` boundary to its
+// target loop. Two independent flags track the two ways a position is unsupported:
+//   `vforbid` — a non-branch VALUE position (`f(break)`, `x + break`); cleared by an `if`/`when` branch.
+//   `cross`   — inside a LAMBDA or `try` whose target loop is outside it (a non-local jump); NOT cleared by
+//               a branch (a break in an if-branch inside a lambda still crosses it).
+// An enclosing LOOP body clears BOTH: a break there targets that (in-scope) loop, so it's a local goto.
+fn bc_complex_e(file: &File, e: ExprId, vforbid: bool, cross: bool) -> bool {
+    let val = |x: ExprId| bc_complex_e(file, x, true, cross);
     match file.expr(e) {
         // Pure leaves (a `CallableRef` receiver can't carry a loop jump) — never complex.
         Expr::Name(_)
@@ -1984,74 +1991,79 @@ fn bc_complex_e(file: &File, e: ExprId, forbidden: bool) -> bool {
         | Expr::CharLit(_)
         | Expr::NullLit
         | Expr::CallableRef { .. } => false,
-        // A lambda body's `break`/`continue` would be a non-local jump (unsupported) — forbid throughout.
-        Expr::Lambda { body, .. } => bc_complex_e(file, *body, true),
-        // The condition/subject is a value; branches inherit the current context (a value `if`/`when`
-        // makes its branches values; a statement `if` keeps them statements).
+        // A lambda body's `break`/`continue` targeting an OUTER loop is a non-local jump — set `cross`.
+        Expr::Lambda { body, .. } => bc_complex_e(file, *body, true, true),
+        // The condition/subject is a value; a branch clears `vforbid` (a direct branch break lowers to a
+        // goto, the merge skips the diverging branch) but keeps `cross` (a branch break inside a lambda/try
+        // still crosses it).
         Expr::If {
             cond,
             then_branch,
             else_branch,
         } => {
-            v(*cond)
-                || bc_complex_e(file, *then_branch, forbidden)
-                || else_branch.map_or(false, |x| bc_complex_e(file, x, forbidden))
+            val(*cond)
+                || bc_complex_e(file, *then_branch, false, cross)
+                || else_branch.map_or(false, |x| bc_complex_e(file, x, false, cross))
         }
         Expr::When { subject, arms } => {
-            subject.map_or(false, |s| v(s))
+            subject.map_or(false, &val)
                 || arms.iter().any(|a| {
-                    a.conditions.iter().any(|&c| v(c)) || bc_complex_e(file, a.body, forbidden)
+                    a.conditions.iter().any(|&c| val(c)) || bc_complex_e(file, a.body, false, cross)
                 })
         }
         Expr::Block { stmts, trailing } => {
-            stmts.iter().any(|&s| bc_complex_s(file, s, forbidden))
-                || trailing.map_or(false, |t| bc_complex_e(file, t, forbidden))
+            stmts.iter().any(|&s| bc_complex_s(file, s, vforbid, cross))
+                || trailing.map_or(false, |t| bc_complex_e(file, t, vforbid, cross))
         }
-        // Inside a `try`, any `break`/`continue` must cross the region — forbid throughout.
+        // A break/continue inside a `try` would cross its region — set `cross`.
         Expr::Try {
             body,
             catches,
             finally,
         } => {
-            bc_complex_e(file, *body, true)
-                || catches.iter().any(|c| bc_complex_e(file, c.body, true))
-                || finally.map_or(false, |f| bc_complex_e(file, f, true))
+            bc_complex_e(file, *body, true, true)
+                || catches
+                    .iter()
+                    .any(|c| bc_complex_e(file, c.body, true, true))
+                || finally.map_or(false, |f| bc_complex_e(file, f, true, true))
         }
-        // Every other expression evaluates its children as *values* (forbidden context).
-        _ => file.any_child_expr(e, &mut |c| v(c), &mut |s| bc_complex_s(file, s, true)),
+        // Every other expression evaluates its children as *values* (vforbid; `cross` unchanged).
+        _ => file.any_child_expr(e, &mut |c| val(c), &mut |s| {
+            bc_complex_s(file, s, true, cross)
+        }),
     }
 }
 
-fn bc_complex_s(file: &File, s: StmtId, forbidden: bool) -> bool {
-    let v = |x: ExprId| bc_complex_e(file, x, true);
+fn bc_complex_s(file: &File, s: StmtId, vforbid: bool, cross: bool) -> bool {
+    let val = |x: ExprId| bc_complex_e(file, x, true, cross);
+    // An enclosing loop body: a break/continue there targets THIS loop — a local goto, so clear both flags.
+    let loop_body = |x: ExprId| bc_complex_e(file, x, false, false);
     match file.stmt(s) {
-        Stmt::Break(_) | Stmt::Continue(_) => forbidden,
+        Stmt::Break(_) | Stmt::Continue(_) => vforbid || cross,
         Stmt::Local { init, .. }
         | Stmt::Destructure { init, .. }
         | Stmt::LocalDelegate { delegate: init, .. }
-        | Stmt::Assign { value: init, .. } => v(*init),
+        | Stmt::Assign { value: init, .. } => val(*init),
         Stmt::AssignMember {
             receiver, value, ..
-        } => v(*receiver) || v(*value),
+        } => val(*receiver) || val(*value),
         Stmt::AssignIndex {
             array,
             index,
             value,
-        } => v(*array) || v(*index) || v(*value),
-        Stmt::Return(Some(e), _) => v(*e),
+        } => val(*array) || val(*index) || val(*value),
+        Stmt::Return(Some(e), _) => val(*e),
         Stmt::Return(None, _) | Stmt::IncDec { .. } => false,
         // A statement's value is discarded — its (possibly `if`/`when`) tree stays in statement position.
-        Stmt::Expr(e) => bc_complex_e(file, *e, false),
+        Stmt::Expr(e) => bc_complex_e(file, *e, false, cross),
         Stmt::While { cond, body, .. } | Stmt::DoWhile { cond, body, .. } => {
-            v(*cond) || bc_complex_e(file, *body, false)
+            val(*cond) || loop_body(*body)
         }
-        Stmt::For { range, body, .. } => {
-            v(range.start) || v(range.end) || bc_complex_e(file, *body, false)
-        }
-        Stmt::ForEach { iterable, body, .. } => v(*iterable) || bc_complex_e(file, *body, false),
+        Stmt::For { range, body, .. } => val(range.start) || val(range.end) || loop_body(*body),
+        Stmt::ForEach { iterable, body, .. } => val(*iterable) || loop_body(*body),
         // A local function is a separate body — `break`/`continue` in it would be non-local.
         Stmt::LocalFun(f) => match &f.body {
-            FunBody::Expr(e) | FunBody::Block(e) => bc_complex_e(file, *e, true),
+            FunBody::Expr(e) | FunBody::Block(e) => bc_complex_e(file, *e, true, true),
             FunBody::None => false,
         },
         // A local class is hoisted + checked separately; no enclosing-loop break/continue in its body.
@@ -4785,7 +4797,7 @@ impl<'a> Checker<'a> {
 
     fn check_fun_body(&mut self, f: &FunDecl) {
         if let FunBody::Expr(e) | FunBody::Block(e) = &f.body {
-            if bc_complex_e(self.file, *e, false) {
+            if bc_complex_e(self.file, *e, false, false) {
                 self.diags.error(f.span, "krusty: 'break'/'continue' in value position, inside 'try', or inside a lambda is not supported".to_string());
                 return;
             }
