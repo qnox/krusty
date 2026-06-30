@@ -3704,6 +3704,52 @@ impl<'a> Emitter<'a> {
     fn emit_value(&mut self, e: u32, code: &mut CodeBuilder) {
         let node = self.ir.expr(e).clone();
         self.emit_value_node(&node, code);
+        // A `Nothing`-returning REAL-invoke call (`exit(): Nothing`) physically leaves a `java/lang/Void`
+        // on the stack and falls through — unlike `throw`/`return`, which terminate. kotlinc makes the
+        // path truly diverge: discard the `Void`, then `throw KotlinNothingValueException()`. Mirror that
+        // so a `Nothing` call used in a branch (`if (c) … else exit()`) terminates instead of leaking a
+        // `Void` into the merge frame. Inline-spliced `Nothing` calls (`error(...)`) already end in
+        // `athrow`, so they're excluded.
+        if self.is_real_nothing_call(&node) {
+            code.pop();
+            let cls = self.cw.class_ref("kotlin/KotlinNothingValueException");
+            code.new_obj(cls);
+            code.dup();
+            let ctor = self
+                .cw
+                .methodref("kotlin/KotlinNothingValueException", "<init>", "()V");
+            code.invokespecial(ctor, 0, 0);
+            code.athrow();
+        }
+    }
+
+    /// A call that physically returns (real `invoke`, leaving a `java/lang/Void`) yet is typed `Nothing`.
+    /// Excludes inline-spliced (`error`/`require`) and intrinsic (`External`) callees, which already end
+    /// the path in `athrow` and leave nothing to discard.
+    fn is_real_nothing_call(&self, node: &IrExpr) -> bool {
+        match node {
+            IrExpr::MethodCall { class, index, .. } => {
+                let fid = self.ir.classes[*class as usize].methods[*index as usize];
+                norm_nothing(ir_ty_to_jvm(&self.ir.functions[fid as usize].ret)) == Ty::Nothing
+            }
+            IrExpr::Call { callee, .. } => match callee {
+                Callee::Local(fid) => {
+                    norm_nothing(ir_ty_to_jvm(&self.ir.functions[*fid as usize].ret)) == Ty::Nothing
+                }
+                Callee::CrossFile { ret, .. } => norm_nothing(ir_ty_to_jvm(ret)) == Ty::Nothing,
+                Callee::Virtual { descriptor, .. } | Callee::Special { descriptor, .. } => {
+                    descriptor.ends_with(")Ljava/lang/Void;")
+                }
+                Callee::CrossFileVirtual { ret, .. } => {
+                    norm_nothing(ir_ty_to_jvm(ret)) == Ty::Nothing
+                }
+                Callee::Static {
+                    descriptor, inline, ..
+                } => !inline.can_inline() && descriptor.ends_with(")Ljava/lang/Void;"),
+                Callee::External(_) => false,
+            },
+            _ => false,
+        }
     }
 
     fn emit_value_node(&mut self, node: &IrExpr, code: &mut CodeBuilder) {
@@ -6137,15 +6183,17 @@ impl<'a> Emitter<'a> {
             IrExpr::New { class, .. } => Ty::obj(&self.ir.classes[*class as usize].fq_name),
             IrExpr::MethodCall { class, index, .. } => {
                 let fid = self.ir.classes[*class as usize].methods[*index as usize];
-                ir_ty_to_jvm(&self.ir.functions[fid as usize].ret)
+                norm_nothing(ir_ty_to_jvm(&self.ir.functions[fid as usize].ret))
             }
             IrExpr::Call {
                 callee,
                 dispatch_receiver,
                 ..
             } => match callee {
-                Callee::Local(fid) => ir_ty_to_jvm(&self.ir.functions[*fid as usize].ret),
-                Callee::CrossFile { ret, .. } => ir_ty_to_jvm(ret),
+                Callee::Local(fid) => {
+                    norm_nothing(ir_ty_to_jvm(&self.ir.functions[*fid as usize].ret))
+                }
+                Callee::CrossFile { ret, .. } => norm_nothing(ir_ty_to_jvm(ret)),
                 // Array `get` returns the receiver's element; an array `<init>` returns the array type.
                 Callee::External(fq) if fq == "kotlin/Array.get" => dispatch_receiver
                     .map(|r| {
@@ -6170,7 +6218,7 @@ impl<'a> Emitter<'a> {
                         ty_from_descriptor_ret(descriptor)
                     }
                 }
-                Callee::CrossFileVirtual { ret, .. } => ir_ty_to_jvm(ret),
+                Callee::CrossFileVirtual { ret, .. } => norm_nothing(ir_ty_to_jvm(ret)),
             },
             IrExpr::PrimitiveBinOp { op, lhs, .. } => match op {
                 IrBinOp::Lt
@@ -6450,6 +6498,21 @@ fn prim_newarray_atype(elem: Ty) -> u8 {
         Ty::Short => 9,
         Ty::Long => 11,
         _ => 10, // int
+    }
+}
+
+/// Normalize a call's return JVM-type: a Kotlin `Nothing` is carried as an object whose JVM mapping is
+/// `java/lang/Void` (the descriptor the front end emits for it). Collapse that to the `Ty::Nothing`
+/// bottom variant so `diverges`/`value_ty_of_when` see the call never returns — a `Static`/`Virtual`
+/// callee already gets this from its `)Ljava/lang/Void;` descriptor; a `Local`/`CrossFile`/method callee
+/// reads the IR `ret` directly and needs the same normalization (else a `Nothing`-returning call's value
+/// is wrongly merged/popped, e.g. an `exit()` branch of an `if` ⇒ inconsistent stackmap frames).
+fn norm_nothing(t: Ty) -> Ty {
+    match &t {
+        Ty::Obj(n, _) if crate::jvm::jvm_class_map::to_jvm_internal(n) == "java/lang/Void" => {
+            Ty::Nothing
+        }
+        _ => t,
     }
 }
 
