@@ -8035,8 +8035,10 @@ impl<'a> Lower<'a> {
         self.syms.class_by_internal(internal).is_some_and(|c| {
             c.is_fun_interface
                 && c.tparam_names.is_empty()
+                // No-argument SAM only — see the matching note in `resolve::simple_fun_interface`.
                 && c.methods.values().all(|sig| {
-                    !self.is_value_class_ty(sig.ret)
+                    sig.params.is_empty()
+                        && !self.is_value_class_ty(sig.ret)
                         && sig.params.iter().all(|p| !self.is_value_class_ty(*p))
                 })
         })

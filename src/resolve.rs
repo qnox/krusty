@@ -4928,8 +4928,12 @@ impl<'a> Checker<'a> {
         };
         c.is_fun_interface
             && c.tparam_names.is_empty()
+            // No-argument SAM only: the backend's `invokedynamic` SAM descriptor derives the abstract
+            // method's parameter types from the lambda arity, so a SAM method WITH parameters currently
+            // miscompiles (AbstractMethodError). Restrict until that descriptor is fixed.
             && c.methods.values().all(|sig| {
-                !self.ty_is_value_class(sig.ret)
+                sig.params.is_empty()
+                    && !self.ty_is_value_class(sig.ret)
                     && sig.params.iter().all(|p| !self.ty_is_value_class(*p))
             })
     }
