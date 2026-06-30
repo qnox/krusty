@@ -622,14 +622,22 @@ pub fn lower_value_classes(ir: &mut IrFile) -> bool {
             } => ps.iter_mut().for_each(|p| *p = erase(p, &under)),
             IrExpr::InvokeFunction { ret, .. } => *ret = erase(ret, &under),
             // An `Array<X>` of a value class is a reference array of the BOXED `X` (kotlinc) — keep the
-            // element type boxed (don't erase to the underlying); elements are `box-impl`'d when stored.
-            IrExpr::Vararg { element_type, .. } | IrExpr::NewArray { element_type, .. } => {
-                if !element_type
-                    .non_null()
-                    .obj_internal()
-                    .is_some_and(|fq_name| under.contains_key(fq_name))
-                {
-                    *element_type = erase(element_type, &under)
+            // element boxed (don't erase to the underlying); elements are `box-impl`'d when stored. A
+            // non-value-class element is erased; a primitive array (`kotlin/IntArray`) has no element arg.
+            IrExpr::Vararg { array_type, .. } | IrExpr::NewArray { array_type, .. } => {
+                if let Ty::Obj("kotlin/Array", args) = array_type.non_null() {
+                    if let Some(elem) = args.first().copied() {
+                        let keep_boxed = elem
+                            .non_null()
+                            .obj_internal()
+                            .is_some_and(|fq_name| under.contains_key(fq_name));
+                        let new_elem = if keep_boxed {
+                            elem
+                        } else {
+                            erase(&elem, &under)
+                        };
+                        *array_type = Ty::obj_args("kotlin/Array", &[new_elem]);
+                    }
                 }
             }
             IrExpr::RefNew { elem, .. }

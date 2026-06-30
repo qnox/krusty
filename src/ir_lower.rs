@@ -3912,7 +3912,10 @@ impl<'a> Lower<'a> {
         params: Vec<String>,
         body: AstExprId,
     ) -> Option<ExprId> {
-        let elem_ir = ty_to_ir(elem);
+        // For a boxed `Array<T>` (element `Obj("kotlin/Int")`) the array is `Integer[]`, but the filled
+        // VALUE is the UNBOXED primitive — `kotlin/Array.set` boxes it once before `aastore`. Lowering the
+        // value to the boxed element would double-box. A reference element is unchanged.
+        let value_ir = ty_to_ir(elem.unboxed_primitive().unwrap_or(elem));
         let int_ir = ty_to_ir(Ty::Int);
         // val n = <size> (evaluated once — the bound is read again in the loop)
         let size = self.lower_arg(size_arg, &int_ir)?;
@@ -3922,14 +3925,15 @@ impl<'a> Lower<'a> {
             ty: int_ir.clone(),
             init: Some(size),
         });
-        // val a = new T[n]
+        // val a = new T[n] — the whole array type (`kotlin/IntArray` or `kotlin/Array<X>`) drives the
+        // emitter's `newarray`/`anewarray` + element boxing.
+        let arr_ir = ty_to_ir(Ty::array(elem));
         let gn0 = self.ir.add_expr(IrExpr::GetValue(n_v));
         let alloc = self.ir.add_expr(IrExpr::NewArray {
-            element_type: elem_ir.clone(),
+            array_type: arr_ir,
             size: gn0,
         });
         let arr_v = self.fresh_value();
-        let arr_ir = ty_to_ir(Ty::array(elem));
         let var_arr = self.ir.add_expr(IrExpr::Variable {
             index: arr_v,
             ty: arr_ir,
@@ -3955,7 +3959,7 @@ impl<'a> Lower<'a> {
         let pname = params.first().cloned().unwrap_or_else(|| "it".to_string());
         let depth = self.scope.len();
         self.scope.push((pname, i_v, Ty::Int));
-        let body_val = self.lower_arg(body, &elem_ir);
+        let body_val = self.lower_arg(body, &value_ir);
         self.scope.truncate(depth);
         let body_val = body_val?;
         // Spill the element value into a temp before the store: a branchy body (`{ it % 2 == 0 }`)
@@ -3964,7 +3968,7 @@ impl<'a> Lower<'a> {
         let tmp_v = self.fresh_value();
         let var_tmp = self.ir.add_expr(IrExpr::Variable {
             index: tmp_v,
-            ty: elem_ir,
+            ty: value_ir,
             init: Some(body_val),
         });
         let ga = self.ir.add_expr(IrExpr::GetValue(arr_v));
@@ -8183,13 +8187,11 @@ impl<'a> Lower<'a> {
         // element type (the reified `T`), exactly as kotlinc specializes it, rather than calling the
         // throwing stub. Recognized by the call shape (not the erased `Array<Any>` type, which a real
         // `Object[]` value also has); the target supplies the otherwise-erased element.
-        if self.is_empty_array_intrinsic(arg) {
-            if let Some(elem) = ir_array_element(target) {
-                return Some(self.ir.add_expr(IrExpr::Vararg {
-                    element_type: elem,
-                    elements: vec![],
-                }));
-            }
+        if self.is_empty_array_intrinsic(arg) && ir_array_element(target).is_some() {
+            return Some(self.ir.add_expr(IrExpr::Vararg {
+                array_type: *target,
+                elements: vec![],
+            }));
         }
         let e = self.expr(arg)?;
         let target_ref = ir_type_is_reference(target);
@@ -9880,6 +9882,16 @@ impl<'a> Lower<'a> {
                     {
                         Ty::obj(&class_internal(self.afile, &r.name))
                     }
+                    // A primitive array (`ByteArray` → `[B`) or a boxed `Array<X>` — resolve via `ty_of`
+                    // (which maps the element). NOT the class/catch fallbacks, which would resolve a bare
+                    // `ByteArray`/`IntArray` through the global simple-name index to an unrelated JDK class
+                    // (`jdk/internal/util/ByteArray`), corrupting the local's stackmap frame type. After the
+                    // file-class arm so a user class of the same name still wins.
+                    Some(r)
+                        if r.name == "Array" || Ty::primitive_array_element(&r.name).is_some() =>
+                    {
+                        ty_of(self.afile, r)
+                    }
                     // A library reference type (`Throwable?`, `List<Int>`): use the declared reference
                     // type, not the initializer's. A `null` initializer is `Ty::Null`, which would type
                     // the slot as `top` in frames; the declared reference type keeps the slot a
@@ -11351,7 +11363,7 @@ impl<'a> Lower<'a> {
                     }
                 }
                 let arr = self.ir.add_expr(IrExpr::Vararg {
-                    element_type: elem_ir,
+                    array_type: ty_to_ir(*pty),
                     elements,
                 });
                 let slot = self.fresh_value();
@@ -14809,7 +14821,7 @@ impl<'a> Lower<'a> {
                                 }
                             }
                             let arr = self.ir.add_expr(IrExpr::Vararg {
-                                element_type: elem_ir,
+                                array_type: params[fixed],
                                 elements,
                             });
                             a.push(arr);
@@ -15008,7 +15020,7 @@ impl<'a> Lower<'a> {
                                 elements.push(self.lower_arg(arg, &elem_ir)?);
                             }
                             a.push(self.ir.add_expr(IrExpr::Vararg {
-                                element_type: elem_ir,
+                                array_type: ty_to_ir(c.params[fixed]),
                                 elements,
                             }));
                         } else if c.default_call {
@@ -17473,6 +17485,10 @@ fn ty_of(file: &ast::File, r: &ast::TypeRef) -> Ty {
             .unwrap_or_else(|| Ty::obj("kotlin/Any"));
         if elem.is_reference() {
             return Ty::array(elem);
+        } else if elem.boxed_ref().is_some() && !matches!(elem, Ty::UInt | Ty::ULong) {
+            // A boxed primitive `Array<Int>` = `Integer[]` — `Obj("kotlin/Array", [Int])`, the same
+            // logical form as `arrayOf(1)`/`Array(n){…}` (element read unboxed, backend boxes).
+            return Ty::obj_args("kotlin/Array", &[elem]);
         }
     }
     let is_class = file

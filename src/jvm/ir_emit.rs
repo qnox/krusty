@@ -4540,10 +4540,10 @@ impl<'a> Emitter<'a> {
                 None => code.ret_void(),
             },
             IrExpr::Vararg {
-                element_type,
+                array_type,
                 elements,
             } => {
-                let et = ir_ty_to_jvm(element_type);
+                let et = array_jvm_element(array_type);
                 let elements = elements.clone();
                 code.push_int(elements.len() as i32, self.cw);
                 if et.is_jvm_scalar() {
@@ -4553,15 +4553,21 @@ impl<'a> Emitter<'a> {
                     code.anewarray(ci);
                 }
                 let (op, w) = array_store_op(et);
+                // A boxed-primitive element array (`arrayOf(1,2,3)` → `Integer[]`): box each primitive
+                // value before the `aastore` (mirrors `kotlin/Array.set`).
+                let box_elem = boxed_prim_of(et);
                 for (i, &el) in elements.iter().enumerate() {
                     code.dup();
                     code.push_int(i as i32, self.cw);
                     self.emit_value(el, code);
+                    if let Some(p) = box_elem {
+                        box_prim_free(self.cw, code, p);
+                    }
                     code.array_store(op, w);
                 }
             }
-            IrExpr::NewArray { element_type, size } => {
-                let et = ir_ty_to_jvm(element_type);
+            IrExpr::NewArray { array_type, size } => {
+                let et = array_jvm_element(array_type);
                 self.emit_value(*size, code);
                 if et.is_jvm_scalar() {
                     code.newarray(prim_newarray_atype(et));
@@ -6283,8 +6289,8 @@ impl<'a> Emitter<'a> {
             IrExpr::NewExternal { internal, .. } => Ty::obj(internal),
             IrExpr::NewCrossFile { internal, .. } => Ty::obj(internal),
             IrExpr::Throw { .. } | IrExpr::Break { .. } | IrExpr::Continue { .. } => Ty::Nothing,
-            IrExpr::Vararg { element_type, .. } => Ty::array(ir_ty_to_jvm(element_type)),
-            IrExpr::NewArray { element_type, .. } => Ty::array(ir_ty_to_jvm(element_type)),
+            IrExpr::Vararg { array_type, .. } => ir_ty_to_jvm(array_type),
+            IrExpr::NewArray { array_type, .. } => ir_ty_to_jvm(array_type),
             IrExpr::UnitInstance => Ty::obj("kotlin/Unit"),
             IrExpr::CurrentContinuation => Ty::obj("kotlin/coroutines/Continuation"),
             IrExpr::Try { result, .. } => ir_ty_to_jvm(result),
@@ -6594,6 +6600,15 @@ pub fn ir_ty_to_jvm(t: &Ty) -> Ty {
         Ty::TyParam(_, bound) => ir_ty_to_jvm(bound),
         _ => Ty::Error,
     }
+}
+
+/// The JVM element type of an array given its whole array type. `ir_ty_to_jvm` already maps
+/// `kotlin/Array<Int>` → `[Ljava/lang/Integer;` (boxed) and `kotlin/IntArray` → `[I` (primitive), so the
+/// boxed-vs-primitive distinction is carried by the type — no flag needed.
+fn array_jvm_element(array_type: &Ty) -> Ty {
+    ir_ty_to_jvm(array_type)
+        .array_elem()
+        .unwrap_or_else(|| Ty::obj("java/lang/Object"))
 }
 
 /// Swap the operands of a comparison operator (`a < b` ≡ `b > a`) — used to normalize `0 <op> x` into

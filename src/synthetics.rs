@@ -97,16 +97,11 @@ fn prim_elem(name: &str) -> Option<Ty> {
     })
 }
 
-/// Lower each argument to a `Vararg` of `elem` (`int[]`/`T[]`). A branchy element is declined (its
-/// stackmap frame would strand the partially-built array).
+/// Lower each argument to a `Vararg` of `elem` (`int[]`/`T[]`/`Integer[]`). A branchy element is declined
+/// (its stackmap frame would strand the partially-built array). A boxed-primitive element (`arrayOf(1)` →
+/// `Integer[]`) is allocated as the wrapper array (the emitter's `array_element_jvm`); each value is boxed
+/// by `lower_arg` / the Vararg emit. `intArrayOf` passes a primitive `Ty` here, so it stays `[I`.
 fn vararg_of(lw: &mut Lower<'_>, elem: Ty, args: &[AstExprId]) -> Option<ExprId> {
-    // A boxed-primitive element (`arrayOf(1)`/`emptyArray<Int>()` → `Integer[]`) would need each value
-    // boxed into the reference array; declined for now (the type + element access are supported, but
-    // constructing a boxed primitive array is future work). `intArrayOf` passes a primitive `Ty` here
-    // (not a boxed `Obj`), so it is unaffected.
-    if elem.unboxed_primitive().is_some() {
-        return None;
-    }
     let elem_ir = ty_to_ir(elem);
     let mut elements = Vec::new();
     for &arg in args {
@@ -115,8 +110,10 @@ fn vararg_of(lw: &mut Lower<'_>, elem: Ty, args: &[AstExprId]) -> Option<ExprId>
         }
         elements.push(lw.lower_arg(arg, &elem_ir)?);
     }
+    // The whole array type (`kotlin/IntArray` / `kotlin/Array<Int>` / `kotlin/Array<String>`) drives the
+    // emitter — a boxed `Array<Int>` becomes `Integer[]`, a primitive `IntArray` stays `[I`.
     Some(lw.emit(IrExpr::Vararg {
-        element_type: elem_ir,
+        array_type: ty_to_ir(Ty::array(elem)),
         elements,
     }))
 }
@@ -152,22 +149,27 @@ fn b_prim_size(syn: &'static Synthetic, lw: &mut Lower<'_>, c: &SynthCall<'_>) -
 /// `arrayOf(a, b, c)` → a reference `Vararg` (the checker already typed the call `Array<T>` and
 /// rejected a primitive element).
 fn b_ref_vararg(_syn: &'static Synthetic, lw: &mut Lower<'_>, c: &SynthCall<'_>) -> Option<ExprId> {
-    let elem = lw.synth_array_elem(c.call)?;
-    if !elem.is_reference() {
-        return None;
-    }
+    // Box a primitive element (`arrayOf(1,2,3)` → `Integer[]`); a reference element is unchanged.
+    let elem = lw
+        .synth_array_elem(c.call)
+        .map(|t| t.boxed_ref().unwrap_or(t))
+        .filter(|t| t.is_reference())?;
     vararg_of(lw, elem, c.args)
 }
 
-/// `Array<T>(n) { i -> e }` → a fill loop over a reference array. Declines a primitive element (a boxed
-/// `Array<Int>` is `Integer[]`, modeled elsewhere) and a non-lambda call.
+/// `Array<T>(n) { i -> e }` → a fill loop over a reference array. The element is a reference, or a boxed
+/// primitive (`Array<Int>` = `Integer[]`): `build_fill_array` allocates the wrapper array and
+/// `kotlin/Array.set` boxes each filled value. Declines a non-lambda call.
 fn b_ref_array(_syn: &'static Synthetic, lw: &mut Lower<'_>, c: &SynthCall<'_>) -> Option<ExprId> {
     if c.args.len() != 2 {
         return None;
     }
+    // Box a primitive element so the array is `Integer[]` (the checker types `Array(n){…}` as
+    // `Obj("kotlin/Array", [Int])`, element exposed unboxed). A reference element is unchanged.
     let elem = lw
         .synth_array_elem(c.call)
-        .filter(|t| t.is_reference() && t.unboxed_primitive().is_none())?;
+        .map(|t| t.boxed_ref().unwrap_or(t))
+        .filter(|t| t.is_reference())?;
     let (params, body) = lw.synth_arg_lambda(c.args[1])?;
     lw.build_fill_array(elem, c.args[0], params, body)
 }
@@ -188,7 +190,7 @@ fn b_arr_nulls(_syn: &'static Synthetic, lw: &mut Lower<'_>, c: &SynthCall<'_>) 
         .filter(|t| t.is_reference() && t.unboxed_primitive().is_none())?;
     let size = lw.lower_arg(c.args[0], &ty_to_ir(Ty::Int))?;
     Some(lw.emit(IrExpr::NewArray {
-        element_type: ty_to_ir(elem),
+        array_type: ty_to_ir(Ty::array(elem)),
         size,
     }))
 }
