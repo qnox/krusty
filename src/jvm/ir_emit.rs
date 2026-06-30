@@ -3741,19 +3741,15 @@ impl<'a> Emitter<'a> {
         match node {
             IrExpr::MethodCall { class, index, .. } => {
                 let fid = self.ir.classes[*class as usize].methods[*index as usize];
-                norm_nothing(ir_ty_to_jvm(&self.ir.functions[fid as usize].ret)) == Ty::Nothing
+                ret_is_nothing(&self.ir.functions[fid as usize].ret)
             }
             IrExpr::Call { callee, .. } => match callee {
-                Callee::Local(fid) => {
-                    norm_nothing(ir_ty_to_jvm(&self.ir.functions[*fid as usize].ret)) == Ty::Nothing
-                }
-                Callee::CrossFile { ret, .. } => norm_nothing(ir_ty_to_jvm(ret)) == Ty::Nothing,
+                Callee::Local(fid) => ret_is_nothing(&self.ir.functions[*fid as usize].ret),
+                Callee::CrossFile { ret, .. } => ret_is_nothing(ret),
                 Callee::Virtual { descriptor, .. } | Callee::Special { descriptor, .. } => {
                     descriptor.ends_with(")Ljava/lang/Void;")
                 }
-                Callee::CrossFileVirtual { ret, .. } => {
-                    norm_nothing(ir_ty_to_jvm(ret)) == Ty::Nothing
-                }
+                Callee::CrossFileVirtual { ret, .. } => ret_is_nothing(ret),
                 Callee::Static {
                     descriptor, inline, ..
                 } => !inline.can_inline() && descriptor.ends_with(")Ljava/lang/Void;"),
@@ -6194,17 +6190,15 @@ impl<'a> Emitter<'a> {
             IrExpr::New { class, .. } => Ty::obj(&self.ir.classes[*class as usize].fq_name),
             IrExpr::MethodCall { class, index, .. } => {
                 let fid = self.ir.classes[*class as usize].methods[*index as usize];
-                norm_nothing(ir_ty_to_jvm(&self.ir.functions[fid as usize].ret))
+                call_ret_ty(&self.ir.functions[fid as usize].ret)
             }
             IrExpr::Call {
                 callee,
                 dispatch_receiver,
                 ..
             } => match callee {
-                Callee::Local(fid) => {
-                    norm_nothing(ir_ty_to_jvm(&self.ir.functions[*fid as usize].ret))
-                }
-                Callee::CrossFile { ret, .. } => norm_nothing(ir_ty_to_jvm(ret)),
+                Callee::Local(fid) => call_ret_ty(&self.ir.functions[*fid as usize].ret),
+                Callee::CrossFile { ret, .. } => call_ret_ty(ret),
                 // Array `get` returns the receiver's element; an array `<init>` returns the array type.
                 Callee::External(fq) if fq == "kotlin/Array.get" => dispatch_receiver
                     .map(|r| {
@@ -6229,7 +6223,7 @@ impl<'a> Emitter<'a> {
                         ty_from_descriptor_ret(descriptor)
                     }
                 }
-                Callee::CrossFileVirtual { ret, .. } => norm_nothing(ir_ty_to_jvm(ret)),
+                Callee::CrossFileVirtual { ret, .. } => call_ret_ty(ret),
             },
             IrExpr::PrimitiveBinOp { op, lhs, .. } => match op {
                 IrBinOp::Lt
@@ -6518,6 +6512,26 @@ fn prim_newarray_atype(elem: Ty) -> u8 {
 /// callee already gets this from its `)Ljava/lang/Void;` descriptor; a `Local`/`CrossFile`/method callee
 /// reads the IR `ret` directly and needs the same normalization (else a `Nothing`-returning call's value
 /// is wrongly merged/popped, e.g. an `exit()` branch of an `if` ⇒ inconsistent stackmap frames).
+/// Whether an IR return type is the NON-nullable bottom type `Nothing` (so a call to it never returns and
+/// must be terminated). A `Nothing?` return is NULLABLE — it can yield `null` (`fun f(): Nothing? { … return
+/// null … }`) — and must NOT be treated as diverging; the JVM descriptor erases the `?` (both are `Void`),
+/// so the nullability is checked on the IR type before it is erased by `ir_ty_to_jvm`.
+fn ret_is_nothing(ret: &Ty) -> bool {
+    !ret.is_nullable() && norm_nothing(ir_ty_to_jvm(ret)) == Ty::Nothing
+}
+
+/// The JVM `Ty` a call to a function with IR return `ret` leaves on the stack: the `Ty::Nothing` bottom
+/// for a NON-nullable `Nothing` return (no value — the call diverges), else the erased reference/value
+/// type. A `Nothing?` return is a real nullable reference (`Void`, 1 slot) that yields `null`, so it must
+/// NOT collapse to `Nothing` (that would mis-size discards and mis-flag it as diverging).
+fn call_ret_ty(ret: &Ty) -> Ty {
+    if ret_is_nothing(ret) {
+        Ty::Nothing
+    } else {
+        ir_ty_to_jvm(ret)
+    }
+}
+
 fn norm_nothing(t: Ty) -> Ty {
     match &t {
         Ty::Obj(n, _) if crate::jvm::jvm_class_map::to_jvm_internal(n) == "java/lang/Void" => {

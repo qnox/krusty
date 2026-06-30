@@ -3196,6 +3196,14 @@ struct Local {
     is_var: bool,
 }
 
+fn is_nothing_ty(t: Ty) -> bool {
+    match t {
+        Ty::Nothing => true,
+        Ty::Obj(n, _) => crate::jvm::jvm_class_map::to_jvm_internal(n) == "java/lang/Void",
+        _ => false,
+    }
+}
+
 fn make_checker<'a>(file: &'a File, syms: &'a SymbolTable, diags: &'a mut DiagSink) -> Checker<'a> {
     let imports = import_map(file);
     let import_wildcards =
@@ -9496,10 +9504,10 @@ impl<'a> Checker<'a> {
         }
         // `Nothing` is the bottom type: a diverging branch contributes no value, so the join is the
         // other branch (`if (c) x else throw e` has the type of `x`).
-        if a == Ty::Nothing {
+        if is_nothing_ty(a) {
             return b;
         }
-        if b == Ty::Nothing {
+        if is_nothing_ty(b) {
             return a;
         }
         if let Some(t) = Ty::promote(a, b) {
