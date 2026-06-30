@@ -12304,7 +12304,15 @@ impl<'a> Lower<'a> {
                                 Some(self.ir.add_expr(IrExpr::ClassConst { internal }))
                             }
                             None => {
-                                let r = self.expr(receiver?)?;
+                                let recv = receiver?;
+                                // A primitive receiver (`42::class`) is boxed first (an `Object` target
+                                // makes `lower_arg` box to the primitive's wrapper), so `getClass` yields
+                                // the wrapper class — matching an unbound `Int::class` (also the wrapper).
+                                let r = if self.info.ty(recv).is_reference() {
+                                    self.expr(recv)?
+                                } else {
+                                    self.lower_arg(recv, &ty_to_ir(Ty::obj("kotlin/Any")))?
+                                };
                                 Some(self.ir.add_expr(IrExpr::Call {
                                     callee: Callee::Virtual {
                                         owner: "java/lang/Object".to_string(),

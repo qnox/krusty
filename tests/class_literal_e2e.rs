@@ -26,6 +26,21 @@ fun box(): String {\n\
 }
 
 #[test]
+fn primitive_class_literals_bound_and_unbound_agree() {
+    // A primitive literal is modeled by its boxed wrapper class: `Int::class` (unbound) and `x::class`
+    // (bound, boxed-then-getClass) compare equal, as do distinct primitives unequal.
+    const SRC: &str = "fun box(): String {\n\
+    val i = 42\n\
+    val b = true\n\
+    if (i::class != Int::class) return \"Fail 1\"\n\
+    if (b::class != Boolean::class) return \"Fail 2\"\n\
+    if (i::class == b::class) return \"Fail 3\"\n\
+    return \"OK\"\n\
+}\n";
+    assert_eq!(run(SRC).expect("primitive class literals"), "OK");
+}
+
+#[test]
 fn bound_class_literal_smartcast_in_equals() {
     // KT-16291: `other::class == this::class` inside an overridden `equals` (bound literals on values).
     const SRC: &str = "class Foo(val s: String) {\n\
