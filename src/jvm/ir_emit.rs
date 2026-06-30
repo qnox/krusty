@@ -3698,29 +3698,40 @@ impl<'a> Emitter<'a> {
 
     fn emit_discarding_node(&mut self, e: u32, node: &IrExpr, code: &mut CodeBuilder) {
         self.emit_value_node(node, code);
+        // A `Nothing`-returning call leaves a physical `Void` and must terminate the path (it would
+        // otherwise fall through with a stray value); the throw replaces the discard.
+        if self.terminate_if_nothing_call(node, code) {
+            return;
+        }
         discard(self.value_ty(e), code);
     }
 
     fn emit_value(&mut self, e: u32, code: &mut CodeBuilder) {
         let node = self.ir.expr(e).clone();
         self.emit_value_node(&node, code);
-        // A `Nothing`-returning REAL-invoke call (`exit(): Nothing`) physically leaves a `java/lang/Void`
-        // on the stack and falls through — unlike `throw`/`return`, which terminate. kotlinc makes the
-        // path truly diverge: discard the `Void`, then `throw KotlinNothingValueException()`. Mirror that
-        // so a `Nothing` call used in a branch (`if (c) … else exit()`) terminates instead of leaking a
-        // `Void` into the merge frame. Inline-spliced `Nothing` calls (`error(...)`) already end in
-        // `athrow`, so they're excluded.
-        if self.is_real_nothing_call(&node) {
-            code.pop();
-            let cls = self.cw.class_ref("kotlin/KotlinNothingValueException");
-            code.new_obj(cls);
-            code.dup();
-            let ctor = self
-                .cw
-                .methodref("kotlin/KotlinNothingValueException", "<init>", "()V");
-            code.invokespecial(ctor, 0, 0);
-            code.athrow();
+        self.terminate_if_nothing_call(&node, code);
+    }
+
+    /// A `Nothing`-returning REAL-invoke call (`exit(): Nothing`) physically leaves a `java/lang/Void`
+    /// on the stack and falls through — unlike `throw`/`return`, which terminate. kotlinc makes the path
+    /// truly diverge: discard the `Void`, then `throw KotlinNothingValueException()`. Mirror that so a
+    /// `Nothing` call used in a branch (`if (c) … else exit()`, a diverging `catch`) terminates instead of
+    /// leaking a `Void` into the merge/handler frame. Inline-spliced `Nothing` calls (`error(...)`) already
+    /// end in `athrow` and are excluded. Returns whether the terminating throw was emitted.
+    fn terminate_if_nothing_call(&mut self, node: &IrExpr, code: &mut CodeBuilder) -> bool {
+        if !self.is_real_nothing_call(node) {
+            return false;
         }
+        code.pop();
+        let cls = self.cw.class_ref("kotlin/KotlinNothingValueException");
+        code.new_obj(cls);
+        code.dup();
+        let ctor = self
+            .cw
+            .methodref("kotlin/KotlinNothingValueException", "<init>", "()V");
+        code.invokespecial(ctor, 0, 0);
+        code.athrow();
+        true
     }
 
     /// A call that physically returns (real `invoke`, leaving a `java/lang/Void`) yet is typed `Nothing`.
