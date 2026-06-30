@@ -11527,6 +11527,28 @@ impl<'a> Lower<'a> {
                 });
                 Some(self.coerce_erased(call, ret, physical_ret))
             }
+            InvokeKind::ExtensionOperator { receiver_ty: rt } => {
+                // `recv(args)` via an `operator fun Recv.invoke(...)` EXTENSION → `invokestatic
+                // <facade>.invoke(recv, args)`. The receiver is the lifted static's leading argument.
+                let &fid = self
+                    .ext_fun_ids
+                    .get(&(rt.erased_recv(), "invoke".to_string()))?;
+                let target_params = self.ir.functions[fid as usize].params.clone();
+                let recv = self.lower_arg(receiver, target_params.first()?)?;
+                let mut a = vec![recv];
+                for (i, &arg) in args.iter().enumerate() {
+                    let pt = target_params
+                        .get(i + 1)
+                        .copied()
+                        .unwrap_or(ty_to_ir(Ty::obj("kotlin/Any")));
+                    a.push(self.lower_arg(arg, &pt)?);
+                }
+                Some(self.ir.add_expr(IrExpr::Call {
+                    callee: Callee::Local(fid),
+                    dispatch_receiver: None,
+                    args: a,
+                }))
+            }
         }
     }
 

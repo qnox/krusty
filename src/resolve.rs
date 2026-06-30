@@ -3128,6 +3128,9 @@ pub enum InvokeKind {
     Function { ret: Ty, suspend: bool },
     /// Receiver carries a member `operator fun invoke`; lowering calls that member.
     Operator { receiver_ty: Ty },
+    /// Receiver has an `operator fun Recv.invoke(...)` EXTENSION (`"a"(12)` → `invoke("a", 12)`);
+    /// lowering calls the lifted static extension with the receiver as the leading argument.
+    ExtensionOperator { receiver_ty: Ty },
 }
 
 #[derive(Clone, Debug)]
@@ -3939,7 +3942,8 @@ impl<'a> Checker<'a> {
                 },
             ),
             _ => {
-                let (params, ret) = crate::module_symbols::ModuleSymbols::new(self.syms)
+                // A member `operator fun invoke` (user class or a classpath/library type) → `Operator`.
+                let member = crate::module_symbols::ModuleSymbols::new(self.syms)
                     .functions(CALLABLE_INVOKE_OPERATOR, Some(receiver_ty))
                     .overloads
                     .into_iter()
@@ -3953,8 +3957,33 @@ impl<'a> Checker<'a> {
                             arg_tys,
                         )
                         .map(|m| (m.member.params, m.ret))
-                    })?;
-                (params, ret, InvokeKind::Operator { receiver_ty })
+                    });
+                if let Some((params, ret)) = member {
+                    (params, ret, InvokeKind::Operator { receiver_ty })
+                } else {
+                    // An `operator fun Recv.invoke(...)` EXTENSION (`"a"(12)`): logical params are the
+                    // extension's own (`callable.params[0]` is the receiver). Lowered as a static call.
+                    let fi = crate::module_symbols::ModuleSymbols::new(self.syms)
+                        .functions(CALLABLE_INVOKE_OPERATOR, Some(receiver_ty))
+                        .overloads
+                        .into_iter()
+                        .find(|o| {
+                            o.kind == crate::libraries::FnKind::Extension
+                                && o.receiver_rank == 0
+                                // Select by arity (`callable.params[0]` is the receiver) so an
+                                // overloaded `invoke()` / `invoke(Int)` picks the right one.
+                                && o.callable.params.len() == arg_tys.len() + 1
+                                // A `suspend operator fun …invoke` would need continuation threading the
+                                // ExtensionOperator lowering doesn't do — leave it unresolved (skip).
+                                && !o.flags.suspend
+                        })?;
+                    let params = fi.callable.params.get(1..).unwrap_or(&[]).to_vec();
+                    (
+                        params,
+                        fi.callable.ret,
+                        InvokeKind::ExtensionOperator { receiver_ty },
+                    )
+                }
             }
         };
         if params.len() != arg_tys.len() {
