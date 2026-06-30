@@ -116,6 +116,9 @@ pub struct ClassSig {
     pub methods: HashMap<String, Signature>,
     /// True if this is an `interface` (calls dispatch via `invokeinterface`).
     pub is_interface: bool,
+    /// True if declared `fun interface` — a single-abstract-method interface eligible for SAM
+    /// conversion (a lambda may be passed where this type is expected).
+    pub is_fun_interface: bool,
     /// True if declared `sealed` — all subclasses are known in this module, enabling exhaustive
     /// `when` without an `else`.
     pub is_sealed: bool,
@@ -1664,6 +1667,7 @@ pub fn collect_signatures_with_cp(
                             ctor_params,
                             methods,
                             is_interface: c.is_interface(),
+                            is_fun_interface: c.is_fun_interface,
                             is_sealed: c.is_sealed(),
                             inner_of,
                             static_methods,
@@ -1696,6 +1700,7 @@ pub fn collect_signatures_with_cp(
                                 ctor_params: Vec::new(),
                                 methods: companion_methods_sigs,
                                 is_interface: false,
+                                is_fun_interface: false,
                                 is_sealed: false,
                                 inner_of: None,
                                 static_methods: HashMap::new(),
@@ -4912,6 +4917,23 @@ impl<'a> Checker<'a> {
             })
     }
 
+    /// Whether `internal` is a SAM interface krusty can soundly convert a lambda to: a user
+    /// `fun interface` that is NON-generic and whose methods involve no value class. (A generic SAM
+    /// erases its method to `Object` — the `LambdaMetafactory` descriptor `lower_lambda_sam` emits
+    /// wouldn't match; a value-class method has a mangled name / boxing the path doesn't model; a
+    /// library/Kotlin function interface is handled separately at the `Foo { … }` call site.)
+    fn simple_fun_interface(&self, internal: &str) -> bool {
+        let Some(c) = self.syms.class_by_internal(internal) else {
+            return false;
+        };
+        c.is_fun_interface
+            && c.tparam_names.is_empty()
+            && c.methods.values().all(|sig| {
+                !self.ty_is_value_class(sig.ret)
+                    && sig.params.iter().all(|p| !self.ty_is_value_class(*p))
+            })
+    }
+
     fn expect_assignable(&mut self, expected: Ty, actual: Ty, span: Span, ctx: &str) {
         if expected == Ty::Error || actual == Ty::Error {
             return;
@@ -5018,6 +5040,15 @@ impl<'a> Checker<'a> {
         if let Ty::Fun(e) = &expected {
             if self.syms.libraries.function_like_arity(actual) == Some(e.params.len()) {
                 return;
+            }
+        }
+        // SAM conversion: a function value (lambda) is assignable to a simple `fun interface` — the
+        // lowering builds an instance whose single abstract method runs the lambda.
+        if matches!(actual, Ty::Fun(_)) {
+            if let Some(internal) = expected.obj_internal() {
+                if self.simple_fun_interface(internal) {
+                    return;
+                }
             }
         }
         // `Array<T>` reference-element covariance (JVM: `Integer[]` is-a `Object[]`): `Array<Array<Int>>`

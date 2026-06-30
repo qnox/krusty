@@ -8006,7 +8006,70 @@ impl<'a> Lower<'a> {
         Some(a)
     }
 
+    /// The single abstract method of a same-module interface `internal` as `(method_name, returns_void)`
+    /// — used for SAM conversion. `None` if not a single-method interface in this module.
+    fn sam_target(&self, internal: &str) -> Option<(String, bool)> {
+        let ci = self.classes.get(internal)?;
+        let cls = &self.ir.classes[ci.id as usize];
+        if !cls.is_interface {
+            return None;
+        }
+        // The SAM is the single ABSTRACT method (no body) — default/inherited methods don't count.
+        let mut abstract_methods = cls
+            .methods
+            .iter()
+            .filter(|&&m| self.ir.functions[m as usize].body.is_none());
+        let only = abstract_methods.next()?;
+        if abstract_methods.next().is_some() {
+            return None; // more than one abstract method — not a SAM
+        }
+        let f = &self.ir.functions[*only as usize];
+        Some((f.name.clone(), f.ret == ty_to_ir(Ty::Unit)))
+    }
+
+    /// Whether `internal` is a SAM interface a lambda ARGUMENT can be soundly converted to: a non-generic
+    /// user `fun interface` whose method involves no value class (mirrors the checker's gate). Generic /
+    /// value-class / library SAMs are excluded — `lower_lambda_sam`'s metafactory descriptor can't model
+    /// them yet.
+    fn is_simple_fun_interface(&self, internal: &str) -> bool {
+        self.syms.class_by_internal(internal).is_some_and(|c| {
+            c.is_fun_interface
+                && c.tparam_names.is_empty()
+                && c.methods.values().all(|sig| {
+                    !self.is_value_class_ty(sig.ret)
+                        && sig.params.iter().all(|p| !self.is_value_class_ty(*p))
+                })
+        })
+    }
+
+    fn is_value_class_ty(&self, t: Ty) -> bool {
+        t.obj_internal().is_some_and(|i| self.is_value_class(i))
+    }
+
     pub(crate) fn lower_arg(&mut self, arg: AstExprId, target: &Ty) -> Option<u32> {
+        // SAM conversion: a lambda flowing into a simple `fun interface` parameter becomes an instance of
+        // that interface whose single abstract method runs the lambda (the checker validated the target).
+        if let Some(internal) = target.non_null().obj_internal() {
+            if self.is_simple_fun_interface(internal) {
+                if let Expr::Lambda { params, body } = self.afile.expr(arg).clone() {
+                    if let Some((method, void)) = self.sam_target(internal) {
+                        return self.lower_lambda_sam(
+                            arg,
+                            &params,
+                            body,
+                            Some((internal.to_string(), method, void)),
+                        );
+                    }
+                }
+                // A non-literal FUNCTION value (`fnVal`, `expr::ref`) SAM-converted to the interface
+                // needs a wrapper that forwards to its `invoke` — not modeled, so skip rather than pass a
+                // raw `FunctionN` where the interface is expected. (A value already OF the interface type
+                // is not a `Ty::Fun` and passes through the normal path below.)
+                if matches!(self.info.ty(arg), Ty::Fun(_)) {
+                    return None;
+                }
+            }
+        }
         // A value flowing into a `suspend` function-type parameter. A LAMBDA literal becomes a concrete
         // `SuspendLambda` subclass (`lower_suspend_lambda`); any other value (a suspend function value
         // passed through) needs continuation threading not yet modeled, so it bails (skip the file).
