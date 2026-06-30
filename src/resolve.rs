@@ -1965,6 +1965,76 @@ fn expr_has_finally(file: &File, e: ExprId) -> bool {
     }
 }
 
+/// Whether any try-with-`finally` in `e` (inclusive) has a `return` in its body/catch that crosses the
+/// finally. A `return` inlines its enclosing finallys INTO the body (inside the try's protected range), so
+/// if any inlined finally then diverges (a `throw`/`return`/`error()`/`!!` — anything) the enclosing
+/// handler re-runs it and the finally runs twice. A `throw` in the BODY is safe (it propagates via the
+/// handler, which is outside the range), so only `return` triggers this.
+fn expr_try_finally_has_return(file: &File, e: ExprId) -> bool {
+    match file.expr(e) {
+        Expr::Try {
+            body,
+            catches,
+            finally,
+        } => {
+            (finally.is_some()
+                && (expr_has_return(file, *body)
+                    || catches.iter().any(|c| expr_has_return(file, c.body))))
+                || expr_try_finally_has_return(file, *body)
+                || catches
+                    .iter()
+                    .any(|c| expr_try_finally_has_return(file, c.body))
+                || finally.map_or(false, |f| expr_try_finally_has_return(file, f))
+        }
+        Expr::Lambda { .. } => false,
+        _ => file.any_child_expr(e, &mut |c| expr_try_finally_has_return(file, c), &mut |s| {
+            file.any_child_stmt(s, &mut |c| expr_try_finally_has_return(file, c))
+        }),
+    }
+}
+
+/// Whether `e` (inclusive) contains a `return` statement (excludes lambda / local-function bodies, which
+/// return from themselves, not the enclosing try).
+fn expr_has_return(file: &File, e: ExprId) -> bool {
+    match file.expr(e) {
+        Expr::Lambda { .. } => false,
+        _ => file.any_child_expr(e, &mut |c| expr_has_return(file, c), &mut |s| {
+            stmt_has_return(file, s)
+        }),
+    }
+}
+
+fn stmt_has_return(file: &File, s: StmtId) -> bool {
+    match file.stmt(s) {
+        Stmt::Return(..) => true,
+        Stmt::LocalFun(_) => false, // a local function's `return` is its own
+        _ => file.any_child_stmt(s, &mut |c| expr_has_return(file, c)),
+    }
+}
+
+/// Whether any `finally` block in `e` (inclusive) itself contains a `try`. Such a `finally` is inlined at
+/// each exit, duplicating the inner `try`'s exception ranges/frames (a verify error) — unsupported.
+fn expr_has_finally_with_try(file: &File, e: ExprId) -> bool {
+    match file.expr(e) {
+        Expr::Try {
+            body,
+            catches,
+            finally,
+        } => {
+            finally.map_or(false, |f| expr_has_try(file, f))
+                || expr_has_finally_with_try(file, *body)
+                || catches
+                    .iter()
+                    .any(|c| expr_has_finally_with_try(file, c.body))
+                || finally.map_or(false, |f| expr_has_finally_with_try(file, f))
+        }
+        Expr::Lambda { .. } => false,
+        _ => file.any_child_expr(e, &mut |c| expr_has_finally_with_try(file, c), &mut |s| {
+            file.any_child_stmt(s, &mut |c| expr_has_finally_with_try(file, c))
+        }),
+    }
+}
+
 /// Whether `break`/`continue` appears in a position krusty's backend can't yet emit: in *value*
 /// position (its value would be consumed while operands sit on the stack — an operand-spill the
 /// emitter doesn't do), inside a `try` (the jump must cross exception regions / run `finally`), or
@@ -4489,6 +4559,15 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Whether statement `s` always transfers control (so subsequent statements in its block are dead).
+    fn stmt_diverges(&self, s: StmtId) -> bool {
+        match self.file.stmt(s) {
+            Stmt::Return(..) | Stmt::Break(_) | Stmt::Continue(_) => true,
+            Stmt::Expr(e) => self.expr_diverges(*e),
+            _ => false,
+        }
+    }
+
     /// The JVM internal name of a `catch` clause's exception type: a common JDK exception, an
     /// imported class, or a declared class. `None` if krusty can't resolve it to a concrete class.
     fn catch_internal(&self, name: &str) -> Option<String> {
@@ -5265,6 +5344,11 @@ impl<'a> Checker<'a> {
             Expr::NotNull { operand } => {
                 // The value with its non-null type; `Int?!!` narrows to the unboxed primitive `Int`.
                 let t = self.expr(operand);
+                // `null!!` (a statically-null operand) ALWAYS throws — its type is `Nothing`, so code
+                // after it is dead (otherwise the dead path emits an unframed `aload`/store → VerifyError).
+                if t == Ty::Null {
+                    return self.set(e, Ty::Nothing);
+                }
                 t.nullable_primitive().unwrap_or(t)
             }
             Expr::Throw { operand } => {
@@ -5404,7 +5488,14 @@ impl<'a> Checker<'a> {
                     || expr_has_finally(self.file, body)
                     || catches.iter().any(|c| expr_has_finally(self.file, c.body))
                     || finally.map_or(false, |f| expr_has_finally(self.file, f));
-                if nested && any_finally {
+                // A nested try + finally only mis-emits when the inlined finally is re-entered: either a
+                // finally that diverges (its `throw`/`return` on a return path re-enters the enclosing
+                // handler → the finally runs twice) or a `catch` in the nest (the catch's exception path
+                // re-runs the inlined finally). Plain nested try + non-diverging finally with no catch
+                // emits correctly, so allow it; reject only the re-entrant shapes.
+                let reentrant = expr_try_finally_has_return(self.file, e)
+                    || expr_has_finally_with_try(self.file, e);
+                if nested && any_finally && reentrant {
                     self.diags.error(
                         self.span(e),
                         "krusty: a nested try combined with a finally is not supported".to_string(),
@@ -6200,11 +6291,34 @@ impl<'a> Checker<'a> {
             } => {
                 let ct = self.expr(cond);
                 self.expect_assignable(Ty::Boolean, ct, self.span(cond), "if condition");
-                // Smart-cast: `if (x is T)` narrows a stable `x` to `T` in the then-branch (and
-                // `if (x !is T) … else` narrows it in the else-branch).
-                let then_cast = self.smartcast_binding(cond, false);
+                // Smart-cast: `if (x is T)` narrows a stable `x` to `T` in the then-branch. An `&&`-chain
+                // condition (`if (a is Double && b is Double) a == b`) narrows EVERY operand of the chain,
+                // so the then-branch sees both (the `==` then unboxes to an IEEE primitive compare).
+                let mut then_casts = Vec::new();
+                self.collect_and_narrowings(cond, &mut then_casts);
+                let is_and_chain =
+                    matches!(self.file.expr(cond), Expr::Binary { op: BinOp::And, .. });
                 self.push_scope();
-                if let Some((n, t)) = &then_cast {
+                // Declare innermost-last so a variable narrowed twice in a chain (`x is Comparable<*> &&
+                // x is Double`) keeps the LAST (most-specific) narrowing; a duplicate-typed reference +
+                // primitive pair would otherwise leave the slot inconsistent.
+                let mut seen = std::collections::HashSet::new();
+                for (n, t) in then_casts.iter().rev() {
+                    if !seen.insert(n.clone()) {
+                        continue;
+                    }
+                    // Don't narrow to a VALUE class (erased to its underlying — the smart-cast use would
+                    // take an unmodeled unboxed path; mirrors the `&&`-narrowing guard).
+                    let is_value = t
+                        .obj_internal()
+                        .and_then(|i| self.syms.class_by_internal(i))
+                        .is_some_and(|c| c.value_field.is_some());
+                    // A `Boolean` narrowed inside an `&&` chain then used as a `compareTo` receiver
+                    // mis-lowers (a primitive `Boolean` has no instance `compareTo`); leave it un-narrowed
+                    // in the chain case (a single `if (x is Boolean)` is unchanged).
+                    if is_value || (is_and_chain && *t == Ty::Boolean) {
+                        continue;
+                    }
                     self.declare(n, *t, false);
                 }
                 let tt = self.expr(then_branch);
@@ -6225,8 +6339,15 @@ impl<'a> Checker<'a> {
             }
             Expr::Block { stmts, trailing } => {
                 self.push_scope();
+                // True once a statement always transfers control (`throw`/`return`/break/continue/a
+                // `Nothing` call): everything after it — including the trailing value — is unreachable,
+                // so the block's type is `Nothing` (it never falls through). Without this, a `try` whose
+                // body throws before its trailing would be typed by the dead trailing, and the lowerer
+                // would emit that dead code (an unframed branch target → VerifyError).
+                let mut diverged = false;
                 for s in &stmts {
                     self.stmt(*s);
+                    diverged = diverged || self.stmt_diverges(*s);
                     // Early-return guard: `if (x !is T) return …` (a diverging then, no else) narrows
                     // a stable `x` to `T` for the remaining statements of this block.
                     if let Stmt::Expr(ie) = self.file.stmt(*s).clone() {
@@ -6245,7 +6366,14 @@ impl<'a> Checker<'a> {
                     }
                 }
                 let t = match trailing {
+                    // A trailing after a diverging statement is dead — type the block `Nothing` (still
+                    // visit the trailing so its sub-expressions are checked).
+                    Some(te) if diverged => {
+                        self.expr(te);
+                        Ty::Nothing
+                    }
                     Some(te) => self.expr(te),
+                    None if diverged => Ty::Nothing,
                     None => {
                         // A block whose last statement always transfers control (break/continue/return)
                         // has type Nothing — it never produces a value or falls through.

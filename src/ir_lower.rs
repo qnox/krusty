@@ -12029,6 +12029,18 @@ impl<'a> Lower<'a> {
             // `operand!!` — assert non-null. On a reference, `Intrinsics.checkNotNull` throws if null
             // and yields the value; on a (non-null) primitive it is a no-op.
             Expr::NotNull { operand } => {
+                // `null!!` (a statically-null operand) always throws — emit an actual `throw
+                // NullPointerException()` (an `athrow` the verifier knows diverges), not the
+                // `checkNotNull` call (which is `(Object)V` and so appears to fall through, leaving a
+                // handler placed right after it with an inconsistent frame).
+                if self.info.ty(operand) == Ty::Null {
+                    let exc = self.ir.add_expr(IrExpr::NewExternal {
+                        internal: "java/lang/NullPointerException".to_string(),
+                        ctor_desc: "()V".to_string(),
+                        args: vec![],
+                    });
+                    return Some(self.ir.add_expr(IrExpr::Throw { operand: exc }));
+                }
                 let v = self.expr(operand)?;
                 if self.info.ty(operand).is_reference() {
                     let asserted = self.ir.add_expr(IrExpr::NotNullAssert { operand: v });
@@ -12794,8 +12806,24 @@ impl<'a> Lower<'a> {
                 } else if let Some(c) = self.const_lits.get(&n).cloned() {
                     // A same-file `const val` read → inline its literal (`ldc`), like kotlinc.
                     self.ir.add_expr(IrExpr::Const(c))
-                } else if let Some(&(idx, _)) = self.statics.get(&n) {
-                    self.ir.add_expr(IrExpr::GetStatic(idx))
+                } else if let Some(&(idx, sty)) = self.statics.get(&n) {
+                    let read = self.ir.add_expr(IrExpr::GetStatic(idx));
+                    // Smart-cast of a top-level `val` to a scalar (`val x: Any; if (x is Double) …`)
+                    // unboxes the reference field read, mirroring the local-variable path above.
+                    let narrowed = self.info.ty(e);
+                    if narrowed != sty
+                        && self.has_scalar_value_repr(narrowed)
+                        && sty.is_reference()
+                        && !self.is_unsigned_integer_type(narrowed)
+                    {
+                        self.ir.add_expr(IrExpr::TypeOp {
+                            op: IrTypeOp::ImplicitCoercion,
+                            arg: read,
+                            type_operand: ty_to_ir(narrowed),
+                        })
+                    } else {
+                        read
+                    }
                 } else if let Some((facade, ty, _, is_const)) =
                     self.syms.prop_facades.get(&n).cloned()
                 {
