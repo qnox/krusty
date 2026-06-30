@@ -47,7 +47,7 @@ fn main() {
         sources.push(src);
     }
 
-    let cp = std::rc::Rc::new(Classpath::new(opts.classpath.clone()));
+    let cp = std::rc::Rc::new(Classpath::new(opts.effective_classpath()));
     let platform = Box::new(JvmLibraries::new(cp.clone()));
     let mut syms = collect_signatures_with_cp(&files, platform, &mut diags);
 
