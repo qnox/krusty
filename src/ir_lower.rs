@@ -2299,7 +2299,11 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                                 ) {
                                     return None;
                                 }
-                                let val = lo.lower_arg(init_e, &field_ty)?;
+                                // A `var` declared inside the initializer and captured+mutated by a
+                                // closure (`val p = run { var v=…; bar { v=… }; v }`) needs a `Ref` holder.
+                                let val = lo.with_init_shared_cells(init_e, |lo| {
+                                    lo.lower_arg(init_e, &field_ty)
+                                })?;
                                 let recv = lo.ir.add_expr(IrExpr::GetValue(this_v));
                                 stmts.push(lo.ir.add_expr(IrExpr::SetField {
                                     receiver: recv,
@@ -2336,12 +2340,16 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                                         return None;
                                     }
                                 }
-                                for s in bs {
-                                    stmts.push(lo.stmt(s)?);
-                                }
-                                if let Some(t) = trailing {
-                                    stmts.push(lo.expr(t)?);
-                                }
+                                // A `var` the block declares and a nested closure mutates is `Ref`-boxed.
+                                lo.with_init_shared_cells(*e, |lo| -> Option<()> {
+                                    for s in bs {
+                                        stmts.push(lo.stmt(s)?);
+                                    }
+                                    if let Some(t) = trailing {
+                                        stmts.push(lo.expr(t)?);
+                                    }
+                                    Some(())
+                                })?;
                             }
                         }
                     }
@@ -4506,8 +4514,10 @@ impl<'a> Lower<'a> {
         } else {
             arity
         };
-        // A lambda inside a class method could capture `this`/fields — not modeled yet.
-        if self.cur_class.is_some() {
+        // A RECEIVER lambda inside a class method would need two `this`es — its own receiver AND the
+        // enclosing instance — which the single-`this`-slot closure shape can't carry. Bail (skip). A
+        // PLAIN lambda instead captures the enclosing `this` like any other free variable (added below).
+        if self.cur_class.is_some() && recv_ty.is_some() {
             return None;
         }
         // A `Nothing`-returning lambda whose body is an unconditional NON-LOCAL `return` (`f { return … }`)
@@ -4552,6 +4562,22 @@ impl<'a> Lower<'a> {
             }
         }
         captures.reverse();
+        // A lambda in a class member that REFERENCES the enclosing instance (`this`/`super`, or a bare
+        // member access) captures `this` — slot 0 of the enclosing method — as its FIRST captured
+        // parameter, like any captured local; `cur_class` stays set so member accesses lower to
+        // `GetField(GetValue(0))`/`this.m(…)` reading that param. Only a REAL closure (invokedynamic)
+        // needs it — an INLINE-spliced lambda runs in the enclosing method where `this` is already slot 0.
+        // Capture only when actually used: capturing an UNUSED `this` is wrong where `this` isn't
+        // available yet (a lambda in a base-ctor argument, pre-`super()`), and when NOT captured we clear
+        // `cur_class` for the body so a missed member access bails (returns None) rather than miscompiles.
+        let captures_this = deep
+            && self.cur_class.is_some()
+            && recv_ty.is_none()
+            && self.lambda_uses_enclosing_this(body, &bind_names);
+        if captures_this {
+            let tty = Ty::obj(self.cur_class.as_deref().unwrap());
+            captures.insert(0, ("this".to_string(), 0, tty));
+        }
         // The capture values are read in the *enclosing* scope before it's swapped out.
         let capture_vals: Vec<u32> = captures
             .iter()
@@ -4605,7 +4631,17 @@ impl<'a> Lower<'a> {
             sig.ret == Ty::Unit && !sam_void_pre && self.info.ty(body) != Ty::Nothing;
         let saved_unit_ref =
             std::mem::replace(&mut self.cur_method_returns_unit_ref, returns_unit_ref);
+        // When this closure does NOT capture the enclosing `this`, lower its body with `cur_class`
+        // cleared: a bare instance-member access then fails to resolve and the lambda bails (skip)
+        // rather than emitting a `GetField(GetValue(0))` that reads the wrong captured slot. When it
+        // DOES capture `this` (slot 0), keep `cur_class` so those accesses resolve against it.
+        let saved_cur_class = if captures_this {
+            self.cur_class.clone()
+        } else {
+            self.cur_class.take()
+        };
         let ve = self.expr(body);
+        self.cur_class = saved_cur_class;
         self.cur_method_returns_unit_ref = saved_unit_ref;
         self.scope = saved_scope;
         self.next_value = saved_next;
@@ -4687,6 +4723,17 @@ impl<'a> Lower<'a> {
         if body_has_bare_return(self.afile, body) {
             self.ir.inline_only_fns.insert(fid);
         }
+        // A lambda inside a class member captures the enclosing `this` and reads its (private) members,
+        // so its impl method must live ON THAT CLASS — not the file facade (which can't touch C's
+        // privates). Register it as a class method; the facade skips it and `invokedynamic` targets it on
+        // the class. (Skip an inline-only impl — it is spliced, never emitted as a standalone method.)
+        if captures_this && !self.ir.inline_only_fns.contains(&fid) {
+            if let Some(internal) = self.cur_class.clone() {
+                if let Some(cid) = self.classes.get(&internal).map(|ci| ci.id) {
+                    self.ir.classes[cid as usize].methods.push(fid);
+                }
+            }
+        }
         Some(self.ir.add_expr(IrExpr::Lambda {
             impl_fn: fid,
             arity: arity as u8,
@@ -4694,6 +4741,39 @@ impl<'a> Lower<'a> {
             sam: sam.map(|(i, m, _)| (i, m)),
             inline_body: Some(inline_body),
         }))
+    }
+
+    /// Whether a lambda body references the ENCLOSING instance: an explicit `this`/`super`, or a bare
+    /// name that resolves to an instance field/method of `cur_class` (an implicit-`this` member access).
+    /// Drives whether a class-member closure must capture the enclosing `this`. Names BOUND by the lambda
+    /// (its parameters / `it`) are not enclosing references. A miss is safe — the caller clears
+    /// `cur_class` when this returns false, so any member access it overlooked simply fails to lower.
+    fn lambda_uses_enclosing_this(&self, body: AstExprId, bound: &[String]) -> bool {
+        let Some(cur) = self.cur_class.clone() else {
+            return false;
+        };
+        fn scan(lo: &Lower, cur: &str, bound: &[String], e: AstExprId) -> bool {
+            if let Expr::Name(n) = lo.afile.expr(e) {
+                // `this`/`super` (incl. labeled `this@Outer`) are bare names here, not a dedicated
+                // variant — an explicit enclosing-instance reference.
+                if n == "this" || n == "super" || n.starts_with("this@") || n.starts_with("super@")
+                {
+                    return true;
+                }
+                // A bare name resolving to an instance field/method of the enclosing class is an
+                // implicit-`this` member access.
+                if !bound.contains(n)
+                    && (lo.resolve_field(cur, n).is_some() || lo.resolve_method(cur, n).is_some())
+                {
+                    return true;
+                }
+            }
+            lo.afile
+                .any_child_expr(e, &mut |c| scan(lo, cur, bound, c), &mut |s| {
+                    lo.afile.any_child_stmt(s, &mut |c| scan(lo, cur, bound, c))
+                })
+        }
+        scan(self, &cur, bound, body)
     }
 
     /// Lower a `suspend` lambda literal to a concrete `kotlin/coroutines/jvm/internal/SuspendLambda`
@@ -8860,6 +8940,42 @@ impl<'a> Lower<'a> {
     /// implicit receiver takes priority over a receiver-less top-level function (Kotlin scoping), so
     /// this runs first. Tries, in order: a user instance method, a builtin/library member, then a stdlib
     /// extension. `None` when none match (the call falls through to top-level resolution).
+    /// Lower call arguments, packing a trailing `vararg` parameter (`fun f(vararg s: T)` called
+    /// `f(a, b)`): the fixed args lower against their params, the remaining become the elements of a
+    /// fresh array of the vararg param's type — unless a lone argument already OF that array type is
+    /// passed through (a spread). A non-`vararg` call lowers positionally (identical to `lower_args`).
+    fn lower_call_args_vararg(
+        &mut self,
+        args: &[AstExprId],
+        params: &[Ty],
+        vararg: bool,
+        n_fixed: usize,
+    ) -> Option<Vec<u32>> {
+        if !vararg {
+            return self.lower_args(args, params);
+        }
+        let array_param = params[n_fixed];
+        let mut out = Vec::with_capacity(n_fixed + 1);
+        for i in 0..n_fixed {
+            out.push(self.lower_arg(args[i], &params[i])?);
+        }
+        let trailing = &args[n_fixed..];
+        if trailing.len() == 1 && self.info.ty(trailing[0]) == array_param {
+            out.push(self.lower_arg(trailing[0], &array_param)?); // a spread / pass-through
+        } else {
+            let elem = array_param.array_elem().unwrap_or(array_param);
+            let mut elements = Vec::with_capacity(trailing.len());
+            for &arg in trailing {
+                elements.push(self.lower_arg(arg, &elem)?);
+            }
+            out.push(self.ir.add_expr(IrExpr::Vararg {
+                array_type: array_param,
+                elements,
+            }));
+        }
+        Some(out)
+    }
+
     fn lower_this_member_call(
         &mut self,
         this_v: u32,
@@ -8872,9 +8988,23 @@ impl<'a> Lower<'a> {
         if let Some(internal) = this_ty.obj_internal() {
             if let Some((class, index, mfid, _)) = self.resolve_method(internal, name) {
                 let params = self.ir.functions[mfid as usize].params.clone();
-                if args.len() == params.len() {
+                let vararg = self
+                    .syms
+                    .method_of(internal, name)
+                    .is_some_and(|s| s.vararg);
+                let n_fixed = if vararg {
+                    params.len().saturating_sub(1)
+                } else {
+                    params.len()
+                };
+                let arity_ok = if vararg {
+                    args.len() >= n_fixed
+                } else {
+                    args.len() == params.len()
+                };
+                if arity_ok {
                     let recv = self.ir.add_expr(IrExpr::GetValue(this_v));
-                    let a = self.lower_args(args, &params)?;
+                    let a = self.lower_call_args_vararg(args, &params, vararg, n_fixed)?;
                     return Some(self.ir.add_expr(IrExpr::MethodCall {
                         class,
                         index,
@@ -9212,6 +9342,19 @@ impl<'a> Lower<'a> {
         } else {
             None
         }
+    }
+
+    /// Run `f` with `shared_cell_vars` seeded from `root`'s captured-and-mutated `var`s, restoring the
+    /// previous set afterward. The constructor lowers property initializers / `init` blocks outside any
+    /// `lower_body`, so each must seed the set the same way a function body does — this is that one place.
+    fn with_init_shared_cells<T>(&mut self, root: AstExprId, f: impl FnOnce(&mut Self) -> T) -> T {
+        let saved = std::mem::replace(
+            &mut self.shared_cell_vars,
+            shared_cell_vars_for_expr(self.afile, root, self.info),
+        );
+        let r = f(self);
+        self.shared_cell_vars = saved;
+        r
     }
 
     fn lower_body(&mut self, body: &FunBody, ret_ty: &Ty, fid: u32) -> Option<()> {
@@ -15138,18 +15281,29 @@ impl<'a> Lower<'a> {
                         } else {
                             call
                         }
-                    } else if let Some((class, index, mfid, _)) = self
+                    } else if let Some((cur, (class, index, mfid, _))) = self
                         .cur_class
                         .clone()
-                        .and_then(|cur| self.resolve_method(&cur, &fname))
+                        .and_then(|cur| self.resolve_method(&cur, &fname).map(|m| (cur, m)))
                     {
                         // Unqualified instance method call inside a class body: `foo()` → `this.foo()`.
                         let params = self.ir.functions[mfid as usize].params.clone();
-                        if args.len() != params.len() {
+                        let vararg = self.syms.method_of(&cur, &fname).is_some_and(|s| s.vararg);
+                        let n_fixed = if vararg {
+                            params.len().saturating_sub(1)
+                        } else {
+                            params.len()
+                        };
+                        let arity_ok = if vararg {
+                            args.len() >= n_fixed
+                        } else {
+                            args.len() == params.len()
+                        };
+                        if !arity_ok {
                             return None;
                         }
                         let this = self.ir.add_expr(IrExpr::GetValue(0));
-                        let a = self.lower_args(&args, &params)?;
+                        let a = self.lower_call_args_vararg(&args, &params, vararg, n_fixed)?;
                         self.ir.add_expr(IrExpr::MethodCall {
                             class,
                             index,
@@ -16884,6 +17038,17 @@ fn shared_cell_vars_for_body(
         FunBody::Expr(e) | FunBody::Block(e) => *e,
         FunBody::None => return std::collections::HashSet::new(),
     };
+    shared_cell_vars_for_expr(file, root, info)
+}
+
+/// The captured-and-mutated `var`s of a single expression (a property initializer or `init` block) —
+/// each must be boxed into a `Ref` holder so a closure's writes are visible. The constructor lowers
+/// these expressions outside any `lower_body`, so it must seed `shared_cell_vars` from here too.
+fn shared_cell_vars_for_expr(
+    file: &ast::File,
+    root: AstExprId,
+    info: &TypeInfo,
+) -> std::collections::HashSet<String> {
     let mut reassigned = std::collections::HashSet::new();
     collect_reassigned_names(file, root, &mut reassigned);
     let mut scopes: Vec<std::collections::HashMap<String, bool>> = Vec::new();
