@@ -3534,7 +3534,16 @@ impl<'a> Parser<'a> {
         };
         let name = match &destructure {
             Some(_) => format!("$dest${}", start.lo),
-            None => self.ident_or_error("loop variable"),
+            None => {
+                let n = self.ident_or_error("loop variable");
+                // An explicit loop-variable type — `for (i: Int in xs)`. The variable's type is the
+                // iterable's element type; the annotation only widens it (`for (c: Char? in str)`), so
+                // parse and discard it, mirroring the destructuring path above.
+                if self.eat(TokenKind::Colon) {
+                    let _ = self.parse_type();
+                }
+                n
+            }
         };
         self.expect(TokenKind::KwIn, "'in'");
         // Parse the iterable / range start at additive precedence so the `..`/`until`/`downTo`

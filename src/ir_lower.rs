@@ -10570,8 +10570,18 @@ impl<'a> Lower<'a> {
                 };
                 // A bound that is already a plain local (not reassigned in the body) is read directly —
                 // kotlinc does not hoist it into a second slot. Only a complex/reassigned bound is hoisted.
+                // The direct read is valid ONLY when the local's slot already holds the counter's unboxed
+                // scalar: a reference/boxed bound (an `Any`/`Int?` smart-cast to `Int`) would put an
+                // `Object` where the comparison expects an `int`, so it must take the coercing hoist path.
                 let end_local = if inline_bound.is_none() {
-                    self.expr_as_reusable_local(range.end, body)
+                    self.expr_as_reusable_local(range.end, body).filter(|_| {
+                        match self.afile.expr(range.end) {
+                            Expr::Name(n) => self
+                                .lookup(n)
+                                .is_some_and(|(_, ty)| self.has_scalar_value_repr(ty)),
+                            _ => true,
+                        }
+                    })
                 } else {
                     None
                 };
