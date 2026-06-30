@@ -3,7 +3,7 @@
 //! `-version`, `-help`, …), source files **or directories**, `@argfile`s, and graceful handling of
 //! options krusty doesn't implement (ignored with a note, rather than treated as source files).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::features::LangFeatures;
 
@@ -23,6 +23,10 @@ pub struct Options {
     /// `-version` / `-help` requested (handled before compiling).
     pub print_version: bool,
     pub print_help: bool,
+    /// `-jdk-home <dir>`: the JDK whose `lib/modules` (java.base etc.) seeds the bootclasspath.
+    pub jdk_home: Option<PathBuf>,
+    /// `-no-jdk`: do NOT add the platform JDK to the classpath (kotlinc semantics).
+    pub no_jdk: bool,
 }
 
 impl Default for Options {
@@ -36,6 +40,8 @@ impl Default for Options {
             ignored: Vec::new(),
             print_version: false,
             print_help: false,
+            jdk_home: None,
+            no_jdk: false,
         }
     }
 }
@@ -45,7 +51,6 @@ const IGNORED_WITH_VALUE: &[&str] = &[
     "-jvm-target",
     "-language-version",
     "-api-version",
-    "-jdk-home",
     "-kotlin-home",
     "-jvm-default",
     "-Xexplicit-api",
@@ -60,7 +65,6 @@ const IGNORED_FLAGS: &[&str] = &[
     "-include-runtime",
     "-no-stdlib",
     "-no-reflect",
-    "-no-jdk",
     "-nowarn",
     "-verbose",
     "-Werror",
@@ -127,6 +131,12 @@ pub fn parse(argv: impl IntoIterator<Item = String>) -> Options {
                     opts.module_name = v;
                 }
             }
+            "-jdk-home" => {
+                if let Some(v) = it.next() {
+                    opts.jdk_home = Some(PathBuf::from(v));
+                }
+            }
+            "-no-jdk" => opts.no_jdk = true,
             "-version" => opts.print_version = true,
             "-help" | "-h" | "-X" => opts.print_help = true,
             flag if IGNORED_WITH_VALUE.contains(&flag) => {
@@ -145,6 +155,36 @@ pub fn parse(argv: impl IntoIterator<Item = String>) -> Options {
         }
     }
     opts
+}
+
+impl Options {
+    /// The classpath to drive resolution with: the user's `-cp` entries plus — like kotlinc, unless
+    /// `-no-jdk` — the platform JDK's `lib/modules` jimage (the `java.base` bootclasspath). Without it,
+    /// kotlin-stdlib symbols whose `@Metadata` references `java/lang/*` (`require`, `String.isNotBlank`,
+    /// collection ops, …) fail to resolve — a confusing "unresolved function" whose real cause is a
+    /// missing JDK. Resolved from `-jdk-home`, else `$JAVA_HOME`; appended only when the jimage actually
+    /// exists, so a misconfigured env never breaks an explicit classpath. Kept out of `parse` so that
+    /// stays a pure, env-independent function.
+    pub fn effective_classpath(&self) -> Vec<PathBuf> {
+        let mut cp = self.classpath.clone();
+        if !self.no_jdk {
+            if let Some(modules) = default_jdk_modules(self.jdk_home.as_deref()) {
+                cp.push(modules);
+            }
+        }
+        cp
+    }
+}
+
+/// The platform JDK's `lib/modules` jimage (the `java.base` bootclasspath), from `-jdk-home` or
+/// `$JAVA_HOME`. `None` when neither is set or the file is absent (so a bad env is a no-op, not a
+/// hard error). krusty has no embedded JVM, so it relies on these rather than its own `java.home`.
+fn default_jdk_modules(jdk_home: Option<&Path>) -> Option<PathBuf> {
+    let base = jdk_home
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("JAVA_HOME").map(PathBuf::from))?;
+    let modules = base.join("lib").join("modules");
+    modules.is_file().then_some(modules)
 }
 
 /// krusty's release version. Injected at build time via the `KRUSTY_VERSION` env var; the `just`
@@ -230,6 +270,26 @@ mod tests {
         assert!(o.ignored.contains(&"-include-runtime".to_string()));
         assert!(o.ignored.contains(&"-jvm-target".to_string()));
         assert!(o.ignored.contains(&"-Xsomething".to_string()));
+    }
+
+    #[test]
+    fn jdk_home_and_no_jdk_flags() {
+        let o = parse_args(&["-jdk-home", "/opt/jdk", "f.kt"]);
+        assert_eq!(o.jdk_home, Some(PathBuf::from("/opt/jdk")));
+        assert!(!o.no_jdk);
+        assert_eq!(o.sources, vec!["f.kt".to_string()]); // value consumed, not a source
+        let o = parse_args(&["-no-jdk", "f.kt"]);
+        assert!(o.no_jdk);
+        // `-no-jdk` suppresses the JDK even with a `-jdk-home`; effective cp adds nothing.
+        let o = parse_args(&["-no-jdk", "-jdk-home", "/opt/jdk", "f.kt"]);
+        assert_eq!(o.effective_classpath(), o.classpath);
+    }
+
+    #[test]
+    fn effective_classpath_ignores_a_missing_jdk_home() {
+        // A non-existent `-jdk-home` contributes nothing (a bad env must not break an explicit cp).
+        let o = parse_args(&["-jdk-home", "/definitely/not/a/jdk", "-cp", "a.jar", "f.kt"]);
+        assert_eq!(o.effective_classpath(), vec![PathBuf::from("a.jar")]);
     }
 
     #[test]
