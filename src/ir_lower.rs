@@ -8084,6 +8084,18 @@ impl<'a> Lower<'a> {
         t.obj_internal().is_some_and(|i| self.is_value_class(i))
     }
 
+    /// Turn a void `Unit` result into the 1-slot `kotlin/Unit.INSTANCE` reference value: run `effect`
+    /// (a lowered Unit expression, which leaves nothing on the stack) for its side effects, then yield
+    /// the singleton. The single rule for materializing a Unit VALUE where the JVM has only `void` — used
+    /// where a Unit flows into a reference target (`= unitExpr` as `Any?`) or is an `==`/`!=` operand.
+    fn unit_value_after_effect(&mut self, effect: u32) -> u32 {
+        let unit = self.ir.add_expr(IrExpr::UnitInstance);
+        self.ir.add_expr(IrExpr::Block {
+            stmts: vec![effect],
+            value: Some(unit),
+        })
+    }
+
     pub(crate) fn lower_arg(&mut self, arg: AstExprId, target: &Ty) -> Option<u32> {
         // SAM conversion: a lambda flowing into a simple `fun interface` parameter becomes an instance of
         // that interface whose single abstract method runs the lambda (the checker validated the target).
@@ -8173,14 +8185,8 @@ impl<'a> Lower<'a> {
             return None;
         }
         if at == Ty::Unit && target_ref {
-            // A `Unit` value flowing into a reference target (`fun f(): Any? = unitExpr`, `Unit?`): run the
-            // expression for its effect, then materialize the `kotlin/Unit` singleton (the JVM value of
-            // `Unit`) — `Unit` itself leaves nothing on the stack.
-            let unit_val = self.ir.add_expr(IrExpr::UnitInstance);
-            Some(self.ir.add_expr(IrExpr::Block {
-                stmts: vec![e],
-                value: Some(unit_val),
-            }))
+            // A `Unit` value flowing into a reference target (`fun f(): Any? = unitExpr`, `Unit?`).
+            Some(self.unit_value_after_effect(e))
         } else if self.has_scalar_value_repr(at) && target_ref {
             Some(self.ir.add_expr(IrExpr::TypeOp {
                 op: IrTypeOp::ImplicitCoercion,
@@ -13323,23 +13329,14 @@ impl<'a> Lower<'a> {
                     let (lt, rt) = (self.info.ty(lhs), self.info.ty(rhs));
                     let mut l = self.expr(lhs)?;
                     let mut r = self.expr(rhs)?;
-                    // A `Unit` operand of `==`/`!=` is the `Unit.INSTANCE` singleton — a `Unit` expression
-                    // leaves nothing on the stack, so run it for effect then push the singleton, giving the
-                    // structural `areEqual` an `Object` (`foo() != bar()` where `bar(): Unit`).
+                    // A `Unit` operand of `==`/`!=` is the `Unit.INSTANCE` singleton — materialize it so the
+                    // structural `areEqual` gets an `Object` (`foo() != bar()` where `bar(): Unit`).
                     if matches!(op, BinOp::Eq | BinOp::Ne) {
                         if lt == Ty::Unit {
-                            let u = self.ir.add_expr(IrExpr::UnitInstance);
-                            l = self.ir.add_expr(IrExpr::Block {
-                                stmts: vec![l],
-                                value: Some(u),
-                            });
+                            l = self.unit_value_after_effect(l);
                         }
                         if rt == Ty::Unit {
-                            let u = self.ir.add_expr(IrExpr::UnitInstance);
-                            r = self.ir.add_expr(IrExpr::Block {
-                                stmts: vec![r],
-                                value: Some(u),
-                            });
+                            r = self.unit_value_after_effect(r);
                         }
                     }
                     // `Char` arithmetic (`'a' + 1`, `c - 1`, `c1 - c2`): `Char`/`Int` share the int stack
