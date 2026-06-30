@@ -18,6 +18,47 @@ use crate::libraries::{
 use crate::symbol_source::SymbolSource;
 use crate::types::Ty;
 
+/// The packages whose classes Kotlin/JVM imports by default — a bare, unqualified, unimported type
+/// name resolves ONLY to a class in one of these (plus same-package user types and explicit/wildcard
+/// imports, added per file). Dotted form for `platform_default_import_packages`; the slash-form
+/// prefixes used to filter the classpath seed are derived in [`is_default_import_package`].
+const DEFAULT_IMPORT_PACKAGES: &[&str] = &[
+    "kotlin",
+    "kotlin.annotation",
+    "kotlin.collections",
+    "kotlin.comparisons",
+    "kotlin.io",
+    "kotlin.ranges",
+    "kotlin.sequences",
+    "kotlin.text",
+    "kotlin.jvm",
+    "java.lang",
+];
+
+/// Whether a JVM internal name (`java/lang/StringBuilder`) lives directly in a default-import package,
+/// so it may be reached by its simple name without an import (kotlinc semantics). Used to filter the
+/// global classpath seed: a bare name must NOT silently bind to an arbitrary classpath class (e.g.
+/// `Widget` → `jdk/internal/.../Widget`, `plain` → `sun/.../plain`) — a silent miscompile.
+fn is_default_import_package(internal: &str) -> bool {
+    let pkg = match internal.rfind('/') {
+        Some(i) => &internal[..i],
+        None => return false, // the unnamed package is same-package-only, never a default import
+    };
+    matches!(
+        pkg,
+        "java/lang"
+            | "kotlin"
+            | "kotlin/annotation"
+            | "kotlin/collections"
+            | "kotlin/comparisons"
+            | "kotlin/io"
+            | "kotlin/ranges"
+            | "kotlin/sequences"
+            | "kotlin/text"
+            | "kotlin/jvm"
+    )
+}
+
 trait JvmScalarTy {
     fn is_jvm_scalar(&self) -> bool;
 }
@@ -833,7 +874,7 @@ fn member_matches_query(member_name: &str, query: &str) -> bool {
 
 impl SymbolSource for JvmLibraries {
     fn platform_default_import_packages(&self) -> &'static [&'static str] {
-        &["java.lang", "kotlin.jvm"]
+        DEFAULT_IMPORT_PACKAGES
     }
 
     fn physical_property_getter_name(&self, property: &str) -> Option<String> {
@@ -866,7 +907,19 @@ impl SymbolSource for JvmLibraries {
             return hit;
         }
         let idx = self.cp.scan_types();
-        let mut class_names = idx.class_names.clone();
+        // A bare (unqualified, unimported) type name resolves ONLY to a class in a DEFAULT-IMPORT
+        // package — kotlinc semantics. NOT to an arbitrary classpath class: a global simple-name seed
+        // of the whole classpath silently binds a bare name to whatever shares it (`Widget`→
+        // `jdk/internal/.../Widget`, `plain`→`sun/.../plain`, shadowing a user `fun plain()`) — a
+        // silent miscompile. Same-package user types and explicit/wildcard imports are added per file
+        // by the signature collector; default-import typealiases (`ArrayList`→`java/util/ArrayList`,
+        // declared in `kotlin.collections`) are seeded just below from the type-alias index.
+        let mut class_names: std::collections::HashMap<String, String> = idx
+            .class_names
+            .iter()
+            .filter(|(_, internal)| is_default_import_package(internal))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
         let mut canonical_names = std::collections::HashMap::new();
         // Seed the Kotlin built-in → JVM class mapping (ported `JavaToKotlinClassMap`): intrinsic
         // mapped types (`Comparable`, `Throwable`, `List`, …), not `.class` files. Classpath types

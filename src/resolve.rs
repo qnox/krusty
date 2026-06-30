@@ -581,11 +581,46 @@ fn collect_file_type_names(file: &File, out: &mut std::collections::HashSet<Stri
             collect_typeref_names(r, out);
         }
     }
+    // Every bare VALUE reference (`val x = EmptyCoroutineContext` — an object singleton/top-level fun
+    // used as a value) is a candidate too: a wildcard/explicit import resolves it no differently from a
+    // type. Collecting all `Expr::Name`s over-approximates (locals, params), but a name that matches no
+    // import package simply isn't added — harmless. This is what lets a default-import-only seed (no
+    // whole-classpath blanket) still resolve imported values.
+    for e in &file.expr_arena {
+        if let Expr::Name(n) = e {
+            out.insert(n.clone());
+        }
+    }
     for &d in &file.decls {
         match file.decl(d) {
-            Decl::Fun(f) => fun_names(f, file, out),
+            Decl::Fun(f) => {
+                for a in &f.annotations {
+                    out.insert(a.clone());
+                }
+                fun_names(f, file, out)
+            }
             Decl::Property(p) => prop_names(p, out),
             Decl::Class(c) => {
+                for a in c
+                    .annotations
+                    .iter()
+                    .chain(c.methods.iter().flat_map(|m| &m.annotations))
+                {
+                    out.insert(a.clone());
+                }
+                // Supertypes/base/delegated-interface names (`class Done : Continuation<Unit>`) must be
+                // candidates too — they are bare names a wildcard/explicit import resolves, no different
+                // from a parameter type. Stored as simple-name strings (their type args, if any, are
+                // collected elsewhere).
+                for s in c.supertypes.iter().chain(c.base_class.as_ref()) {
+                    out.insert(s.clone());
+                }
+                for (iface, _, _) in &c.delegations {
+                    out.insert(iface.clone());
+                }
+                for (iface, _) in &c.delegation_exprs {
+                    out.insert(iface.clone());
+                }
                 for (_, b) in &c.type_param_bounds {
                     collect_typeref_names(b, out);
                 }

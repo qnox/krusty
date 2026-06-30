@@ -1517,17 +1517,26 @@ fn parse_aliases_from_bytes(bytes: &[u8], idx: &mut TypeIndex) {
         .filter(|m| m.name.ends_with("$annotations"))
         .map(|m| m.name.trim_end_matches("$annotations").to_string())
         .collect();
-    // In d2, alias name and its JVM descriptor appear as consecutive strings:
-    // name → "Lsome/Target;" (a JVM class descriptor).
+    // In d2, an alias name is followed by its underlying type's JVM descriptor — but for a GENERIC
+    // alias the type-parameter NAMES come first (`"ArrayList","E","Ljava/util/ArrayList;"`,
+    // `"LinkedHashMap","K","V","Ljava/util/LinkedHashMap;"`), so the descriptor is NOT simply at i+1.
+    // Scan forward for the first class descriptor, stopping at the next alias name (defensive — every
+    // alias has a descriptor before the next one). Picking the FIRST `L…;` (not the last) avoids
+    // grabbing a trailing annotation marker like `Lkotlin/SinceKotlin;`. A type-parameter BOUND is no
+    // hazard: bounds appear as PLAIN classifier-name strings (`kotlin/Number`), only the underlying
+    // type is emitted in `L…;` descriptor form — so the first descriptor is always the alias target.
     let d2 = &ci.kotlin_d2;
+    let alias_set: std::collections::HashSet<&String> = alias_names.iter().collect();
     for alias in &alias_names {
-        for i in 0..d2.len() {
-            if d2[i] == *alias {
-                if let Some(desc) = d2.get(i + 1) {
-                    if let Some(internal_name) = desc_to_internal(desc) {
-                        idx.type_aliases.insert(alias.clone(), internal_name);
-                    }
-                }
+        let Some(i) = d2.iter().position(|s| s == alias) else {
+            continue;
+        };
+        for desc in &d2[i + 1..] {
+            if alias_set.contains(desc) {
+                break; // ran into the next alias without finding a descriptor
+            }
+            if let Some(internal_name) = desc_to_internal(desc) {
+                idx.type_aliases.insert(alias.clone(), internal_name);
                 break;
             }
         }
