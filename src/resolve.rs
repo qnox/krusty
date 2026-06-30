@@ -671,6 +671,13 @@ pub const KOTLIN_DEFAULT_IMPORT_PACKAGES: &[&str] = &[
 /// default additions — so a bare type name resolves through the generic import machinery instead of a
 /// global every-class simple-name index (which falsely collides `Continuation` with JDK internals).
 pub fn import_wildcards(file: &File, platform_defaults: &[&str]) -> Vec<String> {
+    // The file's OWN package is an implicit wildcard: Kotlin makes same-package declarations (including
+    // ones compiled separately and read from the classpath) visible without an import. The root package
+    // contributes `""`, so a bare name resolves to a top-level classpath class (`RoleId` → `RoleId`).
+    let own_package = std::iter::once(match &file.package {
+        Some(pkg) => pkg.replace('.', "/"),
+        None => String::new(),
+    });
     file.imports
         .iter()
         .filter_map(|fq| fq.strip_suffix(".*").map(|p| p.replace('.', "/")))
@@ -680,7 +687,18 @@ pub fn import_wildcards(file: &File, platform_defaults: &[&str]) -> Vec<String> 
                 .chain(platform_defaults.iter())
                 .map(|s| s.replace('.', "/")),
         )
+        .chain(own_package)
         .collect()
+}
+
+/// A classpath type candidate from a wildcard package and a simple name. The root package (`pkg == ""`)
+/// yields the bare name; a named package yields `pkg/name`.
+fn wildcard_candidate(pkg: &str, name: &str) -> String {
+    if pkg.is_empty() {
+        name.to_string()
+    } else {
+        format!("{pkg}/{name}")
+    }
 }
 
 /// Map a single JVM field descriptor to a krusty `Ty` (the v0 supported set).
@@ -819,7 +837,7 @@ pub fn collect_signatures_with_cp(
                     .or_else(|| {
                         wilds
                             .iter()
-                            .map(|p| format!("{p}/{name}"))
+                            .map(|p| wildcard_candidate(p, &name))
                             .find(|cand| libraries.resolve_type(cand).is_some())
                     });
                 if let Some(full) = full {
@@ -4222,7 +4240,7 @@ impl<'a> Checker<'a> {
             }
         }
         for pkg in &self.import_wildcards {
-            let cand = format!("{pkg}/{name}");
+            let cand = wildcard_candidate(pkg, name);
             if self.syms.libraries.resolve_type(&cand).is_some() {
                 return Some(cand);
             }
