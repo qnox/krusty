@@ -32,6 +32,14 @@ what and why — with no tooling provenance. Keep this rule when amending or rew
 - Do not add ad hoc JVM launchers in tests. Use `tests/common::compile_and_run_box`,
   `tests/common::run_box`, or `tests/common::javac_run`; these keep persistent JVM runners/servers and
   avoid per-test `javac`/`java` startup.
+- **Diagnostics: use the trace facility, never raw prints.** For any debug output in compiler code use
+  `trace_compiler!("<category>", …)` (`src/trace.rs`; categories listed there — `resolve`, `suspend`,
+  `value_classes`, `splice`). It is gated by the `trace` cargo feature, **off by default** so the gate
+  and release pay zero cost (every site compiles out). To diagnose, build `--features trace` then set
+  `KRUSTY_TRACE=all` or a category list (e.g. `KRUSTY_TRACE=resolve`). Do **not** use
+  `eprintln!`/`println!`/`dbg!` in the compiler: the differential harness parses stdout/stderr, so stray
+  prints can corrupt it, and they tend to get left behind. The custom facility is intentional — do
+  **not** add a logging crate (`tracing`/`log`); the project is deliberately dependency-lean.
 - The AST/IR stays **index-based** (`u32` ids into parallel `Vec`s — no `Box`/`Rc` graphs).
 - Correctness is defined by the **differential harness** vs the real `kotlinc`: don't claim a
   feature works without an ABI-signature diff and/or a round-trip test.

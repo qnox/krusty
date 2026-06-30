@@ -1189,6 +1189,7 @@ pub fn lower_value_classes(ir: &mut IrFile) -> bool {
                 let vc_owned = under.contains_key(owner);
                 let refs = descriptor_param_refs(descriptor);
                 let ptypes = descriptor_param_types(descriptor);
+                #[cfg(feature = "trace")]
                 if crate::trace::enabled("value_classes") {
                     if let IrExpr::Call { callee, args, .. } = &ir.exprs[id as usize] {
                         let nm = match callee {
@@ -1300,6 +1301,7 @@ pub fn lower_value_classes(ir: &mut IrFile) -> bool {
             };
             for (a, p) in pairs {
                 let tgt = target(&p, &under);
+                #[cfg(feature = "trace")]
                 if crate::trace::enabled("value_classes") {
                     let r = repr(&ir.exprs, &orig_rets, &orig_fields, slots, &under, a);
                     crate::trace_compiler!(
