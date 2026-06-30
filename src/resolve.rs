@@ -4926,16 +4926,26 @@ impl<'a> Checker<'a> {
         let Some(c) = self.syms.class_by_internal(internal) else {
             return false;
         };
+        // A generic fun interface is allowed: its method erases to `Object`, which the SAM descriptor
+        // (built from the erased interface method) and the erased lambda parameter types both match. A
+        // value-class method is still excluded (mangled name / boxing not modeled).
         c.is_fun_interface
-            && c.tparam_names.is_empty()
-            // No-argument SAM only: the backend's `invokedynamic` SAM descriptor derives the abstract
-            // method's parameter types from the lambda arity, so a SAM method WITH parameters currently
-            // miscompiles (AbstractMethodError). Restrict until that descriptor is fixed.
             && c.methods.values().all(|sig| {
-                sig.params.is_empty()
-                    && !self.ty_is_value_class(sig.ret)
+                !self.ty_is_value_class(sig.ret)
                     && sig.params.iter().all(|p| !self.ty_is_value_class(*p))
             })
+    }
+
+    /// The abstract-method parameter types of a simple fun interface — used to type a lambda being
+    /// SAM-converted to it so its parameters resolve concretely (and the lowered impl matches the SAM
+    /// descriptor). `None` unless the interface has exactly one method.
+    fn fun_interface_sam_params(&self, internal: &str) -> Option<Vec<Ty>> {
+        let c = self.syms.class_by_internal(internal)?;
+        if c.methods.len() == 1 {
+            Some(c.methods.values().next().unwrap().params.clone())
+        } else {
+            None
+        }
     }
 
     fn expect_assignable(&mut self, expected: Ty, actual: Ty, span: Span, ctx: &str) {
@@ -8871,6 +8881,20 @@ impl<'a> Checker<'a> {
                                 };
                                 self.allow_lambda_mutation = prev;
                                 return t;
+                            }
+                            // A lambda argument SAM-converted to a simple `fun interface` parameter:
+                            // type it with the interface abstract method's parameter types so its
+                            // params resolve concretely and the lowered impl matches the SAM descriptor.
+                            if i < sig.params.len()
+                                && matches!(self.file.expr(a), Expr::Lambda { .. })
+                            {
+                                if let Some(internal) = sig.params[i].obj_internal() {
+                                    if self.simple_fun_interface(internal) {
+                                        if let Some(sp) = self.fun_interface_sam_params(internal) {
+                                            return self.check_lambda_with_types(a, &sp);
+                                        }
+                                    }
+                                }
                             }
                         }
                         // A spread argument `*a` (`Array<E>`/`XArray`) contributes its ELEMENT type `E`
