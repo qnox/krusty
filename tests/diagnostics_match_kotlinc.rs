@@ -31,7 +31,10 @@ fn error_messages_match_kotlinc() {
         "fun f(): Int = q",
         "fun f(a: Int): String = a",
         "fun f(): Int { val x = 1; x = 2; return x }",
-        "fun f(p: Widget): Int = 0",
+        // A type present on NO classpath in either compiler (`Widget` resolves to the JDK-internal
+        // `jdk.internal.org.jline.reader.Widget` when the JDK is on the classpath, so it is a poor
+        // choice for an "unresolved" probe).
+        "fun f(p: UnresolvedWidgetType): Int = 0",
     ];
 
     let root = std::env::temp_dir().join(format!("krusty_diag_{}", std::process::id()));
