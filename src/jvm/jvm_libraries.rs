@@ -1132,7 +1132,18 @@ impl SymbolSource for JvmLibraries {
                 Some("kotlin/Float") => Ty::Float,
                 Some("kotlin/Double") => Ty::Double,
                 Some(other) => Ty::obj(other),
-                None => Ty::obj("kotlin/Any"),
+                // The underlying type was carried in the @Metadata type TABLE (proto field 19), not
+                // inlined — `class_inline` can't resolve it there. Recover it from the synthesized
+                // `box-impl(U)` parameter descriptor, the authoritative JVM underlying type. (A type
+                // PARAMETER underlying — `Result<T>` — has no concrete box-impl param and stays `Any`.)
+                None => ci
+                    .methods
+                    .iter()
+                    .find(|m| m.name == "box-impl")
+                    .and_then(|m| m.descriptor.strip_prefix('('))
+                    .and_then(split_one)
+                    .map(|(d, _)| field_desc_to_ty(d))
+                    .unwrap_or_else(|| Ty::obj("kotlin/Any")),
             }
         });
         let value_class_metadata_members = self.value_class_metadata_members_for_class(&ci);
