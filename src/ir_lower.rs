@@ -3452,6 +3452,19 @@ impl<'a> Lower<'a> {
         self.syms.libraries.unsigned_integer_box_type(ty)
     }
 
+    /// The class-constant name for an UNBOUND class literal `T::class` (`ldc <name>.class`): the JVM
+    /// internal of a reference type (`kotlin/String` → `java/lang/String`), or the array descriptor used
+    /// verbatim as a class constant (`Array<Any>::class` → `[Ljava/lang/Object;`).
+    fn class_literal_ldc_internal(&self, ty: Ty) -> Option<String> {
+        let d = self.syms.libraries.type_descriptor(ty)?;
+        Some(
+            match d.strip_prefix('L').and_then(|s| s.strip_suffix(';')) {
+                Some(inner) => inner.to_string(),
+                None => d,
+            },
+        )
+    }
+
     fn compare_ordered(&mut self, ty: Ty, op: IrBinOp, lhs: u32, rhs: u32) -> Option<u32> {
         if self.is_unsigned_integer_type(ty) {
             let call = self.runtime_call(RuntimeOp::UnsignedCompare, ty, vec![lhs, rhs])?;
@@ -12279,6 +12292,33 @@ impl<'a> Lower<'a> {
             // `LambdaMetafactory` machinery as a lambda, but the impl method handle points directly at
             // the referenced function (no synthesized body). Bound/object/constructor references bail.
             Expr::CallableRef { receiver, name } => {
+                // A class literal (the checker recorded bound-vs-unbound). UNBOUND `T::class` → a `Class`
+                // constant; BOUND `expr::class` → `expr.getClass()` (evaluated once).
+                if name == "class" {
+                    if let Some(crate::resolve::ExprLowering::ClassLiteral { unbound }) =
+                        self.info.expr_lowers.get(&e).cloned()
+                    {
+                        return match unbound {
+                            Some(ty) => {
+                                let internal = self.class_literal_ldc_internal(ty)?;
+                                Some(self.ir.add_expr(IrExpr::ClassConst { internal }))
+                            }
+                            None => {
+                                let r = self.expr(receiver?)?;
+                                Some(self.ir.add_expr(IrExpr::Call {
+                                    callee: Callee::Virtual {
+                                        owner: "java/lang/Object".to_string(),
+                                        name: "getClass".to_string(),
+                                        descriptor: "()Ljava/lang/Class;".to_string(),
+                                        interface: false,
+                                    },
+                                    dispatch_receiver: Some(r),
+                                    args: vec![],
+                                }))
+                            }
+                        };
+                    }
+                }
                 // A property reference is typed by its callable shape, but still lowers to the Kotlin
                 // property-reference runtime object on the JVM.
                 if let Some(recv) = receiver {

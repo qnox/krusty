@@ -6165,6 +6165,9 @@ impl<'a> Emitter<'a> {
     fn value_ty(&self, e: u32) -> Ty {
         match self.ir.expr(e) {
             IrExpr::StringConcat(_) => Ty::String,
+            // A class literal `T::class` is a `java/lang/Class` constant — a reference, so `==`/`!=` on
+            // two class literals routes to reference equality, not the primitive `if_icmpeq`.
+            IrExpr::ClassConst { .. } => Ty::obj("java/lang/Class"),
             IrExpr::Const(c) => match c {
                 IrConst::Boolean(_) => Ty::Boolean,
                 IrConst::Int(_) => Ty::Int,
