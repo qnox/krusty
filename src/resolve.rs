@@ -3036,6 +3036,10 @@ fn ty_of_ref_with(
     // A nullable primitive is `Nullable(prim)` (it boxes to its wrapper at the backend boundary); a
     // non-boxable primitive (unsigned/value) is still rejected (skip, never miscompiled).
     if r.nullable && !base.is_reference() && base != Ty::Error {
+        // `Unit?` is a nullable `kotlin/Unit` reference (`Unit.INSTANCE`/`null`), not a primitive.
+        if base == Ty::Unit {
+            return Ty::nullable(Ty::obj("kotlin/Unit"));
+        }
         if let Some(nb) = base.nullable_boxed() {
             return nb;
         }
@@ -4169,6 +4173,9 @@ impl<'a> Checker<'a> {
             Ty::Error
         };
         if r.nullable && !base.is_reference() && base != Ty::Error {
+            if base == Ty::Unit {
+                return Ty::nullable(Ty::obj("kotlin/Unit"));
+            }
             if let Some(nb) = base.nullable_boxed() {
                 return nb;
             }
