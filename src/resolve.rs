@@ -309,6 +309,21 @@ impl SymbolTable {
         self.method_of(&s, name)
     }
 
+    /// Whether `internal`'s method `name` (or one inherited up the base chain) is `vararg` — a
+    /// clone-free probe for the hot call paths, which only need the flag (`method_of` clones the whole
+    /// `Signature`, an allocation per call when used merely to read one bool).
+    pub fn method_is_vararg(&self, internal: &str, name: &str) -> bool {
+        let Some(c) = self.class_by_internal(internal) else {
+            return false;
+        };
+        if let Some(sig) = c.methods.get(name) {
+            return sig.vararg;
+        }
+        c.super_internal
+            .as_deref()
+            .is_some_and(|s| self.method_is_vararg(s, name))
+    }
+
     /// All method signatures inherited from declared supertypes (base-class chain + interfaces,
     /// recursively) as `(name, signature)`. Used to detect overrides that would need a JVM bridge
     /// method (covariant/generic return), which krusty does not synthesize.
@@ -7178,14 +7193,16 @@ impl<'a> Checker<'a> {
             // A `vararg` member (`fun f(vararg s: T)`) accepts any number of trailing `T` arguments,
             // packed into the array parameter — element-type them rather than matching the single array
             // parameter positionally (which would reject `f(x)` as "T but Array<T> expected").
-            if let Some(sig) = self.syms.method_of(internal, name).filter(|s| s.vararg) {
-                let n_fixed = sig.params.len().saturating_sub(1);
-                if arg_tys.len() >= n_fixed {
-                    self.expect_call_args(&sig.params, true, args, arg_tys);
-                    return Some(
-                        self.inferred_member_ret(rt, name, &sig.params)
-                            .unwrap_or(sig.ret),
-                    );
+            if self.syms.method_is_vararg(internal, name) {
+                if let Some(sig) = self.syms.method_of(internal, name) {
+                    let n_fixed = sig.params.len().saturating_sub(1);
+                    if arg_tys.len() >= n_fixed {
+                        self.expect_call_args(&sig.params, true, args, arg_tys);
+                        return Some(
+                            self.inferred_member_ret(rt, name, &sig.params)
+                                .unwrap_or(sig.ret),
+                        );
+                    }
                 }
             }
         }
