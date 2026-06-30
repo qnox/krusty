@@ -3266,13 +3266,19 @@ impl<'a> Parser<'a> {
                         start,
                     );
                 }
-                // `var x: T` with no initializer (deferred assignment) → synthesize the type's default
-                // value (`0`/`false`/`null`); a later `x = …` assigns it. Only for `var` with a type
-                // annotation (a `val` deferred-init needs assign-once tracking krusty lacks → rejected).
-                let init = if is_var && ty.is_some() && !self.at(TokenKind::Eq) {
+                // `val`/`var x: T` with no initializer (deferred assignment) → synthesize the type's
+                // default value (`0`/`false`/`null`); a later `x = …` assigns it. Kotlin's definite-
+                // assignment guarantees the synthetic default is always overwritten before a read, so a
+                // deferred `val` behaves like a once-assigned `var` — treat it as internally mutable
+                // (krusty doesn't enforce assign-once; kotlinc already rejects misuse). A NULLABLE `val`
+                // is left out: assigning a non-null value to it relies on smart-cast-after-assignment
+                // that the checker doesn't yet model, so keep rejecting it (skip, never miscompile).
+                let deferred = ty.is_some()
+                    && !self.at(TokenKind::Eq)
+                    && (is_var || !ty.as_ref().unwrap().nullable);
+                let init = if deferred {
                     let sp = self.tok().span;
-                    let e = self.default_init_expr(ty.as_ref().unwrap(), sp);
-                    e
+                    self.default_init_expr(ty.as_ref().unwrap(), sp)
                 } else {
                     self.expect(TokenKind::Eq, "'='");
                     self.skip_newlines();
@@ -3280,7 +3286,7 @@ impl<'a> Parser<'a> {
                 };
                 self.finish_stmt(
                     Stmt::Local {
-                        is_var,
+                        is_var: is_var || deferred,
                         name,
                         ty,
                         init,
