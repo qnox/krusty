@@ -65,6 +65,21 @@ pub fn params_descriptor(params: &[Ty]) -> String {
     params.iter().map(|t| type_descriptor(*t)).collect()
 }
 
+/// The JVM array descriptor for a primitive-array class name (`kotlin/IntArray` → `[I`), or `None`.
+fn primitive_array_descriptor(internal: &str) -> Option<&'static str> {
+    Some(match internal {
+        "kotlin/IntArray" => "[I",
+        "kotlin/LongArray" => "[J",
+        "kotlin/ShortArray" => "[S",
+        "kotlin/ByteArray" => "[B",
+        "kotlin/BooleanArray" => "[Z",
+        "kotlin/CharArray" => "[C",
+        "kotlin/FloatArray" => "[F",
+        "kotlin/DoubleArray" => "[D",
+        _ => return None,
+    })
+}
+
 /// A JVM field/type descriptor from a krusty `Ty`.
 pub fn type_descriptor(ty: Ty) -> String {
     let obj_desc =
@@ -82,6 +97,19 @@ pub fn type_descriptor(ty: Ty) -> String {
         Ty::ULong => "J".into(),
         Ty::String => obj_desc("kotlin/String"),
         Ty::Unit => "V".into(),
+        // A boxed `Array<T>` (`Obj("kotlin/Array", [T])`) is `[<boxed T>` (`Array<Int>` = `[Ljava/lang/Integer;`),
+        // and a primitive array class name (`kotlin/IntArray`) is its JVM array descriptor (`[I`) — without
+        // this they would descriptor to a bogus `Lkotlin/Array;`/`Lkotlin/IntArray;` class.
+        Ty::Obj("kotlin/Array", args) => {
+            let e = args
+                .first()
+                .copied()
+                .unwrap_or_else(|| Ty::obj("kotlin/Any"));
+            format!("[{}", type_descriptor(e.boxed_ref().unwrap_or(e)))
+        }
+        Ty::Obj(n, _) if primitive_array_descriptor(n).is_some() => {
+            primitive_array_descriptor(n).unwrap().into()
+        }
         Ty::Obj(n, _) => obj_desc(n),
         Ty::Null | Ty::Nothing | Ty::Error => obj_desc("kotlin/Any"),
         Ty::Array(elem) => format!("[{}", type_descriptor(*elem)),

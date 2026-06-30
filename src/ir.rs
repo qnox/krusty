@@ -362,14 +362,19 @@ pub enum IrExpr {
     /// A `vararg` argument at a call site (Kotlin IR's `IrVararg`): the spread/listed elements and
     /// their element type. The JVM backend packs them into an array; another backend may differ.
     Vararg {
-        element_type: Ty,
+        /// The whole array type (`kotlin/IntArray`, `kotlin/Array<Int>`, `kotlin/Array<String>`), NOT the
+        /// bare element — the JVM emitter derives the element + `newarray`/`anewarray` (and boxing of a
+        /// `kotlin/Array<Int>` = `Integer[]`) from it via `ir_ty_to_jvm`. The element alone is ambiguous
+        /// (`Obj("kotlin/Int")` is both a primitive `IntArray` element and a boxed `Array<Int>` element).
+        array_type: Ty,
         elements: Vec<ExprId>,
     },
     /// Allocate an uninitialized array of `size` elements (`anewarray` for a reference element,
     /// `newarray` for a primitive) — the sized constructor `Array<T>(n) { … }` / `arrayOfNulls<T>(n)`
     /// fills it afterwards. (`Vararg` is the *literal* form with a statically-known element list.)
     NewArray {
-        element_type: Ty,
+        /// The whole array type — see [`IrExpr::Vararg::array_type`].
+        array_type: Ty,
         size: ExprId,
     },
     /// `try { body } catch (e: E) { … } … [finally { f }]`. `result` is the value type (`Unit` when

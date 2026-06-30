@@ -948,11 +948,11 @@ impl SerializationPlugin {
             })
             .collect();
         let kclass_arr = ir.add_expr(IrExpr::Vararg {
-            element_type: class_ty("kotlin/reflect/KClass"),
+            array_type: Ty::obj_args("kotlin/Array", &[class_ty("kotlin/reflect/KClass")]),
             elements: sub_kclasses,
         });
         let ser_arr = ir.add_expr(IrExpr::Vararg {
-            element_type: kserializer_of(class_ty("kotlin/Any")),
+            array_type: Ty::obj_args("kotlin/Array", &[kserializer_of(class_ty("kotlin/Any"))]),
             elements: sub_serializers,
         });
         let inst = ir.add_expr(IrExpr::NewExternal {
@@ -2208,7 +2208,7 @@ impl IrPlugin for SerializationPlugin {
                             })
                             .collect();
                         let arr = ir.add_expr(IrExpr::Vararg {
-                            element_type: class_ty(KSERIALIZER_FQ),
+                            array_type: Ty::obj_args("kotlin/Array", &[class_ty(KSERIALIZER_FQ)]),
                             elements,
                         });
                         let ret = ir.add_expr(IrExpr::Return(Some(arr)));

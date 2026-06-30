@@ -2993,10 +2993,11 @@ fn ty_of_ref_with(
                 let e = ty_of_ref_with(a, classes, tparams, ctx, diags);
                 if e.is_reference() {
                     Ty::array(e)
-                } else if let Some(boxed) = e.boxed_ref() {
-                    // `Array<Int>` is an array of BOXED `Integer` (`[Ljava/lang/Integer;`), distinct
-                    // from the unboxed `IntArray` (`[I`). Carry the element as the boxed reference.
-                    Ty::array(boxed)
+                } else if e.boxed_ref().is_some() && !matches!(e, Ty::UInt | Ty::ULong) {
+                    // `Array<Int>` is an array of BOXED `Integer` (`[Ljava/lang/Integer;`, distinct from
+                    // the unboxed `IntArray` = `[I`). Model it as `Obj("kotlin/Array", [Int])` — the SAME
+                    // logical form as `arrayOf(1)`/`Array(n){…}`, element read unboxed (the backend boxes).
+                    Ty::obj_args("kotlin/Array", &[e])
                 } else {
                     diags.error(
                         r.span,
@@ -4190,6 +4191,11 @@ impl<'a> Checker<'a> {
                     let e = self.resolve_ty(a);
                     if e.is_reference() {
                         Ty::array(e)
+                    } else if e.boxed_ref().is_some() && !matches!(e, Ty::UInt | Ty::ULong) {
+                        // A boxed primitive `Array<Int>` = `Integer[]` — the SAME logical form as
+                        // `arrayOf(1)`/`Array(n){…}` (`Obj("kotlin/Array", [Int])`, element read unboxed).
+                        // Unsigned arrays box to their own inline-class wrapper — left unsupported.
+                        Ty::obj_args("kotlin/Array", &[e])
                     } else {
                         Ty::Error
                     }
@@ -6779,6 +6785,7 @@ impl<'a> Checker<'a> {
         args: &[ExprId],
         arg_tys: &[Ty],
         span: Span,
+        explicit_elem: Option<Ty>,
     ) -> Option<Ty> {
         let primitive_of = |f: &str| match f {
             "intArrayOf" => Some(Ty::Int),
@@ -6804,21 +6811,33 @@ impl<'a> Checker<'a> {
             return Some(Ty::array(Ty::obj("kotlin/Any")));
         }
         if fname == "arrayOf" {
-            // The element type is the common type of the arguments; it must be a reference type
-            // (an array of a primitive would require boxing — use `intArrayOf` etc.).
-            let mut elem: Option<Ty> = None;
-            for &t in arg_tys {
-                elem = Some(match elem {
-                    Some(prev) => self.join(prev, t, span),
-                    None => t,
-                });
+            // An explicit type argument (`arrayOf<Byte>(1)`) fixes the element type — the array is
+            // `Array<Byte>` (`[Byte`), and the integer-literal args narrow to it. Otherwise infer the
+            // element as the common type of the arguments.
+            let mut elem: Option<Ty> = explicit_elem;
+            if elem.is_none() {
+                for &t in arg_tys {
+                    elem = Some(match elem {
+                        Some(prev) => self.join(prev, t, span),
+                        None => t,
+                    });
+                }
+            }
+            if let Some(e) = elem {
+                for (i, t) in arg_tys.iter().enumerate() {
+                    self.expect_assignable(e, *t, self.span(args[i]), "array element");
+                }
             }
             match elem {
                 Some(e) if e.is_reference() => return Some(Ty::array(e)),
-                // `arrayOf(1, 2, 3)` is an `Array<Int>` = `[Ljava/lang/Integer;` — box the primitive
-                // element (distinct from `intArrayOf(…)` = `[I`).
-                Some(e) if e.boxed_ref().is_some() => {
-                    return Some(Ty::array(e.boxed_ref().unwrap()))
+                // `arrayOf(1, 2, 3)` is an `Array<Int>` = `[Ljava/lang/Integer;` (distinct from
+                // `intArrayOf(…)` = `[I`). Model it as `Obj("kotlin/Array", [Int])` — the SAME logical form
+                // as `Array(n) { … }`, so the element reads as the unboxed primitive `Int` (the backend owns
+                // the physical boxed layout, un/boxing at access).
+                // Unsigned arrays box to their own inline-class wrapper, not a `java/lang/*` — unsupported,
+                // consistent with the other array-type resolvers.
+                Some(e) if e.boxed_ref().is_some() && !matches!(e, Ty::UInt | Ty::ULong) => {
+                    return Some(Ty::obj_args("kotlin/Array", &[e]))
                 }
                 Some(_) => {
                     self.diags.error(
@@ -7439,7 +7458,8 @@ impl<'a> Checker<'a> {
         if let (Ty::Char, "code") = (rt, name) {
             return Ty::Int; // `c.code` — the Char's UTF-16 code unit as an `Int`.
         }
-        if let (Ty::Array(_), "size") = (rt, name) {
+        if name == "size" && rt.array_elem().is_some() {
+            // `arr.size` — covers both `Ty::Array` and a boxed `Array<T>` (`Obj("kotlin/Array", [T])`).
             return Ty::Int;
         }
         // Property read on a class value: `p.prop` (own or inherited).
@@ -9098,7 +9118,15 @@ impl<'a> Checker<'a> {
                                 return Ty::array(elem);
                             }
                         }
-                        if let Some(t) = self.check_array_builtin(&fname, args, &arg_tys, span) {
+                        let explicit_elem = self
+                            .file
+                            .call_type_args
+                            .get(&call.0)
+                            .and_then(|ts| ts.first())
+                            .map(|r| self.resolve_ty(r));
+                        if let Some(t) =
+                            self.check_array_builtin(&fname, args, &arg_tys, span, explicit_elem)
+                        {
                             return t;
                         }
                     }
@@ -10176,41 +10204,46 @@ impl<'a> Checker<'a> {
                 label,
             } => {
                 let it = self.expr(iterable);
-                let elem = match it {
-                    Ty::Array(_) => it.array_elem().unwrap_or(Ty::Error),
-                    Ty::String => Ty::Char, // iterating a String yields its chars
-                    Ty::Error => Ty::Error,
-                    Ty::Obj(internal, args) => {
-                        if let Some(info) = self.syms.libraries.counted_loop_info(internal) {
-                            info.elem
-                        } else if crate::call_resolver::resolve_instance(
-                            &*self.syms.libraries,
-                            internal,
-                            "iterator",
-                            &[],
-                        )
-                        .is_some()
-                        {
-                            args.first()
-                                .copied()
-                                .unwrap_or_else(|| Ty::obj("kotlin/Any"))
-                        } else {
-                            match self.library_extension_return("iterator", it, &[], &[]) {
-                                Some(ret) => ret
-                                    .type_args()
-                                    .first()
+                // An array element type covers both `Ty::Array` and a boxed `Array<T>`
+                // (`Obj("kotlin/Array", [T])`) — iterate either as an array.
+                let elem = if let Some(e) = it.array_elem() {
+                    e
+                } else {
+                    match it {
+                        Ty::String => Ty::Char, // iterating a String yields its chars
+                        Ty::Error => Ty::Error,
+                        Ty::Obj(internal, args) => {
+                            if let Some(info) = self.syms.libraries.counted_loop_info(internal) {
+                                info.elem
+                            } else if crate::call_resolver::resolve_instance(
+                                &*self.syms.libraries,
+                                internal,
+                                "iterator",
+                                &[],
+                            )
+                            .is_some()
+                            {
+                                args.first()
                                     .copied()
-                                    .unwrap_or_else(|| Ty::obj("kotlin/Any")),
-                                None => {
-                                    self.diags.error(self.span(iterable), format!("krusty: 'for' over '{}' is not supported (only arrays, String, and Iterables)", it.name()));
-                                    Ty::Error
+                                    .unwrap_or_else(|| Ty::obj("kotlin/Any"))
+                            } else {
+                                match self.library_extension_return("iterator", it, &[], &[]) {
+                                    Some(ret) => ret
+                                        .type_args()
+                                        .first()
+                                        .copied()
+                                        .unwrap_or_else(|| Ty::obj("kotlin/Any")),
+                                    None => {
+                                        self.diags.error(self.span(iterable), format!("krusty: 'for' over '{}' is not supported (only arrays, String, and Iterables)", it.name()));
+                                        Ty::Error
+                                    }
                                 }
                             }
                         }
-                    }
-                    _ => {
-                        self.diags.error(self.span(iterable), format!("krusty: 'for' over '{}' is not supported (only arrays, String, and Iterables)", it.name()));
-                        Ty::Error
+                        _ => {
+                            self.diags.error(self.span(iterable), format!("krusty: 'for' over '{}' is not supported (only arrays, String, and Iterables)", it.name()));
+                            Ty::Error
+                        }
                     }
                 };
                 self.push_scope();
