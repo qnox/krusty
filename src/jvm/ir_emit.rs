@@ -5924,6 +5924,11 @@ impl<'a> Emitter<'a> {
             }
         }
 
+        // The `finally` catch-all must protect the body and each catch BODY, but NOT the inlined finally
+        // code (normal-path, per-catch, or its own) — otherwise an exception thrown inside an inlined
+        // finally re-enters the handler and the finally runs twice. Collect each catch body's range
+        // (`[cbody_start, cbody_end)`, ending before that catch's inlined finally).
+        let mut fin_ranges: Vec<(Label, Label)> = vec![(start, end)];
         for c in catches {
             let handler = code.new_label();
             code.bind(handler);
@@ -5935,6 +5940,8 @@ impl<'a> Emitter<'a> {
             self.next_slot += 1;
             self.slots.insert(c.var, (cslot, exc_ty));
             store(exc_ty, cslot, code);
+            let cbody_start = code.new_label();
+            code.bind(cbody_start);
             let cbody_diverges = self.diverges(c.body);
             if is_stmt || cbody_diverges {
                 self.emit(c.body, code);
@@ -5943,6 +5950,13 @@ impl<'a> Emitter<'a> {
                 store(rt, result_slot.unwrap(), code);
             }
             self.slots.remove(&c.var);
+            // The catch body is protected by the finally handler (a throw in a catch runs the finally),
+            // but the catch's own inlined finally (below) is not.
+            let cbody_end = code.new_label();
+            code.bind(cbody_end);
+            if finally.is_some() {
+                fin_ranges.push((cbody_start, cbody_end));
+            }
             if !cbody_diverges {
                 if let Some(f) = finally {
                     self.emit(f, code);
@@ -5955,12 +5969,10 @@ impl<'a> Emitter<'a> {
             code.add_exception(start, end, handler, exc_ci);
         }
 
-        // `finally` catch-all: any exception not handled above (in the body or a catch handler) runs
-        // the `finally` then re-throws. Its protected region covers the body + all catch handlers; the
-        // handler's own code is past `protected_end`, so it doesn't catch itself.
+        // `finally` catch-all: any exception not handled above (in the body or a catch body) runs the
+        // `finally` then re-throws. It protects only the body + catch bodies (`fin_ranges`), NOT the
+        // inlined finally code — which lies past those ranges, so it doesn't re-catch itself.
         if let Some(f) = finally {
-            let protected_end = code.new_label();
-            code.bind(protected_end);
             let fin_handler = code.new_label();
             code.bind(fin_handler);
             let thr_ci = self.cw.class_ref("java/lang/Throwable");
@@ -5978,7 +5990,9 @@ impl<'a> Emitter<'a> {
                 code.athrow();
             }
             // `catch_type` 0 = catch-all (any throwable), matching kotlinc's `finally` table entry.
-            code.add_exception(start, protected_end, fin_handler, 0);
+            for (rs, re) in fin_ranges {
+                code.add_exception(rs, re, fin_handler, 0);
+            }
         }
 
         if after_reachable {
