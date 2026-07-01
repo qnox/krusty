@@ -9070,6 +9070,89 @@ impl<'a> Lower<'a> {
         Some(call)
     }
 
+    /// Lower a classpath instance-member call that OMITS a defaulted argument (named or short) through
+    /// the member's static `$default` synthetic — the general case behind a classpath `data class`'s
+    /// `r.copy(b = "y")`. Maps the labels onto positions via `@Metadata` names/default flags, then emits
+    /// `invokestatic Owner.name$default(recv, <arg | placeholder>…, int mask, Object marker)` (the omitted
+    /// positions form the bitmask; the synthetic fills them from the receiver). `None` (fall through to the
+    /// plain member path) when nothing is omitted, no defaulting member matches, or no synthetic exists.
+    fn lower_library_default_member_call(
+        &mut self,
+        receiver: AstExprId,
+        rt: Ty,
+        name: &str,
+        call: AstExprId,
+        args: &[AstExprId],
+    ) -> Option<u32> {
+        let owner = self
+            .class_of(rt)
+            .map(|ci| ci.internal.clone())
+            .or_else(|| rt.obj_internal().map(str::to_string))?;
+        crate::trace_compiler!(
+            "resolve",
+            "lower_library_default_member_call {owner}.{name} args={} named={}",
+            args.len(),
+            self.afile.call_arg_names.contains_key(&call.0)
+        );
+        let fi = self
+            .syms
+            .libraries
+            .functions(name, Some(rt))
+            .overloads
+            .into_iter()
+            .find(|o| {
+                o.kind == crate::libraries::FnKind::Member
+                    && o.call_sig.required < o.callable.params.len()
+                    && !o.call_sig.param_names.is_empty()
+            })?;
+        let cs = fi.call_sig;
+        let arg_names = self.afile.call_arg_names.get(&call.0).cloned();
+        // Only this path when an argument is actually OMITTED (else the plain member call is emitted).
+        if arg_names.is_none() && args.len() == cs.param_names.len() {
+            return None;
+        }
+        let slots = crate::resolve::map_call_args(
+            args,
+            arg_names.as_deref(),
+            &cs.param_names,
+            cs.required,
+            &cs.param_defaults,
+        )
+        .ok()?;
+        let (desc, real, _ret) = crate::call_resolver::synthetic_default_member(
+            &*self.syms.libraries,
+            &owner,
+            name,
+            slots.len(),
+        )?;
+        let recv = self.expr(receiver)?;
+        let mut a = vec![recv];
+        for (i, slot) in slots.iter().enumerate() {
+            match slot {
+                Some(arg) => a.push(self.lower_arg(*arg, &ty_to_ir(real[i]))?),
+                None => a.push(self.zero_placeholder(real[i])),
+            }
+        }
+        let mask: i32 = slots
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| s.is_none())
+            .map(|(i, _)| 1i32 << i)
+            .sum();
+        a.push(self.ir.add_expr(IrExpr::Const(IrConst::Int(mask))));
+        a.push(self.ir.add_expr(IrExpr::Const(IrConst::Null))); // omitted-default marker
+        Some(self.ir.add_expr(IrExpr::Call {
+            callee: Callee::Static {
+                owner,
+                name: format!("{name}$default"),
+                descriptor: desc,
+                inline: crate::libraries::InlineKind::None,
+            },
+            dispatch_receiver: None,
+            args: a,
+        }))
+    }
+
     /// Lower a CALL `recv.name(args)` that resolves to a top-level EXTENSION function on `rt` — the
     /// shared path behind a qualified `recv.name(args)` and a receiver-lambda / extension-fn body's
     /// implicit `this.name(args)` (`"ab".run { uppercase() }`, `fun String.shout() = uppercase()`).
@@ -16770,6 +16853,17 @@ impl<'a> Lower<'a> {
                             dispatch_receiver: Some(recv),
                             args: vec![],
                         })
+                    } else if let Some(r) = self.lower_library_default_member_call(
+                        receiver,
+                        self.recv_ty(receiver),
+                        &name,
+                        e,
+                        &args,
+                    ) {
+                        // A classpath member call OMITTING a defaulted argument (`r.copy(b = "y")`) →
+                        // the static `name$default` synthetic. Tried before the plain instance path, which
+                        // would fail the arity match and fall through to a wrong construction.
+                        r
                     } else if let Some((owner, mname, desc, is_iface, mparams, mret, msuspend)) = {
                         // A classpath *instance* method `recv.name(args)` → `invokevirtual`/
                         // `invokeinterface recvType.name:descriptor` (descriptor from the classpath; no

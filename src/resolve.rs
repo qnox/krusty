@@ -8910,7 +8910,16 @@ impl<'a> Checker<'a> {
                         {
                             let params = fi.callable.params.clone();
                             let pn = &fi.call_sig.param_names;
-                            match map_call_args(args, Some(names), pn, pn.len(), &[]) {
+                            // Honour the member's per-parameter DEFAULT flags (a data-class `copy` defaults
+                            // every parameter to the receiver's property), so a named call may OMIT one —
+                            // otherwise every label would be required and `r.copy(b = "y")` errors on `a`.
+                            match map_call_args(
+                                args,
+                                Some(names),
+                                pn,
+                                fi.call_sig.required,
+                                &fi.call_sig.param_defaults,
+                            ) {
                                 Ok(slots) => {
                                     for (i, slot) in slots.iter().enumerate() {
                                         if let Some(a) = slot {

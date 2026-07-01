@@ -1216,6 +1216,30 @@ pub fn synthetic_default_ctor(lib: &dyn SymbolSource, internal: &str) -> Option<
     None
 }
 
+/// The classpath default-value synthetic for a MEMBER — `name$default(Owner, <params…>, int mask,
+/// Object marker): Ret` (a static, e.g. a data class's `copy$default`) — as `(descriptor, real_params,
+/// ret)`, the parameter types being the source method's (WITHOUT the leading receiver and trailing
+/// mask/marker). Lets a call omit a defaulted argument. `None` when the class has no such synthetic.
+pub fn synthetic_default_member(
+    lib: &dyn SymbolSource,
+    owner: &str,
+    name: &str,
+    arity: usize,
+) -> Option<(String, Vec<Ty>, Ty)> {
+    let t = lib.resolve_type(owner)?;
+    let dname = format!("{name}$default");
+    // Shape `(Owner receiver, <real params…>, int mask, Object marker)`: exactly `arity` real params, an
+    // `int` mask, and a reference marker. Match by `arity` (not just name) so an overloaded `name$default`
+    // of a different parameter count can't be picked.
+    let m = t.companion.iter().find(|m| {
+        m.name == dname
+            && m.params.len() == arity + 3
+            && m.params[arity + 1] == Ty::Int
+            && m.params[arity + 2].is_reference()
+    })?;
+    Some((m.descriptor.clone(), m.params[1..arity + 1].to_vec(), m.ret))
+}
+
 /// Resolve a classpath construction that a plain [`resolve_constructor`] can't match because it needs a
 /// synthetic `DefaultConstructorMarker` overload (a value-class param, or omitted defaults). See
 /// [`SyntheticCtorCall`]. `None` when no marker overload fits.
