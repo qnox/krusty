@@ -954,6 +954,16 @@ impl SymbolSource for JvmLibraries {
         self.cp.metadata_constructor_param_names(internal, arity)
     }
 
+    fn value_class_ctor_has_default(&self, internal: &str) -> bool {
+        // A defaulted primary constructor of a value class surfaces as the synthetic
+        // `constructor-impl$default` static method (kotlinc emits it iff some param has a default).
+        self.cp.find(internal).is_some_and(|ci| {
+            ci.methods
+                .iter()
+                .any(|m| m.name == "constructor-impl$default")
+        })
+    }
+
     fn infer_constructor_type_args(&self, internal: &str, arg_tys: &[Ty]) -> Option<Vec<Ty>> {
         let ci = self.cp.find(internal)?;
         // The class's formal type parameters, in declaration order (`Pair` → `[A, B]`).

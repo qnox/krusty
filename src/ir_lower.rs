@@ -2930,6 +2930,15 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 IrExpr::RefNew { elem, .. }
                 | IrExpr::RefGet { elem, .. }
                 | IrExpr::RefSet { elem, .. } => note(elem, &mut referenced),
+                // An INLINE classpath value-class construction (`Id().v`, `RoleId("x").v` — never bound
+                // to a typed local) references the value class only through the static `constructor-impl`
+                // / `box-impl` call owner. Note it so its underlying erasure + getter rewrite still fire.
+                IrExpr::Call {
+                    callee: Callee::Static { owner, name, .. },
+                    ..
+                } if name.starts_with("constructor-impl") || name == "box-impl" => {
+                    referenced.insert(owner.clone());
+                }
                 _ => {}
             }
         }
@@ -4106,6 +4115,33 @@ impl<'a> Lower<'a> {
                     },
                     dispatch_receiver: None,
                     args: vec![arg],
+                }));
+            }
+            // A ZERO-arg construction `Id()` of an all-default value class: kotlinc emits
+            // `constructor-impl$default(dummyUnder, mask, null)`, which fills the default internally and
+            // returns the unboxed underlying. The sole param is defaulted → mask = 1; the dummy underlying
+            // is `null` (reference underlying only — a scalar's dummy slot can't take `null`).
+            if args.is_empty()
+                && under.is_reference()
+                && self.syms.libraries.value_class_ctor_has_default(internal)
+            {
+                let marker = Ty::obj("kotlin/jvm/internal/DefaultConstructorMarker");
+                let desc = self
+                    .syms
+                    .libraries
+                    .method_descriptor(&[under, Ty::Int, marker], under)?;
+                let dummy = self.ir.add_expr(IrExpr::Const(IrConst::Null));
+                let mask = self.ir.add_expr(IrExpr::Const(IrConst::Int(1)));
+                let null_marker = self.ir.add_expr(IrExpr::Const(IrConst::Null));
+                return Some(self.ir.add_expr(IrExpr::Call {
+                    callee: Callee::Static {
+                        owner: internal.to_string(),
+                        name: "constructor-impl$default".to_string(),
+                        descriptor: desc,
+                        inline: crate::libraries::InlineKind::None,
+                    },
+                    dispatch_receiver: None,
+                    args: vec![dummy, mask, null_marker],
                 }));
             }
         }
@@ -9381,35 +9417,43 @@ impl<'a> Lower<'a> {
     /// maps to a classpath internal names the outer type; remaining segments join with `$`. Existence is
     /// verified via `resolve_type` so a bogus `A.B` stays unresolved.
     fn resolve_qualified_nested(&self, name: &str) -> Option<String> {
-        let (outer, rest) = name.split_once('.')?;
-        let base = self
-            .syms
-            .classes
-            .get(outer)
-            .map(|c| c.internal.clone())
-            .or_else(|| {
-                self.syms
-                    .class_names
-                    .get(outer)
-                    .filter(|i| !i.starts_with("__ty/"))
-                    .cloned()
-            })
-            // A name PRUNED from the global index (ambiguous across the classpath) still resolves through
-            // this file's explicit import — the same fallback the checker's `imported_type_internal` gives,
-            // so checker and lowerer agree on the outer type. (`import a.b.Subject` → outer `Subject`.)
-            .or_else(|| {
-                self.afile.imports.iter().find_map(|imp| {
-                    let cand = imp.replace('.', "/");
-                    (imp.rsplit('.').next() == Some(outer)
-                        && self.syms.libraries.resolve_type(&cand).is_some())
-                    .then_some(cand)
+        // A nested type under a resolvable outer type FIRST (`Subject.User` → `lib/Subject$User`), matching
+        // the checker — an in-scope type name shadows a package path.
+        if let Some((outer, rest)) = name.split_once('.') {
+            let base = self
+                .syms
+                .classes
+                .get(outer)
+                .map(|c| c.internal.clone())
+                .or_else(|| {
+                    self.syms
+                        .class_names
+                        .get(outer)
+                        .filter(|i| !i.starts_with("__ty/"))
+                        .cloned()
                 })
-            })?;
-        let candidate = format!("{base}${}", rest.replace('.', "$"));
-        self.syms
-            .libraries
-            .resolve_type(&candidate)
-            .map(|_| candidate)
+                // A name PRUNED from the global index (ambiguous across the classpath) still resolves
+                // through this file's explicit import — the same fallback the checker's
+                // `imported_type_internal` gives, so checker and lowerer agree. (`import a.b.Subject`.)
+                .or_else(|| {
+                    self.afile.imports.iter().find_map(|imp| {
+                        let cand = imp.replace('.', "/");
+                        (imp.rsplit('.').next() == Some(outer)
+                            && self.syms.libraries.resolve_type(&cand).is_some())
+                        .then_some(cand)
+                    })
+                });
+            if let Some(base) = base {
+                let candidate = format!("{base}${}", rest.replace('.', "$"));
+                if self.syms.libraries.resolve_type(&candidate).is_some() {
+                    return Some(candidate);
+                }
+            }
+        }
+        // A fully-qualified PACKAGE path (`lib.Thing` → `lib/Thing`) — verified on the classpath. Mirrors
+        // the checker so a qualified constructor / type ref lowers to the same internal name.
+        let fq = name.replace('.', "/");
+        self.syms.libraries.resolve_type(&fq).map(|_| fq)
     }
 
     fn ty_ref(&self, r: &ast::TypeRef) -> Option<Ty> {
@@ -13691,6 +13735,31 @@ impl<'a> Lower<'a> {
                                     receiver: l,
                                     args: vec![Some(r)],
                                 });
+                                let zero = self.ir.add_expr(IrExpr::Const(IrConst::Int(0)));
+                                return Some(self.ir.add_expr(IrExpr::PrimitiveBinOp {
+                                    op: bin_to_ir(op)?,
+                                    lhs: cmp,
+                                    rhs: zero,
+                                }));
+                            }
+                        }
+                        // A CLASSPATH `Comparable` type (`class Money : Comparable<Money>` compiled
+                        // separately): `compareTo` is a classpath member, not user IR. Emit it through the
+                        // library-instance path, then compare its `Int` result with 0. Matches the checker.
+                        let lt = self.recv_ty(lhs);
+                        let rt = self.info.ty(rhs);
+                        // Reference right operand only — matches the checker guard (a primitive arg to an
+                        // erased generic `Comparable.compareTo(Object)` would need a box not applied here).
+                        if rt.is_reference() {
+                            let l = self.expr(lhs)?;
+                            let r = self.expr(rhs)?;
+                            if let Some(cmp) = self.lower_library_instance_call_on(
+                                l,
+                                lt,
+                                "compareTo",
+                                vec![r],
+                                &[rt],
+                            ) {
                                 let zero = self.ir.add_expr(IrExpr::Const(IrConst::Int(0)));
                                 return Some(self.ir.add_expr(IrExpr::PrimitiveBinOp {
                                     op: bin_to_ir(op)?,

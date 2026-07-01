@@ -1217,3 +1217,29 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   identity — matching kotlinc exactly: two data-class instances with equal-content but different array
   instances are NOT equal (`dataClasses/equals/intarray.kt`), while `toString` shows the content
   (`dataClasses/toString/primitiveArrays.kt`).
+
+- **Classpath dotted type references (`lib.Thing`, `Wrap.Box`) in type position.** A dotted name in a
+  type position is resolved to a classpath internal by two complementary rules, tried NESTED-first (an
+  in-scope type shadows a package path, as kotlinc resolves): (1) a nested type under a resolvable outer
+  prefix (`Wrap.Box` → `<pkg>/Wrap$Box`), then (2) a fully-qualified package path (`lib.Thing` →
+  `lib/Thing`), each verified via `resolve_type` so a bogus path stays unresolved. The signature phase
+  registers such names into `class_names` (so the checker/lowerer agree), and the checker/lowerer
+  `resolve_qualified_nested` share the ordering — covering both a parameter/return type ref and a
+  qualified constructor call `lib.Thing(5)` (`classpath_type_ref_e2e`).
+
+- **Zero-arg construction of an all-default classpath value class (`Id()`).** A `@JvmInline value class
+  Id(val v: String = "x")` has no synthetic no-arg `<init>` (unlike a plain all-default class); kotlinc
+  constructs `Id()` via the static `constructor-impl$default(dummy, mask, marker)`, which fills the
+  default itself. krusty resolves the 0-arg call only when the underlying is a REFERENCE and the classpath
+  exposes `constructor-impl$default` (`value_class_ctor_has_default`), and lowers it to
+  `constructor-impl$default(null, 1, null)` (single param ⇒ mask 1). A scalar underlying (its dummy slot
+  can't take `null`) stays a sound skip (`classpath_type_ref_e2e`).
+
+- **Comparison operators on a classpath `Comparable` type (`a < b`).** `<`/`<=`/`>`/`>=` on a classpath
+  type whose `compareTo(o): Int` is a classpath member (not user IR) desugar to `a.compareTo(b) < 0`,
+  resolved via the library set. Guarded to a REFERENCE right operand: an erased generic
+  `Comparable<Double>.compareTo(Object)` with a primitive argument would need a box this path doesn't
+  apply, so it stays a sound skip (`classpath_type_ref_e2e`).
+
+- **Multi-line `catch` parameter.** `catch (\n e: Exception\n)` now parses — the parser skips newlines
+  around the catch parameter exactly as an ordinary parameter list allows (`multiline_catch_e2e`).

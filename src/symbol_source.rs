@@ -115,6 +115,14 @@ pub trait SymbolSource {
         None
     }
 
+    /// Whether the classpath `@JvmInline value class` named `internal` exposes a DEFAULTED primary
+    /// constructor — kotlinc emits a `constructor-impl$default` synthetic exactly then. A zero-arg
+    /// construction `Id()` (all params defaulted) is realized through that synthetic; `false` when the
+    /// value class's sole underlying param is mandatory, so `Id()` stays unresolved rather than miscompiled.
+    fn value_class_ctor_has_default(&self, _internal: &str) -> bool {
+        false
+    }
+
     /// The type arguments of `internal` INFERRED from a constructor call's argument types — `Pair(1, 2)` →
     /// `[Int, Int]`, so `Pair(1, 2)` types as `Pair<Int, Int>` (its `first`/`second`/`component*` then type
     /// concretely). Each formal type parameter is bound by unifying the constructor's generic parameter
@@ -223,6 +231,12 @@ impl SymbolSource for CompositeSource {
         self.children
             .iter()
             .find_map(|c| c.infer_constructor_type_args(internal, arg_tys))
+    }
+
+    fn value_class_ctor_has_default(&self, internal: &str) -> bool {
+        self.children
+            .iter()
+            .any(|c| c.value_class_ctor_has_default(internal))
     }
 }
 
