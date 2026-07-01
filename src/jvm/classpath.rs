@@ -682,6 +682,27 @@ impl Classpath {
             .map(|f| f.value_param_names)
     }
 
+    /// Which parameters of a class MEMBER (`jvm_name`, `arity` value params) DECLARE A DEFAULT VALUE, from
+    /// the CLASS's `@Metadata` functions (field 9) — `metadata_param_defaults` only reads PACKAGE (top-
+    /// level) functions, so a data-class `copy`'s defaults are invisible to it. Returns `None` when the
+    /// member has no defaulted parameter (no `$default` synthetic to route through).
+    pub fn metadata_member_param_defaults(
+        &self,
+        internal: &str,
+        jvm_name: &str,
+        arity: usize,
+    ) -> Option<Vec<bool>> {
+        let ci = self.find(internal)?;
+        super::metadata::class_functions(&ci)
+            .into_iter()
+            .find(|f| {
+                f.jvm_name == jvm_name
+                    && f.value_param_has_default.len() == arity
+                    && f.value_param_has_default.iter().any(|d| *d)
+            })
+            .map(|f| f.value_param_has_default)
+    }
+
     /// All Kotlin extension-receiver internal names of `fn_name` in `internal` (`plusAssign` →
     /// `[kotlin/collections/MutableCollection, …/MutableMap]`), from `@Metadata`. A name is overloaded
     /// across receivers, so a receiver applies if it is a subtype of ANY entry. The JVM signature erases

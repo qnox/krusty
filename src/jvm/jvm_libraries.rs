@@ -1911,18 +1911,28 @@ impl SymbolSource for JvmLibraries {
                                 );
                                 recovered.unwrap_or(m.ret)
                             };
-                            // Source parameter NAMES (from the class's `@Metadata`) for named-argument
-                            // resolution. A member's `params` are the logical params (no receiver), so the
-                            // names align 1:1 when present. Defaults aren't recovered here (named call
-                            // supplies all).
+                            // Source parameter NAMES + per-parameter DEFAULT flags (from the class's
+                            // `@Metadata`) for named/omitted-argument resolution. A member's `params` are the
+                            // logical params (no receiver), so both align 1:1. A data-class `copy` defaults
+                            // every parameter, so `required` drops below the arity and a subset may be passed.
+                            let param_defaults = self
+                                .cp
+                                .metadata_member_param_defaults(&cn, &m.name, params.len())
+                                .unwrap_or_default();
+                            let required = if param_defaults.is_empty() {
+                                params.len()
+                            } else {
+                                param_defaults.iter().filter(|d| !**d).count()
+                            };
                             let call_sig = match self.cp.metadata_member_param_names(
                                 &cn,
                                 &m.name,
                                 params.len(),
                             ) {
                                 Some(names) => crate::libraries::CallSig {
-                                    required: params.len(),
+                                    required,
                                     param_names: names,
+                                    param_defaults,
                                     ..Default::default()
                                 },
                                 _ => crate::libraries::CallSig::default(),
