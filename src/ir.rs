@@ -314,6 +314,14 @@ pub enum IrExpr {
     NotNullAssert {
         operand: ExprId,
     },
+    /// A `lateinit` read: yields `operand`, throwing `UninitializedPropertyAccessException(name)` if it
+    /// is still null. Emitted as `<operand>; dup; ifnonnull L; ldc name;
+    /// invokestatic Intrinsics.throwUninitializedPropertyAccessException; L:` — the same guard the
+    /// member-field lateinit read uses, here for a `lateinit var` LOCAL slot read.
+    LateinitCheck {
+        operand: ExprId,
+        name: String,
+    },
     /// Construct an instance of a classpath (non-IR) class — `RuntimeException("x")`, `StringBuilder()`.
     /// `internal` is the JVM internal name, `ctor_desc` the `(…)V` constructor descriptor.
     NewExternal {
@@ -944,6 +952,7 @@ pub fn for_each_child(exprs: &[IrExpr], e: ExprId, f: &mut impl FnMut(ExprId)) {
         IrExpr::Return(v) => v.iter().for_each(|&v| f(v)),
         IrExpr::TypeOp { arg, .. }
         | IrExpr::NotNullAssert { operand: arg }
+        | IrExpr::LateinitCheck { operand: arg, .. }
         | IrExpr::Throw { operand: arg }
         | IrExpr::EnumValueOf { arg, .. }
         | IrExpr::RefNew { init: arg, .. }

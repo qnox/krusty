@@ -2215,7 +2215,7 @@ fn bc_complex_s(file: &File, s: StmtId, vforbid: bool, cross: bool) -> bool {
             value,
         } => val(*array) || val(*index) || val(*value),
         Stmt::Return(Some(e), _) => val(*e),
-        Stmt::Return(None, _) | Stmt::IncDec { .. } => false,
+        Stmt::Return(None, _) | Stmt::IncDec { .. } | Stmt::LocalLateinit { .. } => false,
         // A statement's value is discarded — its (possibly `if`/`when`) tree stays in statement position.
         Stmt::Expr(e) => bc_complex_e(file, *e, false, cross),
         Stmt::While { cond, body, .. } | Stmt::DoWhile { cond, body, .. } => {
@@ -2467,6 +2467,9 @@ fn collect_lambda_outer_writes(
             }
             Stmt::LocalDelegate { name, delegate, .. } => {
                 ce(file, *delegate, active, out);
+                active.remove(name);
+            }
+            Stmt::LocalLateinit { name, .. } => {
                 active.remove(name);
             }
             Stmt::Destructure { entries, init } => {
@@ -10536,6 +10539,19 @@ impl<'a> Checker<'a> {
                         .unwrap_or(Ty::Error),
                 };
                 self.declare(&name, prop_ty, is_var);
+            }
+            Stmt::LocalLateinit { name, ty } => {
+                if self.declared_in_current_scope(&name) {
+                    self.diags.error(
+                        self.file.stmt_spans[s.0 as usize],
+                        format!("krusty: conflicting local declaration '{name}'"),
+                    );
+                }
+                // A `lateinit var`: a mutable local of the (non-null) annotation type, initialized later.
+                // No initializer to check; reads before assignment are allowed (they throw at runtime).
+                let prop_ty = self.resolve_ty(&ty);
+                self.local_decl_types.insert(s, prop_ty);
+                self.declare(&name, prop_ty, true);
             }
             Stmt::Destructure { entries, init } => {
                 let it = self.expr(init);

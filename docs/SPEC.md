@@ -866,6 +866,20 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`IrStatic::custom_accessor`) to avoid a duplicate-method collision. Tests:
   `tests/top_level_custom_accessor_e2e.rs`.
 
+- **`lateinit var` LOCAL.** `lateinit var s: String` in a function body — a mutable slot with no
+  initializer, defaulting to `null` (`aconst_null; astore`); a read while still null throws
+  `UninitializedPropertyAccessException`. Parsed as `Stmt::LocalLateinit` (distinct from `Stmt::Local`,
+  whose initializer is mandatory) and only for a non-null reference annotation (a primitive/nullable/
+  unresolved type bails). Each read is wrapped in an `IrExpr::LateinitCheck` — the same guard the
+  member-field lateinit read uses (`dup; ifnonnull L; ldc name;
+  invokestatic Intrinsics.throwUninitializedPropertyAccessException; L:`). This is behaviorally exact
+  for every access; kotlinc additionally omits the guard where definite-assignment analysis proves the
+  slot is initialized (a plain read) or unset (an unconditional throw), so krusty's always-guarded read
+  is byte-identical only for a maybe-initialized read (byte-parity for the DA-optimized cases is future
+  work). A CAPTURED (shared-cell) lateinit local is not modeled — its slot is a `Ref` box whose read
+  path carries no guard — so such a file bails (skip, never miscompile). Tests:
+  `tests/lateinit_local_e2e.rs`.
+
 - **Cast of a primitive operand to a reference type (`42 as Any`, `'a' as Char?`, `b as Byte?`).** A
   boxing operation — the primitive is boxed to its wrapper (`Integer`/`Character`/`Byte`, an
   `ImplicitCoercion` → `valueOf`), which is-a the target. Allowed ONLY when the wrapper is assignable

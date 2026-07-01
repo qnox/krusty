@@ -4621,6 +4621,28 @@ impl<'a> Emitter<'a> {
                 );
                 code.invokestatic(m, 1, 0);
             }
+            IrExpr::LateinitCheck { operand, name } => {
+                // A `lateinit var` local read: throw `UninitializedPropertyAccessException` while the slot
+                // is still null. Same guard as the member-field lateinit read (`dup; ifnonnull L; ldc
+                // name; invokestatic throwUninitializedPropertyAccessException; L:`).
+                self.emit_value(*operand, code);
+                code.dup();
+                let lbl = code.new_label();
+                code.ifnonnull(lbl);
+                code.push_string(name, self.cw);
+                let m = self.cw.methodref(
+                    "kotlin/jvm/internal/Intrinsics",
+                    "throwUninitializedPropertyAccessException",
+                    "(Ljava/lang/String;)V",
+                );
+                code.invokestatic(m, 1, 0);
+                // `value_ty` already yields the JVM type of the operand (a reference here); the surviving
+                // (non-null) value is on the stack at the branch target.
+                let jt = self.value_ty(*operand);
+                let st = self.verif_stack(jt);
+                self.frame(lbl, st, code);
+                code.bind(lbl);
+            }
             IrExpr::Throw { operand } => {
                 self.emit_value(*operand, code);
                 code.athrow();
@@ -5177,6 +5199,9 @@ impl<'a> Emitter<'a> {
                 self.records_frame(*arg)
             }
             IrExpr::NotNullAssert { operand } => self.records_frame(*operand),
+            // A `lateinit` read emits an `ifnonnull` merge frame, so a parent must spill other operands
+            // first (else the frame at the join would omit them).
+            IrExpr::LateinitCheck { .. } => true,
             IrExpr::NewExternal { args, .. } => args.iter().any(|&a| self.records_frame(a)),
             IrExpr::NewCrossFile { args, .. } => args.iter().any(|&a| self.records_frame(a)),
             IrExpr::RefGet { holder, .. } => self.records_frame(*holder),
@@ -6397,6 +6422,7 @@ impl<'a> Emitter<'a> {
             }
             IrExpr::InvokeFunction { ret, .. } => ir_ty_to_jvm(ret),
             IrExpr::NotNullAssert { operand } => self.value_ty(*operand),
+            IrExpr::LateinitCheck { operand, .. } => self.value_ty(*operand),
             IrExpr::NewExternal { internal, .. } => Ty::obj(internal),
             IrExpr::NewCrossFile { internal, .. } => Ty::obj(internal),
             IrExpr::Throw { .. } | IrExpr::Break { .. } | IrExpr::Continue { .. } => Ty::Nothing,

@@ -129,6 +129,8 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
         computed_props: HashMap::new(),
         computed_setters: HashMap::new(),
         cur_static_field: None,
+        lateinit_locals: HashMap::new(),
+        closure_captured_names: std::collections::HashSet::new(),
         local_delegated: HashMap::new(),
         cur_tailrec: None,
         expr_depth: 0,
@@ -3569,6 +3571,18 @@ pub(crate) struct Lower<'a> {
     /// (index into `ir.statics`, type) that the `field` keyword reads/writes (the static analogue of
     /// `cur_field`, which is for an instance field).
     cur_static_field: Option<(u32, Ty)>,
+    /// `lateinit var` LOCALS in scope: value-index → source name. A read of such a local is wrapped in
+    /// the uninitialized-check (`dup; ifnonnull L; throwUninitializedPropertyAccessException(name); L`),
+    /// mirroring the member-field lateinit path. Captured lateinit locals are not modeled (the file
+    /// bails — see `closure_captured_names`), so every entry here is a plain value slot read via
+    /// `GetValue`.
+    lateinit_locals: HashMap<u32, String>,
+    /// Names referenced (read or written) inside a NON-inline closure (a non-inline lambda or a local
+    /// function) in the body currently being lowered. A `lateinit var` local among them is not modeled
+    /// (its slot / uninitialized-guard aren't threaded through the closure's captured representation), so
+    /// such a file bails (skip, never miscompile). Inline-spliced lambdas keep their captures in the
+    /// outer scope, so they are NOT collected here (an inline `run { x = … }` over a lateinit works).
+    closure_captured_names: std::collections::HashSet<String>,
     /// Local delegated property name → its delegate info. A read of the name compiles to the delegate's
     /// `getValue` (a `var`'s write to `setValue`); there is no value slot for the property itself, only
     /// the synthesized `$delegate` local (its value index is held here).
@@ -9852,6 +9866,10 @@ impl<'a> Lower<'a> {
             &mut self.shared_cell_vars,
             shared_cell_vars_for_body(self.afile, body, self.info),
         );
+        let prev_closure_captured = std::mem::replace(
+            &mut self.closure_captured_names,
+            closure_captured_names_for_body(self.afile, body, self.info),
+        );
         self.cur_ret_ty = ret_ty.clone();
         // A named/local function returning `Unit` is a `void` JVM method (only a `() -> Unit` lambda's
         // closure method returns the `Unit` reference) — reset so a nested fun doesn't inherit it.
@@ -9879,6 +9897,7 @@ impl<'a> Lower<'a> {
         };
         self.ir.functions[fid as usize].body = Some(b);
         self.shared_cell_vars = prev_shared_cell_vars;
+        self.closure_captured_names = prev_closure_captured;
         Some(())
     }
 
@@ -10461,6 +10480,28 @@ impl<'a> Lower<'a> {
                     return Some(self.ir.add_expr(IrExpr::Block { stmts, value: None }));
                 }
                 Some(self.ir.add_expr(IrExpr::Return(v)))
+            }
+            Stmt::LocalLateinit { name, ty } => {
+                // A lateinit local captured by a NON-inline closure isn't modeled: the closure holds the
+                // slot in a captured/`Ref` representation whose read path carries no uninitialized guard,
+                // so the guard would be dropped (a miscompile) or its frame would be wrong. Bail (skip).
+                if self.closure_captured_names.contains(&name) {
+                    return None;
+                }
+                // `ty_ref` yields `Some` only for a non-null reference type; a nullable/primitive/
+                // unresolved annotation returns `None`, bailing (a lateinit must be a non-null reference).
+                let kty = self.ty_ref(&ty)?;
+                let v = self.fresh_value();
+                self.scope.push((name.clone(), v, kty));
+                self.lateinit_locals.insert(v, name.clone());
+                // The slot defaults to `null` (kotlinc: `aconst_null; astore`); a read while still null
+                // throws via the `LateinitCheck` wrapper (see the local-read path).
+                let null = self.ir.add_expr(IrExpr::Const(IrConst::Null));
+                Some(self.ir.add_expr(IrExpr::Variable {
+                    index: v,
+                    ty: ty_to_ir(kty),
+                    init: Some(null),
+                }))
             }
             Stmt::Local { name, init, ty, .. } => {
                 let init_ty = self.info.ty(init);
@@ -13430,7 +13471,16 @@ impl<'a> Lower<'a> {
                     }));
                 }
                 if let Some((v, slot_ty)) = self.lookup(&n) {
-                    let read = self.ir.add_expr(IrExpr::GetValue(v));
+                    let mut read = self.ir.add_expr(IrExpr::GetValue(v));
+                    // A `lateinit var` local read throws `UninitializedPropertyAccessException` while the
+                    // slot is still null — wrap the raw read in the guard before any smart-cast narrowing
+                    // (kotlinc inserts the guard on the read; the narrowing then applies to its result).
+                    if let Some(name) = self.lateinit_locals.get(&v).cloned() {
+                        read = self.ir.add_expr(IrExpr::LateinitCheck {
+                            operand: read,
+                            name,
+                        });
+                    }
                     // Smart-cast: the checker narrowed this read (`if (s is String) s` → `String`) below
                     // the variable's declared slot type. Insert the `checkcast` (a more specific
                     // reference) or unbox (a nullable primitive narrowed to the primitive) kotlinc emits.
@@ -17753,6 +17803,97 @@ fn shared_cell_vars_for_body(
         FunBody::None => return std::collections::HashSet::new(),
     };
     shared_cell_vars_for_expr(file, root, info)
+}
+
+/// Every name referenced (read or written) inside a NON-inline closure — a non-inline lambda body or a
+/// local-function body — within `body`. Used to bail on a `lateinit var` local captured by such a
+/// closure (its uninitialized guard isn't threaded through the captured representation). An
+/// inline-spliced lambda keeps its captures in the outer scope, so it is traversed like ordinary code
+/// (its captures are NOT collected).
+fn closure_captured_names_for_body(
+    file: &ast::File,
+    body: &FunBody,
+    info: &TypeInfo,
+) -> std::collections::HashSet<String> {
+    let root = match body {
+        FunBody::Expr(e) | FunBody::Block(e) => *e,
+        FunBody::None => return std::collections::HashSet::new(),
+    };
+    let mut out = std::collections::HashSet::new();
+    collect_closure_captured_expr(file, root, info, false, &mut out);
+    out
+}
+
+fn collect_closure_captured_expr(
+    file: &ast::File,
+    e: AstExprId,
+    info: &TypeInfo,
+    in_closure: bool,
+    out: &mut std::collections::HashSet<String>,
+) {
+    match file.expr(e) {
+        Expr::Name(n) if in_closure => {
+            out.insert(n.clone());
+        }
+        Expr::Lambda { body, .. } => {
+            // An inline-spliced lambda's body stays in the enclosing scope — traverse it with the same
+            // `in_closure` flag. A non-inline lambda is a real closure: everything in its body is captured.
+            let inline = matches!(lambda_info(info, e).capture, LambdaCapture::InlineSplice);
+            let child = in_closure || !inline;
+            collect_closure_captured_expr(file, *body, info, child, out);
+            return;
+        }
+        _ => {}
+    }
+    let mut child_exprs = Vec::new();
+    let mut child_stmts = Vec::new();
+    file.any_child_expr(
+        e,
+        &mut |c| {
+            child_exprs.push(c);
+            false
+        },
+        &mut |s| {
+            child_stmts.push(s);
+            false
+        },
+    );
+    for c in child_exprs {
+        collect_closure_captured_expr(file, c, info, in_closure, out);
+    }
+    for s in child_stmts {
+        collect_closure_captured_stmt(file, s, info, in_closure, out);
+    }
+}
+
+fn collect_closure_captured_stmt(
+    file: &ast::File,
+    s: ast::StmtId,
+    info: &TypeInfo,
+    in_closure: bool,
+    out: &mut std::collections::HashSet<String>,
+) {
+    match file.stmt(s) {
+        Stmt::Assign { name, .. } | Stmt::IncDec { name, .. } if in_closure => {
+            out.insert(name.clone());
+        }
+        // A local function's body is a closure — everything it references is captured. Handle its body
+        // here (with `in_closure` set) and return, so the generic child walk doesn't re-visit it.
+        Stmt::LocalFun(f) => {
+            match &f.body {
+                FunBody::Expr(b) | FunBody::Block(b) => {
+                    collect_closure_captured_expr(file, *b, info, true, out)
+                }
+                FunBody::None => {}
+            }
+            return;
+        }
+        _ => {}
+    }
+    file.any_child_stmt(s, &mut |c| {
+        collect_closure_captured_expr(file, c, info, in_closure, out);
+        false
+    });
 }
 
 /// The captured-and-mutated `var`s of a single expression (a property initializer or `init` block) —
