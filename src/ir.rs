@@ -890,6 +890,12 @@ pub struct IrGenericSig {
     pub param_tparams: Vec<Option<String>>,
     /// `Some(name)` when the return type is a bare type-parameter reference, else `None`.
     pub ret_tparam: Option<String>,
+    /// For a CLASS signature with a PARAMETERIZED supertype: the superclass + superinterfaces as
+    /// platform-agnostic `Ty`s carrying their type arguments (`[Any, Operation<Result<Int>>]`), so a
+    /// cross-module reader recovers a member's concrete generic return. The backend formats these into the
+    /// JVM `Signature` string. Empty ⇒ no parameterized supertype (backend emits the default `Object`
+    /// superclass). Empty for a function signature.
+    pub supers: Vec<Ty>,
 }
 
 impl IrFile {

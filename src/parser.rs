@@ -496,9 +496,9 @@ fn fixup_parenless_base_classes(file: &mut File) {
             if let Some(pos) = c
                 .supertypes
                 .iter()
-                .position(|s| base_candidates.contains(s))
+                .position(|s| base_candidates.contains(&s.name))
             {
-                c.base_class = Some(c.supertypes.remove(pos));
+                c.base_class = Some(c.supertypes.remove(pos).name);
             }
         }
     }
@@ -1348,7 +1348,8 @@ impl<'a> Parser<'a> {
         let (ifaces, b, b_args, _delegations, _expr_delegations) = self.parse_supertypes();
         *base = b;
         *base_args = b_args;
-        *supertypes = ifaces;
+        // The companion's supertype list keeps bare names (it has no generic-signature needs yet).
+        *supertypes = ifaces.into_iter().map(|t| t.name).collect();
         self.skip_newlines();
         if !self.eat(TokenKind::LBrace) {
             return;
@@ -2235,16 +2236,17 @@ impl<'a> Parser<'a> {
 
     /// Parse an optional `: Base(args), Iface1, Iface2` supertype list. A supertype with `()` is the
     /// base class (returns its name + ctor-arg expressions); the rest are implemented interfaces.
+    #[allow(clippy::type_complexity)]
     fn parse_supertypes(
         &mut self,
     ) -> (
-        Vec<String>,
+        Vec<TypeRef>,
         Option<String>,
         Vec<ExprId>,
         Vec<(String, String, bool)>,
         Vec<(String, ExprId)>,
     ) {
-        let mut ifaces = Vec::new();
+        let mut ifaces: Vec<TypeRef> = Vec::new();
         let mut base: Option<String> = None;
         let mut base_args = Vec::new();
         let mut delegations = Vec::new();
@@ -2252,6 +2254,7 @@ impl<'a> Parser<'a> {
         if self.eat(TokenKind::Colon) {
             loop {
                 self.skip_newlines();
+                let sup_span = self.tok().span;
                 let name = self.parse_qualified_name();
                 let simple = name.rsplit('.').next().unwrap_or(&name).to_string();
                 // Fully-qualified name (e.g. java.util.RandomAccess) → JVM internal format.
@@ -2260,30 +2263,29 @@ impl<'a> Parser<'a> {
                 } else {
                     simple.clone()
                 };
-                // Type arguments (e.g. `A<Int, Number>`) are erased on JVM, but record whether any is a
-                // non-nullable primitive: a delegation to `A<Long>` needs bridges a raw forward mishandles.
-                // Syntactic (a `typealias` to a primitive is not seen here) — sufficient for the direct
-                // primitive spellings the corpus uses; a non-primitive arg is always erased-`Object`-safe.
-                let mut has_primitive_targ = false;
-                if self.at(TokenKind::Lt) {
-                    for ta in self.parse_type_args() {
-                        if !ta.nullable
-                            && matches!(
-                                ta.name.as_str(),
-                                "Int"
-                                    | "Long"
-                                    | "Short"
-                                    | "Byte"
-                                    | "Char"
-                                    | "Boolean"
-                                    | "Double"
-                                    | "Float"
-                            )
-                        {
-                            has_primitive_targ = true;
-                        }
-                    }
-                }
+                // Type arguments (`A<Int, Number>`) are erased in JVM DESCRIPTORS, but kotlinc records them
+                // in the class `Signature` attribute (`LOperation<Lkotlin/Result<..>;>;`) so a reader
+                // recovers a member's concrete generic return — kept on the interface `TypeRef`. Also note
+                // whether any is a non-nullable primitive (`A<Long>` delegation needs substituted bridges).
+                let targs: Vec<TypeRef> = if self.at(TokenKind::Lt) {
+                    self.parse_type_args()
+                } else {
+                    Vec::new()
+                };
+                let has_primitive_targ = targs.iter().any(|ta| {
+                    !ta.nullable
+                        && matches!(
+                            ta.name.as_str(),
+                            "Int"
+                                | "Long"
+                                | "Short"
+                                | "Byte"
+                                | "Char"
+                                | "Boolean"
+                                | "Double"
+                                | "Float"
+                        )
+                });
                 if self.eat(TokenKind::LParen) {
                     // constructor call → base class
                     self.skip_newlines();
@@ -2300,7 +2302,16 @@ impl<'a> Parser<'a> {
                     base = Some(effective.clone());
                     base_args = args;
                 } else if !effective.is_empty() {
-                    ifaces.push(effective.clone());
+                    ifaces.push(TypeRef {
+                        name: effective.clone(),
+                        nullable: false,
+                        arg: None,
+                        targs,
+                        span: sup_span,
+                        fun_params: Vec::new(),
+                        fun_has_receiver: false,
+                        fun_suspend: false,
+                    });
                 }
                 // Class delegation: `: Iface by delegate`. A simple-name delegate (a `val` ctor-param
                 // field) is supported — record `(iface, delegate)`; any other delegate expression is

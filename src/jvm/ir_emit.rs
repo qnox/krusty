@@ -516,12 +516,17 @@ fn emit_class(
         access |= 0x0400;
     } // ABSTRACT
     cw.set_access(access);
-    if let Some(s) = ir
-        .class_signatures
-        .get(&c.fq_name)
-        .and_then(jvm_class_signature)
-    {
-        cw.set_signature(&s);
+    let raw_class_sig = ir.class_signatures.get(&c.fq_name);
+    let jvm_sig = raw_class_sig.and_then(jvm_class_signature);
+    crate::trace_compiler!(
+        "value_classes",
+        "class {} signature: raw={:?} jvm={:?}",
+        c.fq_name,
+        raw_class_sig,
+        jvm_sig
+    );
+    if let Some(s) = &jvm_sig {
+        cw.set_signature(s);
     }
     for itf in &c.interfaces {
         cw.add_interface(itf);
@@ -2604,8 +2609,45 @@ fn jvm_method_signature(g: &crate::ir::IrGenericSig, f: &crate::ir::IrFunction) 
 /// Format a class's generic shape into a JVM class `Signature` (`<T:Ljava/lang/Object;>Ljava/lang/Object;`).
 fn jvm_class_signature(g: &crate::ir::IrGenericSig) -> Option<String> {
     let mut s = jvm_type_params(g)?;
-    s.push_str("Ljava/lang/Object;");
+    if g.supers.is_empty() {
+        // A plain generic class with no (parameterized) supertypes: just extends `Object`.
+        s.push_str("Ljava/lang/Object;");
+    } else {
+        // The parameterized superclass + interfaces (`Ljava/lang/Object;LOperation<Lkotlin/Result<..>;>;`),
+        // formatted from the platform-agnostic `Ty`s so a reader recovers a member's concrete generic return.
+        for sup in &g.supers {
+            s.push_str(&ty_generic_sig(sup)?);
+        }
+    }
     Some(s)
+}
+
+/// A `Ty` as a JVM generic-signature type element: a primitive in a generic position is its BOXED wrapper
+/// (`Int` → `Ljava/lang/Integer;`), a reference maps its internal (`kotlin/Any` → `java/lang/Object`) and
+/// carries its (recursively formatted) type arguments. `None` for a shape not representable here.
+fn ty_generic_sig(t: &Ty) -> Option<String> {
+    if let Some(boxed) = t.boxed_ref() {
+        // A scalar in a generic position boxes; `boxed_ref` gives its wrapper `Obj` (`Integer`, …).
+        return Some(type_descriptor(boxed));
+    }
+    match t {
+        Ty::String => Some("Ljava/lang/String;".to_string()),
+        Ty::Unit => Some("Lkotlin/Unit;".to_string()),
+        Ty::Obj(internal, args) => {
+            let jvm = super::jvm_class_map::to_jvm_internal(internal);
+            let mut s = format!("L{jvm}");
+            if !args.is_empty() {
+                s.push('<');
+                for a in args.iter() {
+                    s.push_str(&ty_generic_sig(a)?);
+                }
+                s.push('>');
+            }
+            s.push(';');
+            Some(s)
+        }
+        _ => None,
+    }
 }
 
 /// The shared `<T:bound…>` type-parameter DECLARATION section, or `""` when there are no own type

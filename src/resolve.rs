@@ -624,11 +624,13 @@ fn collect_file_type_names(file: &File, out: &mut std::collections::HashSet<Stri
                     out.insert(a.clone());
                 }
                 // Supertypes/base/delegated-interface names (`class Done : Continuation<Unit>`) must be
-                // candidates too — they are bare names a wildcard/explicit import resolves, no different
-                // from a parameter type. Stored as simple-name strings (their type args, if any, are
-                // collected elsewhere).
-                for s in c.supertypes.iter().chain(c.base_class.as_ref()) {
-                    out.insert(s.clone());
+                // candidates too — they are names a wildcard/explicit import resolves, no different from a
+                // parameter type. Each interface supertype carries its type args, collected recursively.
+                for s in &c.supertypes {
+                    collect_typeref_names(s, out);
+                }
+                if let Some(b) = &c.base_class {
+                    out.insert(b.clone());
                 }
                 for (iface, _, _) in &c.delegations {
                     out.insert(iface.clone());
@@ -1531,26 +1533,29 @@ pub fn collect_signatures_with_cp(
                     // classes, stdlib aliases, mapped built-ins). A supertype that resolves to none
                     // of those would be emitted as a bare default-package name → `NoClassDefFound`
                     // at load; reject (skip) instead — never emit an unresolved supertype.
-                    let mut resolve_super = |s: &String| -> String {
+                    let mut resolve_super = |s: &str| -> String {
                         match class_names.get(s) {
                             Some(internal) => internal.clone(),
-                            None if ctp.contains(s) => s.clone(), // erased type parameter (degenerate)
+                            None if ctp.contains(s) => s.to_string(), // erased type parameter (degenerate)
                             None => {
                                 diags.error(c.span, format!("krusty: supertype '{s}' could not be resolved (provide it on the classpath)"));
-                                s.clone()
+                                s.to_string()
                             }
                         }
                     };
-                    let interfaces: Vec<String> =
-                        c.supertypes.iter().map(&mut resolve_super).collect();
-                    let super_internal = c.base_class.as_ref().map(&mut resolve_super);
+                    let interfaces: Vec<String> = c
+                        .supertypes
+                        .iter()
+                        .map(|t| resolve_super(&t.name))
+                        .collect();
+                    let super_internal = c.base_class.as_deref().map(&mut resolve_super);
                     // A `companion object`'s OWN supertypes, resolved like the class's — so the synthesized
                     // `C$Companion` can be registered as a typed object (`C` used as a value is its
                     // companion, assignable to the companion's supertypes).
                     let companion_interfaces: Vec<String> = c
                         .companion_supertypes
                         .iter()
-                        .map(&mut resolve_super)
+                        .map(|s| resolve_super(s))
                         .collect();
                     // A `companion object`'s declared base CLASS (`companion object : Base()`) — the
                     // synthesized `C$Companion` extends it, so `C`-as-value is assignable as `Base` (and
