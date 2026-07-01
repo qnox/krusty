@@ -257,6 +257,24 @@ fn inner_constructor_corpus_cases_box_ok() {
     assert_corpus_cases_box_ok(INNER_CONSTRUCTOR_CASES);
 }
 
+/// An external value class (`Result`) returned through a GENERIC / `Any` supertype boundary must be
+/// BOXED at that boundary (`Result.box-impl`, so the caller observes the boxed object's `toString`),
+/// and UNBOXED again at a consuming `as Result` cast (`checkcast kotlin/Result; unbox-impl`, so a
+/// following `getOrThrow()` / `==` sees the underlying). The override method's own direct call stays
+/// unboxed. These single-file cases pin BOTH sides of that ABI (box at the bridge, unbox at the cast);
+/// the multi-MODULE variant (`inlineClasses/result/returnGenericMultiModule.kt`) exercises the same
+/// path across a separately-compiled classpath boundary and is covered by the full conformance gate.
+const VALUE_CLASS_GENERIC_BOUNDARY_CASES: &[&str] = &[
+    "inlineClasses/returnResult/classAnyOverride.kt",
+    "inlineClasses/returnResult/classGenericOverride.kt",
+    "inlineClasses/returnResult/classResultOverride.kt",
+];
+
+#[test]
+fn value_class_generic_boundary_corpus_cases_box_ok() {
+    assert_corpus_cases_box_ok(VALUE_CLASS_GENERIC_BOUNDARY_CASES);
+}
+
 /// Run each corpus case; a case that RAN must be `box()=OK` (any other value is a real miscompile),
 /// while `None` (skipped: declined / multi-file) is tolerated exactly as the conformance gate counts
 /// it — so this e2e is never stricter than the gate. Guards against the whole set silently all-skipping.

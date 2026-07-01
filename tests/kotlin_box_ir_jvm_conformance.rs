@@ -231,8 +231,8 @@ static T_SIGS: AtomicU64 = AtomicU64::new(0);
 static T_CHECK: AtomicU64 = AtomicU64::new(0);
 static T_EMIT: AtomicU64 = AtomicU64::new(0);
 
-/// Compile Kotlin source to a list of (class_internal_name, class_bytes) pairs.
-/// Returns None if compilation fails (unsupported feature).
+// Compile Kotlin source to a list of (class_internal_name, class_bytes) pairs.
+// Returns None if compilation fails (unsupported feature).
 thread_local! {
     /// One `Classpath` per (rayon thread, classpath set), reused across every file that thread
     /// compiles — the real `kotlinc`/`main.rs` builds the classpath once per invocation too, so
@@ -394,7 +394,6 @@ fn compile_multifile(
     cp_jars: &[std::path::PathBuf],
     jdk_modules: Option<&std::path::Path>,
 ) -> Option<Vec<(String, Vec<u8>)>> {
-    use krusty::ast::Decl;
     // Split on `// FILE: name.kt` markers (the preamble before the first marker is directives).
     let mut blocks: Vec<(String, String)> = Vec::new();
     let mut cur_name: Option<String> = None;
@@ -434,15 +433,29 @@ fn compile_multifile(
         return None; // not actually multi-file
     }
 
-    let mut diags = DiagSink::new();
     // `// LANGUAGE:` directives live in the preamble before the first `// FILE:` — read them from the
     // whole source and apply to every block.
     let features = krusty::features::LangFeatures::from_source(src);
+    compile_blocks(&blocks, cp_jars, jdk_modules, &features)
+}
+
+/// Compile a set of already-split source blocks `(stem, content)` as ONE krusty module against the
+/// given classpath: parse, collect global signatures, wire the cross-file function/property→facade map
+/// (like the CLI driver), then check + lower + emit each file, returning ALL emitted classes. `None` if
+/// the module uses something the backend can't lower (so the test SKIPS rather than miscompiles).
+fn compile_blocks(
+    blocks: &[(String, String)],
+    cp_jars: &[std::path::PathBuf],
+    jdk_modules: Option<&std::path::Path>,
+    features: &krusty::features::LangFeatures,
+) -> Option<Vec<(String, Vec<u8>)>> {
+    use krusty::ast::Decl;
+    let mut diags = DiagSink::new();
     let files: Vec<_> = blocks
         .iter()
         .map(|(_, content)| {
             let toks = lex(content, &mut diags);
-            krusty::parser::parse_with_features(content, &toks, &mut diags, &features)
+            krusty::parser::parse_with_features(content, &toks, &mut diags, features)
         })
         .collect();
     if diags.has_errors() {
@@ -513,6 +526,153 @@ fn compile_multifile(
     } else {
         Some(all)
     }
+}
+
+/// One `// MODULE:` block: its name, its regular (classpath) dependency module names, and its own
+/// `// FILE:` source blocks.
+struct ModuleBlock {
+    name: String,
+    deps: Vec<String>,
+    files: Vec<(String, String)>,
+}
+
+/// Split a `// MODULE:`-partitioned test into modules, each with its `// FILE:` blocks. Returns `None`
+/// for a shape krusty's module model doesn't cover (so the test SKIPS, never mis-graded):
+///   * multiplatform / friend-dependency headers (`name()()(common)`, `name()(friend)`) — more than one
+///     paren group (`dependsOn`/`friend` deps need expect-actual / internal-visibility linking);
+///   * a non-`.kt` `// FILE:` (a `.java` module source krusty can't compile).
+///
+/// A module's regular deps are the first paren group (`main(lib)` → `[lib]`), which become the compile
+/// AND runtime classpath — exactly kotlinc's separate-compilation-with-classpath semantics.
+fn split_modules(src: &str) -> Option<Vec<ModuleBlock>> {
+    let mut mods: Vec<ModuleBlock> = Vec::new();
+    let mut cur_file: Option<String> = None;
+    let mut cur = String::new();
+    let flush = |mods: &mut Vec<ModuleBlock>, cur_file: &mut Option<String>, cur: &mut String| {
+        if let Some(fname) = cur_file.take() {
+            if let Some(m) = mods.last_mut() {
+                m.files.push((fname, std::mem::take(cur)));
+            }
+        }
+    };
+    for line in src.lines() {
+        let t = line.trim_start();
+        if let Some(rest) = t.strip_prefix("// MODULE:") {
+            flush(&mut mods, &mut cur_file, &mut cur);
+            let header = rest.trim();
+            if header.matches('(').count() > 1 {
+                return None; // friend / dependsOn (multiplatform) module — unsupported
+            }
+            let name_end = header.find('(').unwrap_or(header.len());
+            let name = header[..name_end].trim().to_string();
+            let deps = header[name_end..]
+                .trim_start_matches('(')
+                .split(')')
+                .next()
+                .unwrap_or("")
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            mods.push(ModuleBlock {
+                name,
+                deps,
+                files: Vec::new(),
+            });
+        } else if let Some(rest) = t.strip_prefix("// FILE:") {
+            flush(&mut mods, &mut cur_file, &mut cur);
+            let fname = rest.trim();
+            if !fname.ends_with(".kt") {
+                return None; // a `.java` (or other) module source — krusty can't compile it
+            }
+            let stem = fname
+                .strip_suffix(".kt")
+                .unwrap_or(fname)
+                .rsplit('/')
+                .next()
+                .unwrap_or(fname)
+                .to_string();
+            cur_file = Some(stem);
+        } else if cur_file.is_some() {
+            cur.push_str(line);
+            cur.push('\n');
+        } else if !mods.is_empty() && !t.is_empty() && !t.starts_with("//") {
+            // A module with source directly after its `// MODULE:` header (no explicit `// FILE:`): treat
+            // the body as one implicit file named after the module. Directive/blank lines are skipped.
+            cur_file = Some(mods.last().unwrap().name.clone());
+            cur.push_str(line);
+            cur.push('\n');
+        }
+    }
+    flush(&mut mods, &mut cur_file, &mut cur);
+    if mods.len() < 2 || mods.iter().any(|m| m.files.is_empty()) {
+        return None;
+    }
+    Some(mods)
+}
+
+/// Write emitted `(internal_name, bytes)` classes under `dir` as `internal/name.class` (package dirs
+/// created), so a later module's compile can read them off the classpath. `None` on any I/O error.
+fn write_classes_to_dir(classes: &[(String, Vec<u8>)], dir: &Path) -> Option<()> {
+    for (name, bytes) in classes {
+        let path = dir.join(format!("{name}.class"));
+        fs::create_dir_all(path.parent()?).ok()?;
+        fs::write(&path, bytes).ok()?;
+    }
+    Some(())
+}
+
+/// Compile a `// MODULE:` test the way a Gradle multi-module build (or kotlinc's separate-compilation
+/// test mode) does — but with EVERY module compiled by KRUSTY, so this also exercises krusty's own
+/// `@Metadata` WRITE→READ round-trip across a real classpath boundary. Each module is compiled in
+/// declaration (dependency) order against its dependency modules' EMITTED classes on the classpath; all
+/// modules' classes are returned together so the persistent BoxRunner loads them in one classloader and
+/// runs `box()`. `None` (SKIP) if the shape is unsupported or any module fails to lower.
+fn compile_module_test(
+    src: &str,
+    cp_jars: &[std::path::PathBuf],
+    jdk_modules: Option<&std::path::Path>,
+) -> Option<Vec<(String, Vec<u8>)>> {
+    static UID: AtomicU64 = AtomicU64::new(0);
+    let modules = split_modules(src)?;
+    let features = krusty::features::LangFeatures::from_source(src);
+    let uid = UID.fetch_add(1, Ordering::Relaxed);
+    let tmp = std::env::temp_dir().join(format!("krusty_modtest_{}_{uid}", std::process::id()));
+    let _ = fs::remove_dir_all(&tmp);
+    let mut dirmap: std::collections::HashMap<String, PathBuf> = std::collections::HashMap::new();
+    let mut all: Vec<(String, Vec<u8>)> = Vec::new();
+    let mut ok = true;
+    for m in &modules {
+        // Compile-time classpath = the base (stdlib/JDK) + each dependency module's emitted-class dir.
+        let mut cp = cp_jars.to_vec();
+        for d in &m.deps {
+            match dirmap.get(d) {
+                Some(p) => cp.push(p.clone()),
+                None => {
+                    ok = false; // a dependency declared out of order / on an unbuilt module — skip
+                    break;
+                }
+            }
+        }
+        if !ok {
+            break;
+        }
+        let Some(classes) = compile_blocks(&m.files, &cp, jdk_modules, &features) else {
+            ok = false;
+            break;
+        };
+        let moddir = tmp.join(&m.name);
+        if write_classes_to_dir(&classes, &moddir).is_none() {
+            ok = false;
+            break;
+        }
+        dirmap.insert(m.name.clone(), moddir);
+        all.extend(classes);
+    }
+    // The dependency classes were read off disk during compilation and are now all held in `all` (for the
+    // in-memory BoxRunner), so the scratch dir is no longer needed.
+    let _ = fs::remove_dir_all(&tmp);
+    (ok && !all.is_empty()).then_some(all)
 }
 
 /// Find the class that declares `static box()Ljava/lang/String;`.
@@ -806,9 +966,10 @@ fn kotlin_codegen_box_conformance() {
                 let src = src.replace("OPTIONAL_JVM_INLINE_ANNOTATION", "@JvmInline");
                 t_read.fetch_add(tr0.elapsed().as_nanos() as u64, Ordering::Relaxed);
                 let __ret = (|| {
-                    // Skip multi-module (separate classpaths) and no-box tests. A `// FILE:` multi-file
-                    // test (single module) is compiled together via `compile_multifile` below.
-                    if src.contains("// MODULE:") || !src.contains("fun box()") {
+                    // Skip no-box tests. A `// MODULE:` multi-module test compiles each module (in
+                    // dependency order, chained via the classpath) through `compile_module_test`; a
+                    // `// FILE:` single-module test compiles its blocks together via `compile_multifile`.
+                    if !src.contains("fun box()") {
                         return (file.clone(), TestResult::Skip);
                     }
                     // Skip tests that require invokedynamic lambdas or features not supported on JVM_IR K2.
@@ -851,8 +1012,9 @@ fn kotlin_codegen_box_conformance() {
                     let t0 = std::time::Instant::now();
                     // A `// FILE:` multi-file test, OR a `// WITH_COROUTINES` test (which needs the
                     // generated `helpers` source compiled alongside it), goes through the multi-block path.
-                    let compiled = if src.contains("// FILE:") || src.contains("// WITH_COROUTINES")
-                    {
+                    let compiled = if src.contains("// MODULE:") {
+                        compile_module_test(&src, &compile_cp, jdk_modules.as_deref())
+                    } else if src.contains("// FILE:") || src.contains("// WITH_COROUTINES") {
                         compile_multifile(&src, &stem, &compile_cp, jdk_modules.as_deref())
                     } else {
                         compile_source(&src, &stem, &compile_cp, jdk_modules.as_deref())
@@ -1000,6 +1162,16 @@ fn kotlin_codegen_box_conformance() {
     for f in failures.iter().take(fail_cap) {
         eprintln!("  FAIL {f}");
     }
+    if env("KRUSTY_BOX_LIST").is_some() {
+        for (file, r) in &results {
+            let tag = match r {
+                TestResult::Skip => "SKIP",
+                TestResult::Pass => "PASS",
+                TestResult::Fail(_) => "FAIL",
+            };
+            eprintln!("  {tag} {}", file.display());
+        }
+    }
     assert!(
         failures.is_empty(),
         "{} box case(s) miscompiled (see above)",
@@ -1015,4 +1187,140 @@ enum TestResult {
     Skip,
     Pass,
     Fail(String),
+}
+
+/// Unit coverage for `split_modules` — the `// MODULE:` / `// FILE:` directive parser that is the core
+/// new behavior of the module-aware harness. Pure (no JVM/corpus), so it always runs in the gate and
+/// pins the shapes krusty's module model DOES cover vs the ones it deliberately declines (→ SKIP).
+#[cfg(test)]
+mod split_modules_tests {
+    use super::split_modules;
+
+    #[test]
+    fn two_modules_with_explicit_files_parse_names_deps_and_bodies() {
+        let src = "\
+// MODULE: lib
+// FILE: lib.kt
+class A
+// MODULE: main(lib)
+// FILE: main.kt
+fun box(): String = \"OK\"
+";
+        let mods = split_modules(src).expect("two-module test should split");
+        assert_eq!(mods.len(), 2);
+        assert_eq!(mods[0].name, "lib");
+        assert!(mods[0].deps.is_empty());
+        assert_eq!(
+            mods[0].files,
+            vec![("lib".to_string(), "class A\n".to_string())]
+        );
+        assert_eq!(mods[1].name, "main");
+        assert_eq!(mods[1].deps, vec!["lib".to_string()]);
+        assert_eq!(
+            mods[1].files,
+            vec![(
+                "main".to_string(),
+                "fun box(): String = \"OK\"\n".to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn multiple_regular_deps_split_on_comma() {
+        let src = "\
+// MODULE: a
+// FILE: a.kt
+class A
+// MODULE: b
+// FILE: b.kt
+class B
+// MODULE: main(a, b)
+// FILE: main.kt
+fun box(): String = \"OK\"
+";
+        let mods = split_modules(src).expect("should split");
+        assert_eq!(mods.len(), 3);
+        assert_eq!(mods[2].deps, vec!["a".to_string(), "b".to_string()]);
+    }
+
+    #[test]
+    fn implicit_file_body_after_module_header() {
+        // A module whose source follows the header directly (no explicit `// FILE:`) becomes one file
+        // named after the module.
+        let src = "\
+// MODULE: lib
+class A
+// MODULE: main(lib)
+fun box(): String = \"OK\"
+";
+        let mods = split_modules(src).expect("implicit-file test should split");
+        assert_eq!(mods.len(), 2);
+        assert_eq!(mods[0].files[0].0, "lib");
+        assert_eq!(mods[1].files[0].0, "main");
+    }
+
+    #[test]
+    fn nested_file_path_uses_leaf_stem() {
+        let src = "\
+// MODULE: lib
+// FILE: pkg/Foo.kt
+package pkg
+class Foo
+// MODULE: main(lib)
+// FILE: main.kt
+fun box(): String = \"OK\"
+";
+        let mods = split_modules(src).expect("should split");
+        assert_eq!(mods[0].files[0].0, "Foo");
+    }
+
+    #[test]
+    fn friend_or_dependson_header_is_declined() {
+        // More than one paren group (`name()()(dep)` / `name()(friend)`) → expect-actual / internal
+        // visibility linking krusty's module model doesn't cover: decline so the case SKIPS.
+        let src = "\
+// MODULE: common
+// FILE: common.kt
+expect fun f(): String
+// MODULE: main()()(common)
+// FILE: main.kt
+actual fun f(): String = \"OK\"
+";
+        assert!(split_modules(src).is_none());
+    }
+
+    #[test]
+    fn java_file_source_is_declined() {
+        let src = "\
+// MODULE: lib
+// FILE: J.java
+public class J {}
+// MODULE: main(lib)
+// FILE: main.kt
+fun box(): String = \"OK\"
+";
+        assert!(split_modules(src).is_none());
+    }
+
+    #[test]
+    fn single_module_is_declined() {
+        // A lone module isn't a multi-module test — the single-file/`// FILE:` path handles it.
+        let src = "\
+// MODULE: only
+// FILE: only.kt
+fun box(): String = \"OK\"
+";
+        assert!(split_modules(src).is_none());
+    }
+
+    #[test]
+    fn module_without_any_source_is_declined() {
+        let src = "\
+// MODULE: lib
+// MODULE: main(lib)
+// FILE: main.kt
+fun box(): String = \"OK\"
+";
+        assert!(split_modules(src).is_none());
+    }
 }

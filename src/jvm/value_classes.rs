@@ -410,6 +410,16 @@ pub fn lower_value_classes(ir: &mut IrFile) -> bool {
                 {
                     b.target_name = Some(m.clone());
                 }
+                crate::trace_compiler!(
+                    "value_classes",
+                    "bridge {}::{} target={:?} concrete_ret={:?} erased_ret={:?} box_ret={:?}",
+                    c.fq_name,
+                    b.name,
+                    b.target_name,
+                    b.concrete_ret,
+                    b.erased_ret,
+                    b.box_ret
+                );
                 let concrete_ret_vc = match &b.concrete_ret {
                     Ty::Obj(fq_name, _) if under.contains_key(*fq_name) => {
                         Some(fq_name.to_string())
@@ -461,10 +471,22 @@ pub fn lower_value_classes(ir: &mut IrFile) -> bool {
                                     && (!b.erased_ret.is_nullable()
                                         || !nullable_is_boxed(fq_name, &under))
                             });
-                    // An EXTERNAL value class (`Result`) is held unboxed (`Object`) everywhere — the bridge
-                    // returns the override's already-`Object` result directly, NO `box-impl` (krusty never
-                    // materializes its box object); same as a supertype that returns the value class unboxed.
-                    if supertype_returns_vc || external_vc.contains(&fq_name) {
+                    // An EXTERNAL value class (`Result`) is held unboxed (`Object`) everywhere in krusty —
+                    // when the SUPERTYPE also carries it unboxed the bridge returns the override's already-
+                    // `Object` result directly, NO `box-impl`. EXCEPTION: a GENERIC boundary — the supertype
+                    // method returns an erased type variable (`fun performOperation(): T` → `Object`). There
+                    // kotlinc materializes the box (`Result.box-impl(Object)Lkotlin/Result;`) so the caller
+                    // observes the boxed object (its `toString`/identity), and krusty must match: `box_ret`
+                    // references the classpath `box-impl`, exactly like a user value class.
+                    // The supertype's erased return is a bare type variable — its front-end form is
+                    // `kotlin/Any` (the resolver's top type), which the emitter lowers to `Object`.
+                    let supertype_is_generic_object = matches!(
+                        b.erased_ret.non_null().obj_internal(),
+                        Some("kotlin/Any" | "java/lang/Object")
+                    );
+                    if supertype_returns_vc
+                        || (external_vc.contains(&fq_name) && !supertype_is_generic_object)
+                    {
                         b.concrete_ret = erase(&b.concrete_ret, &under);
                         b.erased_ret = b.concrete_ret.clone();
                     } else {
@@ -599,6 +621,44 @@ pub fn lower_value_classes(ir: &mut IrFile) -> bool {
         })
         .collect();
 
+    // A user `as Result` (external value class) applied to a value obtained through a GENERIC / `Any`
+    // boundary — where krusty now BOXES the result (see the bridge `box_ret`) — observes a BOXED `Result`.
+    // kotlinc unboxes at that cast: `checkcast kotlin/Result; invokevirtual unbox-impl()`. Collect these
+    // casts to append the `unbox-impl` after the erase pass (which would otherwise erase the target to
+    // `Any` and drop the `checkcast`). A cast already feeding an `unbox-impl` (krusty's own unbox sequence)
+    // is excluded. An external value class has NO user-materialized box, so the ONLY boxed source is such a
+    // boundary — hence a source-level `as Result` always unboxes.
+    let external_cast: Vec<(u32, u32, String)> = ir
+        .exprs
+        .iter()
+        .enumerate()
+        .filter_map(|(i, e)| match e {
+            IrExpr::TypeOp {
+                op: crate::ir::IrTypeOp::CastNonNull,
+                arg,
+                type_operand,
+            } => type_operand
+                .non_null()
+                .obj_internal()
+                .filter(|fq| {
+                    external_vc.contains(*fq) && !unbox_receiver_casts.contains(&(i as u32))
+                })
+                .map(|fq| (i as u32, *arg, fq.to_string())),
+            _ => None,
+        })
+        .collect();
+    let all_external_cast_ids: HashSet<u32> = external_cast.iter().map(|(i, ..)| *i).collect();
+    // Drop a chained `(x as Result) as Result`: its operand is already another external-VC cast, so the
+    // inner cast has ALREADY unboxed to the underlying — a second `checkcast Result; unbox-impl` would
+    // `checkcast` the raw underlying (not a box) and double-unbox. (Degenerate in real source, but keep
+    // the rewrite sound.) The retained ids are those actually rewritten; exclude them from erasure too.
+    let external_cast_unbox: Vec<(u32, String)> = external_cast
+        .iter()
+        .filter(|(_, arg, _)| !all_external_cast_ids.contains(arg))
+        .map(|(i, _, vc)| (*i, vc.clone()))
+        .collect();
+    let external_cast_ids: HashSet<u32> = external_cast_unbox.iter().map(|(i, _)| *i).collect();
+
     // 3. Erase every type carried inside an expression (locals, casts, vararg/array elements, …).
     //    Inside a value-class member body, an `is X`/`(X)other` whose type IS a value class must stay
     //    the BOXED class (the synthesized `equals` checks/casts the box) — keep it; everything else
@@ -619,7 +679,10 @@ pub fn lower_value_classes(ir: &mut IrFile) -> bool {
                     .is_some_and(|fq_name| {
                         under.contains_key(fq_name) && !external_vc.contains(fq_name)
                     });
-                if !is_vc_ty && !unbox_receiver_casts.contains(&(i as u32)) {
+                if !is_vc_ty
+                    && !unbox_receiver_casts.contains(&(i as u32))
+                    && !external_cast_ids.contains(&(i as u32))
+                {
                     *type_operand = erase(type_operand, &under);
                 }
                 let _ = keep_box;
@@ -654,6 +717,30 @@ pub fn lower_value_classes(ir: &mut IrFile) -> bool {
             IrExpr::Try { result, .. } => *result = erase(result, &under),
             _ => {}
         }
+    }
+
+    // Append `unbox-impl` to each external-value-class `as Result` cast (its retained `CastNonNull` still
+    // emits the `checkcast kotlin/Result`): the boxed `Result` the boundary produced is unwrapped to its
+    // underlying, exactly as kotlinc's `checkcast; invokevirtual unbox-impl` — so a following member call
+    // (`getOrThrow()`) or `==` sees the underlying, not the box.
+    for (id, vc) in external_cast_unbox {
+        let cast_id = ir.exprs.len() as ExprId;
+        ir.exprs.push(ir.exprs[id as usize].clone());
+        let u = under
+            .get(&vc)
+            .map(|t| erase(t, &under))
+            .unwrap_or(Ty::Error);
+        let d = desc(&u);
+        ir.exprs[id as usize] = IrExpr::Call {
+            callee: Callee::Virtual {
+                owner: vc,
+                name: "unbox-impl".to_string(),
+                descriptor: format!("(){d}"),
+                interface: false,
+            },
+            dispatch_receiver: Some(cast_id),
+            args: vec![],
+        };
     }
 
     // 4. Rewrite construction / property access — only in bodies that are NOT value-class members
