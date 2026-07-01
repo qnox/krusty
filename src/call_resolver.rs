@@ -1170,6 +1170,7 @@ pub fn resolve_instance(
         member.signature = o.callable.signature;
         member.ret_nullable = o.ret_nullable;
         member.inline = o.flags.inline;
+        member.suspend = o.flags.suspend;
         member
     })
 }
@@ -1178,6 +1179,9 @@ pub fn resolve_instance(
 pub struct ResolvedMember {
     pub member: LibraryMember,
     pub ret: Ty,
+    /// The resolved member is a `suspend fun` — the caller (a suspend body) must thread a
+    /// `Continuation` into the emitted call and treat the (Object-erased) result as `ret`.
+    pub suspend: bool,
 }
 
 /// Resolve an instance member and carry the logical return selected for this call. Generic member
@@ -1201,6 +1205,7 @@ pub fn resolve_instance_member(
     member.signature = o.callable.signature.clone();
     member.ret_nullable = o.ret_nullable;
     member.inline = o.flags.inline;
+    member.suspend = o.flags.suspend;
     let ret = if o.callable.physical_ret == Ty::obj("kotlin/Any") {
         o.generic_sig
             .as_ref()
@@ -1221,7 +1226,11 @@ pub fn resolve_instance_member(
         o.callable.ret
     };
     let ret = selected_return_type(o.ret_class, o.ret_nullable, ret);
-    Some(ResolvedMember { ret, member })
+    Some(ResolvedMember {
+        ret,
+        member,
+        suspend: o.flags.suspend,
+    })
 }
 
 fn nullable_return_type(ret: Ty, ret_nullable: bool) -> Ty {
@@ -1316,18 +1325,46 @@ fn best_member_overload<'a>(
         .or_else(|| {
             candidates.clone().find(|o| {
                 o.callable.params.len() == args.len()
-                    && o.callable
-                        .params
-                        .iter()
-                        .zip(args)
-                        .all(|(p, a)| p == a || *p == Ty::obj("kotlin/Any"))
+                    && o.callable.params.iter().zip(args).all(|(p, a)| {
+                        p == a || *p == Ty::obj("kotlin/Any") || fun_arg_matches(p, a)
+                    })
             })
         })
         .or_else(|| {
             candidates.clone().find(|o| {
-                o.callable.params.len() >= args.len() && o.callable.params[..args.len()] == *args
+                o.callable.params.len() >= args.len()
+                    && o.callable.params[..args.len()]
+                        .iter()
+                        .zip(args)
+                        .all(|(p, a)| p == a || fun_arg_matches(p, a))
             })
         })
+}
+
+/// A lambda argument (`Ty::Fun`) matches a function-typed parameter of the same arity. The parameter may
+/// be a decoded `Ty::Fun` (whose return/parameter types differ from the lambda's — the body adapts) or an
+/// erased `kotlin/jvm/functions/FunctionN` object; neither pairs with the argument under plain equality or
+/// `Any` widening, so arity alone drives the match.
+fn fun_arg_matches(param: &Ty, arg: &Ty) -> bool {
+    let arg_arity = match arg.fun_arity() {
+        Some(n) => n,
+        None => return false,
+    };
+    let param = match param {
+        Ty::Nullable(inner) => **inner,
+        _ => *param,
+    };
+    if let Some(pn) = param.fun_arity() {
+        return pn == arg_arity;
+    }
+    match param.obj_internal() {
+        Some(p) => {
+            p.strip_prefix("kotlin/jvm/functions/Function")
+                .and_then(|d| d.parse::<u8>().ok())
+                == Some(arg_arity)
+        }
+        None => false,
+    }
 }
 
 /// Whether `arg` is assignable to `param` allowing a reference SUBTYPE (`arg`'s classpath supertype

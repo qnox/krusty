@@ -93,6 +93,26 @@ fn foreach_destructuring_runs_correctly() {
     }
 }
 
+// A CLASSPATH generic class (`Pair`/`Triple`) constructed WITHOUT explicit type arguments: krusty
+// infers them from the constructor arguments (`Pair(1, 2)` → `Pair<Int, Int>`), so `component1`/
+// `component2`/`first`/`second` type concretely (not `Any`) and the destructure + arithmetic verify.
+const CLASSPATH_GENERIC_CTOR_SRC: &str = r#"
+fun box(): String {
+    val p = Pair(1, 2)
+    val (a, b) = p
+    val t = Triple("x", 3, true)
+    val sum = p.first + p.second + t.second
+    return if (sum == 6 && a == 1 && b == 2 && t.first == "x" && t.third) "OK" else "FAIL"
+}
+"#;
+
+#[test]
+fn classpath_generic_ctor_type_args_inferred() {
+    if let Some(out) = run_box("gen_ctor", CLASSPATH_GENERIC_CTOR_SRC) {
+        assert_eq!(out, "OK");
+    }
+}
+
 #[test]
 fn lambda_destructuring_parses_and_checks() {
     // A lambda parameter destructured into components: `{ (a, b) -> … }` binds `a`/`b` to

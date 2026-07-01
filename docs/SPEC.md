@@ -886,6 +886,65 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   member return is left at its erased bound), so the bug is classpath-only. Test:
   `tests/shadowed_method_tparam_e2e.rs` (a `javac`-compiled generic class with a shadowing method).
 
+- **Member resolution through INTERFACE supertypes read from classpath `@Metadata`.** A call on a
+  receiver whose declared type is a classpath interface resolves members inherited from its
+  super-interfaces: the member walk (`JvmLibraries::functions`, receiver branch) is breadth-first over the
+  receiver's supertype closure (`ConfigRepo : CrudRepo, Named` inherits `save`/`findById`/`id`). Three
+  entangled shapes are covered:
+  - **Function-typed parameter members** (`Logger.info(msg: () -> Any?)`). The classpath decodes a
+    function-type parameter as a `Ty::Fun`, so a lambda argument (also `Ty::Fun`, but with a different
+    return type) never paired under plain equality / `Any` widening. `best_member_overload`
+    (`call_resolver`) now matches a `Ty::Fun` argument to a function-typed parameter (a decoded `Ty::Fun`
+    OR an erased `kotlin/jvm/functions/FunctionN`) by ARITY — the lambda body adapts its return.
+  - **`suspend` interface members** (`suspend fun getConfig(id): Config`). The member walk strips the
+    trailing `Continuation` parameter and recovers the real return from the `Continuation<T>` type
+    argument in the generic signature (`suspend_return_from_gsig`; `Continuation<-Unit>` → `Unit`). Member
+    suspend detection was fixed at its root: `metadata::suspend_method_names` now reads BOTH the file
+    facade's `Package.function` (field 3) AND a class/interface's `Class.function` (field 9) — it
+    previously saw only top-level functions, so interface/class member `suspend` funs were invisible.
+  - **Lowering a classpath suspend-member call.** A `LibraryMember` now carries `suspend`; the classpath
+    instance-call lowering records the call in `ir.suspend_calls` so the coroutine pass threads the
+    `Continuation` (its CPS descriptor rebuilt for a `Callee::Virtual` in `append_continuation`) and types
+    the resumed result. The resume value (erased `Object`) is `checkcast` to a concrete reference return
+    (`unbox` in `jvm::suspend` now emits `Cast` for a reference target, but NOT for a boxed-primitive
+    object type such as `Obj("kotlin/Int")`, where `ImplicitCoercion` must UNBOX to the JVM primitive).
+  Tests: `tests/interface_supertype_members_e2e.rs` (a kotlinc-built interface library; krusty compiles a
+  caller that inherits CRUD members from a super-interface, binds a lambda to `Logger.info`, and drives a
+  `suspend` inherited member through a Java `Continuation` — both round-trip on the JVM).
+
+- **Concrete generic return of a classpath member keeps its type argument.** `member_return`
+  (`JvmLibraries`) propagates only the RECEIVER's own type arguments, so a member on a NON-generic
+  receiver whose return is a concrete generic (`class Repo { fun all(): List<Item> }`) fell back to the
+  erased `List` — its element then typed as `Any`, and `r.all().forEach { it.id }` / `.map`/`.first()`/
+  `[0]` all failed with "unresolved member on `kotlin/Any`". The member walk now recovers a FULLY CONCRETE
+  generic return (`concrete_generic_ret`: the return's generic signature carries type arguments, none a
+  free type variable) as `List<Item>`, so element access / lambda parameters / `first()` type as `Item`.
+  A return naming a type variable (`fun <T> load(): T`, `List<E>.get(): E`) is untouched — it stays erased
+  or is bound by `member_return` under the receiver's arguments. Test:
+  `tests/interface_supertype_members_e2e.rs::concrete_generic_return_keeps_type_argument`.
+
+- **`@JvmStatic` member of a classpath `object` (`Base58Uuid.of(x)`).** kotlinc emits it as a static
+  method on the object class, so it lands in the type's `companion` (static) list, NOT as an instance
+  member — a call on the object value previously failed as "unresolved method on `<object>`". Both the
+  checker (member-call fallthrough) and lowerer now try `resolve_companion` on the receiver's type and,
+  when it matches, resolve/emit an `invokestatic` on the object class (the instance receiver is dropped,
+  as kotlinc does). Test: `tests/interface_supertype_members_e2e.rs::jvmstatic_object_member`.
+
+- **Named arguments to a CLASSPATH constructor (`Point(y = 2, x = 1)`).** Descriptors don't carry
+  parameter names, so this needs the ctor's `@Metadata`: `metadata::class_constructor_param_names` decodes
+  `Class.constructor` (field 8) → `Constructor.value_parameter` (field 2, a DIFFERENT proto shape from a
+  `Function` — no name/return, value-parameters at field 2 not 6) → `ValueParameter.name`. Exposed via the
+  `SymbolSource::constructor_param_names` hook; the checker's named-argument gate and the lowerer's
+  classpath-`new` both reorder the labelled arguments onto positions (via `reorder_by_param_names`) before
+  resolving/emitting. Test: `named_args_classpath_e2e` / `interface_supertype_members_e2e`.
+
+- **Generic constructor type-argument inference (`Pair(1, 2)` → `Pair<Int, Int>`).** A classpath generic
+  class constructed without explicit `<T>` previously erased to the raw type, so `first`/`second`/
+  `componentN` typed as `Any` (breaking destructuring + arithmetic). `SymbolSource::infer_constructor_type_args`
+  (JvmLibraries) unifies the constructor's generic parameter signatures (which name the class formals) with
+  the actual argument types, binding each formal (unbound → `Any`); `ctor_result` applies it when no explicit
+  type argument is present. Test: `destructure_e2e::classpath_generic_ctor_type_args_inferred`.
+
 ## 8. Success criteria for the PoC
 
 1. krusty compiles the `kotlin-memory-bench` `many_functions` / `multifile` / `bodyheavy` programs.

@@ -761,6 +761,76 @@ pub fn package_functions(ci: &ClassInfo) -> Vec<MetaFn> {
     decode_functions(ci, 3)
 }
 
+/// The SOURCE value-parameter names of every constructor in a `Class`'s `@Metadata` (`Class.constructor`
+/// field 8 → `Constructor.value_parameter` field 2 → `ValueParameter.name` field 2), one `Vec` per
+/// constructor in declaration order (the primary constructor is first). Drives NAMED-ARGUMENT resolution
+/// for a classpath constructor call — descriptors don't carry parameter names.
+pub fn class_constructor_param_names(ci: &ClassInfo) -> Vec<Vec<String>> {
+    let mut out = Vec::new();
+    if ci.kotlin_d1.is_empty() {
+        return out;
+    }
+    let bytes = decode_d1(&ci.kotlin_d1);
+    let (st_body, msg_body) = split_d1(&bytes);
+    let records = parse_string_table(st_body);
+    let d2 = &ci.kotlin_d2;
+    let mut pb = Pb { b: msg_body, i: 0 };
+    while !pb.at_end() {
+        let Some(tag) = pb.varint() else { break };
+        match (tag >> 3, tag & 7) {
+            (8, 2) => {
+                // Class.constructor (repeated Constructor)
+                let Some(len) = pb.varint() else { break };
+                let Some(cbody) = pb.bytes(len as usize) else {
+                    break;
+                };
+                let mut cp = Pb { b: cbody, i: 0 };
+                let mut names = Vec::new();
+                while !cp.at_end() {
+                    let Some(ct) = cp.varint() else { break };
+                    match (ct >> 3, ct & 7) {
+                        (2, 2) => {
+                            // Constructor.value_parameter (repeated ValueParameter)
+                            let Some(vlen) = cp.varint() else { break };
+                            let Some(vbody) = cp.bytes(vlen as usize) else {
+                                break;
+                            };
+                            let mut vp = Pb { b: vbody, i: 0 };
+                            let mut nid = 0u64;
+                            while !vp.at_end() {
+                                let Some(vt) = vp.varint() else { break };
+                                match (vt >> 3, vt & 7) {
+                                    (2, 0) => nid = vp.varint().unwrap_or(0), // ValueParameter.name
+                                    (_, w) => {
+                                        if vp.skip(w).is_none() {
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                            names.push(
+                                resolve_string(&records, d2, nid as usize).unwrap_or_default(),
+                            );
+                        }
+                        (_, w) => {
+                            if cp.skip(w).is_none() {
+                                break;
+                            }
+                        }
+                    }
+                }
+                out.push(names);
+            }
+            (_, w) => {
+                if pb.skip(w).is_none() {
+                    break;
+                }
+            }
+        }
+    }
+    out
+}
+
 /// The simple name of a class's companion object (`Class.companion_object_name = 4`), e.g. `Companion`.
 /// `None` if the class has no companion.
 pub fn class_companion_name(ci: &ClassInfo) -> Option<String> {
@@ -1350,12 +1420,19 @@ fn package_flagged(
 }
 
 /// The Kotlin names of every `suspend` function in a class's `@Metadata` (from the `IS_SUSPEND` flag
-/// bit). A call to a method of one of these names (in this class) is a suspension point.
+/// bit). A call to a method of one of these names (in this class) is a suspension point. Both function
+/// carriers are read: a file facade's `Package.function` (field 3, top-level `suspend fun`s) AND a
+/// `Class.function` (field 9, `suspend` members of a class/interface).
 pub fn suspend_method_names(ci: &ClassInfo) -> HashSet<String> {
     if ci.kotlin_d1.is_empty() {
         return HashSet::new();
     }
-    package_flagged(&decode_d1(&ci.kotlin_d1), &ci.kotlin_d2, |f| f.is_suspend).1
+    class_functions(ci)
+        .into_iter()
+        .chain(package_functions(ci))
+        .filter(|f| f.is_suspend)
+        .map(|f| f.kotlin_name)
+        .collect()
 }
 
 /// The JVM `(name, descriptor)` of every `inline` function in a class with an explicit method

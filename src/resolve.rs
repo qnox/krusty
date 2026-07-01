@@ -7675,6 +7675,23 @@ impl<'a> Checker<'a> {
                 return Ty::obj_args(internal, &args);
             }
         }
+        // No explicit `<T>` — INFER a classpath generic type's arguments from the constructor call's
+        // argument types (`Pair(1, 2)` → `Pair<Int, Int>`), so members/`componentN` type concretely.
+        if let Expr::Call { args, .. } = self.file.expr(call).clone() {
+            let arg_tys: Vec<Ty> = args
+                .iter()
+                .map(|&a| self.expr_types[a.0 as usize])
+                .collect();
+            if let Some(inferred) = self
+                .syms
+                .libraries
+                .infer_constructor_type_args(internal, &arg_tys)
+            {
+                if inferred.iter().any(|t| *t != Ty::obj("kotlin/Any")) {
+                    return Ty::obj_args(internal, &inferred);
+                }
+            }
+        }
         Ty::obj(internal)
     }
 
@@ -7781,6 +7798,16 @@ impl<'a> Checker<'a> {
         Some(t)
     }
 
+    /// The classpath internal name a bare class name resolves to — an explicit import first, then the
+    /// federated class-name seed (default/same-package/wildcard imports). Used to reach a classpath type's
+    /// `@Metadata` (e.g. constructor parameter names) from a simple-name constructor call.
+    fn classpath_class_internal(&self, name: &str) -> Option<String> {
+        self.imports
+            .get(name)
+            .cloned()
+            .or_else(|| self.syms.class_names.get(name).cloned())
+    }
+
     /// Primary-constructor parameter names of a same-file class, in declaration order (parallel to
     /// `ClassSig::ctor_params`/`ctor_defaults`) — for mapping named constructor arguments. `None` if
     /// `class_name` isn't a same-file class with a primary constructor.
@@ -7831,6 +7858,14 @@ impl<'a> Checker<'a> {
                                 o.kind == crate::libraries::FnKind::TopLevel
                                     && !o.call_sig.param_names.is_empty()
                             })
+                        // A CLASSPATH CONSTRUCTOR whose `@Metadata` records parameter names
+                        // (`Point(y = 2, x = 1)` against a data/plain class from a dependency).
+                        || self
+                            .classpath_class_internal(n)
+                            .and_then(|i| {
+                                self.syms.libraries.constructor_param_names(&i, args.len())
+                            })
+                            .is_some()
                 }
                 Expr::Member { receiver, name } => {
                     // A method with default parameters (e.g. data-class `copy`) — `required < params` —
@@ -8968,6 +9003,27 @@ impl<'a> Checker<'a> {
                 {
                     return Ty::Unit;
                 }
+                // A `@JvmStatic` member of a classpath `object` (`Base58Uuid.of(x)`): kotlinc emits a
+                // static method on the object class, so it lands in the type's `companion` (static) list —
+                // not an instance member. Resolve it there as a static call on the receiver's type.
+                if let Some(internal) = rt.obj_internal() {
+                    if let Some(m) = crate::call_resolver::resolve_companion(
+                        &*self.syms.libraries,
+                        internal,
+                        &name,
+                        &arg_tys,
+                    )
+                    // A `@JvmStatic suspend fun` keeps its physical `Continuation` param here (the
+                    // companion path doesn't strip/CPS it), so leave it unresolved rather than
+                    // miscompile the calling convention.
+                    .filter(|m| !m.suspend)
+                    {
+                        for (i, (p, a)) in m.params.iter().zip(&arg_tys).enumerate() {
+                            self.expect_assignable(*p, *a, self.span(args[i]), "argument");
+                        }
+                        return m.ret;
+                    }
+                }
                 self.diags.error(
                     span,
                     format!("unresolved method '{name}' on '{}'", rt.name()),
@@ -9507,6 +9563,57 @@ impl<'a> Checker<'a> {
                             }
                         }
                         return self.ctor_result(call, &cls.internal);
+                    }
+                    // A CLASSPATH constructor with NAMED arguments (`Point(y = 2, x = 1)`): reorder the
+                    // labels onto parameter positions via the ctor's `@Metadata` parameter names, then
+                    // resolve/type-check positionally. (Named call supplies every argument — no defaults.)
+                    if arg_names.is_some() {
+                        if let Some(internal) = self.classpath_class_internal(&fname) {
+                            if let Some(param_names) = self
+                                .syms
+                                .libraries
+                                .constructor_param_names(&internal, args.len())
+                            {
+                                match map_call_args(
+                                    args,
+                                    arg_names.as_deref(),
+                                    &param_names,
+                                    param_names.len(),
+                                    &[],
+                                ) {
+                                    Ok(slots) => {
+                                        if let Some(sel) =
+                                            slots.into_iter().collect::<Option<Vec<ExprId>>>()
+                                        {
+                                            let tys: Vec<Ty> = sel
+                                                .iter()
+                                                .map(|a| self.expr_types[a.0 as usize])
+                                                .collect();
+                                            if let Some(m) =
+                                                crate::call_resolver::resolve_constructor(
+                                                    &*self.syms.libraries,
+                                                    &internal,
+                                                    &tys,
+                                                )
+                                            {
+                                                for (p, a) in m.params.iter().zip(&sel) {
+                                                    self.expect_assignable(
+                                                        *p,
+                                                        self.expr_types[a.0 as usize],
+                                                        self.span(*a),
+                                                        "argument",
+                                                    );
+                                                }
+                                                return self.ctor_result(call, &internal);
+                                            }
+                                        }
+                                    }
+                                    Err(msg) => self
+                                        .diags
+                                        .error(span, format!("constructor '{fname}': {msg}")),
+                                }
+                            }
+                        }
                     }
                     // Constructing a classpath Java type: `Calc()` where `Calc` is imported.
                     if let Some(internal) = self.imports.get(&fname).cloned() {

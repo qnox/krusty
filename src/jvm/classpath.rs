@@ -614,6 +614,40 @@ impl Classpath {
     /// resolution of a classpath instance-member call (`g.greet(b = …, a = …)`). Matches by JVM name and
     /// source arity (the member's `@Metadata` value-parameter count). `None` if no member matches or its
     /// names are unrecorded.
+    /// Whether member `name` (its JVM or source name) of `arity` LOGICAL value parameters on class/
+    /// interface `internal` has a NULLABLE return, per the class's `@Metadata` (`Class.function`, field 9).
+    /// Descriptors erase nullability; a `suspend` member's return is further erased to `Object`, so this is
+    /// the only source of `T?` for such a member. Arity disambiguates overloads of the same name.
+    pub fn metadata_member_return_nullable(
+        &self,
+        internal: &str,
+        name: &str,
+        arity: usize,
+    ) -> bool {
+        self.find(internal)
+            .map(|ci| super::metadata::class_functions(&ci))
+            .into_iter()
+            .flatten()
+            .find(|f| {
+                (f.jvm_name == name || f.kotlin_name == name) && f.value_param_types.len() == arity
+            })
+            .is_some_and(|f| f.ret_nullable)
+    }
+
+    /// The SOURCE value-parameter names of the classpath class `internal`'s constructor of `arity`
+    /// parameters, from its `@Metadata` — for mapping NAMED constructor arguments onto positions. Prefers
+    /// an exact-arity constructor (a class may have several); `None` if none records complete names.
+    pub fn metadata_constructor_param_names(
+        &self,
+        internal: &str,
+        arity: usize,
+    ) -> Option<Vec<String>> {
+        let ci = self.find(internal)?;
+        super::metadata::class_constructor_param_names(&ci)
+            .into_iter()
+            .find(|names| names.len() == arity && !names.iter().any(String::is_empty))
+    }
+
     pub fn metadata_member_param_names(
         &self,
         internal: &str,
@@ -840,6 +874,7 @@ impl Classpath {
                         signature: None,
                         is_interface: is_iface,
                         inline: crate::libraries::InlineKind::None,
+                        suspend: false,
                     }
                 })
             })

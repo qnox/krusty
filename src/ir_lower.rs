@@ -8890,6 +8890,8 @@ impl<'a> Lower<'a> {
             name,
             arg_tys,
         )?;
+        let ret = resolved.ret;
+        let suspend = resolved.suspend;
         let m = resolved.member;
         let owner = m.owner.clone().unwrap_or_else(|| {
             rt.kotlin_class_internal()
@@ -8897,7 +8899,7 @@ impl<'a> Lower<'a> {
                 .to_string()
         });
         let is_iface = self.library_type_is_interface(&owner);
-        Some(self.ir.add_expr(IrExpr::Call {
+        let call = self.ir.add_expr(IrExpr::Call {
             callee: Callee::Virtual {
                 owner,
                 name: m.name,
@@ -8906,7 +8908,15 @@ impl<'a> Lower<'a> {
             },
             dispatch_receiver: Some(recv),
             args: arg_exprs,
-        }))
+        });
+        // A `suspend` member of a classpath type: record the call so the coroutine pass threads the
+        // `Continuation` into it (its CPS descriptor is rebuilt there) and types the resumed result as
+        // the logical `ret`. Only reachable inside a suspend body (calling one elsewhere is a Kotlin error
+        // the file gate already rejects).
+        if suspend {
+            self.ir.suspend_calls.insert(call, ty_to_ir(ret));
+        }
+        Some(call)
     }
 
     /// Lower a CALL `recv.name(args)` that resolves to a top-level EXTENSION function on `rt` — the
@@ -15415,7 +15425,15 @@ impl<'a> Lower<'a> {
                         .filter(|i| !self.classes.contains_key(*i))
                     {
                         // Constructing a classpath (non-IR) class — `RuntimeException("x")`,
-                        // `StringBuilder()`. The constructor descriptor comes from the classpath.
+                        // `StringBuilder()`. The constructor descriptor comes from the classpath. NAMED
+                        // arguments are reordered onto parameter positions via the ctor's `@Metadata`
+                        // parameter names before lowering (source-order emit would pair them wrong).
+                        let args = self
+                            .syms
+                            .libraries
+                            .constructor_param_names(internal, args.len())
+                            .and_then(|pn| self.reorder_by_param_names(e, &args, &pn))
+                            .unwrap_or(args);
                         return self.lower_external_new(internal, &args);
                     } else {
                         // Constructor: the call's result type is the class.
@@ -16434,7 +16452,7 @@ impl<'a> Lower<'a> {
                             dispatch_receiver: Some(recv),
                             args: vec![],
                         })
-                    } else if let Some((owner, mname, desc, is_iface, mparams, mret)) = {
+                    } else if let Some((owner, mname, desc, is_iface, mparams, mret, msuspend)) = {
                         // A classpath *instance* method `recv.name(args)` → `invokevirtual`/
                         // `invokeinterface recvType.name:descriptor` (descriptor from the classpath; no
                         // hardcoded names). Enables stdlib member calls (iterators, collections, …).
@@ -16468,7 +16486,15 @@ impl<'a> Lower<'a> {
                                 .map(|m| {
                                     let owner = m.owner.clone().unwrap_or_else(|| internal.clone());
                                     let is_iface = self.library_type_is_interface(&owner);
-                                    (owner, m.name, m.descriptor, is_iface, m.params, m.ret)
+                                    (
+                                        owner,
+                                        m.name,
+                                        m.descriptor,
+                                        is_iface,
+                                        m.params,
+                                        m.ret,
+                                        m.suspend,
+                                    )
                                 })
                             })
                     } {
@@ -16522,6 +16548,12 @@ impl<'a> Lower<'a> {
                             dispatch_receiver: Some(recv),
                             args: a,
                         });
+                        // A classpath `suspend` member: record the call so the coroutine pass threads the
+                        // `Continuation` and types the resumed result as the logical `mret` (see
+                        // `lower_library_instance_call_on`).
+                        if msuspend {
+                            self.ir.suspend_calls.insert(call, ty_to_ir(mret));
+                        }
                         // A generic member whose erased return is `Object` but whose substituted type is
                         // more specific (`List<Int>.get` → `Int`) gets the unbox/checkcast kotlinc emits.
                         self.coerce_generic_read(call, e, mret)
@@ -16559,6 +16591,44 @@ impl<'a> Lower<'a> {
                             args: a,
                         });
                         self.coerce_erased(call, ret, physical_ret)
+                    } else if let Some(m) = {
+                        // A `@JvmStatic` member of a classpath `object` (`Base58Uuid.of(x)`) → a static
+                        // method on the object class (`invokestatic`), found in the type's static list.
+                        let arg_tys: Vec<Ty> = args.iter().map(|&a| self.info.ty(a)).collect();
+                        rt.obj_internal().and_then(|internal| {
+                            crate::call_resolver::resolve_companion(
+                                &*self.syms.libraries,
+                                internal,
+                                &name,
+                                &arg_tys,
+                            )
+                            // A `@JvmStatic suspend fun` is not CPS-lowered on this path — the checker
+                            // leaves it unresolved, so this never fires; guard anyway to never emit a
+                            // static call missing its `Continuation`.
+                            .filter(|m| !m.suspend)
+                            .map(|m| (internal.to_string(), m))
+                        })
+                    } {
+                        let (internal, m) = m;
+                        let owner = m.owner.unwrap_or(internal);
+                        let mut a = Vec::new();
+                        for (i, &arg) in args.iter().enumerate() {
+                            match m.params.get(i) {
+                                Some(p) => a.push(self.lower_arg(arg, &ty_to_ir(*p))?),
+                                None => a.push(self.expr(arg)?),
+                            }
+                        }
+                        let call = self.ir.add_expr(IrExpr::Call {
+                            callee: Callee::Static {
+                                owner,
+                                name: m.name,
+                                descriptor: m.descriptor,
+                                inline: m.inline,
+                            },
+                            dispatch_receiver: None,
+                            args: a,
+                        });
+                        self.coerce_erased(call, m.ret, m.physical_ret)
                     } else if let Some(c) = {
                         // A library-resolved extension `recv.name(args)` → `invokestatic
                         // facade.name(recv, args)`. Owner + descriptor come from resolver data, so no
