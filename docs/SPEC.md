@@ -945,6 +945,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   the actual argument types, binding each formal (unbound → `Any`); `ctor_result` applies it when no explicit
   type argument is present. Test: `destructure_e2e::classpath_generic_ctor_type_args_inferred`.
 
+- **Numeric reduction extensions selected by element type (`List<Int>.sum()`, `average()`).** `sum`/
+  `average` are `@JvmName`-mangled by the receiver's ELEMENT type — `List<Int>.sum()` is the bytecode
+  method `sumOfInt(Iterable<Integer>): int`, `List<Long>.sum()` is `sumOfLong`, `average()` is
+  `averageOfInt`. The Kotlin source name is not a JVM method, so ordinary extension resolution missed it
+  (and the resulting `Error` cascaded into unrelated `require`/logger calls in the same function). The
+  extension walk now derives the mangled name from the element's simple name (`<name>Of<Element>`, the same
+  convention the `sumOf`-by-lambda-return path uses — `ty_simple_name` from the element's canonical internal
+  name, no per-type list) and binds ONLY the candidate whose generic-signature receiver element equals the
+  actual element (a no-argument overload — the same-named lambda `sumOf` has an extra parameter). Test:
+  `collection_members_e2e::numeric_reduction_extensions_by_element_type`.
+
 ## 8. Success criteria for the PoC
 
 1. krusty compiles the `kotlin-memory-bench` `many_functions` / `multifile` / `bodyheavy` programs.

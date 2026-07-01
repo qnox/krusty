@@ -52,3 +52,17 @@ fun box(): String {\n\
         "OK"
     );
 }
+
+#[test]
+fn numeric_reduction_extensions_by_element_type() {
+    // `sum()`/`average()` are `@JvmName`-mangled by the receiver's ELEMENT type (`List<Int>.sum()` →
+    // the bytecode method `sumOfInt`, `List<Long>.sum()` → `sumOfLong`, `average()` → `averageOfInt`).
+    // krusty derives the mangled name from the element and binds the element-appropriate overload.
+    const SRC: &str = "fun box(): String {\n\
+    val a = listOf(1, 2, 3).sum()\n\
+    val b = listOf(1L, 2L).sum()\n\
+    val c = listOf(1.5, 2.5).average()\n\
+    return if (a == 6 && b == 3L && c == 2.0) \"OK\" else \"FAIL: $a/$b/$c\"\n\
+}\n";
+    assert_eq!(run(SRC).expect("numeric reductions compile + run"), "OK");
+}
