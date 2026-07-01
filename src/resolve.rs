@@ -1843,10 +1843,12 @@ pub fn collect_signatures_with_cp(
                     // A top-level *computed* property (custom getter, no initializer) — needs a type
                     // annotation (no getter-return inference at top level yet); emitted as `getX()`.
                     let is_computed = p.getter.is_some() && p.init.is_none();
-                    // Top-level custom accessors over a *backing field* (a getter with an initializer,
-                    // or any setter) aren't emitted yet — the facade would silently use the default
-                    // accessor. Reject rather than miscompile (member properties are supported).
-                    if (p.getter.is_some() && p.init.is_some()) || p.setter.is_some() {
+                    // A top-level backing-field property with a CUSTOM accessor (`val x = init get() =
+                    // field`, `var y = init set(v){…}`) is lowered as a facade static + custom
+                    // `getX`/`setX` (with `field` bound to the static). Reject only a custom accessor with
+                    // NO backing-field initializer — there is nothing for `field` to bind to.
+                    let has_custom_accessor = p.getter.is_some() || p.setter.is_some();
+                    if has_custom_accessor && p.init.is_none() && !is_computed {
                         diags.error(
                             p.span,
                             "krusty: top-level property custom accessors are not supported"
@@ -4019,10 +4021,17 @@ pub fn check_file(file: &File, syms: &mut SymbolTable, diags: &mut DiagSink) -> 
                         })
                         .unwrap_or(Ty::Error);
                 // A top-level computed property (`val g: T get() = …`) emits a `getG()` static method
-                // (Phase: top-level computed). Type-check the getter body against the declared type.
+                // (Phase: top-level computed). Type-check the getter body against the declared type. A
+                // top-level backing-field property (`val x = init get() = field`) binds `field` to the
+                // property type for the accessor body (like a member accessor).
+                let has_backing_field = p.receiver.is_none() && p.init.is_some();
                 if let Some(g) = &p.getter {
                     let prev = c.ret_ty;
+                    let prev_field = c.field_ty;
                     c.ret_ty = prop_ty;
+                    if has_backing_field {
+                        c.field_ty = Some(prop_ty);
+                    }
                     match g {
                         FunBody::Expr(e) => {
                             let gt = c.expr(*e);
@@ -4034,13 +4043,19 @@ pub fn check_file(file: &File, syms: &mut SymbolTable, diags: &mut DiagSink) -> 
                         FunBody::None => {}
                     }
                     c.ret_ty = prev;
+                    c.field_ty = prev_field;
                 }
-                // Extension-property setter body: bind the parameter and check with `this` = receiver.
-                if p.receiver.is_some() {
+                // A setter body: an extension property's is checked with `this` = receiver; a top-level
+                // backing-field property's binds `field` to the property type. Both bind the value param.
+                if p.receiver.is_some() || has_backing_field {
                     if let Some(setter) = &p.setter {
                         if let Some(body) = &setter.body {
                             let prev = c.ret_ty;
+                            let prev_field = c.field_ty;
                             c.ret_ty = Ty::Unit;
+                            if has_backing_field {
+                                c.field_ty = Some(prop_ty);
+                            }
                             c.push_scope();
                             c.declare(setter.param.as_deref().unwrap_or("value"), prop_ty, true);
                             match body {
@@ -4051,6 +4066,7 @@ pub fn check_file(file: &File, syms: &mut SymbolTable, diags: &mut DiagSink) -> 
                             }
                             c.pop_scope();
                             c.ret_ty = prev;
+                            c.field_ty = prev_field;
                         }
                     }
                 }

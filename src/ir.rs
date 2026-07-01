@@ -807,6 +807,11 @@ pub struct IrStatic {
     /// = a specific class — a `companion object`'s `const val` lives on the OUTER class (kotlinc emits
     /// `public static final` + `ConstantValue` there), not the facade.
     pub owner: Option<String>,
+    /// `true` when this backing field has a CUSTOM accessor (`val x = init get() = field…`): the field
+    /// is still emitted + initialized in `<clinit>`, but the trivial `getX`/`setX` accessors are NOT
+    /// auto-generated here — the custom `getX`/`setX` are emitted as ordinary facade methods (their
+    /// bodies lowered with `field` bound to this static). Prevents a duplicate-accessor collision.
+    pub custom_accessor: bool,
 }
 
 /// One lowered source file (`IrFile`) — its arenas. Index-based, bulk-freeable.
