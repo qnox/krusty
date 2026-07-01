@@ -6943,7 +6943,9 @@ impl<'a> Lower<'a> {
         let reordered = arg_slot.windows(2).any(|w| w[0] > w[1]);
         // A reordered named call evaluates side-effecting args out of source order — bail unless every
         // reordered arg is pure (const/name read). The TRAILING LAMBDA is excluded: it is the last source
-        // argument AND fills the last slot, so it is never evaluated out of order.
+        // argument AND fills the last slot, so it is never evaluated out of order. (Proper source-order
+        // temp-spilling for side-effecting reordered args isn't modeled yet — it needs the temp prelude to
+        // live in the enclosing scope, not a value-position `Block` which scopes its locals.)
         if reordered
             && args.iter().enumerate().any(|(i, &a)| {
                 let is_trailing_lambda =
