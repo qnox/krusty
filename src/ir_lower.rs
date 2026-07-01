@@ -665,6 +665,13 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     dispatch_receiver: Some(internal.clone()),
                     param_checks,
                 });
+                // A `private` method is NON-VIRTUAL: a call to it (even the unqualified `foo()` inside a
+                // sibling default method) must be `invokespecial`, not `invokevirtual`/`invokeinterface` —
+                // else it dispatches to a same-named override (`interface A { private fun foo(); fun bar() =
+                // foo() }` called on a `B : A` with its own private `foo` would wrongly run `B.foo`).
+                if m.is_private {
+                    lo.ir.private_methods.insert(fid);
+                }
                 // Mark a method with default parameters now (pass 1) so a call lowered before this
                 // class's pass-2 body sees that it has defaults; the real default exprs are lowered in
                 // pass 2 and overwrite this marker. (>31 parameters — kotlinc's multi-`int` mask — aren't
@@ -15347,26 +15354,49 @@ impl<'a> Lower<'a> {
                         // A receiver-less top-level library function (`listOf(…)`) → `invokestatic
                         // facade.name(args)`. Resolved (vararg-aware) through the library set, so no
                         // stdlib facade or descriptor is hardcoded.
-                        let arg_tys: Vec<Ty> = args.iter().map(|&a| self.info.ty(a)).collect();
-                        // Forward the call's explicit type arguments (`listOf<Long>(…)`), as the checker
-                        // does — they bind the generic vararg's element type for literal adaptation below.
-                        let call_targs: Vec<Ty> = self
-                            .afile
-                            .call_type_args
-                            .get(&e.0)
-                            .map(|ts| {
-                                ts.iter()
-                                    .map(|r| {
-                                        crate::types::Ty::from_name(&r.name)
-                                            .filter(|_| !r.nullable)
-                                            .or_else(|| self.ty_ref(r))
-                                            .unwrap_or(Ty::Error)
-                                    })
-                                    .collect()
-                            })
-                            .unwrap_or_default();
-                        self.resolver()
-                            .resolve_top_level_callable(&fname, &arg_tys, &call_targs)
+                        // A MEMBER of the enclosing class shadows a same-named top-level function for an
+                        // unqualified call (`foo()` inside `C` is `this.foo()`, not a top-level `foo`) — the
+                        // checker resolves it that way, so the lowerer must NOT pick a top-level callable
+                        // here, or the two diverge (a sibling call mis-lowered to a static one).
+                        crate::trace_compiler!(
+                            "resolve",
+                            "lower toplevel-callable probe {fname}() cur_class={:?} has_member={}",
+                            self.cur_class,
+                            self.cur_class
+                                .as_ref()
+                                .is_some_and(|cur| self.resolve_method(cur, &fname).is_some())
+                        );
+                        if self
+                            .cur_class
+                            .as_ref()
+                            .is_some_and(|cur| self.resolve_method(cur, &fname).is_some())
+                        {
+                            None
+                        } else {
+                            let arg_tys: Vec<Ty> = args.iter().map(|&a| self.info.ty(a)).collect();
+                            // Forward the call's explicit type arguments (`listOf<Long>(…)`), as the checker
+                            // does — they bind the generic vararg's element type for literal adaptation below.
+                            let call_targs: Vec<Ty> = self
+                                .afile
+                                .call_type_args
+                                .get(&e.0)
+                                .map(|ts| {
+                                    ts.iter()
+                                        .map(|r| {
+                                            crate::types::Ty::from_name(&r.name)
+                                                .filter(|_| !r.nullable)
+                                                .or_else(|| self.ty_ref(r))
+                                                .unwrap_or(Ty::Error)
+                                        })
+                                        .collect()
+                                })
+                                .unwrap_or_default();
+                            self.resolver().resolve_top_level_callable(
+                                &fname,
+                                &arg_tys,
+                                &call_targs,
+                            )
+                        }
                     } {
                         // For a spliced top-level `inline fun` (`run { 2 + 3 }`), the body returns the
                         // ERASED `Object` (a generic `R`); coerce it to the logical type so a primitive
@@ -15538,6 +15568,11 @@ impl<'a> Lower<'a> {
                         .and_then(|cur| self.resolve_method(&cur, &fname).map(|m| (cur, m)))
                     {
                         // Unqualified instance method call inside a class body: `foo()` → `this.foo()`.
+                        crate::trace_compiler!(
+                            "resolve",
+                            "lower unqualified sibling {fname}() in {cur}: class={class} index={index} ret={:?}",
+                            self.ir.functions[mfid as usize].ret
+                        );
                         let params = self.ir.functions[mfid as usize].params.clone();
                         let vararg = self.syms.method_is_vararg(&cur, &fname);
                         let n_fixed = vararg_arity(vararg, params.len(), args.len())?;

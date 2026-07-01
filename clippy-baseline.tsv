@@ -1,22 +1,19 @@
 1	src/bin/blockers.rs	consider using `sort_by_key`
 1	src/bin/survey.rs	consider using `sort_by_key`
-1	src/ir_lower.rs	calling `as_bytes` after slicing a string: help: try: `&desc.as_bytes()[1..end]`
 1	src/ir_lower.rs	casting to the same type is unnecessary (`usize` -> `usize`): help: try: `*i`
-1	src/ir_lower.rs	enclosing `Some` and `?` operator are unneeded
-1	src/ir_lower.rs	function `body_has_nonlocal_exit` is never used
 1	src/ir_lower.rs	the loop variable `i` is used to index `args`
 1	src/ir_lower.rs	this `if` has identical blocks
+1	src/ir_lower.rs	this `let...else` may be rewritten with the `?` operator: help: replace it with: `let fq_name = t.non_null().obj_internal()?;`
 1	src/ir_lower.rs	this boolean expression can be simplified: help: try: `!c.body_props.iter().any(|p| p.is_const) || c.methods.is_empty()`
-1	src/ir_lower.rs	using `clone` on type `(u32, Ty)` which implements the `Copy` trait: help: try removing the `clone` call: `lo.statics[&p.name]`
+1	src/ir_lower.rs	this function has too many arguments (8/7)
 1	src/ir_lower.rs	using `clone` on type `Option<(u32, u32, Ty)>` which implements the `Copy` trait: help: try removing the `clone` call: `self.cur_field`
 1	src/ir_lower.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try dereferencing it: `*ty`
-1	src/ir_lower.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try removing the `clone` call: `cls.fields[idx].ty`
 1	src/ir_lower.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try removing the `clone` call: `field_tys[i]`
 1	src/ir_lower.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try removing the `clone` call: `lambda_ty`
-1	src/ir_lower.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try removing the `clone` call: `lo.ir.classes[id as usize].fields[fidx].ty`
 1	src/ir_lower.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try removing the `clone` call: `lo.ir.functions[base_fid as usize].ret`
 1	src/ir_lower.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try removing the `clone` call: `lo.ir.functions[ifid as usize].ret`
 1	src/ir_lower.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try removing the `clone` call: `lo.ir.functions[own_fid as usize].ret`
+1	src/ir_lower.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try removing the `clone` call: `pir`
 1	src/ir_lower.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try removing the `clone` call: `ret_ty`
 1	src/ir_lower.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try removing the `clone` call: `self.ir.functions[mfid as usize].params[0]`
 1	src/ir_lower.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try removing the `clone` call: `target_ir`
@@ -26,8 +23,6 @@
 1	src/jvm/ir_emit.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try dereferencing it: `*result`
 1	src/jvm/ir_emit.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try removing the `clone` call: `c.fields[*index as usize].ty`
 1	src/jvm/ir_emit.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try removing the `clone` call: `c.fields[index as usize].ty`
-1	src/jvm/jvm_libraries.rs	length comparison to zero: help: using `is_empty` is clearer and more explicit: `args.is_empty()`
-1	src/jvm/jvm_libraries.rs	using `contains()` instead of `iter().any()` is more efficient: help: try: `supertype_descriptors(cp, *a).contains(&pd)`
 1	src/jvm/suspend.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try dereferencing it: `*ret_ty`
 1	src/jvm/suspend.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try dereferencing it: `*target`
 1	src/jvm/suspend.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try removing the `clone` call: `cont_ty`
@@ -46,62 +41,47 @@
 1	src/jvm/value_classes.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try removing the `clone` call: `str_ir`
 1	src/jvm/value_classes.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try removing the `clone` call: `u`
 1	src/lexer.rs	casting to the same type is unnecessary (`usize` -> `usize`): help: try: `self.i`
-1	src/parser.rs	called `unwrap` on `ty` after checking its variant with `is_some`
-1	src/parser.rs	empty line after doc comment
 1	src/parser.rs	this manual char comparison can be written more succinctly: help: consider using an array of `char`: `['L', 'l', 'u', 'U']`
-1	src/parser.rs	very complex type used. Consider factoring parts into `type` definitions
 1	src/plugins/serialization.rs	this `let...else` may be rewritten with the `?` operator: help: replace it with: `let fq_name = nn.obj_internal()?;`
-1	src/resolve.rs	empty line after doc comment
-1	src/resolve.rs	function `lambda_body_writes_outer` is never used
 1	src/resolve.rs	redundant closure: help: replace the closure with the function itself: `&is_own_call`
-1	src/resolve.rs	redundant closure: help: replace the closure with the function itself: `&v`
-1	src/resolve.rs	redundant closure: help: replace the closure with the function itself: `resolve_super`
 1	src/resolve.rs	this boolean expression can be simplified: help: try: `narrows_then != for_else`
-1	src/resolve.rs	this expression creates a reference which is immediately dereferenced by the compiler: help: change this to: `name`
+1	src/resolve.rs	this expression creates a reference which is immediately dereferenced by the compiler: help: change this to: `internal`
 1	src/resolve.rs	usage of `contains_key` followed by `insert` on a `HashMap`
+1	src/resolve.rs	using `clone` on type `Option<Ty>` which implements the `Copy` trait: help: try removing the `clone` call: `self.this_ty`
 1	tests/ir_blockers.rs	unreachable pattern: no value can reach this
 1	tests/kotlin_box_ir_jvm_conformance.rs	consider using `sort_by_key`
 1	tests/kotlin_box_ir_jvm_conformance.rs	unused doc comment
-11	src/ir_lower.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try removing the `clone` call: `elem_ir`
+10	src/ir_lower.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try removing the `clone` call: `elem_ir`
+17	src/ir_lower.rs	this `map_or` can be simplified
 2	src/ir_lower.rs	casting to the same type is unnecessary (`usize` -> `usize`): help: try: `(*i)`
-2	src/ir_lower.rs	this `let...else` may be rewritten with the `?` operator: help: replace it with: `let fq_name = t.non_null().obj_internal()?;`
-2	src/ir_lower.rs	this function has too many arguments (8/7)
 2	src/ir_lower.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try dereferencing it: `*a_ty`
 2	src/ir_lower.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try dereferencing it: `*ret_ty`
+2	src/ir_lower.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try removing the `clone` call: `int_ir`
 2	src/ir_lower.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try removing the `clone` call: `lo.ir.functions[impl_fid as usize].ret`
-2	src/ir_lower.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try removing the `clone` call: `pir`
 2	src/ir_lower.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try removing the `clone` call: `self.ir.functions[fid as usize].ret`
 2	src/jvm/ir_emit.rs	unneeded `return` statement
 2	src/jvm/suspend.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try dereferencing it: `*cont_ty`
+2	src/jvm/value_classes.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try dereferencing it: `*t`
 2	src/jvm/value_classes.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try dereferencing it: `*ty`
 2	src/jvm/value_classes.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try removing the `clone` call: `bool_ir`
 2	src/plugins/serialization.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try removing the `clone` call: `f.ty`
-2	src/resolve.rs	this expression creates a reference which is immediately dereferenced by the compiler: help: change this to: `internal`
 2	src/resolve.rs	useless use of `format!`: help: consider using `.to_string()`: `"'val' cannot be reassigned.".to_string()`
-2	src/resolve.rs	using `clone` on type `Option<Ty>` which implements the `Copy` trait: help: try removing the `clone` call: `self.this_ty`
 2	tests/ir_blockers.rs	consider using `sort_by_key`
-23	src/resolve.rs	this `map_or` can be simplified
-28	src/ir_lower.rs	this `map_or` can be simplified
+21	src/resolve.rs	this `map_or` can be simplified
 3	src/ir_lower.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try removing the `clone` call: `class_ty`
-3	src/ir_lower.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try removing the `clone` call: `int_ir`
+3	src/ir_lower.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try removing the `clone` call: `fty_ir`
 3	src/ir_lower.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try removing the `clone` call: `self.cur_ret_ty`
 3	src/jvm/classpath.rs	this `map_or` can be simplified
-3	src/jvm/classpath.rs	very complex type used. Consider factoring parts into `type` definitions
 3	src/jvm/inline.rs	unnecessary use of `to_string`: help: use: `d`
 3	src/jvm/inline.rs	unnecessary use of `to_string`: help: use: `n`
 3	src/jvm/value_classes.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try dereferencing it: `*p`
-3	src/jvm/value_classes.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try dereferencing it: `*t`
 3	src/jvm/value_classes.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try removing the `clone` call: `x_ir`
 37	src/parser.rs	this `map_or` can be simplified
 4	src/ir_lower.rs	usage of `contains_key` followed by `insert` on a `HashMap`
 4	src/ir_lower.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try dereferencing it: `*target`
 4	src/ir_lower.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try removing the `clone` call: `cont_ir`
-4	src/ir_lower.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try removing the `clone` call: `fty_ir`
-4	src/resolve.rs	redundant closure: help: replace the closure with the function itself: `&r`
 5	src/ast.rs	redundant closure: help: replace the closure with the function itself: `&mut fe`
 5	src/ir_lower.rs	using `clone` on type `Ty` which implements the `Copy` trait
-5	src/ir_lower.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try dereferencing it: `*t`
-5	src/jvm/jvm_libraries.rs	this `map_or` can be simplified
 5	src/plugins/serialization.rs	this `match` expression can be replaced with `?`: help: try instead: `ty.non_null().obj_internal()?`
 5	src/plugins/serialization.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try dereferencing it: `*ty`
 6	src/ast.rs	this `map_or` can be simplified
@@ -109,5 +89,5 @@
 7	src/ir_lower.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try removing the `clone` call: `f.ty`
 8	src/ir_lower.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try removing the `clone` call: `object_ir`
 8	src/jvm/ir_emit.rs	this `map_or` can be simplified
+8	src/jvm/suspend.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try dereferencing it: `*ty`
 8	src/jvm/value_classes.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try removing the `clone` call: `u_ir`
-9	src/jvm/suspend.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try dereferencing it: `*ty`
