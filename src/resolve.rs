@@ -3470,29 +3470,16 @@ fn make_checker<'a>(file: &'a File, syms: &'a SymbolTable, diags: &'a mut DiagSi
     }
 }
 
-fn apply_inferred_top_level_returns(
-    syms: &mut SymbolTable,
-    inferred_fun_rets: HashMap<(String, Vec<Ty>), Ty>,
-    inferred_ext_fun_rets: HashMap<(Ty, String), Ty>,
-) {
-    for ((name, params), ret) in inferred_fun_rets {
-        if let Some(sig) = syms
-            .funs
-            .get_mut(&name)
-            .and_then(|sigs| sigs.iter_mut().find(|s| s.params == params))
-        {
-            sig.ret = ret;
-        }
-    }
-    for ((recv, name), ret) in inferred_ext_fun_rets {
-        if let Some(sig) = syms.ext_funs.get_mut(&(recv, name)) {
-            sig.ret = ret;
-        }
-    }
-}
-
 pub fn check_file(file: &File, syms: &mut SymbolTable, diags: &mut DiagSink) -> TypeInfo {
-    {
+    // Pre-infer EXPRESSION-body return types (top-level functions AND class methods) and patch the
+    // signature table BEFORE the main check — so a call to `fun m() = f()` resolves to its real return,
+    // not the collection default `Unit`. Without this, a method whose return couldn't be inferred at
+    // COLLECTION (an inherited-method-calling body in an anonymous object / hoisted local class → `Unit`)
+    // is still `Unit` when a SIBLING call resolves it earlier in the same file
+    // (`object { fun foo4() = foo3() }.apply { foo4() }`). A body that calls another expr-body method
+    // declared LATER (forward reference) needs a second pass, so iterate to a FIXPOINT (bounded — the
+    // dependency chain is shallow; an unresolvable case simply stops improving).
+    for _pass in 0..8 {
         let mut scratch = DiagSink::new();
         let mut pre = make_checker(file, &*syms, &mut scratch);
         for &d in &file.decls {
@@ -3504,9 +3491,58 @@ pub fn check_file(file: &File, syms: &mut SymbolTable, diags: &mut DiagSink) -> 
                     pre.check_fun(f);
                     pre.tparams.clear();
                 }
+            } else if let Decl::Class(cl) = file.decl(d) {
+                let Some(internal) = pre.syms.classes.get(&cl.name).map(|s| s.internal.clone())
+                else {
+                    continue;
+                };
+                pre.this_ty = Some(Ty::obj(&internal));
+                for m in &cl.methods {
+                    if m.ret.is_none() && matches!(m.body, FunBody::Expr(_)) {
+                        let resolve = class_internal_resolver(pre.syms);
+                        pre.tparams =
+                            TParams::from_decl_with(&m.type_params, &m.type_param_bounds, &resolve);
+                        pre.check_method(m, &[]);
+                        pre.tparams.clear();
+                    }
+                }
+                pre.this_ty = None;
             }
         }
-        apply_inferred_top_level_returns(syms, pre.inferred_fun_rets, pre.inferred_ext_fun_rets);
+        let fun_rets = std::mem::take(&mut pre.inferred_fun_rets);
+        let ext_rets = std::mem::take(&mut pre.inferred_ext_fun_rets);
+        let method_rets = std::mem::take(&mut pre.inferred_method_rets);
+        drop(pre);
+        let mut changed = false;
+        for ((name, params), ret) in fun_rets {
+            if let Some(sig) = syms
+                .funs
+                .get_mut(&name)
+                .and_then(|sigs| sigs.iter_mut().find(|s| s.params == params))
+            {
+                changed |= sig.ret != ret;
+                sig.ret = ret;
+            }
+        }
+        for ((recv, name), ret) in ext_rets {
+            if let Some(sig) = syms.ext_funs.get_mut(&(recv, name)) {
+                changed |= sig.ret != ret;
+                sig.ret = ret;
+            }
+        }
+        for ((internal, name, params), ret) in method_rets {
+            if let Some(sig) = syms
+                .class_by_internal_mut(&internal)
+                .and_then(|c| c.methods.get_mut(&name))
+                .filter(|s| s.params == params)
+            {
+                changed |= sig.ret != ret;
+                sig.ret = ret;
+            }
+        }
+        if !changed {
+            break;
+        }
     }
 
     let mut c = make_checker(file, &*syms, diags);
@@ -9893,6 +9929,10 @@ impl<'a> Checker<'a> {
                                         .and_then(|outer| self.lookup_method(&outer, &fname))
                                         .map(|s| (s.params, s.ret))
                                 });
+                        crate::trace_compiler!(
+                            "resolve",
+                            "unqualified sibling call {fname}() on this_ty={internal} -> {resolved:?}"
+                        );
                         if let Some((params, ret)) = resolved {
                             // A `vararg` sibling method (`fun f(vararg s: T)`) accepts trailing `T` args
                             // packed into the array param — element-type them, don't match the array
@@ -9902,8 +9942,21 @@ impl<'a> Checker<'a> {
                                 .method_of(internal, &fname)
                                 .is_some_and(|s| s.vararg);
                             self.expect_call_args(&params, vararg, args, &arg_tys);
-                            return ret;
+                            // An EXPRESSION-body sibling method whose declared return was the collection
+                            // default (`Unit`, not yet inferred) — refine from the inference recorded when
+                            // its body was checked (an anonymous object / local class whose `fun m() = f()`
+                            // return couldn't be inferred at collection). Matches the qualified-member path.
+                            return self
+                                .inferred_member_ret(Ty::obj(internal), &fname, &params)
+                                .unwrap_or(ret);
                         }
+                    } else {
+                        crate::trace_compiler!(
+                            "resolve",
+                            "unqualified call {fname}(): this_ty={:?} module_declares={}",
+                            self.this_ty,
+                            self.module_declares(&fname)
+                        );
                     }
                 }
                 // Resolve a receiver-less call: a user top-level function shadows everything; otherwise

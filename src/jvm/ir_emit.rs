@@ -2555,7 +2555,9 @@ fn emit_method(
         } else {
             0x0001
         };
-        vis | if fin || ir.private_methods.contains(&fid) {
+        // A private method is `final` on a CLASS, but a private INTERFACE method must NOT carry `ACC_FINAL`
+        // (`ClassFormatError: illegal modifiers 0x12`) — private already makes it non-virtual.
+        vis | if fin || (ir.private_methods.contains(&fid) && !owner_is_iface) {
             0x0010
         } else {
             0
@@ -4022,7 +4024,23 @@ impl<'a> Emitter<'a> {
                 self.emit_virtual_operands(&owner, *receiver, &call_args, code);
                 let aw: i32 = param_tys.iter().map(|t| slot_words(*t) as i32).sum();
                 let desc = method_descriptor(&param_tys, ret);
-                if is_iface {
+                crate::trace_compiler!(
+                    "resolve",
+                    "emit MethodCall {}.{} fid={fid} private={} iface={is_iface}",
+                    owner,
+                    name,
+                    self.ir.private_methods.contains(&fid)
+                );
+                if self.ir.private_methods.contains(&fid) {
+                    // A PRIVATE method is non-virtual — `invokespecial` (an interface private method uses an
+                    // `InterfaceMethodref`), so it never dispatches to a same-named override.
+                    let m = if is_iface {
+                        self.cw.interface_methodref(&owner, &name, &desc)
+                    } else {
+                        self.cw.methodref(&owner, &name, &desc)
+                    };
+                    code.invokespecial(m, aw, slot_words(ret) as i32);
+                } else if is_iface {
                     // Dispatch through an interface — `invokeinterface I.m`.
                     let m = self.cw.interface_methodref(&owner, &name, &desc);
                     code.invokeinterface(m, aw, slot_words(ret) as i32);

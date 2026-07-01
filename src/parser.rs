@@ -2390,12 +2390,16 @@ impl<'a> Parser<'a> {
                 match self.kind() {
                     TokenKind::RBrace | TokenKind::Eof => break,
                     TokenKind::KwFun => {
-                        let f = self.parse_fun(
+                        let mut f = self.parse_fun(
                             imods.iter().any(|m| m == "inline"),
                             false,
                             imods.iter().any(|m| m == "suspend"),
                             imods.iter().any(|m| m == "tailrec"),
                         );
+                        // The interface member's modifiers were consumed into `imods` before `parse_fun`,
+                        // so it never saw `private` — a private interface method is non-virtual (called via
+                        // `invokespecial`), so preserve the flag here.
+                        f.is_private = imods.iter().any(|m| m == "private");
                         methods.push(f);
                     }
                     // Abstract interface property: `val`/`var x: T` (no initializer/getter).
