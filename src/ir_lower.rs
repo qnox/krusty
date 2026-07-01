@@ -9376,6 +9376,42 @@ impl<'a> Lower<'a> {
         base
     }
 
+    /// Resolve a dotted CLASSPATH nested type/qualifier (`Subject.User` → `lib/Subject$User`) — the
+    /// lowerer's mirror of the checker's `resolve_qualified_nested`. The longest simple-name prefix that
+    /// maps to a classpath internal names the outer type; remaining segments join with `$`. Existence is
+    /// verified via `resolve_type` so a bogus `A.B` stays unresolved.
+    fn resolve_qualified_nested(&self, name: &str) -> Option<String> {
+        let (outer, rest) = name.split_once('.')?;
+        let base = self
+            .syms
+            .classes
+            .get(outer)
+            .map(|c| c.internal.clone())
+            .or_else(|| {
+                self.syms
+                    .class_names
+                    .get(outer)
+                    .filter(|i| !i.starts_with("__ty/"))
+                    .cloned()
+            })
+            // A name PRUNED from the global index (ambiguous across the classpath) still resolves through
+            // this file's explicit import — the same fallback the checker's `imported_type_internal` gives,
+            // so checker and lowerer agree on the outer type. (`import a.b.Subject` → outer `Subject`.)
+            .or_else(|| {
+                self.afile.imports.iter().find_map(|imp| {
+                    let cand = imp.replace('.', "/");
+                    (imp.rsplit('.').next() == Some(outer)
+                        && self.syms.libraries.resolve_type(&cand).is_some())
+                    .then_some(cand)
+                })
+            })?;
+        let candidate = format!("{base}${}", rest.replace('.', "$"));
+        self.syms
+            .libraries
+            .resolve_type(&candidate)
+            .map(|_| candidate)
+    }
+
     fn ty_ref(&self, r: &ast::TypeRef) -> Option<Ty> {
         // A reified type parameter (inside an expanded `<reified T>` inline body) resolves to the type
         // bound at the call site — `Array<T>`, `val x: T`, a return `T`, etc. all specialize. The bound
@@ -9425,6 +9461,10 @@ impl<'a> Lower<'a> {
                 return None;
             }
             Ty::obj(internal)
+        } else if let Some(internal) = self.resolve_qualified_nested(&r.name) {
+            // A dotted CLASSPATH nested type (`Subject.User`) → `Outer$Nested`, matching the checker's
+            // `resolve_ty` — so an `is`/`as` target on such a type resolves the same internal name.
+            Ty::obj(&internal)
         } else {
             return None;
         };
@@ -15651,6 +15691,22 @@ impl<'a> Lower<'a> {
                     } else {
                         args
                     };
+                    // CLASSPATH nested-class construction `Outer.Nested(args)` (`Subject.User("x")`): the
+                    // receiver names a type (not a value), and the call's result type is the nested
+                    // classpath internal (`lib/Subject$User`, not an IR class). Emit `new … invokespecial`.
+                    if let Expr::Name(root) = self.afile.expr(receiver).clone() {
+                        if self.lookup(&root).is_none() {
+                            if let Some(internal) = self
+                                .resolve_qualified_nested(&format!("{root}.{name}"))
+                                .filter(|i| {
+                                    !self.classes.contains_key(i)
+                                        && self.info.ty(e).obj_internal() == Some(i.as_str())
+                                })
+                            {
+                                return self.lower_external_new(&internal, &args);
+                            }
+                        }
+                    }
                     // `recv.startCoroutine(completion)` — a `kotlin.coroutines` extension intrinsic
                     // (recognized via the registry). The target runtime owns the helper's physical
                     // owner/descriptor.
