@@ -58,6 +58,8 @@ fn classpath_synthetic_ctor_and_nested_type_resolution() {
         import lib.Scope.Ws\n\
         import lib.Cfg\n\
         fun deep(x: a.b.Outer.Inner) {}\n\
+        fun useWs(x: Ws): String = x.s\n\
+        fun makeWs(): Ws = Ws(\"made\")\n\
         fun box(): String {\n\
         \x20 val r = Rec(id = Vid(\"x\"), n = 1)\n\
         \x20 if (r.n != 1) return \"fail d1: ${r.n}\"\n\
@@ -65,6 +67,9 @@ fn classpath_synthetic_ctor_and_nested_type_resolution() {
         \x20 if (rp.n != 2) return \"fail d1p: ${rp.n}\"\n\
         \x20 val w = Ws(\"nested\")\n\
         \x20 if (w.s != \"nested\") return \"fail d2: ${w.s}\"\n\
+        \x20 if (useWs(w) != \"nested\") return \"fail d2-typepos\"\n\
+        \x20 val w2: Ws = makeWs()\n\
+        \x20 if (w2.s != \"made\") return \"fail d2-ret: ${w2.s}\"\n\
         \x20 val c = Cfg(1)\n\
         \x20 if (c.a != 1 || c.b != 9 || c.c != \"z\") return \"fail d4: ${c.a},${c.b},${c.c}\"\n\
         \x20 val c2 = Cfg(3, 4)\n\
