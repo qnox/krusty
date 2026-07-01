@@ -7768,6 +7768,17 @@ impl<'a> Lower<'a> {
         })
     }
 
+    /// Whether the file-declared class `internal` declares method `name` as ABSTRACT (no body — an
+    /// `abstract override fun f()` or an abstract class's bodyless member). `false` for a concrete method
+    /// or a class not declared in this file (a classpath super is assumed concrete for `super.f()`).
+    fn class_method_is_abstract(&self, internal: &str, name: &str) -> bool {
+        self.afile.decls.iter().any(|&d| {
+            matches!(self.afile.decl(d), Decl::Class(c) if !c.is_interface()
+                && class_internal(self.afile, &c.name) == internal
+                && c.methods.iter().any(|m| m.name == name && matches!(m.body, FunBody::None)))
+        })
+    }
+
     /// Lower a call argument, inserting an explicit `ImplicitCoercion` when a primitive must box
     /// into a reference parameter (`Int` → `Any`) or a wrapper must unbox into a primitive param.
     /// Box/unbox is the backend's concern, but the *coercion* is explicit in the IR.
@@ -15837,23 +15848,48 @@ impl<'a> Lower<'a> {
                             .and_then(|ci| ci.super_internal.clone())?;
                         let this = self.ir.add_expr(IrExpr::GetValue(0));
                         let arg_tys: Vec<Ty> = args.iter().map(|&a| self.info.ty(a)).collect();
-                        let (params, descriptor) =
-                            if let Some(sig) = self.syms.method_of(&sup, &name) {
-                                (
-                                    sig.params.clone(),
-                                    self.syms
-                                        .libraries
-                                        .method_descriptor(&sig.params, sig.ret)?,
-                                )
-                            } else if let Some(m) = crate::call_resolver::resolve_instance(
-                                &*self.syms.libraries,
-                                &sup,
-                                &name,
-                                &arg_tys,
-                            ) {
-                                (m.params.clone(), m.descriptor.clone())
+                        // The concrete `super.f()` target: the SUPERCLASS's method — unless that method is
+                        // ABSTRACT (a diamond `class C : AbstractBase(), Iface` where `Base.f` is abstract and
+                        // `Iface.f` is a default). Then dispatch to the concrete superinterface DEFAULT via
+                        // `invokespecial` on the interface (else `invokespecial AbstractBase.f` → AME).
+                        let (owner, interface, params, descriptor) =
+                            if !self.class_method_is_abstract(&sup, &name) {
+                                let (params, descriptor) =
+                                    if let Some(sig) = self.syms.method_of(&sup, &name) {
+                                        (
+                                            sig.params.clone(),
+                                            self.syms
+                                                .libraries
+                                                .method_descriptor(&sig.params, sig.ret)?,
+                                        )
+                                    } else if let Some(m) = crate::call_resolver::resolve_instance(
+                                        &*self.syms.libraries,
+                                        &sup,
+                                        &name,
+                                        &arg_tys,
+                                    ) {
+                                        (m.params.clone(), m.descriptor.clone())
+                                    } else {
+                                        return None;
+                                    };
+                                (sup.clone(), false, params, descriptor)
                             } else {
-                                return None;
+                                // Find a concrete interface DEFAULT for `name` among the current class's
+                                // interfaces (transitively). Emit `invokespecial <iface>.name`.
+                                let iface = self
+                                    .ir
+                                    .classes
+                                    .get(self.classes.get(&cur)?.id as usize)?
+                                    .interfaces
+                                    .iter()
+                                    .find(|itf| self.iface_method_is_default(itf, &name))
+                                    .cloned()?;
+                                let sig = self.syms.method_of(&iface, &name)?;
+                                let descriptor = self
+                                    .syms
+                                    .libraries
+                                    .method_descriptor(&sig.params, sig.ret)?;
+                                (iface, true, sig.params.clone(), descriptor)
                             };
                         if params.len() != args.len() {
                             return None;
@@ -15864,9 +15900,10 @@ impl<'a> Lower<'a> {
                         }
                         return Some(self.ir.add_expr(IrExpr::Call {
                             callee: Callee::Special {
-                                owner: sup,
+                                owner,
                                 name: name.clone(),
                                 descriptor,
+                                interface,
                             },
                             dispatch_receiver: Some(this),
                             args: a,

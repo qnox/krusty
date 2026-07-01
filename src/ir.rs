@@ -83,6 +83,9 @@ pub enum Callee {
         owner: String,
         name: String,
         descriptor: String,
+        /// `owner` is an INTERFACE (a diamond `super.f()` dispatched to a superinterface's DEFAULT method):
+        /// the method reference must be an `InterfaceMethodref` and the call an `invokespecial` on it.
+        interface: bool,
     },
 }
 
