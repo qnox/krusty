@@ -127,6 +127,8 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
         try_finally_stack: Vec::new(),
         companions: HashMap::new(),
         computed_props: HashMap::new(),
+        computed_setters: HashMap::new(),
+        cur_static_field: None,
         local_delegated: HashMap::new(),
         cur_tailrec: None,
         expr_depth: 0,
@@ -152,6 +154,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
             Decl::Property(p)
                 if is_plain_body_prop(p)
                     || is_computed_prop(p)
+                    || is_field_accessor_prop(p)
                     || p.delegate.is_some()
                     || p.receiver.is_some() => {}
             other => {
@@ -996,6 +999,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                             is_var: false,
                             is_const: true,
                             owner: Some(internal.clone()),
+                            custom_accessor: false,
                         });
                         lo.companion_consts
                             .insert((internal.clone(), cp.name.clone()), cty);
@@ -1410,6 +1414,34 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 if p.is_const {
                     if let Some(c) = p.init.and_then(|i| ast_literal_const(file, i, ty)) {
                         lo.const_lits.insert(p.name.clone(), c);
+                    }
+                }
+                // A backing-field property with a CUSTOM accessor (`val x = init get() = field`,
+                // `var y = init set(v){…}`): the field above is the backing store; additionally
+                // synthesize `getX()` (routing reads through it) and, for a `var`, `setX(value)`. Their
+                // bodies are lowered in pass 2 with `field` bound to the static (`cur_static_field`).
+                if is_field_accessor_prop(p) {
+                    let gfid = lo.ir.add_fun(IrFunction {
+                        name: property_getter_name(&p.name),
+                        params: vec![],
+                        ret: ir_ty,
+                        body: None,
+                        is_static: true,
+                        dispatch_receiver: None,
+                        param_checks: vec![],
+                    });
+                    lo.computed_props.insert(p.name.clone(), (gfid, ty));
+                    if p.is_var {
+                        let sfid = lo.ir.add_fun(IrFunction {
+                            name: property_setter_name(&p.name),
+                            params: vec![ir_ty],
+                            ret: ty_to_ir(Ty::Unit),
+                            body: None,
+                            is_static: true,
+                            dispatch_receiver: None,
+                            param_checks: vec![None],
+                        });
+                        lo.computed_setters.insert(p.name.clone(), sfid);
                     }
                 }
             }
@@ -2840,6 +2872,76 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     }
                 } else if p.delegate.is_some() {
                     lo.lower_delegated_top_level(p)?;
+                } else if is_field_accessor_prop(p) {
+                    // A backing-field property with a custom accessor: push the backing static (its init
+                    // runs in `<clinit>`), then lower the custom `getX`/`setX` bodies with `field` bound
+                    // to that static (`cur_static_field`). The trivial accessor is suppressed in emit
+                    // (`custom_accessor`); reads/writes route through `computed_props`/`computed_setters`.
+                    let ir_ty = body_prop_ir_ty(file, info, p);
+                    let init = lo.lower_arg(p.init.unwrap(), &ir_ty)?;
+                    let sidx = lo.ir.statics.len() as u32;
+                    lo.ir.statics.push(crate::ir::IrStatic {
+                        name: p.name.clone(),
+                        ty: ir_ty,
+                        init,
+                        is_var: p.is_var,
+                        is_const: p.is_const,
+                        owner: None,
+                        custom_accessor: true,
+                    });
+                    if let Some(&(gfid, _)) = lo.computed_props.get(&p.name) {
+                        lo.scope.clear();
+                        lo.next_value = 0;
+                        lo.cur_fn_name = property_getter_name(&p.name);
+                        lo.lambda_seq = 0;
+                        lo.cur_static_field = Some((sidx, ir_ty));
+                        if let Some(getter) = p.getter.clone() {
+                            lo.lower_body(&getter, &ir_ty, gfid)?;
+                        } else {
+                            // Default getter: `return field` → `getstatic; areturn`.
+                            let read = lo.ir.add_expr(IrExpr::GetStatic(sidx));
+                            let ret = lo.ir.add_expr(IrExpr::Return(Some(read)));
+                            let body = lo.ir.add_expr(IrExpr::Block {
+                                stmts: vec![ret],
+                                value: None,
+                            });
+                            lo.ir.functions[gfid as usize].body = Some(body);
+                        }
+                        lo.cur_static_field = None;
+                    }
+                    if let Some(&sfid) = lo.computed_setters.get(&p.name) {
+                        lo.scope.clear();
+                        lo.next_value = 0;
+                        lo.cur_fn_name = property_setter_name(&p.name);
+                        lo.lambda_seq = 0;
+                        let pty = body_prop_ty(file, info, p);
+                        let custom = p.setter.as_ref().filter(|s| s.body.is_some()).cloned();
+                        let pname = custom
+                            .as_ref()
+                            .and_then(|s| s.param.clone())
+                            .unwrap_or_else(|| "value".to_string());
+                        let v_v = lo.fresh_value();
+                        lo.scope.push((pname, v_v, pty));
+                        lo.cur_static_field = Some((sidx, ir_ty));
+                        if let Some(setter) = custom {
+                            let sbody = setter.body.clone().unwrap();
+                            lo.lower_body(&sbody, &ty_to_ir(Ty::Unit), sfid)?;
+                        } else {
+                            // Default setter: `field = value` → `putstatic; return`.
+                            let val = lo.ir.add_expr(IrExpr::GetValue(v_v));
+                            let set = lo.ir.add_expr(IrExpr::SetStatic {
+                                index: sidx,
+                                value: val,
+                            });
+                            let ret = lo.ir.add_expr(IrExpr::Return(None));
+                            let body = lo.ir.add_expr(IrExpr::Block {
+                                stmts: vec![set, ret],
+                                value: None,
+                            });
+                            lo.ir.functions[sfid as usize].body = Some(body);
+                        }
+                        lo.cur_static_field = None;
+                    }
                 } else if let Some(&(fid, _)) = lo.computed_props.get(&p.name) {
                     // A computed property: lower its custom getter into the `getX()` body.
                     lo.cur_fn_name = property_getter_name(&p.name);
@@ -2857,6 +2959,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                         is_var: p.is_var,
                         is_const: p.is_const,
                         owner: None,
+                        custom_accessor: false,
                     });
                 }
             }
@@ -3455,8 +3558,17 @@ pub(crate) struct Lower<'a> {
     /// Outer-class internal name → its `C$Companion` internal name, for routing `C.foo()` calls.
     companions: HashMap<String, String>,
     /// Top-level computed property name → (its synthesized `getX()` `FunId`, property type). A read of
-    /// the property compiles to a call to the getter (there is no backing field).
+    /// the property compiles to a call to the getter. For a *computed* property there is no backing
+    /// field; for a top-level backing-field property with a custom getter (`val x = init get() = field`)
+    /// this routes reads through the custom `getX()` too (the field is in `statics`).
     computed_props: HashMap<String, (u32, Ty)>,
+    /// Top-level backing-field property name → its synthesized `setX()` `FunId` (a custom `var` setter).
+    /// A write of the name compiles to a call to `setX(value)` instead of a direct `putstatic`.
+    computed_setters: HashMap<String, u32>,
+    /// While lowering a top-level custom accessor body, the property's backing STATIC field
+    /// (index into `ir.statics`, type) that the `field` keyword reads/writes (the static analogue of
+    /// `cur_field`, which is for an instance field).
+    cur_static_field: Option<(u32, Ty)>,
     /// Local delegated property name → its delegate info. A read of the name compiles to the delegate's
     /// `getValue` (a `var`'s write to `setValue`); there is no value slot for the property itself, only
     /// the synthesized `$delegate` local (its value index is held here).
@@ -3896,6 +4008,7 @@ impl<'a> Lower<'a> {
             init: init_d,
             is_var: false,
             is_const: false,
+            custom_accessor: false,
         });
 
         // x$kprop: KProperty — init = new PropertyReference0Impl(Facade::class, "x", "getX()<ret>", 1).
@@ -3924,6 +4037,7 @@ impl<'a> Lower<'a> {
             init: propref,
             is_var: false,
             is_const: false,
+            custom_accessor: false,
         });
 
         // getX(): return x$delegate.getValue(null, x$kprop).
@@ -10590,6 +10704,14 @@ impl<'a> Lower<'a> {
                             value: val,
                         }));
                     }
+                    // A top-level custom setter writes the backing STATIC field.
+                    if let Some((sidx, fty)) = self.cur_static_field {
+                        let val = self.lower_arg(value, &fty)?;
+                        return Some(self.ir.add_expr(IrExpr::SetStatic {
+                            index: sidx,
+                            value: val,
+                        }));
+                    }
                 }
                 // A local delegated `var`: write through the delegate's `setValue(null, propref, value)`.
                 if let Some(ld) = self.local_delegated.get(&name).cloned() {
@@ -10657,6 +10779,20 @@ impl<'a> Lower<'a> {
                         class,
                         index: idx,
                         value: val,
+                    }))
+                } else if let Some(sfid) = self.computed_setters.get(&name).copied() {
+                    // A top-level backing-field `var` with a custom setter → call `setX(value)` (which
+                    // runs the custom body), not a direct `putstatic`.
+                    let ty = self
+                        .statics
+                        .get(&name)
+                        .map(|(_, t)| *t)
+                        .unwrap_or(Ty::Error);
+                    let val = self.lower_arg(value, &ty_to_ir(ty))?;
+                    Some(self.ir.add_expr(IrExpr::Call {
+                        callee: Callee::Local(sfid),
+                        dispatch_receiver: None,
+                        args: vec![val],
                     }))
                 } else if let Some((idx, ty)) = self.statics.get(&name).cloned() {
                     let val = self.lower_arg(value, &ty_to_ir(ty))?;
@@ -13230,6 +13366,10 @@ impl<'a> Lower<'a> {
                             class: class_id,
                             index: fidx,
                         }));
+                    }
+                    // A top-level custom accessor reads the backing STATIC field.
+                    if let Some((sidx, _)) = self.cur_static_field {
+                        return Some(self.ir.add_expr(IrExpr::GetStatic(sidx)));
                     }
                 }
                 // A CLASSPATH `object` referenced as a value (`EmptyCoroutineContext`) — the checker

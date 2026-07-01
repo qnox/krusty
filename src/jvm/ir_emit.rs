@@ -390,7 +390,9 @@ fn emit_statics(ir: &IrFile, facade: &str, cw: &mut ClassWriter, bodies: &dyn Me
     // `var`), so other classes read/write it the way kotlinc compiles cross-file property access. A
     // `const val` is `public static final` with no accessor (kotlinc inlines const reads).
     for s in &facade_statics {
-        if s.is_const {
+        // A `const val` inlines (no accessor); a CUSTOM-accessor property emits its `getX`/`setX` as
+        // ordinary facade methods (from `ir.functions`), so skip the trivial auto-accessor here.
+        if s.is_const || s.custom_accessor {
             continue;
         }
         let jt = ir_ty_to_jvm(&s.ty);

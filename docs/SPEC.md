@@ -854,6 +854,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   and the direct unqualified read/write/incdec sites all decline a custom-accessor property); only the
   `field` keyword inside the accessor reaches the field. Tests: `tests/backing_field_accessor_e2e.rs`.
 
+- **Top-level property with a backing field + custom accessor.** `val x = "OK" get() = field`,
+  `var v = 0 set(value) { field = value }` at file scope. The backing field is a facade STATIC
+  (initialized in `<clinit>`); the synthesized `getX`/`setX` are emitted as ordinary facade static
+  methods running the custom body, with `field` bound to that static (read → `GetStatic`, write →
+  `SetStatic` — the static analogue of the member `cur_field` path). A default accessor is synthesized
+  when only one side is custom (`var v = 0 set(...)` still gets `getV` = `return field`). Same-file
+  reads route through `getX` (via `computed_props`) and writes through `setX` (via `computed_setters`),
+  never the raw `putstatic`, so a custom getter's logic always runs — byte-identical to kotlinc's
+  `getstatic;areturn` getter + `<clinit>` store. The trivial auto-accessor is suppressed
+  (`IrStatic::custom_accessor`) to avoid a duplicate-method collision. Tests:
+  `tests/top_level_custom_accessor_e2e.rs`.
+
 - **Cast of a primitive operand to a reference type (`42 as Any`, `'a' as Char?`, `b as Byte?`).** A
   boxing operation — the primitive is boxed to its wrapper (`Integer`/`Character`/`Byte`, an
   `ImplicitCoercion` → `valueOf`), which is-a the target. Allowed ONLY when the wrapper is assignable
