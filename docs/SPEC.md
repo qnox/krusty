@@ -956,6 +956,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   actual element (a no-argument overload — the same-named lambda `sumOf` has an extra parameter). Test:
   `collection_members_e2e::numeric_reduction_extensions_by_element_type`.
 
+- **Non-inline top-level generic HOF binds the lambda parameter type (`transform(Item(…)) { it.name }`).**
+  A user `fun <T, R> transform(x: T, f: (T) -> R): R` binds `T` from the first value argument, so the
+  lambda parameter `it` types as that concrete type and `R` is inferred from the lambda body (the call
+  result). The lambda materializes as an erased `Function1` whose `invoke` `checkcast`s its parameter —
+  sound for a reference/class binding (as a non-generic HOF already does). `user_generic_call` previously
+  applied only to `inline` HOFs; it now also handles a non-inline one, EXCEPT when a type parameter binds
+  to a `@JvmInline value class` (user or classpath) or an unsigned type — those need UNBOXING of the erased
+  parameter, not a cast, so they stay erased (`ty_is_value_class`/`value_underlying`/`is_unsigned_integer_type`
+  guard). Test: `generic_fn_e2e::non_inline_generic_hof_binds_lambda_param`.
+
 ## 8. Success criteria for the PoC
 
 1. krusty compiles the `kotlin-memory-bench` `many_functions` / `multifile` / `bodyheavy` programs.
