@@ -639,8 +639,6 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Consume a `{ … }` block, balancing nested braces. Assumes the opening `{` is the current token.
-
     // ---- file / decls ----
     fn parse_file(&mut self) {
         self.skip_newlines();

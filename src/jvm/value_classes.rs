@@ -296,6 +296,7 @@ pub fn lower_value_classes(ir: &mut IrFile) -> bool {
                         owner,
                         name,
                         descriptor,
+                        ..
                     }
                     | Callee::Virtual {
                         owner,

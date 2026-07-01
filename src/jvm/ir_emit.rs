@@ -4255,9 +4255,10 @@ impl<'a> Emitter<'a> {
                     owner,
                     name,
                     descriptor,
+                    interface,
                 } => {
-                    let (owner, name, descriptor) =
-                        (owner.clone(), name.clone(), descriptor.clone());
+                    let (owner, name, descriptor, interface) =
+                        (owner.clone(), name.clone(), descriptor.clone(), *interface);
                     let recv = dispatch_receiver.expect("special call needs a receiver");
                     let args = args.clone();
                     let mut ops = vec![recv];
@@ -4268,7 +4269,13 @@ impl<'a> Emitter<'a> {
                         .map(|&a| slot_words(self.value_ty(a)) as i32)
                         .sum();
                     let ret = ty_from_descriptor_ret(&descriptor);
-                    let m = self.cw.methodref(&owner, &name, &descriptor);
+                    // A diamond `super.f()` to a superinterface DEFAULT method: `invokespecial` on an
+                    // `InterfaceMethodref` (JVM allows a direct-superinterface default this way).
+                    let m = if interface {
+                        self.cw.interface_methodref(&owner, &name, &descriptor)
+                    } else {
+                        self.cw.methodref(&owner, &name, &descriptor)
+                    };
                     code.invokespecial(m, aw, slot_words(ret) as i32);
                 }
             },
