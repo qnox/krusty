@@ -576,6 +576,33 @@ fn parse_method_gsig(sig: &str) -> Option<GenericSig> {
     })
 }
 
+/// A type's simple (unqualified) source name, from its canonical internal name's last segment
+/// (`kotlin/Int` → `Int`, `kotlin/UInt` → `UInt`, `app/Foo` → `Foo`). Generic — no per-type list.
+fn ty_simple_name(t: Ty) -> Option<&'static str> {
+    source_internal_of_ty(t).map(|i| i.rsplit('/').next().unwrap_or(i))
+}
+
+/// The canonical element type of a `@JvmName`-mangled reduction extension's RECEIVER — its first
+/// generic parameter's sole type argument (`sumOfInt(Iterable<Integer>): int` → `Int`), canonicalized
+/// (`java/lang/Integer`/`kotlin/Int` → `Ty::Int`). Used to pick the element-appropriate overload of
+/// `sum`/`average`/… among the per-element methods that share a Kotlin source name. `None` if the
+/// signature's receiver isn't a single-type-argument container.
+fn gsig_receiver_element(sig: Option<&str>) -> Option<Ty> {
+    let gsig = sig.and_then(parse_method_gsig)?;
+    match gsig.params.first()? {
+        GSig::Class(_, args) => {
+            // Unbox a boxed-primitive wrapper (`java/lang/Integer`/`kotlin/Int` → `Int`) so the element
+            // compares equal to the receiver's primitive element; a reference element stays its class.
+            let elem_gsig = gsig_unbox_wrapper(args.first()?.clone());
+            Some(crate::call_resolver::gsig_to_ty(
+                &elem_gsig,
+                &std::collections::HashMap::new(),
+            ))
+        }
+        _ => None,
+    }
+}
+
 /// A member's return type recovered from its generic signature ONLY when it is fully CONCRETE (carries
 /// type arguments, none of which is a free type variable) — `all(): List<Item>` → `List<Item>`. This lets
 /// a member of a NON-generic receiver still carry its return's type arguments (which `member_return`
@@ -1532,6 +1559,81 @@ impl SymbolSource for JvmLibraries {
                             origin: crate::libraries::Origin::Library,
                         },
                     });
+                }
+            }
+            // `@JvmName`-mangled REDUCTION extensions selected by the receiver's ELEMENT type:
+            // `List<Int>.sum()` is the bytecode method `sumOfInt(Iterable<Integer>): int` (Kotlin source
+            // name `sum`, `@JvmName` `sumOfInt`). The source name is not a JVM method, so the plain
+            // `find_extensions(name)` above misses it; map `name` → each mangled `jvm_name` via `@Metadata`,
+            // then bind ONLY the candidate whose generic-signature receiver ELEMENT equals the actual
+            // receiver's element — that element match is the disambiguator among the per-element overloads
+            // (`sumOfInt`/`sumOfLong`/…), so an unrelated mangled extension never over-matches.
+            if let Some(jname) = receiver
+                .type_args()
+                .first()
+                .copied()
+                .or_else(|| receiver.array_elem())
+                .and_then(ty_simple_name)
+                // The `@JvmName` follows kotlinc's `<name>Of<Element>` convention (`sum`→`sumOfInt`,
+                // `average`→`averageOfInt`) — the same naming the `sumOf`-by-lambda-return path derives.
+                .map(|simple| format!("{name}Of{simple}"))
+                .filter(|jname| *jname != name)
+            {
+                let want_elem = receiver
+                    .type_args()
+                    .first()
+                    .copied()
+                    .or_else(|| receiver.array_elem());
+                for recv_desc in supertype_descriptors(&self.cp, receiver) {
+                    for c in self.cp.find_extensions(&recv_desc, &jname) {
+                        // Defensive: the candidate's generic-signature receiver element must equal the
+                        // actual receiver's element — bind only the element-appropriate reduction.
+                        if want_elem.is_some()
+                            && gsig_receiver_element(c.signature.as_deref()) != want_elem
+                        {
+                            continue;
+                        }
+                        // A no-argument reduction only: the extension descriptor carries just the RECEIVER
+                        // (`sum(Iterable): R` → one param). A same-named lambda overload
+                        // (`sumOf(Iterable, Function1): R`) has an extra parameter; skip it here.
+                        let (params, pret) = parse_method_desc(&c.descriptor);
+                        if params.len() != 1 {
+                            continue;
+                        }
+                        crate::trace_compiler!(
+                            "resolve",
+                            "reduction {name} -> {} on {recv_desc} ret={pret:?}",
+                            c.name
+                        );
+                        overloads.push(FunctionInfo {
+                            kind: FnKind::Extension,
+                            receiver: Some(receiver),
+                            ret_nullable: false,
+                            ret_class: None,
+                            public: true,
+                            receiver_rank: 0,
+                            overload_rank: descriptor_narrowing(&c.descriptor) as u32,
+                            generic_sig: c.signature.as_deref().and_then(parse_method_gsig),
+                            call_sig: crate::libraries::CallSig::default(),
+                            flags: FnFlags {
+                                inline: InlineKind::from_flags(false, false),
+                                suspend: false,
+                            },
+                            callable: LibraryCallable {
+                                name: c.name.clone(),
+                                owner: c.owner.clone(),
+                                params,
+                                ret: pret,
+                                physical_ret: pret,
+                                descriptor: c.descriptor.clone(),
+                                inline: InlineKind::None,
+                                default_call: false,
+                                vararg_elem: None,
+                                signature: c.signature.clone(),
+                                origin: crate::libraries::Origin::Library,
+                            },
+                        });
+                    }
                 }
             }
             // Metadata-mangled extensions on a value-class receiver. An extension on a value class
