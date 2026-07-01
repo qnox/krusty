@@ -11,7 +11,7 @@
 //! INSIDE one source (an extension's receiver-MRO rank is only comparable within one type hierarchy);
 //! the composite federates at the resolve boundary, never by flattening one global overload set.
 
-use crate::libraries::{FunctionSet, LibrarySeed, LibraryType};
+use crate::libraries::{FunctionSet, LibraryMember, LibrarySeed, LibraryType};
 use crate::types::Ty;
 
 /// The shared-base form of a [`LibrarySeed`]: class names, type aliases, and canonical-name aliases,
@@ -121,6 +121,26 @@ pub trait SymbolSource {
     /// value class's sole underlying param is mandatory, so `Id()` stays unresolved rather than miscompiled.
     fn value_class_ctor_has_default(&self, _internal: &str) -> bool {
         false
+    }
+
+    /// Whether the classpath type `internal` declares an enum entry named `name` — a `static final`
+    /// field of the enum's own type (`Kind.PENDING` → `getstatic lib/Kind.PENDING:Llib/Kind;`). Lets
+    /// `EnumName.ENTRY` resolve for a classpath enum, as it already does for a source enum.
+    fn is_enum_entry(&self, _internal: &str, _name: &str) -> bool {
+        false
+    }
+
+    /// A property of classpath type `internal` whose declared type is a `@JvmInline value class`
+    /// (`Holder(val id: Vid)`): its getter is `@JvmName`-mangled (`getId-<hash>`) and its physical
+    /// return erases to the value class's underlying, so ordinary getter resolution misses it. Returns a
+    /// member carrying the MANGLED getter name + physical descriptor but the LOGICAL value-class return
+    /// type (recovered from `@Metadata`), so `h.id` types as the value class and `h.id.v` resolves.
+    fn value_class_property_member(
+        &self,
+        _internal: &str,
+        _property: &str,
+    ) -> Option<LibraryMember> {
+        None
     }
 
     /// The type arguments of `internal` INFERRED from a constructor call's argument types — `Pair(1, 2)` →
@@ -237,6 +257,18 @@ impl SymbolSource for CompositeSource {
         self.children
             .iter()
             .any(|c| c.value_class_ctor_has_default(internal))
+    }
+
+    fn is_enum_entry(&self, internal: &str, name: &str) -> bool {
+        self.children
+            .iter()
+            .any(|c| c.is_enum_entry(internal, name))
+    }
+
+    fn value_class_property_member(&self, internal: &str, property: &str) -> Option<LibraryMember> {
+        self.children
+            .iter()
+            .find_map(|c| c.value_class_property_member(internal, property))
     }
 }
 

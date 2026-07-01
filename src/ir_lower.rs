@@ -2921,6 +2921,13 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
         for s in &lo.ir.statics {
             note(&s.ty, &mut referenced);
         }
+        // Every EXPRESSION's resolved type — so a classpath value class produced by a member/getter or
+        // any temporary (`h.id` : `Vid`, never bound to a typed local) is discovered and erased to its
+        // underlying, with its sole-property getter rewritten to identity. The downstream filter keeps
+        // only actual value classes, so noting all reference types here is cheap.
+        for t in &lo.info.expr_types {
+            note(t, &mut referenced);
+        }
         for e in &lo.ir.exprs {
             match e {
                 IrExpr::Variable { ty, .. } => note(ty, &mut referenced),
@@ -13520,6 +13527,27 @@ impl<'a> Lower<'a> {
                             name: name.clone(),
                             descriptor: self.syms.libraries.type_descriptor(*cty)?,
                         }));
+                    }
+                    // `Kind.PENDING` on a CLASSPATH enum → `getstatic <internal>.PENDING:L<internal>;`.
+                    // The checker typed this `Obj(<internal>)`; resolve `<internal>` the same way it did
+                    // (global index / this file's explicit import) and emit the enum-constant field read.
+                    if let Some(enum_internal) =
+                        self.syms.class_names.get(&rn).cloned().or_else(|| {
+                            self.afile.imports.iter().find_map(|imp| {
+                                let cand = imp.replace('.', "/");
+                                (imp.rsplit('.').next() == Some(rn.as_str())
+                                    && self.syms.libraries.resolve_type(&cand).is_some())
+                                .then_some(cand)
+                            })
+                        })
+                    {
+                        if self.syms.libraries.is_enum_entry(&enum_internal, &name) {
+                            return Some(self.ir.add_expr(IrExpr::ExternalStaticField {
+                                descriptor: format!("L{enum_internal};"),
+                                owner: enum_internal,
+                                name: name.clone(),
+                            }));
+                        }
                     }
                 }
                 let rt = self.recv_ty(receiver);
