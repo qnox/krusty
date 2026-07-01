@@ -4163,21 +4163,49 @@ impl<'a> Lower<'a> {
                 }));
             }
         }
-        let ctor =
-            crate::call_resolver::resolve_constructor(&*self.syms.libraries, internal, &arg_tys)?;
-        if ctor.params.len() != args.len() {
-            return None;
+        if let Some(ctor) =
+            crate::call_resolver::resolve_constructor(&*self.syms.libraries, internal, &arg_tys)
+                .filter(|c| c.params.len() == args.len())
+        {
+            let mut a = Vec::new();
+            for (arg, pty) in args.iter().zip(&ctor.params) {
+                let pty = ty_to_ir(*pty);
+                a.push(self.lower_arg(*arg, &pty)?);
+            }
+            return Some(self.ir.add_expr(IrExpr::NewExternal {
+                internal: internal.to_string(),
+                ctor_desc: ctor.descriptor,
+                args: a,
+            }));
         }
-        let mut a = Vec::new();
-        for (arg, pty) in args.iter().zip(&ctor.params) {
-            let pty = ty_to_ir(*pty);
-            a.push(self.lower_arg(*arg, &pty)?);
+        // A SYNTHETIC `<init>` overload carrying a trailing `DefaultConstructorMarker`: a value-class-typed
+        // parameter (`Rec(id: Vid, …)` → `<init>(String, …, marker)`, caller appends `null`), or omitted
+        // DEFAULTS (`Cfg(1)` for `Cfg(a, b = 9)` → `<init>(int, int, int mask, marker)`, caller appends a
+        // placeholder per omitted param + the bitmask + `null`). See `resolve_synthetic_constructor`.
+        if let Some(sc) = crate::call_resolver::resolve_synthetic_constructor(
+            &*self.syms.libraries,
+            internal,
+            &arg_tys,
+        ) {
+            let mut a = Vec::new();
+            for (i, pty) in sc.real_params.iter().enumerate() {
+                if i < sc.provided {
+                    a.push(self.lower_arg(args[i], &ty_to_ir(*pty))?);
+                } else {
+                    a.push(self.zero_placeholder(*pty));
+                }
+            }
+            if let Some(mask) = sc.mask {
+                a.push(self.ir.add_expr(IrExpr::Const(IrConst::Int(mask))));
+            }
+            a.push(self.ir.add_expr(IrExpr::Const(IrConst::Null))); // DefaultConstructorMarker
+            return Some(self.ir.add_expr(IrExpr::NewExternal {
+                internal: internal.to_string(),
+                ctor_desc: sc.descriptor,
+                args: a,
+            }));
         }
-        Some(self.ir.add_expr(IrExpr::NewExternal {
-            internal: internal.to_string(),
-            ctor_desc: ctor.descriptor,
-            args: a,
-        }))
+        None
     }
 
     /// Whether `internal` names a `@JvmInline value`/inline class (unboxed representation) — a file
