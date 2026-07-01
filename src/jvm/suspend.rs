@@ -460,6 +460,17 @@ fn append_continuation(ir: &mut IrFile, call_e: ExprId, cont: ExprId) -> ExprId 
             *ret = object_ty();
             args.push(cont);
         }
+        // A classpath `suspend` MEMBER (`repo.getConfig(id)`, an invokevirtual/invokeinterface): its
+        // physical CPS method appends the `Continuation` and erases the return to `Object`, so rewrite the
+        // (logical) descriptor to the CPS form before threading the continuation argument.
+        IrExpr::Call {
+            args,
+            callee: Callee::Virtual { descriptor, .. },
+            ..
+        } => {
+            *descriptor = cps_descriptor(descriptor);
+            args.push(cont);
+        }
         IrExpr::Call { args, .. } => args.push(cont),
         IrExpr::MethodCall { args, .. } => args.push(Some(cont)),
         // A suspend function VALUE call (`block(a)`): the value implements `Function{N+1}`, so append the
@@ -1956,11 +1967,59 @@ fn throw_on_failure(ir: &mut IrFile, result_v: u32) -> ExprId {
 
 /// Coerce an `Object` value to `target` (unbox a primitive, or checkcast a reference).
 fn unbox(ir: &mut IrFile, value: ExprId, target: &Ty) -> ExprId {
+    // The CPS resume value is `Object`; a reference target (`Config`, `String`, `List<…>`) needs a real
+    // `checkcast` to that type, while a primitive target unboxes. `ImplicitCoercion` unboxes but does not
+    // narrow a reference, so a concrete reference result would otherwise stay `Object` (VerifyError at its
+    // first typed use). `Cast` (a plain `checkcast`, null-passing) applies for a reference; `kotlin/Any`
+    // needs neither (already `Object`).
+    let op = if reference_needs_checkcast(target) {
+        IrTypeOp::Cast
+    } else {
+        IrTypeOp::ImplicitCoercion
+    };
     ir.add_expr(IrExpr::TypeOp {
-        op: IrTypeOp::ImplicitCoercion,
+        op,
         arg: value,
         type_operand: target.clone(),
     })
+}
+
+/// Whether narrowing an erased `Object` resume value to `t` needs an explicit `checkcast` — a concrete
+/// reference class (`Config`), `String`, or an array. `kotlin/Any` (already `Object`) and primitives do
+/// NOT; crucially a BOXED-primitive object type (`Obj("kotlin/Int")`, a spilled `Int`) also does not —
+/// there `ImplicitCoercion` UNBOXES to the primitive, whereas a `checkcast` would leave it boxed and a
+/// later primitive use (`istore`/`iadd`) would fail verification.
+fn reference_needs_checkcast(t: &Ty) -> bool {
+    match t {
+        Ty::Nullable(inner) | Ty::TyParam(_, inner) => reference_needs_checkcast(inner),
+        Ty::String | Ty::Array(_) => true,
+        Ty::Obj(i, _) => *i != "kotlin/Any" && !is_boxed_primitive_internal(i),
+        _ => false,
+    }
+}
+
+/// A boxed-primitive object internal name (`kotlin/Int`, `java/lang/Integer`, …) — one whose
+/// `ImplicitCoercion` unboxes to a JVM primitive rather than acting as a reference.
+fn is_boxed_primitive_internal(internal: &str) -> bool {
+    matches!(
+        internal,
+        "kotlin/Int"
+            | "kotlin/Long"
+            | "kotlin/Short"
+            | "kotlin/Byte"
+            | "kotlin/Char"
+            | "kotlin/Boolean"
+            | "kotlin/Float"
+            | "kotlin/Double"
+            | "java/lang/Integer"
+            | "java/lang/Long"
+            | "java/lang/Short"
+            | "java/lang/Byte"
+            | "java/lang/Character"
+            | "java/lang/Boolean"
+            | "java/lang/Float"
+            | "java/lang/Double"
+    )
 }
 
 /// Wrap the value of every `Return` reachable from `e` in an `ImplicitCoercion` to `Object`.

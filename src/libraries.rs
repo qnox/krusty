@@ -66,6 +66,10 @@ pub struct LibraryMember {
     pub signature: Option<String>,
     pub is_interface: bool,
     pub inline: InlineKind,
+    /// The member is a `suspend fun` — a call site inside a suspend body must thread a `Continuation`
+    /// into the emitted invoke (its CPS descriptor rebuilt by the coroutine pass) and treat the
+    /// Object-erased result as `ret`.
+    pub suspend: bool,
 }
 
 /// Platform-provided accessor used by counted range/progression loop lowering. The name and descriptor
@@ -287,6 +291,7 @@ impl LibraryMember {
             signature: None,
             is_interface: false,
             inline: InlineKind::None,
+            suspend: false,
         }
     }
 }

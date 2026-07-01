@@ -107,6 +107,22 @@ pub trait SymbolSource {
     fn physical_property_getter_name(&self, _property: &str) -> Option<String> {
         None
     }
+
+    /// SOURCE value-parameter names of the constructor of `internal` taking `arity` parameters, when this
+    /// source records them (from `@Metadata`) — for mapping NAMED constructor arguments onto positions.
+    /// Descriptors don't carry parameter names, so this is the only source for a classpath constructor.
+    fn constructor_param_names(&self, _internal: &str, _arity: usize) -> Option<Vec<String>> {
+        None
+    }
+
+    /// The type arguments of `internal` INFERRED from a constructor call's argument types — `Pair(1, 2)` →
+    /// `[Int, Int]`, so `Pair(1, 2)` types as `Pair<Int, Int>` (its `first`/`second`/`component*` then type
+    /// concretely). Each formal type parameter is bound by unifying the constructor's generic parameter
+    /// signatures with `arg_tys`; an unbound formal defaults to `Any`. `None` if `internal` is non-generic
+    /// or this source can't infer.
+    fn infer_constructor_type_args(&self, _internal: &str, _arg_tys: &[Ty]) -> Option<Vec<Ty>> {
+        None
+    }
 }
 
 /// An ordered federation of sources — itself a [`SymbolSource`], so it nests. Earlier children win:
@@ -195,6 +211,18 @@ impl SymbolSource for CompositeSource {
         self.children
             .iter()
             .find_map(|c| c.physical_property_getter_name(property))
+    }
+
+    fn constructor_param_names(&self, internal: &str, arity: usize) -> Option<Vec<String>> {
+        self.children
+            .iter()
+            .find_map(|c| c.constructor_param_names(internal, arity))
+    }
+
+    fn infer_constructor_type_args(&self, internal: &str, arg_tys: &[Ty]) -> Option<Vec<Ty>> {
+        self.children
+            .iter()
+            .find_map(|c| c.infer_constructor_type_args(internal, arg_tys))
     }
 }
 

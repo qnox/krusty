@@ -576,6 +576,52 @@ fn parse_method_gsig(sig: &str) -> Option<GenericSig> {
     })
 }
 
+/// A member's return type recovered from its generic signature ONLY when it is fully CONCRETE (carries
+/// type arguments, none of which is a free type variable) — `all(): List<Item>` → `List<Item>`. This lets
+/// a member of a NON-generic receiver still carry its return's type arguments (which `member_return`
+/// skips, as it only propagates the receiver's own arguments). A return naming a type variable
+/// (`fun <T> load(): T`, `List<E>.get(): E`) is NOT recovered here — it stays erased / is bound by
+/// `member_return` under the receiver's arguments.
+fn concrete_generic_ret(gsig: &GenericSig) -> Option<Ty> {
+    fn is_concrete(g: &GSig) -> bool {
+        match g {
+            GSig::Var(_) => false,
+            GSig::Prim(_) => true,
+            GSig::Arr(inner) => is_concrete(inner),
+            GSig::Function { params, ret } => params.iter().all(is_concrete) && is_concrete(ret),
+            GSig::Class(_, args) => args.iter().all(is_concrete),
+        }
+    }
+    match &gsig.ret {
+        GSig::Class(_, args) if !args.is_empty() && is_concrete(&gsig.ret) => Some(
+            crate::call_resolver::gsig_to_ty(&gsig.ret, &std::collections::HashMap::new()),
+        ),
+        _ => None,
+    }
+}
+
+/// The LOGICAL return of a `suspend` method, recovered from its generic signature: the last parameter is
+/// `Continuation<-T>`, whose type argument `T` is the source return type (`Continuation<-Config>` →
+/// `Config`). A `Continuation<-Unit>` maps to `Ty::Unit` (the source `Unit` return).
+fn suspend_return_from_gsig(gsig: &GenericSig) -> Option<Ty> {
+    match gsig.params.last()? {
+        GSig::Class(n, args) if n == "kotlin/coroutines/Continuation" => match args.first()? {
+            // A bare class → its CANONICAL `Ty` (`kotlin/String` → `Ty::String`, `kotlin/Int` → `Ty::Int`,
+            // `kotlin/Unit` → `Ty::Unit`), so the recovered return unifies with the source-spelled type
+            // rather than a non-canonical `Obj("kotlin/String")`. A generic class (`List<Item>`) keeps its
+            // arguments via the general converter.
+            GSig::Class(name, cargs) if cargs.is_empty() => {
+                Some(super::classpath::kotlin_name_to_ty(name))
+            }
+            other => Some(crate::call_resolver::gsig_to_ty(
+                other,
+                &std::collections::HashMap::new(),
+            )),
+        },
+        _ => None,
+    }
+}
+
 /// Count the `Byte`/`Short` primitive parameters in a JVM method descriptor — the "narrowing" measure
 /// used to prefer the widest among overloads krusty's `Byte`/`Short`/`Int` → `Int` collapse made
 /// indistinguishable. Object (`L…;`) and array (`[`) params are skipped (a `B`/`S` inside a class name
@@ -877,6 +923,51 @@ impl SymbolSource for JvmLibraries {
         (getter != property).then_some(getter)
     }
 
+    fn constructor_param_names(&self, internal: &str, arity: usize) -> Option<Vec<String>> {
+        self.cp.metadata_constructor_param_names(internal, arity)
+    }
+
+    fn infer_constructor_type_args(&self, internal: &str, arg_tys: &[Ty]) -> Option<Vec<Ty>> {
+        let ci = self.cp.find(internal)?;
+        // The class's formal type parameters, in declaration order (`Pair` → `[A, B]`).
+        let (formals, _) = ci.signature.as_deref().and_then(parse_class_gsig)?;
+        if formals.is_empty() {
+            return None;
+        }
+        // The primary constructor of matching arity, and its generic parameter signatures (which name the
+        // class formals, e.g. `(TA;TB;)V`). Unify each with the actual argument type to bind the formals.
+        let mut binds = std::collections::HashMap::new();
+        for m in &ci.methods {
+            if m.name != "<init>" {
+                continue;
+            }
+            let Some(gsig) = m.signature.as_deref().and_then(parse_method_gsig) else {
+                continue;
+            };
+            if gsig.params.len() != arg_tys.len() {
+                continue;
+            }
+            for (p, a) in gsig.params.iter().zip(arg_tys) {
+                crate::call_resolver::unify_gsig(p, *a, &mut binds);
+            }
+            break;
+        }
+        if binds.is_empty() {
+            return None;
+        }
+        Some(
+            formals
+                .iter()
+                .map(|f| {
+                    binds
+                        .get(f)
+                        .copied()
+                        .unwrap_or_else(|| Ty::obj("kotlin/Any"))
+                })
+                .collect(),
+        )
+    }
+
     fn seed(&self) -> LibrarySeed {
         let (class_names, type_aliases, canonical_names) = self.seed_shared();
         LibrarySeed {
@@ -1051,6 +1142,7 @@ impl SymbolSource for JvmLibraries {
             let (params, ret) = parse_method_desc(&m.descriptor);
             let mut member = LibraryMember::new(m.name.clone(), params, ret, m.descriptor.clone());
             member.signature = m.signature.clone();
+            member.suspend = self.cp.is_suspend_method(internal, &m.name);
             if is_map && member.name == "put" {
                 member.ret_nullable = true;
             }
@@ -1542,10 +1634,57 @@ impl SymbolSource for JvmLibraries {
                     };
                     for m in &t.members {
                         if member_matches_query(&m.name, name) {
+                            crate::trace_compiler!(
+                                "resolve",
+                                "member walk {cn}.{} (rung {rung}) desc={} sig={:?}",
+                                m.name,
+                                m.descriptor,
+                                m.signature
+                            );
                             let generic_sig = m.signature.as_deref().and_then(parse_method_gsig);
-                            let ret = self
-                                .member_return(receiver, &m.name, &m.params)
-                                .unwrap_or(m.ret);
+                            // A `suspend fun` member's physical method appends a `Continuation` parameter
+                            // and erases its return to `Object`; present the LOGICAL signature (drop the
+                            // continuation, recover the real return from the `Continuation<T>` type
+                            // argument in the generic signature) so a normal call resolves. The coroutine
+                            // pass re-derives the CPS form for the emit.
+                            let suspend = self.cp.is_suspend_method(&cn, &m.name);
+                            let params: Vec<Ty> = if suspend {
+                                m.params
+                                    .split_last()
+                                    .map(|(_, rest)| rest.to_vec())
+                                    .unwrap_or_default()
+                            } else {
+                                m.params.clone()
+                            };
+                            let descriptor = if suspend {
+                                strip_continuation_param(&m.descriptor)
+                            } else {
+                                m.descriptor.clone()
+                            };
+                            // A `suspend` member's `T?` return is erased twice (to `Object`, then via the
+                            // `Continuation<T>` type argument which drops nullability), so recover it from
+                            // the class `@Metadata` — the only place a member's return nullability survives.
+                            let suspend_ret_nullable = suspend
+                                && self.cp.metadata_member_return_nullable(
+                                    &cn,
+                                    &m.name,
+                                    params.len(),
+                                );
+                            let ret = if suspend {
+                                let base = generic_sig
+                                    .as_ref()
+                                    .and_then(suspend_return_from_gsig)
+                                    .unwrap_or(m.ret);
+                                if suspend_ret_nullable && base != Ty::Unit && !base.is_nullable() {
+                                    Ty::nullable(base)
+                                } else {
+                                    base
+                                }
+                            } else {
+                                self.member_return(receiver, &m.name, &m.params)
+                                    .or_else(|| generic_sig.as_ref().and_then(concrete_generic_ret))
+                                    .unwrap_or(m.ret)
+                            };
                             // Source parameter NAMES (from the class's `@Metadata`) for named-argument
                             // resolution. A member's `params` are the logical params (no receiver), so the
                             // names align 1:1 when present. Defaults aren't recovered here (named call
@@ -1553,10 +1692,10 @@ impl SymbolSource for JvmLibraries {
                             let call_sig = match self.cp.metadata_member_param_names(
                                 &cn,
                                 &m.name,
-                                m.params.len(),
+                                params.len(),
                             ) {
                                 Some(names) => crate::libraries::CallSig {
-                                    required: m.params.len(),
+                                    required: params.len(),
                                     param_names: names,
                                     ..Default::default()
                                 },
@@ -1565,7 +1704,7 @@ impl SymbolSource for JvmLibraries {
                             overloads.push(FunctionInfo {
                                 kind: FnKind::Member,
                                 receiver: Some(receiver),
-                                ret_nullable: m.ret_nullable,
+                                ret_nullable: m.ret_nullable || suspend_ret_nullable,
                                 ret_class: None,
                                 public: true,
                                 receiver_rank: rung,
@@ -1574,15 +1713,15 @@ impl SymbolSource for JvmLibraries {
                                 call_sig,
                                 flags: FnFlags {
                                     inline: m.inline,
-                                    ..Default::default()
+                                    suspend,
                                 },
                                 callable: LibraryCallable {
                                     name: m.physical_name.clone().unwrap_or_else(|| m.name.clone()),
                                     owner: m.owner.clone().unwrap_or_else(|| cn.clone()),
-                                    params: m.params.clone(),
+                                    params,
                                     ret,
                                     physical_ret: m.physical_ret,
-                                    descriptor: m.descriptor.clone(),
+                                    descriptor,
                                     inline: m.inline,
                                     default_call: false,
                                     vararg_elem: None,
