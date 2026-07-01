@@ -1243,6 +1243,49 @@ impl SymbolSource for JvmLibraries {
                 members.push(member);
             }
         }
+        // A member whose JVM name is MANGLED by a value-class PARAMETER (`fun get(id: Vid): Cat` →
+        // `get-<hash>(String)`): the descriptor-read loop above stored it under the mangled name, so a
+        // source-name call `p.get(v)` misses it, and its erased `String` parameter wouldn't accept the
+        // `Vid` argument. Recover the SOURCE name + logical (value-class) parameter types from `@Metadata`
+        // and expose the member under the source name — keeping the mangled JVM name as `physical_name`
+        // and the erased descriptor for emit (the value-classes pass unboxes the `Vid` argument).
+        for mf in crate::jvm::metadata::class_functions(&ci) {
+            if !mf.is_public || mf.is_extension || mf.jvm_name == mf.kotlin_name {
+                continue;
+            }
+            let Some(desc) = mf.jvm_desc.as_deref() else {
+                continue;
+            };
+            let (params, physical_ret) = parse_method_desc(desc);
+            if params.len() != mf.value_param_types.len() {
+                continue; // synthetic JVM params (suspend/composer) — not a plain mangled member
+            }
+            let logical: Vec<Ty> = params
+                .iter()
+                .zip(&mf.value_param_types)
+                .map(|(p, vt)| {
+                    vt.as_deref()
+                        .map(super::classpath::kotlin_name_to_ty)
+                        .unwrap_or(*p)
+                })
+                .collect();
+            let ret = metadata_return_ty(mf.ret_class.as_deref()).unwrap_or(physical_ret);
+            let mut member =
+                LibraryMember::new(mf.kotlin_name.clone(), logical, ret, desc.to_string());
+            member.physical_name = Some(mf.jvm_name.clone());
+            member.physical_ret = physical_ret;
+            member.ret_nullable = mf.ret_nullable;
+            member.suspend = mf.is_suspend;
+            crate::trace_compiler!(
+                "resolve",
+                "mangled member {}.{} jvm={} logical_params={:?}",
+                internal,
+                mf.kotlin_name,
+                mf.jvm_name,
+                member.params
+            );
+            members.push(member);
+        }
         // Every JDK `Throwable` has a no-arg and a single-message constructor; synthesize those two
         // shapes when the classpath reader can't surface the jimage constructor descriptors.
         if constructors.is_empty() && super::jvm_class_map::is_throwable_internal(internal) {
