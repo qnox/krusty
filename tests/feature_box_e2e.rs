@@ -3622,6 +3622,22 @@ fun box(): String {
 
 #[test]
 fn feature_snippets_run() {
+    // Run on a thread with a generous stack. Under `cargo test` (what `just test-all` uses) each test
+    // runs on a libtest worker thread whose default stack is 2 MiB — too small for the recursive-descent
+    // compiler on a deeply-nested snippet (e.g. nested inline calls) in the unoptimized debug profile,
+    // where `opt-level = 0` reuses no stack slots so a big-`match` frame (`lower_arg` ~485 KiB measured)
+    // holds every arm's locals at once. It is NOT a runaway recursion (depth stays ~12) and never happens
+    // in release/`gate` (slots reused) — the CLI (8 MiB main thread) and the nextest runner (per-test
+    // PROCESS, main-thread stack) both compile it fine. This matches that headroom for the plain runner.
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(feature_snippets_run_impl)
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+fn feature_snippets_run_impl() {
     let Some(java_home) = env("KRUSTY_REF_JAVA_HOME").or_else(|| env("JAVA_HOME")) else {
         eprintln!("skipping feature_box_e2e: set JAVA_HOME");
         return;
