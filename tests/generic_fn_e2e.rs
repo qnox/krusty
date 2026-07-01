@@ -98,3 +98,30 @@ return \"OK\"\n\
     };
     assert_eq!(out, "OK");
 }
+
+/// A NON-inline top-level generic higher-order function (`fun <T, R> transform(x: T, f: (T) -> R): R`)
+/// binds its type parameter `T` from the FIRST value argument, so the lambda parameter `it` types as
+/// that concrete type (`transform(Item(...)) { it.name }` → `it: Item`) and `R` is inferred from the
+/// lambda body (the call result). The lambda materializes as an erased `Function1` whose `invoke`
+/// `checkcast`s the parameter — sound for a reference/class binding.
+#[test]
+fn non_inline_generic_hof_binds_lambda_param() {
+    let Some(java_home) = common::java_home() else {
+        return;
+    };
+    let Some(stdlib) = common::stdlib_jar() else {
+        return;
+    };
+    let src = "class Item(val name: String)\n\
+fun <T, R> transform(x: T, f: (T) -> R): R = f(x)\n\
+fun box(): String {\n\
+val r: String = transform(Item(\"k\")) { it.name }\n\
+val n: Int = transform(listOf(1, 2, 3)) { it.size }\n\
+return if (r == \"k\" && n == 3) \"OK\" else \"FAIL: $r/$n\"\n\
+}\n";
+    let jdk = std::path::PathBuf::from(format!("{java_home}/lib/modules"));
+    let Some(out) = common::compile_and_run_box(src, "G", &[stdlib], Some(&jdk)) else {
+        return;
+    };
+    assert_eq!(out, "OK");
+}

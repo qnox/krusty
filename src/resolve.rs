@@ -7326,9 +7326,12 @@ impl<'a> Checker<'a> {
                 _ => None,
             })?;
         // Only an INLINE function specializes its type params at the call site (the body is spliced with
-        // concrete types). A NON-inline generic function runs through the erased `Function1` — its lambda
-        // `it` is `Object` at runtime, so typing it concretely would mismatch (and break value-class args).
-        if !f.is_inline || f.type_params.is_empty() {
+        // concrete types); a NON-inline one materializes its lambda as an erased `Function1` whose `it`
+        // arrives as `Object`, but the synthesized invoke `checkcast`s to the bound type — sound for a
+        // reference/class binding (a `(Item)->R` lambda's `it.name` verifies after the cast, as a
+        // non-generic HOF already does). A VALUE-CLASS binding would need UNBOXING, not a cast, so those
+        // stay erased (skipped below).
+        if f.type_params.is_empty() {
             return None;
         }
         let tparams: std::collections::HashSet<&str> =
@@ -7342,6 +7345,18 @@ impl<'a> Checker<'a> {
             }
         }
         if binds.is_empty() {
+            return None;
+        }
+        // A value-class binding (`T` = a `@JvmInline value class` — user OR classpath — or an unsigned
+        // type) can't be recovered by a plain `checkcast` on the erased lambda parameter (it needs
+        // unboxing); keep such a call erased rather than miscompile it.
+        if !f.is_inline
+            && binds.values().any(|t| {
+                self.ty_is_value_class(*t)
+                    || self.syms.libraries.value_underlying(*t).is_some()
+                    || self.syms.libraries.is_unsigned_integer_type(*t)
+            })
+        {
             return None;
         }
         let lam_pts: Vec<Vec<Ty>> = f
