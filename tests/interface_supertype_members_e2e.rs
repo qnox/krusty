@@ -134,11 +134,24 @@ fn suspend_interface_member() {
     if !std::path::Path::new(&format!("{jh}/bin/javac")).exists() {
         return;
     }
+    // The inherited `suspend` members cover the return shapes real repository ports use: a reference
+    // (`getConfig: Config`) and `Unit` (`updateStatus`). A nullable member (`findById: Config?`) is also
+    // DECLARED — proving the nullable `suspend` member is decoded/resolved without error — but not driven,
+    // as lowering a nullable classpath-suspension result is a separate coroutine-state-machine item. Each
+    // caller has a SINGLE suspension point (the multi-suspension state machine is a separate track).
     let lib = "package app\n\
         class Config(val name: String)\n\
-        interface CrudRepo { suspend fun getConfig(id: String): Config }\n\
+        interface CrudRepo {\n\
+        \x20 suspend fun getConfig(id: String): Config\n\
+        \x20 suspend fun updateStatus(id: String, status: String)\n\
+        \x20 suspend fun findById(id: String): Config?\n\
+        }\n\
         interface ConfigRepo : CrudRepo\n\
-        class MemRepo : ConfigRepo { override suspend fun getConfig(id: String) = Config(id) }\n";
+        class MemRepo : ConfigRepo {\n\
+        \x20 override suspend fun getConfig(id: String) = Config(id)\n\
+        \x20 override suspend fun updateStatus(id: String, status: String) {}\n\
+        \x20 override suspend fun findById(id: String): Config? = Config(id)\n\
+        }\n";
     let work = work_dir("susp_iface");
     let Some(libout) = build_lib(&work, lib) else {
         return;
@@ -153,6 +166,10 @@ fn suspend_interface_member() {
          suspend fun grab(r: ConfigRepo): String {\n\
          \x20 val c = r.getConfig(\"k\")\n\
          \x20 return c.name\n\
+         }\n\
+         suspend fun grabUnit(r: ConfigRepo): String {\n\
+         \x20 r.updateStatus(\"k\", \"done\")\n\
+         \x20 return \"unit\"\n\
          }\n",
     )
     .unwrap();
@@ -169,11 +186,15 @@ fn suspend_interface_member() {
     fs::write(
         work.join("M.java"),
         "import kotlin.coroutines.*; import app.*;\n\
-         public class M { public static void main(String[] a) {\n\
-         Continuation<Object> k = new Continuation<Object>() {\n\
+         public class M {\n\
+         static Continuation<Object> k() { return new Continuation<Object>() {\n\
          public CoroutineContext getContext() { return EmptyCoroutineContext.INSTANCE; }\n\
-         public void resumeWith(Object o) {} };\n\
-         System.out.println(\"k\".equals(MainKt.grab(new MemRepo(), k)) ? \"OK\" : \"fail\"); } }\n",
+         public void resumeWith(Object o) {} }; }\n\
+         public static void main(String[] a) {\n\
+         MemRepo r = new MemRepo();\n\
+         boolean ok = \"k\".equals(MainKt.grab(r, k()))\n\
+         \x20 && \"unit\".equals(MainKt.grabUnit(r, k()));\n\
+         System.out.println(ok ? \"OK\" : \"fail\"); } }\n",
     )
     .unwrap();
     let cp = format!(

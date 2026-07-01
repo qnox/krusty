@@ -88,3 +88,93 @@ fn constructs_and_calls_java_instance_methods() {
     );
     let _ = fs::remove_dir_all(&root);
 }
+
+/// Java (non-Kotlin) STATIC method resolution, including overload selection by argument type:
+/// `Logf.make(String)` vs `Logf.make(Class)`, and `Logf.parse(String)` vs `Logf.parse(String, int)`.
+/// krusty resolves the class-name receiver's static (from the `.class` reader → the type's static list),
+/// picks the arity/type-appropriate overload, and emits `invokestatic`.
+#[test]
+fn calls_java_static_overloaded_methods() {
+    let Some(java_home) = common::java_home() else {
+        return;
+    };
+    let javac = format!("{java_home}/bin/javac");
+    let java = format!("{java_home}/bin/java");
+    if !std::path::Path::new(&javac).exists() {
+        return;
+    }
+    let krusty = env!("CARGO_BIN_EXE_krusty");
+    let root = std::env::temp_dir().join(format!("krusty_js_{}", std::process::id()));
+    let cp = root.join("cp");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(cp.join("lib")).unwrap();
+
+    fs::write(
+        cp.join("lib/Logf.java"),
+        "package lib;\npublic class Logf {\n\
+         public static String make(String name) { return \"n:\" + name; }\n\
+         public static String make(Class<?> c) { return \"c:\" + c.getSimpleName(); }\n\
+         public static int parse(String s) { return Integer.parseInt(s); }\n\
+         public static int parse(String s, int radix) { return Integer.parseInt(s, radix); }\n\
+         }\n",
+    )
+    .unwrap();
+    assert!(Command::new(&javac)
+        .args(["-d", cp.to_str().unwrap()])
+        .arg(cp.join("lib/Logf.java"))
+        .output()
+        .unwrap()
+        .status
+        .success());
+
+    fs::write(
+        root.join("Use.kt"),
+        "import lib.Logf\nfun box(): String {\n\
+         if (Logf.make(\"x\") != \"n:x\") return \"f1\"\n\
+         if (Logf.parse(\"10\") != 10) return \"f2\"\n\
+         if (Logf.parse(\"ff\", 16) != 255) return \"f3\"\n\
+         return \"OK\"\n}\n",
+    )
+    .unwrap();
+    let kr = root.join("kr");
+    let out = Command::new(krusty)
+        .args(["-cp", cp.to_str().unwrap(), "-d", kr.to_str().unwrap()])
+        .arg(root.join("Use.kt"))
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "krusty failed on Java static call:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let main = "public class M { public static void main(String[] a) { System.out.println(UseKt.box()); } }";
+    fs::write(kr.join("M.java"), main).unwrap();
+    let stdlib = common::stdlib_jar()
+        .map(|p| format!(":{}", p.display()))
+        .unwrap_or_default();
+    let kcp = format!(
+        "{}:{}{}",
+        kr.to_str().unwrap(),
+        cp.to_str().unwrap(),
+        stdlib
+    );
+    assert!(Command::new(&javac)
+        .args(["-cp", &kcp, "-d", kr.to_str().unwrap()])
+        .arg(kr.join("M.java"))
+        .output()
+        .unwrap()
+        .status
+        .success());
+    let run = Command::new(&java)
+        .args(["-Xverify:all", "-cp", &kcp, "M"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&run.stdout).trim(),
+        "OK",
+        "stderr={}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let _ = fs::remove_dir_all(&root);
+}

@@ -966,6 +966,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   parameter, not a cast, so they stay erased (`ty_is_value_class`/`value_underlying`/`is_unsigned_integer_type`
   guard). Test: `generic_fn_e2e::non_inline_generic_hof_binds_lambda_param`.
 
+- **Java (non-Kotlin) static method calls, with overload selection (`Logf.make(x)`, `Logf.parse(s, 16)`).**
+  A `.class`-read Java class's static methods land in the type's static list; the checker's class-name
+  static-call path resolves the arity/type-appropriate overload via `resolve_companion` and now types the
+  class-name receiver as its own `Obj(internal)` so the lowerer's classpath static-call path emits the
+  `invokestatic` (previously the checker resolved it but the emit bailed). Test:
+  `java_instance_e2e::calls_java_static_overloaded_methods`.
+
 ## 8. Success criteria for the PoC
 
 1. krusty compiles the `kotlin-memory-bench` `many_functions` / `multifile` / `bodyheavy` programs.
