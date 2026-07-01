@@ -9938,6 +9938,7 @@ impl<'a> Checker<'a> {
                                         } else if crate::call_resolver::synthetic_default_ctor(
                                             &*self.syms.libraries,
                                             &internal,
+                                            slots.len(),
                                         )
                                         .is_some()
                                         {
