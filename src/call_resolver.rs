@@ -1196,24 +1196,23 @@ pub struct SyntheticCtorCall {
 }
 
 /// The classpath default-value synthetic constructor `<init>(<params…>, int mask, DefaultConstructorMarker)`
-/// for `internal`, as `(descriptor, real_params)` — the parameter types BEFORE the mask+marker. Found
-/// independently of the call arguments (a NAMED call with an omitted default supplies args out of order),
-/// by locating the marker overload whose params, minus the trailing `int` mask, equal a sibling non-marker
-/// constructor's (the public primary). `None` when the class has no such default synthetic.
-pub fn synthetic_default_ctor(lib: &dyn SymbolSource, internal: &str) -> Option<(String, Vec<Ty>)> {
+/// for `internal`, as `(descriptor, real_params)` — the (erased) parameter types BEFORE the mask+marker.
+/// Matched by `arity` (the source parameter count): the default synthetic has exactly `arity` real params
+/// then an `int` mask then the marker (`arity + 2` total). Matching by arity — not by a public non-marker
+/// sibling — is required because a class with a VALUE-CLASS parameter has a PRIVATE primary constructor
+/// (absent from the public `constructors`) and ALSO a separate value-class marker overload
+/// `<init>(<params…>, marker)` (no mask); only the `arity + 2` shape is the default synthetic.
+pub fn synthetic_default_ctor(
+    lib: &dyn SymbolSource,
+    internal: &str,
+    arity: usize,
+) -> Option<(String, Vec<Ty>)> {
     let t = lib.resolve_type(internal)?;
     let is_marker = |ty: &Ty| matches!(ty, Ty::Obj(n, _) if *n == "kotlin/jvm/internal/DefaultConstructorMarker");
-    for m in &t.constructors {
-        let p = &m.params;
-        if p.len() < 2 || !is_marker(&p[p.len() - 1]) || p[p.len() - 2] != Ty::Int {
-            continue;
-        }
-        let real = &p[..p.len() - 2];
-        if t.constructors.iter().any(|s| s.params == *real) {
-            return Some((m.descriptor.clone(), real.to_vec()));
-        }
-    }
-    None
+    let m = t.constructors.iter().find(|m| {
+        m.params.len() == arity + 2 && is_marker(&m.params[arity + 1]) && m.params[arity] == Ty::Int
+    })?;
+    Some((m.descriptor.clone(), m.params[..arity].to_vec()))
 }
 
 /// The classpath default-value synthetic for a MEMBER — `name$default(Owner, <params…>, int mask,

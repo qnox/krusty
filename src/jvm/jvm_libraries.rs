@@ -1266,10 +1266,18 @@ impl SymbolSource for JvmLibraries {
                 continue;
             };
             let (params, physical_ret) = parse_method_desc(desc);
-            if params.len() != mf.value_param_types.len() {
-                continue; // synthetic JVM params (suspend/composer) — not a plain mangled member
+            // A `suspend` member appends a `Continuation` JVM parameter the SOURCE signature
+            // (`value_param_types`) excludes — drop it (the CPS pass re-threads it) and match the leading
+            // value parameters. Any OTHER count mismatch (`@Composable`, …) isn't a plain mangled member.
+            let value_params = if mf.is_suspend && !params.is_empty() {
+                &params[..params.len() - 1]
+            } else {
+                &params[..]
+            };
+            if value_params.len() != mf.value_param_types.len() {
+                continue;
             }
-            let logical: Vec<Ty> = params
+            let mut logical: Vec<Ty> = value_params
                 .iter()
                 .zip(&mf.value_param_types)
                 .map(|(p, vt)| {
@@ -1278,6 +1286,12 @@ impl SymbolSource for JvmLibraries {
                         .unwrap_or(*p)
                 })
                 .collect();
+            // A `suspend` member's `params` carry the trailing `Continuation` (the resolver strips it when
+            // matching a call, exactly as for a non-mangled suspend member); the logical value parameters
+            // are the leading ones.
+            if mf.is_suspend {
+                logical.push(Ty::obj("kotlin/coroutines/Continuation"));
+            }
             let ret = metadata_return_ty(mf.ret_class.as_deref()).unwrap_or(physical_ret);
             let mut member =
                 LibraryMember::new(mf.kotlin_name.clone(), logical, ret, desc.to_string());
@@ -1915,9 +1929,12 @@ impl SymbolSource for JvmLibraries {
                             // `@Metadata`) for named/omitted-argument resolution. A member's `params` are the
                             // logical params (no receiver), so both align 1:1. A data-class `copy` defaults
                             // every parameter, so `required` drops below the arity and a subset may be passed.
+                            // `@Metadata` keys on the JVM name, so a value-class-param-MANGLED member (`copy`
+                            // → `copy-<hash>`) is looked up by its `physical_name`.
+                            let meta_name = m.physical_name.as_deref().unwrap_or(&m.name);
                             let param_defaults = self
                                 .cp
-                                .metadata_member_param_defaults(&cn, &m.name, params.len())
+                                .metadata_member_param_defaults(&cn, meta_name, params.len())
                                 .unwrap_or_default();
                             let required = if param_defaults.is_empty() {
                                 params.len()
@@ -1926,7 +1943,7 @@ impl SymbolSource for JvmLibraries {
                             };
                             let call_sig = match self.cp.metadata_member_param_names(
                                 &cn,
-                                &m.name,
+                                meta_name,
                                 params.len(),
                             ) {
                                 Some(names) => crate::libraries::CallSig {

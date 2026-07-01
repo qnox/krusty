@@ -4239,11 +4239,11 @@ impl<'a> Lower<'a> {
             return self.lower_external_new(internal, &ordered);
         }
         // A defaulted parameter was omitted → the `<init>$default` synthetic fills it.
-        let (desc, real) =
-            crate::call_resolver::synthetic_default_ctor(&*self.syms.libraries, internal)?;
-        if real.len() != slots.len() {
-            return None; // the synthetic's real-param count must match the source parameter list
-        }
+        let (desc, real) = crate::call_resolver::synthetic_default_ctor(
+            &*self.syms.libraries,
+            internal,
+            slots.len(),
+        )?;
         let mut a = Vec::new();
         for (i, slot) in slots.iter().enumerate() {
             match slot {
@@ -9106,6 +9106,9 @@ impl<'a> Lower<'a> {
                     && !o.call_sig.param_names.is_empty()
             })?;
         let cs = fi.call_sig;
+        // The `@Metadata`/synthetic key on the JVM name: a value-class-param-MANGLED member (`copy` →
+        // `copy-<hash>`, with `copy-<hash>$default`) is looked up by its physical name.
+        let phys = fi.callable.name.clone();
         let arg_names = self.afile.call_arg_names.get(&call.0).cloned();
         // Only this path when an argument is actually OMITTED (else the plain member call is emitted).
         if arg_names.is_none() && args.len() == cs.param_names.len() {
@@ -9122,7 +9125,7 @@ impl<'a> Lower<'a> {
         let (desc, real, _ret) = crate::call_resolver::synthetic_default_member(
             &*self.syms.libraries,
             &owner,
-            name,
+            &phys,
             slots.len(),
         )?;
         let recv = self.expr(receiver)?;
@@ -9144,7 +9147,7 @@ impl<'a> Lower<'a> {
         Some(self.ir.add_expr(IrExpr::Call {
             callee: Callee::Static {
                 owner,
-                name: format!("{name}$default"),
+                name: format!("{phys}$default"),
                 descriptor: desc,
                 inline: crate::libraries::InlineKind::None,
             },
