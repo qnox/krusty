@@ -954,6 +954,15 @@ impl SymbolSource for JvmLibraries {
         self.cp.metadata_constructor_param_names(internal, arity)
     }
 
+    fn constructor_named_params(
+        &self,
+        internal: &str,
+        min_arity: usize,
+    ) -> Option<(Vec<String>, Vec<bool>)> {
+        self.cp
+            .metadata_constructor_named_params(internal, min_arity)
+    }
+
     fn value_class_ctor_has_default(&self, internal: &str) -> bool {
         // A defaulted primary constructor of a value class surfaces as the synthetic
         // `constructor-impl$default` static method (kotlinc emits it iff some param has a default).

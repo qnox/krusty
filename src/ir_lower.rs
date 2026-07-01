@@ -4208,6 +4208,64 @@ impl<'a> Lower<'a> {
         None
     }
 
+    /// Lower a NAMED classpath constructor call, mapping labels onto parameter positions via `@Metadata`.
+    /// When every parameter is supplied, delegate to the plain positional path. When a DEFAULTED parameter
+    /// is OMITTED (`Cfg(a = 1, c = "x")` for `Cfg(a, b = 9, c = "z")`), emit kotlinc's synthetic
+    /// `<init>(<params…>, int mask, DefaultConstructorMarker)`: each provided arg (coerced) or a
+    /// `zero_placeholder` for an omitted one, then the omitted-position bitmask, then the `null` marker.
+    fn lower_external_new_named(
+        &mut self,
+        internal: &str,
+        call: AstExprId,
+        args: &[AstExprId],
+    ) -> Option<u32> {
+        let names = self.afile.call_arg_names.get(&call.0)?.clone();
+        let (param_names, param_defaults) = self
+            .syms
+            .libraries
+            .constructor_named_params(internal, args.len())?;
+        let required = param_defaults.iter().filter(|d| !**d).count();
+        let slots = crate::resolve::map_call_args(
+            args,
+            Some(&names),
+            &param_names,
+            required,
+            &param_defaults,
+        )
+        .ok()?;
+        if slots.iter().all(Option::is_some) {
+            // Every parameter supplied — reorder onto positions and use the plain positional path.
+            let ordered: Vec<AstExprId> = slots.into_iter().flatten().collect();
+            return self.lower_external_new(internal, &ordered);
+        }
+        // A defaulted parameter was omitted → the `<init>$default` synthetic fills it.
+        let (desc, real) =
+            crate::call_resolver::synthetic_default_ctor(&*self.syms.libraries, internal)?;
+        if real.len() != slots.len() {
+            return None; // the synthetic's real-param count must match the source parameter list
+        }
+        let mut a = Vec::new();
+        for (i, slot) in slots.iter().enumerate() {
+            match slot {
+                Some(arg) => a.push(self.lower_arg(*arg, &ty_to_ir(real[i]))?),
+                None => a.push(self.zero_placeholder(real[i])),
+            }
+        }
+        let mask: i32 = slots
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| s.is_none())
+            .map(|(i, _)| 1i32 << i)
+            .sum();
+        a.push(self.ir.add_expr(IrExpr::Const(IrConst::Int(mask))));
+        a.push(self.ir.add_expr(IrExpr::Const(IrConst::Null))); // DefaultConstructorMarker
+        Some(self.ir.add_expr(IrExpr::NewExternal {
+            internal: internal.to_string(),
+            ctor_desc: desc,
+            args: a,
+        }))
+    }
+
     /// Whether `internal` names a `@JvmInline value`/inline class (unboxed representation) — a file
     /// class in this compilation or a classpath one.
     fn is_value_class(&self, internal: &str) -> bool {
@@ -15643,12 +15701,15 @@ impl<'a> Lower<'a> {
                         // `StringBuilder()`. The constructor descriptor comes from the classpath. NAMED
                         // arguments are reordered onto parameter positions via the ctor's `@Metadata`
                         // parameter names before lowering (source-order emit would pair them wrong).
-                        let args = self
-                            .syms
-                            .libraries
-                            .constructor_param_names(internal, args.len())
-                            .and_then(|pn| self.reorder_by_param_names(e, &args, &pn))
-                            .unwrap_or(args);
+                        // A NAMED call (`Point(y = 2, x = 1)`, or `Cfg(a = 1, c = "x")` omitting a
+                        // defaulted `b`) is lowered by `lower_external_new_named` — labels → positions, with
+                        // the `<init>$default` synthetic (placeholder + bitmask + marker) for an omitted
+                        // default. It handles the all-supplied case too (reorder + positional). A named call
+                        // it can't map returns `None` (skip) — do NOT fall through to the positional path,
+                        // which would pair the SOURCE-order args against the wrong parameters (a miscompile).
+                        if self.afile.call_arg_names.contains_key(&e.0) {
+                            return self.lower_external_new_named(internal, e, &args);
+                        }
                         return self.lower_external_new(internal, &args);
                     } else {
                         // Constructor: the call's result type is the class.
