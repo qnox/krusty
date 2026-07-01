@@ -3302,9 +3302,9 @@ impl<'a> Parser<'a> {
             }
             return self.parse_stmt();
         }
-        // `lateinit var x: T` local — krusty defaults the slot to `null` rather than throwing
-        // `UninitializedPropertyAccessException` on a read-before-init (a semantic difference that
-        // miscompiles a negative test), so reject it (the file skips).
+        // `lateinit var x: T` local — a mutable slot defaulting to `null`; a read while still null throws
+        // `UninitializedPropertyAccessException` (the lowering wraps each read in the guard). Requires an
+        // explicit non-null reference type (enforced downstream — the lowering bails otherwise).
         if self.at(TokenKind::Ident)
             && self.text() == "lateinit"
             && self
@@ -3312,11 +3312,13 @@ impl<'a> Parser<'a> {
                 .get(self.i + 1)
                 .map_or(false, |t| t.kind == TokenKind::KwVar)
         {
-            self.diags.error(
-                self.tok().span,
-                "krusty: lateinit local variables are not supported",
-            );
+            let start = self.tok().span;
             self.bump(); // 'lateinit'
+            self.bump(); // 'var'
+            let name = self.ident_or_error("variable name");
+            self.expect(TokenKind::Colon, "':'");
+            let ty = self.parse_type();
+            return self.finish_stmt(Stmt::LocalLateinit { name, ty }, start);
         }
         let start = self.tok().span;
         match self.kind() {

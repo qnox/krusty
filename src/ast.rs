@@ -240,6 +240,13 @@ pub enum Stmt {
         ty: Option<TypeRef>,
         init: ExprId,
     },
+    /// `lateinit var name: type` — a mutable local with no initializer (the slot defaults to `null`); a
+    /// read while still null throws `UninitializedPropertyAccessException`. Kept distinct from `Local`
+    /// (whose initializer is mandatory).
+    LocalLateinit {
+        name: String,
+        ty: TypeRef,
+    },
     /// `val`/`var name (: type)? by delegate` — a local delegated property. Reads route through the
     /// delegate's `getValue`; a `var`'s writes through `setValue`. No backing local of its own (only the
     /// synthesized `$delegate` local holds the delegate instance).
@@ -879,9 +886,11 @@ impl File {
     /// by [`any_child_expr`](Self::any_child_expr).) Companion to that method.
     pub fn any_child_stmt(&self, s: StmtId, fe: &mut impl FnMut(ExprId) -> bool) -> bool {
         match self.stmt(s) {
-            Stmt::Break(_) | Stmt::Continue(_) | Stmt::Return(None, _) | Stmt::IncDec { .. } => {
-                false
-            }
+            Stmt::Break(_)
+            | Stmt::Continue(_)
+            | Stmt::Return(None, _)
+            | Stmt::IncDec { .. }
+            | Stmt::LocalLateinit { .. } => false,
             Stmt::Local { init, .. }
             | Stmt::Destructure { init, .. }
             | Stmt::Assign { value: init, .. }
@@ -1257,6 +1266,9 @@ impl File {
                 out.push_str(&format!("({} {name} ", if *is_var { "var" } else { "val" }));
                 self.write_expr(*init, out);
                 out.push(')');
+            }
+            Stmt::LocalLateinit { name, .. } => {
+                out.push_str(&format!("(lateinit var {name})"));
             }
             Stmt::LocalDelegate {
                 is_var,
