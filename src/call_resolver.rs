@@ -1115,9 +1115,17 @@ pub fn resolve_constructor(
         let fits = args.len() == 1
             && (args[0] == underlying
                 || (matches!(args[0], Ty::Null) && underlying.is_reference()));
+        // A ZERO-arg construction `Id()` when the sole underlying param is DEFAULTED — kotlinc realizes
+        // it through the `constructor-impl$default` synthetic (which fills the default itself). Accept it
+        // ONLY when that synthetic exists on the classpath, AND the underlying is a REFERENCE: the lowering
+        // passes `null` for the dummy underlying slot, which fits only a reference (a scalar would need a
+        // typed zero). A mandatory-param value class stays unresolved (no synthetic → no phantom call).
+        let all_default = args.is_empty()
+            && underlying.is_reference()
+            && lib.value_class_ctor_has_default(internal);
         crate::trace_compiler!(
             "value_classes",
-            "resolve_constructor {internal} value-class underlying={underlying:?} args={args:?} fits={fits}"
+            "resolve_constructor {internal} value-class underlying={underlying:?} args={args:?} fits={fits} all_default={all_default}"
         );
         if fits {
             // Descriptor is unused on this path (the checker only needs the type; the lowerer lowers the
@@ -1125,6 +1133,14 @@ pub fn resolve_constructor(
             return Some(LibraryMember::new(
                 "<init>".to_string(),
                 vec![underlying],
+                Ty::obj(internal),
+                String::new(),
+            ));
+        }
+        if all_default {
+            return Some(LibraryMember::new(
+                "<init>".to_string(),
+                vec![],
                 Ty::obj(internal),
                 String::new(),
             ));

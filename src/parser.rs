@@ -4965,9 +4965,15 @@ impl<'a> Parser<'a> {
             if self.at(TokenKind::Ident) && self.text() == "catch" {
                 self.bump(); // 'catch'
                 self.expect(TokenKind::LParen, "'('");
+                // The parameter may sit on its own line(s) inside the parens (`catch (\n e: E\n)`),
+                // so skip newlines around each part exactly as an ordinary parameter list allows.
+                self.skip_newlines();
                 let name = self.ident_or_error("catch parameter name");
+                self.skip_newlines();
                 self.expect(TokenKind::Colon, "':'");
+                self.skip_newlines();
                 let ty = self.parse_type();
+                self.skip_newlines();
                 self.expect(TokenKind::RParen, "')'");
                 self.skip_newlines();
                 let cbody = self.parse_block_expr();

@@ -701,6 +701,62 @@ fn wildcard_candidate(pkg: &str, name: &str) -> String {
     }
 }
 
+/// Resolve a DOTTED type name written in type position to a classpath internal name, so the SIGNATURE
+/// phase (and, via the shared `class_names` map, the checker) accepts it. Two complementary forms:
+///   * A fully-qualified package path — `lib.Thing` → `lib/Thing`, `a.b.C` → `a/b/C` — verified via
+///     `resolve_type` (so a bogus path stays unresolved rather than becoming a phantom `Obj`).
+///   * A nested type under a resolvable outer prefix — `Wrap.Box` → `<pkg>/Wrap$Box`. The longest
+///     leading prefix that names a known/importable type is the outer; the rest is the nested path
+///     joined with `$` (kotlinc's nesting separator).
+///
+/// `None` (never a guess) when neither form resolves on the classpath.
+fn resolve_dotted_classpath_type(
+    name: &str,
+    class_names: &ClassNames,
+    imap: &HashMap<String, String>,
+    wilds: &[String],
+    libraries: &dyn CompilerPlatform,
+) -> Option<String> {
+    if !name.contains('.') {
+        return None;
+    }
+    // (a) Nested type under a resolvable outer prefix FIRST — an in-scope type name shadows a package
+    // path (kotlinc resolves the type in scope before treating the qualifier as a package).
+    let segs: Vec<&str> = name.split('.').collect();
+    for k in 1..segs.len() {
+        let outer = segs[..k].join(".");
+        let base = class_names
+            .get(&outer)
+            .filter(|i| !i.starts_with("__ty/"))
+            .cloned()
+            .or_else(|| {
+                imap.get(&outer)
+                    .filter(|f| libraries.resolve_type(f).is_some())
+                    .cloned()
+            })
+            .or_else(|| {
+                wilds
+                    .iter()
+                    .map(|p| wildcard_candidate(p, &outer))
+                    .find(|c| libraries.resolve_type(c).is_some())
+            });
+        if let Some(base) = base {
+            let cand = format!("{base}${}", segs[k..].join("$"));
+            if libraries.resolve_type(&cand).is_some() {
+                crate::trace_compiler!("resolve", "dotted nested type {name} -> {cand}");
+                return Some(cand);
+            }
+        }
+    }
+    // (b) Fully-qualified package path (`lib.Thing` → `lib/Thing`).
+    let fq = name.replace('.', "/");
+    if libraries.resolve_type(&fq).is_some() {
+        crate::trace_compiler!("resolve", "dotted FQ type {name} -> {fq}");
+        return Some(fq);
+    }
+    None
+}
+
 /// Map a single JVM field descriptor to a krusty `Ty` (the v0 supported set).
 /// Extract a slash-separated qualified name from a `Name`/`Member` chain (`kotlin.SinceKotlin` →
 /// `"kotlin/SinceKotlin"`); `None` if the chain contains a non-name node.
@@ -839,6 +895,17 @@ pub fn collect_signatures_with_cp(
                             .iter()
                             .map(|p| wildcard_candidate(p, &name))
                             .find(|cand| libraries.resolve_type(cand).is_some())
+                    })
+                    .or_else(|| {
+                        // A dotted type name (`lib.Thing`, `Wrap.Box`) — resolve the FQ package path
+                        // or a nested type under a resolvable outer prefix.
+                        resolve_dotted_classpath_type(
+                            &name,
+                            &class_names,
+                            &imap,
+                            &wilds,
+                            &*libraries,
+                        )
                     });
                 if let Some(full) = full {
                     match from_import.get(&name) {
@@ -4242,25 +4309,34 @@ impl<'a> Checker<'a> {
     /// type; the remaining segments are the nested path joined with `$` (kotlinc's nesting separator).
     /// Existence is verified via `resolve_type` so a bogus `A.B` stays unresolved (never a phantom `Obj`).
     fn resolve_qualified_nested(&self, name: &str) -> Option<String> {
-        let (outer, rest) = name.split_once('.')?;
-        let base = self
-            .syms
-            .classes
-            .get(outer)
-            .map(|c| c.internal.clone())
-            .or_else(|| self.imported_type_internal(outer))
-            .or_else(|| {
-                self.syms
-                    .class_names
-                    .get(outer)
-                    .filter(|i| !i.starts_with("__ty/"))
-                    .cloned()
-            })?;
-        let candidate = format!("{base}${}", rest.replace('.', "$"));
-        self.syms
-            .libraries
-            .resolve_type(&candidate)
-            .map(|_| candidate)
+        // A nested type under a resolvable outer type FIRST (`Subject.User` → `lib/Subject$User`) — an
+        // in-scope type name shadows a package path, as kotlinc resolves it.
+        if let Some((outer, rest)) = name.split_once('.') {
+            let base = self
+                .syms
+                .classes
+                .get(outer)
+                .map(|c| c.internal.clone())
+                .or_else(|| self.imported_type_internal(outer))
+                .or_else(|| {
+                    self.syms
+                        .class_names
+                        .get(outer)
+                        .filter(|i| !i.starts_with("__ty/"))
+                        .cloned()
+                });
+            if let Some(base) = base {
+                let candidate = format!("{base}${}", rest.replace('.', "$"));
+                if self.syms.libraries.resolve_type(&candidate).is_some() {
+                    return Some(candidate);
+                }
+            }
+        }
+        // A fully-qualified PACKAGE path (`lib.Thing` → `lib/Thing`): the qualifier is a package, not a
+        // type. Verified via `resolve_type`. Handles both a type reference (`x: lib.Thing?`) and a
+        // qualified constructor call (`lib.Thing(5)`).
+        let fq = name.replace('.', "/");
+        self.syms.libraries.resolve_type(&fq).map(|_| fq)
     }
 
     fn classpath_object_value(&self, name: &str) -> Option<String> {
@@ -6308,6 +6384,28 @@ impl<'a> Checker<'a> {
                                     "operator argument",
                                 );
                                 return self.set(e, Ty::Boolean);
+                            }
+                        }
+                        // A CLASSPATH `Comparable` type (`class Money : Comparable<Money>` compiled
+                        // separately): its `operator fun compareTo(o): Int` is on the classpath, not in
+                        // `method_of`. Resolve it through the library set; lowering re-resolves the call.
+                        // Only a REFERENCE right operand: an erased generic `Comparable<Double>.compareTo`
+                        // takes `Object`, so a PRIMITIVE argument would need a box the lowering path here
+                        // doesn't apply — leave that to the existing generic handling / a sound skip.
+                        if rt.is_reference() {
+                            if let Some(m) = crate::call_resolver::resolve_instance_member(
+                                &*self.syms.libraries,
+                                lt,
+                                "compareTo",
+                                &[rt],
+                            ) {
+                                if m.ret == Ty::Int {
+                                    crate::trace_compiler!(
+                                        "resolve",
+                                        "classpath compareTo drives comparison on {internal}"
+                                    );
+                                    return self.set(e, Ty::Boolean);
+                                }
                             }
                         }
                     }
