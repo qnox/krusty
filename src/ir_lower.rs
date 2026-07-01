@@ -6867,13 +6867,20 @@ impl<'a> Lower<'a> {
     /// Lower a call's arguments, filling omitted trailing parameters from their **constant-literal**
     /// defaults (`fun f(x: Int = 5)` called `f()`). A non-literal default (one referencing other
     /// params or `this`) needs the `$default` synthetic method krusty doesn't emit yet → `None`.
+    /// Lower a (possibly named / defaulted) call's arguments into parameter-slot order. Returns
+    /// `(args, prelude)` where `prelude` is a list of temp-declaration statements that MUST run before the
+    /// call — non-empty only for a REORDERED named call with side-effecting arguments, whose Kotlin
+    /// source-order evaluation is realized by spilling each argument to a temp in source order and loading
+    /// the temps in slot order. The caller wraps the built call expression in `Block { stmts: prelude,
+    /// value: call }` so the temps live in the enclosing scope (a temp declared in a value-position
+    /// `Block` used AS an argument would be scoped away before a later argument reads it).
     fn lower_args_defaulted(
         &mut self,
         call: AstExprId,
         param_meta: &[(String, Option<AstExprId>)],
         args: &[AstExprId],
         ir_params: &[Ty],
-    ) -> Option<Vec<u32>> {
+    ) -> Option<(Vec<u32>, Vec<u32>)> {
         let n = ir_params.len();
         if args.len() > n {
             return None;
@@ -6941,36 +6948,79 @@ impl<'a> Lower<'a> {
             }
         }
         let reordered = arg_slot.windows(2).any(|w| w[0] > w[1]);
-        // A reordered named call evaluates side-effecting args out of source order — bail unless every
-        // reordered arg is pure (const/name read). The TRAILING LAMBDA is excluded: it is the last source
-        // argument AND fills the last slot, so it is never evaluated out of order. (Proper source-order
-        // temp-spilling for side-effecting reordered args isn't modeled yet — it needs the temp prelude to
-        // live in the enclosing scope, not a value-position `Block` which scopes its locals.)
-        if reordered
+        // Whether the reordering moves a SIDE-EFFECTING argument out of source order. A pure argument
+        // (const literal / bare name read) is order-independent, so slot-order lowering is still correct
+        // (and byte-identical to before). The TRAILING LAMBDA is excluded: it is the last source argument
+        // AND fills the last slot, so it is never evaluated out of order.
+        let needs_source_order = reordered
             && args.iter().enumerate().any(|(i, &a)| {
                 let is_trailing_lambda =
                     i == args.len() - 1 && matches!(self.afile.expr(a), Expr::Lambda { .. });
                 !is_trailing_lambda
                     && !is_const_literal(self.afile, a)
                     && !matches!(self.afile.expr(a), Expr::Name(_))
-            })
-        {
-            return None;
+            });
+        if !needs_source_order {
+            let mut a = Vec::new();
+            for (k, pt) in ir_params.iter().enumerate() {
+                match slot[k] {
+                    Some(arg) => a.push(self.lower_arg(arg, pt)?),
+                    None => {
+                        let def = param_meta.get(k).and_then(|(_, d)| *d)?;
+                        if !is_const_literal(self.afile, def) {
+                            return None;
+                        }
+                        a.push(self.lower_arg(def, pt)?);
+                    }
+                }
+            }
+            return Some((a, Vec::new()));
+        }
+        // Source-order spill: lower each source argument into a fresh temp in SOURCE order (the prelude),
+        // then load the temps in SLOT order for the call. The caller runs the prelude before the call.
+        let mut slot_temp: Vec<Option<u32>> = vec![None; n];
+        let mut prelude: Vec<u32> = Vec::new();
+        for (i, &arg) in args.iter().enumerate() {
+            let k = arg_slot[i];
+            let v = self.lower_arg(arg, &ir_params[k])?;
+            let tmp = self.fresh_value();
+            let decl = self.ir.add_expr(IrExpr::Variable {
+                index: tmp,
+                ty: ty_to_ir(ir_params[k]),
+                init: Some(v),
+            });
+            prelude.push(decl);
+            slot_temp[k] = Some(tmp);
         }
         let mut a = Vec::new();
-        for (k, pt) in ir_params.iter().enumerate() {
-            match slot[k] {
-                Some(arg) => a.push(self.lower_arg(arg, pt)?),
+        for k in 0..n {
+            let val = match slot_temp[k] {
+                Some(tmp) => self.ir.add_expr(IrExpr::GetValue(tmp)),
                 None => {
                     let def = param_meta.get(k).and_then(|(_, d)| *d)?;
                     if !is_const_literal(self.afile, def) {
                         return None;
                     }
-                    a.push(self.lower_arg(def, pt)?);
+                    self.lower_arg(def, &ir_params[k])?
                 }
-            }
+            };
+            a.push(val);
         }
-        Some(a)
+        Some((a, prelude))
+    }
+
+    /// Wrap a call expression whose arguments needed a source-order temp `prelude` (from
+    /// [`lower_args_defaulted`]) in a `Block { stmts: prelude, value: call }`, so the temps are declared
+    /// in the enclosing scope and stay live while the call loads them. An empty prelude returns `call`
+    /// unchanged (the common path).
+    fn wrap_arg_prelude(&mut self, call: u32, prelude: Vec<u32>) -> u32 {
+        if prelude.is_empty() {
+            return call;
+        }
+        self.ir.add_expr(IrExpr::Block {
+            stmts: prelude,
+            value: Some(call),
+        })
     }
 
     /// Reorder a NAMED-argument call to a CLASSPATH top-level function (`foo(b = …, a = …)`) into
@@ -15644,12 +15694,13 @@ impl<'a> Lower<'a> {
                         if self.erased_generic_call_unmodeled(e, &fname) {
                             return None;
                         }
-                        let a = self.lower_args_defaulted(e, &meta, &args, &params)?;
+                        let (a, prelude) = self.lower_args_defaulted(e, &meta, &args, &params)?;
                         let call = self.ir.add_expr(IrExpr::Call {
                             callee: Callee::Local(fid),
                             dispatch_receiver: None,
                             args: a,
                         });
+                        let call = self.wrap_arg_prelude(call, prelude);
                         let ret = self.ir.functions[fid as usize].ret.clone();
                         // Whether the callee's DECLARED return is a bare type parameter (`fun <T> f(): T`)
                         // — only then is the erased return refined by the call-site static type.
@@ -16160,14 +16211,15 @@ impl<'a> Lower<'a> {
                                 args: a,
                                 ctor_params: Some(sc.params),
                             })
-                        } else if let Some(a) =
+                        } else if let Some((a, prelude)) =
                             self.lower_args_defaulted(e, &meta, &args, &field_tys)
                         {
-                            self.ir.add_expr(IrExpr::New {
+                            let new = self.ir.add_expr(IrExpr::New {
                                 class,
                                 args: a,
                                 ctor_params: None,
-                            })
+                            });
+                            self.wrap_arg_prelude(new, prelude)
                         } else if let Some(sc) = no_named
                             .then(|| {
                                 self.ir.classes[class as usize]
@@ -16578,14 +16630,15 @@ impl<'a> Lower<'a> {
                                             .collect()
                                     })
                                     .unwrap_or_default();
-                                if let Some(a) =
+                                if let Some((a, prelude)) =
                                     self.lower_args_defaulted(e, &meta, &args, &field_tys)
                                 {
-                                    return Some(self.ir.add_expr(IrExpr::New {
+                                    let new = self.ir.add_expr(IrExpr::New {
                                         class,
                                         args: a,
                                         ctor_params: None,
-                                    }));
+                                    });
+                                    return Some(self.wrap_arg_prelude(new, prelude));
                                 }
                                 return None;
                             }

@@ -977,6 +977,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   classpath-`new` both reorder the labelled arguments onto positions (via `reorder_by_param_names`) before
   resolving/emitting. Test: `named_args_classpath_e2e` / `interface_supertype_members_e2e`.
 
+- **Reordered named arguments evaluate in SOURCE order (`f(b = X(), a = Y())`).** Kotlin evaluates
+  arguments in written order, then binds each to its parameter position. When a reordering moves a
+  SIDE-EFFECTING argument out of source order, `lower_args_defaulted` spills each argument to a fresh temp
+  in source order (a `prelude` of `IrExpr::Variable` decls) and loads the temps in slot order for the call;
+  the caller wraps the built call in `Block { stmts: prelude, value: call }` (via `wrap_arg_prelude`) so the
+  temps live in the enclosing scope — a temp in a value-position `Block` used AS an argument would be scoped
+  away before a later argument reads it (`Block` emit clones+restores `self.slots`). A pure reordering
+  (const/name args, order-independent) keeps the byte-identical slot-order lowering (no prelude). Applies to
+  top-level function and constructor calls. Test: `tests/named_arg_source_order_e2e.rs`.
+
 - **Generic constructor type-argument inference (`Pair(1, 2)` → `Pair<Int, Int>`).** A classpath generic
   class constructed without explicit `<T>` previously erased to the raw type, so `first`/`second`/
   `componentN` typed as `Any` (breaking destructuring + arithmetic). `SymbolSource::infer_constructor_type_args`
