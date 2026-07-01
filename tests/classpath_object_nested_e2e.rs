@@ -4,18 +4,11 @@
 //! object / nested / sealed type rather than a companion.
 use std::fs;
 mod common;
-fn env(k: &str) -> Option<String> {
-    std::env::var(k).ok().filter(|v| !v.is_empty())
-}
 
 #[test]
 fn classpath_object_and_nested_resolution() {
-    let Some(_) = env("KRUSTY_KOTLINC") else {
-        eprintln!("skipping: set KRUSTY_KOTLINC");
-        return;
-    };
-    let Some(jh) = env("KRUSTY_REF_JAVA_HOME").or_else(|| env("JAVA_HOME")) else {
-        eprintln!("skipping: set JAVA_HOME");
+    let Some(jdk) = common::jdk_modules() else {
+        eprintln!("skipping: no JDK modules");
         return;
     };
     let Some(sl) = common::stdlib_jar() else {
@@ -23,7 +16,6 @@ fn classpath_object_and_nested_resolution() {
         return;
     };
     let stdlib = sl.to_str().unwrap().to_string();
-    let jdk = std::path::PathBuf::from(format!("{jh}/lib/modules"));
     let work = std::env::temp_dir().join(format!("krusty_cobj_{}", std::process::id()));
     let _ = fs::remove_dir_all(&work);
     let libout = work.join("lib");
