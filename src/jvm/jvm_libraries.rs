@@ -964,6 +964,57 @@ impl SymbolSource for JvmLibraries {
         })
     }
 
+    fn is_enum_entry(&self, internal: &str, name: &str) -> bool {
+        // An enum constant is a `static` field of the enum's OWN type (`descriptor == L<internal>;`),
+        // distinguishing it from `$VALUES` (an array `[L<internal>;`) and a companion INSTANCE.
+        const ACC_STATIC: u16 = 0x0008;
+        let want = format!("L{internal};");
+        self.cp.find(internal).is_some_and(|ci| {
+            ci.fields
+                .iter()
+                .any(|f| f.name == name && f.access & ACC_STATIC != 0 && f.descriptor == want)
+        })
+    }
+
+    fn value_class_property_member(
+        &self,
+        internal: &str,
+        property: &str,
+    ) -> Option<crate::libraries::LibraryMember> {
+        let ci = self.cp.find(internal)?;
+        // The property's LOGICAL (@Metadata) return type — a value class here (`id` → `lib/Vid`), whose
+        // physical getter erases the return to the underlying. Only handle a value-class-typed property
+        // (guarded by `value_underlying`), so an ordinary property keeps its normal getter path.
+        let logical = crate::jvm::metadata::class_property_return_classes(&ci)
+            .get(property)?
+            .clone();
+        self.resolve_type(&logical)
+            .and_then(|t| t.value_underlying)?;
+        // Getter name = `get` + capitalized property, possibly `@JvmName`-mangled with a `-<hash>` suffix
+        // (kotlinc mangles any accessor whose signature mentions a value class).
+        let mut chars = property.chars();
+        let cap = chars.next()?.to_uppercase().collect::<String>();
+        let getter = format!("get{cap}{}", chars.as_str());
+        let dashed = format!("{getter}-");
+        let m = ci
+            .methods
+            .iter()
+            .find(|mm| mm.name == getter || mm.name.starts_with(&dashed))?;
+        crate::trace_compiler!(
+            "value_classes",
+            "value-class property {internal}.{property} -> getter {} : {logical}",
+            m.name
+        );
+        let mut member = crate::libraries::LibraryMember::new(
+            m.name.clone(),
+            vec![],
+            Ty::obj(&logical),
+            m.descriptor.clone(),
+        );
+        member.owner = Some(internal.to_string());
+        Some(member)
+    }
+
     fn infer_constructor_type_args(&self, internal: &str, arg_tys: &[Ty]) -> Option<Vec<Ty>> {
         let ci = self.cp.find(internal)?;
         // The class's formal type parameters, in declaration order (`Pair` → `[A, B]`).

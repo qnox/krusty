@@ -6456,6 +6456,20 @@ impl<'a> Checker<'a> {
                                 return self.set(e, Ty::obj(&internal));
                             }
                         }
+                        // `Kind.PENDING` on a CLASSPATH enum — a static enum-constant field of the enum's
+                        // own type. Lowering emits `getstatic <internal>.ENTRY:L<internal>;`.
+                        if let Some(internal) = self
+                            .imported_type_internal(&en)
+                            .or_else(|| self.syms.class_names.get(&en).cloned())
+                        {
+                            if self.syms.libraries.is_enum_entry(&internal, &name) {
+                                crate::trace_compiler!(
+                                    "resolve",
+                                    "classpath enum entry {en}.{name} -> {internal}"
+                                );
+                                return self.set(e, Ty::obj(&internal));
+                            }
+                        }
                         // `ClassName.PROP` — a companion (static) property read.
                         if let Some(cs) = self.syms.classes.get(&en) {
                             if let Some(&ty) = cs.static_props.get(&name) {

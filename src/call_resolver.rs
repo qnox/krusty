@@ -1274,6 +1274,19 @@ pub fn resolve_property_member(
             resolve_instance_member(lib, recv, &getter, &[])
                 .filter(|m| m.ret.is_read_value_result())
         })
+        .or_else(|| {
+            // A property whose declared type is a `@JvmInline value class`: its getter is
+            // `@JvmName`-mangled (`getId-<hash>`) and the physical return erases to the underlying, so
+            // the plain lookups above miss it. Recover the mangled getter + logical value-class type.
+            let internal = recv.kotlin_class_internal()?;
+            let member = lib.value_class_property_member(internal, property)?;
+            let ret = member.ret;
+            Some(ResolvedMember {
+                member,
+                ret,
+                suspend: false,
+            })
+        })
 }
 
 fn select_instance_info(
@@ -1389,7 +1402,17 @@ fn arg_subtype_assignable(lib: &dyn SymbolSource, param: &Ty, arg: &Ty) -> bool 
     if param == arg || *param == Ty::obj("kotlin/Any") {
         return true;
     }
-    match (param.obj_internal(), arg.obj_internal()) {
+    // A builtin reference arg (`Ty::String`) isn't an `Obj`, so map it to its class internal name
+    // (`kotlin/String`, whose classpath supertypes include `java/lang/CharSequence`/`Comparable`) — so
+    // `Regex("…").matches(s: String)` matches the `CharSequence` parameter via the supertype walk.
+    // Only a NON-NULLABLE reference arg maps this way: passing `String?` where `CharSequence` (non-null)
+    // is expected is a null-safety error kotlinc rejects, so it must not select the overload via subtype.
+    let arg_internal = if arg.is_reference() && !arg.is_nullable() {
+        arg.kotlin_class_internal()
+    } else {
+        None
+    };
+    match (param.obj_internal(), arg_internal) {
         (Some(p), Some(a)) => is_classpath_subtype(lib, a, p, 0),
         _ => false,
     }
