@@ -930,6 +930,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   when it matches, resolve/emit an `invokestatic` on the object class (the instance receiver is dropped,
   as kotlinc does). Test: `tests/interface_supertype_members_e2e.rs::jvmstatic_object_member`.
 
+- **INSTANCE member of a classpath `object`, and dotted classpath nested types.** A plain (non-`@JvmStatic`)
+  member call on a classpath `object` (`Ids.generate()`, `L.logger { }`) is an instance call on the
+  singleton — `getstatic <Object>.INSTANCE; invokevirtual`. The qualified-name path previously errored it
+  as an "unresolved Java static": it only tried `resolve_companion` (static) and the companion-object
+  instance path, neither of which fits a bare `object`. The checker's Java-static fallthrough now, when the
+  qualifier resolves to a classpath `object` (`LibraryType::is_object`), types the receiver as the object's
+  own `Obj(internal)` and records `ObjectValue` so the existing instance-member + `INSTANCE`-read lowering
+  fires. Separately, a dotted CLASSPATH nested type/qualifier (`Subject.User`, `SlugValidation.Ok`) resolves
+  via a shared longest-prefix rule (outer simple-name → classpath internal, remaining segments joined with
+  `$`, existence verified through `resolve_type`) — mirrored in both `resolve_ty` (checker) and `ty_ref`
+  (lowerer) so `is`/`as`/`when` targets and a nested-class constructor (`Subject.User("x")` → `new
+  lib/Subject$User`) all resolve the same `Outer$Nested` internal. Test: `tests/classpath_object_nested_e2e.rs`.
+
 - **Named arguments to a CLASSPATH constructor (`Point(y = 2, x = 1)`).** Descriptors don't carry
   parameter names, so this needs the ctor's `@Metadata`: `metadata::class_constructor_param_names` decodes
   `Class.constructor` (field 8) → `Constructor.value_parameter` (field 2, a DIFFERENT proto shape from a

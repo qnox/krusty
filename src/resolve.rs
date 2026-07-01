@@ -4237,6 +4237,32 @@ impl<'a> Checker<'a> {
     /// descriptors but let the front end recover member/element types.
     /// If bare `name` resolves (through imports/defaults) to a CLASSPATH Kotlin `object`, its internal
     /// name — so the object can be referenced as a value (`getstatic <internal>.INSTANCE` in lowering).
+    /// Resolve a dotted type/qualifier `Outer.Nested` (`Subject.User`, `SlugValidation.Ok`) to a
+    /// classpath internal name (`lib/Subject$User`). The longest resolvable prefix names the outer
+    /// type; the remaining segments are the nested path joined with `$` (kotlinc's nesting separator).
+    /// Existence is verified via `resolve_type` so a bogus `A.B` stays unresolved (never a phantom `Obj`).
+    fn resolve_qualified_nested(&self, name: &str) -> Option<String> {
+        let (outer, rest) = name.split_once('.')?;
+        let base = self
+            .syms
+            .classes
+            .get(outer)
+            .map(|c| c.internal.clone())
+            .or_else(|| self.imported_type_internal(outer))
+            .or_else(|| {
+                self.syms
+                    .class_names
+                    .get(outer)
+                    .filter(|i| !i.starts_with("__ty/"))
+                    .cloned()
+            })?;
+        let candidate = format!("{base}${}", rest.replace('.', "$"));
+        self.syms
+            .libraries
+            .resolve_type(&candidate)
+            .map(|_| candidate)
+    }
+
     fn classpath_object_value(&self, name: &str) -> Option<String> {
         let internal = self.imported_type_internal(name)?;
         if self.syms.libraries.resolve_type(&internal)?.is_object() {
@@ -4345,6 +4371,9 @@ impl<'a> Checker<'a> {
             // An explicit/wildcard import resolves a name whose simple form is ABSENT from the global
             // index — either never registered or pruned because it's ambiguous across the whole classpath
             // (`Continuation` collides with `jdk/internal/vm/Continuation`). The import names the package.
+            self.obj_with_targs(&internal, r)
+        } else if let Some(internal) = self.resolve_qualified_nested(&r.name) {
+            // A dotted CLASSPATH nested type (`Subject.User`, `SlugValidation.Ok`) → `Outer$Nested`.
             self.obj_with_targs(&internal, r)
         } else {
             Ty::Error
@@ -8039,6 +8068,31 @@ impl<'a> Checker<'a> {
                         }
                     }
                 }
+                // CLASSPATH nested-class constructor `Outer.Nested(args)` (a sealed subclass
+                // `Subject.User("x")`, or any nested class): resolve `Outer.Nested` to `Outer$Nested`
+                // on the classpath and match a constructor. Lowering emits `new Outer$Nested; invokespecial`.
+                if let Expr::Name(outer) = self.file.expr(receiver).clone() {
+                    if self.lookup(&outer).is_none() {
+                        let qualified = format!("{outer}.{name}");
+                        if let Some(internal) = self.resolve_qualified_nested(&qualified) {
+                            let arg_tys: Vec<Ty> = args.iter().map(|a| self.expr(*a)).collect();
+                            if let Some(m) = crate::call_resolver::resolve_constructor(
+                                &*self.syms.libraries,
+                                &internal,
+                                &arg_tys,
+                            ) {
+                                crate::trace_compiler!(
+                                    "resolve",
+                                    "classpath nested constructor {qualified} -> {internal}"
+                                );
+                                for (i, (p, a)) in m.params.iter().zip(&arg_tys).enumerate() {
+                                    self.expect_assignable(*p, *a, self.span(args[i]), "argument");
+                                }
+                                return Ty::obj(&internal);
+                            }
+                        }
+                    }
+                }
                 // Classpath value-class COMPANION call `Result.success(args)`: `Result` is a classpath
                 // value class whose companion declares `success` (an `inline` fn — private in bytecode,
                 // public per `@Metadata`). Resolve metadata-first; lowering emits the companion `getstatic`
@@ -8248,6 +8302,39 @@ impl<'a> Checker<'a> {
                                             }
                                         }
                                         None => {
+                                            // A classpath `object` INSTANCE member (`Ids.generate()`,
+                                            // `L.logger { }`): not a companion/static — dispatch on the
+                                            // object singleton. Type the receiver as the object's own
+                                            // type and record the singleton read so LOWERING emits
+                                            // `getstatic <internal>.INSTANCE; invokevirtual`.
+                                            let is_object = self
+                                                .syms
+                                                .libraries
+                                                .resolve_type(&internal)
+                                                .is_some_and(|t| t.is_object());
+                                            if is_object {
+                                                if let Some(m) =
+                                                    crate::call_resolver::resolve_instance_member(
+                                                        &*self.syms.libraries,
+                                                        Ty::obj(&internal),
+                                                        &name,
+                                                        &arg_tys,
+                                                    )
+                                                {
+                                                    crate::trace_compiler!(
+                                                        "resolve",
+                                                        "classpath object instance member {cls}.{name} on {internal}"
+                                                    );
+                                                    self.set(receiver, Ty::obj(&internal));
+                                                    self.expr_lowers.insert(
+                                                        receiver,
+                                                        ExprLowering::ObjectValue {
+                                                            internal: internal.clone(),
+                                                        },
+                                                    );
+                                                    return m.ret;
+                                                }
+                                            }
                                             self.diags.error(span, format!("unresolved Java static '{cls}.{name}' for given argument types"));
                                             Ty::Error
                                         }
