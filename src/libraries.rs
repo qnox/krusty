@@ -584,7 +584,7 @@ fn params_prefix(member_params: &[Ty], args: &[Ty]) -> bool {
 /// (`List<Int>.add(E)` → `add(Object)`, calling with `Int` boxes to `Integer`), a reference passes
 /// directly. This is what lets a primitive argument select the erased `(Object)` overload instead of
 /// falling through to a longer-arity overload it happens to prefix.
-fn arg_assignable(param: &Ty, arg: &Ty) -> bool {
+pub(crate) fn arg_assignable(param: &Ty, arg: &Ty) -> bool {
     param == arg || *param == Ty::obj("kotlin/Any")
 }
 

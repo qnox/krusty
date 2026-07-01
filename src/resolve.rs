@@ -756,6 +756,17 @@ fn resolve_dotted_classpath_type(
         crate::trace_compiler!("resolve", "dotted FQ type {name} -> {fq}");
         return Some(fq);
     }
+    // A deep FQN whose TAIL names a NESTED type (`a.b.Outer.Inner` → `a/b/Outer$Inner`) when the outer
+    // prefix isn't itself imported/in-scope (so branch (a) couldn't seed it): convert trailing `/` → `$`
+    // from the right until the classpath resolves it.
+    let mut cand = fq;
+    while let Some(pos) = cand.rfind('/') {
+        cand.replace_range(pos..=pos, "$");
+        if libraries.resolve_type(&cand).is_some() {
+            crate::trace_compiler!("resolve", "dotted FQ nested type {name} -> {cand}");
+            return Some(cand);
+        }
+    }
     None
 }
 
@@ -4375,9 +4386,10 @@ impl<'a> Checker<'a> {
         }
         // A fully-qualified PACKAGE path (`lib.Thing` → `lib/Thing`): the qualifier is a package, not a
         // type. Verified via `resolve_type`. Handles both a type reference (`x: lib.Thing?`) and a
-        // qualified constructor call (`lib.Thing(5)`).
+        // qualified constructor call (`lib.Thing(5)`). `nested_internal` also recovers a DEEP FQN whose
+        // tail names a NESTED type (`a.b.Outer.Inner` → `a/b/Outer$Inner`), which the flat slash form misses.
         let fq = name.replace('.', "/");
-        self.syms.libraries.resolve_type(&fq).map(|_| fq)
+        self.nested_internal(&fq)
     }
 
     fn classpath_object_value(&self, name: &str) -> Option<String> {
@@ -4395,12 +4407,31 @@ impl<'a> Checker<'a> {
     /// is verified via the federated source's `resolve_type` (no guessing a non-existent `Obj`).
     fn imported_type_internal(&self, name: &str) -> Option<String> {
         if let Some(internal) = self.imports.get(name) {
-            if self.syms.libraries.resolve_type(internal).is_some() {
-                return Some(internal.clone());
+            if let Some(resolved) = self.nested_internal(internal) {
+                return Some(resolved);
             }
         }
         for pkg in &self.import_wildcards {
             let cand = wildcard_candidate(pkg, name);
+            if self.syms.libraries.resolve_type(&cand).is_some() {
+                return Some(cand);
+            }
+        }
+        None
+    }
+
+    /// Resolve a dotted import flattened to slashes (`import lib.Scope.Ws` → `lib/Scope/Ws`) to the
+    /// internal name that actually EXISTS on the classpath, treating trailing path segments as NESTED
+    /// classes (`lib/Scope$Ws`). A nested-type import can't be told apart from a package path
+    /// syntactically, so convert `/` → `$` from the RIGHT until `resolve_type` finds the class. Returns
+    /// the input unchanged when it already resolves (the common package-qualified case).
+    fn nested_internal(&self, internal: &str) -> Option<String> {
+        if self.syms.libraries.resolve_type(internal).is_some() {
+            return Some(internal.to_string());
+        }
+        let mut cand = internal.to_string();
+        while let Some(pos) = cand.rfind('/') {
+            cand.replace_range(pos..=pos, "$");
             if self.syms.libraries.resolve_type(&cand).is_some() {
                 return Some(cand);
             }
@@ -7865,6 +7896,20 @@ impl<'a> Checker<'a> {
     /// The result type of a constructor call `Name<A,…>(…)`: the class instantiated with the call's
     /// explicit type arguments (`ArrayList<Int>()` → `ArrayList<Int>`), so member/element types
     /// resolve. Falls back to the raw class type when there are no explicit type arguments.
+    /// Whether the federated library source can construct `internal` with `arg_tys` — a plain
+    /// constructor, or a SYNTHETIC default/marker overload (a value-class-typed parameter, or omitted
+    /// defaults). The lowerer (`lower_external_new`) fills the marker/placeholder/bitmask args to match.
+    fn library_ctor_resolves(&self, internal: &str, arg_tys: &[Ty]) -> bool {
+        crate::call_resolver::resolve_constructor(&*self.syms.libraries, internal, arg_tys)
+            .is_some()
+            || crate::call_resolver::resolve_synthetic_constructor(
+                &*self.syms.libraries,
+                internal,
+                arg_tys,
+            )
+            .is_some()
+    }
+
     fn ctor_result(&mut self, call: ExprId, internal: &str) -> Ty {
         if let Some(targs) = self.file.call_type_args.get(&call.0).cloned() {
             let args: Vec<Ty> = targs.iter().map(|r| self.resolve_ty(r)).collect();
@@ -9877,15 +9922,18 @@ impl<'a> Checker<'a> {
                             }
                         }
                     }
-                    // Constructing a classpath Java type: `Calc()` where `Calc` is imported.
-                    if let Some(internal) = self.imports.get(&fname).cloned() {
-                        if crate::call_resolver::resolve_constructor(
-                            &*self.syms.libraries,
-                            &internal,
-                            &arg_tys,
-                        )
-                        .is_some()
-                        {
+                    // Constructing a classpath Java type: `Calc()` where `Calc` is imported. Resolve the
+                    // EXPLICIT import through `nested_internal` so a NESTED type import (`import lib.Scope.Ws`
+                    // → `lib/Scope$Ws`) maps to the real `$`-qualified internal, not the flat `lib/Scope/Ws`.
+                    // Explicit-only (not `imported_type_internal`): a WILDCARD would resolve a mapped builtin
+                    // like `Throwable` to `kotlin/Throwable` ahead of the `class_names` `java/lang/Throwable`,
+                    // changing a nested ctor arg's type.
+                    if let Some(internal) = self
+                        .imports
+                        .get(&fname)
+                        .and_then(|i| self.nested_internal(i))
+                    {
+                        if self.library_ctor_resolves(&internal, &arg_tys) {
                             return self.ctor_result(call, &internal);
                         }
                     }
@@ -9894,13 +9942,7 @@ impl<'a> Checker<'a> {
                     // library owns any target-specific knowledge (e.g. the throwable-ctor shapes the
                     // JVM jimage can't surface) — the resolver no longer special-cases throwables.
                     if let Some(internal) = self.syms.class_names.get(&fname).cloned() {
-                        if crate::call_resolver::resolve_constructor(
-                            &*self.syms.libraries,
-                            &internal,
-                            &arg_tys,
-                        )
-                        .is_some()
-                        {
+                        if self.library_ctor_resolves(&internal, &arg_tys) {
                             return self.ctor_result(call, &internal);
                         }
                     }

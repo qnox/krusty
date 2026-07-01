@@ -1100,9 +1100,37 @@ pub fn resolve_constructor(
     internal: &str,
     args: &[Ty],
 ) -> Option<LibraryMember> {
-    let t = lib.resolve_type(internal)?;
+    let Some(t) = lib.resolve_type(internal) else {
+        crate::trace_compiler!(
+            "value_classes",
+            "resolve_constructor {internal} resolve_type=None args={args:?}"
+        );
+        return None;
+    };
+    crate::trace_compiler!(
+        "value_classes",
+        "resolve_constructor {internal} ctors={:?} args={args:?}",
+        t.constructors.iter().map(|m| &m.params).collect::<Vec<_>>()
+    );
     if let Some(m) = t.ctor(args) {
         return Some(m.clone());
+    }
+    // A constructor PARAMETER of value-class type erases to its underlying in the JVM `<init>` descriptor
+    // (`class Rec(val id: Vid, val n: Int)` → `<init>(Ljava/lang/String;I)V` for `Vid(String)`), but the
+    // call passes the value-class type itself (`Rec(Vid("x"), 1)` → arg `Vid`). Retry with each value-class
+    // argument erased to its underlying, mirroring the ABI the descriptor-read `ctor` params already carry.
+    let erased: Vec<Ty> = args
+        .iter()
+        .map(|a| lib.value_underlying(*a).unwrap_or(*a))
+        .collect();
+    if erased != args {
+        if let Some(m) = t.ctor(&erased) {
+            crate::trace_compiler!(
+                "value_classes",
+                "resolve_constructor {internal} matched via value-class-erased args {args:?} -> {erased:?}"
+            );
+            return Some(m.clone());
+        }
     }
     // A classpath `@JvmInline value class` exposes only a PRIVATE `<init>` (its public surface is the
     // static `box-impl`/`constructor-impl`), so `ctor` finds nothing. Construction is `X(u)` over the
@@ -1145,6 +1173,88 @@ pub fn resolve_constructor(
                 String::new(),
             ));
         }
+    }
+    None
+}
+
+/// A construction routed through kotlinc's SYNTHETIC `<init>` overload carrying a trailing
+/// `DefaultConstructorMarker` — two shapes krusty must fill at the call site:
+///   * a VALUE-CLASS-typed parameter forces `<init>(<erased-params…>, DefaultConstructorMarker)` (the
+///     real `<init>` is private), and the caller passes every arg plus a `null` marker (`mask: None`);
+///   * an omitted DEFAULT parameter uses `<init>(<params…>, int mask, DefaultConstructorMarker)`, and the
+///     caller passes the provided args, a placeholder per omitted param, the `mask`, then the `null` marker.
+pub struct SyntheticCtorCall {
+    /// The synthetic `<init>` descriptor to invoke.
+    pub descriptor: String,
+    /// The REAL (source) parameter types in descriptor form — a value-class param appears here as its
+    /// erased underlying. Provided args coerce to the leading `provided` of these; the rest are omitted.
+    pub real_params: Vec<Ty>,
+    /// Number of args the caller supplies (a prefix of `real_params`).
+    pub provided: usize,
+    /// The default bitmask (bit `i` set = param `i` omitted), present only in the default-arg shape.
+    pub mask: Option<i32>,
+}
+
+/// Resolve a classpath construction that a plain [`resolve_constructor`] can't match because it needs a
+/// synthetic `DefaultConstructorMarker` overload (a value-class param, or omitted defaults). See
+/// [`SyntheticCtorCall`]. `None` when no marker overload fits.
+pub fn resolve_synthetic_constructor(
+    lib: &dyn SymbolSource,
+    internal: &str,
+    args: &[Ty],
+) -> Option<SyntheticCtorCall> {
+    let t = lib.resolve_type(internal)?;
+    let is_marker = |ty: &Ty| matches!(ty, Ty::Obj(n, _) if *n == "kotlin/jvm/internal/DefaultConstructorMarker");
+    // A value-class argument is passed as its erased underlying (`Vid` arg → `String` param).
+    let erased: Vec<Ty> = args
+        .iter()
+        .map(|a| lib.value_underlying(*a).unwrap_or(*a))
+        .collect();
+    for m in &t.constructors {
+        if m.params.last().is_none_or(|p| !is_marker(p)) {
+            continue;
+        }
+        let leading = &m.params[..m.params.len() - 1];
+        // Tell the default-mask shape (`…, int mask, marker`) from the value-class-param shape (`…, marker`):
+        // a mask int is present iff dropping it leaves the params of a SIBLING non-marker ctor (the public
+        // primary). Otherwise the trailing int is a real parameter.
+        let (real_params, has_mask): (&[Ty], bool) = if leading.last() == Some(&Ty::Int)
+            && !leading.is_empty()
+            && t.constructors.iter().any(|s| {
+                s.params.last().is_none_or(|p| !is_marker(p))
+                    && s.params == leading[..leading.len() - 1]
+            }) {
+            (&leading[..leading.len() - 1], true)
+        } else {
+            (leading, false)
+        };
+        if erased.len() > real_params.len() {
+            continue;
+        }
+        // No mask ⇒ no defaults ⇒ every parameter must be supplied.
+        if !has_mask && erased.len() != real_params.len() {
+            continue;
+        }
+        if !erased
+            .iter()
+            .zip(real_params)
+            .all(|(a, p)| crate::libraries::arg_assignable(p, a))
+        {
+            continue;
+        }
+        let mask = has_mask.then(|| (erased.len()..real_params.len()).map(|j| 1i32 << j).sum());
+        crate::trace_compiler!(
+            "value_classes",
+            "resolve_synthetic_constructor {internal} desc={} real={real_params:?} provided={} mask={mask:?}",
+            m.descriptor,
+            erased.len()
+        );
+        return Some(SyntheticCtorCall {
+            descriptor: m.descriptor.clone(),
+            real_params: real_params.to_vec(),
+            provided: erased.len(),
+            mask,
+        });
     }
     None
 }
