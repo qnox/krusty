@@ -712,6 +712,24 @@ fn wildcard_candidate(pkg: &str, name: &str) -> String {
 ///     joined with `$` (kotlinc's nesting separator).
 ///
 /// `None` (never a guess) when neither form resolves on the classpath.
+/// Resolve `internal` (a dotted name flattened to slashes, e.g. `lib/Outer/Ws`) to the internal that
+/// actually EXISTS, treating trailing path segments as NESTED classes (`lib/Outer$Ws`) — convert `/` → `$`
+/// from the RIGHT until `resolve_type` finds it. Returns the input unchanged when it already resolves. The
+/// signature-phase free-function twin of the checker's `Checker::nested_internal`.
+fn resolve_nested_internal(internal: &str, libraries: &dyn CompilerPlatform) -> Option<String> {
+    if libraries.resolve_type(internal).is_some() {
+        return Some(internal.to_string());
+    }
+    let mut cand = internal.to_string();
+    while let Some(pos) = cand.rfind('/') {
+        cand.replace_range(pos..=pos, "$");
+        if libraries.resolve_type(&cand).is_some() {
+            return Some(cand);
+        }
+    }
+    None
+}
+
 fn resolve_dotted_classpath_type(
     name: &str,
     class_names: &ClassNames,
@@ -750,24 +768,16 @@ fn resolve_dotted_classpath_type(
             }
         }
     }
-    // (b) Fully-qualified package path (`lib.Thing` → `lib/Thing`).
+    // (b) Fully-qualified package path (`lib.Thing` → `lib/Thing`), or a deep FQN whose TAIL names a
+    // NESTED type (`a.b.Outer.Inner` → `a/b/Outer$Inner`) when the outer prefix isn't itself imported/in
+    // scope (so branch (a) couldn't seed it) — `resolve_nested_internal` tries the flat form then the
+    // `/` → `$` variants.
     let fq = name.replace('.', "/");
-    if libraries.resolve_type(&fq).is_some() {
-        crate::trace_compiler!("resolve", "dotted FQ type {name} -> {fq}");
-        return Some(fq);
+    let resolved = resolve_nested_internal(&fq, libraries);
+    if let Some(r) = &resolved {
+        crate::trace_compiler!("resolve", "dotted FQ type {name} -> {r}");
     }
-    // A deep FQN whose TAIL names a NESTED type (`a.b.Outer.Inner` → `a/b/Outer$Inner`) when the outer
-    // prefix isn't itself imported/in-scope (so branch (a) couldn't seed it): convert trailing `/` → `$`
-    // from the right until the classpath resolves it.
-    let mut cand = fq;
-    while let Some(pos) = cand.rfind('/') {
-        cand.replace_range(pos..=pos, "$");
-        if libraries.resolve_type(&cand).is_some() {
-            crate::trace_compiler!("resolve", "dotted FQ nested type {name} -> {cand}");
-            return Some(cand);
-        }
-    }
-    None
+    resolved
 }
 
 /// Map a single JVM field descriptor to a krusty `Ty` (the v0 supported set).
@@ -898,11 +908,13 @@ pub fn collect_signatures_with_cp(
                 if class_names.contains_key(name.as_str()) || user_defined.contains(&name) {
                     continue;
                 }
-                // An explicit import wins; else a wildcard package that actually provides the type.
+                // An explicit import wins; else a wildcard package that actually provides the type. The
+                // explicit import is resolved through `resolve_nested_internal` so a NESTED-type import
+                // (`import lib.Outer.Ws` → flat `lib/Outer/Ws`) registers the real `lib/Outer$Ws` — needed
+                // for a TYPE-position use (`fun f(x: Ws)`), which the signature phase resolves via this map.
                 let full = imap
                     .get(&name)
-                    .filter(|f| libraries.resolve_type(f).is_some())
-                    .cloned()
+                    .and_then(|f| resolve_nested_internal(f, &*libraries))
                     .or_else(|| {
                         wilds
                             .iter()
@@ -4426,17 +4438,7 @@ impl<'a> Checker<'a> {
     /// syntactically, so convert `/` → `$` from the RIGHT until `resolve_type` finds the class. Returns
     /// the input unchanged when it already resolves (the common package-qualified case).
     fn nested_internal(&self, internal: &str) -> Option<String> {
-        if self.syms.libraries.resolve_type(internal).is_some() {
-            return Some(internal.to_string());
-        }
-        let mut cand = internal.to_string();
-        while let Some(pos) = cand.rfind('/') {
-            cand.replace_range(pos..=pos, "$");
-            if self.syms.libraries.resolve_type(&cand).is_some() {
-                return Some(cand);
-            }
-        }
-        None
+        resolve_nested_internal(internal, &*self.syms.libraries)
     }
 
     /// If a bare type name `n` denotes a reference type usable as an UNBOUND class literal `n::class`,
