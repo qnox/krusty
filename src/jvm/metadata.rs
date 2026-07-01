@@ -831,6 +831,71 @@ pub fn class_constructor_param_names(ci: &ClassInfo) -> Vec<Vec<String>> {
     out
 }
 
+/// Which constructor parameters DECLARE A DEFAULT VALUE (`ValueParameter.flags` bit 1), one `Vec<bool>`
+/// per constructor, parallel to [`class_constructor_param_names`]. Lets a NAMED classpath ctor call omit
+/// a defaulted parameter (`Cfg(a = 1, c = "x")`) — the omitted slot lowers to the `<init>$default` synthetic.
+pub fn class_constructor_param_defaults(ci: &ClassInfo) -> Vec<Vec<bool>> {
+    let mut out = Vec::new();
+    if ci.kotlin_d1.is_empty() {
+        return out;
+    }
+    let bytes = decode_d1(&ci.kotlin_d1);
+    let (_st_body, msg_body) = split_d1(&bytes);
+    let mut pb = Pb { b: msg_body, i: 0 };
+    while !pb.at_end() {
+        let Some(tag) = pb.varint() else { break };
+        match (tag >> 3, tag & 7) {
+            (8, 2) => {
+                // Class.constructor (repeated Constructor)
+                let Some(len) = pb.varint() else { break };
+                let Some(cbody) = pb.bytes(len as usize) else {
+                    break;
+                };
+                let mut cp = Pb { b: cbody, i: 0 };
+                let mut defaults = Vec::new();
+                while !cp.at_end() {
+                    let Some(ct) = cp.varint() else { break };
+                    match (ct >> 3, ct & 7) {
+                        (2, 2) => {
+                            // Constructor.value_parameter (repeated ValueParameter)
+                            let Some(vlen) = cp.varint() else { break };
+                            let Some(vbody) = cp.bytes(vlen as usize) else {
+                                break;
+                            };
+                            let mut vp = Pb { b: vbody, i: 0 };
+                            let mut vflags = 0u64;
+                            while !vp.at_end() {
+                                let Some(vt) = vp.varint() else { break };
+                                match (vt >> 3, vt & 7) {
+                                    (1, 0) => vflags = vp.varint().unwrap_or(0), // ValueParameter.flags
+                                    (_, w) => {
+                                        if vp.skip(w).is_none() {
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                            defaults.push(vflags & DECLARES_DEFAULT_VALUE_BIT != 0);
+                        }
+                        (_, w) => {
+                            if cp.skip(w).is_none() {
+                                break;
+                            }
+                        }
+                    }
+                }
+                out.push(defaults);
+            }
+            (_, w) => {
+                if pb.skip(w).is_none() {
+                    break;
+                }
+            }
+        }
+    }
+    out
+}
+
 /// The simple name of a class's companion object (`Class.companion_object_name = 4`), e.g. `Companion`.
 /// `None` if the class has no companion.
 pub fn class_companion_name(ci: &ClassInfo) -> Option<String> {

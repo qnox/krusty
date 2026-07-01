@@ -31,7 +31,7 @@ fn classpath_synthetic_ctor_and_nested_type_resolution() {
          @JvmInline value class Vid(val v: String)\n\
          class Rec(val id: Vid, val n: Int)\n\
          object Scope { class Ws(val s: String) }\n\
-         class Cfg(val a: Int, val b: Int = 9)\n",
+         class Cfg(val a: Int, val b: Int = 9, val c: String = \"z\")\n",
     )
     .unwrap();
     fs::write(
@@ -66,9 +66,13 @@ fn classpath_synthetic_ctor_and_nested_type_resolution() {
         \x20 val w = Ws(\"nested\")\n\
         \x20 if (w.s != \"nested\") return \"fail d2: ${w.s}\"\n\
         \x20 val c = Cfg(1)\n\
-        \x20 if (c.a != 1 || c.b != 9) return \"fail d4: ${c.a},${c.b}\"\n\
+        \x20 if (c.a != 1 || c.b != 9 || c.c != \"z\") return \"fail d4: ${c.a},${c.b},${c.c}\"\n\
         \x20 val c2 = Cfg(3, 4)\n\
         \x20 if (c2.a != 3 || c2.b != 4) return \"fail d4b: ${c2.a},${c2.b}\"\n\
+        \x20 val c3 = Cfg(a = 1, c = \"x\")\n\
+        \x20 if (c3.a != 1 || c3.b != 9 || c3.c != \"x\") return \"fail e4: ${c3.a},${c3.b},${c3.c}\"\n\
+        \x20 val c4 = Cfg(c = \"q\", a = 5)\n\
+        \x20 if (c4.a != 5 || c4.b != 9 || c4.c != \"q\") return \"fail e4b: ${c4.a},${c4.b},${c4.c}\"\n\
         \x20 return \"OK\"\n\
         }\n";
     let classes = common::compile_in_process(main, "Main", &cp, Some(&jdk))

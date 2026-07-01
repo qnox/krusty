@@ -8101,11 +8101,14 @@ impl<'a> Checker<'a> {
                                     && !o.call_sig.param_names.is_empty()
                             })
                         // A CLASSPATH CONSTRUCTOR whose `@Metadata` records parameter names
-                        // (`Point(y = 2, x = 1)` against a data/plain class from a dependency).
+                        // (`Point(y = 2, x = 1)`, or `Cfg(a = 1, c = "x")` omitting a defaulted `b`,
+                        // against a data/plain class from a dependency). `constructor_named_params` returns
+                        // the FULL parameter list for a ctor with at least `args.len()` params, so an
+                        // omitted-default named call is still recognized.
                         || self
                             .classpath_class_internal(n)
                             .and_then(|i| {
-                                self.syms.libraries.constructor_param_names(&i, args.len())
+                                self.syms.libraries.constructor_named_params(&i, args.len())
                             })
                             .is_some()
                 }
@@ -9871,27 +9874,35 @@ impl<'a> Checker<'a> {
                         }
                         return self.ctor_result(call, &cls.internal);
                     }
-                    // A CLASSPATH constructor with NAMED arguments (`Point(y = 2, x = 1)`): reorder the
-                    // labels onto parameter positions via the ctor's `@Metadata` parameter names, then
-                    // resolve/type-check positionally. (Named call supplies every argument — no defaults.)
+                    // A CLASSPATH constructor with NAMED arguments (`Point(y = 2, x = 1)`, or
+                    // `Cfg(a = 1, c = "x")` OMITTING a defaulted `b`): reorder the labels onto parameter
+                    // positions via the ctor's `@Metadata` names + per-parameter default flags. Every
+                    // parameter supplied ⇒ a plain constructor; an omitted defaulted parameter ⇒ the
+                    // `<init>$default` synthetic (the lowerer fills the placeholder + bitmask + marker).
                     if arg_names.is_some() {
                         if let Some(internal) = self.classpath_class_internal(&fname) {
-                            if let Some(param_names) = self
+                            if let Some((param_names, param_defaults)) = self
                                 .syms
                                 .libraries
-                                .constructor_param_names(&internal, args.len())
+                                .constructor_named_params(&internal, args.len())
                             {
+                                let required = param_defaults.iter().filter(|d| !**d).count();
                                 match map_call_args(
                                     args,
                                     arg_names.as_deref(),
                                     &param_names,
-                                    param_names.len(),
-                                    &[],
+                                    required,
+                                    &param_defaults,
                                 ) {
                                     Ok(slots) => {
+                                        // Type-check every PROVIDED argument (omitted-default slots are `None`).
+                                        for &a in slots.iter().flatten() {
+                                            self.expr(a);
+                                        }
                                         if let Some(sel) =
-                                            slots.into_iter().collect::<Option<Vec<ExprId>>>()
+                                            slots.iter().copied().collect::<Option<Vec<ExprId>>>()
                                         {
+                                            // All parameters supplied — a plain constructor.
                                             let tys: Vec<Ty> = sel
                                                 .iter()
                                                 .map(|a| self.expr_types[a.0 as usize])
@@ -9913,6 +9924,15 @@ impl<'a> Checker<'a> {
                                                 }
                                                 return self.ctor_result(call, &internal);
                                             }
+                                        } else if crate::call_resolver::synthetic_default_ctor(
+                                            &*self.syms.libraries,
+                                            &internal,
+                                        )
+                                        .is_some()
+                                        {
+                                            // A defaulted parameter was omitted — the `<init>$default`
+                                            // synthetic (verified present) fills it; the lowerer emits it.
+                                            return self.ctor_result(call, &internal);
                                         }
                                     }
                                     Err(msg) => self

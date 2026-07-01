@@ -115,6 +115,19 @@ pub trait SymbolSource {
         None
     }
 
+    /// The primary constructor's SOURCE parameter names PLUS a per-parameter "declares a default value"
+    /// flag, for a constructor whose parameter count is at least `min_arity` — so a NAMED call may OMIT a
+    /// defaulted parameter (`Cfg(a = 1, c = "x")` for `Cfg(a, b = 9, c = "z")`). Unlike
+    /// [`Self::constructor_param_names`] (exact arity), this returns the FULL parameter list; the omitted
+    /// slots lower to kotlinc's `<init>$default` synthetic. `None` when no such constructor is recorded.
+    fn constructor_named_params(
+        &self,
+        _internal: &str,
+        _min_arity: usize,
+    ) -> Option<(Vec<String>, Vec<bool>)> {
+        None
+    }
+
     /// Whether the classpath `@JvmInline value class` named `internal` exposes a DEFAULTED primary
     /// constructor — kotlinc emits a `constructor-impl$default` synthetic exactly then. A zero-arg
     /// construction `Id()` (all params defaulted) is realized through that synthetic; `false` when the

@@ -1195,6 +1195,27 @@ pub struct SyntheticCtorCall {
     pub mask: Option<i32>,
 }
 
+/// The classpath default-value synthetic constructor `<init>(<params…>, int mask, DefaultConstructorMarker)`
+/// for `internal`, as `(descriptor, real_params)` — the parameter types BEFORE the mask+marker. Found
+/// independently of the call arguments (a NAMED call with an omitted default supplies args out of order),
+/// by locating the marker overload whose params, minus the trailing `int` mask, equal a sibling non-marker
+/// constructor's (the public primary). `None` when the class has no such default synthetic.
+pub fn synthetic_default_ctor(lib: &dyn SymbolSource, internal: &str) -> Option<(String, Vec<Ty>)> {
+    let t = lib.resolve_type(internal)?;
+    let is_marker = |ty: &Ty| matches!(ty, Ty::Obj(n, _) if *n == "kotlin/jvm/internal/DefaultConstructorMarker");
+    for m in &t.constructors {
+        let p = &m.params;
+        if p.len() < 2 || !is_marker(&p[p.len() - 1]) || p[p.len() - 2] != Ty::Int {
+            continue;
+        }
+        let real = &p[..p.len() - 2];
+        if t.constructors.iter().any(|s| s.params == *real) {
+            return Some((m.descriptor.clone(), real.to_vec()));
+        }
+    }
+    None
+}
+
 /// Resolve a classpath construction that a plain [`resolve_constructor`] can't match because it needs a
 /// synthetic `DefaultConstructorMarker` overload (a value-class param, or omitted defaults). See
 /// [`SyntheticCtorCall`]. `None` when no marker overload fits.
