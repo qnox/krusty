@@ -443,7 +443,8 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
             // Implemented interfaces (`: I, J`): a file interface, or a classpath interface
             // (`Runnable`, `Comparator`) resolved through the library set; else bail.
             let mut iface_internals = Vec::new();
-            for st in &c.supertypes {
+            for st_ref in &c.supertypes {
+                let st = &st_ref.name;
                 let is_file_iface = file.decls.iter().any(|&d| matches!(file.decl(d), Decl::Class(ic) if ic.name == *st && ic.is_interface()));
                 if is_file_iface {
                     iface_internals.push(class_internal(file, st));
@@ -901,6 +902,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                                     type_params: vec![],
                                     param_tparams: vec![],
                                     ret_tparam: Some(tp.clone()),
+                                    supers: Vec::new(),
                                 },
                             );
                         }
@@ -945,6 +947,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                                         type_params: vec![],
                                         param_tparams: vec![Some(tp.clone())],
                                         ret_tparam: None,
+                                        supers: Vec::new(),
                                     },
                                 );
                             }
@@ -2538,7 +2541,8 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     // at an interface-typed call (e.g. an interface `val ordinal` mapped to `getOrdinal`
                     // that the enum doesn't provide). A classpath-interface supertype (abstractness not
                     // checked here) bails conservatively.
-                    for st in &c.supertypes {
+                    for st_ref in &c.supertypes {
+                        let st = &st_ref.name;
                         let Some(ic) = file.decls.iter().find_map(|&d| match file.decl(d) {
                             Decl::Class(ic) if ic.name == *st && ic.is_interface() => Some(ic),
                             _ => None,
@@ -17812,6 +17816,34 @@ fn class_generic_sig(
     c: &ast::ClassDecl,
     libraries: &dyn CompilerPlatform,
 ) -> Option<crate::ir::IrGenericSig> {
+    // A CLASS with a PARAMETERIZED supertype (`object O : Operation<Result<Int>>`): carry the superclass
+    // + interfaces as `Ty`s (with their type arguments) so the backend can format a class `Signature` a
+    // cross-module reader uses to recover a member's concrete generic return. Independent of own type params.
+    if c.supertypes.iter().any(|s| !s.targs.is_empty()) {
+        let mut supers: Vec<Ty> = Vec::new();
+        // Superclass first (kotlin/Any → the backend's Object when no base). Base-class type args aren't
+        // preserved yet (the base is a bare name), so a base class is emitted raw.
+        supers.push(match &c.base_class {
+            Some(b) => Ty::obj(&resolve_super_internal(b, file, libraries)?),
+            None => Ty::obj("kotlin/Any"),
+        });
+        for st in &c.supertypes {
+            supers.push(supertype_ty(st, file, libraries)?);
+        }
+        let type_params = if c.type_params.is_empty() {
+            Vec::new()
+        } else {
+            type_param_bounds_ir(file, &c.type_params, &c.type_param_bounds, libraries)?
+        };
+        crate::trace_compiler!("value_classes", "class {} supers = {:?}", c.name, supers);
+        return Some(crate::ir::IrGenericSig {
+            type_params,
+            param_tparams: Vec::new(),
+            ret_tparam: None,
+            supers,
+        });
+    }
+    // The original case: a generic class with only own type parameters and no supertypes.
     if c.type_params.is_empty() || c.base_class.is_some() || !c.supertypes.is_empty() {
         return None;
     }
@@ -17819,7 +17851,48 @@ fn class_generic_sig(
         type_params: type_param_bounds_ir(file, &c.type_params, &c.type_param_bounds, libraries)?,
         param_tparams: Vec::new(),
         ret_tparam: None,
+        supers: Vec::new(),
     })
+}
+
+/// A supertype / type-argument `TypeRef` resolved to a platform-agnostic `Ty` carrying its type arguments
+/// (`Operation<Result<Int>>` → `Obj("Operation", [Obj("kotlin/Result", [Int])])`). `None` when a name
+/// can't be resolved to an internal (then no class `Signature` is emitted — a safe fallback).
+fn supertype_ty(
+    tr: &ast::TypeRef,
+    file: &ast::File,
+    libraries: &dyn CompilerPlatform,
+) -> Option<Ty> {
+    if let Some(t) = Ty::from_name(&tr.name) {
+        return Some(t); // a builtin scalar / String / Any / Unit
+    }
+    let internal = resolve_super_internal(&tr.name, file, libraries)?;
+    if tr.targs.is_empty() {
+        return Some(Ty::obj(&internal));
+    }
+    let args: Vec<Ty> = tr
+        .targs
+        .iter()
+        .map(|a| supertype_ty(a, file, libraries))
+        .collect::<Option<_>>()?;
+    Some(Ty::obj_args(&internal, &args))
+}
+
+/// Resolve a supertype / type-argument simple name to a krusty-canonical internal name: a class declared
+/// in THIS file, else a classpath type via the platform's seeded name→internal map. `None` if unresolvable.
+fn resolve_super_internal(
+    name: &str,
+    file: &ast::File,
+    libraries: &dyn CompilerPlatform,
+) -> Option<String> {
+    if file
+        .decls
+        .iter()
+        .any(|&d| matches!(file.decl(d), Decl::Class(ic) if ic.name == name))
+    {
+        return Some(class_internal(file, name));
+    }
+    libraries.seed_shared().0.get(name).cloned()
 }
 
 /// For a generic class, list `(field name, type-parameter name)` for each property whose declared type
@@ -17882,6 +17955,7 @@ fn fn_generic_sig(
         type_params: type_param_bounds_ir(file, tps, &f.type_param_bounds, libraries)?,
         param_tparams,
         ret_tparam,
+        supers: Vec::new(),
     })
 }
 

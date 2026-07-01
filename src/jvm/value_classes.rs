@@ -1414,6 +1414,14 @@ pub fn lower_value_classes(ir: &mut IrFile) -> bool {
             BoxOp::Box(x) | BoxOp::BoxNull(x) | BoxOp::Unbox(x) => x,
         };
         if ir.external_value_classes.contains_key(x) {
+            // Skipped: an external value class is held UNBOXED. This is where `"$r"`/`r == q`/`r.hashCode()`
+            // on a classpath value class currently diverge from kotlinc (which observes the boxed form's
+            // `toString`/`equals`/`hashCode`) — the box/unbox op is dropped rather than routed to the
+            // classpath `-impl`. Traced so the divergence is diagnosable on the real corpus.
+            crate::trace_compiler!(
+                "value_classes",
+                "SKIP external-vc box/unbox op on {x} at id={id}"
+            );
             continue;
         }
         match op {

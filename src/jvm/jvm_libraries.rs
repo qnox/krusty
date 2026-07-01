@@ -1844,9 +1844,20 @@ impl SymbolSource for JvmLibraries {
                                     base
                                 }
                             } else {
-                                self.member_return(receiver, &m.name, &m.params)
-                                    .or_else(|| generic_sig.as_ref().and_then(concrete_generic_ret))
-                                    .unwrap_or(m.ret)
+                                let recovered =
+                                    self.member_return(receiver, &m.name, &m.params).or_else(
+                                        || generic_sig.as_ref().and_then(concrete_generic_ret),
+                                    );
+                                crate::trace_compiler!(
+                                    "resolve",
+                                    "member return {}.{}: recovered={:?} erased={:?} (gsig={})",
+                                    receiver.name(),
+                                    m.name,
+                                    recovered,
+                                    m.ret,
+                                    generic_sig.is_some()
+                                );
+                                recovered.unwrap_or(m.ret)
                             };
                             // Source parameter NAMES (from the class's `@Metadata`) for named-argument
                             // resolution. A member's `params` are the logical params (no receiver), so the

@@ -529,7 +529,10 @@ pub struct ClassDecl {
     /// outer type (the first field + first constructor parameter). `Some(outer_class_simple_name)`.
     pub inner_of: Option<String>,
     /// Implemented interface names from a supertype list (`class C : I1, I2`).
-    pub supertypes: Vec<String>,
+    /// Implemented interfaces (NOT the base class — that's `base_class`), each as a full `TypeRef` so its
+    /// type arguments are preserved (`Operation<Result<Int>>`), for the class `Signature` attribute and
+    /// any downstream generic-supertype reasoning. Read `.name` for the bare simple name.
+    pub supertypes: Vec<TypeRef>,
     /// Interface delegation `: Iface by delegate` — `(iface simple name, delegate variable name,
     /// has_primitive_targ)`. The class forwards each of `Iface`'s methods to `delegate` (a `val`
     /// constructor-parameter field). `has_primitive_targ` is true when the delegated interface is
