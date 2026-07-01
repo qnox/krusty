@@ -123,5 +123,8 @@ if [ -f "$logdir/FAILED" ]; then
 fi
 
 echo "=== SLOWEST TEST BINARIES ==="
-sort -rn "$logdir/TIMINGS" | head -20 | awk '{printf "%7.2fs  %s\n", $1 / 1000, $2}'
+# awk limits to 20 rows (rather than `| head -20`): head closing the pipe early makes `sort` take
+# SIGPIPE, which under `set -o pipefail` fails this cosmetic diagnostic — and thus the whole (green)
+# run — with 141. Letting awk consume all of sort's output keeps the pipeline exit status 0.
+sort -rn "$logdir/TIMINGS" | awk 'NR <= 20 {printf "%7.2fs  %s\n", $1 / 1000, $2}'
 echo "all test binaries passed"
