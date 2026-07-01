@@ -8200,7 +8200,14 @@ impl<'a> Checker<'a> {
                                 &name,
                                 &arg_tys,
                             ) {
-                                Some(m) => m.ret,
+                                Some(m) => {
+                                    // Type the class-name receiver as its own type so the LOWERING emits
+                                    // the static call (`invokestatic <internal>.name`) via the classpath
+                                    // static path — a Java class's static method (`Logf.make(x)`) or a
+                                    // Kotlin `@JvmStatic`/companion static.
+                                    self.set(receiver, Ty::obj(&internal));
+                                    m.ret
+                                }
                                 // Not a companion STATIC — try a companion-object INSTANCE method
                                 // (`Json.encodeToString(…)`/`Random.nextInt(…)` = `<Class>.Default.m(…)`):
                                 // resolve `m` as an instance method on the companion's type.

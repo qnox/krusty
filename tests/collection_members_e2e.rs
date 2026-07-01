@@ -66,3 +66,21 @@ fn numeric_reduction_extensions_by_element_type() {
 }\n";
     assert_eq!(run(SRC).expect("numeric reductions compile + run"), "OK");
 }
+
+#[test]
+fn numeric_reductions_cover_element_types_and_average() {
+    // Broader element/return coverage: `Double`/`Long` sums (distinct return types), `average()` over
+    // an `Int` list (returns `Double`), and a `sum()` that flows straight into arithmetic. Each binds a
+    // DIFFERENT `@JvmName` overload by element (`sumOfDouble`/`sumOfLong`/`averageOfInt`).
+    const SRC: &str = "fun box(): String {\n\
+    val d: Double = listOf(1.5, 2.5, 3.0).sum()\n\
+    val l: Long = listOf(10L, 20L, 30L).sum()\n\
+    val avg: Double = listOf(2, 4, 6).average()\n\
+    val chained: Int = listOf(1, 2, 3, 4).sum() * 2\n\
+    return if (d == 7.0 && l == 60L && avg == 4.0 && chained == 20) \"OK\" else \"FAIL: $d/$l/$avg/$chained\"\n\
+}\n";
+    assert_eq!(
+        run(SRC).expect("reduction element/return coverage compiles + runs"),
+        "OK"
+    );
+}
