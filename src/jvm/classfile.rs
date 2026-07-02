@@ -1430,4 +1430,347 @@ mod tests {
         code.ireturn();
         assert_eq!(code.max_stack, 2);
     }
+
+    // ---- ConstPool interning / dedup across every entry kind ----
+
+    #[test]
+    fn constpool_dedup_all_kinds() {
+        let mut cp = ConstPool::default();
+        // Each helper returns a 1-based index; a second identical intern must return the same index,
+        // while a distinct value must return a fresh one.
+        assert_eq!(cp.integer(42), cp.integer(42));
+        assert_ne!(cp.integer(42), cp.integer(43));
+        assert_eq!(cp.long(7), cp.long(7));
+        assert_eq!(cp.float(1.5), cp.float(1.5));
+        assert_eq!(cp.double(2.5), cp.double(2.5));
+        assert_eq!(cp.string("hi"), cp.string("hi"));
+        assert_ne!(cp.string("hi"), cp.string("bye"));
+        assert_eq!(cp.class("a/B"), cp.class("a/B"));
+        assert_eq!(cp.name_and_type("m", "()V"), cp.name_and_type("m", "()V"));
+        assert_ne!(cp.name_and_type("m", "()V"), cp.name_and_type("m", "()I"));
+        assert_eq!(
+            cp.methodref("a/B", "m", "()V"),
+            cp.methodref("a/B", "m", "()V")
+        );
+        assert_eq!(
+            cp.interface_methodref("a/I", "m", "()V"),
+            cp.interface_methodref("a/I", "m", "()V")
+        );
+        assert_eq!(cp.fieldref("a/B", "f", "I"), cp.fieldref("a/B", "f", "I"));
+        assert_eq!(
+            cp.method_handle_static("a/B", "m", "()V"),
+            cp.method_handle_static("a/B", "m", "()V")
+        );
+        assert_eq!(cp.method_type("()V"), cp.method_type("()V"));
+        assert_eq!(
+            cp.invoke_dynamic(0, "m", "()V"),
+            cp.invoke_dynamic(0, "m", "()V")
+        );
+    }
+
+    #[test]
+    fn constpool_class_maps_kotlin_any_to_object() {
+        // A `Class` entry interned under a Kotlin built-in name must carry the JVM name, and must dedup
+        // with the already-mapped JVM form.
+        let mut cp = ConstPool::default();
+        let a = cp.class("kotlin/Any");
+        let b = cp.class("java/lang/Object");
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn constpool_composite_reuses_leaf_utf8() {
+        // methodref interns class + name_and_type, which in turn intern Utf8 leaves. Re-using the same
+        // leaves (a fieldref onto the same class) must not allocate a fresh Class/Utf8 slot for `a/B`.
+        let mut cp = ConstPool::default();
+        let class_first = cp.class("a/B");
+        let _mref = cp.methodref("a/B", "m", "()V");
+        let class_again = cp.class("a/B");
+        assert_eq!(class_first, class_again);
+    }
+
+    #[test]
+    fn double_takes_two_slots() {
+        let mut cp = ConstPool::default();
+        let _d = cp.double(3.0);
+        let after = cp.utf8("next");
+        assert_eq!(after, 3); // double consumed slots 1,2
+    }
+
+    // ---- int/long push encodings (assert the exact opcodes) ----
+
+    #[test]
+    fn push_int_encodings() {
+        let mut cw = ClassWriter::new("FooKt", "java/lang/Object");
+        let mut code = CodeBuilder::new(0);
+        code.push_int(-1, &mut cw); // iconst_m1 = 0x02
+        code.push_int(5, &mut cw); // iconst_5 = 0x08
+        code.push_int(100, &mut cw); // bipush 100
+        code.push_int(1000, &mut cw); // sipush 1000
+        code.push_int(100000, &mut cw); // ldc
+        let b = &code.bytes;
+        assert_eq!(b[0], 0x02); // iconst_m1
+        assert_eq!(b[1], 0x08); // iconst_5
+        assert_eq!(b[2], 0x10); // bipush
+        assert_eq!(b[3], 100);
+        assert_eq!(b[4], 0x11); // sipush
+        assert_eq!(u16::from_be_bytes([b[5], b[6]]), 1000);
+        assert_eq!(b[7], 0x12); // ldc (single-byte index)
+    }
+
+    #[test]
+    fn push_long_encodings() {
+        let mut cw = ClassWriter::new("FooKt", "java/lang/Object");
+        let mut code = CodeBuilder::new(0);
+        code.push_long(0, &mut cw); // lconst_0 = 0x09
+        code.push_long(1, &mut cw); // lconst_1 = 0x0a
+        code.push_long(99, &mut cw); // ldc2_w = 0x14
+        assert_eq!(code.bytes[0], 0x09);
+        assert_eq!(code.bytes[1], 0x0a);
+        assert_eq!(code.bytes[2], 0x14);
+        assert_eq!(code.max_stack, 6); // three longs live at peak (2 words each)
+    }
+
+    // ---- compact vs wide load/store forms ----
+
+    #[test]
+    fn load_store_compact_vs_wide() {
+        let mut code = CodeBuilder::new(6);
+        code.iload(0); // iload_0 = 0x1a
+        code.iload(3); // iload_3 = 0x1d
+        code.iload(4); // iload <u1> = 0x15 0x04
+        code.astore(2); // astore_2 = 0x4d (astore_0 = 0x3b + (0x3a-0x36)*4 = 0x4b)
+        code.astore(5); // astore <u1> = 0x3a 0x05
+        let b = &code.bytes;
+        assert_eq!(b[0], 0x1a);
+        assert_eq!(b[1], 0x1d);
+        assert_eq!(b[2], 0x15);
+        assert_eq!(b[3], 0x04);
+        assert_eq!(b[4], 0x4d);
+        assert_eq!(b[5], 0x3a);
+        assert_eq!(b[6], 0x05);
+    }
+
+    #[test]
+    fn store_grows_max_locals() {
+        let mut code = CodeBuilder::new(1);
+        code.lstore(4); // long occupies slots 4,5 => max_locals must reach 6
+        assert_eq!(code.max_locals, 6);
+    }
+
+    #[test]
+    fn iinc_encoding_and_locals() {
+        let mut code = CodeBuilder::new(1);
+        code.iinc(7, -3);
+        assert_eq!(code.bytes, vec![0x84, 7, 0xfd]); // -3 as u8 = 0xfd
+        assert_eq!(code.max_locals, 8);
+    }
+
+    // ---- branch / goto fixups ----
+
+    #[test]
+    fn goto_backward_branch_offset() {
+        let mut code = CodeBuilder::new(0);
+        let top = code.new_label();
+        code.bind(top); // offset 0
+        code.ret_void(); // 1 byte at offset 0
+        code.goto(top); // goto at offset 1, operand at 2..4
+        code.link();
+        // opcode at pos 1, operand relative to opcode: target(0) - 1 = -1
+        let off = i16::from_be_bytes([code.bytes[2], code.bytes[3]]);
+        assert_eq!(off, -1);
+        assert_eq!(code.bytes[1], 0xa7); // goto
+    }
+
+    #[test]
+    fn forward_ifeq_branch_offset() {
+        let mut code = CodeBuilder::new(1);
+        code.iload(0); // offset 0 (iload_0, 1 byte)
+        let end = code.new_label();
+        code.ifeq(end); // opcode at 1, operand 2..4
+        code.ret_void(); // offset 4
+        code.bind(end); // offset 5
+        code.link();
+        let off = i16::from_be_bytes([code.bytes[2], code.bytes[3]]);
+        assert_eq!(off, 4); // target(5) - opcode_pos(1) = 4
+        assert_eq!(code.bytes[1], 0x99); // ifeq
+    }
+
+    // ---- invokeinterface count byte ----
+
+    #[test]
+    fn invokeinterface_count_byte() {
+        let mut cw = ClassWriter::new("FooKt", "java/lang/Object");
+        let iref = cw.interface_methodref("a/I", "m", "(II)V");
+        let mut code = CodeBuilder::new(0);
+        code.set_stack(3); // receiver + two int args on stack
+        code.invokeinterface(iref, 2, 0); // arg_words = 2
+        let b = &code.bytes;
+        assert_eq!(b[0], 0xb9);
+        assert_eq!(u16::from_be_bytes([b[1], b[2]]), iref);
+        assert_eq!(b[3], 3); // count = arg_words + receiver = 3
+        assert_eq!(b[4], 0); // trailing zero
+    }
+
+    #[test]
+    fn invokedynamic_encoding() {
+        let mut cw = ClassWriter::new("FooKt", "java/lang/Object");
+        let mh = cw.method_handle_static("a/B", "boot", "()V");
+        let bsm = cw.add_bootstrap(mh, vec![]);
+        let indy = cw.invoke_dynamic(bsm, "apply", "()La/I;");
+        let mut code = CodeBuilder::new(0);
+        code.invokedynamic(indy, 0, 1);
+        let b = &code.bytes;
+        assert_eq!(b[0], 0xba);
+        assert_eq!(u16::from_be_bytes([b[1], b[2]]), indy);
+        assert_eq!(b[3], 0);
+        assert_eq!(b[4], 0);
+        assert_eq!(code.max_stack, 1);
+    }
+
+    // ---- StackMapTable frame building ----
+
+    #[test]
+    fn stackmap_none_without_frames() {
+        let code = CodeBuilder::new(0);
+        assert!(code.build_stackmap().is_none());
+        assert!(!code.has_frames());
+    }
+
+    #[test]
+    fn stackmap_full_frame_deltas() {
+        let mut code = CodeBuilder::new(1);
+        code.iload(0); // 0
+        let l1 = code.new_label();
+        code.ifeq(l1); // 1..4
+        code.iload(0); // 4
+        code.ret_void(); // 5
+        code.bind(l1); // offset 6
+        code.ret_void(); // 6 — keeps l1 in-range
+        code.add_frame_if_new(l1, vec![VerifType::Integer], vec![]);
+        assert!(code.has_frames());
+        let sm = code.build_stackmap().unwrap();
+        // number_of_entries = 1
+        assert_eq!(u16::from_be_bytes([sm[0], sm[1]]), 1);
+        assert_eq!(sm[2], 255); // full_frame tag
+        assert_eq!(u16::from_be_bytes([sm[3], sm[4]]), 6); // first delta = offset 6
+        assert_eq!(u16::from_be_bytes([sm[5], sm[6]]), 1); // one local
+        assert_eq!(sm[7], 1); // Integer verif type
+        assert_eq!(u16::from_be_bytes([sm[8], sm[9]]), 0); // empty stack
+    }
+
+    #[test]
+    fn stackmap_add_frame_first_wins() {
+        let mut code = CodeBuilder::new(1);
+        code.ret_void();
+        let l = code.new_label();
+        code.bind(l);
+        code.add_frame_if_new(l, vec![VerifType::Integer], vec![]);
+        code.add_frame_if_new(l, vec![VerifType::Float], vec![]); // ignored
+        assert_eq!(code.frames.len(), 1);
+        assert_eq!(code.frames[0].1.len(), 1);
+        // First registration (Integer) wins; the later Float attempt is dropped.
+        assert!(code.frames[0].1[0] == VerifType::Integer);
+    }
+
+    #[test]
+    fn stackmap_object_verif_type_written() {
+        let mut cw = ClassWriter::new("FooKt", "java/lang/Object");
+        let cidx = cw.class_ref("java/lang/String");
+        let mut out = Vec::new();
+        write_verif_type(&VerifType::Object(cidx), &mut out);
+        assert_eq!(out[0], 7);
+        assert_eq!(u16::from_be_bytes([out[1], out[2]]), cidx);
+    }
+
+    // ---- bootstrap-method dedup ----
+
+    #[test]
+    fn bootstrap_dedup() {
+        let mut cw = ClassWriter::new("FooKt", "java/lang/Object");
+        let mh = cw.method_handle_static("a/B", "boot", "()V");
+        let arg = cw.method_type("()V");
+        let i0 = cw.add_bootstrap(mh, vec![arg]);
+        let i0_again = cw.add_bootstrap(mh, vec![arg]);
+        let i1 = cw.add_bootstrap(mh, vec![]); // different args => new entry
+        assert_eq!(i0, 0);
+        assert_eq!(i0_again, 0);
+        assert_eq!(i1, 1);
+    }
+
+    // ---- max_stack / widen ----
+
+    #[test]
+    fn widen_emits_conversions() {
+        use crate::types::Ty;
+        let mut c = CodeBuilder::new(0);
+        c.widen(Ty::Int, Ty::Long); // i2l = 0x85
+        c.widen(Ty::Int, Ty::Double); // i2d = 0x87
+        c.widen(Ty::Long, Ty::Double); // l2d = 0x8a
+        c.widen(Ty::Float, Ty::Double); // f2d = 0x8d
+        assert_eq!(c.bytes, vec![0x85, 0x87, 0x8a, 0x8d]);
+        // Equal from/to is a no-op.
+        let before = c.bytes.len();
+        c.widen(Ty::Int, Ty::Int);
+        assert_eq!(c.bytes.len(), before);
+    }
+
+    #[test]
+    fn set_stack_raises_max_stack() {
+        let mut c = CodeBuilder::new(0);
+        c.set_stack(4);
+        assert_eq!(c.stack_height(), 4);
+        assert_eq!(c.max_stack, 4);
+        c.set_stack(1); // lowering does not shrink max
+        assert_eq!(c.max_stack, 4);
+    }
+
+    // ---- splice_inline ----
+
+    #[test]
+    fn splice_inline_stack_and_locals() {
+        // Simulate: two int args (2 words) already on stack; body internally peaks at 3 words, stores
+        // args into locals up to slot 5, and returns 1 word.
+        let mut c = CodeBuilder::new(2);
+        c.set_stack(2); // args present
+        let body = vec![0x60]; // arbitrary body bytes (iadd)
+        c.splice_inline(&body, 3, 5, 2, 1);
+        assert_eq!(c.max_locals, 5);
+        // baseline = 2 - 2 = 0; peak = max(0+2, 0+3) = 3
+        assert_eq!(c.max_stack, 3);
+        assert_eq!(c.stack_height(), 1); // baseline + ret_words
+        assert_eq!(&c.bytes, &body);
+    }
+
+    // ---- resolved_exceptions drops empty ranges ----
+
+    #[test]
+    fn resolved_exceptions_filters_empty_ranges() {
+        let mut c = CodeBuilder::new(0);
+        let start = c.new_label();
+        let end = c.new_label();
+        let handler = c.new_label();
+        c.bind(start); // 0
+        c.ret_void(); // 0
+        c.bind(end); // 1
+        c.bind(handler); // 1
+        c.add_exception(start, end, handler, 0); // start(0) < end(1): kept
+                                                 // A degenerate empty range start==end must be dropped.
+        c.add_exception(end, end, handler, 0);
+        let resolved = c.resolved_exceptions();
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0], (0, 1, 1, 0));
+    }
+
+    // ---- full build -> field/method attribute shape (const value + signature) ----
+
+    #[test]
+    fn abstract_method_has_no_code() {
+        let mut cw = ClassWriter::new("a/I", "java/lang/Object");
+        cw.set_access(ACC_PUBLIC | ACC_INTERFACE | ACC_ABSTRACT);
+        cw.add_abstract_method(ACC_PUBLIC | ACC_ABSTRACT, "m", "()V");
+        let bytes = cw.finish();
+        // Round-trips through the reader as an abstract method (no Code body available).
+        assert!(super::super::classreader::read_method_code(&bytes, "m", "()V").is_none());
+    }
 }
