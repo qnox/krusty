@@ -1048,10 +1048,10 @@ pub fn for_each_child(exprs: &[IrExpr], e: ExprId, f: &mut impl FnMut(ExprId)) {
 /// Whether a top-level `foo$default` synthetic can be SAFELY emitted for `fid`. The function name must be
 /// unmangled — a value-class-parameter-mangled `foo-<hash>` needs box/unbox adaptation the plain facade
 /// stub doesn't model — and every registered default expression must be simple enough to re-emit inside
-/// the stub: no lambda, no object/value-class construction, no `invoke`, no value-class-mangled call, and
-/// no reference to a value index beyond the parameters (a default that spilled a temp or captured a
-/// closure). Conservative — an unknown shape is rejected, so the caller falls back to the unchanged
-/// inline call-site fill (never a miscompile).
+/// the stub: no lambda, no `invoke`, no value-class-mangled call, and no reference to a value index beyond
+/// the parameters (a default that spilled a temp or captured a closure). A plain OBJECT/`new` construction
+/// (`filters: F = F()`) IS allowed — the stub re-emits it like any other value. Conservative — an unknown
+/// shape is rejected, so the caller falls back to the unchanged inline call-site fill (never a miscompile).
 pub fn toplevel_default_stub_safe(ir: &IrFile, fid: u32) -> bool {
     let f = &ir.functions[fid as usize];
     if f.name.contains('-') {
@@ -1094,12 +1094,25 @@ fn default_expr_stub_safe(ir: &IrFile, e: ExprId, n: u32) -> bool {
         IrExpr::GetValue(i) if *i >= n => return false,
         IrExpr::SetValue { var, .. } if *var >= n => return false,
         IrExpr::Variable { index, .. } if *index >= n => return false,
-        IrExpr::Lambda { .. }
-        | IrExpr::New { .. }
-        | IrExpr::NewExternal { .. }
-        | IrExpr::NewCrossFile { .. }
-        | IrExpr::RefNew { .. }
-        | IrExpr::InvokeFunction { .. } => return false,
+        // A plain `new`/object construction (`f: F = F()`) is fine — the stub re-emits it. But a
+        // VALUE/inline-class construction is NOT: it erases to its unboxed underlying (and mangles the
+        // owning function's `$default` name), which the plain static stub doesn't box/unbox — so keep it
+        // excluded (the file falls back to the inline call-site fill / skip).
+        IrExpr::New { class, .. }
+            if ir.classes.get(*class as usize).is_some_and(|c| c.is_value) =>
+        {
+            return false
+        }
+        IrExpr::NewExternal { internal, .. } | IrExpr::NewCrossFile { internal, .. }
+            if ir.external_value_classes.contains_key(internal) =>
+        {
+            return false
+        }
+        // A closure (`Lambda`/`RefNew`) or an `invoke` reaches captured/spilled state the static stub
+        // layout doesn't carry.
+        IrExpr::Lambda { .. } | IrExpr::RefNew { .. } | IrExpr::InvokeFunction { .. } => {
+            return false
+        }
         IrExpr::Call {
             callee: Callee::Static { name, .. },
             ..
