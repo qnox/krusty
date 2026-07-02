@@ -648,12 +648,33 @@ fn suspend_return_from_gsig(gsig: &GenericSig) -> Option<Ty> {
                     name,
                 )))
             }
-            other => Some(crate::call_resolver::gsig_to_ty(
-                other,
-                &std::collections::HashMap::new(),
+            // A generic class (`List<Item>`) keeps its arguments via the general converter, then any JVM
+            // collection name the signature spelled in Java terms (`java/util/List`) is canonicalized to
+            // its Kotlin type (`kotlin/collections/List`) so a `.map { … }` / `.first()` extension — keyed
+            // on the Kotlin collection — resolves on the recovered suspend result (a member such as `.size`
+            // already resolved on either form).
+            other => Some(canonicalize_jvm_collections(
+                crate::call_resolver::gsig_to_ty(other, &std::collections::HashMap::new()),
             )),
         },
         _ => None,
+    }
+}
+
+/// Recursively rewrite each JVM collection interface in `ty` (`java/util/List<T>` → its Kotlin
+/// `kotlin/collections/List<T>`), leaving every other type and the type arguments' own structure intact.
+fn canonicalize_jvm_collections(ty: Ty) -> Ty {
+    match ty {
+        Ty::Obj(name, args) => {
+            let kname = super::jvm_class_map::jvm_collection_to_kotlin(name).unwrap_or(name);
+            let cargs: Vec<Ty> = args
+                .iter()
+                .map(|a| canonicalize_jvm_collections(*a))
+                .collect();
+            Ty::obj_args(kname, &cargs)
+        }
+        Ty::Array(e) => Ty::array(canonicalize_jvm_collections(*e)),
+        other => other,
     }
 }
 
@@ -1925,6 +1946,37 @@ impl SymbolSource for JvmLibraries {
                                     .as_ref()
                                     .and_then(suspend_return_from_gsig)
                                     .unwrap_or(m.ret);
+                                // `suspend_return_from_gsig` canonicalized a collection return to its
+                                // READ-ONLY Kotlin form (the JVM signature erases read-only vs mutable).
+                                // Recover the EXACT source form (`List` vs `MutableList`, …) from the
+                                // member's `@Metadata` return classifier — which preserves it — keeping the
+                                // gsig's (already-canonicalized) type arguments, so `.add(…)` on a declared
+                                // `MutableList` return still resolves.
+                                let base = match (
+                                    base,
+                                    self.cp.metadata_member_return_class(
+                                        &cn,
+                                        &m.name,
+                                        params.len(),
+                                    ),
+                                ) {
+                                    // Override the outer name ONLY when the metadata classifier is the SAME
+                                    // JVM collection as the gsig-recovered base — i.e. its read-only/mutable
+                                    // sibling (`List`/`MutableList` both erase to `java/util/List`). This
+                                    // guarantees the same collection family and arity, so keeping the gsig's
+                                    // type arguments is sound; a divergent classifier (stale metadata) is
+                                    // ignored rather than forming an arity-mismatched type.
+                                    (Ty::Obj(base_name, args), Some(meta_cls))
+                                        if meta_cls.starts_with("kotlin/collections/")
+                                            && super::jvm_class_map::to_jvm_internal(&meta_cls)
+                                                == super::jvm_class_map::to_jvm_internal(
+                                                    base_name,
+                                                ) =>
+                                    {
+                                        Ty::obj_args(&meta_cls, args)
+                                    }
+                                    (b, _) => b,
+                                };
                                 crate::trace_compiler!(
                                     "suspend",
                                     "suspend return {cn}.{}: gsig={:?} base={:?} nullable={}",

@@ -72,6 +72,27 @@ pub fn kotlin_builtin_to_jvm(simple: &str) -> Option<&'static str> {
     })
 }
 
+/// The Kotlin (read-only) collection internal name for a JVM collection interface a generic signature
+/// spells in Java terms (`java/util/List` → `kotlin/collections/List`). The inverse of the collection
+/// half of [`kotlin_builtin_to_jvm`], mapping to the READ-ONLY form (a return type is read-only by
+/// default, and every read-only extension also applies to the mutable subtype). Needed where a signature
+/// carries the erased JVM name but the front end resolves members/extensions on the Kotlin type — e.g. a
+/// `suspend fun`'s `Continuation<List<T>>` return, recovered so `.map { … }` resolves. `None` for a
+/// non-collection JVM name.
+pub fn jvm_collection_to_kotlin(internal: &str) -> Option<&'static str> {
+    Some(match internal {
+        "java/lang/Iterable" => "kotlin/collections/Iterable",
+        "java/util/Iterator" => "kotlin/collections/Iterator",
+        "java/util/ListIterator" => "kotlin/collections/ListIterator",
+        "java/util/Collection" => "kotlin/collections/Collection",
+        "java/util/List" => "kotlin/collections/List",
+        "java/util/Set" => "kotlin/collections/Set",
+        "java/util/Map" => "kotlin/collections/Map",
+        "java/util/Map$Entry" => "kotlin/collections/Map$Entry",
+        _ => return None,
+    })
+}
+
 /// Map a Kotlin built-in type's **simple name** to its FRONT-END Kotlin internal name. Differs from
 /// [`kotlin_builtin_to_jvm`] only for the COLLECTION types: the front end keeps `List` vs `MutableList`
 /// distinct (`kotlin/collections/List` vs `…/MutableList`) so the read-only/mutable distinction survives

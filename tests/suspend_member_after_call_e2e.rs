@@ -6,10 +6,6 @@
 //! hoists each suspension to a preceding bound temp (`val tmp = r.all(); return tmp.size`), the shape the
 //! flattener handles. Running a coroutine needs a driver, so this asserts the bodies LOWER end-to-end
 //! (they were skipped before), which is where the bug lived; the library is built by real kotlinc.
-//! (A kotlin-`collections` EXTENSION or indexing on a suspend collection result — `r.all().first()`,
-//! `r.all()[0]` — is a separate gap: the suspend return is recovered in its erased JVM form
-//! `java/util/List`, on which the `kotlin.collections` extensions aren't keyed. A MEMBER access —
-//! `.size`, `.isEmpty()` — resolves and is covered here.)
 use std::path::PathBuf;
 mod common;
 

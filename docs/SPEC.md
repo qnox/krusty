@@ -1028,9 +1028,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `GetField` (receiver) — all of which evaluate their children unconditionally before the access — hoisting
   each suspension to a preceding `val tmp = <call>` temp the flattener handles (`return r.all().size` →
   `val tmp = r.all(); return tmp.size`). Conditional nodes (`if`/`when`/elvis) and lambda bodies are left in
-  place. Test: `tests/suspend_member_after_call_e2e.rs`. (A `kotlin.collections` EXTENSION/indexing on a
-  suspend collection result — `r.all().first()` — remains a separate gap: the suspend return is recovered in
-  its erased `java/util/List` form, on which those extensions aren't keyed.)
+  place. Test: `tests/suspend_member_after_call_e2e.rs`.
+- **A `suspend` body applying a kotlin.collections INLINE HOF / extension to a suspend call's collection
+  result (`val m = r.cfg(); m.map { … }`, `r.cfg().first()`, `m[0]`).** Two fixes. (1) The suspend return
+  was recovered in erased JVM form (`Continuation<List<T>>` spells the collection in Java terms —
+  `java/util/List`), on which the kotlin.collections extensions aren't keyed. `suspend_return_from_gsig`
+  now canonicalizes a JVM collection to its Kotlin type (`jvm_class_map::jvm_collection_to_kotlin`), and
+  the member walk recovers the EXACT read-only-vs-mutable form (`List` vs `MutableList`) from the member's
+  `@Metadata` return classifier (`Classpath::metadata_member_return_class`) — which the JVM signature
+  erases — so a declared `MutableList` return keeps `.add(…)`. (2) The CPS `box_returns` pass hit its
+  `_ => false` fallthrough on a LAMBDA argument in `return m.map { … }`, bailing the state machine; a lambda
+  argument is a value (its body is a separate impl function, not a `return` of the suspend fn) so it is now
+  a leaf there (varargs recurse into their elements). Test: `tests/suspend_collection_hof_e2e.rs`.
 - **A fully-qualified top-level function call `a.b.helper(args)`.** The callee is a dotted path whose prefix
   is a PACKAGE (its leftmost segment not a value in scope, via `dotted_root`) and whose last segment is a
   top-level function of that package (compiled to `a/b/<File>Kt`). The checker resolves the overload with

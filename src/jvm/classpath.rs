@@ -634,6 +634,26 @@ impl Classpath {
             .is_some_and(|f| f.ret_nullable)
     }
 
+    /// The SOURCE return-type CLASSIFIER of the classpath member `internal.name/arity`, from its
+    /// `@Metadata` (`kotlin/collections/List` vs `kotlin/collections/MutableList`, …) — the read-only vs
+    /// mutable distinction the JVM signature erases (both to `java/util/List`). Used to recover the exact
+    /// collection type of a `suspend` member's return; `None` when no such member/return is recorded.
+    pub fn metadata_member_return_class(
+        &self,
+        internal: &str,
+        name: &str,
+        arity: usize,
+    ) -> Option<String> {
+        self.find(internal)
+            .map(|ci| super::metadata::class_functions(&ci))
+            .into_iter()
+            .flatten()
+            .find(|f| {
+                (f.jvm_name == name || f.kotlin_name == name) && f.value_param_types.len() == arity
+            })
+            .and_then(|f| f.ret_class)
+    }
+
     /// The SOURCE value-parameter names of the classpath class `internal`'s constructor of `arity`
     /// parameters, from its `@Metadata` — for mapping NAMED constructor arguments onto positions. Prefers
     /// an exact-arity constructor (a class may have several); `None` if none records complete names.
