@@ -4,3 +4,5 @@ docs/badges/
 # LLVM source-based coverage counter dumps (see scripts/coverage.sh); can land in the tree root if a
 # coverage-instrumented binary runs without LLVM_PROFILE_FILE pointed at target/.
 *.profraw
+# cargo-mutants run output
+mutants.out/
