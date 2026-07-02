@@ -1419,3 +1419,1295 @@ fn unop(op: UnOp) -> &'static str {
         UnOp::Plus => "plus",
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sp() -> Span {
+        Span::new(0, 0)
+    }
+
+    fn tref(name: &str) -> TypeRef {
+        TypeRef {
+            name: name.to_string(),
+            nullable: false,
+            arg: None,
+            targs: Vec::new(),
+            span: sp(),
+            fun_params: Vec::new(),
+            fun_has_receiver: false,
+            fun_suspend: false,
+        }
+    }
+
+    fn class_decl(name: &str, kind: ClassKind, modality: Modality) -> ClassDecl {
+        ClassDecl {
+            name: name.to_string(),
+            annotations: Vec::new(),
+            annotation_args: Vec::new(),
+            type_params: Vec::new(),
+            type_param_bounds: Vec::new(),
+            props: Vec::new(),
+            methods: Vec::new(),
+            companion_methods: Vec::new(),
+            companion_props: Vec::new(),
+            companion_base: None,
+            companion_base_args: Vec::new(),
+            companion_supertypes: Vec::new(),
+            body_props: Vec::new(),
+            init_order: Vec::new(),
+            kind,
+            is_data: false,
+            is_value: false,
+            enum_entries: Vec::new(),
+            is_fun_interface: false,
+            modality,
+            inner_of: None,
+            supertypes: Vec::new(),
+            delegations: Vec::new(),
+            delegation_exprs: Vec::new(),
+            base_class: None,
+            base_args: Vec::new(),
+            secondary_ctors: Vec::new(),
+            has_primary_ctor: true,
+            span: sp(),
+        }
+    }
+
+    // ---- BinOp / UnOp helpers ------------------------------------------------
+
+    #[test]
+    fn arith_operator_name_roundtrips() {
+        let pairs = [
+            (BinOp::Add, "plus"),
+            (BinOp::Sub, "minus"),
+            (BinOp::Mul, "times"),
+            (BinOp::Div, "div"),
+            (BinOp::Rem, "rem"),
+        ];
+        for (op, name) in pairs {
+            assert_eq!(op.arith_operator_name(), Some(name));
+            assert_eq!(BinOp::from_arith_operator_name(name), Some(op));
+        }
+    }
+
+    #[test]
+    fn arith_operator_name_none_for_non_arith() {
+        for op in [
+            BinOp::Eq,
+            BinOp::Ne,
+            BinOp::Lt,
+            BinOp::Le,
+            BinOp::Gt,
+            BinOp::Ge,
+            BinOp::And,
+            BinOp::Or,
+            BinOp::RefEq,
+            BinOp::RefNe,
+        ] {
+            assert_eq!(op.arith_operator_name(), None);
+        }
+        assert_eq!(BinOp::from_arith_operator_name("nope"), None);
+        assert_eq!(BinOp::from_arith_operator_name(""), None);
+    }
+
+    // ---- Modality accessors --------------------------------------------------
+
+    #[test]
+    fn modality_default_is_final() {
+        let m = Modality::default();
+        assert_eq!(m, Modality::Final);
+        assert!(!m.is_abstract());
+        assert!(!m.is_open());
+        assert!(!m.is_sealed());
+    }
+
+    #[test]
+    fn modality_open() {
+        let m = Modality::Open;
+        assert!(!m.is_abstract());
+        assert!(m.is_open());
+        assert!(!m.is_sealed());
+    }
+
+    #[test]
+    fn modality_abstract() {
+        let m = Modality::Abstract;
+        assert!(m.is_abstract());
+        assert!(!m.is_open());
+        assert!(!m.is_sealed());
+    }
+
+    #[test]
+    fn modality_sealed_is_abstract_and_open() {
+        let m = Modality::Sealed;
+        assert!(m.is_abstract());
+        assert!(m.is_open());
+        assert!(m.is_sealed());
+    }
+
+    // ---- ClassDecl accessors -------------------------------------------------
+
+    #[test]
+    fn class_decl_kind_accessors() {
+        let c = class_decl("C", ClassKind::Class, Modality::Final);
+        assert!(!c.is_interface());
+        assert!(!c.is_object());
+        assert!(!c.is_enum());
+        assert!(!c.is_annotation());
+
+        let i = class_decl("I", ClassKind::Interface, Modality::Abstract);
+        assert!(i.is_interface());
+        let o = class_decl("O", ClassKind::Object, Modality::Final);
+        assert!(o.is_object());
+        let e = class_decl("E", ClassKind::Enum, Modality::Final);
+        assert!(e.is_enum());
+        let a = class_decl("A", ClassKind::Annotation, Modality::Abstract);
+        assert!(a.is_annotation());
+    }
+
+    #[test]
+    fn class_decl_modality_accessors_delegate() {
+        let sealed = class_decl("S", ClassKind::Class, Modality::Sealed);
+        assert!(sealed.is_abstract());
+        assert!(sealed.is_open());
+        assert!(sealed.is_sealed());
+
+        let plain = class_decl("P", ClassKind::Class, Modality::Final);
+        assert!(!plain.is_abstract());
+        assert!(!plain.is_open());
+        assert!(!plain.is_sealed());
+    }
+
+    // ---- File arena add/get + spread ----------------------------------------
+
+    #[test]
+    fn file_arena_add_and_get() {
+        let mut f = File::default();
+        let a = f.add_expr(Expr::IntLit(1), sp());
+        let b = f.add_expr(Expr::IntLit(2), sp());
+        assert_eq!(a, ExprId(0));
+        assert_eq!(b, ExprId(1));
+        assert!(matches!(f.expr(a), Expr::IntLit(1)));
+        assert!(matches!(f.expr(b), Expr::IntLit(2)));
+
+        let s = f.add_stmt(Stmt::Expr(a), sp());
+        assert_eq!(s, StmtId(0));
+        assert!(matches!(f.stmt(s), Stmt::Expr(_)));
+
+        let d = f.add_decl(Decl::Property(PropDecl {
+            name: "x".to_string(),
+            receiver: None,
+            ty: None,
+            is_var: false,
+            init: Some(a),
+            is_lateinit: false,
+            getter: None,
+            setter: None,
+            is_const: false,
+            is_abstract: false,
+            delegate: None,
+            span: sp(),
+        }));
+        assert_eq!(d, DeclId(0));
+        assert!(matches!(f.decl(d), Decl::Property(_)));
+        assert_eq!(f.expr_spans.len(), 2);
+        assert_eq!(f.stmt_spans.len(), 1);
+    }
+
+    #[test]
+    fn file_is_spread_arg() {
+        let mut f = File::default();
+        let a = f.add_expr(Expr::Name("arr".to_string()), sp());
+        let b = f.add_expr(Expr::Name("plain".to_string()), sp());
+        f.spread_arg_ids.insert(a.0);
+        assert!(f.is_spread_arg(a));
+        assert!(!f.is_spread_arg(b));
+    }
+
+    // ---- any_child_expr ------------------------------------------------------
+
+    // Predicate that returns true only for the marked target id.
+    fn hits(target: ExprId) -> impl FnMut(ExprId) -> bool {
+        move |id| id == target
+    }
+
+    #[test]
+    fn any_child_expr_leaf_is_false() {
+        let mut f = File::default();
+        let lit = f.add_expr(Expr::IntLit(7), sp());
+        let name = f.add_expr(Expr::Name("z".to_string()), sp());
+        let mut yes = |_: ExprId| true;
+        let mut ys = |_: StmtId| true;
+        assert!(!f.any_child_expr(lit, &mut yes, &mut ys));
+        assert!(!f.any_child_expr(name, &mut yes, &mut ys));
+    }
+
+    #[test]
+    fn any_child_expr_binary_both_branches() {
+        let mut f = File::default();
+        let l = f.add_expr(Expr::IntLit(1), sp());
+        let r = f.add_expr(Expr::IntLit(2), sp());
+        let bin = f.add_expr(
+            Expr::Binary {
+                op: BinOp::Add,
+                lhs: l,
+                rhs: r,
+            },
+            sp(),
+        );
+        let mut fs = |_: StmtId| false;
+        // matches lhs
+        let mut h = hits(l);
+        assert!(f.any_child_expr(bin, &mut h, &mut fs));
+        // matches rhs
+        let mut h = hits(r);
+        assert!(f.any_child_expr(bin, &mut h, &mut fs));
+        // matches neither
+        let mut none = |_: ExprId| false;
+        assert!(!f.any_child_expr(bin, &mut none, &mut fs));
+    }
+
+    #[test]
+    fn any_child_expr_unary_and_operand_group() {
+        let mut f = File::default();
+        let op = f.add_expr(Expr::BoolLit(true), sp());
+        let un = f.add_expr(
+            Expr::Unary {
+                op: UnOp::Not,
+                operand: op,
+            },
+            sp(),
+        );
+        let notnull = f.add_expr(Expr::NotNull { operand: op }, sp());
+        let mut fs = |_: StmtId| false;
+        let mut h = hits(op);
+        assert!(f.any_child_expr(un, &mut h, &mut fs));
+        let mut h = hits(op);
+        assert!(f.any_child_expr(notnull, &mut h, &mut fs));
+    }
+
+    #[test]
+    fn any_child_expr_call_callee_and_args() {
+        let mut f = File::default();
+        let callee = f.add_expr(Expr::Name("g".to_string()), sp());
+        let arg0 = f.add_expr(Expr::IntLit(1), sp());
+        let arg1 = f.add_expr(Expr::IntLit(2), sp());
+        let call = f.add_expr(
+            Expr::Call {
+                callee,
+                args: vec![arg0, arg1],
+            },
+            sp(),
+        );
+        let mut fs = |_: StmtId| false;
+        let mut h = hits(callee);
+        assert!(f.any_child_expr(call, &mut h, &mut fs));
+        let mut h = hits(arg1);
+        assert!(f.any_child_expr(call, &mut h, &mut fs));
+        let mut none = |_: ExprId| false;
+        assert!(!f.any_child_expr(call, &mut none, &mut fs));
+    }
+
+    #[test]
+    fn any_child_expr_safecall_args_optional() {
+        let mut f = File::default();
+        let recv = f.add_expr(Expr::Name("r".to_string()), sp());
+        let arg = f.add_expr(Expr::IntLit(9), sp());
+        let with_args = f.add_expr(
+            Expr::SafeCall {
+                receiver: recv,
+                name: "m".to_string(),
+                args: Some(vec![arg]),
+            },
+            sp(),
+        );
+        let no_args = f.add_expr(
+            Expr::SafeCall {
+                receiver: recv,
+                name: "p".to_string(),
+                args: None,
+            },
+            sp(),
+        );
+        let mut fs = |_: StmtId| false;
+        let mut h = hits(arg);
+        assert!(f.any_child_expr(with_args, &mut h, &mut fs));
+        // no_args: arg not reachable, receiver is
+        let mut h = hits(arg);
+        assert!(!f.any_child_expr(no_args, &mut h, &mut fs));
+        let mut h = hits(recv);
+        assert!(f.any_child_expr(no_args, &mut h, &mut fs));
+    }
+
+    #[test]
+    fn any_child_expr_return_and_callableref_optionals() {
+        let mut f = File::default();
+        let v = f.add_expr(Expr::IntLit(3), sp());
+        let ret_some = f.add_expr(
+            Expr::Return {
+                value: Some(v),
+                label: None,
+            },
+            sp(),
+        );
+        let ret_none = f.add_expr(
+            Expr::Return {
+                value: None,
+                label: Some("l".to_string()),
+            },
+            sp(),
+        );
+        let recv = f.add_expr(Expr::Name("r".to_string()), sp());
+        let cref_recv = f.add_expr(
+            Expr::CallableRef {
+                receiver: Some(recv),
+                name: "m".to_string(),
+            },
+            sp(),
+        );
+        let cref_none = f.add_expr(
+            Expr::CallableRef {
+                receiver: None,
+                name: "top".to_string(),
+            },
+            sp(),
+        );
+        let mut fs = |_: StmtId| false;
+        let mut yes = |_: ExprId| true;
+        let mut h = hits(v);
+        assert!(f.any_child_expr(ret_some, &mut h, &mut fs));
+        assert!(!f.any_child_expr(ret_none, &mut yes, &mut fs));
+        let mut h = hits(recv);
+        assert!(f.any_child_expr(cref_recv, &mut h, &mut fs));
+        assert!(!f.any_child_expr(cref_none, &mut yes, &mut fs));
+    }
+
+    #[test]
+    fn any_child_expr_if_when_block_template_try() {
+        let mut f = File::default();
+        let cond = f.add_expr(Expr::BoolLit(true), sp());
+        let then_b = f.add_expr(Expr::IntLit(1), sp());
+        let else_b = f.add_expr(Expr::IntLit(2), sp());
+        let iff = f.add_expr(
+            Expr::If {
+                cond,
+                then_branch: then_b,
+                else_branch: Some(else_b),
+            },
+            sp(),
+        );
+        let iff_noelse = f.add_expr(
+            Expr::If {
+                cond,
+                then_branch: then_b,
+                else_branch: None,
+            },
+            sp(),
+        );
+
+        let subj = f.add_expr(Expr::IntLit(5), sp());
+        let armc = f.add_expr(Expr::IntLit(5), sp());
+        let armb = f.add_expr(Expr::IntLit(6), sp());
+        let when = f.add_expr(
+            Expr::When {
+                subject: Some(subj),
+                arms: vec![WhenArm {
+                    conditions: vec![armc],
+                    body: armb,
+                }],
+            },
+            sp(),
+        );
+
+        let trailing = f.add_expr(Expr::IntLit(8), sp());
+        let inner_e = f.add_expr(Expr::IntLit(9), sp());
+        let inner_s = f.add_stmt(Stmt::Expr(inner_e), sp());
+        let block = f.add_expr(
+            Expr::Block {
+                stmts: vec![inner_s],
+                trailing: Some(trailing),
+            },
+            sp(),
+        );
+
+        let tpart = f.add_expr(Expr::IntLit(11), sp());
+        let tmpl = f.add_expr(
+            Expr::Template(vec![
+                TemplatePart::Str("a".to_string()),
+                TemplatePart::Expr(tpart),
+            ]),
+            sp(),
+        );
+
+        let tbody = f.add_expr(Expr::IntLit(20), sp());
+        let cbody = f.add_expr(Expr::IntLit(21), sp());
+        let fbody = f.add_expr(Expr::IntLit(22), sp());
+        let tri = f.add_expr(
+            Expr::Try {
+                body: tbody,
+                catches: vec![CatchClause {
+                    name: "e".to_string(),
+                    ty: tref("E"),
+                    body: cbody,
+                }],
+                finally: Some(fbody),
+            },
+            sp(),
+        );
+
+        let mut fs_false = |_: StmtId| false;
+
+        let mut h = hits(else_b);
+        assert!(f.any_child_expr(iff, &mut h, &mut fs_false));
+        let mut h = hits(else_b);
+        assert!(!f.any_child_expr(iff_noelse, &mut h, &mut fs_false));
+        let mut h = hits(cond);
+        assert!(f.any_child_expr(iff_noelse, &mut h, &mut fs_false));
+
+        let mut h = hits(subj);
+        assert!(f.any_child_expr(when, &mut h, &mut fs_false));
+        let mut h = hits(armc);
+        assert!(f.any_child_expr(when, &mut h, &mut fs_false));
+        let mut h = hits(armb);
+        assert!(f.any_child_expr(when, &mut h, &mut fs_false));
+
+        // block: trailing via fe
+        let mut h = hits(trailing);
+        assert!(f.any_child_expr(block, &mut h, &mut fs_false));
+        // block: stmt via fs
+        let mut none = |_: ExprId| false;
+        let mut fs_hit = |s: StmtId| s == inner_s;
+        assert!(f.any_child_expr(block, &mut none, &mut fs_hit));
+
+        let mut h = hits(tpart);
+        assert!(f.any_child_expr(tmpl, &mut h, &mut fs_false));
+        let mut none = |_: ExprId| false;
+        assert!(!f.any_child_expr(tmpl, &mut none, &mut fs_false));
+
+        let mut h = hits(cbody);
+        assert!(f.any_child_expr(tri, &mut h, &mut fs_false));
+        let mut h = hits(fbody);
+        assert!(f.any_child_expr(tri, &mut h, &mut fs_false));
+        let mut h = hits(tbody);
+        assert!(f.any_child_expr(tri, &mut h, &mut fs_false));
+    }
+
+    #[test]
+    fn any_child_expr_ranges_index_member() {
+        let mut f = File::default();
+        let lo = f.add_expr(Expr::IntLit(0), sp());
+        let hi = f.add_expr(Expr::IntLit(9), sp());
+        let rng = f.add_expr(
+            Expr::RangeTo {
+                lo,
+                hi,
+                kind: RangeKind::Through,
+            },
+            sp(),
+        );
+        let val = f.add_expr(Expr::IntLit(3), sp());
+        let inr = f.add_expr(
+            Expr::InRange {
+                value: val,
+                start: lo,
+                end: hi,
+                kind: RangeKind::Until,
+                negated: false,
+            },
+            sp(),
+        );
+        let arr = f.add_expr(Expr::Name("a".to_string()), sp());
+        let idx = f.add_expr(Expr::IntLit(1), sp());
+        let index = f.add_expr(
+            Expr::Index {
+                array: arr,
+                index: idx,
+            },
+            sp(),
+        );
+        let recv = f.add_expr(Expr::Name("o".to_string()), sp());
+        let member = f.add_expr(
+            Expr::Member {
+                receiver: recv,
+                name: "f".to_string(),
+            },
+            sp(),
+        );
+        let tgt = f.add_expr(Expr::Name("c".to_string()), sp());
+        let incdec = f.add_expr(
+            Expr::IncDec {
+                target: tgt,
+                dec: false,
+                prefix: true,
+            },
+            sp(),
+        );
+
+        let mut fs = |_: StmtId| false;
+        let mut h = hits(hi);
+        assert!(f.any_child_expr(rng, &mut h, &mut fs));
+        let mut h = hits(val);
+        assert!(f.any_child_expr(inr, &mut h, &mut fs));
+        let mut h = hits(idx);
+        assert!(f.any_child_expr(index, &mut h, &mut fs));
+        let mut h = hits(recv);
+        assert!(f.any_child_expr(member, &mut h, &mut fs));
+        let mut h = hits(tgt);
+        assert!(f.any_child_expr(incdec, &mut h, &mut fs));
+    }
+
+    // ---- any_child_stmt ------------------------------------------------------
+
+    #[test]
+    fn any_child_stmt_leaf_false() {
+        let mut f = File::default();
+        let brk = f.add_stmt(Stmt::Break(None), sp());
+        let cont = f.add_stmt(Stmt::Continue(Some("l".to_string())), sp());
+        let ret0 = f.add_stmt(Stmt::Return(None, None), sp());
+        let inc = f.add_stmt(
+            Stmt::IncDec {
+                name: "x".to_string(),
+                dec: false,
+            },
+            sp(),
+        );
+        let li = f.add_stmt(
+            Stmt::LocalLateinit {
+                name: "y".to_string(),
+                ty: tref("Int"),
+            },
+            sp(),
+        );
+        let mut yes = |_: ExprId| true;
+        for s in [brk, cont, ret0, inc, li] {
+            assert!(!f.any_child_stmt(s, &mut yes));
+        }
+    }
+
+    #[test]
+    fn any_child_stmt_single_init_group() {
+        let mut f = File::default();
+        let init = f.add_expr(Expr::IntLit(1), sp());
+        let local = f.add_stmt(
+            Stmt::Local {
+                is_var: false,
+                name: "a".to_string(),
+                ty: None,
+                init,
+            },
+            sp(),
+        );
+        let expr = f.add_stmt(Stmt::Expr(init), sp());
+        let mut h = hits(init);
+        assert!(f.any_child_stmt(local, &mut h));
+        let mut h = hits(init);
+        assert!(f.any_child_stmt(expr, &mut h));
+        let mut none = |_: ExprId| false;
+        assert!(!f.any_child_stmt(local, &mut none));
+    }
+
+    #[test]
+    fn any_child_stmt_multi_child() {
+        let mut f = File::default();
+        let recv = f.add_expr(Expr::Name("o".to_string()), sp());
+        let value = f.add_expr(Expr::IntLit(2), sp());
+        let am = f.add_stmt(
+            Stmt::AssignMember {
+                receiver: recv,
+                name: "p".to_string(),
+                value,
+            },
+            sp(),
+        );
+        let arr = f.add_expr(Expr::Name("a".to_string()), sp());
+        let idx = f.add_expr(Expr::IntLit(0), sp());
+        let ai = f.add_stmt(
+            Stmt::AssignIndex {
+                array: arr,
+                index: idx,
+                value,
+            },
+            sp(),
+        );
+        let cond = f.add_expr(Expr::BoolLit(true), sp());
+        let body = f.add_expr(Expr::IntLit(5), sp());
+        let whl = f.add_stmt(
+            Stmt::While {
+                cond,
+                body,
+                label: None,
+            },
+            sp(),
+        );
+        let iterable = f.add_expr(Expr::Name("xs".to_string()), sp());
+        let fe = f.add_stmt(
+            Stmt::ForEach {
+                name: "e".to_string(),
+                iterable,
+                body,
+                label: None,
+            },
+            sp(),
+        );
+        let rstart = f.add_expr(Expr::IntLit(0), sp());
+        let rend = f.add_expr(Expr::IntLit(9), sp());
+        let forr = f.add_stmt(
+            Stmt::For {
+                name: "i".to_string(),
+                range: ForRange {
+                    start: rstart,
+                    end: rend,
+                    kind: RangeKind::Through,
+                },
+                body,
+                label: None,
+            },
+            sp(),
+        );
+
+        let mut h = hits(value);
+        assert!(f.any_child_stmt(am, &mut h));
+        let mut h = hits(recv);
+        assert!(f.any_child_stmt(am, &mut h));
+        let mut h = hits(idx);
+        assert!(f.any_child_stmt(ai, &mut h));
+        let mut h = hits(cond);
+        assert!(f.any_child_stmt(whl, &mut h));
+        let mut h = hits(iterable);
+        assert!(f.any_child_stmt(fe, &mut h));
+        let mut h = hits(rend);
+        assert!(f.any_child_stmt(forr, &mut h));
+    }
+
+    #[test]
+    fn any_child_stmt_localfun_and_localclass() {
+        let mut f = File::default();
+        let body = f.add_expr(Expr::IntLit(1), sp());
+        let lf = f.add_stmt(
+            Stmt::LocalFun(FunDecl {
+                name: "g".to_string(),
+                receiver: None,
+                params: Vec::new(),
+                ret: None,
+                body: FunBody::Expr(body),
+                type_params: Vec::new(),
+                type_param_bounds: Vec::new(),
+                non_null_type_params: std::collections::HashSet::new(),
+                reified_type_params: std::collections::HashSet::new(),
+                span: sp(),
+                is_inline: false,
+                is_final: false,
+                is_private: false,
+                is_suspend: false,
+                is_tailrec: false,
+                annotations: Vec::new(),
+            }),
+            sp(),
+        );
+        let lc = f.add_stmt(
+            Stmt::LocalClass(class_decl("L", ClassKind::Class, Modality::Final)),
+            sp(),
+        );
+        let mut h = hits(body);
+        assert!(f.any_child_stmt(lf, &mut h));
+        let mut yes = |_: ExprId| true;
+        assert!(!f.any_child_stmt(lc, &mut yes));
+    }
+
+    // ---- debug_tree / write_* ------------------------------------------------
+
+    #[test]
+    fn debug_tree_property_and_fun() {
+        let mut f = File::default();
+        let init = f.add_expr(Expr::IntLit(42), sp());
+        let d = f.add_decl(Decl::Property(PropDecl {
+            name: "x".to_string(),
+            receiver: None,
+            ty: Some(tref("Int")),
+            is_var: true,
+            init: Some(init),
+            is_lateinit: false,
+            getter: None,
+            setter: None,
+            is_const: false,
+            is_abstract: false,
+            delegate: None,
+            span: sp(),
+        }));
+        f.decls.push(d);
+        let out = f.debug_tree();
+        assert!(out.contains("(var x :Int 42)"), "got: {out}");
+
+        let mut f = File::default();
+        let body = f.add_expr(Expr::Name("y".to_string()), sp());
+        let d = f.add_decl(Decl::Fun(FunDecl {
+            name: "foo".to_string(),
+            receiver: None,
+            params: vec![Param {
+                name: "a".to_string(),
+                ty: tref("Int"),
+                is_vararg: false,
+                default: None,
+                annotations: Vec::new(),
+                annotation_args: Vec::new(),
+            }],
+            ret: Some(tref("Int")),
+            body: FunBody::Expr(body),
+            type_params: Vec::new(),
+            type_param_bounds: Vec::new(),
+            non_null_type_params: std::collections::HashSet::new(),
+            reified_type_params: std::collections::HashSet::new(),
+            span: sp(),
+            is_inline: false,
+            is_final: false,
+            is_private: false,
+            is_suspend: false,
+            is_tailrec: false,
+            annotations: Vec::new(),
+        }));
+        f.decls.push(d);
+        let out = f.debug_tree();
+        assert!(out.contains("(fun foo (param a Int) :Int y)"), "got: {out}");
+    }
+
+    #[test]
+    fn debug_tree_class_interface_enum_object() {
+        // class with a prop + a method
+        let mut f = File::default();
+        let mut c = class_decl("C", ClassKind::Class, Modality::Final);
+        c.props.push(PropParam {
+            name: "n".to_string(),
+            ty: tref("Int"),
+            is_var: false,
+            is_property: true,
+            default: None,
+            annotations: Vec::new(),
+            annotation_args: Vec::new(),
+        });
+        c.methods.push(FunDecl {
+            name: "m".to_string(),
+            receiver: None,
+            params: Vec::new(),
+            ret: Some(tref("Unit")),
+            body: FunBody::None,
+            type_params: Vec::new(),
+            type_param_bounds: Vec::new(),
+            non_null_type_params: std::collections::HashSet::new(),
+            reified_type_params: std::collections::HashSet::new(),
+            span: sp(),
+            is_inline: false,
+            is_final: false,
+            is_private: false,
+            is_suspend: false,
+            is_tailrec: false,
+            annotations: Vec::new(),
+        });
+        let d = f.add_decl(Decl::Class(c));
+        f.decls.push(d);
+        let out = f.debug_tree();
+        assert!(
+            out.contains("(class C (val n Int) (method m :Unit))"),
+            "got: {out}"
+        );
+
+        // interface
+        let mut f = File::default();
+        let mut i = class_decl("I", ClassKind::Interface, Modality::Abstract);
+        i.methods.push(FunDecl {
+            name: "am".to_string(),
+            receiver: None,
+            params: Vec::new(),
+            ret: None,
+            body: FunBody::None,
+            type_params: Vec::new(),
+            type_param_bounds: Vec::new(),
+            non_null_type_params: std::collections::HashSet::new(),
+            reified_type_params: std::collections::HashSet::new(),
+            span: sp(),
+            is_inline: false,
+            is_final: false,
+            is_private: false,
+            is_suspend: false,
+            is_tailrec: false,
+            annotations: Vec::new(),
+        });
+        let d = f.add_decl(Decl::Class(i));
+        f.decls.push(d);
+        assert!(f.debug_tree().contains("(interface I (absfun am))"));
+
+        // enum
+        let mut f = File::default();
+        let mut e = class_decl("E", ClassKind::Enum, Modality::Final);
+        e.enum_entries.push(AstEnumEntry {
+            name: "A".to_string(),
+            args: Vec::new(),
+            methods: Vec::new(),
+            props: Vec::new(),
+        });
+        let d = f.add_decl(Decl::Class(e));
+        f.decls.push(d);
+        assert!(f.debug_tree().contains("(enum E A)"));
+
+        // object
+        let mut f = File::default();
+        let o = class_decl("O", ClassKind::Object, Modality::Final);
+        let d = f.add_decl(Decl::Class(o));
+        f.decls.push(d);
+        assert!(f.debug_tree().contains("(object O)"));
+    }
+
+    #[test]
+    fn write_expr_covers_many_variants() {
+        let mut f = File::default();
+        let lit_i = f.add_expr(Expr::IntLit(1), sp());
+        let lit_l = f.add_expr(Expr::LongLit(2), sp());
+        let lit_u = f.add_expr(Expr::UIntLit(3), sp());
+        let lit_ul = f.add_expr(Expr::ULongLit(4), sp());
+        let lit_d = f.add_expr(Expr::DoubleLit(1.5), sp());
+        let lit_f = f.add_expr(Expr::FloatLit(2.5), sp());
+        let lit_b = f.add_expr(Expr::BoolLit(false), sp());
+        let lit_s = f.add_expr(Expr::StringLit("hi".to_string()), sp());
+        let lit_c = f.add_expr(Expr::CharLit('q'), sp());
+        let lit_n = f.add_expr(Expr::NullLit, sp());
+
+        // Build a big binary/template/when/incdec tree and render via a fun body.
+        let a = f.add_expr(Expr::Name("a".to_string()), sp());
+        let b = f.add_expr(Expr::Name("b".to_string()), sp());
+        let elvis = f.add_expr(Expr::Elvis { lhs: a, rhs: b }, sp());
+        let throw = f.add_expr(Expr::Throw { operand: b }, sp());
+        let notnull = f.add_expr(Expr::NotNull { operand: a }, sp());
+        let ret = f.add_expr(
+            Expr::Return {
+                value: Some(a),
+                label: Some("L".to_string()),
+            },
+            sp(),
+        );
+        let lam = f.add_expr(
+            Expr::Lambda {
+                params: Vec::new(),
+                body: a,
+            },
+            sp(),
+        );
+        let lam2 = f.add_expr(
+            Expr::Lambda {
+                params: vec!["p".to_string()],
+                body: a,
+            },
+            sp(),
+        );
+        let idx = f.add_expr(Expr::Index { array: a, index: b }, sp());
+        let is_e = f.add_expr(
+            Expr::Is {
+                operand: a,
+                ty: tref("Int"),
+                negated: true,
+            },
+            sp(),
+        );
+        let as_e = f.add_expr(
+            Expr::As {
+                operand: a,
+                ty: tref("Int"),
+                nullable: true,
+            },
+            sp(),
+        );
+        let inr = f.add_expr(
+            Expr::InRange {
+                value: a,
+                start: lit_i,
+                end: b,
+                kind: RangeKind::DownTo,
+                negated: true,
+            },
+            sp(),
+        );
+        let rng = f.add_expr(
+            Expr::RangeTo {
+                lo: lit_i,
+                hi: b,
+                kind: RangeKind::Until,
+            },
+            sp(),
+        );
+        let incdec = f.add_expr(
+            Expr::IncDec {
+                target: a,
+                dec: true,
+                prefix: false,
+            },
+            sp(),
+        );
+        let safe = f.add_expr(
+            Expr::SafeCall {
+                receiver: a,
+                name: "m".to_string(),
+                args: Some(vec![b]),
+            },
+            sp(),
+        );
+        let tmpl = f.add_expr(
+            Expr::Template(vec![
+                TemplatePart::Str("x".to_string()),
+                TemplatePart::Expr(a),
+            ]),
+            sp(),
+        );
+        let unary = f.add_expr(
+            Expr::Unary {
+                op: UnOp::Neg,
+                operand: a,
+            },
+            sp(),
+        );
+        let bin = f.add_expr(
+            Expr::Binary {
+                op: BinOp::Lt,
+                lhs: a,
+                rhs: b,
+            },
+            sp(),
+        );
+        let member = f.add_expr(
+            Expr::Member {
+                receiver: a,
+                name: "f".to_string(),
+            },
+            sp(),
+        );
+        let call = f.add_expr(
+            Expr::Call {
+                callee: a,
+                args: vec![b],
+            },
+            sp(),
+        );
+        let iff = f.add_expr(
+            Expr::If {
+                cond: lit_b,
+                then_branch: a,
+                else_branch: Some(b),
+            },
+            sp(),
+        );
+        let when = f.add_expr(
+            Expr::When {
+                subject: Some(a),
+                arms: vec![
+                    WhenArm {
+                        conditions: vec![lit_i],
+                        body: b,
+                    },
+                    WhenArm {
+                        conditions: Vec::new(),
+                        body: a,
+                    },
+                ],
+            },
+            sp(),
+        );
+        let cref = f.add_expr(
+            Expr::CallableRef {
+                receiver: Some(a),
+                name: "r".to_string(),
+            },
+            sp(),
+        );
+        let inner_e = f.add_expr(Expr::IntLit(0), sp());
+        let inner_s = f.add_stmt(Stmt::Expr(inner_e), sp());
+        let block = f.add_expr(
+            Expr::Block {
+                stmts: vec![inner_s],
+                trailing: Some(a),
+            },
+            sp(),
+        );
+
+        // Render each via a one-off fun body, checking key fragments.
+        let cases: &[(ExprId, &str)] = &[
+            (lit_i, "1"),
+            (lit_l, "2L"),
+            (lit_u, "3u"),
+            (lit_ul, "4uL"),
+            (lit_d, "1.5d"),
+            (lit_f, "2.5f"),
+            (lit_b, "false"),
+            (lit_s, "\"hi\""),
+            (lit_c, "'q'"),
+            (lit_n, "null"),
+            (elvis, "(?: a b)"),
+            (throw, "(throw b)"),
+            (notnull, "(!! a)"),
+            (ret, "(return@L a)"),
+            (lam, "(lambda it a)"),
+            (lam2, "(lambda p a)"),
+            (idx, "(index a b)"),
+            (is_e, "(!is a Int)"),
+            (as_e, "(as? a Int)"),
+            (inr, "(!in a downTo 1 b)"),
+            (rng, "(..< 1 b)"),
+            (incdec, "(post-- a)"),
+            (safe, "(?. a m b)"),
+            (tmpl, "(template \"x\" a)"),
+            (unary, "(neg a)"),
+            (bin, "(< a b)"),
+            (member, "(. a f)"),
+            (call, "(call a b)"),
+            (iff, "(if false a b)"),
+            (when, "(when a (arm 1 => b) (arm else => a))"),
+            (cref, "a::r"),
+            (block, "(block 0 =>a)"),
+        ];
+        for (e, frag) in cases {
+            let d = f.add_decl(Decl::Fun(FunDecl {
+                name: "w".to_string(),
+                receiver: None,
+                params: Vec::new(),
+                ret: None,
+                body: FunBody::Expr(*e),
+                type_params: Vec::new(),
+                type_param_bounds: Vec::new(),
+                non_null_type_params: std::collections::HashSet::new(),
+                reified_type_params: std::collections::HashSet::new(),
+                span: sp(),
+                is_inline: false,
+                is_final: false,
+                is_private: false,
+                is_suspend: false,
+                is_tailrec: false,
+                annotations: Vec::new(),
+            }));
+            f.decls.clear();
+            f.decls.push(d);
+            let out = f.debug_tree();
+            assert!(out.contains(frag), "expected {frag:?} in {out:?}");
+        }
+    }
+
+    #[test]
+    fn write_stmt_covers_many_variants() {
+        let mut f = File::default();
+        let e = f.add_expr(Expr::Name("v".to_string()), sp());
+        let recv = f.add_expr(Expr::Name("o".to_string()), sp());
+        let idx = f.add_expr(Expr::IntLit(0), sp());
+
+        let local = f.add_stmt(
+            Stmt::Local {
+                is_var: true,
+                name: "a".to_string(),
+                ty: None,
+                init: e,
+            },
+            sp(),
+        );
+        let lateinit = f.add_stmt(
+            Stmt::LocalLateinit {
+                name: "b".to_string(),
+                ty: tref("Int"),
+            },
+            sp(),
+        );
+        let deleg = f.add_stmt(
+            Stmt::LocalDelegate {
+                is_var: false,
+                name: "c".to_string(),
+                ty: None,
+                delegate: e,
+            },
+            sp(),
+        );
+        let destr = f.add_stmt(
+            Stmt::Destructure {
+                entries: vec![("x".to_string(), false), ("y".to_string(), true)],
+                init: e,
+            },
+            sp(),
+        );
+        let assign = f.add_stmt(
+            Stmt::Assign {
+                name: "a".to_string(),
+                value: e,
+            },
+            sp(),
+        );
+        let inc = f.add_stmt(
+            Stmt::IncDec {
+                name: "a".to_string(),
+                dec: true,
+            },
+            sp(),
+        );
+        let am = f.add_stmt(
+            Stmt::AssignMember {
+                receiver: recv,
+                name: "p".to_string(),
+                value: e,
+            },
+            sp(),
+        );
+        let ai = f.add_stmt(
+            Stmt::AssignIndex {
+                array: recv,
+                index: idx,
+                value: e,
+            },
+            sp(),
+        );
+        let brk = f.add_stmt(Stmt::Break(Some("outer".to_string())), sp());
+        let cont = f.add_stmt(Stmt::Continue(None), sp());
+        let ret = f.add_stmt(Stmt::Return(Some(e), Some("L".to_string())), sp());
+        let whl = f.add_stmt(
+            Stmt::While {
+                cond: e,
+                body: e,
+                label: None,
+            },
+            sp(),
+        );
+        let dow = f.add_stmt(
+            Stmt::DoWhile {
+                body: e,
+                cond: e,
+                label: None,
+            },
+            sp(),
+        );
+        let rstart = f.add_expr(Expr::IntLit(0), sp());
+        let rend = f.add_expr(Expr::IntLit(9), sp());
+        let forr = f.add_stmt(
+            Stmt::For {
+                name: "i".to_string(),
+                range: ForRange {
+                    start: rstart,
+                    end: rend,
+                    kind: RangeKind::Until,
+                },
+                body: e,
+                label: None,
+            },
+            sp(),
+        );
+        let fe = f.add_stmt(
+            Stmt::ForEach {
+                name: "z".to_string(),
+                iterable: e,
+                body: e,
+                label: None,
+            },
+            sp(),
+        );
+        let lc = f.add_stmt(
+            Stmt::LocalClass(class_decl("Loc", ClassKind::Class, Modality::Final)),
+            sp(),
+        );
+
+        let cases: &[(StmtId, &str)] = &[
+            (local, "(var a v)"),
+            (lateinit, "(lateinit var b)"),
+            (deleg, "(val c by v)"),
+            (destr, "(destructure (x y) v)"),
+            (assign, "(set a v)"),
+            (inc, "(dec a)"),
+            (am, "(set-member o p v)"),
+            (ai, "(set-index o 0 v)"),
+            (brk, "(break@outer)"),
+            (cont, "(continue)"),
+            (ret, "(return@L v)"),
+            (whl, "(while v v)"),
+            (dow, "(do v while v)"),
+            (forr, "(for i (0 until 9) v)"),
+            (fe, "(for-each z v v)"),
+            (lc, "(local-class Loc)"),
+        ];
+        for (s, frag) in cases {
+            let block = f.add_expr(
+                Expr::Block {
+                    stmts: vec![*s],
+                    trailing: None,
+                },
+                sp(),
+            );
+            let d = f.add_decl(Decl::Fun(FunDecl {
+                name: "w".to_string(),
+                receiver: None,
+                params: Vec::new(),
+                ret: None,
+                body: FunBody::Block(block),
+                type_params: Vec::new(),
+                type_param_bounds: Vec::new(),
+                non_null_type_params: std::collections::HashSet::new(),
+                reified_type_params: std::collections::HashSet::new(),
+                span: sp(),
+                is_inline: false,
+                is_final: false,
+                is_private: false,
+                is_suspend: false,
+                is_tailrec: false,
+                annotations: Vec::new(),
+            }));
+            f.decls.clear();
+            f.decls.push(d);
+            let out = f.debug_tree();
+            assert!(out.contains(frag), "expected {frag:?} in {out:?}");
+        }
+    }
+
+    // A local-fun statement renders by name only.
+    #[test]
+    fn write_stmt_local_fun() {
+        let mut f = File::default();
+        let body = f.add_expr(Expr::IntLit(1), sp());
+        let lf = f.add_stmt(
+            Stmt::LocalFun(FunDecl {
+                name: "inner".to_string(),
+                receiver: None,
+                params: Vec::new(),
+                ret: None,
+                body: FunBody::Expr(body),
+                type_params: Vec::new(),
+                type_param_bounds: Vec::new(),
+                non_null_type_params: std::collections::HashSet::new(),
+                reified_type_params: std::collections::HashSet::new(),
+                span: sp(),
+                is_inline: false,
+                is_final: false,
+                is_private: false,
+                is_suspend: false,
+                is_tailrec: false,
+                annotations: Vec::new(),
+            }),
+            sp(),
+        );
+        let block = f.add_expr(
+            Expr::Block {
+                stmts: vec![lf],
+                trailing: None,
+            },
+            sp(),
+        );
+        let d = f.add_decl(Decl::Fun(FunDecl {
+            name: "outer".to_string(),
+            receiver: None,
+            params: Vec::new(),
+            ret: None,
+            body: FunBody::Block(block),
+            type_params: Vec::new(),
+            type_param_bounds: Vec::new(),
+            non_null_type_params: std::collections::HashSet::new(),
+            reified_type_params: std::collections::HashSet::new(),
+            span: sp(),
+            is_inline: false,
+            is_final: false,
+            is_private: false,
+            is_suspend: false,
+            is_tailrec: false,
+            annotations: Vec::new(),
+        }));
+        f.decls.push(d);
+        assert!(f.debug_tree().contains("(local-fun inner)"));
+    }
+}
