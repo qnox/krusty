@@ -10339,6 +10339,33 @@ impl<'a> Checker<'a> {
                         return c.ret;
                     }
                 }
+                // An unqualified reference to a SIBLING nested class inside the enclosing class body
+                // (`Inner()` in `class Outer { class Inner { … } }`) resolves to `Outer$Inner` — Kotlin's
+                // nested-class scoping (a qualified `Outer.Inner()` already resolves). Exact-arity
+                // positional construction only; named/omitted-default nested ctors are a later slice.
+                if let Some(Ty::Obj(outer, _)) = self.this_ty {
+                    let nested = format!("{outer}${fname}");
+                    if let Some(cls) = self
+                        .syms
+                        .classes
+                        .values()
+                        .find(|s| s.internal == nested)
+                        .cloned()
+                    {
+                        // An `inner class` needs the enclosing INSTANCE (a synthetic `this$0` ctor
+                        // parameter not in `ctor_params`), so `Inner(…)` unqualified isn't a plain
+                        // construction — leave it unresolved (skip). Only a PLAIN nested class resolves here.
+                        if cls.inner_of.is_none()
+                            && cls.ctor_params.len() == arg_tys.len()
+                            && arg_names.is_none()
+                        {
+                            for (i, (p, a)) in cls.ctor_params.iter().zip(&arg_tys).enumerate() {
+                                self.expect_assignable(*p, *a, self.span(args[i]), "argument");
+                            }
+                            return self.ctor_result(call, &cls.internal);
+                        }
+                    }
+                }
                 self.diags
                     .error(span, format!("unresolved function '{fname}'"));
                 Ty::Error

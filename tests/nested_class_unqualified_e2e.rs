@@ -1,0 +1,32 @@
+//! An unqualified reference to a SIBLING nested class inside the enclosing class body
+//! (`Inner()` in `class Outer { class Inner { … } }`) resolves to `Outer$Inner` — Kotlin's
+//! nested-class scoping (a qualified `Outer.Inner()` already worked).
+
+mod common;
+
+fn run(src: &str) -> Option<String> {
+    let jh = common::java_home()?;
+    let sl = common::stdlib_jar()?;
+    let jdk = std::path::PathBuf::from(format!("{jh}/lib/modules"));
+    common::compile_and_run_box(src, "Main", &[sl], Some(&jdk))
+}
+
+#[test]
+fn unqualified_nested_class_construction() {
+    const SRC: &str = "class Outer {\n\
+    class Inner { fun v() = \"OK\" }\n\
+    fun make(): String = Inner().v()\n\
+}\n\
+fun box(): String = Outer().make()\n";
+    assert_eq!(run(SRC).expect("unqualified nested class"), "OK");
+}
+
+#[test]
+fn unqualified_nested_class_with_ctor_arg() {
+    const SRC: &str = "class Outer {\n\
+    class Inner(val s: String) { fun v() = s }\n\
+    fun make(): String = Inner(\"OK\").v()\n\
+}\n\
+fun box(): String = Outer().make()\n";
+    assert_eq!(run(SRC).expect("unqualified nested class with arg"), "OK");
+}
