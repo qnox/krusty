@@ -747,7 +747,199 @@ impl TargetRuntime for EmptySymbolSource {}
 
 #[cfg(test)]
 mod tests {
-    use super::InlineKind;
+    use super::*;
+    use crate::types::Ty;
+
+    /// A bare `LibraryType` with everything empty, so a test can fill in only the field it exercises.
+    fn empty_type(kind: TypeKind) -> LibraryType {
+        LibraryType {
+            is_public: true,
+            kind,
+            supertypes: Vec::new(),
+            constructors: Vec::new(),
+            members: Vec::new(),
+            companion: Vec::new(),
+            companion_consts: HashMap::new(),
+            sam_method: None,
+            companion_object: None,
+            value_companion_fns: Vec::new(),
+            value_underlying: None,
+        }
+    }
+
+    #[test]
+    fn params_prefix_matches_a_proper_prefix() {
+        // Exact, shorter-arg (prefix), and equal-length-but-mismatch cases.
+        assert!(params_prefix(&[Ty::Int, Ty::String], &[Ty::Int]));
+        assert!(params_prefix(
+            &[Ty::Int, Ty::String],
+            &[Ty::Int, Ty::String]
+        ));
+        assert!(params_prefix(&[Ty::Int], &[]));
+        // More args than params can never prefix.
+        assert!(!params_prefix(&[Ty::Int], &[Ty::Int, Ty::String]));
+        // Same arity, different element -> not a prefix.
+        assert!(!params_prefix(&[Ty::Int], &[Ty::String]));
+    }
+
+    #[test]
+    fn arg_assignable_exact_or_erased_any() {
+        // Exact match.
+        assert!(arg_assignable(&Ty::Int, &Ty::Int));
+        // Any parameter accepts any argument (a primitive boxes into it).
+        assert!(arg_assignable(&Ty::obj("kotlin/Any"), &Ty::Int));
+        assert!(arg_assignable(&Ty::obj("kotlin/Any"), &Ty::obj("demo/Foo")));
+        // A concrete non-Any parameter rejects a differing argument.
+        assert!(!arg_assignable(&Ty::Int, &Ty::String));
+    }
+
+    #[test]
+    fn best_overload_prefers_exact_then_boxing_then_prefix() {
+        let exact = LibraryMember::new("f".into(), vec![Ty::Int], Ty::Unit, "d".into());
+        let boxing = LibraryMember::new(
+            "f".into(),
+            vec![Ty::obj("kotlin/Any")],
+            Ty::Unit,
+            "d".into(),
+        );
+        let prefix =
+            LibraryMember::new("f".into(), vec![Ty::Int, Ty::String], Ty::Unit, "d".into());
+        let other = LibraryMember::new("g".into(), vec![Ty::Int], Ty::Unit, "d".into());
+
+        // Exact-Ty match wins over the erased-Any and the prefix overload.
+        let all = [prefix.clone(), boxing.clone(), exact.clone(), other.clone()];
+        let picked = best_overload(all.iter(), "f", &[Ty::Int]).unwrap();
+        assert_eq!(picked.params, vec![Ty::Int]);
+
+        // No exact: a boxing (erased-Any) match is selected over the longer prefix overload.
+        let no_exact = [prefix.clone(), boxing.clone(), other.clone()];
+        let picked = best_overload(no_exact.iter(), "f", &[Ty::String]).unwrap();
+        assert_eq!(picked.params, vec![Ty::obj("kotlin/Any")]);
+
+        // Only a longer overload that the args prefix -> the loose fallback.
+        let only_prefix = [prefix.clone(), other.clone()];
+        let picked = best_overload(only_prefix.iter(), "f", &[Ty::Int]).unwrap();
+        assert_eq!(picked.params, vec![Ty::Int, Ty::String]);
+
+        // Wrong name -> nothing.
+        assert!(best_overload(all.iter(), "missing", &[Ty::Int]).is_none());
+    }
+
+    #[test]
+    fn library_member_new_defaults() {
+        let m = LibraryMember::new("x".into(), vec![Ty::Int], Ty::Unit, "()V".into());
+        assert_eq!(m.name, "x");
+        assert_eq!(m.params, vec![Ty::Int]);
+        assert_eq!(m.ret, Ty::Unit);
+        assert_eq!(m.physical_ret, Ty::Unit);
+        assert!(m.owner.is_none());
+        assert!(m.physical_name.is_none());
+        assert!(!m.ret_nullable);
+        assert!(m.signature.is_none());
+        assert!(!m.is_interface);
+        assert!(!m.suspend);
+        assert_eq!(m.inline, InlineKind::None);
+    }
+
+    #[test]
+    fn type_kind_accessors() {
+        let class = empty_type(TypeKind::Class);
+        assert!(!class.is_interface());
+        assert!(!class.is_annotation());
+        assert!(!class.is_object());
+
+        let iface = empty_type(TypeKind::Interface);
+        assert!(iface.is_interface());
+        assert!(!iface.is_annotation());
+
+        // A JVM annotation is also an interface.
+        let anno = empty_type(TypeKind::Annotation);
+        assert!(anno.is_interface());
+        assert!(anno.is_annotation());
+
+        let obj = empty_type(TypeKind::Object);
+        assert!(obj.is_object());
+        assert!(!obj.is_interface());
+    }
+
+    #[test]
+    fn ctor_exact_null_and_widened() {
+        let mut ty = empty_type(TypeKind::Class);
+        ty.constructors = vec![
+            LibraryMember::new("<init>".into(), vec![Ty::Int], Ty::Unit, "d".into()),
+            LibraryMember::new(
+                "<init>".into(),
+                vec![Ty::obj("kotlin/Any"), Ty::obj("kotlin/Any")],
+                Ty::Unit,
+                "d".into(),
+            ),
+        ];
+        // Exact primitive-arg ctor.
+        assert!(ty.ctor(&[Ty::Int]).is_some());
+        // A reference and a primitive both widen to Any for the erased generic ctor.
+        assert!(ty.ctor(&[Ty::obj("demo/Foo"), Ty::Int]).is_some());
+        // A `null` arg matches a reference parameter position.
+        assert!(ty.ctor(&[Ty::Null, Ty::obj("demo/Foo")]).is_some());
+        // No ctor of that arity.
+        assert!(ty.ctor(&[Ty::Int, Ty::Int, Ty::Int]).is_none());
+    }
+
+    #[test]
+    fn companion_member_selects_by_name_and_args() {
+        let mut ty = empty_type(TypeKind::Class);
+        ty.companion = vec![LibraryMember::new(
+            "of".into(),
+            vec![Ty::Int],
+            Ty::Unit,
+            "d".into(),
+        )];
+        assert!(ty.companion_member("of", &[Ty::Int]).is_some());
+        assert!(ty.companion_member("of", &[Ty::String]).is_none());
+        assert!(ty.companion_member("nope", &[Ty::Int]).is_none());
+    }
+
+    #[test]
+    fn annotation_members_only_for_annotations() {
+        // A non-annotation yields None.
+        let class = empty_type(TypeKind::Class);
+        assert!(class.annotation_members().is_none());
+
+        // No-arg accessors are collected; `<init>` is skipped.
+        let mut anno = empty_type(TypeKind::Annotation);
+        anno.members = vec![
+            LibraryMember::new("value".into(), vec![], Ty::Int, "d".into()),
+            LibraryMember::new("<init>".into(), vec![], Ty::Unit, "d".into()),
+        ];
+        let members = anno.annotation_members().unwrap();
+        assert_eq!(members, vec![("value".to_string(), Ty::Int)]);
+
+        // An un-modellable (`Error`) member type aborts the whole annotation.
+        let mut bad = empty_type(TypeKind::Annotation);
+        bad.members = vec![LibraryMember::new(
+            "x".into(),
+            vec![],
+            Ty::Error,
+            "d".into(),
+        )];
+        assert!(bad.annotation_members().is_none());
+    }
+
+    #[test]
+    fn coroutine_intrinsic_lookup() {
+        assert_eq!(
+            coroutine_intrinsic("COROUTINE_SUSPENDED"),
+            Some(CoroutineIntrinsic::CoroutineSuspended)
+        );
+        assert_eq!(
+            coroutine_intrinsic("suspendCoroutine"),
+            Some(CoroutineIntrinsic::SuspendCoroutine)
+        );
+        assert_eq!(
+            coroutine_intrinsic("startCoroutine"),
+            Some(CoroutineIntrinsic::StartCoroutine)
+        );
+        assert!(coroutine_intrinsic("notAnIntrinsic").is_none());
+    }
 
     #[test]
     fn inline_kind_from_flags_collapses_the_pair() {

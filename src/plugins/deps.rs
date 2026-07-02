@@ -280,4 +280,93 @@ mod tests {
         // Environment-dependent; just exercise the probe.
         let _ = detect();
     }
+
+    #[test]
+    fn is_valid_coord_edge_cases() {
+        // Too few / too many segments.
+        assert!(!is_valid_coord("g"));
+        assert!(!is_valid_coord("g:a"));
+        assert!(!is_valid_coord("g:a:1:c:extra"));
+        // Empty group / empty version.
+        assert!(!is_valid_coord(":a:1"));
+        assert!(!is_valid_coord("g:a:"));
+        // Empty string overall.
+        assert!(!is_valid_coord(""));
+        // Allowed punctuation inside a segment.
+        assert!(is_valid_coord("com.foo_bar-baz:art.name:1.0-RC_2"));
+    }
+
+    #[test]
+    fn gradle_script_escapes_backslashes_and_quotes_in_path() {
+        let script = gradle_build_script(&coords(), Path::new("/tmp/a\\b\"c"));
+        // Backslash doubled and quote escaped so the Kotlin string literal is well-formed.
+        assert!(script.contains("/tmp/a\\\\b\\\"c"));
+    }
+
+    #[test]
+    fn gradle_script_with_no_coords_still_valid() {
+        let script = gradle_build_script(&[], Path::new("/tmp/out"));
+        assert!(script.contains("dependencies {"));
+        assert!(script.contains("fetchJars"));
+        // No `fetch(` dependency lines when there are no coords.
+        assert!(!script.contains("fetch(\""));
+    }
+
+    #[test]
+    fn maven_pom_with_no_coords_has_empty_dependencies() {
+        let pom = maven_pom(&[]);
+        assert!(pom.contains("<dependencies>\n</dependencies>"));
+    }
+
+    #[test]
+    fn which_finds_file_in_path_and_misses_absent() {
+        let dir = std::env::temp_dir().join(format!("krusty-which-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let bin = dir.join("krusty-fake-tool");
+        std::fs::write(&bin, b"#!/bin/sh\n").unwrap();
+
+        let prev = std::env::var_os("PATH");
+        // SAFETY: single-threaded test-local mutation; restored below.
+        unsafe {
+            std::env::set_var("PATH", &dir);
+        }
+        let found = which("krusty-fake-tool");
+        let missing = which("krusty-definitely-absent-tool");
+        unsafe {
+            match prev {
+                Some(p) => std::env::set_var("PATH", p),
+                None => std::env::remove_var("PATH"),
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(found.as_deref(), Some(bin.as_path()));
+        assert!(missing.is_none());
+    }
+
+    #[test]
+    fn collect_jars_lists_only_jars_sorted() {
+        let dir = std::env::temp_dir().join(format!("krusty-jars-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("b.jar"), b"").unwrap();
+        std::fs::write(dir.join("a.jar"), b"").unwrap();
+        std::fs::write(dir.join("notes.txt"), b"").unwrap();
+
+        let jars = collect_jars(&dir).unwrap();
+        let names: Vec<String> = jars
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(names, vec!["a.jar".to_string(), "b.jar".to_string()]);
+    }
+
+    #[test]
+    fn resolver_variants_are_comparable() {
+        let g = Resolver::Gradle(PathBuf::from("/x/gradle"));
+        assert_eq!(g, Resolver::Gradle(PathBuf::from("/x/gradle")));
+        assert_ne!(g, Resolver::Maven(PathBuf::from("/x/gradle")));
+    }
 }

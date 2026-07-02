@@ -455,4 +455,82 @@ mod tests {
         assert_eq!(fs.overloads.len(), 2);
         assert_eq!(fs.overloads[0].callable.owner, "module");
     }
+
+    #[test]
+    fn default_trait_methods_are_empty_or_none() {
+        let s = module();
+        // FakeSource does not override this, so it is `false`.
+        assert!(!s.is_unsigned_integer_type(Ty::Int));
+        assert!(s.jvm_descriptor_form(Ty::Int).is_none());
+        assert!(s.property_reference_type(1, false).is_none());
+        assert!(s.class_literal_type().is_none());
+        assert!(s.platform_default_import_packages().is_empty());
+        assert!(s.physical_property_getter_name("x").is_none());
+        assert!(s.constructor_param_names("mod/Foo", 1).is_none());
+        assert!(s.constructor_named_params("mod/Foo", 0).is_none());
+        assert!(!s.value_class_ctor_has_default("mod/Foo"));
+        assert!(!s.is_enum_entry("mod/Foo", "A"));
+        assert!(s.value_class_property_member("mod/Foo", "id").is_none());
+        assert!(s.infer_constructor_type_args("mod/Foo", &[]).is_none());
+    }
+
+    #[test]
+    fn default_value_underlying_uses_resolve_type() {
+        // FakeSource's resolved type has `value_underlying: None`, so this is None even for a known type.
+        let s = module();
+        assert!(s.value_underlying(Ty::obj("shared")).is_none());
+        // A non-Obj type short-circuits to None.
+        assert!(s.value_underlying(Ty::Int).is_none());
+    }
+
+    #[test]
+    fn default_function_like_arity_uses_fun_arity() {
+        let s = module();
+        // A non-function type has no callable arity.
+        assert!(s.function_like_arity(Ty::Int).is_none());
+    }
+
+    #[test]
+    fn default_seed_shared_wraps_seed_in_rc() {
+        let s = module();
+        let (class_names, _aliases, _canon) = s.seed_shared();
+        assert_eq!(class_names.get("Foo"), Some(&"mod/Foo".to_string()));
+    }
+
+    #[test]
+    fn composite_delegates_defaults_to_children() {
+        let c = CompositeSource::new(vec![Box::new(module()), Box::new(library())]);
+        // No child overrides these, so the composite reports the empty/None defaults.
+        assert!(!c.is_unsigned_integer_type(Ty::Int));
+        assert!(c.jvm_descriptor_form(Ty::Int).is_none());
+        assert!(c.property_reference_type(0, true).is_none());
+        assert!(c.class_literal_type().is_none());
+        assert!(c.platform_default_import_packages().is_empty());
+        assert!(c.physical_property_getter_name("x").is_none());
+        assert!(c.constructor_param_names("shared", 1).is_none());
+        assert!(c.infer_constructor_type_args("shared", &[]).is_none());
+        assert!(!c.value_class_ctor_has_default("shared"));
+        assert!(!c.is_enum_entry("shared", "A"));
+        assert!(c.value_class_property_member("shared", "id").is_none());
+        assert!(c.value_underlying(Ty::obj("shared")).is_none());
+        assert!(c.function_like_arity(Ty::Int).is_none());
+    }
+
+    #[test]
+    fn push_appends_at_lowest_precedence() {
+        let mut c = CompositeSource::new(vec![Box::new(module())]);
+        c.push(Box::new(library()));
+        let fs = c.functions("greet", None);
+        assert_eq!(fs.overloads.len(), 2);
+        // The pushed library is consulted last.
+        assert_eq!(fs.overloads[1].callable.owner, "library");
+    }
+
+    #[test]
+    fn empty_composite_has_empty_seed_and_no_functions() {
+        let c = CompositeSource::default();
+        assert!(c.seed().class_names.is_empty());
+        assert!(c.functions("anything", None).overloads.is_empty());
+        assert!(c.resolve_type("anything").is_none());
+    }
 }

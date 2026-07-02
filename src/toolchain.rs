@@ -300,3 +300,120 @@ fn collect_stdlib_jars(dir: &std::path::Path, out: &mut Vec<PathBuf>, depth: usi
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    /// A fresh, uniquely-named temp directory (no external tempfile dependency). Cleaned by the caller.
+    fn temp_dir() -> PathBuf {
+        static COUNTER: AtomicU32 = AtomicU32::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "krusty_toolchain_test_{}_{}",
+            std::process::id(),
+            n
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn touch(dir: &std::path::Path, name: &str) {
+        std::fs::write(dir.join(name), b"").unwrap();
+    }
+
+    fn names(paths: &[PathBuf]) -> Vec<String> {
+        let mut v: Vec<String> = paths
+            .iter()
+            .map(|p| p.file_name().unwrap().to_str().unwrap().to_string())
+            .collect();
+        v.sort();
+        v
+    }
+
+    #[test]
+    fn collect_named_jars_filters_by_prefix_ext_and_excludes() {
+        let dir = temp_dir();
+        touch(&dir, "kotlin-test-1.9.24.jar"); // match
+        touch(&dir, "kotlin-test-junit-1.9.jar"); // excluded via `excludes`
+        touch(&dir, "kotlin-test-sources.jar"); // bad: sources
+        touch(&dir, "kotlin-test-1.9.txt"); // not a .jar
+        touch(&dir, "kotlin-reflect-1.9.jar"); // wrong prefix
+
+        let mut out = Vec::new();
+        collect_named_jars(&dir, "kotlin-test-", &["junit"], &mut out, 0);
+        assert_eq!(names(&out), vec!["kotlin-test-1.9.24.jar".to_string()]);
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn collect_named_jars_recurses_into_subdirs() {
+        let dir = temp_dir();
+        let sub = dir.join("nested");
+        std::fs::create_dir_all(&sub).unwrap();
+        touch(&sub, "kotlin-test-2.0.0.jar");
+
+        let mut out = Vec::new();
+        collect_named_jars(&dir, "kotlin-test-", &[], &mut out, 0);
+        assert_eq!(names(&out), vec!["kotlin-test-2.0.0.jar".to_string()]);
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn collect_named_jars_respects_depth_guard() {
+        let dir = temp_dir();
+        touch(&dir, "kotlin-test-1.9.jar");
+
+        // depth > 9 returns immediately without scanning.
+        let mut out = Vec::new();
+        collect_named_jars(&dir, "kotlin-test-", &[], &mut out, 10);
+        assert!(out.is_empty());
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn collect_named_jars_stops_when_full() {
+        let dir = temp_dir();
+        touch(&dir, "kotlin-test-1.9.jar");
+
+        // out already over the cap (> 8) -> the entry guard bails without adding more.
+        let mut out: Vec<PathBuf> = (0..9).map(|i| PathBuf::from(format!("x{i}"))).collect();
+        collect_named_jars(&dir, "kotlin-test-", &[], &mut out, 0);
+        assert_eq!(out.len(), 9);
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn collect_stdlib_jars_filters_variants() {
+        let dir = temp_dir();
+        touch(&dir, "kotlin-stdlib-1.9.24.jar"); // match
+        touch(&dir, "kotlin-stdlib-common-1.9.jar"); // bad: common
+        touch(&dir, "kotlin-stdlib-sources.jar"); // bad: sources
+        touch(&dir, "kotlin-stdlib-js-1.9.jar"); // bad: -js
+        touch(&dir, "kotlin-stdlib.jar"); // no trailing dash -> wrong prefix
+        touch(&dir, "kotlin-reflect-1.9.jar"); // wrong prefix
+
+        let mut out = Vec::new();
+        collect_stdlib_jars(&dir, &mut out, 0);
+        assert_eq!(names(&out), vec!["kotlin-stdlib-1.9.24.jar".to_string()]);
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn collect_stdlib_jars_respects_depth_guard() {
+        let dir = temp_dir();
+        touch(&dir, "kotlin-stdlib-1.9.jar");
+
+        let mut out = Vec::new();
+        collect_stdlib_jars(&dir, &mut out, 9); // depth > 8 -> immediate return
+        assert!(out.is_empty());
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+}
