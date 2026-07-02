@@ -113,3 +113,57 @@ fn suspend_interface_get_with_list_param_lowers() {
         "OK"
     );
 }
+
+#[test]
+fn method_with_set_param() {
+    // The fix generalizes to any collection: `Set<String>` → `Ljava/util/Set;`.
+    const LIB: &str = "package lib\nclass H { fun count(s: Set<String>): Int = s.size }\n";
+    const MAIN: &str = "import lib.H\n\
+        fun box(): String = if (H().count(setOf(\"a\", \"b\")) == 2) \"OK\" else \"fail\"\n";
+    assert_eq!(run_with_lib("set_p", LIB, MAIN).expect("Set param"), "OK");
+}
+
+#[test]
+fn method_with_map_param() {
+    // `Map<String, Int>` → `Ljava/util/Map;`.
+    const LIB: &str = "package lib\nclass H { fun keys(m: Map<String, Int>): Int = m.size }\n";
+    const MAIN: &str = "import lib.H\n\
+        fun box(): String = if (H().keys(mapOf(\"a\" to 1)) == 1) \"OK\" else \"fail\"\n";
+    assert_eq!(run_with_lib("map_p", LIB, MAIN).expect("Map param"), "OK");
+}
+
+#[test]
+fn method_with_mutable_list_param() {
+    // The mutable collection erases to the SAME JVM interface (`MutableList<Int>` → `Ljava/util/List;`).
+    const LIB: &str = "package lib\nclass H { fun n(xs: MutableList<Int>): Int = xs.size }\n";
+    const MAIN: &str = "import lib.H\n\
+        fun box(): String {\n\
+        \x20 val m = mutableListOf(1, 2, 3)\n\
+        \x20 return if (H().n(m) == 3) \"OK\" else \"fail\"\n\
+        }\n";
+    assert_eq!(
+        run_with_lib("mutlist_p", LIB, MAIN).expect("MutableList param"),
+        "OK"
+    );
+}
+
+#[test]
+fn overloads_by_collection_interface_stay_distinct() {
+    // SOUNDNESS: the JVM-descriptor-form pass must not conflate distinct collection interfaces. A class with
+    // both `f(List<Int>)` and `f(Set<Int>)` — a `listOf` call selects the `List` overload, a `setOf` call the
+    // `Set` one (`java/util/List` != `java/util/Set`), rather than the pass grabbing whichever comes first.
+    const LIB: &str = "package lib\n\
+        class H {\n\
+        \x20 fun f(xs: List<Int>): String = \"list\"\n\
+        \x20 fun f(xs: Set<Int>): String = \"set\"\n\
+        }\n";
+    const MAIN: &str = "import lib.H\n\
+        fun box(): String {\n\
+        \x20 val h = H()\n\
+        \x20 return if (h.f(listOf(1)) == \"list\" && h.f(setOf(1)) == \"set\") \"OK\" else \"fail\"\n\
+        }\n";
+    assert_eq!(
+        run_with_lib("ovl_distinct", LIB, MAIN).expect("List vs Set overloads distinct"),
+        "OK"
+    );
+}
