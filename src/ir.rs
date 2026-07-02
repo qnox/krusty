@@ -31,6 +31,12 @@ pub type ClassId = u32;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Callee {
     Local(FunId),
+    /// The `$default` synthetic of a same-file top-level function/extension (`FunId`) — emitted as
+    /// `invokestatic <facade>.<name>$default(realparams, int mask, Object marker)ret`. Like `Local` the
+    /// facade is resolved at emit (`self.facade`); the descriptor appends the trailing `I` mask +
+    /// `Object` marker to the real function's parameters. Used when a call omits a (possibly non-const)
+    /// defaulted argument, mirroring kotlinc's default-argument ABI.
+    LocalDefault(FunId),
     External(String),
     /// A top-level function defined in ANOTHER source file of the same multi-file compilation —
     /// `invokestatic <facade>.<name>(params)ret`. Carries the signature as backend-agnostic `Ty`s
@@ -1037,6 +1043,64 @@ pub fn for_each_child(exprs: &[IrExpr], e: ExprId, f: &mut impl FnMut(ExprId)) {
         | IrExpr::UnitInstance
         | IrExpr::CurrentContinuation => {}
     }
+}
+
+/// Whether a top-level `foo$default` synthetic can be SAFELY emitted for `fid`. The function name must be
+/// unmangled — a value-class-parameter-mangled `foo-<hash>` needs box/unbox adaptation the plain facade
+/// stub doesn't model — and every registered default expression must be simple enough to re-emit inside
+/// the stub: no lambda, no object/value-class construction, no `invoke`, no value-class-mangled call, and
+/// no reference to a value index beyond the parameters (a default that spilled a temp or captured a
+/// closure). Conservative — an unknown shape is rejected, so the caller falls back to the unchanged
+/// inline call-site fill (never a miscompile).
+pub fn toplevel_default_stub_safe(ir: &IrFile, fid: u32) -> bool {
+    let f = &ir.functions[fid as usize];
+    if f.name.contains('-') {
+        return false;
+    }
+    // A user function literally named `<name>$default` (a back-ticked identifier) would collide with the
+    // synthetic — don't emit the stub (kotlinc also treats that as a conflicting declaration).
+    let stub_name = format!("{}$default", f.name);
+    if ir
+        .functions
+        .iter()
+        .any(|g| g.dispatch_receiver.is_none() && g.name == stub_name)
+    {
+        return false;
+    }
+    let n = f.params.len() as u32;
+    let Some(defaults) = ir.fn_param_defaults.get(&fid) else {
+        return false;
+    };
+    defaults
+        .iter()
+        .flatten()
+        .all(|&d| default_expr_stub_safe(ir, d, n))
+}
+
+fn default_expr_stub_safe(ir: &IrFile, e: ExprId, n: u32) -> bool {
+    match &ir.exprs[e as usize] {
+        IrExpr::GetValue(i) if *i >= n => return false,
+        IrExpr::SetValue { var, .. } if *var >= n => return false,
+        IrExpr::Variable { index, .. } if *index >= n => return false,
+        IrExpr::Lambda { .. }
+        | IrExpr::New { .. }
+        | IrExpr::NewExternal { .. }
+        | IrExpr::NewCrossFile { .. }
+        | IrExpr::RefNew { .. }
+        | IrExpr::InvokeFunction { .. } => return false,
+        IrExpr::Call {
+            callee: Callee::Static { name, .. },
+            ..
+        } if name.contains('-') => return false,
+        _ => {}
+    }
+    let mut ok = true;
+    for_each_child(&ir.exprs, e, &mut |c| {
+        if !default_expr_stub_safe(ir, c, n) {
+            ok = false;
+        }
+    });
+    ok
 }
 
 /// Shift every value index (`GetValue`/`SetValue`/`Variable`) `>= threshold` by `by`, throughout the

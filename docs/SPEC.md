@@ -1006,6 +1006,20 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   fires for a named call to a NO-DEFAULT method too (previously only defaulted methods), and falls through
   to the shared return-type logic so a generic higher-order member still infers its `<R>`.
 
+- **Top-level default arguments via the `$default` synthetic (`fun f(a: String, b: String = compute())`,
+  called `f("A")`).** krusty inline-fills CONST-literal defaults at the call site; for a NON-const /
+  side-effecting default it now emits kotlinc's `f$default(realparams, int mask, Object marker)` synthetic
+  (`emit_facade_default_stub`: no `self`, value-index `i` → slot `i`; for each `mask & (1<<i)` bit set it
+  evaluates `default_i` into the slot then `invokestatic`s the real facade method) and routes an
+  omitted-default call to it via `Callee::LocalDefault` (`lower_toplevel_default_call`: provided arguments
+  evaluated in source order into temps, omitted slots get a zero placeholder + their mask bit, marker
+  `null`). Gated by `toplevel_default_stub_safe` to a SOUND subset — an unmangled function whose default
+  expressions are simple (no lambda, object/value-class construction, `invoke`, value-class-mangled call,
+  or reference beyond the parameters), and no user function already named `<name>$default`. A value-class
+  or lambda/wide-shape default falls back to the (unchanged) inline fill / skip, never a miscompile (this
+  gate was added after an ungated version regressed value-class-parameter + lambda-default corpus files
+  with `VerifyError`/`ClassCastException`). Test: `tests/default_args_synthetic_e2e.rs`.
+
 - **Generic constructor type-argument inference (`Pair(1, 2)` → `Pair<Int, Int>`).** A classpath generic
   class constructed without explicit `<T>` previously erased to the raw type, so `first`/`second`/
   `componentN` typed as `Any` (breaking destructuring + arithmetic). `SymbolSource::infer_constructor_type_args`

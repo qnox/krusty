@@ -126,6 +126,15 @@ pub fn emit_all_with_class_meta(
             continue;
         }
         emit_method(ir, i as u32, facade, facade, &mut cw, false, bodies);
+        // A top-level function (or extension) with SIMPLE parameter defaults gets kotlinc's
+        // `foo$default(params…, int mask, Object marker)` synthetic (dispatches to the real method,
+        // filling the masked slots from the defaults), so an omitted-argument caller — same-file or
+        // cross-module — resolves against the same ABI kotlinc emits. A value-class-mangled function or a
+        // complex default (lambda / construction / spilled temp) is skipped (`toplevel_default_stub_safe`).
+        if crate::ir::toplevel_default_stub_safe(ir, i as u32) {
+            let defaults = &ir.fn_param_defaults[&(i as u32)];
+            emit_facade_default_stub(ir, i as u32, facade, &mut cw, defaults, bodies);
+        }
     }
     emit_statics(ir, facade, &mut cw, bodies);
     if let Some(m) = metadata {
@@ -217,7 +226,7 @@ pub(crate) fn jvm_can_emit(ir: &IrFile) -> bool {
                     && ty_ok(ret)
             }
             Callee::CrossFile { params, ret, .. } => params.iter().all(ty_ok) && ty_ok(ret),
-            Callee::Local(_) | Callee::External(_) => true,
+            Callee::Local(_) | Callee::LocalDefault(_) | Callee::External(_) => true,
         }
     }
     fn generic_value_class_ok(ir: &IrFile, class_idx: usize) -> bool {
@@ -265,6 +274,10 @@ pub fn emit_file(ir: &IrFile, facade: &str, bodies: &dyn MethodBodies) -> Vec<u8
     for (i, f) in ir.functions.iter().enumerate() {
         if f.dispatch_receiver.is_none() && f.body.is_some() {
             emit_method(ir, i as u32, facade, facade, &mut cw, false, bodies);
+            if crate::ir::toplevel_default_stub_safe(ir, i as u32) {
+                let defaults = &ir.fn_param_defaults[&(i as u32)];
+                emit_facade_default_stub(ir, i as u32, facade, &mut cw, defaults, bodies);
+            }
         }
     }
     emit_statics(ir, facade, &mut cw, bodies);
@@ -2792,6 +2805,92 @@ fn emit_default_stub(
     );
 }
 
+/// Emit the `foo$default(params…, int mask, Object marker)` synthetic for a TOP-LEVEL facade function
+/// (kotlinc's default-argument ABI). Unlike [`emit_default_stub`] (an instance member) there is NO leading
+/// `self`: the real parameters occupy value-indices `0..n` (the STATIC layout the defaults were lowered
+/// with), and the stub dispatches to the real facade method via `invokestatic`. For each `mask & (1<<i)`
+/// bit set, the argument slot is overwritten with `default_i` before the dispatch.
+fn emit_facade_default_stub(
+    ir: &IrFile,
+    fid: u32,
+    facade: &str,
+    cw: &mut ClassWriter,
+    defaults: &[Option<u32>],
+    bodies: &dyn MethodBodies,
+) {
+    let f = &ir.functions[fid as usize];
+    let method_name = f.name.clone();
+    let real_params: Vec<Ty> = f.params.iter().map(ir_ty_to_jvm).collect();
+    let ret = ir_ty_to_jvm(&f.ret);
+    let n = real_params.len();
+
+    let mut e = Emitter {
+        ir,
+        cw,
+        bodies,
+        owner: facade.to_string(),
+        facade: facade.to_string(),
+        slots: HashMap::new(),
+        var_types: collect_var_types(ir),
+        next_slot: 0,
+        ret,
+        loop_stack: Vec::new(),
+    };
+    // No `self`: value-index `i` = the i-th real parameter (the static layout the defaults were lowered
+    // with); then mask + marker (not value-indexed).
+    let mut slot = 0u16;
+    let mut param_slots: Vec<(u16, Ty)> = Vec::new();
+    for (i, t) in real_params.iter().enumerate() {
+        e.slots.insert(i as u32, (slot, *t));
+        param_slots.push((slot, *t));
+        slot += slot_words(*t);
+    }
+    let mask_slot = slot;
+    e.slots.insert(9_000_001, (mask_slot, Ty::Int)); // register so frames type these slots
+    slot += 1;
+    e.slots
+        .insert(9_000_002, (slot, Ty::obj("java/lang/Object")));
+    slot += 1;
+    e.next_slot = slot;
+
+    let mut code = CodeBuilder::new(slot);
+    for (i, def) in defaults.iter().enumerate().take(n) {
+        if let Some(def_expr) = def {
+            let (pslot, pty) = param_slots[i];
+            code.iload(mask_slot);
+            code.push_int(1 << i, e.cw);
+            code.iand();
+            let skip = code.new_label();
+            e.frame(skip, vec![], &mut code);
+            code.ifeq(skip);
+            e.emit_value(*def_expr, &mut code);
+            store(pty, pslot, &mut code);
+            code.bind(skip);
+        }
+    }
+    for &(pslot, pty) in &param_slots {
+        load(pty, pslot, &mut code);
+    }
+    let aw: i32 = real_params.iter().map(|t| slot_words(*t) as i32).sum();
+    let desc = method_descriptor(&real_params, ret);
+    let m = e.cw.methodref(facade, &method_name, &desc);
+    code.invokestatic(m, aw, slot_words(ret) as i32);
+    emit_return(ret, &mut code);
+    code.ensure_locals(e.next_slot);
+    code.link();
+
+    let mut stub_params = real_params.clone();
+    stub_params.push(Ty::Int);
+    stub_params.push(Ty::obj("java/lang/Object"));
+    let desc = method_descriptor(&stub_params, ret);
+    e.cw.add_method(
+        0x1009, /* PUBLIC | STATIC | SYNTHETIC */
+        &format!("{method_name}$default"),
+        &desc,
+        &code,
+    );
+}
+
 struct Emitter<'a> {
     ir: &'a IrFile,
     cw: &'a mut ClassWriter,
@@ -3809,7 +3908,9 @@ impl<'a> Emitter<'a> {
                 ret_is_nothing(&self.ir.functions[fid as usize].ret)
             }
             IrExpr::Call { callee, .. } => match callee {
-                Callee::Local(fid) => ret_is_nothing(&self.ir.functions[*fid as usize].ret),
+                Callee::Local(fid) | Callee::LocalDefault(fid) => {
+                    ret_is_nothing(&self.ir.functions[*fid as usize].ret)
+                }
                 Callee::CrossFile { ret, .. } => ret_is_nothing(ret),
                 Callee::Virtual { descriptor, .. } | Callee::Special { descriptor, .. } => {
                     descriptor.ends_with(")Ljava/lang/Void;")
@@ -4061,6 +4162,24 @@ impl<'a> Emitter<'a> {
                     let param_tys: Vec<Ty> = f.params.iter().map(ir_ty_to_jvm).collect();
                     let ret = ir_ty_to_jvm(&f.ret);
                     let name = f.name.clone();
+                    let args = args.clone();
+                    self.emit_operands(&args, code);
+                    let aw: i32 = param_tys.iter().map(|t| slot_words(*t) as i32).sum();
+                    let owner = self.facade.clone();
+                    let m = self
+                        .cw
+                        .methodref(&owner, &name, &method_descriptor(&param_tys, ret));
+                    code.invokestatic(m, aw, slot_words(ret) as i32);
+                }
+                Callee::LocalDefault(fid) => {
+                    // The `foo$default(realparams, int mask, Object marker)` synthetic on the self facade
+                    // (emitted by `emit_facade_default_stub`). Args already include the mask + marker.
+                    let f = &self.ir.functions[*fid as usize];
+                    let mut param_tys: Vec<Ty> = f.params.iter().map(ir_ty_to_jvm).collect();
+                    param_tys.push(Ty::Int);
+                    param_tys.push(Ty::obj("java/lang/Object"));
+                    let ret = ir_ty_to_jvm(&f.ret);
+                    let name = format!("{}$default", f.name);
                     let args = args.clone();
                     self.emit_operands(&args, code);
                     let aw: i32 = param_tys.iter().map(|t| slot_words(*t) as i32).sum();
@@ -6342,7 +6461,9 @@ impl<'a> Emitter<'a> {
                 dispatch_receiver,
                 ..
             } => match callee {
-                Callee::Local(fid) => call_ret_ty(&self.ir.functions[*fid as usize].ret),
+                Callee::Local(fid) | Callee::LocalDefault(fid) => {
+                    call_ret_ty(&self.ir.functions[*fid as usize].ret)
+                }
                 Callee::CrossFile { ret, .. } => call_ret_ty(ret),
                 // Array `get` returns the receiver's element; an array `<init>` returns the array type.
                 Callee::External(fq) if fq == "kotlin/Array.get" => dispatch_receiver
