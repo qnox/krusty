@@ -999,6 +999,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (previously only defaulted functions were). Overloaded members share one class-map slot (a pre-existing
   limitation); a divergent overload degrades to a skip via the `param_names`/`lower_arg` type checks, never
   a miscompile. Test: `tests/named_arg_member_e2e.rs`.
+  The CHECKER type-checks a named member call against each argument's MAPPED parameter (via `map_call_args`),
+  not positionally — otherwise a reordered argument bound to a differently-typed parameter (e.g. `c = { }`
+  for a `() -> String` parameter reordered before the `String` parameters) would be checked against the
+  wrong parameter type ("inferred type is Function but String was expected"). This `map_call_args` path now
+  fires for a named call to a NO-DEFAULT method too (previously only defaulted methods), and falls through
+  to the shared return-type logic so a generic higher-order member still infers its `<R>`.
 
 - **Generic constructor type-argument inference (`Pair(1, 2)` → `Pair<Int, Int>`).** A classpath generic
   class constructed without explicit `<T>` previously erased to the raw type, so `first`/`second`/

@@ -54,6 +54,22 @@ fun box(): String {\n\
 }
 
 #[test]
+fn member_named_args_reorder_lambda_param() {
+    // A named argument bound to a `() -> String` parameter, reordered BEFORE the `String` parameters:
+    // the checker must type-check each argument against its NAMED parameter (not positionally), else
+    // the lambda `c` is checked against `String`. Mirrors `argumentOrder/simpleInClass.kt`.
+    const SRC: &str = "class Z(val p: String) {\n\
+    fun test(a: String, b: String, c: () -> String): String = a + b + c() + p\n\
+}\n\
+fun box(): String {\n\
+    var res = \"\"\n\
+    val call = Z(\"Z\").test(c = { res += \"L\"; \"L\" }, b = { res += \"K\"; \"K\" }(), a = { res += \"O\"; \"O\" }())\n\
+    return if (res == \"KOL\" && call == \"OKLZ\") \"OK\" else \"FAIL: res=$res call=$call\"\n\
+}\n";
+    assert_eq!(run(SRC).expect("reordered lambda-param named arg"), "OK");
+}
+
+#[test]
 fn member_named_args_in_order_still_work() {
     // A non-reordered named call is unaffected.
     const SRC: &str = "class Z {\n\
