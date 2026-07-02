@@ -609,13 +609,25 @@ fn build_state_machine(ir: &mut IrFile, facade: &str, fid: u32, b: ExprId) -> bo
     // so the conditional suspension surfaces as a `Variable{init: When}` the flattener handles.
     normalize_block_inits(ir, b);
     let IrExpr::Block { stmts, value } = ir.exprs[b as usize].clone() else {
+        crate::trace_compiler!(
+            "suspend",
+            "build_state_machine fid={fid} BAIL: body not a Block"
+        );
         return false;
     };
     if value.is_some() {
+        crate::trace_compiler!(
+            "suspend",
+            "build_state_machine fid={fid} BAIL: block has a trailing value (suspend body must use `return`)"
+        );
         return false; // a block trailing-value body isn't modeled (suspend bodies use `return`)
     }
     let suspend_set: HashSet<u32> = ir.suspend_funs.iter().copied().collect();
     if binds_value_class_suspension(ir, b, &suspend_set) {
+        crate::trace_compiler!(
+            "suspend",
+            "build_state_machine fid={fid} BAIL: inline-class suspension result across CPS boundary"
+        );
         return false; // an inline-class suspension result across the CPS boundary isn't modeled
     }
 
@@ -625,6 +637,10 @@ fn build_state_machine(ir: &mut IrFile, facade: &str, fid: u32, b: ExprId) -> bo
         .iter()
         .position(|&s| expr_calls_suspend(ir, s, &suspend_set))
     else {
+        crate::trace_compiler!(
+            "suspend",
+            "build_state_machine fid={fid} BAIL: no suspension found"
+        );
         return false; // caller guarantees a suspension exists
     };
     let mut reads: Vec<u32> = Vec::new();
@@ -701,6 +717,10 @@ fn build_state_machine(ir: &mut IrFile, facade: &str, fid: u32, b: ExprId) -> bo
     };
     flat.flatten(&stmts, 0, None);
     if flat.failed {
+        crate::trace_compiler!(
+            "suspend",
+            "build_state_machine fid={fid} BAIL: flattener failed"
+        );
         return false;
     }
     let states = std::mem::take(&mut flat.states);
@@ -2210,6 +2230,12 @@ fn box_returns(ir: &mut IrFile, e: ExprId) -> bool {
                 && box_returns(ir, body)
                 && update.is_none_or(|u| box_returns(ir, u))
         }
+        // A lambda argument (`m.map { it.value }`) is a VALUE — its body is a separate impl function,
+        // not a `return` of the suspend function being boxed — so it is a leaf here (no outer return to
+        // box inside it). Its captures are ordinary outer-scope value reads handled by the other arms.
+        IrExpr::Lambda { .. } => true,
+        // A `vararg` argument's elements evaluate in the enclosing expression — validate each.
+        IrExpr::Vararg { elements, .. } => elements.into_iter().all(|el| box_returns(ir, el)),
         _ => false,
     }
 }
