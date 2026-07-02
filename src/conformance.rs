@@ -90,3 +90,220 @@ pub fn extra_libs(src: &str) -> ExtraLibs {
         coroutines: directive(src, "WITH_COROUTINES"),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn directive_present_when_first_token_matches() {
+        assert!(directive(
+            "// WITH_REFLECT\nfun box() = \"OK\"",
+            "WITH_REFLECT"
+        ));
+    }
+
+    #[test]
+    fn directive_matches_with_colon_separator() {
+        // The token is split on space OR colon, so a `NAME: value` directive matches `NAME`.
+        assert!(directive("// TARGET_BACKEND: JVM_IR", "TARGET_BACKEND"));
+    }
+
+    #[test]
+    fn directive_matches_with_space_separator() {
+        assert!(directive("// WITH_REFLECT extra", "WITH_REFLECT"));
+    }
+
+    #[test]
+    fn directive_absent_returns_false() {
+        assert!(!directive("// WITH_COROUTINES\n", "WITH_REFLECT"));
+    }
+
+    #[test]
+    fn directive_requires_exact_first_token_not_substring() {
+        // `WITH_REFLECT_EXTRA` must NOT satisfy a query for `WITH_REFLECT`.
+        assert!(!directive("// WITH_REFLECT_EXTRA", "WITH_REFLECT"));
+    }
+
+    #[test]
+    fn directive_ignores_non_comment_lines() {
+        assert!(!directive("val WITH_REFLECT = 1", "WITH_REFLECT"));
+    }
+
+    #[test]
+    fn directive_tolerates_leading_whitespace_and_extra_slashes() {
+        assert!(directive("    /// WITH_REFLECT", "WITH_REFLECT"));
+        assert!(directive("\t// WITH_REFLECT", "WITH_REFLECT"));
+    }
+
+    #[test]
+    fn directive_finds_among_multiple_lines() {
+        let src = "// FILE: a.kt\n// WITH_COROUTINES\nfun box() = \"OK\"";
+        assert!(directive(src, "WITH_COROUTINES"));
+        assert!(directive(src, "FILE"));
+    }
+
+    #[test]
+    fn directive_empty_source_is_false() {
+        assert!(!directive("", "WITH_REFLECT"));
+    }
+
+    #[test]
+    fn backend_applicable_no_directives_applies() {
+        assert!(backend_applicable("fun box() = \"OK\"", BACKENDS));
+    }
+
+    #[test]
+    fn backend_applicable_target_backend_matching_included() {
+        assert!(backend_applicable("// TARGET_BACKEND: JVM_IR", BACKENDS));
+        assert!(backend_applicable("// TARGET_BACKEND: JVM", BACKENDS));
+    }
+
+    #[test]
+    fn backend_applicable_target_backend_nonmatching_excluded() {
+        assert!(!backend_applicable("// TARGET_BACKEND: JS", BACKENDS));
+        assert!(!backend_applicable("// TARGET_BACKEND: NATIVE", BACKENDS));
+    }
+
+    #[test]
+    fn backend_applicable_target_backend_comma_list() {
+        assert!(backend_applicable(
+            "// TARGET_BACKEND: JS, JVM_IR",
+            BACKENDS
+        ));
+    }
+
+    #[test]
+    fn backend_applicable_ignore_backend_excludes() {
+        assert!(!backend_applicable("// IGNORE_BACKEND: JVM_IR", BACKENDS));
+        assert!(!backend_applicable("// IGNORE_BACKEND: JVM", BACKENDS));
+    }
+
+    #[test]
+    fn backend_applicable_ignore_backend_other_is_kept() {
+        assert!(backend_applicable("// IGNORE_BACKEND: JS", BACKENDS));
+    }
+
+    #[test]
+    fn backend_applicable_ignore_backend_k2_excludes() {
+        // krusty is K2, so a K2 mute excludes.
+        assert!(!backend_applicable(
+            "// IGNORE_BACKEND_K2: JVM_IR",
+            BACKENDS
+        ));
+        assert!(!backend_applicable(
+            "// IGNORE_BACKEND_K2_MULTI_MODULE: JVM_IR",
+            BACKENDS
+        ));
+    }
+
+    #[test]
+    fn backend_applicable_dont_target_exact_backend_excludes() {
+        assert!(!backend_applicable(
+            "// DONT_TARGET_EXACT_BACKEND: JVM_IR",
+            BACKENDS
+        ));
+    }
+
+    #[test]
+    fn backend_applicable_ignore_backend_k1_is_not_excluded() {
+        // krusty is NOT K1: a K1-only mute must NOT exclude (it isn't in the filtered set).
+        assert!(backend_applicable("// IGNORE_BACKEND_K1: JVM_IR", BACKENDS));
+    }
+
+    #[test]
+    fn backend_applicable_ignore_backend_comma_list() {
+        assert!(!backend_applicable(
+            "// IGNORE_BACKEND: JS, JVM_IR",
+            BACKENDS
+        ));
+        assert!(backend_applicable(
+            "// IGNORE_BACKEND: JS, NATIVE",
+            BACKENDS
+        ));
+    }
+
+    #[test]
+    fn applies_combines_backend_and_flag_checks() {
+        assert!(applies("fun box() = \"OK\""));
+        // Backend-excluded → not applicable.
+        assert!(!applies("// IGNORE_BACKEND: JVM_IR"));
+        // Unmodeled flag → not applicable even though the backend is fine.
+        assert!(!applies("// LANGUAGE: +UnrestrictedBuilderInference"));
+    }
+
+    #[test]
+    fn needs_unmodeled_flag_free_compiler_args() {
+        assert!(needs_unmodeled_compiler_flag(
+            "// FREE_COMPILER_ARGS: -XXLanguage:+genericSafeCasts"
+        ));
+        assert!(!needs_unmodeled_compiler_flag(
+            "// FREE_COMPILER_ARGS: -Xfoo"
+        ));
+    }
+
+    #[test]
+    fn needs_unmodeled_flag_language() {
+        assert!(needs_unmodeled_compiler_flag(
+            "// LANGUAGE: +UnrestrictedBuilderInference"
+        ));
+        assert!(!needs_unmodeled_compiler_flag(
+            "// LANGUAGE: +SomethingElse"
+        ));
+    }
+
+    #[test]
+    fn needs_unmodeled_flag_directive() {
+        assert!(needs_unmodeled_compiler_flag("// KJS_WITH_FULL_RUNTIME"));
+    }
+
+    #[test]
+    fn needs_unmodeled_flag_source_marker() {
+        // Matched anywhere in the source, not just in a directive comment.
+        assert!(needs_unmodeled_compiler_flag(
+            "@OptIn(ExperimentalTypeInference::class)"
+        ));
+    }
+
+    #[test]
+    fn needs_unmodeled_flag_absent() {
+        assert!(!needs_unmodeled_compiler_flag("fun box() = \"OK\""));
+    }
+
+    #[test]
+    fn extra_libs_none_by_default() {
+        let libs = extra_libs("fun box() = \"OK\"");
+        assert!(!libs.reflect);
+        assert!(!libs.stdlib_jdk8);
+        assert!(!libs.coroutines);
+    }
+
+    #[test]
+    fn extra_libs_reads_each_directive() {
+        let libs = extra_libs("// WITH_REFLECT");
+        assert!(libs.reflect);
+        assert!(!libs.coroutines);
+
+        let libs = extra_libs("// WITH_COROUTINES");
+        assert!(libs.coroutines);
+        assert!(!libs.reflect);
+
+        let libs = extra_libs("// STDLIB_JDK8");
+        assert!(libs.stdlib_jdk8);
+    }
+
+    #[test]
+    fn extra_libs_reads_multiple_directives_together() {
+        let src = "// WITH_REFLECT\n// WITH_COROUTINES\n// STDLIB_JDK8\nfun box() = \"OK\"";
+        let libs = extra_libs(src);
+        assert!(libs.reflect);
+        assert!(libs.coroutines);
+        assert!(libs.stdlib_jdk8);
+    }
+
+    #[test]
+    fn backends_constant_lists_jvm_variants() {
+        assert!(BACKENDS.contains(&"JVM"));
+        assert!(BACKENDS.contains(&"JVM_IR"));
+    }
+}
