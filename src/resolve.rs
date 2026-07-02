@@ -5158,6 +5158,22 @@ impl<'a> Checker<'a> {
     }
 
     fn check_fun(&mut self, f: &FunDecl) {
+        // Duplicate parameter names are illegal (kotlinc reports a conflicting declaration). `_` is
+        // not a valid function parameter name in Kotlin, so no placeholder exception is needed.
+        {
+            let mut seen = std::collections::HashSet::new();
+            for p in &f.params {
+                if !seen.insert(p.name.as_str()) {
+                    self.diags.error(
+                        f.span,
+                        format!(
+                            "conflicting declaration: parameter '{}' is declared more than once",
+                            p.name
+                        ),
+                    );
+                }
+            }
+        }
         // The set of locals reassigned anywhere in this function (for captured-`var` boxing).
         self.fn_reassigned.clear();
         if let FunBody::Expr(b) | FunBody::Block(b) = &f.body {
