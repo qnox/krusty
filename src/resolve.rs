@@ -4473,6 +4473,17 @@ impl<'a> Checker<'a> {
     /// value in scope) and `Outer.Nested` resolves to a classpath nested class. The nested internal, so
     /// named/omitted-default argument mapping can reach the class's `@Metadata`. `None` when the receiver
     /// is a value (a normal `recv.method(...)` call) or the path is not a nested type.
+    /// The leftmost simple name of a dotted `Name`/`Member` chain (`a.b.c` → `a`), or `None` if the
+    /// chain bottoms out in something other than a bare name. Lets a fully-qualified path be told apart
+    /// from a member access on a value by testing whether the root is a value in scope.
+    fn dotted_root(&self, e: ExprId) -> Option<String> {
+        match self.file.expr(e) {
+            Expr::Name(n) => Some(n.clone()),
+            Expr::Member { receiver, .. } => self.dotted_root(*receiver),
+            _ => None,
+        }
+    }
+
     fn qualified_nested_ctor_internal(&self, receiver: ExprId, name: &str) -> Option<String> {
         let Expr::Name(outer) = self.file.expr(receiver) else {
             return None;
@@ -8363,6 +8374,46 @@ impl<'a> Checker<'a> {
                                     }
                                 }
                                 return Ty::obj(&internal);
+                            }
+                        }
+                    }
+                }
+                // A FULLY-QUALIFIED top-level FUNCTION call `a.b.helper(args)`: the receiver is a package
+                // PATH (its leftmost segment is not a value in scope), and `helper` is a top-level function
+                // of that package (compiled to `a/b/<File>Kt`). Resolve it by name among the classpath
+                // top-level overloads and confirm the owning facade sits in the receiver's package.
+                if let Some(root) = self.dotted_root(receiver) {
+                    if self.lookup(&root).is_none() {
+                        if let Some(pkg) = qualified_path(self.file, receiver) {
+                            let arg_tys: Vec<Ty> = args.iter().map(|a| self.expr(*a)).collect();
+                            let targs: Vec<Ty> = self
+                                .file
+                                .call_type_args
+                                .get(&call.0)
+                                .map(|ts| ts.iter().map(|r| self.resolve_ty(r)).collect())
+                                .unwrap_or_default();
+                            if let Some(c) = self
+                                .resolver()
+                                .resolve_top_level_callable(&name, &arg_tys, &targs)
+                            {
+                                if c.owner.rsplit_once('/').map(|(p, _)| p) == Some(pkg.as_str()) {
+                                    crate::trace_compiler!(
+                                        "resolve",
+                                        "fully-qualified top-level call {pkg}.{name} -> {}",
+                                        c.owner
+                                    );
+                                    for (i, a) in args.iter().enumerate() {
+                                        if let Some(p) = c.params.get(i) {
+                                            self.expect_assignable(
+                                                *p,
+                                                arg_tys[i],
+                                                self.span(*a),
+                                                "argument",
+                                            );
+                                        }
+                                    }
+                                    return c.ret;
+                                }
                             }
                         }
                     }

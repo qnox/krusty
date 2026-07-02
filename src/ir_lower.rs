@@ -106,6 +106,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
         ext_prop_get_ids: HashMap::new(),
         companion_consts: HashMap::new(),
         const_lits: HashMap::new(),
+        object_const_lits: HashMap::new(),
         ext_prop_set_ids: HashMap::new(),
         classes: HashMap::new(),
         statics: HashMap::new(),
@@ -142,6 +143,26 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
         inline_lambda_ret: Vec::new(),
     };
 
+    // Pre-scan every `object`'s `const val`s so a read inlines the literal (like a top-level const),
+    // removing the init-ordering hazard that would otherwise gate the object out. Only literal-valued
+    // consts are recorded; a computed-value const keeps the object gated (a sound skip below).
+    for &d in &file.decls {
+        if let Decl::Class(c) = file.decl(d) {
+            if c.is_object() {
+                let internal = class_internal(file, &c.name);
+                for p in c.body_props.iter().filter(|p| p.is_const) {
+                    if let Some(lit) = p
+                        .init
+                        .and_then(|i| ast_literal_const(file, i, body_prop_ty(file, info, p)))
+                    {
+                        lo.object_const_lits
+                            .insert((internal.clone(), p.name.clone()), lit);
+                    }
+                }
+            }
+        }
+    }
+
     set_bail("deep"); // refined below as lowering progresses (survey diagnostic only)
                       // Only files of top-level functions + *simple* classes take the IR path.
     for &d in &file.decls {
@@ -150,7 +171,16 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
             Decl::Class(c) if is_simple_class(c) => {}
             Decl::Class(c) if c.is_enum() && is_simple_enum(c) => {}
             Decl::Class(c) if c.is_interface() && is_simple_interface(c) => {}
-            Decl::Class(c) if c.is_object() && is_simple_object(c) => {}
+            Decl::Class(c)
+                if c.is_object()
+                    && is_simple_object(c)
+                    // Every `const val` must be an inlinable literal (recorded in `object_const_lits`
+                    // above) — its reads inline the value, so a method reading it is safe. A computed
+                    // (non-literal) const keeps the object gated (its read would need the backing field).
+                    && c.body_props.iter().all(|p| {
+                        !p.is_const
+                            || p.init.is_some_and(|i| is_const_literal(file, i))
+                    }) => {}
             // A `val` extension property (`val Recv.name get() = …`) is lowered to a static getter; the
             // unsupported shapes (`var`, no `get()`) are skipped in pass 1.
             Decl::Property(p)
@@ -1005,6 +1035,30 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                         });
                         lo.companion_consts
                             .insert((internal.clone(), cp.name.clone()), cty);
+                    }
+                }
+            }
+            // An `object`'s own `const val`s become `public static final` + `ConstantValue` fields on the
+            // object class (kotlinc's layout) — reads inline the literal (`object_const_lits`), exactly as
+            // kotlinc inlines a const, so the field is present for binary compatibility but never fetched.
+            if c.is_object() {
+                for bp in c.body_props.iter().filter(|p| p.is_const) {
+                    let cty = body_prop_ty(file, info, bp);
+                    lo.cur_class = None;
+                    lo.scope.clear();
+                    lo.next_value = 0;
+                    if let (Some(initx), false) = (bp.init, cty == Ty::Error) {
+                        if let Some(init) = lo.lower_arg(initx, &ty_to_ir(cty)) {
+                            lo.ir.statics.push(crate::ir::IrStatic {
+                                name: bp.name.clone(),
+                                ty: ty_to_ir(cty),
+                                init,
+                                is_var: false,
+                                is_const: true,
+                                owner: Some(internal.clone()),
+                                custom_accessor: false,
+                            });
+                        }
                     }
                 }
             }
@@ -3293,9 +3347,9 @@ fn is_simple_object(c: &ast::ClassDecl) -> bool {
         // An `init { … }` block with side effects must not run when a `const val` is read (a const is
         // inlined, not fetched through INSTANCE) — krusty doesn't model const-inlining, so bail.
         && c.init_order.iter().all(|s| matches!(s, ast::ClassInit::PropInit(_)))
-        // A `const val` read through a method during property initialization would observe the
-        // uninitialized backing field (kotlinc inlines the constant; krusty doesn't). Bail.
-        && !(c.body_props.iter().any(|p| p.is_const) && !c.methods.is_empty())
+    // (A `const val` read from a method is safe: `object_const_lits` inlines the literal at the read
+    // site — like kotlinc — so no backing field is fetched. The call site additionally requires each
+    // const to be an inlinable literal.)
 }
 
 /// An `interface` the IR can emit: only abstract methods (no default/bodied methods, which need a
@@ -3445,7 +3499,11 @@ fn is_computed_prop(p: &ast::PropDecl) -> bool {
 /// nor an `abstract` one (emitted as an abstract `getX()`, the field lives on the subclass) nor a
 /// delegated one (`by Del()` — its field is the synthetic `x$delegate`, accessor calls `getValue`).
 fn is_backing_field_prop(p: &ast::PropDecl) -> bool {
-    !is_computed_prop(p) && !p.is_abstract && p.delegate.is_none()
+    // A `const val` is NEVER an instance backing field — Kotlin only allows `const` in an `object`,
+    // `companion object`, or at top level, where it compiles to a `public static final` + `ConstantValue`
+    // field (emitted on the static path) and every read is inlined. Excluding it here also suppresses the
+    // `getX()` accessor (kotlinc emits none for a const).
+    !p.is_const && !is_computed_prop(p) && !p.is_abstract && p.delegate.is_none()
 }
 
 /// A backing-field property whose accessor is CUSTOM and reads/writes `field` (`val x = init get() =
@@ -3509,6 +3567,11 @@ pub(crate) struct Lower<'a> {
     /// Top-level `const val` name → its compile-time literal value. A same-file read inlines this as a
     /// constant (kotlinc's `ldc`), exactly like the reference compiler — byte-identical, no `getstatic`.
     const_lits: HashMap<String, crate::ir::IrConst>,
+    /// `(object internal, const-val name)` → its compile-time literal value. A `const val` inside an
+    /// `object` is inlined at every read (unqualified inside the object's own methods, or qualified
+    /// `Obj.NAME`), exactly as kotlinc inlines it — so no `getstatic` is needed and a read during the
+    /// object's own initialization can't observe an uninitialized field.
+    object_const_lits: HashMap<(String, String), crate::ir::IrConst>,
     ext_prop_set_ids: HashMap<(Ty, String), u32>,
     classes: HashMap<String, ClassInfo>,
     /// Top-level property name → (index into `ir.statics`, type).
@@ -4268,6 +4331,70 @@ impl<'a> Lower<'a> {
     /// Lower construction of a classpath (non-IR) class — `RuntimeException("x")`, `StringBuilder()`.
     /// The constructor descriptor is resolved from the classpath; arguments are coerced to its
     /// parameter types. Bails when the constructor can't be resolved or arity mismatches.
+    /// The leftmost simple name of a dotted `Name`/`Member` chain (`a.b.c` → `a`), or `None`. Lets a
+    /// fully-qualified package path be told apart from a member access on a value in scope.
+    fn ast_dotted_root(&self, e: AstExprId) -> Option<String> {
+        match self.afile.expr(e) {
+            Expr::Name(n) => Some(n.clone()),
+            Expr::Member { receiver, .. } => self.ast_dotted_root(*receiver),
+            _ => None,
+        }
+    }
+
+    /// Lower a FULLY-QUALIFIED top-level function call `a.b.helper(args)` — the receiver is a package path
+    /// (its root is not a value in scope) and `helper` is a top-level function of that package (compiled
+    /// to `a/b/<File>Kt`). Emits the `invokestatic` to the facade, threading a `Continuation` if the
+    /// callee is `suspend`. `None` (→ normal member-call handling) when the receiver is not a package, the
+    /// name resolves elsewhere, or the shape is a vararg/defaulted/inline call this focused path leaves to
+    /// a later slice (a plain FQ call is the common form).
+    fn lower_fq_toplevel_call(
+        &mut self,
+        receiver: AstExprId,
+        name: &str,
+        args: &[AstExprId],
+        e: AstExprId,
+    ) -> Option<u32> {
+        let root = self.ast_dotted_root(receiver)?;
+        if self.lookup(&root).is_some() {
+            return None;
+        }
+        let pkg = crate::resolve::qualified_path(self.afile, receiver)?;
+        let arg_tys: Vec<Ty> = args.iter().map(|&a| self.info.ty(a)).collect();
+        let c = self
+            .resolver()
+            .resolve_top_level_callable(name, &arg_tys, &[])?;
+        if c.owner.rsplit_once('/').map(|(p, _)| p) != Some(pkg.as_str()) {
+            return None;
+        }
+        // Plain fixed-arity call only — a vararg/defaulted FQ call is a later slice (sound skip).
+        let last_is_array = c.params.last().is_some_and(|p| p.array_elem().is_some());
+        if c.default_call || last_is_array || c.params.len() != args.len() {
+            return None;
+        }
+        let mut a = Vec::new();
+        for (i, &arg) in args.iter().enumerate() {
+            a.push(self.lower_arg(arg, &ty_to_ir(c.params[i]))?);
+        }
+        let call = self.ir.add_expr(IrExpr::Call {
+            callee: Callee::Static {
+                owner: c.owner.clone(),
+                name: c.name.clone(),
+                descriptor: c.descriptor.clone(),
+                inline: c.inline,
+            },
+            dispatch_receiver: None,
+            args: a,
+        });
+        if self.resolver().toplevel_is_suspend(name) {
+            self.ir.suspend_calls.insert(call, ty_to_ir(c.ret));
+        }
+        Some(if c.inline.can_inline() {
+            self.coerce_erased_call_result(e, call, &c.physical_ret, true)
+        } else {
+            call
+        })
+    }
+
     fn lower_external_new(&mut self, internal: &str, args: &[AstExprId]) -> Option<u32> {
         // A user class defined in ANOTHER file of this compilation (found by internal name in the global
         // symbol table, but not in THIS file's IR classes) → construct via `NewCrossFile` from its
@@ -13949,6 +14076,15 @@ impl<'a> Lower<'a> {
                 } else if let Some(c) = self.const_lits.get(&n).cloned() {
                     // A same-file `const val` read → inline its literal (`ldc`), like kotlinc.
                     self.ir.add_expr(IrExpr::Const(c))
+                } else if let Some(c) = self
+                    .cur_class
+                    .as_ref()
+                    .and_then(|cc| self.object_const_lits.get(&(cc.clone(), n.clone())))
+                    .cloned()
+                {
+                    // A `const val` of the enclosing `object` read UNQUALIFIED inside its own method
+                    // (`fun m() = MAX`) → inline the literal, like kotlinc.
+                    self.ir.add_expr(IrExpr::Const(c))
                 } else if let Some(&(idx, sty)) = self.statics.get(&n) {
                     let read = self.ir.add_expr(IrExpr::GetStatic(idx));
                     // Smart-cast of a top-level `val` to a scalar (`val x: Any; if (x is Double) …`)
@@ -14321,6 +14457,15 @@ impl<'a> Lower<'a> {
                                 index: idx as u32,
                             }));
                         }
+                    }
+                    // `Obj.NAME` where `NAME` is a `const val` of an `object` → inline the literal
+                    // (kotlinc inlines a const read; no `getstatic`).
+                    if let Some(c) = self
+                        .object_const_lits
+                        .get(&(internal.clone(), name.clone()))
+                        .cloned()
+                    {
+                        return Some(self.ir.add_expr(IrExpr::Const(c)));
                     }
                     // `C.X` where `X` is a companion `const val` → `getstatic C.X` (the field lives on the
                     // outer class C; the JVM initializes it from its `ConstantValue` attribute).
@@ -16630,6 +16775,12 @@ impl<'a> Lower<'a> {
                 }
                 // Instance method call `recv.m(args)`, or a stdlib intrinsic method.
                 Expr::Member { receiver, name } => {
+                    // A FULLY-QUALIFIED top-level FUNCTION call `a.b.helper(args)` (the checker typed it):
+                    // the receiver is a package path, `helper` a top-level fn of that package — emit the
+                    // static call to its facade. `None` falls through to normal member-call handling.
+                    if let Some(v) = self.lower_fq_toplevel_call(receiver, &name, &args, e) {
+                        return Some(v);
+                    }
                     // NAMED-ARGUMENT call to a same-file USER instance method (`z.test(b = …, a = …)`) with
                     // all parameters required and exactly supplied: reorder onto positions, evaluating the
                     // receiver then the arguments in SOURCE order (temps). `resolve_method` scopes to IR

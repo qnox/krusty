@@ -1021,6 +1021,29 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   treats a declared `String?` (reference nullability is not carried in `Ty`), so the recovered suspend
   return matches a source-spelled reference return instead of a divergent `Ty::Nullable`. Test:
   `tests/suspend_return_type_recovery_e2e.rs`.
+- **A `suspend` body accessing a member of a suspend call's result inline (`suspend fun f(r) =
+  r.all().size`).** The CPS flattener only meets a suspension at a bound-local / bare-statement position;
+  a suspension nested in a `return`/member-access value must be pre-hoisted. `hoist_suspensions` now
+  descends into a NON-suspend `Call` (dispatch-receiver + args), `MethodCall` (receiver + args) and
+  `GetField` (receiver) — all of which evaluate their children unconditionally before the access — hoisting
+  each suspension to a preceding `val tmp = <call>` temp the flattener handles (`return r.all().size` →
+  `val tmp = r.all(); return tmp.size`). Conditional nodes (`if`/`when`/elvis) and lambda bodies are left in
+  place. Test: `tests/suspend_member_after_call_e2e.rs`. (A `kotlin.collections` EXTENSION/indexing on a
+  suspend collection result — `r.all().first()` — remains a separate gap: the suspend return is recovered in
+  its erased `java/util/List` form, on which those extensions aren't keyed.)
+- **A fully-qualified top-level function call `a.b.helper(args)`.** The callee is a dotted path whose prefix
+  is a PACKAGE (its leftmost segment not a value in scope, via `dotted_root`) and whose last segment is a
+  top-level function of that package (compiled to `a/b/<File>Kt`). The checker resolves the overload with
+  `resolve_top_level_callable` and confirms the owning facade sits in the receiver's package
+  (`qualified_path`); the lowerer's `lower_fq_toplevel_call` mirrors this and emits the `invokestatic` to the
+  facade (a vararg/defaulted/inline FQ call bails to a later slice). Test: `tests/fq_toplevel_call_e2e.rs`.
+- **A `const val` inside an `object`.** Kotlin inlines every const read; krusty now does the same — a
+  pre-scan records each literal-valued object `const val` in `object_const_lits[(object internal, name)]`,
+  and a read inlines the literal (unqualified inside the object's own methods via `cur_class`, and qualified
+  `Obj.NAME`). The const is emitted as a `public static final` + `ConstantValue` field on the object class
+  (kotlinc's layout — `is_backing_field_prop` excludes const, so it is neither an instance field nor a
+  `getX()` accessor). This removes the init-ordering hazard that gated such an object out; a computed
+  (non-literal) const keeps the object gated. Test: `tests/object_const_val_e2e.rs`.
 
 - **Reordered named arguments evaluate in SOURCE order (`f(b = X(), a = Y())`).** Kotlin evaluates
   arguments in written order, then binds each to its parameter position. When a reordering moves a
