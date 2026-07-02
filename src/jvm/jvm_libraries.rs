@@ -2039,6 +2039,26 @@ impl SymbolSource for JvmLibraries {
                                 },
                                 _ => crate::libraries::CallSig::default(),
                             };
+                            // A generic-return builtin member (`Map.get(K): V?`) resolves to the erased
+                            // classpath method (`java/util/Map.get` → `Object`), which carries no Kotlin
+                            // nullability. Recover the source `V?` from the builtin `@Metadata`. Applied
+                            // only for a PRIMITIVE return (a nullable primitive is a distinct BOXED type,
+                            // so `m[k] ?: d` must null-check before unboxing); a nullable REFERENCE already
+                            // null-checks regardless, and keeps its plain erased `Ty` (see below).
+                            // `cn` may already be the front-end `kotlin/collections/…` name or the erased
+                            // JVM form (`java/util/Map`, when the member is found on a classpath supertype);
+                            // map both to the builtin whose `@Metadata` declares the nullability.
+                            let builtin_cn = super::jvm_class_map::jvm_collection_to_kotlin(&cn)
+                                .or_else(|| {
+                                    super::jvm_class_map::jvm_to_kotlin_builtin_with_members(&cn)
+                                })
+                                .unwrap_or(cn.as_str());
+                            let builtin_ret_nullable = !ret.is_reference()
+                                && self.cp.builtin_member_ret_nullable(
+                                    builtin_cn,
+                                    &m.name,
+                                    params.len(),
+                                );
                             overloads.push(FunctionInfo {
                                 kind: FnKind::Member,
                                 receiver: Some(receiver),
@@ -2048,6 +2068,7 @@ impl SymbolSource for JvmLibraries {
                                 // `resolve_ty` treat a declared `String?` — so a recovered suspend return
                                 // matches the source-spelled reference return instead of diverging.
                                 ret_nullable: m.ret_nullable
+                                    || builtin_ret_nullable
                                     || (suspend_ret_nullable && !ret.is_reference()),
                                 ret_class: None,
                                 public: true,
