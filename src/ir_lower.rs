@@ -16688,6 +16688,13 @@ impl<'a> Lower<'a> {
                                         && self.info.ty(e).obj_internal() == Some(i.as_str())
                                 })
                             {
+                                // NAMED args (`Op.Ext(a = 1, b = "x")`, or omitting a defaulted param) map
+                                // labels onto positions via the nested class's `@Metadata`; positional
+                                // (incl. an omitted default) goes through the plain path, which already
+                                // emits the `<init>$default`/marker synthetic.
+                                if self.afile.call_arg_names.contains_key(&e.0) {
+                                    return self.lower_external_new_named(&internal, e, &args);
+                                }
                                 return self.lower_external_new(&internal, &args);
                             }
                         }

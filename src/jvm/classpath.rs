@@ -1576,60 +1576,27 @@ fn class_internal_from_entry(name: &str) -> Option<&str> {
     name.strip_suffix(".class").filter(|s| !s.is_empty())
 }
 
-/// Parse Kotlin type aliases from a `*TypeAliasesKt.class` file's `@Metadata` `d2` array. Only such
-/// files are ever parsed for the type index — every other class is indexed by name alone.
+/// Parse Kotlin type aliases from a file facade's `@Metadata` (the `Package.typeAlias` proto entries).
+/// A top-level `typealias` lands in its file facade (`Lib.kt` → `LibKt`), not only the stdlib's
+/// dedicated `*TypeAliasesKt` files, so every `*Kt` facade is parsed — the proto reader only emits real
+/// alias entries (unlike the old `d2` `$annotations` heuristic, which a facade's annotated top-level
+/// property would have tripped).
 fn parse_aliases_from_bytes(bytes: &[u8], idx: &mut TypeIndex) {
     let Ok(ci) = parse_class(bytes) else { return };
-    if ci.kotlin_d2.is_empty() {
-        return;
-    }
-    let alias_names: Vec<String> = ci
-        .methods
-        .iter()
-        .filter(|m| m.name.ends_with("$annotations"))
-        .map(|m| m.name.trim_end_matches("$annotations").to_string())
-        .collect();
-    // In d2, an alias name is followed by its underlying type's JVM descriptor — but for a GENERIC
-    // alias the type-parameter NAMES come first (`"ArrayList","E","Ljava/util/ArrayList;"`,
-    // `"LinkedHashMap","K","V","Ljava/util/LinkedHashMap;"`), so the descriptor is NOT simply at i+1.
-    // Scan forward for the first class descriptor, stopping at the next alias name (defensive — every
-    // alias has a descriptor before the next one). Picking the FIRST `L…;` (not the last) avoids
-    // grabbing a trailing annotation marker like `Lkotlin/SinceKotlin;`. A type-parameter BOUND is no
-    // hazard: bounds appear as PLAIN classifier-name strings (`kotlin/Number`), only the underlying
-    // type is emitted in `L…;` descriptor form — so the first descriptor is always the alias target.
-    let d2 = &ci.kotlin_d2;
-    let alias_set: std::collections::HashSet<&String> = alias_names.iter().collect();
-    for alias in &alias_names {
-        let Some(i) = d2.iter().position(|s| s == alias) else {
-            continue;
-        };
-        for desc in &d2[i + 1..] {
-            if alias_set.contains(desc) {
-                break; // ran into the next alias without finding a descriptor
-            }
-            if let Some(internal_name) = desc_to_internal(desc) {
-                idx.type_aliases.insert(alias.clone(), internal_name);
-                break;
-            }
-        }
+    for (alias, internal) in super::metadata::package_type_aliases(&ci) {
+        idx.type_aliases.insert(alias, internal);
     }
 }
 
+/// A Kotlin FILE FACADE (`*Kt`) — where a top-level `typealias` is recorded. Parsed for aliases; every
+/// other class is indexed by name alone. (`TypeAliasesKt` is just the stdlib's conventional facade name;
+/// a general library's alias lives in its own `<File>Kt` facade.)
 fn is_type_aliases_kt(internal: &str) -> bool {
     internal
         .rsplit('/')
         .next()
         .unwrap_or(internal)
-        .ends_with("TypeAliasesKt")
-}
-
-/// Convert a JVM class descriptor `Lsome/Class;` to internal name `some/Class`.
-fn desc_to_internal(desc: &str) -> Option<String> {
-    let s = desc.strip_prefix('L')?.strip_suffix(';')?;
-    if s.is_empty() {
-        return None;
-    }
-    Some(s.to_string())
+        .ends_with("Kt")
 }
 
 fn scan_types_dir(

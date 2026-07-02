@@ -172,6 +172,25 @@ pub fn kotlin_prim_to_wrapper(internal: &str) -> Option<&'static str> {
     })
 }
 
+/// Inverse of [`kotlin_prim_to_wrapper`]: the Kotlin primitive internal name for a JVM box class
+/// (`java/lang/Long` → `kotlin/Long`), or `None` if `internal` is not a boxed primitive. A generic type
+/// argument (e.g. `Continuation<T>` in a `suspend fun`'s signature) always carries the BOXED form, so
+/// recovering the source primitive return needs this inverse. Unsigned inline-class wrappers are
+/// intentionally omitted — they are not `java/lang/*` boxes and keep their own identity.
+pub fn wrapper_to_kotlin_prim(internal: &str) -> Option<&'static str> {
+    Some(match internal {
+        "java/lang/Integer" => "kotlin/Int",
+        "java/lang/Long" => "kotlin/Long",
+        "java/lang/Short" => "kotlin/Short",
+        "java/lang/Byte" => "kotlin/Byte",
+        "java/lang/Double" => "kotlin/Double",
+        "java/lang/Float" => "kotlin/Float",
+        "java/lang/Boolean" => "kotlin/Boolean",
+        "java/lang/Character" => "kotlin/Char",
+        _ => return None,
+    })
+}
+
 /// Map a Kotlin built-in type's internal name to its JVM name (`kotlin/Any` → `java/lang/Object`).
 /// Any other name — a user class, a JDK class already named in JVM form, a Kotlin stdlib class with
 /// no JVM-builtin counterpart — passes through unchanged. Applied at the Ty→bytecode boundary.

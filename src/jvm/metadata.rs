@@ -761,6 +761,76 @@ pub fn package_functions(ci: &ClassInfo) -> Vec<MetaFn> {
     decode_functions(ci, 3)
 }
 
+/// Type aliases declared in a file facade's `Package` `@Metadata` (`typealias Alias = Real` →
+/// `("Alias", "pkg/Real")`). Reads the `Package.typeAlias` entries (field 5) from the proto directly:
+/// each alias's name (field 2, a string-table id) and its EXPANDED type (field 6, fully resolved to the
+/// concrete class, so an alias chain collapses to the final class; falls back to the immediate
+/// underlying type, field 4). This is robust where the older `d2` `$annotations` heuristic was not — a
+/// file facade also carries annotated top-level properties whose `$annotations` markers that heuristic
+/// would misread as aliases.
+pub fn package_type_aliases(ci: &ClassInfo) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    if ci.kotlin_d1.is_empty() {
+        return out;
+    }
+    let bytes = decode_d1(&ci.kotlin_d1);
+    let (st_body, msg_body) = split_d1(&bytes);
+    let records = parse_string_table(st_body);
+    let d2 = &ci.kotlin_d2;
+    let mut pb = Pb { b: msg_body, i: 0 };
+    while !pb.at_end() {
+        let Some(tag) = pb.varint() else { break };
+        match (tag >> 3, tag & 7) {
+            // Package.typeAlias = 5 (length-delimited message).
+            (5, 2) => {
+                let Some(len) = pb.varint() else { break };
+                let Some(body) = pb.bytes(len as usize) else {
+                    break;
+                };
+                if let Some((name, internal)) = parse_type_alias(body, &records, d2) {
+                    out.push((name, internal));
+                }
+            }
+            (_, w) => {
+                if pb.skip(w).is_none() {
+                    break;
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Decode a `TypeAlias` message → `(alias name, expanded/underlying class internal name)`.
+/// `TypeAlias.name` = 2 (string-table id), `underlyingType` = 4, `expandedType` = 6 (both `Type`).
+fn parse_type_alias(body: &[u8], records: &[Rec], d2: &[String]) -> Option<(String, String)> {
+    let mut pb = Pb { b: body, i: 0 };
+    let mut name_id: Option<u64> = None;
+    let mut expanded_class: Option<u64> = None;
+    let mut underlying_class: Option<u64> = None;
+    while !pb.at_end() {
+        let tag = pb.varint()?;
+        match (tag >> 3, tag & 7) {
+            (2, 0) => name_id = pb.varint(),
+            (4, 2) => {
+                let len = pb.varint()? as usize;
+                let tb = pb.bytes(len)?;
+                underlying_class = parse_type_class_name(tb);
+            }
+            (6, 2) => {
+                let len = pb.varint()? as usize;
+                let tb = pb.bytes(len)?;
+                expanded_class = parse_type_class_name(tb);
+            }
+            (_, w) => pb.skip(w)?,
+        }
+    }
+    let name = d2.get(name_id? as usize).cloned()?;
+    let class_id = expanded_class.or(underlying_class)?;
+    let internal = resolve_class_name(records, d2, class_id as usize)?;
+    Some((name, internal))
+}
+
 /// The SOURCE value-parameter names of every constructor in a `Class`'s `@Metadata` (`Class.constructor`
 /// field 8 → `Constructor.value_parameter` field 2 → `ValueParameter.name` field 2), one `Vec` per
 /// constructor in declaration order (the primary constructor is first). Drives NAMED-ARGUMENT resolution
