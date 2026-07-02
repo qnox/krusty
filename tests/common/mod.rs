@@ -406,6 +406,69 @@ pub fn compile_and_run_box(
     run_box(&classes, &box_class, cp_jars)
 }
 
+/// Compile Kotlin `lib_src` with the REAL kotlinc into a fresh classpath dir (tagged by `tag` +
+/// process id), returning the output dir for a `-classpath`. `None` (→ skip the test) when the kotlinc
+/// toolchain / stdlib isn't provisioned. The single shared "build a dependency jar" helper — classpath
+/// e2e tests use this instead of each re-implementing the kotlinc invocation.
+#[allow(dead_code)]
+pub fn compile_lib(tag: &str, lib_src: &str) -> Option<PathBuf> {
+    let stdlib = stdlib_jar()?;
+    let work = std::env::temp_dir().join(format!("krusty_lib_{tag}_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&work);
+    let out = work.join("libout");
+    std::fs::create_dir_all(&out).ok()?;
+    let lib_kt = work.join("Lib.kt");
+    std::fs::write(&lib_kt, lib_src).ok()?;
+    let args = vec![
+        "-d".into(),
+        out.to_string_lossy().into_owned(),
+        "-cp".into(),
+        stdlib.to_string_lossy().into_owned(),
+        lib_kt.to_string_lossy().into_owned(),
+    ];
+    match kotlinc_compile(&args) {
+        Some((0, _)) => Some(out),
+        Some((code, err)) => panic!("kotlinc(lib) failed ({code}): {err}"),
+        None => None,
+    }
+}
+
+/// Compile `main` against a kotlinc-built `lib_src` (via [`compile_lib`]) and run its `box()` on the
+/// persistent JVM. `None` (→ skip) when the toolchain is unavailable. stdlib + JDK modules are on both
+/// the compile and run classpath.
+#[allow(dead_code)]
+pub fn run_box_against(tag: &str, lib_src: &str, main: &str) -> Option<String> {
+    let libout = compile_lib(tag, lib_src)?;
+    let stdlib = stdlib_jar()?;
+    compile_and_run_box(main, "Main", &[libout, stdlib], jdk_modules().as_deref())
+}
+
+/// Compile `main` against a kotlinc-built `lib_src` up to the CHECKER only (no lowering/emit), returning
+/// the diagnostic messages (empty = clean). For asserting the RESOLUTION of a shape whose end-to-end
+/// lowering is an orthogonal, not-yet-implemented feature. `None` (→ skip) when the toolchain is absent.
+#[allow(dead_code)]
+pub fn checker_diags_against(tag: &str, lib_src: &str, main: &str) -> Option<Vec<String>> {
+    use krusty::diag::DiagSink;
+    use krusty::resolve::{check_file, collect_signatures_with_cp};
+    let libout = compile_lib(tag, lib_src)?;
+    let stdlib = stdlib_jar()?;
+    let mut cp_paths = vec![libout, stdlib];
+    if let Some(jdk) = jdk_modules() {
+        cp_paths.push(jdk);
+    }
+    let mut diags = DiagSink::new();
+    let features = krusty::features::LangFeatures::from_source(main);
+    let toks = krusty::lexer::lex(main, &mut diags);
+    let files = vec![krusty::parser::parse_with_features(
+        main, &toks, &mut diags, &features,
+    )];
+    let cp = std::rc::Rc::new(Classpath::new(cp_paths));
+    let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(cp));
+    let mut syms = collect_signatures_with_cp(&files, platform, &mut diags);
+    let _ = check_file(&files[0], &mut syms, &mut diags);
+    Some(diags.diags.iter().map(|m| m.msg.clone()).collect())
+}
+
 /// The provisioned Kotlin codegen/box corpus directory (`KRUSTY_KOTLIN_BOX_DIR`), if present — the
 /// SAME corpus the differential conformance gate runs over. Lets an e2e pin a SPECIFIC real corpus
 /// case as a named regression test (instead of a hand-written snippet that may hit a lowering edge the

@@ -1095,6 +1095,43 @@ impl<'a> CallResolver<'a> {
 // this layer (not the oracle). `resolve` and `ir_lower` share one implementation, backend-agnostic.
 
 /// Resolve a constructor on a library type by argument types (with the type's own widening).
+/// Whether a call argument `arg` fits a constructor parameter `param` after both are reduced to their
+/// JVM-descriptor identity — accepting a reference argument that is a SUBTYPE of the parameter's JVM
+/// interface (`java/util/List` argument → `java/util/Collection` parameter). Non-reference sides only
+/// match on identity. The supertype closure is walked through the classpath (`resolve_type`); no
+/// collection relationships are hardcoded.
+fn ctor_arg_subtype_of_param(lib: &dyn SymbolSource, arg: Ty, param: Ty) -> bool {
+    let pj = lib.jvm_descriptor_form(param).unwrap_or(param);
+    let aj = lib.jvm_descriptor_form(arg).unwrap_or(arg);
+    if aj == pj {
+        return true;
+    }
+    // Only a reference argument can widen to a reference parameter through the type hierarchy.
+    let (Ty::Obj(arg_internal, _), Ty::Obj(param_jvm, _)) = (arg, pj) else {
+        return false;
+    };
+    let mut stack = vec![arg_internal.to_string()];
+    let mut seen = std::collections::HashSet::new();
+    while let Some(cur) = stack.pop() {
+        if !seen.insert(cur.clone()) {
+            continue;
+        }
+        // Compare each visited supertype in its JVM-descriptor identity (a Kotlin collection supertype
+        // such as `kotlin/collections/Collection` erases to `java/util/Collection`).
+        let cur_jvm = lib
+            .jvm_descriptor_form(Ty::obj(&cur))
+            .and_then(|t| t.obj_internal().map(str::to_string))
+            .unwrap_or_else(|| cur.clone());
+        if cur_jvm == param_jvm {
+            return true;
+        }
+        if let Some(t) = lib.resolve_type(&cur) {
+            stack.extend(t.supertypes);
+        }
+    }
+    false
+}
+
 pub fn resolve_constructor(
     lib: &dyn SymbolSource,
     internal: &str,
@@ -1144,6 +1181,9 @@ pub fn resolve_constructor(
         .map(|a| lib.jvm_descriptor_form(*a).unwrap_or(*a))
         .collect();
     if jvm_args != args {
+        // First pass — EXACT JVM-descriptor form on every parameter. This is tried before the
+        // subtype pass so a `Rule(List)` overload always wins over a `Rule(Collection)` one when the
+        // call passes a `List` (the most-specific constructor).
         if let Some(m) = t.constructors.iter().find(|m| {
             m.params.len() == jvm_args.len()
                 && m.params
@@ -1154,6 +1194,23 @@ pub fn resolve_constructor(
             crate::trace_compiler!(
                 "value_classes",
                 "resolve_constructor {internal} matched via jvm-descriptor-form args {args:?} -> {jvm_args:?}"
+            );
+            return Some(m.clone());
+        }
+        // Second pass — a reference argument may be a SUBTYPE of the parameter's JVM identity
+        // (`Rule(val c: Collection<String>)` called with `listOf(…)`: `java/util/List` is-a
+        // `java/util/Collection`). Walk each argument's supertype closure (in the classpath, no
+        // hardcoded relationships) to the parameter's erased JVM interface.
+        if let Some(m) = t.constructors.iter().find(|m| {
+            m.params.len() == jvm_args.len()
+                && m.params
+                    .iter()
+                    .zip(args)
+                    .all(|(p, a)| ctor_arg_subtype_of_param(lib, *a, *p))
+        }) {
+            crate::trace_compiler!(
+                "value_classes",
+                "resolve_constructor {internal} matched via jvm-subtype form args {args:?}"
             );
             return Some(m.clone());
         }

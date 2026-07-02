@@ -5,36 +5,15 @@
 //!   f4  suspend interface method with a value-class param    — `p.get(id)` (`get-<h>(String, Continuation)`)
 //! Library compiled by kotlinc (the real mangled/synthetic ABI); consumed by krusty.
 //! Needs the JVM toolchain + kotlin-stdlib; skips otherwise.
-use std::fs;
 mod common;
 
-fn build_lib(work: &std::path::Path, stdlib: &str) -> Option<std::path::PathBuf> {
-    let libout = work.join("lib");
-    fs::create_dir_all(&libout).unwrap();
-    fs::write(
-        work.join("Lib.kt"),
-        "package lib\n\
-         @JvmInline value class Vid(val v: String)\n\
-         class Rec(val id: Vid, val n: Int = 0)\n\
-         data class Cat(val id: Vid, val name: String)\n\
-         interface Port { suspend fun get(id: Vid): String }\n\
-         private class PortImpl : Port { override suspend fun get(id: Vid): String = \"cat-\" + id.v }\n\
-         fun makePort(): Port = PortImpl()\n",
-    )
-    .unwrap();
-    let kc = vec![
-        "-d".into(),
-        libout.to_string_lossy().into_owned(),
-        "-cp".into(),
-        stdlib.to_string(),
-        work.join("Lib.kt").to_string_lossy().into_owned(),
-    ];
-    match common::kotlinc_compile(&kc) {
-        Some((0, _)) => Some(libout),
-        Some((_, e)) => panic!("kotlinc(lib): {e}"),
-        None => None,
-    }
-}
+const LIB: &str = "package lib\n\
+     @JvmInline value class Vid(val v: String)\n\
+     class Rec(val id: Vid, val n: Int = 0)\n\
+     data class Cat(val id: Vid, val name: String)\n\
+     interface Port { suspend fun get(id: Vid): String }\n\
+     private class PortImpl : Port { override suspend fun get(id: Vid): String = \"cat-\" + id.v }\n\
+     fun makePort(): Port = PortImpl()\n";
 
 #[test]
 fn value_class_ctor_default_and_data_copy() {
@@ -44,10 +23,7 @@ fn value_class_ctor_default_and_data_copy() {
     let Some(sl) = common::stdlib_jar() else {
         return;
     };
-    let stdlib = sl.to_str().unwrap().to_string();
-    let work = std::env::temp_dir().join(format!("krusty_vcdef_{}", std::process::id()));
-    let _ = fs::remove_dir_all(&work);
-    let Some(libout) = build_lib(&work, &stdlib) else {
+    let Some(libout) = common::compile_lib("vcdef", LIB) else {
         return;
     };
     let cp = vec![libout.clone(), sl.clone()];
@@ -87,10 +63,7 @@ fn suspend_value_class_param_member_resolves_and_emits_cps() {
     let Some(sl) = common::stdlib_jar() else {
         return;
     };
-    let stdlib = sl.to_str().unwrap().to_string();
-    let work = std::env::temp_dir().join(format!("krusty_vcsusp_{}", std::process::id()));
-    let _ = fs::remove_dir_all(&work);
-    let Some(libout) = build_lib(&work, &stdlib) else {
+    let Some(libout) = common::compile_lib("vcsusp", LIB) else {
         return;
     };
     let cp = vec![libout.clone(), sl.clone()];
