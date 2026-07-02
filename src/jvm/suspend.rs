@@ -2236,6 +2236,21 @@ fn box_returns(ir: &mut IrFile, e: ExprId) -> bool {
         IrExpr::Lambda { .. } => true,
         // A `vararg` argument's elements evaluate in the enclosing expression — validate each.
         IrExpr::Vararg { elements, .. } => elements.into_iter().all(|el| box_returns(ir, el)),
+        // `try { … } catch … finally { … }`: box a `return` in the try body, in each catch body, and in
+        // the finally. The try/finally is emitted with its own exception table (unchanged by the CPS
+        // return-boxing); a suspension INSIDE the try body is a separate case the flattener still
+        // declines (its `finally`-across-states isn't modeled), so this only enables non-suspending try
+        // bodies inside a suspend function.
+        IrExpr::Try {
+            body,
+            catches,
+            finally,
+            ..
+        } => {
+            box_returns(ir, body)
+                && catches.into_iter().all(|c| box_returns(ir, c.body))
+                && finally.is_none_or(|f| box_returns(ir, f))
+        }
         _ => false,
     }
 }
