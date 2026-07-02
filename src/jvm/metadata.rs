@@ -1915,3 +1915,439 @@ mod pure_helper_tests {
         assert_eq!(strip_builtins_header(data), None);
     }
 }
+
+/// Tests that drive the protobuf decoders (`parse_record`, `parse_function`, the `Type` readers,
+/// and the end-to-end `@Metadata` function decode) with hand-built wire-format fixtures. The helpers
+/// mirror kotlinc's `metadata.proto` field numbers so a byte fixture is easy to read.
+#[cfg(test)]
+mod proto_fixture_tests {
+    use super::*;
+    use crate::jvm::classreader::ClassInfo;
+
+    // --- minimal protobuf wire-format builders ------------------------------------------------
+
+    fn uvarint(mut v: u64) -> Vec<u8> {
+        let mut out = Vec::new();
+        loop {
+            let b = (v & 0x7f) as u8;
+            v >>= 7;
+            if v != 0 {
+                out.push(b | 0x80);
+            } else {
+                out.push(b);
+                break;
+            }
+        }
+        out
+    }
+    fn tag(field: u64, wire: u64) -> Vec<u8> {
+        uvarint((field << 3) | wire)
+    }
+    fn fvar(field: u64, v: u64) -> Vec<u8> {
+        let mut o = tag(field, 0);
+        o.extend(uvarint(v));
+        o
+    }
+    fn flen(field: u64, body: &[u8]) -> Vec<u8> {
+        let mut o = tag(field, 2);
+        o.extend(uvarint(body.len() as u64));
+        o.extend_from_slice(body);
+        o
+    }
+    fn cat(parts: &[&[u8]]) -> Vec<u8> {
+        parts.concat()
+    }
+
+    #[test]
+    fn uvarint_matches_known_leb128() {
+        assert_eq!(uvarint(0), vec![0x00]);
+        assert_eq!(uvarint(300), vec![0xac, 0x02]);
+        assert_eq!(uvarint(1030), vec![0x86, 0x08]);
+    }
+
+    // --- packed_varints ------------------------------------------------------------------------
+
+    #[test]
+    fn packed_varints_reads_sequence_and_empty() {
+        let body = cat(&[&uvarint(1), &uvarint(300), &uvarint(0)]);
+        assert_eq!(packed_varints(&body), vec![1, 300, 0]);
+        assert_eq!(packed_varints(&[]), Vec::<u64>::new());
+    }
+
+    // --- parse_record: every field kind of a StringTableTypes.Record ---------------------------
+
+    #[test]
+    fn parse_record_range_and_predefined_index() {
+        // Record.range = 1, Record.predefined_index = 2.
+        let body = cat(&[&fvar(1, 3), &fvar(2, 5)]);
+        let (range, rec) = parse_record(&body).unwrap();
+        assert_eq!(range, 3);
+        assert_eq!(rec.predefined_index, Some(5));
+        assert_eq!(rec.operation, 0);
+    }
+
+    #[test]
+    fn parse_record_string_operation_substring_replace() {
+        // Record.string = 6, operation = 3, substring = 4 (packed), replace = 5 (packed).
+        let substr = cat(&[&uvarint(1), &uvarint(4)]);
+        let repl = cat(&[&uvarint(98), &uvarint(88)]); // 'b' -> 'X'
+        let body = cat(&[
+            &flen(6, b"foo/Bar"),
+            &fvar(3, 2),
+            &flen(4, &substr),
+            &flen(5, &repl),
+        ]);
+        let (range, rec) = parse_record(&body).unwrap();
+        assert_eq!(range, 1); // default when field 1 absent
+        assert_eq!(rec.string.as_deref(), Some("foo/Bar"));
+        assert_eq!(rec.operation, 2);
+        assert_eq!(rec.substring, Some((1, 4)));
+        assert_eq!(rec.replace, Some((98, 88)));
+    }
+
+    #[test]
+    fn parse_record_short_packed_field_is_ignored() {
+        // A substring packed array with fewer than 2 entries leaves `substring` None.
+        let body = cat(&[&flen(4, &uvarint(1))]);
+        let (_, rec) = parse_record(&body).unwrap();
+        assert_eq!(rec.substring, None);
+    }
+
+    #[test]
+    fn parse_record_skips_unknown_field() {
+        // Unknown field 9 (length-delimited) then a real range field.
+        let body = cat(&[&flen(9, b"junk"), &fvar(1, 4)]);
+        let (range, _) = parse_record(&body).unwrap();
+        assert_eq!(range, 4);
+    }
+
+    // --- parse_string_table: flattens each record `range` times ---------------------------------
+
+    #[test]
+    fn parse_string_table_flattens_range() {
+        // One record with range=2 and string "X" → two identical entries.
+        let rec_body = cat(&[&fvar(1, 2), &flen(6, b"X")]);
+        let stt = flen(1, &rec_body);
+        let recs = parse_string_table(&stt);
+        assert_eq!(recs.len(), 2);
+        assert_eq!(recs[0].string.as_deref(), Some("X"));
+        assert_eq!(recs[1].string.as_deref(), Some("X"));
+    }
+
+    #[test]
+    fn parse_string_table_skips_non_record_fields() {
+        // A stray field 2 (varint) before the record must be skipped, not mis-parsed.
+        let rec_body = flen(6, b"Y");
+        let stt = cat(&[&fvar(2, 9), &flen(1, &rec_body)]);
+        let recs = parse_string_table(&stt);
+        assert_eq!(recs.len(), 1);
+        assert_eq!(recs[0].string.as_deref(), Some("Y"));
+    }
+
+    // --- resolve_string vs resolve_class_name: operation transform is NOT applied by the former --
+
+    #[test]
+    fn resolve_string_does_not_apply_operation() {
+        let recs = vec![Rec {
+            string: Some("Outer$Inner".to_string()),
+            operation: 1,
+            ..Default::default()
+        }];
+        // resolve_string keeps the `$`; resolve_class_name maps it to `.`.
+        assert_eq!(
+            resolve_string(&recs, &[], 0).as_deref(),
+            Some("Outer$Inner")
+        );
+        assert_eq!(
+            resolve_class_name(&recs, &[], 0).as_deref(),
+            Some("Outer.Inner")
+        );
+    }
+
+    #[test]
+    fn resolve_string_applies_substring_and_falls_back_to_d2() {
+        let recs = vec![Rec {
+            string: Some("abcdef".to_string()),
+            substring: Some((1, 4)),
+            ..Default::default()
+        }];
+        assert_eq!(resolve_string(&recs, &[], 0).as_deref(), Some("bcd"));
+        // No record for id 0 → d2 fallback.
+        assert_eq!(
+            resolve_string(&[], &["hi".to_string()], 0).as_deref(),
+            Some("hi")
+        );
+        // No record and no d2 entry → None.
+        assert_eq!(resolve_string(&[], &[], 3), None);
+    }
+
+    // --- parse_type_class_name / parse_type_nullable -------------------------------------------
+
+    #[test]
+    fn parse_type_class_name_reads_field_6() {
+        assert_eq!(parse_type_class_name(&fvar(6, 42)), Some(42));
+        assert_eq!(parse_type_class_name(&[]), None);
+        // Skips a preceding nullable field.
+        assert_eq!(
+            parse_type_class_name(&cat(&[&fvar(3, 1), &fvar(6, 9)])),
+            Some(9)
+        );
+    }
+
+    #[test]
+    fn parse_type_nullable_reads_field_3() {
+        assert!(parse_type_nullable(&fvar(3, 1)));
+        assert!(!parse_type_nullable(&fvar(3, 0)));
+        assert!(!parse_type_nullable(&[]));
+        // Skips a preceding class_name field.
+        assert!(parse_type_nullable(&cat(&[&fvar(6, 5), &fvar(3, 1)])));
+    }
+
+    // --- parse_type_recv_fun: @ExtensionFunctionType annotation id + receiver arg class ---------
+
+    #[test]
+    fn parse_type_recv_fun_extracts_annotation_and_first_arg() {
+        // Argument.type (field 2) = Type{class_name=7}; Type.annotation (field 100) = Annotation{id=9}.
+        let arg_type = fvar(6, 7);
+        let argument = flen(2, &arg_type);
+        let annotation = fvar(1, 9);
+        let type_body = cat(&[&flen(2, &argument), &flen(100, &annotation)]);
+        assert_eq!(parse_type_recv_fun(&type_body), (Some(9), Some(7)));
+    }
+
+    #[test]
+    fn parse_type_recv_fun_uses_only_first_argument() {
+        let arg0 = flen(2, &fvar(6, 7));
+        let arg1 = flen(2, &fvar(6, 99));
+        let type_body = cat(&[&flen(2, &arg0), &flen(2, &arg1)]);
+        assert_eq!(parse_type_recv_fun(&type_body), (None, Some(7)));
+    }
+
+    #[test]
+    fn parse_type_recv_fun_absent_is_none_none() {
+        assert_eq!(parse_type_recv_fun(&[]), (None, None));
+    }
+
+    // --- flags_visibility ----------------------------------------------------------------------
+
+    #[test]
+    fn flags_visibility_extracts_3_bit_field() {
+        // hasAnnotations = bit0, visibility = next 3 bits.
+        assert_eq!(flags_visibility(0), 0); // INTERNAL
+        assert_eq!(flags_visibility(VIS_PUBLIC << 1), VIS_PUBLIC);
+        assert_eq!(flags_visibility(0b1111), 7); // all three bits
+    }
+
+    // --- parse_function: flags, signature, receiver/return types, value parameters --------------
+
+    #[test]
+    fn parse_function_decodes_all_fields() {
+        // A public, inline, suspend extension function with an explicit JVM signature, a nullable
+        // class return type, a class receiver type, and two value parameters (one defaulted +
+        // crossinline, one plain).
+        let flags = IS_INLINE_BIT | IS_SUSPEND_BIT | (VIS_PUBLIC << 1);
+        let jvm_sig = cat(&[&fvar(1, 1), &fvar(2, 2)]); // name id 1, desc id 2
+        let ret_type = cat(&[&fvar(6, 10), &fvar(3, 1)]); // class_name 10, nullable
+        let recv_type = fvar(6, 11); // class_name 11
+        let vp0 = cat(&[
+            &fvar(1, DECLARES_DEFAULT_VALUE_BIT | IS_CROSSINLINE_BIT), // flags
+            &fvar(2, 3),                                               // name id 3
+            &flen(3, &fvar(6, 12)),                                    // type class_name 12
+        ]);
+        let vp1 = cat(&[&fvar(2, 4), &flen(3, &fvar(6, 13))]); // plain param, no flags
+        let body = cat(&[
+            &fvar(9, flags),
+            &fvar(2, 5), // Function.name id 5
+            &flen(100, &jvm_sig),
+            &flen(3, &ret_type),
+            &flen(5, &recv_type),
+            &flen(6, &vp0),
+            &flen(6, &vp1),
+        ]);
+        let f = parse_function(&body).unwrap();
+        assert!(f.is_inline);
+        assert!(f.is_suspend);
+        assert!(f.is_public);
+        assert_eq!(f.name_id, 5);
+        assert_eq!(f.jvm_sig, Some((1, 2)));
+        assert_eq!(f.ret_class, Some(10));
+        assert!(f.ret_nullable);
+        assert_eq!(f.recv_class, Some(11));
+        assert!(f.has_receiver);
+        assert_eq!(f.value_param_classes, vec![Some(12), Some(13)]);
+        assert_eq!(f.value_param_names, vec![3, 4]);
+        assert_eq!(f.value_param_has_default, vec![true, false]);
+        assert_eq!(f.value_param_materialized, vec![true, false]);
+    }
+
+    #[test]
+    fn parse_function_non_public_non_inline_defaults() {
+        // Empty body: no flags, no name, no signature → all-false, private-ish visibility.
+        let f = parse_function(&[]).unwrap();
+        assert!(!f.is_inline);
+        assert!(!f.is_suspend);
+        assert!(!f.is_public);
+        assert_eq!(f.name_id, 0);
+        assert!(f.jvm_sig.is_none());
+        assert!(!f.has_receiver);
+        assert!(f.value_param_classes.is_empty());
+    }
+
+    // --- parse_type_alias: name + expanded/underlying class -----------------------------------
+
+    #[test]
+    fn parse_type_alias_prefers_expanded_type() {
+        let d2 = vec!["MyAlias".to_string(), "pkg/Real".to_string()];
+        // name id 0, underlyingType Type{class=2}, expandedType Type{class=1} → expanded wins.
+        let body = cat(&[&fvar(2, 0), &flen(4, &fvar(6, 2)), &flen(6, &fvar(6, 1))]);
+        let d2b = vec![
+            "MyAlias".to_string(),
+            "pkg/Real".to_string(),
+            "pkg/Wrong".to_string(),
+        ];
+        assert_eq!(
+            parse_type_alias(&body, &[], &d2b),
+            Some(("MyAlias".to_string(), "pkg/Real".to_string()))
+        );
+        // Only underlyingType present → it is used as the fallback.
+        let body2 = cat(&[&fvar(2, 0), &flen(4, &fvar(6, 1))]);
+        assert_eq!(
+            parse_type_alias(&body2, &[], &d2),
+            Some(("MyAlias".to_string(), "pkg/Real".to_string()))
+        );
+    }
+
+    #[test]
+    fn parse_type_alias_missing_name_is_none() {
+        let d2 = vec!["A".to_string(), "pkg/Real".to_string()];
+        // No name field → None even though a type is present.
+        assert_eq!(parse_type_alias(&flen(6, &fvar(6, 1)), &[], &d2), None);
+    }
+
+    // --- end-to-end @Metadata decode through a ClassInfo ---------------------------------------
+
+    /// Wrap a `Package`/`Class` message body into a `d1` string: a leading UTF-8 mode marker (dropped
+    /// by `decode_d1`), then an empty `StringTableTypes` (length 0), then the message body.
+    fn d1_from_message(msg_body: &[u8]) -> String {
+        let mut s = String::new();
+        s.push('\u{0}'); // UTF-8 mode marker
+        s.push('\u{0}'); // StringTableTypes length = 0 (empty table)
+        for &b in msg_body {
+            s.push(b as char);
+        }
+        s
+    }
+
+    fn ci_meta(d1: Vec<String>, d2: Vec<String>) -> ClassInfo {
+        ClassInfo {
+            major: 52,
+            access: 0,
+            this_class: "demo/Facade".to_string(),
+            super_class: Some("java/lang/Object".to_string()),
+            interfaces: vec![],
+            fields: vec![],
+            methods: vec![],
+            kotlin_d1: d1,
+            kotlin_d2: d2,
+            signature: None,
+        }
+    }
+
+    /// A `Function` body with an explicit JVM signature (name id 1, desc id 2) and Kotlin name id 0.
+    fn function_body(flags: u64) -> Vec<u8> {
+        let jvm_sig = cat(&[&fvar(1, 1), &fvar(2, 2)]);
+        cat(&[&fvar(2, 0), &fvar(9, flags), &flen(100, &jvm_sig)])
+    }
+
+    #[test]
+    fn package_functions_end_to_end() {
+        let func = function_body(IS_INLINE_BIT | (VIS_PUBLIC << 1));
+        let package = flen(3, &func); // Package.function = 3
+        let d2 = vec!["greet".to_string(), "greet".to_string(), "()V".to_string()];
+        let ci = ci_meta(vec![d1_from_message(&package)], d2);
+        let fns = package_functions(&ci);
+        assert_eq!(fns.len(), 1);
+        assert_eq!(fns[0].kotlin_name, "greet");
+        assert_eq!(fns[0].jvm_name, "greet");
+        assert_eq!(fns[0].jvm_desc.as_deref(), Some("()V"));
+        assert!(fns[0].is_inline);
+        assert!(fns[0].is_public);
+        assert!(!fns[0].is_extension);
+        // inline_method_names / inline_methods read the same metadata.
+        assert!(inline_method_names(&ci).contains("greet"));
+        assert!(inline_methods(&ci).contains(&("greet".to_string(), "()V".to_string())));
+    }
+
+    #[test]
+    fn class_functions_reads_field_9() {
+        let func = function_body(VIS_PUBLIC << 1);
+        let class_msg = flen(9, &func); // Class.function = 9
+        let d2 = vec!["m".to_string(), "m".to_string(), "()I".to_string()];
+        let ci = ci_meta(vec![d1_from_message(&class_msg)], d2);
+        let fns = class_functions(&ci);
+        assert_eq!(fns.len(), 1);
+        assert_eq!(fns[0].kotlin_name, "m");
+        assert_eq!(fns[0].jvm_desc.as_deref(), Some("()I"));
+        assert!(!fns[0].is_inline);
+        // A class-carrier suspend function is picked up by suspend_method_names.
+        assert!(suspend_method_names(&ci).is_empty());
+    }
+
+    #[test]
+    fn suspend_method_names_from_package() {
+        let func = function_body(IS_SUSPEND_BIT | (VIS_PUBLIC << 1));
+        let package = flen(3, &func);
+        let d2 = vec![
+            "load".to_string(),
+            "load".to_string(),
+            "(Lkotlin/coroutines/Continuation;)Ljava/lang/Object;".to_string(),
+        ];
+        let ci = ci_meta(vec![d1_from_message(&package)], d2);
+        let names = suspend_method_names(&ci);
+        assert!(names.contains("load"));
+    }
+
+    #[test]
+    fn package_type_aliases_end_to_end() {
+        // Package.typeAlias = 5: name id 0, expandedType Type{class_name=1}.
+        let ta = cat(&[&fvar(2, 0), &flen(6, &fvar(6, 1))]);
+        let package = flen(5, &ta);
+        let d2 = vec!["MyList".to_string(), "kotlin/collections/List".to_string()];
+        let ci = ci_meta(vec![d1_from_message(&package)], d2);
+        assert_eq!(
+            package_type_aliases(&ci),
+            vec![("MyList".to_string(), "kotlin/collections/List".to_string())]
+        );
+    }
+
+    #[test]
+    fn class_constructor_param_names_and_defaults_end_to_end() {
+        // Class.constructor = 8 → Constructor.value_parameter = 2 → ValueParameter{ flags, name }.
+        let vp0 = cat(&[&fvar(1, DECLARES_DEFAULT_VALUE_BIT), &fvar(2, 0)]); // defaulted, name id 0
+        let vp1 = fvar(2, 1); // plain, name id 1
+        let ctor = cat(&[&flen(2, &vp0), &flen(2, &vp1)]);
+        let class_msg = flen(8, &ctor);
+        let d2 = vec!["a".to_string(), "b".to_string()];
+        let ci = ci_meta(vec![d1_from_message(&class_msg)], d2);
+        assert_eq!(
+            class_constructor_param_names(&ci),
+            vec![vec!["a".to_string(), "b".to_string()]]
+        );
+        assert_eq!(
+            class_constructor_param_defaults(&ci),
+            vec![vec![true, false]]
+        );
+    }
+
+    #[test]
+    fn empty_metadata_yields_no_functions() {
+        let ci = ci_meta(vec![], vec![]);
+        assert!(package_functions(&ci).is_empty());
+        assert!(class_functions(&ci).is_empty());
+        assert!(package_type_aliases(&ci).is_empty());
+        assert!(class_constructor_param_names(&ci).is_empty());
+        assert!(suspend_method_names(&ci).is_empty());
+        assert!(inline_methods(&ci).is_empty());
+        assert!(inline_method_names(&ci).is_empty());
+    }
+}

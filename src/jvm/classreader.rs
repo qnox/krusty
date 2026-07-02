@@ -804,4 +804,119 @@ mod tests {
         // methods_named finds the abstract method
         assert_eq!(info.methods_named("run").len(), 1);
     }
+
+    #[test]
+    fn unknown_constant_tag_is_bad_constant() {
+        // magic, minor=0, major=52, constant_pool_count=2, then an unsupported tag byte (2).
+        let bytes = [
+            0xCA, 0xFE, 0xBA, 0xBE, 0, 0, 0, 52, 0, 2, 2, // tag 2 is unassigned
+        ];
+        match parse_class(&bytes) {
+            Err(ReadError::BadConstant(2)) => {}
+            other => panic!("expected BadConstant(2), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn method_named_lookup_miss_is_none() {
+        let mut cw = ClassWriter::new("demo/M", "java/lang/Object");
+        let mut code = CodeBuilder::new(0);
+        code.ret_void();
+        cw.add_method(ACC_PUBLIC, "present", "()V", &code);
+        let info = parse_class(&cw.finish()).unwrap();
+        assert!(info.method("present", "()V").is_some());
+        assert!(info.method("present", "()I").is_none()); // wrong descriptor
+        assert!(info.methods_named("absent").is_empty());
+    }
+
+    #[test]
+    fn kotlin_metadata_d1_d2_roundtrip_and_decode() {
+        // Build a class carrying a real @kotlin.Metadata annotation whose d1 encodes a Package with one
+        // public inline top-level function; parse_class must recover d1/d2 verbatim, and the metadata
+        // decoder must read the function back out. Exercises read_class_attrs + the array element_value
+        // extraction path.
+        fn uvarint(mut v: u64) -> Vec<u8> {
+            let mut out = Vec::new();
+            loop {
+                let b = (v & 0x7f) as u8;
+                v >>= 7;
+                if v != 0 {
+                    out.push(b | 0x80);
+                } else {
+                    out.push(b);
+                    break;
+                }
+            }
+            out
+        }
+        let tag = |field: u64, wire: u64| uvarint((field << 3) | wire);
+        let fvar = |field: u64, v: u64| {
+            let mut o = tag(field, 0);
+            o.extend(uvarint(v));
+            o
+        };
+        let flen = |field: u64, body: &[u8]| {
+            let mut o = tag(field, 2);
+            o.extend(uvarint(body.len() as u64));
+            o.extend_from_slice(body);
+            o
+        };
+        // Function{ name id 0, flags = IS_INLINE(1<<10) | PUBLIC(3<<1), method_signature{ name 1, desc 2 } }
+        let jvm_sig = [fvar(1, 1), fvar(2, 2)].concat();
+        let func = [
+            fvar(2, 0),
+            fvar(9, (1 << 10) | (3 << 1)),
+            flen(100, &jvm_sig),
+        ]
+        .concat();
+        let package = flen(3, &func); // Package.function = 3
+                                      // d1 string: UTF-8 mode marker + empty StringTableTypes (len 0) + package body.
+        let mut d1 = String::new();
+        d1.push('\u{0}');
+        d1.push('\u{0}');
+        for &b in &package {
+            d1.push(b as char);
+        }
+        let d2 = vec!["greet".to_string(), "greet".to_string(), "()V".to_string()];
+
+        let mut cw = ClassWriter::new("demo/FacadeKt", "java/lang/Object");
+        cw.set_kotlin_metadata(2, &[1, 9, 0], 48, &[d1.clone()], &d2);
+        let info = parse_class(&cw.finish()).unwrap();
+        assert_eq!(info.kotlin_d1, vec![d1]);
+        assert_eq!(info.kotlin_d2, d2);
+
+        let fns = super::super::metadata::package_functions(&info);
+        assert_eq!(fns.len(), 1);
+        assert_eq!(fns[0].kotlin_name, "greet");
+        assert_eq!(fns[0].jvm_desc.as_deref(), Some("()V"));
+        assert!(fns[0].is_inline);
+    }
+
+    #[test]
+    fn method_code_recovers_exception_handlers() {
+        // A method with a try/catch range: read_method_code must recover the exception-table entry.
+        let mut cw = ClassWriter::new("demo/TryKt", "java/lang/Object");
+        let cat = cw.class_ref("java/lang/Exception");
+        let mut code = CodeBuilder::new(1);
+        let start = code.new_label();
+        let end = code.new_label();
+        let handler = code.new_label();
+        code.bind(start); // offset 0
+        code.ret_void(); // offset 0, 1 byte
+        code.bind(end); // offset 1
+        code.bind(handler); // offset 1
+        code.astore(0); // handler body
+        code.ret_void();
+        code.add_exception(start, end, handler, cat);
+        code.link();
+        cw.add_method(ACC_PUBLIC, "m", "()V", &code);
+
+        let mc = read_method_code(&cw.finish(), "m", "()V").unwrap();
+        assert_eq!(mc.handlers.len(), 1);
+        assert_eq!(mc.handlers[0].start_pc, 0);
+        assert_eq!(mc.handlers[0].end_pc, 1);
+        assert_eq!(mc.handlers[0].handler_pc, 1);
+        assert_eq!(mc.handlers[0].catch_type, cat);
+        assert!(mc.stackmap.is_none()); // no frames added
+    }
 }
