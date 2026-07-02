@@ -996,6 +996,31 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `SymbolSource::constructor_param_names` hook; the checker's named-argument gate and the lowerer's
   classpath-`new` both reorder the labelled arguments onto positions (via `reorder_by_param_names`) before
   resolving/emitting. Test: `named_args_classpath_e2e` / `interface_supertype_members_e2e`.
+- **Named args / omitted defaults on a QUALIFIED nested-class constructor (`Op.Ext(a = 1, b = "x")`,
+  `Op.Ext(a = 1)`, `Op.Ext(4)`).** A qualified nested ctor's receiver names a TYPE, not a value, so the
+  named-argument gate recognizes it via `qualified_nested_ctor_internal` (receiver is an out-of-scope type
+  name and `Outer.Nested` resolves via `resolve_qualified_nested`) WITHOUT typing the receiver as a value
+  (which errored "unresolved reference"). The nested-ctor construction path then maps labels onto positions
+  (`constructor_named_params` + `map_call_args`, with `synthetic_default_ctor` for an omitted defaulted
+  param) and resolves positional forms via `library_ctor_resolves` (covering the `<init>$default`
+  synthetic); the lowerer routes a named call to `lower_external_new_named`, positional to
+  `lower_external_new`. Test: `tests/classpath_qualified_nested_named_ctor_e2e.rs`.
+- **Classpath `typealias` (`import lib.Alias` for `typealias Alias = Real`).** A top-level type alias lands
+  in its FILE FACADE's `@Metadata` (`LibKt`), not only the stdlib's dedicated `*TypeAliasesKt` files, so the
+  classpath type scan parses `Package.typeAlias` (proto field 5 → name field 2 + EXPANDED type field 6,
+  falling back to the underlying type field 4) from EVERY `*Kt` facade (`metadata::package_type_aliases`).
+  This proto reader replaced a `d2` `$annotations` heuristic that a facade's annotated top-level property
+  would have tripped. Resolves the alias as a constructor and in a type position. Test:
+  `tests/classpath_typealias_e2e.rs`.
+- **A `suspend` member's return type is recovered from its `Continuation<T>` generic argument.** The
+  generic argument carries a PRIMITIVE return BOXED (generics erase primitives to wrappers), so a non-null
+  primitive return unboxes to its Kotlin primitive (`java/lang/Long` → `Ty::Long` via
+  `jvm_class_map::wrapper_to_kotlin_prim`), and a reference is canonicalized (`java/lang/String` →
+  `kotlin/String`). Nullability applies (`ret_nullable`) only to a PRIMITIVE return — a nullable primitive
+  is a distinct boxed type — while a nullable REFERENCE keeps its plain erased `Ty`, exactly as `resolve_ty`
+  treats a declared `String?` (reference nullability is not carried in `Ty`), so the recovered suspend
+  return matches a source-spelled reference return instead of a divergent `Ty::Nullable`. Test:
+  `tests/suspend_return_type_recovery_e2e.rs`.
 
 - **Reordered named arguments evaluate in SOURCE order (`f(b = X(), a = Y())`).** Kotlin evaluates
   arguments in written order, then binds each to its parameter position. When a reordering moves a

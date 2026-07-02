@@ -638,7 +638,15 @@ fn suspend_return_from_gsig(gsig: &GenericSig) -> Option<Ty> {
             // rather than a non-canonical `Obj("kotlin/String")`. A generic class (`List<Item>`) keeps its
             // arguments via the general converter.
             GSig::Class(name, cargs) if cargs.is_empty() => {
-                Some(super::classpath::kotlin_name_to_ty(name))
+                // Canonicalize a JVM built-in the generic signature spells in Java terms
+                // (`java/lang/String` → `kotlin/String`, `java/lang/Object` → `kotlin/Any`) so the
+                // recovered return unifies with the source-spelled type rather than a non-canonical
+                // `Obj("java/lang/String")`. A boxed PRIMITIVE (`java/lang/Long`) stays an `Obj` here —
+                // the call site unboxes it to the source primitive only when the return is non-nullable
+                // (a `Long?` return must keep the boxed form).
+                Some(super::classpath::kotlin_name_to_ty(to_kotlin_internal(
+                    name,
+                )))
             }
             other => Some(crate::call_resolver::gsig_to_ty(
                 other,
@@ -1917,11 +1925,23 @@ impl SymbolSource for JvmLibraries {
                                     .as_ref()
                                     .and_then(suspend_return_from_gsig)
                                     .unwrap_or(m.ret);
-                                if suspend_ret_nullable && base != Ty::Unit && !base.is_nullable() {
-                                    Ty::nullable(base)
-                                } else {
-                                    base
-                                }
+                                crate::trace_compiler!(
+                                    "suspend",
+                                    "suspend return {cn}.{}: gsig={:?} base={:?} nullable={}",
+                                    m.name,
+                                    generic_sig,
+                                    base,
+                                    suspend_ret_nullable
+                                );
+                                // The `Continuation<T>` generic argument carries a PRIMITIVE return
+                                // BOXED (generics erase primitives to their wrapper); unbox it to the
+                                // source Kotlin primitive (`java/lang/Long` → `Ty::Long`) so
+                                // `val n: Long = r.count()` type-checks. Nullability is applied by
+                                // `ret_nullable` below (which mirrors the non-suspend member path).
+                                base.obj_internal()
+                                    .and_then(super::jvm_class_map::wrapper_to_kotlin_prim)
+                                    .map(super::classpath::kotlin_name_to_ty)
+                                    .unwrap_or(base)
                             } else {
                                 let recovered =
                                     self.member_return(receiver, &m.name, &m.params).or_else(
@@ -1970,7 +1990,13 @@ impl SymbolSource for JvmLibraries {
                             overloads.push(FunctionInfo {
                                 kind: FnKind::Member,
                                 receiver: Some(receiver),
-                                ret_nullable: m.ret_nullable || suspend_ret_nullable,
+                                // A suspend `T?` return applies nullability only for a PRIMITIVE (a
+                                // nullable primitive is a distinct BOXED type). A nullable REFERENCE keeps
+                                // its plain erased `Ty` — exactly as the non-suspend member path and
+                                // `resolve_ty` treat a declared `String?` — so a recovered suspend return
+                                // matches the source-spelled reference return instead of diverging.
+                                ret_nullable: m.ret_nullable
+                                    || (suspend_ret_nullable && !ret.is_reference()),
                                 ret_class: None,
                                 public: true,
                                 receiver_rank: rung,

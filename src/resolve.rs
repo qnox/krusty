@@ -4469,6 +4469,20 @@ impl<'a> Checker<'a> {
     /// classpath internal name (`lib/Subject$User`). The longest resolvable prefix names the outer
     /// type; the remaining segments are the nested path joined with `$` (kotlinc's nesting separator).
     /// Existence is verified via `resolve_type` so a bogus `A.B` stays unresolved (never a phantom `Obj`).
+    /// A qualified nested-class CONSTRUCTOR call `Outer.Nested(...)` — the receiver names a TYPE (not a
+    /// value in scope) and `Outer.Nested` resolves to a classpath nested class. The nested internal, so
+    /// named/omitted-default argument mapping can reach the class's `@Metadata`. `None` when the receiver
+    /// is a value (a normal `recv.method(...)` call) or the path is not a nested type.
+    fn qualified_nested_ctor_internal(&self, receiver: ExprId, name: &str) -> Option<String> {
+        let Expr::Name(outer) = self.file.expr(receiver) else {
+            return None;
+        };
+        if self.lookup(outer).is_some() {
+            return None;
+        }
+        self.resolve_qualified_nested(&format!("{outer}.{name}"))
+    }
+
     fn resolve_qualified_nested(&self, name: &str) -> Option<String> {
         // A nested type under a resolvable outer type FIRST (`Subject.User` → `lib/Subject$User`) — an
         // in-scope type name shadows a package path, as kotlinc resolves it.
@@ -8266,6 +8280,18 @@ impl<'a> Checker<'a> {
                             })
                             .is_some()
                 }
+                Expr::Member { receiver, name }
+                    if self
+                        .qualified_nested_ctor_internal(*receiver, name)
+                        .is_some() =>
+                {
+                    // A qualified nested-class CONSTRUCTOR with named args (`Op.Ext(a = 1)`). The receiver
+                    // names a TYPE, so DON'T type it as a value (that would emit "unresolved reference");
+                    // named args map via the nested class's `@Metadata` constructor parameter names.
+                    self.qualified_nested_ctor_internal(*receiver, name)
+                        .and_then(|i| self.syms.libraries.constructor_named_params(&i, args.len()))
+                        .is_some()
+                }
                 Expr::Member { receiver, name } => {
                     // A method with default parameters (e.g. data-class `copy`) — `required < params` —
                     // queried through the module source.
@@ -8431,18 +8457,89 @@ impl<'a> Checker<'a> {
                     if self.lookup(&outer).is_none() {
                         let qualified = format!("{outer}.{name}");
                         if let Some(internal) = self.resolve_qualified_nested(&qualified) {
+                            // NAMED arguments (`Op.Ext(a = 1, b = "x")`, or omitting a defaulted param):
+                            // map the labels onto positions via the nested class's `@Metadata` ctor names,
+                            // exactly as the unqualified/simple-name classpath-ctor path does. Every param
+                            // supplied ⇒ a plain constructor; an omitted defaulted param ⇒ the
+                            // `<init>$default` synthetic (the lowerer fills placeholder + mask + marker).
+                            if arg_names.is_some() {
+                                if let Some((param_names, param_defaults)) = self
+                                    .syms
+                                    .libraries
+                                    .constructor_named_params(&internal, args.len())
+                                {
+                                    let required = param_defaults.iter().filter(|d| !**d).count();
+                                    match map_call_args(
+                                        args,
+                                        arg_names.as_deref(),
+                                        &param_names,
+                                        required,
+                                        &param_defaults,
+                                    ) {
+                                        Ok(slots) => {
+                                            for &a in slots.iter().flatten() {
+                                                self.expr(a);
+                                            }
+                                            let all_provided = slots
+                                                .iter()
+                                                .copied()
+                                                .collect::<Option<Vec<ExprId>>>();
+                                            if let Some(sel) = all_provided {
+                                                let tys: Vec<Ty> = sel
+                                                    .iter()
+                                                    .map(|a| self.expr_types[a.0 as usize])
+                                                    .collect();
+                                                if crate::call_resolver::resolve_constructor(
+                                                    &*self.syms.libraries,
+                                                    &internal,
+                                                    &tys,
+                                                )
+                                                .is_some()
+                                                {
+                                                    return Ty::obj(&internal);
+                                                }
+                                            } else if crate::call_resolver::synthetic_default_ctor(
+                                                &*self.syms.libraries,
+                                                &internal,
+                                                slots.len(),
+                                            )
+                                            .is_some()
+                                            {
+                                                return Ty::obj(&internal);
+                                            }
+                                        }
+                                        Err(msg) => {
+                                            self.diags.error(
+                                                span,
+                                                format!("constructor '{qualified}': {msg}"),
+                                            );
+                                            return Ty::Error;
+                                        }
+                                    }
+                                }
+                            }
                             let arg_tys: Vec<Ty> = args.iter().map(|a| self.expr(*a)).collect();
-                            if let Some(m) = crate::call_resolver::resolve_constructor(
-                                &*self.syms.libraries,
-                                &internal,
-                                &arg_tys,
-                            ) {
+                            // POSITIONAL — a plain constructor, a value-class-param/omitted-default
+                            // synthetic (`library_ctor_resolves` covers both). Type-check the provided
+                            // arguments against the plain constructor's params when it matches.
+                            if self.library_ctor_resolves(&internal, &arg_tys) {
                                 crate::trace_compiler!(
                                     "resolve",
                                     "classpath nested constructor {qualified} -> {internal}"
                                 );
-                                for (i, (p, a)) in m.params.iter().zip(&arg_tys).enumerate() {
-                                    self.expect_assignable(*p, *a, self.span(args[i]), "argument");
+                                if let Some(m) = crate::call_resolver::resolve_constructor(
+                                    &*self.syms.libraries,
+                                    &internal,
+                                    &arg_tys,
+                                ) {
+                                    for (i, (p, a)) in m.params.iter().zip(&arg_tys).enumerate() {
+                                        self.expect_assignable(
+                                            *p,
+                                            *a,
+                                            self.span(args[i]),
+                                            "argument",
+                                        );
+                                    }
                                 }
                                 return Ty::obj(&internal);
                             }
