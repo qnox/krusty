@@ -196,3 +196,92 @@ fn b_arr_nulls(_syn: &'static Synthetic, lw: &mut Lower<'_>, c: &SynthCall<'_>) 
         size,
     }))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lookup_finds_each_registered_synthetic_by_source_name() {
+        // Every TABLE entry is discoverable by its source call name, and the returned identity
+        // (fqn/name) matches the entry — the identity shared with the JVM intrinsic registry.
+        for s in TABLE {
+            let got = lookup(s.name).expect("registered name must resolve");
+            assert_eq!(got.name, s.name);
+            assert_eq!(got.fqn, s.fqn);
+        }
+    }
+
+    #[test]
+    fn lookup_declines_unknown_name() {
+        assert!(lookup("nope").is_none());
+        assert!(lookup("").is_none());
+        // A real classpath function that is deliberately NOT synthetic must not match.
+        assert!(lookup("listOf").is_none());
+        assert!(lookup("println").is_none());
+    }
+
+    #[test]
+    fn lookup_covers_the_documented_creator_families() {
+        // Vararg + size primitive families, plus the four reference creators.
+        for name in [
+            "intArrayOf",
+            "longArrayOf",
+            "IntArray",
+            "LongArray",
+            "arrayOf",
+            "Array",
+            "emptyArray",
+            "arrayOfNulls",
+        ] {
+            assert!(lookup(name).is_some(), "{name} should be synthetic");
+        }
+    }
+
+    #[test]
+    fn prim_elem_maps_both_the_vararg_and_size_spellings() {
+        assert_eq!(prim_elem("intArrayOf"), Some(Ty::Int));
+        assert_eq!(prim_elem("IntArray"), Some(Ty::Int));
+        assert_eq!(prim_elem("longArrayOf"), Some(Ty::Long));
+        assert_eq!(prim_elem("LongArray"), Some(Ty::Long));
+        assert_eq!(prim_elem("doubleArrayOf"), Some(Ty::Double));
+        assert_eq!(prim_elem("DoubleArray"), Some(Ty::Double));
+        assert_eq!(prim_elem("floatArrayOf"), Some(Ty::Float));
+        assert_eq!(prim_elem("FloatArray"), Some(Ty::Float));
+        assert_eq!(prim_elem("booleanArrayOf"), Some(Ty::Boolean));
+        assert_eq!(prim_elem("BooleanArray"), Some(Ty::Boolean));
+        assert_eq!(prim_elem("charArrayOf"), Some(Ty::Char));
+        assert_eq!(prim_elem("CharArray"), Some(Ty::Char));
+        assert_eq!(prim_elem("byteArrayOf"), Some(Ty::Byte));
+        assert_eq!(prim_elem("ByteArray"), Some(Ty::Byte));
+        assert_eq!(prim_elem("shortArrayOf"), Some(Ty::Short));
+        assert_eq!(prim_elem("ShortArray"), Some(Ty::Short));
+    }
+
+    #[test]
+    fn prim_elem_declines_reference_creators_and_unknowns() {
+        // The reference creators (`arrayOf`, `Array`, …) are not primitive-element-fixed.
+        assert_eq!(prim_elem("arrayOf"), None);
+        assert_eq!(prim_elem("Array"), None);
+        assert_eq!(prim_elem("emptyArray"), None);
+        assert_eq!(prim_elem("arrayOfNulls"), None);
+        assert_eq!(prim_elem("whatever"), None);
+    }
+
+    #[test]
+    fn syn_constructs_the_expected_identity() {
+        let s = syn("kotlin/intArrayOf", "intArrayOf", b_prim_vararg);
+        assert_eq!(s.fqn, "kotlin/intArrayOf");
+        assert_eq!(s.name, "intArrayOf");
+    }
+
+    #[test]
+    fn registered_source_names_are_unique() {
+        // lookup() returns the FIRST match; a duplicate source name would silently shadow — assert none.
+        let mut names: Vec<&str> = TABLE.iter().map(|s| s.name).collect();
+        let count = names.len();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), count, "synthetic source names must be unique");
+    }
+}

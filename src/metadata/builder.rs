@@ -300,4 +300,96 @@ mod tests {
         );
         assert_eq!(d2.iter().filter(|s| s.is_empty()).count(), 1);
     }
+
+    fn plain_fn(name: &str, params: Vec<(String, Ty)>, ret: Ty) -> FnMeta {
+        FnMeta {
+            name: name.into(),
+            params,
+            ret,
+            receiver: None,
+            param_fun_recvs: Vec::new(),
+            param_defaults: Vec::new(),
+            suspend: false,
+            jvm_desc: None,
+        }
+    }
+
+    #[test]
+    fn builtin_index_maps_known_types() {
+        assert_eq!(builtin_index(Ty::Unit), Some(2));
+        assert_eq!(builtin_index(Ty::Double), Some(6));
+        assert_eq!(builtin_index(Ty::Int), Some(8));
+        assert_eq!(builtin_index(Ty::Long), Some(9));
+        assert_eq!(builtin_index(Ty::Boolean), Some(11));
+        assert_eq!(builtin_index(Ty::String), Some(14));
+        // A reference type has no predefined index.
+        assert_eq!(builtin_index(Ty::Obj("demo/Point", &[])), None);
+        assert_eq!(builtin_index(Ty::Char), None);
+    }
+
+    #[test]
+    fn reference_return_type_emits_class_id_descriptor() {
+        let (_d1, d2) = build_package(&[plain_fn("make", vec![], Ty::Obj("demo/Point", &[]))], &[]);
+        assert!(d2.contains(&"Ldemo/Point;".to_string()));
+    }
+
+    #[test]
+    fn flags_constants_match_kotlinc() {
+        // IS_SUSPEND (bit 13) plus PUBLIC/FINAL (0x06).
+        assert_eq!(SUSPEND_FUN_FLAGS, (1 << 13) | 0x06);
+        assert_eq!(SUSPEND_FUN_FLAGS, 8198);
+        assert_eq!(DECLARES_DEFAULT_VALUE_BIT, 2);
+    }
+
+    #[test]
+    fn suspend_flag_changes_payload() {
+        let plain = build_package(&[plain_fn("f", vec![], Ty::Unit)], &[]).0;
+        let mut sus = plain_fn("f", vec![], Ty::Unit);
+        sus.suspend = true;
+        let suspended = build_package(&[sus], &[]).0;
+        // The IS_SUSPEND flag makes the encoded function strictly longer.
+        assert!(suspended.len() > plain.len());
+    }
+
+    #[test]
+    fn property_getter_setter_names_in_string_table() {
+        let (_d1, d2) = build_package(
+            &[],
+            &[PropMeta {
+                name: "count".into(),
+                ty: Ty::Int,
+                is_var: true,
+                getter: ("getCount".into(), "()I".into()),
+                setter: Some(("setCount".into(), "(I)V".into())),
+            }],
+        );
+        assert!(d2.contains(&"count".to_string()));
+        assert!(d2.contains(&"getCount".to_string()));
+        assert!(d2.contains(&"setCount".to_string()));
+        assert!(d2.contains(&"(I)V".to_string()));
+    }
+
+    #[test]
+    fn val_property_omits_setter_signature() {
+        let (_d1, d2) = build_package(
+            &[],
+            &[PropMeta {
+                name: "name".into(),
+                ty: Ty::String,
+                is_var: false,
+                getter: ("getName".into(), "()Ljava/lang/String;".into()),
+                setter: None,
+            }],
+        );
+        assert!(d2.contains(&"getName".to_string()));
+        assert!(!d2.iter().any(|s| s.starts_with("set")));
+    }
+
+    #[test]
+    fn jvm_desc_extension_appears_verbatim() {
+        let mut f = plain_fn("g", vec![], Ty::Unit);
+        f.jvm_desc = Some("()V".into());
+        let (_d1, d2) = build_package(&[f], &[]);
+        assert!(d2.contains(&"()V".to_string()));
+    }
 }

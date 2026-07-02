@@ -295,6 +295,81 @@ mod tests {
         );
     }
 
+    #[test]
+    fn annotation_simple_name_takes_the_tail_of_either_separator() {
+        assert_eq!(
+            annotation_simple_name("kotlinx/serialization/Serializable"),
+            "Serializable"
+        );
+        assert_eq!(
+            annotation_simple_name("kotlinx.serialization.Serializable"),
+            "Serializable"
+        );
+        // Already-simple name is returned unchanged.
+        assert_eq!(annotation_simple_name("Serializable"), "Serializable");
+        assert_eq!(annotation_simple_name(""), "");
+    }
+
+    #[test]
+    fn classes_with_simple_matches_fq_and_simple_spellings() {
+        let mut ctx = PluginContext::default();
+        ctx.class_annotations
+            .insert(0, vec!["kotlinx/serialization/Serializable".to_string()]);
+        ctx.class_annotations
+            .insert(1, vec!["Serializable".to_string()]);
+        ctx.class_annotations
+            .insert(2, vec!["other/Thing".to_string()]);
+        // Both a FQ and a bare `@Serializable` match by simple name; the unrelated one does not.
+        assert_eq!(ctx.classes_with_simple("Serializable"), vec![0, 1]);
+        assert_eq!(ctx.classes_with_simple("Thing"), vec![2]);
+        assert!(ctx.classes_with_simple("Absent").is_empty());
+    }
+
+    #[test]
+    fn classes_with_returns_sorted_deterministic_ids() {
+        let mut ctx = PluginContext::default();
+        // Insert out of order — output must still be ascending (HashMap iteration is not).
+        ctx.class_annotations.insert(5, vec!["a/B".to_string()]);
+        ctx.class_annotations.insert(2, vec!["a/B".to_string()]);
+        ctx.class_annotations.insert(9, vec!["a/B".to_string()]);
+        assert_eq!(ctx.classes_with("a/B"), vec![2, 5, 9]);
+        // Missing class → has_annotation is false, not a panic.
+        assert!(!ctx.has_annotation(42, "a/B"));
+    }
+
+    #[test]
+    fn plugin_host_tracks_size_emptiness_and_names_in_order() {
+        struct Named(&'static str);
+        impl IrPlugin for Named {
+            fn name(&self) -> &str {
+                self.0
+            }
+        }
+        let mut host = PluginHost::new();
+        assert!(host.is_empty());
+        assert_eq!(host.len(), 0);
+        assert!(host.plugin_names().is_empty());
+
+        host.register(Box::new(Named("first")));
+        host.register(Box::new(Named("second")));
+        assert!(!host.is_empty());
+        assert_eq!(host.len(), 2);
+        // Registration order is preserved.
+        assert_eq!(host.plugin_names(), vec!["first", "second"]);
+    }
+
+    #[test]
+    fn synthetic_class_defaults_are_a_plain_final_object() {
+        let c = synthetic_class("demo/Gen");
+        assert_eq!(c.fq_name, "demo/Gen");
+        assert_eq!(c.superclass, "java/lang/Object");
+        assert!(!c.is_interface);
+        assert!(!c.is_object);
+        assert!(c.has_primary_ctor);
+        assert!(c.fields.is_empty());
+        assert!(c.methods.is_empty());
+    }
+
     /// A `ClassDecl` with only the fields `from_source` reads (name + annotations) populated.
     fn blank_class(name: &str) -> crate::ast::ClassDecl {
         let src = format!("class {name}");

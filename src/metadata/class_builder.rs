@@ -273,4 +273,84 @@ mod tests {
         assert!(d2.contains(&"setY".to_string()));
         assert!(d2.contains(&"(ILjava/lang/String;)V".to_string()));
     }
+
+    #[test]
+    fn predefined_index_maps_known_types() {
+        assert_eq!(predefined_index(Ty::Unit), 2);
+        assert_eq!(predefined_index(Ty::Double), 6);
+        assert_eq!(predefined_index(Ty::Int), 8);
+        assert_eq!(predefined_index(Ty::Long), 9);
+        assert_eq!(predefined_index(Ty::Boolean), 11);
+        assert_eq!(predefined_index(Ty::String), 14);
+        // Unknown / reference types fall back to kotlin/Any (index 0).
+        assert_eq!(predefined_index(Ty::Char), ANY_PREDEFINED);
+        assert_eq!(predefined_index(Ty::Obj("demo/Point", &[])), 0);
+    }
+
+    #[test]
+    fn fn_meta_plain_has_no_flags_or_defaults() {
+        let m = FnMeta::plain("greet".into(), vec![("who".into(), Ty::String)], Ty::Unit);
+        assert_eq!(m.name, "greet");
+        assert_eq!(m.flags, 0);
+        assert!(!m.params_have_defaults);
+        assert_eq!(m.params.len(), 1);
+    }
+
+    #[test]
+    fn data_class_flag_constants() {
+        assert_eq!(COMPONENT_FN_FLAGS, 454);
+        assert_eq!(COPY_FN_FLAGS, 198);
+        assert_eq!(DECLARES_DEFAULT_VALUE, 2);
+        assert_eq!(VAR_PROPERTY_FLAGS, 1798);
+    }
+
+    #[test]
+    fn member_function_names_in_string_table() {
+        let (_d1, d2) = build_class(
+            "demo/Greeter",
+            &[],
+            "()V",
+            &[],
+            &[FnMeta::plain(
+                "greet".into(),
+                vec![("who".into(), Ty::String)],
+                Ty::Unit,
+            )],
+            &[],
+            0,
+        );
+        assert!(d2.contains(&"greet".to_string()));
+        assert!(d2.contains(&"who".to_string()));
+        assert!(d2.contains(&"Ldemo/Greeter;".to_string()));
+    }
+
+    #[test]
+    fn enum_entry_names_in_string_table() {
+        let (_d1, d2) = build_class(
+            "demo/Color",
+            &[],
+            "()V",
+            &[],
+            &[],
+            &["RED".into(), "GREEN".into(), "BLUE".into()],
+            0,
+        );
+        assert!(d2.contains(&"RED".to_string()));
+        assert!(d2.contains(&"GREEN".to_string()));
+        assert!(d2.contains(&"BLUE".to_string()));
+    }
+
+    #[test]
+    fn class_flags_change_payload() {
+        let plain = build_class("demo/A", &[], "()V", &[], &[], &[], 0).0;
+        let data = build_class("demo/A", &[], "()V", &[], &[], &[], 1030).0;
+        // A non-zero Class.flags value is emitted as an extra field.
+        assert!(data.len() > plain.len());
+    }
+
+    #[test]
+    fn payload_starts_with_utf8_mode_marker() {
+        let (d1, _d2) = build_class("demo/A", &[], "()V", &[], &[], &[], 0);
+        assert_eq!(d1[0], 0x00);
+    }
 }
