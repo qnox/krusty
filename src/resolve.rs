@@ -116,6 +116,8 @@ pub struct ClassSig {
     pub methods: HashMap<String, Signature>,
     /// True if this is an `interface` (calls dispatch via `invokeinterface`).
     pub is_interface: bool,
+    /// True if declared `abstract` (or `sealed`, which is abstract) — cannot be instantiated directly.
+    pub is_abstract: bool,
     /// True if declared `fun interface` — a single-abstract-method interface eligible for SAM
     /// conversion (a lambda may be passed where this type is expected).
     pub is_fun_interface: bool,
@@ -1822,6 +1824,7 @@ pub fn collect_signatures_with_cp(
                             ctor_params,
                             methods,
                             is_interface: c.is_interface(),
+                            is_abstract: c.is_abstract(),
                             is_fun_interface: c.is_fun_interface,
                             is_sealed: c.is_sealed(),
                             inner_of,
@@ -1855,6 +1858,7 @@ pub fn collect_signatures_with_cp(
                                 ctor_params: Vec::new(),
                                 methods: companion_methods_sigs,
                                 is_interface: false,
+                                is_abstract: false,
                                 is_fun_interface: false,
                                 is_sealed: false,
                                 inner_of: None,
@@ -8165,6 +8169,22 @@ impl<'a> Checker<'a> {
     }
 
     fn ctor_result(&mut self, call: ExprId, internal: &str) -> Ty {
+        // Cannot construct an abstract class / interface directly (kotlinc rejects it; the JVM would
+        // throw at `new`). Only fires on a genuine construction call here — a `super(…)` delegation
+        // and an `object : I {}` literal reach the backend by other paths, not `ctor_result`.
+        if let Some(cls) = self.syms.class_by_internal(internal) {
+            if cls.is_interface || cls.is_abstract {
+                let kind = if cls.is_interface {
+                    "an interface"
+                } else {
+                    "an abstract class"
+                };
+                self.diags.error(
+                    self.span(call),
+                    format!("cannot create an instance of {kind} '{internal}'"),
+                );
+            }
+        }
         if let Some(targs) = self.file.call_type_args.get(&call.0).cloned() {
             let args: Vec<Ty> = targs.iter().map(|r| self.resolve_ty(r)).collect();
             if !args.is_empty() {
