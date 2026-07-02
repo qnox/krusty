@@ -669,4 +669,175 @@ mod tests {
         // Already a reference → not a primitive to box.
         assert_eq!(Ty::String.nullable_boxed(), None);
     }
+
+    #[test]
+    fn intern_returns_the_same_pointer_for_equal_names() {
+        let a = intern("demo/Point");
+        let b = intern("demo/Point");
+        assert!(std::ptr::eq(a, b));
+        assert_ne!(a.as_ptr(), intern("demo/Other").as_ptr());
+    }
+
+    #[test]
+    fn obj_and_obj_args_carry_name_and_type_args() {
+        assert_eq!(Ty::obj("demo/Point").obj_internal(), Some("demo/Point"));
+        assert!(Ty::obj("demo/Point").type_args().is_empty());
+        let list = Ty::obj_args("kotlin/collections/List", &[Ty::Int]);
+        assert_eq!(list.obj_internal(), Some("kotlin/collections/List"));
+        assert_eq!(list.type_args(), &[Ty::Int]);
+        // Non-obj types have no type arguments.
+        assert!(Ty::Int.type_args().is_empty());
+        // A type parameter delegates obj identity + type args to its bound.
+        let tp = Ty::ty_param("T", list);
+        assert_eq!(tp.obj_internal(), Some("kotlin/collections/List"));
+        assert_eq!(tp.type_args(), &[Ty::Int]);
+        assert_eq!(Ty::Int.obj_internal(), None);
+    }
+
+    #[test]
+    fn array_constructor_and_element_recovery() {
+        let a = Ty::array(Ty::String);
+        assert_eq!(a.array_elem(), Some(Ty::String));
+        // A boxed `Array<Int>` carries its element as a type argument.
+        assert_eq!(
+            Ty::obj_args("kotlin/Array", &[Ty::Int]).array_elem(),
+            Some(Ty::Int)
+        );
+        // An empty `kotlin/Array` obj has no element.
+        assert_eq!(Ty::obj("kotlin/Array").array_elem(), None);
+        // A type parameter follows its bound.
+        assert_eq!(Ty::ty_param("T", a).array_elem(), Some(Ty::String));
+        // Not an array.
+        assert_eq!(Ty::Int.array_elem(), None);
+    }
+
+    #[test]
+    fn name_reports_the_source_level_name() {
+        assert_eq!(Ty::Int.name(), "Int");
+        assert_eq!(Ty::ULong.name(), "ULong");
+        assert_eq!(Ty::String.name(), "String");
+        assert_eq!(Ty::Unit.name(), "Unit");
+        assert_eq!(Ty::obj("demo/Point").name(), "demo/Point");
+        assert_eq!(Ty::Null.name(), "Null");
+        assert_eq!(Ty::Nothing.name(), "Nothing");
+        assert_eq!(Ty::array(Ty::Int).name(), "Array");
+        assert_eq!(Ty::Error.name(), "<error>");
+        assert_eq!(Ty::fun(vec![], Ty::Int).name(), "Function");
+        // Nullable delegates to the inner name; a type parameter reports its own name.
+        assert_eq!(Ty::nullable(Ty::String).name(), "String");
+        assert_eq!(Ty::ty_param("E", Ty::obj("kotlin/Any")).name(), "E");
+    }
+
+    #[test]
+    fn is_reference_covers_reference_and_primitive_shapes() {
+        assert!(Ty::String.is_reference());
+        assert!(Ty::obj("demo/Point").is_reference());
+        assert!(Ty::Null.is_reference());
+        assert!(Ty::array(Ty::Int).is_reference());
+        assert!(Ty::fun(vec![], Ty::Unit).is_reference());
+        assert!(Ty::nullable(Ty::Int).is_reference());
+        // Bare primitives / Unit / Nothing are not references.
+        assert!(!Ty::Int.is_reference());
+        assert!(!Ty::Unit.is_reference());
+        assert!(!Ty::Nothing.is_reference());
+    }
+
+    #[test]
+    fn numeric_predicates() {
+        assert!(Ty::Int.is_numeric());
+        assert!(Ty::Double.is_numeric());
+        assert!(!Ty::Char.is_numeric());
+        assert!(!Ty::Boolean.is_numeric());
+        assert!(!Ty::UInt.is_numeric());
+        // `is_numeric_or_char` additionally admits `Char`.
+        assert!(Ty::Char.is_numeric_or_char());
+        assert!(Ty::Long.is_numeric_or_char());
+        assert!(!Ty::Boolean.is_numeric_or_char());
+    }
+
+    #[test]
+    fn small_boolean_predicates() {
+        // A readable property result excludes Unit/Error.
+        assert!(Ty::Int.is_read_value_result());
+        assert!(!Ty::Unit.is_read_value_result());
+        assert!(!Ty::Error.is_read_value_result());
+        // Int-range operands are the signed small integrals.
+        assert!(Ty::Byte.is_int_range_operand());
+        assert!(Ty::Int.is_int_range_operand());
+        assert!(!Ty::Long.is_int_range_operand());
+        // Unsigned types.
+        assert!(Ty::UInt.is_unsigned());
+        assert!(Ty::ULong.is_unsigned());
+        assert!(!Ty::Int.is_unsigned());
+        // Specializable bounds are the integral JVM primitives (not floating/unsigned).
+        assert!(Ty::Int.is_specializable_bound());
+        assert!(Ty::Char.is_specializable_bound());
+        assert!(!Ty::Double.is_specializable_bound());
+        assert!(!Ty::UInt.is_specializable_bound());
+    }
+
+    #[test]
+    fn promote_widens_by_rank_and_rejects_non_numeric() {
+        assert_eq!(Ty::promote(Ty::Int, Ty::Long), Some(Ty::Long));
+        assert_eq!(Ty::promote(Ty::Long, Ty::Int), Some(Ty::Long));
+        assert_eq!(Ty::promote(Ty::Int, Ty::Double), Some(Ty::Double));
+        assert_eq!(Ty::promote(Ty::Float, Ty::Long), Some(Ty::Float));
+        // Byte/Short arithmetic widens to Int (Kotlin has no byte/short arithmetic).
+        assert_eq!(Ty::promote(Ty::Byte, Ty::Short), Some(Ty::Int));
+        assert_eq!(Ty::promote(Ty::Byte, Ty::Byte), Some(Ty::Int));
+        // A non-numeric operand yields None.
+        assert_eq!(Ty::promote(Ty::Int, Ty::Boolean), None);
+        assert_eq!(Ty::promote(Ty::String, Ty::Int), None);
+    }
+
+    #[test]
+    fn from_name_maps_known_types_only() {
+        assert_eq!(Ty::from_name("Int"), Some(Ty::Int));
+        assert_eq!(Ty::from_name("ULong"), Some(Ty::ULong));
+        assert_eq!(Ty::from_name("Unit"), Some(Ty::Unit));
+        assert_eq!(Ty::from_name("Any"), Some(Ty::obj("kotlin/Any")));
+        assert_eq!(Ty::from_name("Nope"), None);
+    }
+
+    #[test]
+    fn primitive_array_element_names() {
+        assert_eq!(Ty::primitive_array_element("IntArray"), Some(Ty::Int));
+        assert_eq!(Ty::primitive_array_element("CharArray"), Some(Ty::Char));
+        assert_eq!(Ty::primitive_array_element("ByteArray"), Some(Ty::Byte));
+        // `Array<T>` is not a primitive array class name.
+        assert_eq!(Ty::primitive_array_element("Array"), None);
+    }
+
+    #[test]
+    fn boxed_ref_and_unboxed_primitive_round_trip() {
+        assert_eq!(Ty::Int.boxed_ref(), Some(Ty::obj("kotlin/Int")));
+        assert_eq!(Ty::UInt.boxed_ref(), Some(Ty::obj("kotlin/UInt")));
+        // A reference has no boxed form.
+        assert_eq!(Ty::String.boxed_ref(), None);
+        // Inverse: a boxed primitive obj recovers the primitive (unsigned excluded).
+        assert_eq!(Ty::obj("kotlin/Int").unboxed_primitive(), Some(Ty::Int));
+        assert_eq!(Ty::obj("kotlin/Char").unboxed_primitive(), Some(Ty::Char));
+        assert_eq!(Ty::obj("kotlin/UInt").unboxed_primitive(), None);
+        assert_eq!(Ty::obj("demo/Point").unboxed_primitive(), None);
+        assert_eq!(Ty::Int.unboxed_primitive(), None);
+    }
+
+    #[test]
+    fn function_type_accessors() {
+        let f = Ty::fun(vec![Ty::Int, Ty::String], Ty::Boolean);
+        assert!(!f.is_suspend_fun());
+        assert_eq!(f.fun_arity(), Some(2));
+        assert_eq!(f.fun_ret(), Some(Ty::Boolean));
+        assert_eq!(f.fun_params(), Some(&[Ty::Int, Ty::String][..]));
+
+        let s = Ty::fun_suspend(vec![Ty::Int], Ty::Unit);
+        assert!(s.is_suspend_fun());
+        assert_eq!(s.fun_arity(), Some(1));
+
+        // Non-function types report None / false.
+        assert!(!Ty::Int.is_suspend_fun());
+        assert_eq!(Ty::Int.fun_arity(), None);
+        assert_eq!(Ty::Int.fun_ret(), None);
+        assert_eq!(Ty::Int.fun_params(), None);
+    }
 }

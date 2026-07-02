@@ -4341,6 +4341,31 @@ impl<'a> Lower<'a> {
         }
     }
 
+    /// The classpath internal a qualified constructor receiver+name denotes — a nested type
+    /// (`Outer.Nested` → `Outer$Nested`) or a FULLY-QUALIFIED class via a package path (`a.b.Ctx` →
+    /// `a/b/Ctx`). `None` when the receiver's root is a value in scope (an ordinary member call) or the
+    /// path is not a classpath type. Mirrors the checker's `qualified_nested_ctor_internal`.
+    fn nested_ctor_internal(&self, receiver: AstExprId, name: &str) -> Option<String> {
+        let root = self.ast_dotted_root(receiver)?;
+        if self.lookup(&root).is_some() {
+            return None;
+        }
+        match self.afile.expr(receiver) {
+            Expr::Name(outer) => self.resolve_qualified_nested(&format!("{outer}.{name}")),
+            Expr::Member { .. } => {
+                let internal = format!(
+                    "{}/{name}",
+                    crate::resolve::qualified_path(self.afile, receiver)?
+                );
+                self.syms
+                    .libraries
+                    .resolve_type(&internal)
+                    .map(|_| internal)
+            }
+            _ => None,
+        }
+    }
+
     /// Lower a FULLY-QUALIFIED top-level function call `a.b.helper(args)` — the receiver is a package path
     /// (its root is not a value in scope) and `helper` is a top-level function of that package (compiled
     /// to `a/b/<File>Kt`). Emits the `invokestatic` to the facade, threading a `Continuation` if the
@@ -16830,11 +16855,10 @@ impl<'a> Lower<'a> {
                     // CLASSPATH nested-class construction `Outer.Nested(args)` (`Subject.User("x")`): the
                     // receiver names a type (not a value), and the call's result type is the nested
                     // classpath internal (`lib/Subject$User`, not an IR class). Emit `new … invokespecial`.
-                    if let Expr::Name(root) = self.afile.expr(receiver).clone() {
-                        if self.lookup(&root).is_none() {
-                            if let Some(internal) = self
-                                .resolve_qualified_nested(&format!("{root}.{name}"))
-                                .filter(|i| {
+                    {
+                        {
+                            if let Some(internal) =
+                                self.nested_ctor_internal(receiver, &name).filter(|i| {
                                     !self.classes.contains_key(i)
                                         && self.info.ty(e).obj_internal() == Some(i.as_str())
                                 })
