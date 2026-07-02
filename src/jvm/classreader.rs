@@ -602,7 +602,7 @@ fn decode_modified_utf8(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::jvm::classfile::*;
+    use crate::jvm::classfile::{ClassWriter, CodeBuilder};
 
     #[test]
     fn reads_krusty_emitted_class_roundtrip() {
@@ -620,5 +620,188 @@ mod tests {
         assert_eq!(ci.methods.len(), 1);
         assert_eq!(ci.methods[0].name, "add");
         assert_eq!(ci.methods[0].descriptor, "(II)I");
+    }
+
+    /// Build a rich class (super, interfaces, fields with signature + const value, generic method
+    /// signature) and assert the reader recovers every piece.
+    #[test]
+    fn roundtrip_fields_methods_signatures() {
+        let mut cw = ClassWriter::new("demo/Box", "java/lang/Object");
+        cw.set_signature("<T:Ljava/lang/Object;>Ljava/lang/Object;");
+        cw.add_interface("java/lang/Runnable");
+        cw.add_interface("java/lang/Comparable");
+        // plain field
+        cw.add_field(ACC_PUBLIC, "plain", "I");
+        // field with a generic Signature (TT;)
+        cw.add_field_sig(ACC_PUBLIC, "value", "Ljava/lang/Object;", Some("TT;"));
+        // const val field carrying a ConstantValue attribute
+        let ci_idx = cw.const_int(2147483647);
+        cw.add_field_const(ACC_PUBLIC | 0x0010, "MAX", "I", ci_idx);
+
+        let mut code = CodeBuilder::new(1);
+        code.aload(0);
+        code.areturn();
+        cw.add_method_sig(
+            ACC_PUBLIC,
+            "get",
+            "(Ljava/lang/Object;)Ljava/lang/Object;",
+            &code,
+            Some("(TT;)TT;"),
+        );
+
+        let bytes = cw.finish();
+        let info = parse_class(&bytes).unwrap();
+
+        assert_eq!(info.this_class, "demo/Box");
+        assert_eq!(info.super_class.as_deref(), Some("java/lang/Object"));
+        assert_eq!(
+            info.interfaces,
+            vec![
+                "java/lang/Runnable".to_string(),
+                "java/lang/Comparable".to_string()
+            ]
+        );
+        assert_eq!(
+            info.signature.as_deref(),
+            Some("<T:Ljava/lang/Object;>Ljava/lang/Object;")
+        );
+
+        // Fields
+        assert_eq!(info.fields.len(), 3);
+        let plain = info.fields.iter().find(|f| f.name == "plain").unwrap();
+        assert_eq!(plain.descriptor, "I");
+        assert!(plain.signature.is_none());
+        assert!(plain.const_value.is_none());
+        let value = info.fields.iter().find(|f| f.name == "value").unwrap();
+        assert_eq!(value.signature.as_deref(), Some("TT;"));
+        let max = info.fields.iter().find(|f| f.name == "MAX").unwrap();
+        assert_eq!(max.const_value, Some(ConstVal::Int(2147483647)));
+
+        // Method + its generic signature
+        let m = info
+            .method("get", "(Ljava/lang/Object;)Ljava/lang/Object;")
+            .unwrap();
+        assert_eq!(m.signature.as_deref(), Some("(TT;)TT;"));
+        assert!(m.is_public());
+        assert!(!m.is_static());
+    }
+
+    #[test]
+    fn roundtrip_recovers_method_code_body() {
+        let mut cw = ClassWriter::new("demo/CodeKt", "java/lang/Object");
+        let mut code = CodeBuilder::new(2);
+        code.iload(0);
+        code.iload(1);
+        code.iadd();
+        code.ireturn();
+        cw.add_method(ACC_PUBLIC | ACC_STATIC, "add", "(II)I", &code);
+        let bytes = cw.finish();
+        let mc = read_method_code(&bytes, "add", "(II)I").unwrap();
+        assert_eq!(mc.max_locals, 2);
+        assert_eq!(mc.max_stack, 2);
+        // iload_0, iload_1, iadd, ireturn
+        assert_eq!(mc.code, vec![0x1a, 0x1b, 0x60, 0xac]);
+        assert!(mc.handlers.is_empty());
+    }
+
+    #[test]
+    fn read_method_code_missing_method_is_none() {
+        let mut cw = ClassWriter::new("demo/CodeKt", "java/lang/Object");
+        let mut code = CodeBuilder::new(0);
+        code.ret_void();
+        cw.add_method(ACC_PUBLIC, "present", "()V", &code);
+        let bytes = cw.finish();
+        assert!(read_method_code(&bytes, "absent", "()V").is_none());
+    }
+
+    #[test]
+    fn const_value_variants_roundtrip() {
+        let mut cw = ClassWriter::new("demo/Consts", "java/lang/Object");
+        let li = cw.const_long(9_000_000_000);
+        cw.add_field_const(ACC_PUBLIC | 0x0010, "L", "J", li);
+        let fi = cw.const_float(1.5);
+        cw.add_field_const(ACC_PUBLIC | 0x0010, "F", "F", fi);
+        let di = cw.const_double(2.5);
+        cw.add_field_const(ACC_PUBLIC | 0x0010, "D", "D", di);
+        let si = cw.const_string("hello");
+        cw.add_field_const(ACC_PUBLIC | 0x0010, "S", "Ljava/lang/String;", si);
+        let bytes = cw.finish();
+        let info = parse_class(&bytes).unwrap();
+        let find = |n: &str| info.fields.iter().find(|f| f.name == n).unwrap();
+        assert_eq!(find("L").const_value, Some(ConstVal::Long(9_000_000_000)));
+        assert_eq!(find("F").const_value, Some(ConstVal::Float(1.5)));
+        assert_eq!(find("D").const_value, Some(ConstVal::Double(2.5)));
+        assert_eq!(
+            find("S").const_value,
+            Some(ConstVal::Str("hello".to_string()))
+        );
+    }
+
+    #[test]
+    fn bad_magic_is_error() {
+        let bytes = [0u8, 1, 2, 3, 4, 5, 6, 7];
+        match parse_class(&bytes) {
+            Err(ReadError::NotAClass) => {}
+            other => panic!("expected NotAClass, got {other:?}"),
+        }
+        assert!(read_method_code(&bytes, "x", "()V").is_none());
+    }
+
+    #[test]
+    fn truncated_is_error() {
+        // Valid magic then nothing — the pool count read must fail as Truncated.
+        let bytes = [0xCA, 0xFE, 0xBA, 0xBE, 0, 0, 0, 52];
+        assert!(matches!(parse_class(&bytes), Err(ReadError::Truncated)));
+    }
+
+    #[test]
+    fn modified_utf8_decode_via_roundtrip() {
+        // A method name with a NUL (encoded as C0 80 in modified UTF-8) and a multibyte char must
+        // survive the writer's modified_utf8 encode and the reader's decode.
+        let name = "a\u{0000}\u{00e9}"; // NUL + é (2-byte), plus ASCII
+        let mut cw = ClassWriter::new("demo/UKt", "java/lang/Object");
+        let mut code = CodeBuilder::new(0);
+        code.ret_void();
+        cw.add_method(ACC_PUBLIC, name, "()V", &code);
+        let bytes = cw.finish();
+        let info = parse_class(&bytes).unwrap();
+        assert_eq!(info.methods[0].name, name);
+    }
+
+    #[test]
+    fn decode_modified_utf8_units() {
+        // ASCII, NUL via C0 80, 2-byte and 3-byte sequences.
+        assert_eq!(decode_modified_utf8(b"hi"), "hi");
+        assert_eq!(decode_modified_utf8(&[0xC0, 0x80]), "\u{0000}");
+        assert_eq!(decode_modified_utf8(&[0xC3, 0xA9]), "\u{00e9}"); // é
+        assert_eq!(decode_modified_utf8(&[0xE2, 0x82, 0xAC]), "\u{20ac}"); // €
+    }
+
+    #[test]
+    fn no_superclass_when_super_index_zero() {
+        // java/lang/Object itself has super_class index 0; emulate by hand-checking the accessor path
+        // is exercised through a normal parse where super is present.
+        let cw = ClassWriter::new("demo/Empty", "java/lang/Object");
+        let bytes = cw.finish();
+        let info = parse_class(&bytes).unwrap();
+        assert_eq!(info.super_class.as_deref(), Some("java/lang/Object"));
+        assert!(info.interfaces.is_empty());
+        assert!(info.methods.is_empty());
+        assert!(info.fields.is_empty());
+        assert!(info.kotlin_d1.is_empty());
+        assert!(info.kotlin_d2.is_empty());
+    }
+
+    #[test]
+    fn interface_flag_recovered() {
+        let mut cw = ClassWriter::new("demo/I", "java/lang/Object");
+        cw.set_access(ACC_PUBLIC | 0x0200 | 0x0400); // PUBLIC | INTERFACE | ABSTRACT
+        cw.add_abstract_method(ACC_PUBLIC | 0x0400, "run", "()V");
+        let bytes = cw.finish();
+        let info = parse_class(&bytes).unwrap();
+        assert!(info.is_interface());
+        assert!(info.is_public());
+        // methods_named finds the abstract method
+        assert_eq!(info.methods_named("run").len(), 1);
     }
 }

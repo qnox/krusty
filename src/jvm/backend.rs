@@ -186,3 +186,54 @@ impl Backend for JvmBackend {
         )]
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn backend() -> JvmBackend {
+        // finalize does not touch the classpath, so an empty one suffices.
+        let cp = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(Vec::new()));
+        JvmBackend::new(cp)
+    }
+
+    #[test]
+    fn finalize_empty_state_yields_no_artifacts() {
+        let state = JvmState::default();
+        let artifacts = backend().finalize(state, "mymod");
+        assert!(artifacts.is_empty());
+    }
+
+    #[test]
+    fn finalize_populated_state_writes_kotlin_module() {
+        let mut state = JvmState::default();
+        state
+            .module_packages
+            .entry("com/example".to_string())
+            .or_default()
+            .push("MainKt".to_string());
+        let artifacts = backend().finalize(state, "mymod");
+        assert_eq!(artifacts.len(), 1);
+        let (name, bytes) = &artifacts[0];
+        assert_eq!(name, "META-INF/mymod.kotlin_module");
+        assert!(!bytes.is_empty());
+        // The build must match building the module directly from the same package mapping.
+        let expected = crate::metadata::module::build_kotlin_module(&[(
+            "com/example".to_string(),
+            vec!["MainKt".to_string()],
+        )]);
+        assert_eq!(bytes, &expected);
+    }
+
+    #[test]
+    fn finalize_module_name_is_reflected_in_artifact_path() {
+        let mut state = JvmState::default();
+        state
+            .module_packages
+            .entry(String::new())
+            .or_default()
+            .push("FooKt".to_string());
+        let artifacts = backend().finalize(state, "other-name");
+        assert_eq!(artifacts[0].0, "META-INF/other-name.kotlin_module");
+    }
+}
