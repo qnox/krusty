@@ -1053,6 +1053,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   by joining `qualified_path(receiver)` with the name (`a/b/Ctx`), verified via `resolve_type`, then run the
   existing named/positional/reordered/omitted-default classpath-ctor resolution + `<init>$default` synthetic.
   Test: `tests/fq_ctor_call_e2e.rs`.
+- **A default PARAMETER whose default VALUE is an object construction (`fun list(f: F = F(), n: Int = 2)`),
+  called omitting that argument.** The `foo$default` synthetic stub re-emits an omitted parameter's default
+  expression, so `toplevel_default_stub_safe` now ACCEPTS a plain `new`/object construction default (it was
+  excluded alongside lambdas). A VALUE/inline-class construction default stays excluded — it erases to its
+  unboxed underlying and mangles the owning function's name, which the plain static stub can't box/unbox
+  (`default_expr_stub_safe` rejects a `New` of an `is_value` class, and an external value class via
+  `external_value_classes`); such a file falls back to the inline call-site fill / skip. This is the
+  AuditService root (a suspend service `list(filters = AuditFilters(), …)`). Test:
+  `tests/construction_default_arg_e2e.rs`.
 - **A `const val` inside an `object`.** Kotlin inlines every const read; krusty now does the same — a
   pre-scan records each literal-valued object `const val` in `object_const_lits[(object internal, name)]`,
   and a read inlines the literal (unqualified inside the object's own methods via `cur_class`, and qualified
