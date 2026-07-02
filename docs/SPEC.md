@@ -1047,6 +1047,22 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   covered two reported failures: a plain method with a `List<T>` param, and a `suspend` interface member
   whose `get(ids: List<Int>): List<Info>` PARAM (not its return) was the actual unresolved-member cause.
   Test: `tests/classpath_collection_param_member_e2e.rs`.
+- **`kotlinx.coroutines.runBlocking { … }` (a classpath coroutine builder) resolves, lowers, and RUNS.** Two
+  coordinated pieces. RESOLUTION: `runBlocking { }` passes ONE trailing lambda against TWO parameters (a
+  defaulted `context` + the `block`). `default_omit_lambda_param_indices` aligns the trailing lambda to the
+  LAST parameter (omitting leading defaults) so the checker's lambda helpers type the block and the call
+  resolves to `BuildersKt.runBlocking$default`. The alignment is gated behind `has_exact` — it applies ONLY
+  when NO overload of that name matches the argument count exactly, so a plain `run { … }` (which HAS an
+  exact-arity overload) never mis-binds against a wider same-named overload. LOWERING: the block is `suspend
+  CoroutineScope.() -> T`, erased in the descriptor to a bare `Function2` with no `suspend` flag; `lower_arg`
+  detects the suspend lambda STRUCTURALLY (its checked `Ty::Fun` ends in a `Continuation` param) and routes
+  it to `lower_suspend_lambda`, which builds the real `SuspendLambda` state machine (the `CoroutineScope`
+  receiver is modeled as the value parameter `it`). The lambda body is lowered as a `suspend` context
+  (`cur_fn_suspend`) so a suspend MEMBER call inside it (`repo.get(…)` on a classpath `suspend` interface) is
+  CPS-threaded, and `suspend_member_call` detection consults the library for classpath members. Supports a
+  non-suspending body, a tail suspend call, and a bound suspension (`val x = work(); …`); a suspension nested
+  in an `if`/`when` CONDITION cleanly SKIPS (the pre-existing flattener limit), never miscompiles. Test:
+  `tests/classpath_runblocking_e2e.rs`.
 - **A `suspend` body accessing a member of a suspend call's result inline (`suspend fun f(r) =
   r.all().size`).** The CPS flattener only meets a suspension at a bound-local / bare-statement position;
   a suspension nested in a `return`/member-access value must be pre-hoisted. `hoist_suspensions` now

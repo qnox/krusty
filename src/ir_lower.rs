@@ -5521,14 +5521,26 @@ impl<'a> Lower<'a> {
                         _ => {}
                     }
                 }
-                // A plain member call `recv.m(args)` to a suspend method.
-                if let ast::Expr::Call { callee, .. } = self.afile.expr(call) {
+                // A plain member call `recv.m(args)` to a suspend method — a USER class method, or a
+                // CLASSPATH member (`repo.get(...)` on a `suspend fun` of a classpath interface), whose
+                // suspend-ness lives on the resolved library member, not in `syms`.
+                if let ast::Expr::Call { callee, args } = self.afile.expr(call) {
                     if let ast::Expr::Member { receiver, name } = self.afile.expr(*callee) {
-                        return self
-                            .info
-                            .ty(*receiver)
+                        let recv_ty = self.info.ty(*receiver);
+                        if recv_ty
                             .obj_internal()
-                            .is_some_and(|i| method_suspends(i, name));
+                            .is_some_and(|i| method_suspends(i, name))
+                        {
+                            return true;
+                        }
+                        let arg_tys: Vec<Ty> = args.iter().map(|&a| self.info.ty(a)).collect();
+                        return crate::call_resolver::resolve_instance_member(
+                            &*self.syms.libraries,
+                            recv_ty,
+                            name,
+                            &arg_tys,
+                        )
+                        .is_some_and(|m| m.suspend);
                     }
                 }
                 false
@@ -5689,8 +5701,18 @@ impl<'a> Lower<'a> {
                 let lv = self.fresh_value();
                 self.scope.push((name.clone(), lv, *pty));
             }
-            let body_val = self.expr(body)?;
+            // The lambda body is itself a `suspend` context — a suspend MEMBER call inside it
+            // (`repo.get(...)` on a classpath suspend interface) must be recorded in `ir.suspend_calls`
+            // (gated on `cur_fn_suspend`) so the coroutine pass threads its continuation; without this the
+            // call emits without the trailing `Continuation` and fails at runtime (`NoSuchMethodError`).
+            let saved_cur_suspend = self.cur_fn_suspend;
+            self.cur_fn_suspend = true;
+            // Evaluate WITHOUT `?` so the `cur_fn_suspend` / `scope` state is always restored, even when the
+            // body bails (an early `?` here would leak `cur_fn_suspend = true` into the enclosing method).
+            let body_val = self.expr(body);
+            self.cur_fn_suspend = saved_cur_suspend;
             self.scope = saved_scope_sm;
+            let body_val = body_val?;
             // Extract the suspend `call`, an optional `bound` local (`val a = <call>`) and `tail_expr`
             // (the expression computed after the binding). Shapes: `{ foo() }` (call, no bound), and
             // `{ val a = foo(); <tail> }` (call = the binding init, bound = `a`, tail = the value).
@@ -9231,6 +9253,44 @@ impl<'a> Lower<'a> {
     }
 
     pub(crate) fn lower_arg(&mut self, arg: AstExprId, target: &Ty) -> Option<u32> {
+        // A lambda flowing into a CLASSPATH suspend-lambda parameter (`runBlocking { … }` and the other
+        // coroutine builders). The JVM descriptor erases the parameter to a bare `FunctionN`, so neither the
+        // target nor the checked argument type carries `suspend = true`; the STRUCTURAL marker is a trailing
+        // `Continuation` parameter on the checked lambda type (`suspend CoroutineScope.() -> R` erases to
+        // `Function2<CoroutineScope, Continuation<R>, Object>`). Strip that continuation and route the lambda
+        // to `lower_suspend_lambda`, which builds the real `SuspendLambda` state machine — the coroutine
+        // builder then drives it. (Recognized BEFORE the SAM path below, which would wrap it as a plain
+        // `FunctionN` whose body ignores the continuation and VerifyErrors when driven as a coroutine.)
+        if matches!(self.afile.expr(arg), Expr::Lambda { .. }) {
+            if let Ty::Fun(s) = self.info.ty(arg) {
+                let tail_continuation = s.params.last().and_then(|p| p.obj_internal())
+                    == Some("kotlin/coroutines/Continuation");
+                if tail_continuation && !s.suspend {
+                    // Value parameters are everything before the trailing continuation (the receiver of a
+                    // `Recv.() -> R` builder lambda is modeled as the single value parameter `it`).
+                    let value_params: Vec<Ty> = s.params[..s.params.len() - 1].to_vec();
+                    if let Expr::Lambda {
+                        params: lparams,
+                        body,
+                    } = self.afile.expr(arg).clone()
+                    {
+                        let bind_names: Vec<String> = if !lparams.is_empty() {
+                            lparams
+                        } else if value_params.len() == 1 {
+                            vec!["it".to_string()]
+                        } else if value_params.is_empty() {
+                            vec![]
+                        } else {
+                            return None;
+                        };
+                        if bind_names.len() == value_params.len() {
+                            return self.lower_suspend_lambda(body, &value_params, bind_names);
+                        }
+                    }
+                    return None;
+                }
+            }
+        }
         // SAM conversion: a lambda flowing into a simple `fun interface` parameter becomes an instance of
         // that interface whose single abstract method runs the lambda (the checker validated the target).
         if let Some(internal) = target.non_null().obj_internal() {

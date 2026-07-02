@@ -110,6 +110,25 @@ fn is_function_param(t: &Ty) -> bool {
     matches!(t, Ty::Fun(_))
 }
 
+/// Map each provided argument to a parameter index for a top-level call carrying a lambda. Identity when
+/// the counts match; else, for a call that omits leading defaulted parameters before a TRAILING lambda
+/// (`runBlocking { … }`), leading args → leading params and the trailing lambda → the LAST parameter.
+fn default_omit_lambda_param_indices(
+    param_count: usize,
+    arg_tys: &[Option<Ty>],
+) -> Option<Vec<usize>> {
+    let n = arg_tys.len();
+    if param_count == n {
+        return Some((0..n).collect());
+    }
+    if param_count > n && n >= 1 && arg_tys[n - 1].is_none() {
+        let mut map: Vec<usize> = (0..n - 1).collect();
+        map.push(param_count - 1);
+        return Some(map);
+    }
+    None
+}
+
 fn metadata_ret_with_args(meta: Ty, fallback_args: &[Ty]) -> Ty {
     match meta {
         Ty::Obj(internal, args) if args.is_empty() && !fallback_args.is_empty() => {
@@ -868,26 +887,38 @@ impl<'a> CallResolver<'a> {
         name: &str,
         arg_tys: &[Option<Ty>],
     ) -> Option<Vec<Vec<Ty>>> {
-        self.lib
-            .functions(name, None)
+        let fs = self.lib.functions(name, None);
+        // The default-omitted trailing-lambda alignment (`runBlocking { … }`) applies ONLY when NO overload
+        // of this name matches the provided argument count exactly. A name WITH an exact-arity overload
+        // (`run { … }`) always uses that overload's own parameter positions — never an alignment against a
+        // wider overload — so a legitimately-empty lambda-parameter result is not shadowed by one.
+        let has_exact = fs
             .overloads
+            .iter()
+            .any(|o| o.kind == FnKind::TopLevel && o.callable.params.len() == arg_tys.len());
+        fs.overloads
             .iter()
             .filter(|o| o.kind == FnKind::TopLevel)
             .find_map(|o| {
                 let gsig = o.generic_sig.as_ref()?;
-                if gsig.params.len() != arg_tys.len() {
+                if has_exact && gsig.params.len() != arg_tys.len() {
                     return None;
                 }
+                let map = default_omit_lambda_param_indices(gsig.params.len(), arg_tys)?;
                 let mut binds = std::collections::HashMap::new();
-                for (ps, at) in gsig.params.iter().zip(arg_tys) {
-                    if let Some(t) = at {
+                for (ai, at) in arg_tys.iter().enumerate() {
+                    if let (Some(t), Some(ps)) = (at, gsig.params.get(map[ai])) {
                         unify_gsig(ps, *t, &mut binds);
                     }
                 }
-                let out: Vec<Vec<Ty>> = gsig
-                    .params
+                let out: Vec<Vec<Ty>> = map
                     .iter()
-                    .map(|ps| function_input_types(ps, &binds))
+                    .map(|&pi| {
+                        gsig.params
+                            .get(pi)
+                            .map(|ps| function_input_types(ps, &binds))
+                            .unwrap_or_default()
+                    })
                     .collect();
                 out.iter()
                     .zip(arg_tys)
@@ -904,15 +935,28 @@ impl<'a> CallResolver<'a> {
         name: &str,
         arg_tys: &[Option<Ty>],
     ) -> Option<Vec<Option<Ty>>> {
-        self.lib
-            .functions(name, None)
+        let fs = self.lib.functions(name, None);
+        // Same rule as `top_level_lambda_param_types`: only fall back to the default-omitted trailing-lambda
+        // alignment (`runBlocking { … }` binds `this: CoroutineScope`) when NO overload matches the argument
+        // count exactly, so an exact-arity call never mis-binds a receiver from a wider overload.
+        let has_exact = fs
             .overloads
+            .iter()
+            .any(|o| o.kind == FnKind::TopLevel && o.callable.params.len() == arg_tys.len());
+        fs.overloads
             .iter()
             .filter(|o| o.kind == FnKind::TopLevel)
             .find_map(|o| {
                 let recvs = &o.call_sig.lambda_receivers;
-                (recvs.len() == arg_tys.len() && recvs.iter().any(|o| o.is_some()))
-                    .then(|| recvs.clone())
+                if has_exact && recvs.len() != arg_tys.len() {
+                    return None;
+                }
+                let map = default_omit_lambda_param_indices(recvs.len(), arg_tys)?;
+                let out: Vec<Option<Ty>> = map
+                    .iter()
+                    .map(|&pi| recvs.get(pi).cloned().flatten())
+                    .collect();
+                out.iter().any(|o| o.is_some()).then_some(out)
             })
     }
 
