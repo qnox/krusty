@@ -114,6 +114,54 @@ fn suspend_interface_get_with_list_param_lowers() {
     );
 }
 
+// --- The RETURN-focused w1 shape (`suspend fun …(): List<CustomType>`) with NO collection PARAMETER ---
+// The build.663 report framed w1 as "suspend interface method RETURNING List<CustomType>". Investigation
+// showed the return was never the failure (the suspend collection RETURN was already recovered — see
+// suspend_collection_hof_e2e); the `unresolved method 'get' on 'lib/Port'` came solely from a collection
+// PARAMETER, the same root as z1. These lock that a return-only suspend member (a no-arg one, and one with a
+// scalar `Int` arg — neither has a collection param) resolves AND lowers, so a regression in the collection-
+// param pass can never silently break the return shape either. A coroutine RUN needs a driver (out of scope);
+// LOWERING is the bar, exactly as `suspend_interface_get_with_list_param_lowers`.
+
+fn suspend_lowers(tag: &str, lib: &str, main: &str) -> Option<String> {
+    let jdk = common::jdk_modules()?;
+    let sl = common::stdlib_jar()?;
+    let libout = common::compile_lib(tag, lib)?;
+    let cp: Vec<PathBuf> = vec![libout, sl];
+    common::compile_and_run_box(main, "Main", &cp, Some(&jdk))
+}
+
+#[test]
+fn suspend_interface_noarg_returns_custom_list_lowers() {
+    // `suspend fun all(): List<Info>` — no parameter at all; the custom-element List return resolves + lowers.
+    const LIB: &str = "package lib\n\
+        data class Info(val n: Int)\n\
+        interface Port { suspend fun all(): List<Info> }\n";
+    const MAIN: &str = "import lib.Port\n\
+        suspend fun use(p: Port): Int = p.all().size\n\
+        fun box(): String = \"OK\"\n";
+    assert_eq!(
+        suspend_lowers("w1_noarg", LIB, MAIN).expect("no-arg suspend List return lowers"),
+        "OK"
+    );
+}
+
+#[test]
+fn suspend_interface_scalar_arg_returns_custom_list_lowers() {
+    // `suspend fun get(id: Int): List<Info>` — a SCALAR param (no collection), the literal return-focused w1
+    // reproducer; resolves + lowers (was never the actual failure, unlike the collection-param shape above).
+    const LIB: &str = "package lib\n\
+        data class Info(val n: Int)\n\
+        interface Port { suspend fun get(id: Int): List<Info> }\n";
+    const MAIN: &str = "import lib.Port\n\
+        suspend fun use(p: Port): Int = p.get(1).size\n\
+        fun box(): String = \"OK\"\n";
+    assert_eq!(
+        suspend_lowers("w1_scalar", LIB, MAIN).expect("scalar-arg suspend List return lowers"),
+        "OK"
+    );
+}
+
 #[test]
 fn method_with_set_param() {
     // The fix generalizes to any collection: `Set<String>` → `Ljava/util/Set;`.
