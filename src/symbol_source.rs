@@ -75,6 +75,17 @@ pub trait SymbolSource {
         false
     }
 
+    /// Normalize a semantic type to the form a JVM `<init>`/method descriptor carries, so a call
+    /// argument can be matched against a descriptor-read parameter. A Kotlin built-in erases to its
+    /// single JVM identity (`kotlin/collections/Set<String>` → `java/util/Set`, read-only and mutable
+    /// alike) and type arguments are dropped, mirroring erasure. `None` = no platform normalization
+    /// applies (compare the type unchanged). Reference (`Ty::Obj`) types are normalized and arrays
+    /// recurse into their element (so a nested collection normalizes too); primitives, `String` and
+    /// function types already compare exactly across the two sides.
+    fn jvm_descriptor_form(&self, _ty: Ty) -> Option<Ty> {
+        None
+    }
+
     /// If values of this type can be invoked like a Kotlin function, return their arity. Plain
     /// `Ty::Fun` is handled here; platform providers can add callable runtime types such as property
     /// references without the checker knowing their class names.
@@ -222,6 +233,10 @@ impl SymbolSource for CompositeSource {
 
     fn is_unsigned_integer_type(&self, ty: Ty) -> bool {
         self.children.iter().any(|c| c.is_unsigned_integer_type(ty))
+    }
+
+    fn jvm_descriptor_form(&self, ty: Ty) -> Option<Ty> {
+        self.children.iter().find_map(|c| c.jvm_descriptor_form(ty))
     }
 
     fn function_like_arity(&self, ty: Ty) -> Option<usize> {

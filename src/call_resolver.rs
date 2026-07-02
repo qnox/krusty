@@ -1132,6 +1132,32 @@ pub fn resolve_constructor(
             return Some(m.clone());
         }
     }
+    // A parameter typed as a Kotlin COLLECTION erases in the `<init>` descriptor to its single JVM
+    // interface with the type argument dropped (`Set<String>` → `Ljava/util/Set;`), but the call passes
+    // the Kotlin type itself (`Rule(setOf("a"))` → arg `kotlin/collections/Set<String>`). Retry matching
+    // both parameter and argument in their JVM-descriptor form — the collection identity is bridged and
+    // type arguments erased — so the exact-`Ty` compare above (which sees `java/util/Set` vs
+    // `kotlin/collections/Set<String>`) can succeed. Normalizing BOTH sides keeps overloads distinct
+    // (`java/util/List` ≠ `java/util/Set`) and never coerces a scalar parameter.
+    let jvm_args: Vec<Ty> = args
+        .iter()
+        .map(|a| lib.jvm_descriptor_form(*a).unwrap_or(*a))
+        .collect();
+    if jvm_args != args {
+        if let Some(m) = t.constructors.iter().find(|m| {
+            m.params.len() == jvm_args.len()
+                && m.params
+                    .iter()
+                    .zip(&jvm_args)
+                    .all(|(p, a)| lib.jvm_descriptor_form(*p).unwrap_or(*p) == *a)
+        }) {
+            crate::trace_compiler!(
+                "value_classes",
+                "resolve_constructor {internal} matched via jvm-descriptor-form args {args:?} -> {jvm_args:?}"
+            );
+            return Some(m.clone());
+        }
+    }
     // A classpath `@JvmInline value class` exposes only a PRIVATE `<init>` (its public surface is the
     // static `box-impl`/`constructor-impl`), so `ctor` finds nothing. Construction is `X(u)` over the
     // single underlying value `u`; synthesize that constructor so the call type-checks. The
