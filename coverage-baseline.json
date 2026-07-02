@@ -1,22 +1,22 @@
 {
   "regions": {
-    "covered": 88551,
-    "count": 101805,
-    "percent": 86.58099307499631
+    "covered": 93741,
+    "count": 106089,
+    "percent": 87.9607160026016
   },
   "functions": {
-    "covered": 4092,
-    "count": 4460,
-    "percent": 91.3488789237668
+    "covered": 4323,
+    "count": 4664,
+    "percent": 92.28867924528302
   },
   "lines": {
-    "covered": 49686,
-    "count": 56278,
-    "percent": 87.88671949962684
+    "covered": 52032,
+    "count": 58162,
+    "percent": 89.06047247343625
   },
   "branches": {
-    "covered": 9005,
-    "count": 12257,
-    "percent": 73.06822224035245
+    "covered": 9179,
+    "count": 12265,
+    "percent": 74.43897268650632
   }
 }
