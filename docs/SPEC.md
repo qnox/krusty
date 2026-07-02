@@ -984,7 +984,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   parameter/return/field types resolve; the checker's `resolve_ty` adds the same `this_ty`-scoped fallback
   for checker-only positions (local `val`, `as`/`is`). A nested type shadows an outer same-name type within
   the class body (Kotlin scoping); the fallback is last-resort so a real top-level/imported type still wins.
-  Test: `tests/nested_type_scope_e2e.rs`.
+  The same nested fallback is mirrored in `resolve_ty_no_diag` (smart-cast narrowing) and the lowerer's
+  `ty_ref`, so `is Inner` / `as Inner` on a nested type narrow/cast correctly. On a name COLLISION with a
+  top-level type (`class Foo; class Outer { class Foo }`), ALL resolvers consistently pick the top-level
+  (the signature-collection scope insert is skipped when the simple name already resolves), so the checker
+  and codegen never disagree. Test: `tests/nested_type_scope_e2e.rs`.
 - **Named arguments to a CLASSPATH constructor (`Point(y = 2, x = 1)`).** Descriptors don't carry
   parameter names, so this needs the ctor's `@Metadata`: `metadata::class_constructor_param_names` decodes
   `Class.constructor` (field 8) → `Constructor.value_parameter` (field 2, a DIFFERENT proto shape from a

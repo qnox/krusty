@@ -1183,7 +1183,12 @@ pub fn collect_signatures_with_cp(
                         for &nd in &file.decls {
                             if let Decl::Class(nc) = file.decl(nd) {
                                 if let Some(seg) = nc.name.strip_prefix(&prefix) {
-                                    if !seg.contains('.') {
+                                    // Only bring the nested type into scope when its simple name does NOT
+                                    // already resolve to a top-level/imported type — a same-name collision
+                                    // (`class Foo; class Outer { class Foo }`) is left to the top-level
+                                    // resolution, so the signature checker and the lowerer's `ty_ref`
+                                    // (both last-resort on nested) agree (no checker/codegen mismatch).
+                                    if !seg.contains('.') && !ext.contains_key(seg) {
                                         let ni = class_names
                                             .get(&nc.name)
                                             .cloned()
@@ -4912,6 +4917,17 @@ impl<'a> Checker<'a> {
             self.tparams.erase(&r.name)
         } else if let Some(cs) = self.syms.classes.get(&r.name) {
             Ty::obj(&cs.internal)
+        } else if let Some(Ty::Obj(outer, _)) = self.this_ty {
+            // A sibling nested type unqualified within the enclosing class body (`is Inner` in
+            // `class Outer { class Inner }`) → `Outer$Inner`, so a nested-type `is`/`as` smart-cast
+            // narrows. Mirrors the same fallback in `resolve_ty`.
+            let nested = format!("{outer}${}", r.name);
+            self.syms
+                .classes
+                .values()
+                .find(|s| s.internal == nested)
+                .map(|s| Ty::obj(&s.internal))
+                .unwrap_or(Ty::Error)
         } else {
             Ty::Error
         }
