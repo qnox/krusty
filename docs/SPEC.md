@@ -987,6 +987,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (const/name args, order-independent) keeps the byte-identical slot-order lowering (no prelude). Applies to
   top-level function and constructor calls. Test: `tests/named_arg_source_order_e2e.rs`.
 
+- **Named arguments on a same-file MEMBER method / EXTENSION function (`z.test(b = …, a = …)`,
+  `"x".ext(b = …, a = …)`).** The checker's member named-arg gate accepts any member with recorded
+  parameter names (not only one with defaults). The lowerer reorders at the call site: `lower_named_member_call`
+  (a `MethodCall`) and `lower_named_ext_call` (a static `Call` with the receiver as arg 0) evaluate the
+  RECEIVER first, then each argument in SOURCE order into a temp, then load the temps in parameter (slot)
+  order — matching Kotlin's left-to-right evaluation while binding labels to positions, wrapped in a
+  `Block` so the temps outlive the call (as for the top-level path). A no-default user member/extension
+  named call is ALWAYS handled or skipped, never routed to positional pairing (which would bind the labels
+  in the wrong order). Parameter names for a no-default function are recorded in `fn_param_names`
+  (previously only defaulted functions were). Overloaded members share one class-map slot (a pre-existing
+  limitation); a divergent overload degrades to a skip via the `param_names`/`lower_arg` type checks, never
+  a miscompile. Test: `tests/named_arg_member_e2e.rs`.
+
 - **Generic constructor type-argument inference (`Pair(1, 2)` → `Pair<Int, Int>`).** A classpath generic
   class constructed without explicit `<T>` previously erased to the raw type, so `first`/`second`/
   `componentN` typed as `Any` (breaking destructuring + arithmetic). `SymbolSource::infer_constructor_type_args`

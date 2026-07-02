@@ -8140,14 +8140,15 @@ impl<'a> Checker<'a> {
                     let module_overloads = crate::module_symbols::ModuleSymbols::new(self.syms)
                         .functions(name, Some(rt))
                         .overloads;
+                    // A member with recorded parameter names supports named arguments: one with defaults
+                    // (`required < params`, e.g. data-class `copy`) maps labels + fills omitted slots; one
+                    // with all-required parameters (a plain method) reorders the labelled arguments onto
+                    // positions (the lowerer evaluates the receiver + args in source order).
                     let module_member = matches!(rt, Ty::Obj(_, _))
                         && module_overloads
                             .iter()
                             .find(|o| o.kind == crate::libraries::FnKind::Member)
-                            .map_or(false, |fi| {
-                                fi.call_sig.required < fi.callable.params.len()
-                                    && !fi.call_sig.param_names.is_empty()
-                            });
+                            .map_or(false, |fi| !fi.call_sig.param_names.is_empty());
                     // A user-module EXTENSION with named parameters (`"s".foo(b = …, a = …)`).
                     let module_ext = module_overloads.iter().any(|o| {
                         o.kind == crate::libraries::FnKind::Extension
@@ -11259,17 +11260,15 @@ mod tests {
 
     #[test]
     fn named_arguments() {
-        // Accepted: named (any order), and named combined with an omitted default.
+        // Accepted: named (any order), named combined with an omitted default, and named arguments on a
+        // same-file class MEMBER (reordering is realized by the lowerer's source-order temp spill).
         ok("fun f(a: Int, b: Int): Int = a - b\nfun g(): Int = f(b = 2, a = 5)");
         ok("fun f(a: Int, b: Int = 10): Int = a + b\nfun g(): Int = f(a = 1)");
-        // Rejected: unknown parameter name, and named args on a non-free-function call.
+        ok("class C { fun m(a: Int, b: Int): Int = a - b }\nfun g(): Int = C().m(b = 2, a = 5)");
+        // Rejected: unknown parameter name.
         err_contains(
             "fun f(a: Int): Int = a\nfun g(): Int = f(z = 1)",
             "no parameter named 'z'",
-        );
-        err_contains(
-            "class C { fun m(a: Int): Int = a }\nfun g(): Int = C().m(a = 3)",
-            "named arguments are only supported",
         );
     }
 

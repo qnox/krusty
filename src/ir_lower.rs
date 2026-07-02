@@ -1538,6 +1538,16 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     names.extend(f.params.iter().map(|p| p.name.clone()));
                     lo.ir.fn_param_names.insert(fid, names);
                 }
+                // Record parameter names for a NO-DEFAULT (non-vararg) function/extension too, so a
+                // named-argument reorder can map labels onto positions (the reorder itself is done at the
+                // call site; the names are neutral metadata). Only names — no `$default` stub.
+                if !lo.ir.fn_param_names.contains_key(&fid) && !f.params.iter().any(|p| p.is_vararg)
+                {
+                    let recv_off = usize::from(f.receiver.is_some());
+                    let mut names = vec!["$receiver".to_string(); recv_off];
+                    names.extend(f.params.iter().map(|p| p.name.clone()));
+                    lo.ir.fn_param_names.insert(fid, names);
+                }
                 let ret_ty = lo.ir.functions[fid as usize].ret.clone();
                 // A top-level `tailrec fun` (no extension receiver): rewrite its tail self-calls into a
                 // `while(true)` loop (param reassignment + `continue`) so deep recursion doesn't overflow.
@@ -7021,6 +7031,186 @@ impl<'a> Lower<'a> {
             stmts: prelude,
             value: Some(call),
         })
+    }
+
+    /// Lower a NAMED-argument call to a same-file USER-class instance method (`z.test(b = …, a = …)`)
+    /// whose parameters are all required (no defaults/varargs) and exactly supplied. Evaluates the
+    /// RECEIVER first, then each argument in SOURCE order into a temp, then invokes the method with the
+    /// temps loaded in parameter (slot) order — matching Kotlin's left-to-right evaluation while binding
+    /// each labelled argument to its position. The whole thing is a `Block { stmts: [recv temp, arg
+    /// temps…], value: MethodCall }` so the temps live across the call. Returns `None` (caller skips the
+    /// file) if the labels don't map cleanly. Preconditions (exact arity, no vararg/defaults) are checked
+    /// by the caller.
+    fn lower_named_member_call(
+        &mut self,
+        call: AstExprId,
+        receiver: AstExprId,
+        name: &str,
+        args: &[AstExprId],
+        internal: &str,
+    ) -> Option<u32> {
+        let (class, index, fid, _) = self.resolve_method(internal, name)?;
+        let params = self.ir.functions[fid as usize].params.clone();
+        let n = params.len();
+        let sig = self.syms.method_of(internal, name)?;
+        let param_names = sig.param_names;
+        if param_names.len() != n || args.len() != n {
+            return None;
+        }
+        // Map each source argument onto its parameter slot (a label names a parameter; an unlabelled arg
+        // fills the next free position). `arg_slot[i]` is the slot source-argument `i` lands in.
+        let names = self.afile.call_arg_names.get(&call.0)?;
+        let mut slot: Vec<Option<AstExprId>> = vec![None; n];
+        let mut arg_slot: Vec<usize> = Vec::with_capacity(n);
+        let mut pos = 0usize;
+        for (i, &arg) in args.iter().enumerate() {
+            match names.get(i).and_then(|o| o.as_ref()) {
+                None => {
+                    if pos >= n || slot[pos].is_some() {
+                        return None;
+                    }
+                    slot[pos] = Some(arg);
+                    arg_slot.push(pos);
+                    pos += 1;
+                }
+                Some(nm) => {
+                    let idx = param_names.iter().position(|p| p == nm)?;
+                    if slot[idx].is_some() {
+                        return None;
+                    }
+                    slot[idx] = Some(arg);
+                    arg_slot.push(idx);
+                }
+            }
+        }
+        // Receiver first (a `z.test(…)` where `z` has side effects evaluates `z` before the arguments).
+        let recv_v = self.expr(receiver)?;
+        let recv_tmp = self.fresh_value();
+        let recv_ty = ty_to_ir(self.info.ty(receiver));
+        let recv_decl = self.ir.add_expr(IrExpr::Variable {
+            index: recv_tmp,
+            ty: recv_ty,
+            init: Some(recv_v),
+        });
+        let mut prelude = vec![recv_decl];
+        // Arguments in SOURCE order → temps (typed by their target slot).
+        let mut slot_temp: Vec<Option<u32>> = vec![None; n];
+        for (i, &arg) in args.iter().enumerate() {
+            let k = arg_slot[i];
+            let v = self.lower_arg(arg, &params[k])?;
+            let tmp = self.fresh_value();
+            let decl = self.ir.add_expr(IrExpr::Variable {
+                index: tmp,
+                ty: params[k],
+                init: Some(v),
+            });
+            prelude.push(decl);
+            slot_temp[k] = Some(tmp);
+        }
+        // Load the temps in slot order for the call.
+        let recv_read = self.ir.add_expr(IrExpr::GetValue(recv_tmp));
+        let mut a: Vec<Option<u32>> = Vec::with_capacity(n);
+        for slot in &slot_temp {
+            let tmp = (*slot)?;
+            a.push(Some(self.ir.add_expr(IrExpr::GetValue(tmp))));
+        }
+        let mcall = self.ir.add_expr(IrExpr::MethodCall {
+            class,
+            index,
+            receiver: recv_read,
+            args: a,
+        });
+        Some(self.ir.add_expr(IrExpr::Block {
+            stmts: prelude,
+            value: Some(mcall),
+        }))
+    }
+
+    /// Lower a NAMED-argument call to a same-module USER EXTENSION function (`"x".test(b = …, a = …)`)
+    /// with all parameters required and exactly supplied. An extension lowers to a static `Call` whose
+    /// first argument is the receiver; this evaluates the RECEIVER first, then each argument in SOURCE
+    /// order into a temp, then loads the temps in parameter (slot) order — Kotlin's evaluation order while
+    /// binding labels to positions. Wrapped in a `Block` so the temps live across the call. `fid`'s IR
+    /// params are `[receiver, p0, p1, …]`; `fn_param_names` is aligned (`["$receiver", p0, p1, …]`).
+    fn lower_named_ext_call(
+        &mut self,
+        call: AstExprId,
+        receiver: AstExprId,
+        fid: u32,
+        args: &[AstExprId],
+    ) -> Option<u32> {
+        let params = self.ir.functions[fid as usize].params.clone();
+        let n = params.len();
+        if args.len() + 1 != n {
+            return None;
+        }
+        let names = self.ir.fn_param_names.get(&fid)?.clone();
+        if names.len() != n {
+            return None;
+        }
+        // Map each source argument onto a LOGICAL slot in `1..n` (slot 0 is the receiver).
+        let arg_names = self.afile.call_arg_names.get(&call.0)?;
+        let mut slot_filled = vec![false; n];
+        slot_filled[0] = true;
+        let mut arg_slot: Vec<usize> = Vec::with_capacity(args.len());
+        let mut pos = 1usize;
+        for (i, _) in args.iter().enumerate() {
+            match arg_names.get(i).and_then(|o| o.as_ref()) {
+                None => {
+                    if pos >= n || slot_filled[pos] {
+                        return None;
+                    }
+                    slot_filled[pos] = true;
+                    arg_slot.push(pos);
+                    pos += 1;
+                }
+                Some(nm) => {
+                    let idx = names.iter().position(|p| p == nm).filter(|&x| x >= 1)?;
+                    if slot_filled[idx] {
+                        return None;
+                    }
+                    slot_filled[idx] = true;
+                    arg_slot.push(idx);
+                }
+            }
+        }
+        // Receiver first, then arguments in SOURCE order into temps.
+        let recv_v = self.lower_arg(receiver, &params[0])?;
+        let recv_tmp = self.fresh_value();
+        let recv_decl = self.ir.add_expr(IrExpr::Variable {
+            index: recv_tmp,
+            ty: params[0],
+            init: Some(recv_v),
+        });
+        let mut prelude = vec![recv_decl];
+        let mut slot_temp: Vec<Option<u32>> = vec![None; n];
+        for (i, &arg) in args.iter().enumerate() {
+            let k = arg_slot[i];
+            let v = self.lower_arg(arg, &params[k])?;
+            let tmp = self.fresh_value();
+            let decl = self.ir.add_expr(IrExpr::Variable {
+                index: tmp,
+                ty: params[k],
+                init: Some(v),
+            });
+            prelude.push(decl);
+            slot_temp[k] = Some(tmp);
+        }
+        // Build args `[receiver, slot1, …]` in slot order.
+        let mut a = vec![self.ir.add_expr(IrExpr::GetValue(recv_tmp))];
+        for slot in slot_temp.iter().skip(1) {
+            let tmp = (*slot)?;
+            a.push(self.ir.add_expr(IrExpr::GetValue(tmp)));
+        }
+        let ecall = self.ir.add_expr(IrExpr::Call {
+            callee: Callee::Local(fid),
+            dispatch_receiver: None,
+            args: a,
+        });
+        Some(self.ir.add_expr(IrExpr::Block {
+            stmts: prelude,
+            value: Some(ecall),
+        }))
     }
 
     /// Reorder a NAMED-argument call to a CLASSPATH top-level function (`foo(b = …, a = …)`) into
@@ -16246,6 +16436,41 @@ impl<'a> Lower<'a> {
                 }
                 // Instance method call `recv.m(args)`, or a stdlib intrinsic method.
                 Expr::Member { receiver, name } => {
+                    // NAMED-ARGUMENT call to a same-file USER instance method (`z.test(b = …, a = …)`) with
+                    // all parameters required and exactly supplied: reorder onto positions, evaluating the
+                    // receiver then the arguments in SOURCE order (temps). `resolve_method` scopes to IR
+                    // (user) classes, so a classpath member falls through to its own reorder below. A method
+                    // with defaults/varargs is left to the default/vararg paths (this fires only at exact
+                    // arity with no defaults). Once it fires, we never fall through to positional pairing
+                    // (which would bind the labels in the wrong order).
+                    if self.afile.call_arg_names.contains_key(&e.0) {
+                        if let Some(internal) =
+                            self.info.ty(receiver).obj_internal().map(str::to_string)
+                        {
+                            if let Some((_, _, fid, _)) = self.resolve_method(&internal, &name) {
+                                let params_len = self.ir.functions[fid as usize].params.len();
+                                let no_defaults = self
+                                    .ir
+                                    .fn_param_defaults
+                                    .get(&fid)
+                                    .is_none_or(|d| d.iter().all(|x| x.is_none()));
+                                // A no-default user member with named args: the ONLY correct lowering is a
+                                // reorder — never the positional pairing below. Handle it (exact arity, no
+                                // vararg) or bail (skip the file). `lower_arg` type-checks each argument, so
+                                // an overload the class map didn't keep degrades to a skip, not a miscompile.
+                                // A method WITH defaults keeps the existing default/positional path.
+                                if no_defaults {
+                                    let no_vararg = !self.syms.method_is_vararg(&internal, &name);
+                                    if args.len() == params_len && no_vararg {
+                                        return self.lower_named_member_call(
+                                            e, receiver, &name, &args, &internal,
+                                        );
+                                    }
+                                    return None;
+                                }
+                            }
+                        }
+                    }
                     // NAMED-ARGUMENT call to a CLASSPATH instance member (`g.greet(b = …, a = …)`):
                     // reorder the arguments into parameter order (from the member's `@Metadata` names) so
                     // the positional lowering below pairs each argument with its parameter. `None` → leave
@@ -16717,6 +16942,12 @@ impl<'a> Lower<'a> {
                         if let Some(&fid) = self.ext_fun_ids.get(&(recv_key, name.clone())) {
                             let params = self.ir.functions[fid as usize].params.clone();
                             if params.len() == args.len() + 1 {
+                                // A NAMED extension call may reorder the arguments: map labels onto
+                                // positions and evaluate receiver + args in source order (never the
+                                // positional pairing below, which would bind labels in the wrong order).
+                                if self.afile.call_arg_names.contains_key(&e.0) {
+                                    return self.lower_named_ext_call(e, receiver, fid, &args);
+                                }
                                 let recv = self.lower_arg(receiver, &params[0])?;
                                 let mut a = vec![recv];
                                 for (arg, pt) in args.iter().zip(&params[1..]) {
