@@ -33,13 +33,16 @@ pre-push:
     lint:
       priority: 1
       run: just lint
-    test:
-      priority: 2
-      run: just test
-    # Coverage regression gate: re-runs the suite instrumented and fails if regions/functions/lines/
-    # branches drop below the committed master baseline (coverage-baseline.json). Heavy (instrumented),
-    # so it runs last. CI (`just ci`) re-runs this as the unbypassable backstop, so a `--no-verify`
-    # push can't sneak a coverage drop past review.
+    # Own tests WITH coverage: `coverage-gate` runs the own suite instrumented, which both checks
+    # correctness (a failing test fails the run) AND enforces coverage >= the master baseline. No
+    # separate plain own-suite run — this one covers both.
     coverage:
-      priority: 3
+      priority: 2
       run: just coverage-gate
+    # Conformance WITHOUT coverage: the kotlin box/codegen corpus, plain (instrumenting it would be
+    # slow and it's excluded from the coverage metric anyway). Runs after coverage. On a 4-core box
+    # the full gate lands around ~3 minutes — the hardware floor for this scope; CI (`just ci`) runs
+    # everything across all Kotlin versions as the unbypassable backstop.
+    conformance:
+      priority: 3
+      run: just conformance-plain

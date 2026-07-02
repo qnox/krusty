@@ -64,8 +64,10 @@ baseline. `EPS` absorbs LLVM's small run-to-run branch jitter; it is not licence
 
 Enforced in two places:
 
-- **pre-push git hook** (`lefthook.yml`) — blocks a push that lowers coverage, alongside `lint` and
-  `test`. Runs last because it is the heaviest step.
+- **pre-push git hook** (`lefthook.yml`) — three steps: `lint`, then `coverage-gate` (the own suite
+  WITH coverage — one instrumented run that both checks correctness and enforces the baseline, so
+  there is no separate plain own-suite run), then `conformance-plain` (the kotlin box corpus WITHOUT
+  coverage). Blocks a push that lowers coverage or breaks a test.
 - **CI** (`just ci` → `… coverage-gate`) — the unbypassable backstop. A local `git push --no-verify`
   skips the hook, but CI re-measures and fails the PR, so coverage cannot be lowered by bypassing
   the client-side hook.
@@ -73,22 +75,22 @@ Enforced in two places:
 To land an intentional coverage change, run `just coverage-bless` and commit the refreshed
 `coverage-baseline.json` with the change.
 
-## Performance impact
+## Performance
 
-The coverage run is instrumented (larger, slower codegen; counters add runtime overhead), but it is
-NOT JVM startup — the shared JVM daemon is amortized exactly as in `run-tests.sh` — and the parallel
-`show-env` runner (above) avoids adding serialization on top. Measured cold, on a full build:
+The pre-push gate was folded from two full suite runs (plain `just test` + `coverage-gate`) into one
+instrumented own-suite run plus the plain conformance suite, and the runners were tuned:
 
-| run                         | wall  | CPU   |
-|-----------------------------|-------|-------|
-| `just test` (normal gate)   | ~5:06 | ~684s |
-| `just coverage` (own suite) | ~5:26 | ~676s |
+- **No double-run.** `coverage-gate`'s instrumented run is also the correctness check for the own
+  suite, so the old separate `just test` is gone.
+- **`--test-threads=1` per binary** in both `run-tests.sh` and `scripts/coverage.sh`. With ~190
+  binaries the `-P jobs` across-binary parallelism already fills the cores; letting each binary
+  default to `nproc` threads made it `jobs×nproc`-wide and thrashed (measured: 4×1 beats 4×2).
+- **Concurrent JVM box-runner** (`tests/common`): requests carry an id and a background thread demuxes
+  tagged responses, so a multi-threaded binary overlaps its JVM round-trips instead of serialising on
+  one lock. (Neutral at the 4×1 default; it unblocks threading a small tail of binaries.)
 
-The coverage run lands close to the normal gate: the instrumentation overhead is offset by excluding
-the six heavy external-corpus suites (`kotlin_box_ir_jvm_conformance` alone is a large fraction of
-the gate). Warm/incremental re-runs are dominated by the test run, not the rebuild.
-
-Consequence for the gate: pre-push runs `just test` AND `coverage-gate`, so it is roughly **2×** the
-old pre-push (about +5 min cold, +2–3 min warm). If that is too heavy locally, run `coverage-gate`
-in CI only — CI is the unbypassable enforcement point regardless — and treat the pre-push copy as an
-optional early-warning (skip a single push with `git push --no-verify`; CI still blocks a real drop).
+On a 4-core box the gate is ~3 minutes for this scope (own+coverage + conformance). A flamegraph of
+the compile pipeline shows the floor: `check` (call resolution) ≈ 60% and `emit` ≈ 35% of compile
+time, spread thin with no single hotspot — it is unoptimised-compiler CPU, and raising `opt-level`
+is rejected because the rebuild cost after each change outweighs the faster run. So the gate is
+CPU-bound on 4 cores; the full suite across all Kotlin versions still runs in CI.

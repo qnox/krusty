@@ -93,6 +93,21 @@ test *ARGS:
     set -euo pipefail
     ./run-tests.sh {{ARGS}}
 
+# The whole suite MINUS the slow external-corpus suites (kotlin box corpus, serialization/ksp
+# conformance) — the same set coverage measures. A quick dev inner-loop check; the full suite runs
+# in CI via `just test-all`.
+test-fast:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export KRUSTY_TEST_EXCLUDE="kotlin_box_ir_jvm_conformance,box_corpus_regression_e2e,ir_blockers,box_vendored_e2e,serialization_conformance,ksp_real_e2e"
+    ./run-tests.sh
+
+# Run ONLY the Kotlin box/codegen conformance suite, plain (no coverage instrumentation) — the
+# "conformance without coverage" half of the pre-push gate. Provisions kotlinc + corpus via the
+# harness. The suite is internally rayon-parallel, so it uses all cores on its own.
+conformance-plain:
+    ./run-tests.sh --test kotlin_box_ir_jvm_conformance
+
 # Measure test coverage — regions, functions, lines and BRANCHES — via LLVM source-based coverage
 # (nightly, `-Zcoverage-options=branch`). Runs an instrumented build + the own suite in parallel and
 # writes target/coverage/{full,summary}.json. External corpus/conformance suites are excluded.
