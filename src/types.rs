@@ -360,6 +360,10 @@ impl Ty {
             "CharArray" => Ty::Char,
             "ByteArray" => Ty::Byte,
             "ShortArray" => Ty::Short,
+            // Unsigned size constructors: `UIntArray(n) { … }` / `ULongArray(n) { … }`. The element is
+            // `UInt`/`ULong`; the physical array is the unboxed `[I`/`[J` (see `ir_lower`).
+            "UIntArray" => Ty::UInt,
+            "ULongArray" => Ty::ULong,
             _ => return None,
         })
     }
@@ -804,6 +808,9 @@ mod tests {
         assert_eq!(Ty::primitive_array_element("IntArray"), Some(Ty::Int));
         assert_eq!(Ty::primitive_array_element("CharArray"), Some(Ty::Char));
         assert_eq!(Ty::primitive_array_element("ByteArray"), Some(Ty::Byte));
+        // Unsigned size constructors resolve to their unsigned element (physical array is `[I`/`[J`).
+        assert_eq!(Ty::primitive_array_element("UIntArray"), Some(Ty::UInt));
+        assert_eq!(Ty::primitive_array_element("ULongArray"), Some(Ty::ULong));
         // `Array<T>` is not a primitive array class name.
         assert_eq!(Ty::primitive_array_element("Array"), None);
     }

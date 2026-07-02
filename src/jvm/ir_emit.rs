@@ -6720,8 +6720,10 @@ fn boxed_prim_of(t: Ty) -> Option<Ty> {
 
 fn array_load_op(elem: Ty) -> (u8, i32) {
     match elem {
-        Ty::Int => (0x2e, 1),
-        Ty::Long => (0x2f, 2),
+        // Unsigned arrays are the unboxed underlying primitive array (`UIntArray` = `[I`,
+        // `ULongArray` = `[J`), so they load with `iaload`/`laload`.
+        Ty::Int | Ty::UInt => (0x2e, 1),
+        Ty::Long | Ty::ULong => (0x2f, 2),
         Ty::Float => (0x30, 1),
         Ty::Double => (0x31, 2),
         Ty::Boolean | Ty::Byte => (0x33, 1),
@@ -6748,8 +6750,9 @@ fn push_zero(t: Ty, code: &mut CodeBuilder, cw: &mut ClassWriter) {
 
 fn array_store_op(elem: Ty) -> (u8, i32) {
     match elem {
-        Ty::Int => (0x4f, 1),
-        Ty::Long => (0x50, 2),
+        // Unsigned arrays store into the unboxed underlying primitive array (`[I`/`[J`).
+        Ty::Int | Ty::UInt => (0x4f, 1),
+        Ty::Long | Ty::ULong => (0x50, 2),
         Ty::Float => (0x51, 1),
         Ty::Double => (0x52, 2),
         Ty::Boolean | Ty::Byte => (0x54, 1),
