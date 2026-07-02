@@ -925,7 +925,9 @@ impl Classpath {
                         physical_name: None,
                         params: m.params.iter().map(|p| kotlin_name_to_ty(p)).collect(),
                         ret,
-                        ret_nullable: false,
+                        // The declared return nullability from the `.kotlin_builtins` `Type.nullable`
+                        // flag (`Map.get(K): V?`) — the JVM descriptor erases it.
+                        ret_nullable: m.ret_nullable,
                         physical_ret,
                         descriptor,
                         signature: None,
@@ -942,6 +944,24 @@ impl Classpath {
             .borrow_mut()
             .insert(internal.to_string(), std::rc::Rc::new(members.clone()));
         members
+    }
+
+    /// Whether the Kotlin builtin `internal` declares its function member `name`/`arity` with a NULLABLE
+    /// return (`kotlin/collections/Map.get(K): V?`). A generic-return member is dropped from
+    /// `builtin_members` (its return is a bare type parameter), and the member that actually resolves such
+    /// a call is the erased classpath method (`java/util/Map.get` → `Object`) which carries no Kotlin
+    /// nullability — so the builtin's `Type.nullable` flag is the only surviving record. `false` when no
+    /// such member/builtin is recorded.
+    pub fn builtin_member_ret_nullable(&self, internal: &str, name: &str, arity: usize) -> bool {
+        let path = Self::builtins_path_for(internal);
+        self.builtins_file(&path)
+            .get(internal)
+            .map(|c| {
+                c.member_ret_nullable
+                    .iter()
+                    .any(|(n, a, nullable)| *nullable && n == name && *a == arity)
+            })
+            .unwrap_or(false)
     }
 
     /// Direct supertypes declared in `.kotlin_builtins` for a Kotlin builtin class.

@@ -1246,6 +1246,9 @@ pub struct BuiltinMember {
     pub params: Vec<String>,
     pub ret: String,
     pub is_property: bool,
+    /// Whether the declared return type is nullable (`V?`) — the JVM descriptor erases it, only the
+    /// `.kotlin_builtins` `Type.nullable` flag carries it (`Map.get(K): V?`, `firstOrNull(): T?`).
+    pub ret_nullable: bool,
 }
 
 /// A builtin `Class` decoded from a `.kotlin_builtins` fragment: its direct supertypes and declared
@@ -1254,6 +1257,12 @@ pub struct BuiltinMember {
 pub struct BuiltinClass {
     pub supertypes: Vec<String>,
     pub members: Vec<BuiltinMember>,
+    /// Return-nullability for EVERY declared function member keyed by `(name, value-arity)`, INCLUDING
+    /// members `members` drops because their return is a bare type parameter (`Map.get(K): V?`,
+    /// `firstOrNull(): T?`). The resolved member for such a call is the erased classpath method (`java/util
+    /// /Map.get` returns `Object`) which carries no Kotlin nullability — this is the only surviving record
+    /// that the source return is `T?`. Consulted by the member walk to null-annotate that resolved return.
+    pub member_ret_nullable: Vec<(String, usize, bool)>,
 }
 
 /// Parse a `.kotlin_builtins` resource → every declared `Class` (qualified name → its supertypes +
@@ -1400,6 +1409,7 @@ pub fn parse_builtins(data: &[u8]) -> std::collections::HashMap<String, BuiltinC
         };
         let supertypes: Vec<String> = supids.iter().filter_map(|&sid| type_of_id(sid)).collect();
         let mut members = Vec::new();
+        let mut member_ret_nullable = Vec::new();
         for fb in &funcs {
             let mut p = Pb { b: fb, i: 0 };
             let mut name_id = None;
@@ -1451,13 +1461,23 @@ pub fn parse_builtins(data: &[u8]) -> std::collections::HashMap<String, BuiltinC
                 }
             }
             if let (Some(ni), Some(ri)) = (name_id, ret_id) {
-                if let (Some(name), Some(ret)) = (strings.get(ni as usize).cloned(), type_of_id(ri))
-                {
+                // The return type's nullability (`Map.get(K): V?`) lives on the type-table entry's
+                // `Type.nullable` flag — the JVM descriptor erases it.
+                let ret_nullable = types
+                    .get(ri as usize)
+                    .is_some_and(|tb| parse_type_nullable(tb));
+                // Record nullability for EVERY function (even the type-parameter-return ones the member
+                // list drops just below) so the erased classpath member can be null-annotated later.
+                if let Some(name) = strings.get(ni as usize) {
+                    member_ret_nullable.push((name.clone(), params.len(), ret_nullable));
+                }
+                if let Some((name, ret)) = strings.get(ni as usize).cloned().zip(type_of_id(ri)) {
                     members.push(BuiltinMember {
                         name,
                         params,
                         ret,
                         is_property: false,
+                        ret_nullable,
                     });
                 }
             }
@@ -1483,11 +1503,15 @@ pub fn parse_builtins(data: &[u8]) -> std::collections::HashMap<String, BuiltinC
             if let (Some(ni), Some(ri)) = (name_id, ret_id) {
                 if let (Some(name), Some(ret)) = (strings.get(ni as usize).cloned(), type_of_id(ri))
                 {
+                    let ret_nullable = types
+                        .get(ri as usize)
+                        .is_some_and(|tb| parse_type_nullable(tb));
                     members.push(BuiltinMember {
                         name,
                         params: vec![],
                         ret,
                         is_property: true,
+                        ret_nullable,
                     });
                 }
             }
@@ -1497,6 +1521,7 @@ pub fn parse_builtins(data: &[u8]) -> std::collections::HashMap<String, BuiltinC
             BuiltinClass {
                 supertypes,
                 members,
+                member_ret_nullable,
             },
         );
     }

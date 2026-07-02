@@ -1021,6 +1021,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   treats a declared `String?` (reference nullability is not carried in `Ty`), so the recovered suspend
   return matches a source-spelled reference return instead of a divergent `Ty::Nullable`. Test:
   `tests/suspend_return_type_recovery_e2e.rs`.
+- **A generic-return builtin member's nullability is recovered from `.kotlin_builtins` metadata**
+  (`kotlin/collections/Map.get(K): V?`, `getOrDefault`, …). Such a member's return is a bare TYPE
+  PARAMETER, so `builtin_members` drops it, and the member that actually resolves the call is the erased
+  classpath method (`java/util/Map.get` → `Object`), which carries no Kotlin nullability. The source `V?`
+  survives only on the builtin's `Type.nullable` flag; `parse_builtins` records every function member's
+  return-nullability (including the dropped ones) in `BuiltinClass.member_ret_nullable`, and the member
+  walk (`Classpath::builtin_member_ret_nullable`) null-annotates the resolved return. Applied only to a
+  PRIMITIVE return — a nullable primitive is a distinct boxed type, so `m[k] ?: d` must null-check before
+  unboxing (else a null `Integer` unboxes → NPE); a nullable REFERENCE already null-checks regardless and
+  keeps its plain erased `Ty` (mirrors the suspend/`resolve_ty` policy above). This is why `m[k] ?: continue`
+  correctly skips absent keys. NOT a hardcoded method list — the flag is read from `@Metadata`. Test:
+  `tests/map_get_nullable_elvis_e2e.rs`.
 - **A `suspend` body accessing a member of a suspend call's result inline (`suspend fun f(r) =
   r.all().size`).** The CPS flattener only meets a suspension at a bound-local / bare-statement position;
   a suspension nested in a `return`/member-access value must be pre-hoisted. `hoist_suspensions` now
