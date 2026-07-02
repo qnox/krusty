@@ -389,6 +389,60 @@ fn hoist_expr(
             };
             e
         }
+        // A NON-suspend call/member-access whose receiver (or arguments) suspends
+        // (`return r.all().size` — the suspend `r.all()` is the receiver of the `.size` read): the
+        // receiver and arguments evaluate UNCONDITIONALLY and left-to-right before the access, so hoist
+        // each suspension there to a preceding bound temp (`val tmp = r.all(); return tmp.size`), which
+        // the flattener handles. A suspend call in this position was already intercepted above.
+        IrExpr::Call {
+            callee,
+            dispatch_receiver,
+            args,
+        } => {
+            let nr = dispatch_receiver.map(|r| hoist_expr(ir, r, suspend_set, orig_rets, prelude));
+            let na: Vec<ExprId> = args
+                .iter()
+                .map(|&a| hoist_expr(ir, a, suspend_set, orig_rets, prelude))
+                .collect();
+            ir.exprs[e as usize] = IrExpr::Call {
+                callee,
+                dispatch_receiver: nr,
+                args: na,
+            };
+            e
+        }
+        IrExpr::MethodCall {
+            class,
+            index,
+            receiver,
+            args,
+        } => {
+            let nr = hoist_expr(ir, receiver, suspend_set, orig_rets, prelude);
+            let na: Vec<Option<ExprId>> = args
+                .iter()
+                .map(|&a| a.map(|x| hoist_expr(ir, x, suspend_set, orig_rets, prelude)))
+                .collect();
+            ir.exprs[e as usize] = IrExpr::MethodCall {
+                class,
+                index,
+                receiver: nr,
+                args: na,
+            };
+            e
+        }
+        IrExpr::GetField {
+            receiver,
+            class,
+            index,
+        } => {
+            let nr = hoist_expr(ir, receiver, suspend_set, orig_rets, prelude);
+            ir.exprs[e as usize] = IrExpr::GetField {
+                receiver: nr,
+                class,
+                index,
+            };
+            e
+        }
         // A leaf or a conditional/unhandled node: leave it (any suspension inside surfaces to the
         // flattener, which restructures it or skips the file).
         _ => e,
