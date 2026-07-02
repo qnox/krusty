@@ -36,3 +36,10 @@ pre-push:
     test:
       priority: 2
       run: just test
+    # Coverage regression gate: re-runs the suite instrumented and fails if regions/functions/lines/
+    # branches drop below the committed master baseline (coverage-baseline.json). Heavy (instrumented),
+    # so it runs last. CI (`just ci`) re-runs this as the unbypassable backstop, so a `--no-verify`
+    # push can't sneak a coverage drop past review.
+    coverage:
+      priority: 3
+      run: just coverage-gate
