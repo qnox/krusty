@@ -39,6 +39,30 @@ fun box(): String {\n\
 }
 
 #[test]
+fn default_references_earlier_parameter() {
+    // A default that reads an EARLIER parameter (`z = x + y + 1`) — evaluated inside `$default` where the
+    // parameters are in scope. Mirrors `function/defaults1.kt`.
+    const SRC: &str = "fun foo(x: Int = 0, y: Int = x + 1, z: Int = x + y + 1) = x + y + z\n\
+fun box(): String {\n\
+    val v = foo()\n\
+    return if (v == 3) \"OK\" else \"FAIL: $v\"\n\
+}\n";
+    assert_eq!(run(SRC).expect("param-referencing default"), "OK");
+}
+
+#[test]
+fn int_non_const_default_omitted() {
+    // A primitive (Int) non-const default omitted — the omitted-slot placeholder must be `0`, not null.
+    const SRC: &str = "fun mk(): Int = 7\n\
+fun f(a: Int, b: Int = mk()): Int = a + b\n\
+fun box(): String {\n\
+    val v = f(5)\n\
+    return if (v == 12) \"OK\" else \"FAIL: $v\"\n\
+}\n";
+    assert_eq!(run(SRC).expect("int non-const default"), "OK");
+}
+
+#[test]
 fn two_non_const_defaults_both_omitted() {
     // Two defaulted params, both non-const, both omitted — the `$default` synthetic fills both.
     const SRC: &str = "fun mk(s: String): String = s + s\n\

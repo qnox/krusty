@@ -1019,6 +1019,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   or lambda/wide-shape default falls back to the (unchanged) inline fill / skip, never a miscompile (this
   gate was added after an ungated version regressed value-class-parameter + lambda-default corpus files
   with `VerifyError`/`ClassCastException`). Test: `tests/default_args_synthetic_e2e.rs`.
+  A default may reference an EARLIER parameter (`fun f(a: Int, c: Int = a + 1)`): it is realized inside the
+  single `$default` synthetic where the parameters are in scope (the checker declares each parameter as it
+  checks defaults, left-to-right). This is still rejected for an OVERLOADED function (its overloads share
+  the name `foo$default` and the omitted-default routing isn't overload-aware — the checker and
+  `toplevel_default_stub_safe` both count every same-name non-member function, so they agree). An omitted
+  PRIMITIVE-typed default slot passes the primitive zero (`iconst_0`), not `null` — `zero_placeholder` maps
+  a non-nullable boxed-primitive `Obj("kotlin/Int")` (a JVM `int`) to `0`.
 
 - **Generic constructor type-argument inference (`Pair(1, 2)` → `Pair<Int, Int>`).** A classpath generic
   class constructed without explicit `<T>` previously erased to the raw type, so `first`/`second`/
