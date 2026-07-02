@@ -11727,4 +11727,248 @@ mod tests {
             "unresolved reference 'Widget'.",
         );
     }
+
+    // --- Pure, pipeline-free helper functions -------------------------------------------------
+
+    fn sig(params: Vec<Ty>, ret: Ty, vararg: bool, required: usize) -> Signature {
+        Signature {
+            params,
+            ret,
+            vararg,
+            required,
+            param_defaults: Vec::new(),
+            param_names: Vec::new(),
+            lambda_param_types: Vec::new(),
+            lambda_recv: Vec::new(),
+            is_inline: false,
+            is_final: false,
+            is_suspend: false,
+        }
+    }
+
+    fn parse_file(src: &str) -> File {
+        let mut d = DiagSink::new();
+        let toks = lex(src, &mut d);
+        parse(src, &toks, &mut d)
+    }
+
+    #[test]
+    fn arg_assignable_simple_branches() {
+        // Exact match, and error/nothing placeholders always fit.
+        assert!(arg_assignable_simple(Ty::Int, Ty::Int));
+        assert!(arg_assignable_simple(Ty::Int, Ty::Error));
+        assert!(arg_assignable_simple(Ty::Error, Ty::Int));
+        assert!(arg_assignable_simple(Ty::obj("demo/A"), Ty::Nothing));
+        // `null` fits a reference param but not a primitive one.
+        assert!(arg_assignable_simple(Ty::String, Ty::Null));
+        assert!(!arg_assignable_simple(Ty::Int, Ty::Null));
+        // Any numeric fits any numeric (widening/narrowing ranked elsewhere).
+        assert!(arg_assignable_simple(Ty::Long, Ty::Int));
+        assert!(arg_assignable_simple(Ty::Double, Ty::Int));
+        // Any value boxes into a reference param; a reference does not fit a primitive param.
+        assert!(arg_assignable_simple(Ty::obj("kotlin/Any"), Ty::Int));
+        assert!(!arg_assignable_simple(Ty::Int, Ty::String));
+    }
+
+    #[test]
+    fn pick_overload_single_and_arity() {
+        // A single candidate is always chosen (no scoring needed).
+        assert_eq!(
+            pick_overload(&[sig(vec![Ty::Int], Ty::Int, false, 1)], &[]),
+            Some(0)
+        );
+        // Arity filters: only the 2-arg candidate matches two args.
+        let sigs = vec![
+            sig(vec![Ty::Int], Ty::Int, false, 1),
+            sig(vec![Ty::Int, Ty::Int], Ty::Int, false, 2),
+        ];
+        assert_eq!(pick_overload(&sigs, &[Ty::Int, Ty::Int]), Some(1));
+        // Nothing matches the arity → None.
+        assert_eq!(pick_overload(&sigs, &[Ty::Int, Ty::Int, Ty::Int]), None);
+    }
+
+    #[test]
+    fn pick_overload_scores_exact_over_loose() {
+        // Two same-arity candidates: the exact-typed one outscores the boxing one.
+        let sigs = vec![
+            sig(vec![Ty::obj("kotlin/Any")], Ty::Int, false, 1),
+            sig(vec![Ty::Int], Ty::Int, false, 1),
+        ];
+        assert_eq!(pick_overload(&sigs, &[Ty::Int]), Some(1));
+    }
+
+    #[test]
+    fn pick_overload_bails_on_ambiguous_erased_any() {
+        // An erased `Any` argument where the candidates' params differ can't be disambiguated → None.
+        let any = Ty::obj("kotlin/Any");
+        let sigs = vec![
+            sig(vec![Ty::String], Ty::Int, false, 1),
+            sig(vec![Ty::obj("demo/Box")], Ty::Int, false, 1),
+        ];
+        assert_eq!(pick_overload(&sigs, &[any]), None);
+        // But identical param types at that position are fine (no real ambiguity).
+        let sigs2 = vec![
+            sig(vec![Ty::String, Ty::Int], Ty::Int, false, 2),
+            sig(vec![Ty::String, Ty::Long], Ty::Int, false, 2),
+        ];
+        assert_eq!(pick_overload(&sigs2, &[any, Ty::Int]), Some(0));
+    }
+
+    #[test]
+    fn builtin_bitwise_ret_only_int_long() {
+        assert_eq!(builtin_bitwise_ret(Ty::Int, "shl", 1), Some(Ty::Int));
+        assert_eq!(builtin_bitwise_ret(Ty::Long, "and", 1), Some(Ty::Long));
+        assert_eq!(builtin_bitwise_ret(Ty::Int, "inv", 0), Some(Ty::Int));
+        // Wrong arity / unknown name / non-integral receiver → None.
+        assert_eq!(builtin_bitwise_ret(Ty::Int, "inv", 1), None);
+        assert_eq!(builtin_bitwise_ret(Ty::Int, "plus", 1), None);
+        assert_eq!(builtin_bitwise_ret(Ty::Double, "shl", 1), None);
+    }
+
+    #[test]
+    fn is_builtin_operator_method_names() {
+        assert!(is_builtin_operator_method("plus"));
+        assert!(is_builtin_operator_method("compareTo"));
+        assert!(is_builtin_operator_method("rangeTo"));
+        assert!(!is_builtin_operator_method("toString"));
+        assert!(!is_builtin_operator_method("invoke"));
+    }
+
+    #[test]
+    fn assign_op_name_maps_only_arithmetic() {
+        assert_eq!(assign_op_name(BinOp::Add), Some("plusAssign"));
+        assert_eq!(assign_op_name(BinOp::Sub), Some("minusAssign"));
+        assert_eq!(assign_op_name(BinOp::Mul), Some("timesAssign"));
+        assert_eq!(assign_op_name(BinOp::Div), Some("divAssign"));
+        assert_eq!(assign_op_name(BinOp::Rem), Some("remAssign"));
+        assert_eq!(assign_op_name(BinOp::Lt), None);
+    }
+
+    #[test]
+    fn common_lit_ty_widens_or_errors() {
+        assert_eq!(common_lit_ty(Ty::Int, Ty::Int), Ty::Int);
+        assert_eq!(common_lit_ty(Ty::Int, Ty::Long), Ty::Long);
+        // Non-numeric mismatch is conservatively `Error`.
+        assert_eq!(common_lit_ty(Ty::Int, Ty::String), Ty::Error);
+        assert_eq!(common_lit_ty(Ty::String, Ty::String), Ty::String);
+    }
+
+    #[test]
+    fn is_nothing_ty_recognizes_bottom_and_void() {
+        assert!(is_nothing_ty(Ty::Nothing));
+        // The checker carries `Nothing` as the JVM `java/lang/Void` object.
+        assert!(is_nothing_ty(Ty::obj("java/lang/Void")));
+        assert!(!is_nothing_ty(Ty::Int));
+        assert!(!is_nothing_ty(Ty::obj("demo/Box")));
+    }
+
+    #[test]
+    fn wildcard_candidate_joins_package() {
+        assert_eq!(
+            wildcard_candidate("kotlin/collections", "List"),
+            "kotlin/collections/List"
+        );
+        // The root package yields the bare name.
+        assert_eq!(wildcard_candidate("", "RoleId"), "RoleId");
+    }
+
+    #[test]
+    fn erased_type_key_folds_generics_nullability_unsigned() {
+        // Unsigned folds to its signed representation.
+        assert_eq!(erased_type_key(Ty::UInt), ErasedTypeKey::Ty(Ty::Int));
+        assert_eq!(erased_type_key(Ty::ULong), ErasedTypeKey::Ty(Ty::Long));
+        // Generic args drop.
+        assert_eq!(
+            erased_type_key(Ty::obj_args("kotlin/collections/List", &[Ty::Int])),
+            ErasedTypeKey::Ty(Ty::obj("kotlin/collections/List"))
+        );
+        // null/Nothing/Error key under Any.
+        assert_eq!(
+            erased_type_key(Ty::Null),
+            ErasedTypeKey::Ty(Ty::obj("kotlin/Any"))
+        );
+        // A function type keys by its arity.
+        assert_eq!(
+            erased_type_key(Ty::fun(vec![Ty::Int, Ty::Int], Ty::Unit)),
+            ErasedTypeKey::Function(2)
+        );
+        // A suspend function type counts its implicit continuation.
+        assert_eq!(
+            erased_type_key(Ty::fun_suspend(vec![Ty::Int], Ty::Unit)),
+            ErasedTypeKey::Function(2)
+        );
+        // A nullable primitive boxes to its wrapper key.
+        assert_eq!(
+            erased_type_key(Ty::nullable(Ty::Int)),
+            ErasedTypeKey::Ty(Ty::obj("kotlin/Int"))
+        );
+        // A type parameter erases to its bound.
+        assert_eq!(
+            erased_type_key(Ty::ty_param("T", Ty::String)),
+            ErasedTypeKey::Ty(Ty::obj("kotlin/String"))
+        );
+    }
+
+    #[test]
+    fn erased_key_ty_reverses_the_key() {
+        assert_eq!(erased_key_ty(ErasedTypeKey::Ty(Ty::Int)), Ty::Int);
+        assert_eq!(
+            erased_key_ty(ErasedTypeKey::Function(2)),
+            Ty::obj("kotlin/Function2")
+        );
+        assert_eq!(
+            erased_key_ty(ErasedTypeKey::Unresolved("demo/Box".into())),
+            Ty::obj("demo/Box")
+        );
+    }
+
+    #[test]
+    fn import_map_skips_wildcards_and_slashes_names() {
+        let f = parse_file("import a.b.Calc\nimport x.y.*\nfun box(): String = \"OK\"");
+        let m = import_map(&f);
+        assert_eq!(m.get("Calc"), Some(&"a/b/Calc".to_string()));
+        // A wildcard has no simple name — not in the explicit map.
+        assert!(!m.contains_key("y"));
+        assert!(!m.values().any(|v| v.contains('*')));
+    }
+
+    #[test]
+    fn import_wildcards_includes_explicit_own_package_and_defaults() {
+        let f = parse_file("package demo.pkg\nimport a.b.*\nfun box(): String = \"OK\"");
+        let ws = import_wildcards(&f, &[]);
+        // Explicit wildcard, own package, and at least one platform default are present.
+        assert!(ws.contains(&"a/b".to_string()));
+        assert!(ws.contains(&"demo/pkg".to_string()));
+        assert!(ws.iter().any(|w| w == "kotlin"));
+        // A root-package file contributes the empty wildcard.
+        let root = parse_file("fun box(): String = \"OK\"");
+        assert!(import_wildcards(&root, &[]).contains(&String::new()));
+    }
+
+    #[test]
+    fn qualified_path_flattens_member_chains() {
+        let f = parse_file("fun box(): String { val x = a.b.c; return \"OK\" }");
+        // Find the `a.b.c` member-access expression and confirm it flattens with `/` separators.
+        let mut found = false;
+        for e in 0..f.expr_arena.len() {
+            let id = ExprId(e as u32);
+            if matches!(f.expr(id), Expr::Member { .. })
+                && qualified_path(&f, id) == Some("a/b/c".to_string())
+            {
+                found = true;
+            }
+        }
+        assert!(found, "expected an a.b.c member chain");
+    }
+
+    #[test]
+    fn class_internal_qualifies_with_package_and_nesting() {
+        let f = parse_file("package demo.pkg\nfun box(): String = \"OK\"");
+        assert_eq!(class_internal(&f, "Foo"), "demo/pkg/Foo");
+        // Nested source name `Outer.Inner` becomes `Outer$Inner`.
+        assert_eq!(class_internal(&f, "Outer.Inner"), "demo/pkg/Outer$Inner");
+        // No package → bare (still `$`-nested).
+        let g = parse_file("fun box(): String = \"OK\"");
+        assert_eq!(class_internal(&g, "Bar"), "Bar");
+    }
 }

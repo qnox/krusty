@@ -840,4 +840,82 @@ mod tests {
         assert_eq!(Ty::Int.fun_ret(), None);
         assert_eq!(Ty::Int.fun_params(), None);
     }
+
+    #[test]
+    fn intern_ty_and_tys_share_pointers_for_equal_values() {
+        // Equal element types intern to one pointer, so `Ty::Array` compares by value.
+        assert!(std::ptr::eq(intern_ty(Ty::Int), intern_ty(Ty::Int)));
+        assert_eq!(Ty::array(Ty::Int), Ty::array(Ty::Int));
+        // Equal type-arg lists share a slice pointer; an empty list is the shared `&[]`.
+        let a = intern_tys(&[Ty::Int, Ty::String]);
+        let b = intern_tys(&[Ty::Int, Ty::String]);
+        assert!(std::ptr::eq(a, b));
+        assert!(intern_tys(&[]).is_empty());
+        assert_eq!(
+            Ty::obj_args("demo/Box", &[Ty::Int, Ty::String]),
+            Ty::obj_args("demo/Box", &[Ty::Int, Ty::String])
+        );
+    }
+
+    #[test]
+    fn intern_fnsig_shares_pointers_and_distinguishes_suspend() {
+        let plain = FnSig {
+            params: vec![Ty::Int],
+            ret: Ty::Unit,
+            suspend: false,
+        };
+        assert!(std::ptr::eq(
+            intern_fnsig(plain.clone()),
+            intern_fnsig(plain)
+        ));
+        // A suspend function type is a distinct value from its non-suspend twin.
+        assert_ne!(
+            Ty::fun(vec![Ty::Int], Ty::Unit),
+            Ty::fun_suspend(vec![Ty::Int], Ty::Unit)
+        );
+    }
+
+    #[test]
+    fn nullable_and_array_combinators_nest() {
+        // `Array<String?>` keeps the nullable element; the element recovers as `String?`.
+        let arr = Ty::array(Ty::nullable(Ty::String));
+        assert_eq!(arr.array_elem(), Some(Ty::nullable(Ty::String)));
+        // A nullable array is a reference and strips back to the bare array.
+        let narr = Ty::nullable(arr);
+        assert!(narr.is_reference());
+        assert_eq!(narr.non_null(), arr);
+        // A function-typed value nested in a nullable recovers its arity through non_null.
+        let nf = Ty::nullable(Ty::fun(vec![Ty::Int], Ty::Boolean));
+        assert_eq!(nf.non_null().fun_arity(), Some(1));
+    }
+
+    #[test]
+    fn promote_is_symmetric_across_all_numeric_ranks() {
+        // Float outranks Long; Double outranks everything.
+        assert_eq!(Ty::promote(Ty::Long, Ty::Float), Some(Ty::Float));
+        assert_eq!(Ty::promote(Ty::Double, Ty::Float), Some(Ty::Double));
+        assert_eq!(Ty::promote(Ty::Float, Ty::Double), Some(Ty::Double));
+        // Short promotes to Int against Int; identical Double stays Double.
+        assert_eq!(Ty::promote(Ty::Short, Ty::Int), Some(Ty::Int));
+        assert_eq!(Ty::promote(Ty::Double, Ty::Double), Some(Ty::Double));
+        // Char is not numeric, so it never promotes.
+        assert_eq!(Ty::promote(Ty::Char, Ty::Int), None);
+    }
+
+    #[test]
+    fn obj_args_round_trips_type_arguments() {
+        // A map-like double-arg obj preserves both type arguments in order.
+        let m = Ty::obj_args("kotlin/collections/Map", &[Ty::String, Ty::Int]);
+        assert_eq!(m.obj_internal(), Some("kotlin/collections/Map"));
+        assert_eq!(m.type_args(), &[Ty::String, Ty::Int]);
+        // A nested generic argument round-trips too.
+        let nested = Ty::obj_args(
+            "kotlin/collections/List",
+            &[Ty::obj_args("kotlin/collections/List", &[Ty::Int])],
+        );
+        assert_eq!(
+            nested.type_args(),
+            &[Ty::obj_args("kotlin/collections/List", &[Ty::Int])]
+        );
+    }
 }

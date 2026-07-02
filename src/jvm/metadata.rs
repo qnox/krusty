@@ -1588,3 +1588,305 @@ pub fn inline_method_names(ci: &ClassInfo) -> HashSet<String> {
     }
     package_inline(&decode_d1(&ci.kotlin_d1), &ci.kotlin_d2).1
 }
+
+#[cfg(test)]
+mod pure_helper_tests {
+    use super::*;
+
+    // --- decode_d1: BitEncoding.decodeBytes (each char → one byte) ---
+
+    #[test]
+    fn decode_d1_drops_leading_utf8_mode_marker_on_first_string_only() {
+        // A leading 0x00 on the FIRST string is the UTF-8 mode marker and is dropped.
+        assert_eq!(decode_d1(&["\u{0}abc".into()]), vec![97, 98, 99]);
+        // A 0x00 at the head of a LATER string is a real byte and is kept.
+        let out = decode_d1(&["\u{0}x".into(), "\u{0}y".into()]);
+        assert_eq!(out, vec![120, 0, 121]);
+    }
+
+    #[test]
+    fn decode_d1_concatenates_strings_as_bytes() {
+        assert_eq!(
+            decode_d1(&["ab".into(), "cd".into()]),
+            vec![97, 98, 99, 100]
+        );
+        assert_eq!(decode_d1(&[]), Vec::<u8>::new());
+    }
+
+    // --- resolve_class_name: getString over expanded StringTableTypes records ---
+
+    fn rec_string(s: &str) -> Rec {
+        Rec {
+            string: Some(s.to_string()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn resolve_class_name_prefers_inline_string() {
+        let recs = vec![rec_string("foo/Bar")];
+        assert_eq!(
+            resolve_class_name(&recs, &[], 0).as_deref(),
+            Some("foo/Bar")
+        );
+    }
+
+    #[test]
+    fn resolve_class_name_uses_predefined_index() {
+        let recs = vec![Rec {
+            predefined_index: Some(0),
+            ..Default::default()
+        }];
+        // PREDEFINED_STRINGS[0] == "kotlin/Any".
+        assert_eq!(
+            resolve_class_name(&recs, &[], 0).as_deref(),
+            Some("kotlin/Any")
+        );
+    }
+
+    #[test]
+    fn resolve_class_name_falls_back_to_d2_by_id() {
+        let recs = vec![Rec::default()];
+        let d2 = vec!["pkg/Q".to_string()];
+        assert_eq!(resolve_class_name(&recs, &d2, 0).as_deref(), Some("pkg/Q"));
+    }
+
+    #[test]
+    fn resolve_class_name_out_of_range_id_is_none() {
+        assert_eq!(resolve_class_name(&[], &[], 7), None);
+    }
+
+    #[test]
+    fn resolve_class_name_applies_valid_substring_and_ignores_out_of_range() {
+        let recs = vec![Rec {
+            string: Some("abcdef".to_string()),
+            substring: Some((1, 4)),
+            ..Default::default()
+        }];
+        assert_eq!(resolve_class_name(&recs, &[], 0).as_deref(), Some("bcd"));
+
+        let bad = vec![Rec {
+            string: Some("ab".to_string()),
+            substring: Some((0, 100)),
+            ..Default::default()
+        }];
+        assert_eq!(resolve_class_name(&bad, &[], 0).as_deref(), Some("ab"));
+    }
+
+    #[test]
+    fn resolve_class_name_applies_char_replacement() {
+        let recs = vec![Rec {
+            string: Some("a/b/c".to_string()),
+            replace: Some(('b' as u32, 'X' as u32)),
+            ..Default::default()
+        }];
+        assert_eq!(resolve_class_name(&recs, &[], 0).as_deref(), Some("a/X/c"));
+    }
+
+    #[test]
+    fn resolve_class_name_operation_1_dollar_to_dot() {
+        let recs = vec![Rec {
+            string: Some("Outer$Inner".to_string()),
+            operation: 1,
+            ..Default::default()
+        }];
+        assert_eq!(
+            resolve_class_name(&recs, &[], 0).as_deref(),
+            Some("Outer.Inner")
+        );
+    }
+
+    #[test]
+    fn resolve_class_name_operation_2_strips_desc_wrapper_and_maps_dollar() {
+        let recs = vec![Rec {
+            string: Some("La$b;".to_string()),
+            operation: 2,
+            ..Default::default()
+        }];
+        // Drop leading `L` / trailing `;`, then `$` → `.`.
+        assert_eq!(resolve_class_name(&recs, &[], 0).as_deref(), Some("a.b"));
+    }
+
+    // --- Pb: the wire-format read cursor ---
+
+    #[test]
+    fn pb_varint_reads_multibyte_leb128() {
+        let mut pb = Pb {
+            b: &[0xac, 0x02],
+            i: 0,
+        };
+        assert_eq!(pb.varint(), Some(300));
+        assert!(pb.at_end());
+    }
+
+    #[test]
+    fn pb_varint_none_on_truncated_continuation() {
+        // A byte with the continuation bit set and nothing after → None.
+        let mut pb = Pb { b: &[0x80], i: 0 };
+        assert_eq!(pb.varint(), None);
+    }
+
+    #[test]
+    fn pb_bytes_returns_slice_and_advances() {
+        let mut pb = Pb {
+            b: &[1, 2, 3, 4],
+            i: 0,
+        };
+        assert_eq!(pb.bytes(2), Some(&[1u8, 2][..]));
+        assert_eq!(pb.bytes(3), None); // only 2 left
+    }
+
+    #[test]
+    fn pb_skip_consumes_each_wire_type() {
+        // wire 2 (length-delimited): varint length then that many bytes.
+        let mut pb = Pb {
+            b: &[0x03, 9, 9, 9],
+            i: 0,
+        };
+        assert_eq!(pb.skip(2), Some(()));
+        assert!(pb.at_end());
+        // wire 0 varint, wire 1 = 8 bytes, wire 5 = 4 bytes.
+        let mut v0 = Pb { b: &[0x7f], i: 0 };
+        assert_eq!(v0.skip(0), Some(()));
+        let mut v1 = Pb { b: &[0; 8], i: 0 };
+        assert_eq!(v1.skip(1), Some(()));
+        let mut v5 = Pb { b: &[0; 4], i: 0 };
+        assert_eq!(v5.skip(5), Some(()));
+        // Unknown wire type is rejected.
+        let mut bad = Pb { b: &[0], i: 0 };
+        assert_eq!(bad.skip(3), None);
+    }
+
+    // --- split_d1: length-delimited StringTableTypes prefix + Package body ---
+
+    #[test]
+    fn split_d1_splits_on_leading_length() {
+        let (stt, pkg) = split_d1(&[0x02, 0xaa, 0xbb, 0xcc]);
+        assert_eq!(stt, &[0xaa, 0xbb]);
+        assert_eq!(pkg, &[0xcc]);
+    }
+
+    #[test]
+    fn split_d1_malformed_yields_empty_prefix() {
+        // Empty input: no length varint.
+        assert_eq!(split_d1(&[]), (&[][..], &[][..]));
+        // Declared length exceeds the buffer → prefix empty, whole buffer is the package body.
+        let bytes = &[0x05u8, 0x01];
+        assert_eq!(split_d1(bytes), (&[][..], &bytes[..]));
+    }
+
+    // --- parse_jvm_signature: (name id, desc id) from a JvmMethodSignature body ---
+
+    #[test]
+    fn parse_jvm_signature_reads_name_and_desc_ids() {
+        // field 1 (name) = 5, field 2 (desc) = 7.
+        assert_eq!(parse_jvm_signature(&[0x08, 0x05, 0x10, 0x07]), Some((5, 7)));
+    }
+
+    #[test]
+    fn parse_jvm_signature_requires_both_fields() {
+        assert_eq!(parse_jvm_signature(&[0x08, 0x05]), None); // desc missing
+        assert_eq!(parse_jvm_signature(&[]), None);
+    }
+
+    #[test]
+    fn parse_jvm_signature_skips_unknown_fields() {
+        // field 3 length-delimited (tag 0x1a) then name/desc.
+        let body = &[0x1a, 0x01, 0xff, 0x08, 0x05, 0x10, 0x07];
+        assert_eq!(parse_jvm_signature(body), Some((5, 7)));
+    }
+
+    // --- parse_qname: QualifiedName message → QName ---
+
+    #[test]
+    fn parse_qname_defaults_when_empty() {
+        let q = parse_qname(&[]);
+        assert_eq!(q.parent, -1);
+        assert_eq!(q.short, 0);
+        assert_eq!(q.kind, 1); // default PACKAGE
+    }
+
+    #[test]
+    fn parse_qname_reads_all_three_fields() {
+        // field 1 (parent)=3, field 2 (short)=7, field 3 (kind)=0.
+        let q = parse_qname(&[0x08, 0x03, 0x10, 0x07, 0x18, 0x00]);
+        assert_eq!(q.parent, 3);
+        assert_eq!(q.short, 7);
+        assert_eq!(q.kind, 0);
+    }
+
+    #[test]
+    fn parse_qname_skips_unknown_field() {
+        // Unknown field 5 (length-delimited) precedes the short-name field.
+        let q = parse_qname(&[0x2a, 0x01, 0xff, 0x10, 0x04]);
+        assert_eq!(q.short, 4);
+    }
+
+    // --- resolve_qname: traverse the parent chain into `pkg/Relative.Class` ---
+
+    fn qn(parent: i64, short: usize, kind: u64) -> QName {
+        QName {
+            parent,
+            short,
+            kind,
+        }
+    }
+
+    #[test]
+    fn resolve_qname_root_sentinel_is_empty() {
+        assert_eq!(resolve_qname(&[], &[], -1), "");
+    }
+
+    #[test]
+    fn resolve_qname_class_without_package() {
+        let qnames = vec![qn(-1, 0, 0)];
+        let strings = vec!["Foo".to_string()];
+        assert_eq!(resolve_qname(&qnames, &strings, 0), "Foo");
+    }
+
+    #[test]
+    fn resolve_qname_joins_package_with_slash_and_class_with_dot() {
+        // p (pkg) / Outer.Inner (nested classes).
+        let qnames = vec![qn(-1, 0, 1), qn(0, 1, 0), qn(1, 2, 0)];
+        let strings = vec!["p".to_string(), "Outer".to_string(), "Inner".to_string()];
+        assert_eq!(resolve_qname(&qnames, &strings, 2), "p/Outer.Inner");
+    }
+
+    #[test]
+    fn resolve_qname_multi_segment_package() {
+        // kotlin/collections/List.
+        let qnames = vec![qn(-1, 0, 1), qn(0, 1, 1), qn(1, 2, 0)];
+        let strings = vec![
+            "kotlin".to_string(),
+            "collections".to_string(),
+            "List".to_string(),
+        ];
+        assert_eq!(
+            resolve_qname(&qnames, &strings, 2),
+            "kotlin/collections/List"
+        );
+    }
+
+    #[test]
+    fn resolve_qname_breaks_on_missing_string() {
+        let qnames = vec![qn(-1, 99, 0)];
+        let strings = vec!["a".to_string()];
+        assert_eq!(resolve_qname(&qnames, &strings, 0), "");
+    }
+
+    // --- strip_builtins_header: drop the BuiltInsBinaryVersion header ---
+
+    #[test]
+    fn strip_builtins_header_skips_count_prefixed_version_words() {
+        // count=1 → skip 4 (count) + 4*1 (version words) = 8 bytes, then payload.
+        let data = &[0, 0, 0, 1, 9, 9, 9, 9, 0xab];
+        assert_eq!(strip_builtins_header(data), Some(&[0xab][..]));
+    }
+
+    #[test]
+    fn strip_builtins_header_too_short_is_none() {
+        // count=2 needs 4 + 8 = 12 bytes; buffer is shorter.
+        let data = &[0, 0, 0, 2, 9];
+        assert_eq!(strip_builtins_header(data), None);
+    }
+}
