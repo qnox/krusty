@@ -1,0 +1,8 @@
+# cargo-mutants config (perturbation / mutation testing) — see `just mutants` and docs/TEST_QUALITY.md.
+#
+# Each mutant rebuilds and re-runs the test suite, so use the fast `gate` profile and a generous
+# timeout (a cold suite run is minutes). Tooling/entrypoints aren't the compiler under test.
+profile = "gate"
+timeout_multiplier = 4.0
+minimum_test_timeout = 400
+exclude_globs = ["src/bin/**", "src/main.rs"]
