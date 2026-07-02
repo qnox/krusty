@@ -126,6 +126,41 @@ pub fn lower_to_ir(
     krusty::ir_lower::lower_file(file, &info, &syms)
 }
 
+/// Run the front end (`lex → parse → collect signatures → check`) on `src` and return every
+/// diagnostic message it produced (parse errors, then resolve/check errors). Empty ⇒ the snippet is
+/// accepted. Lets tests exercise ERROR paths — assert a bad snippet yields a diagnostic (optionally
+/// matching a substring). `cp_jars`/`jdk_modules` supply the resolution classpath, like the box
+/// helpers; pass `&[]`/`None` for snippets that need no library symbols.
+#[allow(dead_code)]
+pub fn front_end_diagnostics(
+    src: &str,
+    cp_jars: &[PathBuf],
+    jdk_modules: Option<&std::path::Path>,
+) -> Vec<String> {
+    use krusty::diag::DiagSink;
+    use krusty::resolve::{check_file, collect_signatures_with_cp};
+
+    let mut diags = DiagSink::new();
+    let features = krusty::features::LangFeatures::from_source(src);
+    let toks = krusty::lexer::lex(src, &mut diags);
+    let files = vec![krusty::parser::parse_with_features(
+        src, &toks, &mut diags, &features,
+    )];
+    if !diags.has_errors() {
+        let mut cp_paths: Vec<PathBuf> = cp_jars.to_vec();
+        if let Some(p) = jdk_modules {
+            cp_paths.push(p.to_path_buf());
+        }
+        let cp = std::rc::Rc::new(Classpath::new(cp_paths));
+        let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(cp));
+        let mut syms = collect_signatures_with_cp(&files, platform, &mut diags);
+        if !diags.has_errors() {
+            let _ = check_file(&files[0], &mut syms, &mut diags);
+        }
+    }
+    diags.diags.iter().map(|d| d.msg.clone()).collect()
+}
+
 /// Run a JavaScript source string on Node and return its stdout (trimmed), or `None` if `node` is
 /// not on `PATH` (caller skips, exactly like a missing JVM). Used by the `js` backend e2e tests.
 #[allow(dead_code)]
