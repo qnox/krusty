@@ -369,4 +369,83 @@ mod tests {
         assert_eq!(g, Resolver::Gradle(PathBuf::from("/x/gradle")));
         assert_ne!(g, Resolver::Maven(PathBuf::from("/x/gradle")));
     }
+
+    /// A fresh, uniquely-named temp directory (no external tempfile dependency).
+    fn temp_dir() -> PathBuf {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static COUNTER: AtomicU32 = AtomicU32::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir =
+            std::env::temp_dir().join(format!("krusty_deps_test_{}_{}", std::process::id(), n));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn gradle_script_has_copy_task_wiring() {
+        let script = gradle_build_script(&coords(), Path::new("/tmp/ksp-out"));
+        // The Copy task pulls from the `fetch` configuration into the out dir.
+        assert!(script.contains("tasks.register<Copy>(\"fetchJars\")"));
+        assert!(script.contains("from(configurations[\"fetch\"])"));
+        assert!(script.contains("into(\"/tmp/ksp-out\")"));
+        assert!(script.contains("val fetch by configurations.creating"));
+        // One `fetch("...")` dependency line per coord.
+        assert_eq!(script.matches("fetch(\"").count(), coords().len());
+    }
+
+    #[test]
+    fn maven_pom_has_project_skeleton() {
+        let pom = maven_pom(&coords());
+        assert!(pom.contains("<modelVersion>4.0.0</modelVersion>"));
+        assert!(pom.contains("<groupId>org.krusty</groupId>"));
+        assert!(pom.contains("<artifactId>ksp-fetch</artifactId>"));
+        // One `<dependency>` element per (well-formed) coord.
+        assert_eq!(pom.matches("<dependency>").count(), coords().len());
+    }
+
+    #[test]
+    fn collect_jars_errors_on_missing_dir() {
+        let missing = temp_dir().join("does-not-exist");
+        assert!(collect_jars(&missing).is_err());
+    }
+
+    #[test]
+    fn fetch_gradle_writes_scripts_then_fails_on_missing_bin() {
+        let out = temp_dir();
+        let bin = out.join("no-such-gradle");
+        let r = Resolver::Gradle(bin);
+        // Spawning the missing bin fails (no network); the generated scripts are written first.
+        let err = r.fetch(&coords(), &out).unwrap_err();
+        assert!(!err.to_string().is_empty());
+
+        let proj = out.join(".gradle-fetch");
+        let script = std::fs::read_to_string(proj.join("build.gradle.kts")).unwrap();
+        assert_eq!(script, gradle_build_script(&coords(), &out));
+        let settings = std::fs::read_to_string(proj.join("settings.gradle.kts")).unwrap();
+        assert!(settings.contains("kspfetch"));
+
+        std::fs::remove_dir_all(&out).unwrap();
+    }
+
+    #[test]
+    fn fetch_maven_writes_pom_then_fails_on_missing_bin() {
+        let out = temp_dir();
+        let r = Resolver::Maven(out.join("no-such-mvn"));
+        let err = r.fetch(&coords(), &out).unwrap_err();
+        assert!(!err.to_string().is_empty());
+
+        // Missing-bin spawn fails before the pom is cleaned up, so it is still on disk.
+        let pom = std::fs::read_to_string(out.join("pom.xml")).unwrap();
+        assert_eq!(pom, maven_pom(&coords()));
+
+        std::fs::remove_dir_all(&out).unwrap();
+    }
+
+    #[test]
+    fn fetch_coursier_fails_on_missing_bin() {
+        let out = temp_dir();
+        let r = Resolver::Coursier(out.join("no-such-cs"));
+        assert!(r.fetch(&coords(), &out).is_err());
+        std::fs::remove_dir_all(&out).unwrap();
+    }
 }

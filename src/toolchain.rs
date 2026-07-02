@@ -416,4 +416,207 @@ mod tests {
 
         std::fs::remove_dir_all(&dir).unwrap();
     }
+
+    #[test]
+    fn collect_stdlib_jars_stops_when_full() {
+        let dir = temp_dir();
+        touch(&dir, "kotlin-stdlib-1.9.jar");
+
+        // out already over the cap (> 4) -> the entry guard bails without scanning.
+        let mut out: Vec<PathBuf> = (0..5).map(|i| PathBuf::from(format!("x{i}"))).collect();
+        collect_stdlib_jars(&dir, &mut out, 0);
+        assert_eq!(out.len(), 5);
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // ---- Env-driven helpers -------------------------------------------------
+    //
+    // These mutate process-wide environment variables, so they serialize on a shared lock and
+    // always restore prior values. No network is touched: every path is a temp-dir fixture.
+
+    /// Serialize env-mutating tests against each other (they share process globals).
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Set (or, with `None`, remove) an env var, returning its prior value for restoration.
+    fn set_env(key: &str, val: Option<&str>) -> Option<std::ffi::OsString> {
+        let prev = std::env::var_os(key);
+        match val {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
+        }
+        prev
+    }
+
+    fn restore_env(key: &str, prev: Option<std::ffi::OsString>) {
+        match prev {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
+        }
+    }
+
+    /// Build a fake kotlinc dist skeleton (`<root>/bin/kotlinc`, `<root>/lib/`) and return `root`.
+    fn fake_dist() -> PathBuf {
+        let root = temp_dir();
+        let bin = root.join("bin");
+        let lib = root.join("lib");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::create_dir_all(&lib).unwrap();
+        touch(&bin, "kotlinc");
+        root
+    }
+
+    #[test]
+    fn kotlinc_lib_dir_derives_lib_from_bin_and_dist_jar_by_name() {
+        let _g = env_lock();
+        let root = fake_dist();
+        let lib = root.join("lib");
+        touch(&lib, "kotlin-test.jar");
+        let kc = root.join("bin").join("kotlinc");
+        let prev = set_env("KRUSTY_KOTLINC", Some(kc.to_str().unwrap()));
+
+        assert_eq!(kotlinc_lib_dir(), Some(lib.clone()));
+        // dist_jar resolves an exact (unversioned) name in that lib dir; a missing one is None.
+        assert_eq!(
+            dist_jar("kotlin-test.jar"),
+            Some(lib.join("kotlin-test.jar"))
+        );
+        assert!(dist_jar("kotlin-absent.jar").is_none());
+
+        restore_env("KRUSTY_KOTLINC", prev);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn kotlinc_lib_dir_none_when_unset_or_empty_or_missing_lib() {
+        let _g = env_lock();
+        // Empty string is filtered to None.
+        let prev = set_env("KRUSTY_KOTLINC", Some(""));
+        assert!(kotlinc_lib_dir().is_none());
+        // Removed entirely -> None.
+        let _ = set_env("KRUSTY_KOTLINC", None);
+        assert!(kotlinc_lib_dir().is_none());
+        assert!(dist_jar("kotlin-test.jar").is_none());
+
+        // Points at a bin without a sibling lib/ dir -> None (lib.is_dir() false).
+        let root = temp_dir();
+        std::fs::create_dir_all(root.join("bin")).unwrap();
+        touch(&root.join("bin"), "kotlinc");
+        let kc = root.join("bin").join("kotlinc");
+        set_env("KRUSTY_KOTLINC", Some(kc.to_str().unwrap()));
+        assert!(kotlinc_lib_dir().is_none());
+
+        restore_env("KRUSTY_KOTLINC", prev);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn kotlin_version_reads_and_trims_build_txt() {
+        let _g = env_lock();
+        let root = fake_dist();
+        // build.txt sits beside lib/ (dist root); the version is the pre-`-` prefix, trimmed.
+        std::fs::write(root.join("build.txt"), "1.9.24-release-822\n").unwrap();
+        let kc = root.join("bin").join("kotlinc");
+        let prev = set_env("KRUSTY_KOTLINC", Some(kc.to_str().unwrap()));
+
+        assert_eq!(kotlin_version(), "1.9.24");
+
+        // A bare version with no `-` suffix is returned as-is.
+        std::fs::write(root.join("build.txt"), "2.0.0\n").unwrap();
+        assert_eq!(kotlin_version(), "2.0.0");
+
+        restore_env("KRUSTY_KOTLINC", prev);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn jdk_modules_honors_explicit_override_then_java_home() {
+        let _g = env_lock();
+        let root = temp_dir();
+
+        // Explicit override to a real file wins.
+        let modules = root.join("modules");
+        touch(&root, "modules");
+        let prev_override = set_env("KRUSTY_SURVEY_JDK_MODULES", Some(modules.to_str().unwrap()));
+        let prev_java = set_env("JAVA_HOME", None);
+        let prev_ref = set_env("KRUSTY_REF_JAVA_HOME", None);
+        assert_eq!(jdk_modules(), Some(modules.clone()));
+
+        // Override pointing at a non-file -> None (does NOT fall through to JAVA_HOME).
+        set_env(
+            "KRUSTY_SURVEY_JDK_MODULES",
+            Some(root.join("nope").to_str().unwrap()),
+        );
+        assert!(jdk_modules().is_none());
+
+        // No override -> derive `<JAVA_HOME>/lib/modules`.
+        set_env("KRUSTY_SURVEY_JDK_MODULES", None);
+        let jh = root.join("jdk");
+        std::fs::create_dir_all(jh.join("lib")).unwrap();
+        touch(&jh.join("lib"), "modules");
+        set_env("JAVA_HOME", Some(jh.to_str().unwrap()));
+        assert_eq!(jdk_modules(), Some(jh.join("lib").join("modules")));
+
+        restore_env("KRUSTY_SURVEY_JDK_MODULES", prev_override);
+        restore_env("JAVA_HOME", prev_java);
+        restore_env("KRUSTY_REF_JAVA_HOME", prev_ref);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn find_jar_prefers_shortest_name_under_home() {
+        let _g = env_lock();
+        let home = temp_dir();
+        let gradle = home.join(".gradle").join("caches");
+        std::fs::create_dir_all(&gradle).unwrap();
+        touch(&gradle, "kotlin-reflect-1.0.jar"); // plain, shortest -> preferred
+        touch(&gradle, "kotlin-reflect-1.0-extra.jar"); // longer variant
+        touch(&gradle, "kotlin-reflect-1.0-sources.jar"); // bad: sources (skipped)
+        touch(&gradle, "kotlin-reflect-1.0-junit.jar"); // excluded via `excludes`
+
+        let prev_home = set_env("HOME", Some(home.to_str().unwrap()));
+        let found = find_jar("kotlin-reflect-", &["junit"]).unwrap();
+        restore_env("HOME", prev_home);
+
+        assert_eq!(
+            found.file_name().unwrap().to_str().unwrap(),
+            "kotlin-reflect-1.0.jar"
+        );
+        std::fs::remove_dir_all(&home).unwrap();
+    }
+
+    #[test]
+    fn stdlib_jar_and_classpath_none_when_nothing_available() {
+        let _g = env_lock();
+        // No dist and an empty HOME -> no stdlib is located.
+        let home = temp_dir();
+        let prev_kc = set_env("KRUSTY_KOTLINC", None);
+        let prev_home = set_env("HOME", Some(home.to_str().unwrap()));
+
+        assert!(stdlib_jar().is_none());
+        // The empty-classpath branch: scanning yields no type aliases.
+        assert!(stdlib_classpath().scan_types().type_aliases.is_empty());
+
+        restore_env("KRUSTY_KOTLINC", prev_kc);
+        restore_env("HOME", prev_home);
+        std::fs::remove_dir_all(&home).unwrap();
+    }
+
+    #[test]
+    fn ensure_maven_returns_cached_jar_without_network() {
+        let _g = env_lock();
+        let cache = temp_dir();
+        // Pre-seed the exact cache file name `ensure_maven` computes -> it short-circuits (no curl).
+        std::fs::write(cache.join("annotations-23.0.0.jar"), b"x").unwrap();
+        let prev = set_env("KRUSTY_DEPS_CACHE", Some(cache.to_str().unwrap()));
+
+        let got = ensure_maven("org.jetbrains", "annotations", "23.0.0");
+        assert_eq!(got, Some(cache.join("annotations-23.0.0.jar")));
+
+        restore_env("KRUSTY_DEPS_CACHE", prev);
+        std::fs::remove_dir_all(&cache).unwrap();
+    }
 }
