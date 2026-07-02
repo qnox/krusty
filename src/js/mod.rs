@@ -194,6 +194,26 @@ fn emit_stmt(ir: &IrFile, e: u32, depth: usize, inst: bool, out: &mut String) {
                     .unwrap_or_else(|| "continue;\n".to_string()),
             );
         }
+        // A `when`/`if` in STATEMENT position → an `if / else if / else` chain with STATEMENT bodies.
+        // Rendering it as the expression ternary (the `other` arm below) would evaluate a `break`,
+        // `continue` or `return` branch as a value and drop it — e.g. `if (c) break` would no-op.
+        IrExpr::When { branches } => {
+            let mut first = true;
+            for (cond, body) in branches {
+                indent(depth, out);
+                match cond {
+                    Some(c) => {
+                        let kw = if first { "if" } else { "else if" };
+                        out.push_str(&format!("{kw} ({}) {{\n", emit_expr(ir, *c, inst)));
+                    }
+                    None => out.push_str("else {\n"),
+                }
+                emit_stmt(ir, *body, depth + 1, inst, out);
+                indent(depth, out);
+                out.push_str("}\n");
+                first = false;
+            }
+        }
         other => {
             indent(depth, out);
             out.push_str(&emit_expr_node(ir, other, inst));
@@ -395,6 +415,37 @@ fn emit_expr_node(ir: &IrFile, node: &IrExpr, inst: bool) -> String {
                 s.push(')');
             }
             s
+        }
+        // Assignments are valid JS *expressions* (`x = e`), not only statements. They appear in an
+        // expression position most importantly as a `for`-loop update (`for (; cond; i = i + 1)`),
+        // where rendering them as `undefined` would drop the increment and spin forever.
+        IrExpr::SetValue { var, value } => {
+            format!(
+                "({} = {})",
+                val_name(*var, inst),
+                emit_expr(ir, *value, inst)
+            )
+        }
+        IrExpr::SetField {
+            receiver,
+            class,
+            index,
+            value,
+        } => {
+            let name = &ir.classes[*class as usize].fields[*index as usize].name;
+            format!(
+                "({}.{} = {})",
+                emit_expr(ir, *receiver, inst),
+                name,
+                emit_expr(ir, *value, inst)
+            )
+        }
+        IrExpr::SetStatic { index, value } => {
+            format!(
+                "({} = {})",
+                ir.statics[*index as usize].name,
+                emit_expr(ir, *value, inst)
+            )
         }
         _ => "undefined".to_string(),
     }
