@@ -48,6 +48,21 @@ while IFS= read -r line; do
   bins+=("$line")
 done < <(sed -nE 's/.*[Ee]xecutable [^(]*\(([^)]+)\)/\1/p' "$build_log" | sort -u)
 
+# KRUSTY_TEST_EXCLUDE: comma-separated test-binary base names to skip (e.g. the slow external-corpus
+# suites for the fast pre-push run). Matched against each binary's name with the cargo hash stripped.
+# Used by `just test-fast`; empty by default so the normal gate runs everything.
+if [ -n "${KRUSTY_TEST_EXCLUDE:-}" ]; then
+  IFS=',' read -r -a _excl <<<"$KRUSTY_TEST_EXCLUDE"
+  kept=()
+  for b in "${bins[@]}"; do
+    stem="$(basename "$b" | sed -E 's/-[0-9a-f]+$//')"
+    skip=0
+    for e in "${_excl[@]}"; do [ "$stem" = "$e" ] && skip=1 && break; done
+    [ "$skip" -eq 0 ] && kept+=("$b")
+  done
+  bins=("${kept[@]}")
+fi
+
 run_one() {
   local b="${2%%::*}" extra="" name
   [ "$2" != "$b" ] && extra="${2#*::}"
@@ -70,7 +85,13 @@ export -f run_one
 gate="$(printf '%s\n' "${bins[@]}" | grep kotlin_box_ir_jvm_conformance || true)"
 [ -n "$gate" ] && run_one "$logdir" "$gate"
 
-jobs="${KRUSTY_TEST_JOBS:-$(nproc 2>/dev/null || sysctl -n hw.ncpu)}"
+ncpu="$(nproc 2>/dev/null || sysctl -n hw.ncpu)"
+jobs="${KRUSTY_TEST_JOBS:-$ncpu}"
+# Per-binary test threads. With ~190 binaries the jobs-wide across-binary parallelism already fills
+# the cores (separate processes → no shared-state contention), so 1 thread/binary is fastest; raising
+# it oversubscribes and slows the whole run. The knob exists mainly to thread a small binary subset
+# (where across-binary parallelism has run out) via the now-concurrent JVM box-runner.
+threads="${KRUSTY_TEST_THREADS:-1}"
 rest=()
 while IFS= read -r b; do
   rest+=("$b")
@@ -111,7 +132,7 @@ for b in "${rest[@]}"; do
 done
 
 printf '%s\n' "${ordered[@]}" \
-  | xargs -P "$jobs" -I{} bash -c 'run_one "$0" "$1::--test-threads=1"' "$logdir" {}
+  | xargs -P "$jobs" -I{} bash -c 'run_one "$0" "$1::--test-threads='"$threads"'"' "$logdir" {}
 
 if [ -f "$logdir/FAILED" ]; then
   echo "=== FAILED TEST BINARIES ==="

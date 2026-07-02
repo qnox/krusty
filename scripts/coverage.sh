@@ -66,9 +66,12 @@ echo "coverage: running ${#run[@]} test binaries in parallel (-P $jobs), ${#EXCL
 
 # Run the binaries in parallel; each writes its own profraw (LLVM_PROFILE_FILE has a %p pid slot).
 # A non-zero exit from any binary (a failing test) fails the whole run — the tests are the workload.
+# `--test-threads=1` per binary is deliberate: -P already gives jobs-wide across-binary parallelism,
+# so one thread each keeps total concurrency at `jobs`; letting each binary default to nproc threads
+# would make it jobs×nproc-wide and thrash the cores (much slower under coverage instrumentation).
 status_dir="$(mktemp -d)"
 printf '%s\0' "${run[@]}" | xargs -0 -P "$jobs" -I{} \
-  sh -c '"$1" --quiet 2>/dev/null || echo fail > "$2/$(basename "$1")"' _ {} "$status_dir"
+  sh -c '"$1" --quiet --test-threads=1 2>/dev/null || echo fail > "$2/$(basename "$1")"' _ {} "$status_dir"
 if compgen -G "$status_dir/*" >/dev/null; then
   echo "coverage: FAIL — test binaries reported failures:" >&2
   ls "$status_dir" >&2

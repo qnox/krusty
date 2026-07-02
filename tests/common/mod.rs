@@ -1,11 +1,12 @@
 //! Shared test helpers.
 
 use std::collections::HashMap;
-use std::io::Write as _;
+use std::io::{Read as _, Write as _};
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
-use std::sync::{Mutex, OnceLock};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use krusty::jvm::classpath::Classpath;
@@ -118,6 +119,10 @@ const BOX_RUNNER_SRC: &str = r#"
 import java.io.*;
 import java.util.concurrent.*;
 
+// Concurrent box-runner. Each request carries an 8-byte id; the main thread only READS requests and
+// hands each to a worker pool, so many box() calls run in parallel (a single test binary with N test
+// threads keeps N calls in flight). Responses are written back tagged with their id — possibly out of
+// order — under a lock on the output stream. The Rust client demuxes replies by id.
 public class BoxRunner {
     static final long TIMEOUT_MS = 10000;
     static final ExecutorService EXEC = Executors.newCachedThreadPool(r -> {
@@ -128,11 +133,12 @@ public class BoxRunner {
 
     public static void main(String[] args) throws Exception {
         DataInputStream din = new DataInputStream(new BufferedInputStream(System.in, 65536));
-        DataOutputStream dout = new DataOutputStream(new BufferedOutputStream(System.out, 4096));
+        final DataOutputStream dout = new DataOutputStream(new BufferedOutputStream(System.out, 4096));
         System.setOut(System.err);
         while (true) {
-            int n;
-            try { n = din.readInt(); } catch (EOFException e) { break; }
+            long id;
+            try { id = din.readLong(); } catch (EOFException e) { break; }
+            int n = din.readInt();
             String[] names = new String[n];
             byte[][] data = new byte[n][];
             for (int i = 0; i < n; i++) {
@@ -143,33 +149,45 @@ public class BoxRunner {
             }
             int bl = din.readUnsignedShort();
             String boxClass = new String(din.readNBytes(bl), "UTF-8");
+            final long idF = id;
             final String[] namesF = names;
             final byte[][] dataF = data;
             final String boxClassF = boxClass;
-            Future<String> future = EXEC.submit(() -> {
+            // Each request runs on its own worker so the read loop never blocks. The inner future
+            // bounds a single box() call's wall time without stalling other in-flight requests.
+            EXEC.submit(() -> {
+                String result;
+                Future<String> future = EXEC.submit(() -> {
+                    try {
+                        TestClassLoader ldr = new TestClassLoader(namesF, dataF);
+                        Class<?> cls = ldr.loadClass(boxClassF);
+                        String r = (String) cls.getMethod("box").invoke(null);
+                        return r == null ? "null" : r;
+                    } catch (Throwable t) {
+                        Throwable cause = (t instanceof java.lang.reflect.InvocationTargetException && t.getCause() != null) ? t.getCause() : t;
+                        return "ERROR:" + cause.getClass().getSimpleName() + ":" + cause.getMessage();
+                    }
+                });
                 try {
-                    TestClassLoader ldr = new TestClassLoader(namesF, dataF);
-                    Class<?> cls = ldr.loadClass(boxClassF);
-                    String r = (String) cls.getMethod("box").invoke(null);
-                    return r == null ? "null" : r;
-                } catch (Throwable t) {
-                    Throwable cause = (t instanceof java.lang.reflect.InvocationTargetException && t.getCause() != null) ? t.getCause() : t;
-                    return "ERROR:" + cause.getClass().getSimpleName() + ":" + cause.getMessage();
+                    result = future.get(TIMEOUT_MS, TimeUnit.MILLISECONDS);
+                } catch (TimeoutException e) {
+                    future.cancel(true);
+                    result = "ERROR:TimeoutException:box() exceeded " + TIMEOUT_MS + "ms";
+                } catch (Throwable e) {
+                    Throwable c = e instanceof ExecutionException && e.getCause() != null ? e.getCause() : e;
+                    result = "ERROR:" + c.getClass().getSimpleName() + ":" + c.getMessage();
+                }
+                byte[] rb;
+                try { rb = result.getBytes("UTF-8"); } catch (Exception e) { rb = new byte[0]; }
+                synchronized (dout) {
+                    try {
+                        dout.writeLong(idF);
+                        dout.writeInt(rb.length);
+                        dout.write(rb);
+                        dout.flush();
+                    } catch (IOException e) { /* client gone */ }
                 }
             });
-            String result;
-            try {
-                result = future.get(TIMEOUT_MS, TimeUnit.MILLISECONDS);
-            } catch (TimeoutException e) {
-                future.cancel(true);
-                result = "ERROR:TimeoutException:box() exceeded " + TIMEOUT_MS + "ms";
-            } catch (ExecutionException e) {
-                result = "ERROR:" + e.getCause().getClass().getSimpleName() + ":" + e.getCause().getMessage();
-            }
-            byte[] rb = result.getBytes("UTF-8");
-            dout.writeInt(rb.length);
-            dout.write(rb);
-            dout.flush();
         }
     }
 }
@@ -226,11 +244,17 @@ fn setup_runner(java_home: &str) -> Option<PathBuf> {
     Some(dir)
 }
 
-/// A persistent JVM subprocess that accepts class bytes and runs `box()`.
+/// A persistent JVM subprocess that runs `box()` calls CONCURRENTLY. Requests are tagged with an id
+/// and written under a short stdin lock; a background reader thread demuxes tagged responses back to
+/// the waiting caller by id. Many threads can therefore have box() calls in flight at once (bounded
+/// only by the JVM worker pool), so a multi-threaded test binary overlaps its JVM round-trips instead
+/// of serialising on one lock.
 struct BoxRunner {
     _child: Child,
-    stdin: ChildStdin,
-    stdout: ChildStdout,
+    stdin: Mutex<ChildStdin>,
+    waiters: Arc<Mutex<HashMap<u64, mpsc::Sender<Vec<u8>>>>>,
+    next_id: AtomicU64,
+    alive: Arc<AtomicBool>,
 }
 
 impl BoxRunner {
@@ -243,43 +267,88 @@ impl BoxRunner {
             .spawn()
             .ok()?;
         let stdin = child.stdin.take()?;
-        let stdout = child.stdout.take()?;
+        let mut stdout = child.stdout.take()?;
+        let waiters: Arc<Mutex<HashMap<u64, mpsc::Sender<Vec<u8>>>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let alive = Arc::new(AtomicBool::new(true));
+        let w2 = Arc::clone(&waiters);
+        let a2 = Arc::clone(&alive);
+        // Reader thread: pull tagged responses off the JVM's stdout and hand each to its waiter. On
+        // EOF/error (JVM died) mark dead and drop every waiter's sender so blocked callers wake with
+        // an error and the runner gets restarted.
+        std::thread::spawn(move || {
+            let mut hdr = [0u8; 12];
+            loop {
+                if stdout.read_exact(&mut hdr).is_err() {
+                    break;
+                }
+                let id = u64::from_be_bytes(hdr[0..8].try_into().unwrap());
+                let len = u32::from_be_bytes(hdr[8..12].try_into().unwrap()) as usize;
+                let mut body = vec![0u8; len];
+                if stdout.read_exact(&mut body).is_err() {
+                    break;
+                }
+                if let Some(tx) = w2.lock().unwrap().remove(&id) {
+                    let _ = tx.send(body);
+                }
+            }
+            a2.store(false, Ordering::SeqCst);
+            w2.lock().unwrap().clear();
+        });
         Some(BoxRunner {
             _child: child,
-            stdin,
-            stdout,
+            stdin: Mutex::new(stdin),
+            waiters,
+            next_id: AtomicU64::new(1),
+            alive,
         })
     }
 
-    fn try_run(
-        &mut self,
-        classes: &[(String, Vec<u8>)],
-        box_class: &str,
-    ) -> std::io::Result<String> {
-        let n = classes.len() as u32;
-        self.stdin.write_all(&n.to_be_bytes())?;
-        for (name, data) in classes {
-            self.stdin.write_all(&(name.len() as u16).to_be_bytes())?;
-            self.stdin.write_all(name.as_bytes())?;
-            self.stdin.write_all(&(data.len() as u32).to_be_bytes())?;
-            self.stdin.write_all(data)?;
+    fn try_run(&self, classes: &[(String, Vec<u8>)], box_class: &str) -> std::io::Result<String> {
+        if !self.alive.load(Ordering::SeqCst) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "BoxRunner dead",
+            ));
         }
-        self.stdin
-            .write_all(&(box_class.len() as u16).to_be_bytes())?;
-        self.stdin.write_all(box_class.as_bytes())?;
-        self.stdin.flush()?;
+        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+        let (tx, rx) = mpsc::channel();
+        self.waiters.lock().unwrap().insert(id, tx);
 
-        let deadline = Instant::now() + Duration::from_secs(15);
-        let fd = self.stdout.as_raw_fd();
-        let mut len_buf = [0u8; 4];
-        read_exact_deadline(fd, &mut len_buf, deadline)?;
-        let rlen = u32::from_be_bytes(len_buf) as usize;
-        let mut result = vec![0u8; rlen];
-        read_exact_deadline(fd, &mut result, deadline)?;
-        Ok(String::from_utf8_lossy(&result).into_owned())
+        // Frame the whole request into one buffer, then write it under the stdin lock so concurrent
+        // requests never interleave on the pipe.
+        let mut buf = Vec::with_capacity(64);
+        buf.extend_from_slice(&id.to_be_bytes());
+        buf.extend_from_slice(&(classes.len() as u32).to_be_bytes());
+        for (name, data) in classes {
+            buf.extend_from_slice(&(name.len() as u16).to_be_bytes());
+            buf.extend_from_slice(name.as_bytes());
+            buf.extend_from_slice(&(data.len() as u32).to_be_bytes());
+            buf.extend_from_slice(data);
+        }
+        buf.extend_from_slice(&(box_class.len() as u16).to_be_bytes());
+        buf.extend_from_slice(box_class.as_bytes());
+        {
+            let mut stdin = self.stdin.lock().unwrap();
+            stdin.write_all(&buf)?;
+            stdin.flush()?;
+        }
+
+        match rx.recv_timeout(Duration::from_secs(15)) {
+            Ok(body) => Ok(String::from_utf8_lossy(&body).into_owned()),
+            Err(_) => {
+                self.waiters.lock().unwrap().remove(&id);
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "BoxRunner timeout",
+                ))
+            }
+        }
     }
 }
 
+/// Blocking `read_exact` with a wall-clock deadline (via `poll`), for the request/response JVM servers
+/// (`KotlincServer` et al.) whose one-pipe protocol reads directly rather than through a demux thread.
 fn read_exact_deadline(fd: i32, buf: &mut [u8], deadline: Instant) -> std::io::Result<()> {
     let mut pos = 0;
     while pos < buf.len() {
@@ -287,7 +356,7 @@ fn read_exact_deadline(fd: i32, buf: &mut [u8], deadline: Instant) -> std::io::R
         if remaining.is_zero() {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::TimedOut,
-                "BoxRunner read timeout",
+                "read timeout",
             ));
         }
         let poll_ms = remaining.as_millis().min(1000) as i32;
@@ -320,7 +389,7 @@ fn read_exact_deadline(fd: i32, buf: &mut [u8], deadline: Instant) -> std::io::R
             0 => {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::UnexpectedEof,
-                    "BoxRunner EOF",
+                    "EOF",
                 ));
             }
             n => pos += n as usize,
@@ -345,11 +414,14 @@ pub fn find_box_class(classes: &[(String, Vec<u8>)]) -> Option<String> {
     None
 }
 
-type RunnerPool = Mutex<HashMap<String, Mutex<BoxRunner>>>;
+type RunnerPool = Mutex<HashMap<String, Arc<BoxRunner>>>;
 
 /// Run `box()` on already-compiled classes via a persistent JVM keyed by `cp_jars` (the runtime
 /// classpath — typically the stdlib jar so loaded classes resolve `kotlin.jvm.internal.*`). Returns
 /// the `box()` return value (or `ERROR:…`), or `None` if the JVM environment is unavailable.
+///
+/// The runner is concurrency-safe (id-tagged requests, demuxed responses), so callers on different
+/// threads share one JVM without an exclusive round-trip lock.
 #[allow(dead_code)]
 pub fn run_box(
     classes: &[(String, Vec<u8>)],
@@ -369,24 +441,31 @@ pub fn run_box(
         cp.push_str(&j.to_string_lossy());
     }
     let pool = POOL.get_or_init(|| Mutex::new(HashMap::new()));
-    // First run with a key spins up its JVM; later runs reuse it. Hold the per-runner lock for the
-    // round-trip (the protocol is request/response over one pipe, so it isn't concurrency-safe).
-    {
+
+    // Fetch (or spin up) the runner for this classpath under the pool lock, then release the lock so
+    // the actual round-trip runs concurrently with other threads' calls.
+    let get_runner = || -> Option<Arc<BoxRunner>> {
         let mut map = pool.lock().unwrap();
-        if !map.contains_key(&cp) {
-            let runner = BoxRunner::new(&java, &cp)?;
-            map.insert(cp.clone(), Mutex::new(runner));
+        if map.get(&cp).is_none_or(|r| !r.alive.load(Ordering::SeqCst)) {
+            map.insert(cp.clone(), Arc::new(BoxRunner::new(&java, &cp)?));
         }
-    }
-    let map = pool.lock().unwrap();
-    let runner_mx = map.get(&cp).unwrap();
-    let mut runner = runner_mx.lock().unwrap();
+        map.get(&cp).cloned()
+    };
+
+    let runner = get_runner()?;
     match runner.try_run(classes, box_class) {
         Ok(s) => Some(s),
         Err(_) => {
-            // Subprocess died (e.g. a JVM crash); restart it once and retry.
-            *runner = BoxRunner::new(&java, &cp)?;
-            runner.try_run(classes, box_class).ok()
+            // The JVM died or timed out. Replace the dead runner (if another thread hasn't already)
+            // and retry once on a fresh one.
+            {
+                let mut map = pool.lock().unwrap();
+                if map.get(&cp).is_some_and(|r| Arc::ptr_eq(r, &runner)) {
+                    map.remove(&cp);
+                }
+            }
+            let fresh = get_runner()?;
+            fresh.try_run(classes, box_class).ok()
         }
     }
 }
