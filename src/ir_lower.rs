@@ -7033,6 +7033,109 @@ impl<'a> Lower<'a> {
         })
     }
 
+    /// Lower a top-level function call that OMITS one or more defaulted arguments, via kotlinc's
+    /// `foo$default(realparams…, int mask, Object marker)` synthetic (`Callee::LocalDefault`, emitted by
+    /// `emit_facade_default_stub`). Each PROVIDED argument is evaluated in SOURCE order into a temp (so a
+    /// reordered named call keeps left-to-right side-effect order) and loaded in slot order; each OMITTED
+    /// slot gets a zero placeholder and its bit set in the mask; the marker is `null`. Used when the plain
+    /// call-site fill (`lower_args_defaulted`) can't handle the omission (a NON-const default). Returns
+    /// `None` (caller skips) if the labels don't map cleanly or an argument can't be lowered. `param_meta`
+    /// gives each parameter's (name, default) — a slot with no default that is omitted ⇒ `None` (can't
+    /// call `$default`).
+    fn lower_toplevel_default_call(
+        &mut self,
+        call: AstExprId,
+        fid: u32,
+        param_meta: &[(String, Option<AstExprId>)],
+        args: &[AstExprId],
+        ir_params: &[Ty],
+    ) -> Option<u32> {
+        let n = ir_params.len();
+        if args.len() > n || param_meta.len() != n {
+            return None;
+        }
+        // Only when a `$default` synthetic is actually emitted for `fid` (simple defaults, unmangled) —
+        // the same gate the emitter uses, so a routed call always has a target and the stub is sound.
+        if !crate::ir::toplevel_default_stub_safe(&self.ir, fid) {
+            return None;
+        }
+        // Map each source argument onto its parameter slot (label → named position; unlabelled → next
+        // free positional). `arg_slot[i]` is the slot source-argument `i` lands in.
+        let names = self.afile.call_arg_names.get(&call.0).cloned();
+        let mut slot: Vec<Option<AstExprId>> = vec![None; n];
+        let mut arg_slot: Vec<usize> = Vec::with_capacity(args.len());
+        let mut pos = 0usize;
+        for (i, &arg) in args.iter().enumerate() {
+            match names
+                .as_ref()
+                .and_then(|ns| ns.get(i))
+                .and_then(|o| o.as_ref())
+            {
+                None => {
+                    while pos < n && slot[pos].is_some() {
+                        pos += 1;
+                    }
+                    if pos >= n {
+                        return None;
+                    }
+                    slot[pos] = Some(arg);
+                    arg_slot.push(pos);
+                    pos += 1;
+                }
+                Some(nm) => {
+                    let idx = param_meta.iter().position(|(name, _)| name == nm)?;
+                    if slot[idx].is_some() {
+                        return None;
+                    }
+                    slot[idx] = Some(arg);
+                    arg_slot.push(idx);
+                }
+            }
+        }
+        // Every omitted slot must have a default (else `$default` can't fill it).
+        for (k, s) in slot.iter().enumerate() {
+            if s.is_none() && param_meta[k].1.is_none() {
+                return None;
+            }
+        }
+        // Provided arguments evaluated in SOURCE order into temps (preserving side-effect order).
+        let mut slot_temp: Vec<Option<u32>> = vec![None; n];
+        let mut prelude: Vec<u32> = Vec::new();
+        for (i, &arg) in args.iter().enumerate() {
+            let k = arg_slot[i];
+            let v = self.lower_arg(arg, &ir_params[k])?;
+            let tmp = self.fresh_value();
+            let decl = self.ir.add_expr(IrExpr::Variable {
+                index: tmp,
+                ty: ir_params[k],
+                init: Some(v),
+            });
+            prelude.push(decl);
+            slot_temp[k] = Some(tmp);
+        }
+        // Build the `$default` argument list in slot order: provided temp, or a zero placeholder for an
+        // omitted slot (with its mask bit set). Then the int mask and the null marker.
+        let mut a: Vec<u32> = Vec::with_capacity(n + 2);
+        let mut mask: i32 = 0;
+        for (k, item) in slot_temp.iter().enumerate() {
+            match item {
+                Some(tmp) => a.push(self.ir.add_expr(IrExpr::GetValue(*tmp))),
+                None => {
+                    mask |= 1i32 << k;
+                    a.push(self.zero_placeholder(ir_params[k]));
+                }
+            }
+        }
+        a.push(self.ir.add_expr(IrExpr::Const(IrConst::Int(mask))));
+        a.push(self.ir.add_expr(IrExpr::Const(IrConst::Null))); // omitted-default marker
+        let dcall = self.ir.add_expr(IrExpr::Call {
+            callee: Callee::LocalDefault(fid),
+            dispatch_receiver: None,
+            args: a,
+        });
+        Some(self.wrap_arg_prelude(dcall, prelude))
+    }
+
     /// Lower a NAMED-argument call to a same-file USER-class instance method (`z.test(b = …, a = …)`)
     /// whose parameters are all required (no defaults/varargs) and exactly supplied. Evaluates the
     /// RECEIVER first, then each argument in SOURCE order into a temp, then invokes the method with the
@@ -15884,13 +15987,21 @@ impl<'a> Lower<'a> {
                         if self.erased_generic_call_unmodeled(e, &fname) {
                             return None;
                         }
-                        let (a, prelude) = self.lower_args_defaulted(e, &meta, &args, &params)?;
-                        let call = self.ir.add_expr(IrExpr::Call {
-                            callee: Callee::Local(fid),
-                            dispatch_receiver: None,
-                            args: a,
-                        });
-                        let call = self.wrap_arg_prelude(call, prelude);
+                        // Fill omitted arguments from CONST-literal defaults at the call site; if that
+                        // bails (a NON-const/side-effecting omitted default), route through the
+                        // `foo$default(…, mask, marker)` synthetic (kotlinc's default-argument ABI).
+                        let call = if let Some((a, prelude)) =
+                            self.lower_args_defaulted(e, &meta, &args, &params)
+                        {
+                            let call = self.ir.add_expr(IrExpr::Call {
+                                callee: Callee::Local(fid),
+                                dispatch_receiver: None,
+                                args: a,
+                            });
+                            self.wrap_arg_prelude(call, prelude)
+                        } else {
+                            self.lower_toplevel_default_call(e, fid, &meta, &args, &params)?
+                        };
                         let ret = self.ir.functions[fid as usize].ret.clone();
                         // Whether the callee's DECLARED return is a bare type parameter (`fun <T> f(): T`)
                         // — only then is the erased return refined by the call-site static type.
