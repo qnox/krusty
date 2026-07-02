@@ -173,4 +173,121 @@ mod tests {
         let p = Ty::obj("demo/Point");
         assert_eq!(type_descriptor(Ty::nullable(p)), type_descriptor(p));
     }
+
+    #[test]
+    fn file_class_name_uppercases_stem_and_appends_kt() {
+        assert_eq!(file_class_name("foo", None), "FooKt");
+        // Already-uppercase first letter is kept.
+        assert_eq!(file_class_name("Foo", None), "FooKt");
+    }
+
+    #[test]
+    fn file_class_name_qualifies_with_package_path() {
+        assert_eq!(
+            file_class_name("foo", Some("com.example")),
+            "com/example/FooKt"
+        );
+        // An empty package is treated as none.
+        assert_eq!(file_class_name("foo", Some("")), "FooKt");
+    }
+
+    #[test]
+    fn file_class_name_sanitizes_illegal_class_chars() {
+        // `.`/`/` etc. are illegal in a JVM class name and become `_`.
+        assert_eq!(file_class_name("foo.1.0", None), "Foo_1_0Kt");
+        assert_eq!(file_class_name("a<b>c", None), "A_b_cKt");
+    }
+
+    #[test]
+    fn property_getter_name_handles_is_prefix_and_default() {
+        assert_eq!(property_getter_name("x"), "getX");
+        assert_eq!(property_getter_name("value"), "getValue");
+        // An `isFoo` boolean property keeps its name.
+        assert_eq!(property_getter_name("isOpen"), "isOpen");
+        // `is` not followed by an uppercase letter is an ordinary property.
+        assert_eq!(property_getter_name("island"), "getIsland");
+        // Degenerate empty name.
+        assert_eq!(property_getter_name(""), "get");
+    }
+
+    #[test]
+    fn property_setter_name_handles_is_prefix_and_default() {
+        assert_eq!(property_setter_name("x"), "setX");
+        // `isOpen` sets `setOpen` (the `is` prefix is dropped).
+        assert_eq!(property_setter_name("isOpen"), "setOpen");
+        assert_eq!(property_setter_name("island"), "setIsland");
+        assert_eq!(property_setter_name(""), "set");
+    }
+
+    #[test]
+    fn method_and_params_descriptor_compose_from_tys() {
+        assert_eq!(
+            method_descriptor(&[Ty::Int, Ty::Boolean], Ty::Unit),
+            "(IZ)V"
+        );
+        assert_eq!(method_descriptor(&[], Ty::Int), "()I");
+        assert_eq!(params_descriptor(&[Ty::Long, Ty::Double]), "JD");
+        assert_eq!(params_descriptor(&[]), "");
+    }
+
+    #[test]
+    fn type_descriptor_of_primitives_and_unit() {
+        assert_eq!(type_descriptor(Ty::Int), "I");
+        assert_eq!(type_descriptor(Ty::Byte), "B");
+        assert_eq!(type_descriptor(Ty::Short), "S");
+        assert_eq!(type_descriptor(Ty::Long), "J");
+        assert_eq!(type_descriptor(Ty::Float), "F");
+        assert_eq!(type_descriptor(Ty::Double), "D");
+        assert_eq!(type_descriptor(Ty::Boolean), "Z");
+        assert_eq!(type_descriptor(Ty::Char), "C");
+        assert_eq!(type_descriptor(Ty::Unit), "V");
+        // Unsigned inline classes erase to their signed primitive descriptor.
+        assert_eq!(type_descriptor(Ty::UInt), "I");
+        assert_eq!(type_descriptor(Ty::ULong), "J");
+    }
+
+    #[test]
+    fn type_descriptor_of_reference_and_bottom_types() {
+        assert_eq!(type_descriptor(Ty::String), "Ljava/lang/String;");
+        assert_eq!(type_descriptor(Ty::obj("demo/Point")), "Ldemo/Point;");
+        // `null`/`Nothing`/error all descriptor as `Object`.
+        assert_eq!(type_descriptor(Ty::Null), "Ljava/lang/Object;");
+        assert_eq!(type_descriptor(Ty::Nothing), "Ljava/lang/Object;");
+        assert_eq!(type_descriptor(Ty::Error), "Ljava/lang/Object;");
+    }
+
+    #[test]
+    fn type_descriptor_of_arrays() {
+        // A specialized primitive array class → its JVM array descriptor.
+        assert_eq!(type_descriptor(Ty::obj("kotlin/IntArray")), "[I");
+        assert_eq!(type_descriptor(Ty::obj("kotlin/CharArray")), "[C");
+        // A boxed `Array<Int>` boxes its element (`[Ljava/lang/Integer;`).
+        assert_eq!(
+            type_descriptor(Ty::obj_args("kotlin/Array", &[Ty::Int])),
+            "[Ljava/lang/Integer;"
+        );
+        // A raw `kotlin/Array` with no element defaults to `Array<Any>`.
+        assert_eq!(
+            type_descriptor(Ty::obj("kotlin/Array")),
+            "[Ljava/lang/Object;"
+        );
+        // An interned array type descriptors to `[<elem>`.
+        assert_eq!(
+            type_descriptor(Ty::array(Ty::String)),
+            "[Ljava/lang/String;"
+        );
+    }
+
+    #[test]
+    fn type_descriptor_of_function_types() {
+        assert_eq!(
+            type_descriptor(Ty::fun(vec![Ty::Int, Ty::Int], Ty::Int)),
+            "Lkotlin/jvm/functions/Function2;"
+        );
+        // A suspend function type gets one extra parameter (the continuation).
+        assert_eq!(
+            type_descriptor(Ty::fun_suspend(vec![Ty::Int], Ty::Unit)),
+            "Lkotlin/jvm/functions/Function2;"
+        );
+    }
 }

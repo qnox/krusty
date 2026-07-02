@@ -1046,6 +1046,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `resolve_top_level_callable` and confirms the owning facade sits in the receiver's package
   (`qualified_path`); the lowerer's `lower_fq_toplevel_call` mirrors this and emits the `invokestatic` to the
   facade (a vararg/defaulted/inline FQ call bails to a later slice). Test: `tests/fq_toplevel_call_e2e.rs`.
+- **A fully-qualified CONSTRUCTOR call via a package path `a.b.Ctx(x = 1, y = 2)`.** The constructor analog
+  of the FQ top-level call: `a.b` is a package and `Ctx` a top-level class of it. `qualified_nested_ctor_
+  internal` (checker) / `nested_ctor_internal` (lowerer) — which already resolved a two-segment nested type
+  `Outer.Nested` from a bare-`Name` receiver — now also resolve a dotted-package-path receiver (`Expr::Member`)
+  by joining `qualified_path(receiver)` with the name (`a/b/Ctx`), verified via `resolve_type`, then run the
+  existing named/positional/reordered/omitted-default classpath-ctor resolution + `<init>$default` synthetic.
+  Test: `tests/fq_ctor_call_e2e.rs`.
 - **A `const val` inside an `object`.** Kotlin inlines every const read; krusty now does the same — a
   pre-scan records each literal-valued object `const val` in `object_const_lits[(object internal, name)]`,
   and a read inlines the literal (unqualified inside the object's own methods via `cur_class`, and qualified

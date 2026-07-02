@@ -1211,4 +1211,167 @@ mod tests {
             "lambda-internal inline_body ref must NOT shift"
         );
     }
+
+    #[test]
+    fn ir_field_new_uses_kotlin_defaults() {
+        let f = IrField::new("x".to_string(), Ty::Int);
+        assert_eq!(f.name, "x");
+        assert_eq!(f.ty, Ty::Int);
+        assert_eq!(f.type_param, None);
+        assert_eq!(f.default, None);
+        // Kotlin default: private backing field, not known-final, not lateinit.
+        assert!(f.is_private);
+        assert!(!f.is_final);
+        assert!(!f.is_lateinit);
+    }
+
+    #[test]
+    fn arena_builders_append_and_index() {
+        let mut f = IrFile::default();
+        let a = f.add_expr(IrExpr::Const(IrConst::Int(1)));
+        let b = f.add_expr(IrExpr::Const(IrConst::Int(2)));
+        assert_eq!(a, 0);
+        assert_eq!(b, 1);
+        assert!(matches!(f.expr(a), IrExpr::Const(IrConst::Int(1))));
+
+        let fid = f.add_fun(IrFunction {
+            name: "g".to_string(),
+            params: vec![],
+            ret: Ty::Unit,
+            body: None,
+            is_static: true,
+            dispatch_receiver: None,
+            param_checks: Vec::new(),
+        });
+        assert_eq!(fid, 0);
+        let cid = f.add_class(IrClass {
+            fq_name: "demo/C".to_string(),
+            ..blank_class("demo/C")
+        });
+        assert_eq!(cid, 0);
+        assert_eq!(f.classes[cid as usize].fq_name, "demo/C");
+    }
+
+    #[test]
+    fn for_each_child_visits_every_direct_operand() {
+        let mut f = IrFile::default();
+        let lhs = f.add_expr(IrExpr::Const(IrConst::Int(1)));
+        let rhs = f.add_expr(IrExpr::Const(IrConst::Int(2)));
+        let bin = f.add_expr(IrExpr::PrimitiveBinOp {
+            op: IrBinOp::Add,
+            lhs,
+            rhs,
+        });
+        let mut kids = Vec::new();
+        for_each_child(&f.exprs, bin, &mut |c| kids.push(c));
+        assert_eq!(kids, vec![lhs, rhs]);
+
+        // A leaf node (Const) has no children.
+        let mut none = Vec::new();
+        for_each_child(&f.exprs, lhs, &mut |c| none.push(c));
+        assert!(none.is_empty());
+
+        // A block visits its statements then its value.
+        let blk = f.add_expr(IrExpr::Block {
+            stmts: vec![lhs, rhs],
+            value: Some(bin),
+        });
+        let mut bk = Vec::new();
+        for_each_child(&f.exprs, blk, &mut |c| bk.push(c));
+        assert_eq!(bk, vec![lhs, rhs, bin]);
+    }
+
+    /// A minimal well-formed `IrClass` for tests that only exercise fields/functions on the file.
+    fn blank_class(fq: &str) -> IrClass {
+        IrClass {
+            fq_name: fq.to_string(),
+            is_value: false,
+            type_param_bounds: Vec::new(),
+            type_params: Vec::new(),
+            supertypes: Vec::new(),
+            fields: Vec::new(),
+            serial_names: Vec::new(),
+            custom_serializer: None,
+            field_serializers: Vec::new(),
+            contextual_fields: Vec::new(),
+            ctor_param_count: 0,
+            ctor_args: Vec::new(),
+            init_body: None,
+            explicit_param_stores: false,
+            methods: Vec::new(),
+            is_interface: false,
+            is_annotation: false,
+            annotation_impl_of: None,
+            is_sealed: false,
+            is_abstract: false,
+            superclass: "kotlin/Any".to_string(),
+            super_args: Vec::new(),
+            enum_entries: Vec::new(),
+            enum_entry_of: None,
+            prop_ref: None,
+            func_ref: None,
+            bridges: Vec::new(),
+            interfaces: Vec::new(),
+            is_object: false,
+            is_companion: false,
+            companion_class: None,
+            secondary_ctors: Vec::new(),
+            has_primary_ctor: true,
+        }
+    }
+
+    fn add_toplevel_fn(f: &mut IrFile, name: &str, param: Ty) -> u32 {
+        f.add_fun(IrFunction {
+            name: name.to_string(),
+            params: vec![param],
+            ret: Ty::Unit,
+            body: None,
+            is_static: true,
+            dispatch_receiver: None,
+            param_checks: Vec::new(),
+        })
+    }
+
+    #[test]
+    fn toplevel_default_stub_safe_accepts_a_simple_constant_default() {
+        let mut f = IrFile::default();
+        let fid = add_toplevel_fn(&mut f, "greet", Ty::Int);
+        let def = f.add_expr(IrExpr::Const(IrConst::Int(5)));
+        f.fn_param_defaults.insert(fid, vec![Some(def)]);
+        assert!(toplevel_default_stub_safe(&f, fid));
+    }
+
+    #[test]
+    fn toplevel_default_stub_safe_rejects_mangled_and_missing_defaults() {
+        // A value-class-mangled name is rejected outright.
+        let mut f = IrFile::default();
+        let fid = add_toplevel_fn(&mut f, "greet-abc123", Ty::Int);
+        let def = f.add_expr(IrExpr::Const(IrConst::Int(5)));
+        f.fn_param_defaults.insert(fid, vec![Some(def)]);
+        assert!(!toplevel_default_stub_safe(&f, fid));
+
+        // No registered defaults at all → not safe (nothing to stub).
+        let mut g = IrFile::default();
+        let gid = add_toplevel_fn(&mut g, "hello", Ty::Int);
+        assert!(!toplevel_default_stub_safe(&g, gid));
+    }
+
+    #[test]
+    fn toplevel_default_stub_safe_rejects_overloaded_and_unsafe_default() {
+        // An overloaded top-level name can't route among $default synthetics.
+        let mut f = IrFile::default();
+        let fid = add_toplevel_fn(&mut f, "over", Ty::Int);
+        add_toplevel_fn(&mut f, "over", Ty::String);
+        let def = f.add_expr(IrExpr::Const(IrConst::Int(0)));
+        f.fn_param_defaults.insert(fid, vec![Some(def)]);
+        assert!(!toplevel_default_stub_safe(&f, fid));
+
+        // A default that reads a value index beyond the parameters is unsafe.
+        let mut g = IrFile::default();
+        let gid = add_toplevel_fn(&mut g, "spill", Ty::Int);
+        // Param count is 1; reading slot 3 is a spilled temp → rejected.
+        let bad = g.add_expr(IrExpr::GetValue(3));
+        g.fn_param_defaults.insert(gid, vec![Some(bad)]);
+        assert!(!toplevel_default_stub_safe(&g, gid));
+    }
 }
