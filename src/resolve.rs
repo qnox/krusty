@@ -8858,11 +8858,14 @@ impl<'a> Checker<'a> {
                     if let Some(fi) = module_member {
                         let params = fi.callable.params.clone();
                         let cs = &fi.call_sig;
-                        // Named or omitted arguments (a method with parameter defaults, e.g. data-class
-                        // `copy`): map by name/position via the parameter names, honouring `required`.
-                        if (arg_names.is_some() || arg_tys.len() != params.len())
-                            && cs.required < params.len()
-                            && !cs.param_names.is_empty()
+                        // Named or omitted arguments: map each argument onto its parameter position via the
+                        // parameter names (honouring `required`), then type-check against THAT parameter —
+                        // a NAMED call may reorder (`z.test(b = …, a = …)`), so a positional check would
+                        // pair each argument with the wrong parameter. Fires for any named call, and for an
+                        // omitted-argument call to a method with defaults.
+                        if !cs.param_names.is_empty()
+                            && (arg_names.is_some()
+                                || (arg_tys.len() != params.len() && cs.required < params.len()))
                         {
                             match map_call_args(
                                 args,
@@ -8887,9 +8890,9 @@ impl<'a> Checker<'a> {
                                     self.diags.error(span, format!("call to '{name}': {msg}"))
                                 }
                             }
-                            return fi.callable.ret;
-                        }
-                        if params.len() != arg_tys.len() {
+                            // Fall through to the shared return-type logic below (generic `<R>` inference /
+                            // `inferred_member_ret`) rather than returning the erased `fi.callable.ret`.
+                        } else if params.len() != arg_tys.len() {
                             self.diags.error(
                                 span,
                                 format!(
