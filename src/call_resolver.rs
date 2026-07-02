@@ -1577,6 +1577,36 @@ fn select_instance_info(
             return Some(o.clone());
         }
     }
+    // Fourth pass — JVM-descriptor form on BOTH sides, mirroring the constructor path
+    // (`resolve_constructor`). A parameter typed as a Kotlin COLLECTION erases in the method descriptor to
+    // its single JVM interface with the type argument dropped (`List<String>` → `Ljava/util/List;`), but the
+    // call passes the Kotlin type itself (`h.size(listOf("a"))` → arg `kotlin/collections/List<String>`).
+    // The exact/widened/subtype passes above all see `java/util/List` vs `kotlin/collections/List<String>`
+    // and miss. Normalizing both sides bridges the collection identity and erases type arguments, while
+    // keeping distinct interfaces distinct (`java/util/List` ≠ `java/util/Set`) and never coercing a scalar.
+    let jvm_args: Vec<Ty> = args
+        .iter()
+        .map(|a| lib.jvm_descriptor_form(*a).unwrap_or(*a))
+        .collect();
+    if jvm_args != args {
+        for members in by_rank.values() {
+            if let Some(o) = members.iter().copied().find(|o| {
+                o.callable.params.len() == jvm_args.len()
+                    && o.callable
+                        .params
+                        .iter()
+                        .zip(&jvm_args)
+                        .all(|(p, a)| lib.jvm_descriptor_form(*p).unwrap_or(*p) == *a)
+            }) {
+                crate::trace_compiler!(
+                    "resolve",
+                    "select_instance_info {} matched via jvm-descriptor-form args {args:?} -> {jvm_args:?}",
+                    o.callable.name
+                );
+                return Some(o.clone());
+            }
+        }
+    }
     None
 }
 

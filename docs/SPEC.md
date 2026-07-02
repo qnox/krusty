@@ -1033,6 +1033,20 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   keeps its plain erased `Ty` (mirrors the suspend/`resolve_ty` policy above). This is why `m[k] ?: continue`
   correctly skips absent keys. NOT a hardcoded method list — the flag is read from `@Metadata`. Test:
   `tests/map_get_nullable_elvis_e2e.rs`.
+- **A classpath method/interface member with a Kotlin-COLLECTION parameter (`fun size(items: List<String>):
+  Int`) resolves.** The JVM method descriptor erases a collection parameter to its single JVM interface
+  with the type argument dropped (`List<String>` → `Ljava/util/List;`), but the call passes the Kotlin type
+  itself (`h.size(listOf("a"))` → arg `kotlin/collections/List<String>`). The exact / `Any`-widened /
+  subtype overload passes in `select_instance_info` all compared `java/util/List` against
+  `kotlin/collections/List<String>` and missed → `unresolved method 'size' on 'lib/H'`. A final pass now
+  matches BOTH parameter and argument in their JVM-descriptor form (`SymbolSource::jvm_descriptor_form`),
+  bridging the collection identity and erasing type arguments — the METHOD analog of the constructor path
+  `resolve_constructor` already had. Runs LAST (after the specific passes) and only when an argument's form
+  actually changes (`jvm_args != args`), so it never alters existing overload selection, keeps distinct
+  interfaces distinct (`java/util/List` ≠ `java/util/Set`), and never coerces a scalar. This single root
+  covered two reported failures: a plain method with a `List<T>` param, and a `suspend` interface member
+  whose `get(ids: List<Int>): List<Info>` PARAM (not its return) was the actual unresolved-member cause.
+  Test: `tests/classpath_collection_param_member_e2e.rs`.
 - **A `suspend` body accessing a member of a suspend call's result inline (`suspend fun f(r) =
   r.all().size`).** The CPS flattener only meets a suspension at a bound-local / bare-statement position;
   a suspension nested in a `return`/member-access value must be pre-hoisted. `hoist_suspensions` now
