@@ -86,6 +86,97 @@ pub fn compile_in_process(
     }
 }
 
+/// Lower Kotlin `src` to backend-agnostic IR (`lex → parse → check → collect → ir_lower`), stopping
+/// before any JVM-specific pass — the exact input the alternate (`js`) backend consumes. Returns
+/// `None` on a front-end error (caller skips). Shares the same thread-local `Classpath` cache as
+/// `compile_in_process`.
+#[allow(dead_code)]
+pub fn lower_to_ir(
+    src: &str,
+    cp_jars: &[PathBuf],
+    jdk_modules: Option<&std::path::Path>,
+) -> Option<krusty::ir::IrFile> {
+    use krusty::diag::DiagSink;
+    use krusty::resolve::{check_file, collect_signatures_with_cp};
+
+    let mut diags = DiagSink::new();
+    let features = krusty::features::LangFeatures::from_source(src);
+    let toks = krusty::lexer::lex(src, &mut diags);
+    let files = vec![krusty::parser::parse_with_features(
+        src, &toks, &mut diags, &features,
+    )];
+    if diags.has_errors() {
+        return None;
+    }
+    let mut cp_paths: Vec<PathBuf> = cp_jars.to_vec();
+    if let Some(p) = jdk_modules {
+        cp_paths.push(p.to_path_buf());
+    }
+    let cp = std::rc::Rc::new(Classpath::new(cp_paths));
+    let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(cp));
+    let mut syms = collect_signatures_with_cp(&files, platform, &mut diags);
+    if diags.has_errors() {
+        return None;
+    }
+    let file = &files[0];
+    let info = check_file(file, &mut syms, &mut diags);
+    if diags.has_errors() {
+        return None;
+    }
+    krusty::ir_lower::lower_file(file, &info, &syms)
+}
+
+/// Run a JavaScript source string on Node and return its stdout (trimmed), or `None` if `node` is
+/// not on `PATH` (caller skips, exactly like a missing JVM). Used by the `js` backend e2e tests.
+#[allow(dead_code)]
+pub fn run_js(js: &str) -> Option<String> {
+    let node = which_node()?;
+    let dir = std::env::temp_dir().join(format!("krusty_js_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join(format!("m_{:x}.mjs", hash_str(js)));
+    std::fs::write(&path, js).ok()?;
+    // Bound wall time via `timeout` so a miscompiled loop can't hang the suite forever (exit 124).
+    let out = Command::new("timeout")
+        .arg("15s")
+        .arg(&node)
+        .arg(&path)
+        .output()
+        .ok()?;
+    let _ = std::fs::remove_file(&path);
+    if !out.status.success() {
+        let code = out.status.code().unwrap_or(-1);
+        let tag = if code == 124 { "TIMEOUT" } else { "ERROR" };
+        return Some(format!(
+            "{tag}:{}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+fn which_node() -> Option<PathBuf> {
+    if let Ok(p) = std::env::var("KRUSTY_NODE") {
+        if !p.is_empty() && Path::new(&p).exists() {
+            return Some(PathBuf::from(p));
+        }
+    }
+    for dir in std::env::var("PATH").ok()?.split(':') {
+        let cand = Path::new(dir).join("node");
+        if cand.exists() {
+            return Some(cand);
+        }
+    }
+    None
+}
+
+fn hash_str(s: &str) -> u64 {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for b in s.bytes() {
+        h = (h ^ b as u64).wrapping_mul(0x100000001b3);
+    }
+    h
+}
+
 // The Kotlin toolchain jar location (stdlib family + Maven fallback + JDK modules) lives in the
 // library (`krusty::toolchain`) so the box-corpus `survey` binary builds the SAME `-classpath` these
 // tests do — one implementation, no drift. Re-exported here under the names the test files already use.
