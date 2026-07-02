@@ -8139,9 +8139,13 @@ impl<'a> Checker<'a> {
     /// federated class-name seed (default/same-package/wildcard imports). Used to reach a classpath type's
     /// `@Metadata` (e.g. constructor parameter names) from a simple-name constructor call.
     fn classpath_class_internal(&self, name: &str) -> Option<String> {
-        self.imports
-            .get(name)
-            .cloned()
+        // Resolve through the same NESTED-type rewrite the positional-construction path uses: an
+        // unqualified nested-type import (`import lib.Op.Apply`) stores the flat `lib/Op/Apply`, but the
+        // class is `lib/Op$Apply`. `imported_type_internal` applies the `/`→`$` recovery (and wildcard
+        // imports), so a NAMED constructor call on such an import (`Apply(a = 1)`) resolves its ctor
+        // parameter names the same way the positional form already resolves the class.
+        self.imported_type_internal(name)
+            .or_else(|| self.imports.get(name).cloned())
             .or_else(|| self.syms.class_names.get(name).cloned())
     }
 
