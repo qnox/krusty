@@ -290,4 +290,47 @@ mod tests {
             "Lkotlin/jvm/functions/Function2;"
         );
     }
+
+    #[test]
+    fn method_descriptor_with_reference_params_and_return() {
+        // Reference params/returns map through `to_jvm_internal` (kotlin/String → java/lang/String).
+        assert_eq!(
+            method_descriptor(&[Ty::String, Ty::obj("demo/Point")], Ty::String),
+            "(Ljava/lang/String;Ldemo/Point;)Ljava/lang/String;"
+        );
+        // A reference return with only primitive params.
+        assert_eq!(
+            method_descriptor(&[Ty::Int], Ty::obj("demo/Point")),
+            "(I)Ldemo/Point;"
+        );
+    }
+
+    #[test]
+    fn type_descriptor_of_nested_arrays_nests_the_brackets() {
+        // An interned `Array<Array<Int>>` yields `[[I`.
+        assert_eq!(type_descriptor(Ty::array(Ty::array(Ty::Int))), "[[I");
+        // Object element arrays nest their `L…;` element.
+        assert_eq!(
+            type_descriptor(Ty::array(Ty::array(Ty::String))),
+            "[[Ljava/lang/String;"
+        );
+    }
+
+    #[test]
+    fn property_accessor_names_with_short_is_prefix() {
+        // Bare `is` (length 2, no following uppercase) is treated as an ordinary property.
+        assert_eq!(property_getter_name("is"), "getIs");
+        assert_eq!(property_setter_name("is"), "setIs");
+        // A single letter uppercases correctly.
+        assert_eq!(property_getter_name("a"), "getA");
+        assert_eq!(property_setter_name("a"), "setA");
+    }
+
+    #[test]
+    fn file_class_name_sanitizes_semicolon_bracket_and_colon() {
+        assert_eq!(file_class_name("a;b[c", None), "A_b_cKt");
+        assert_eq!(file_class_name("ns:name", None), "Ns_nameKt");
+        // A leading illegal char is sanitized then uppercased (no-op for `_`).
+        assert_eq!(file_class_name("/root", None), "_rootKt");
+    }
 }

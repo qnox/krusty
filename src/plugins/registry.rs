@@ -354,4 +354,106 @@ mod tests {
         assert_eq!(resolved.native.plugin_names(), vec!["vendor.noop"]);
         assert!(!resolved.has_errors());
     }
+
+    #[test]
+    fn diagnostic_is_error_only_for_unsupported() {
+        let native = PluginDiagnostic::NativeSubstitution {
+            plugin_id: "x".into(),
+            jar: None,
+        };
+        let hosted = PluginDiagnostic::Hosted {
+            plugin_id: "x".into(),
+        };
+        let unsupported = PluginDiagnostic::Unsupported { plugin: "x".into() };
+        assert!(!native.is_error());
+        assert!(!hosted.is_error());
+        assert!(unsupported.is_error());
+    }
+
+    #[test]
+    fn native_substitution_message_mentions_jar_only_when_present() {
+        let with_jar = PluginDiagnostic::NativeSubstitution {
+            plugin_id: "org.jetbrains.kotlinx.serialization".into(),
+            jar: Some("/k/serial.jar".into()),
+        }
+        .message();
+        assert!(with_jar.contains("org.jetbrains.kotlinx.serialization"));
+        assert!(with_jar.contains("/k/serial.jar"));
+        assert!(with_jar.contains("not executed"));
+
+        let no_jar = PluginDiagnostic::NativeSubstitution {
+            plugin_id: "org.jetbrains.kotlinx.serialization".into(),
+            jar: None,
+        }
+        .message();
+        assert!(no_jar.contains("org.jetbrains.kotlinx.serialization"));
+        // With no jar the interpolation is empty — no stray quoted path.
+        assert!(!no_jar.contains(".jar"));
+    }
+
+    #[test]
+    fn hosted_message_names_the_plugin() {
+        let msg = PluginDiagnostic::Hosted {
+            plugin_id: KSP_PLUGIN_ID.into(),
+        }
+        .message();
+        assert!(msg.contains(KSP_PLUGIN_ID));
+        assert!(msg.contains("sidecar"));
+    }
+
+    #[test]
+    fn new_registry_is_empty_then_open_to_registration() {
+        let mut r = PluginRegistry::new();
+        assert!(!r.is_registered(SERIALIZATION_PLUGIN_ID));
+        r.register(RegisteredExtension {
+            plugin_id: "vendor.x",
+            jar_marker: "vendor-x",
+            kind: ExtensionKind::CodegenHost,
+        });
+        assert!(r.is_registered("vendor.x"));
+        assert!(!r.is_registered("vendor.y"));
+    }
+
+    #[test]
+    fn basename_strips_both_path_separators() {
+        assert_eq!(basename("/a/b/c.jar"), "c.jar");
+        assert_eq!(basename("a\\b\\c.jar"), "c.jar");
+        assert_eq!(basename("bare.jar"), "bare.jar");
+        assert_eq!(basename(""), "");
+    }
+
+    #[test]
+    fn jar_matching_finds_by_basename_marker() {
+        let c = cfg(&[
+            "-Xplugin=/k/kotlinx-serialization-compiler-plugin.jar",
+            "-Xplugin=/k/symbol-processing.jar",
+        ]);
+        assert_eq!(
+            jar_matching(&c, "serialization"),
+            Some("/k/kotlinx-serialization-compiler-plugin.jar".to_string())
+        );
+        assert_eq!(
+            jar_matching(&c, "symbol-processing"),
+            Some("/k/symbol-processing.jar".to_string())
+        );
+        assert_eq!(jar_matching(&c, "no-such-marker"), None);
+    }
+
+    #[test]
+    fn duplicate_unsupported_p_ids_are_flagged_once() {
+        // The same unknown plugin id appearing in multiple -P options is reported a single time.
+        let c = cfg(&[
+            "-P",
+            "plugin:vendor.unknown:a=1",
+            "-P",
+            "plugin:vendor.unknown:b=2",
+        ]);
+        let resolved = PluginRegistry::with_builtins().resolve(&activation(&c, &[]));
+        let unsupported = resolved
+            .diagnostics
+            .iter()
+            .filter(|d| matches!(d, PluginDiagnostic::Unsupported { .. }))
+            .count();
+        assert_eq!(unsupported, 1);
+    }
 }
