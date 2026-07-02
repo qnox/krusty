@@ -3224,6 +3224,111 @@ fn class_tparams(file: &ast::File, c: &ast::ClassDecl) -> Vec<(String, Ty, bool)
 /// A `const val`'s compile-time literal initializer as an `IrConst`, narrowed to its declared type
 /// (`const val b: Byte = 1` → `Byte(1)`). `None` for any non-literal initializer (then the read stays a
 /// `getstatic`). Lets a same-file const read inline the value (`ldc`), byte-identical to kotlinc.
+/// Whether every `break`/`continue` EXPRESSION in `e` sits in a TAIL position — one where the operand
+/// stack is empty at the jump (an elvis RHS, an `if`/`when`-branch value, a block's trailing value). A
+/// `break`/`continue` used mid-expression (`x + break`, `inc() downTo continue`, `while (break)`) would
+/// jump with values still on the operand stack, which krusty's emitter does not clear (a VerifyError), so
+/// such a body is declined (the file skips) rather than miscompiled; the common tail forms compile.
+fn break_continue_tail_only(file: &ast::File, e: AstExprId, tail: bool) -> bool {
+    match file.expr(e) {
+        Expr::Break { .. } | Expr::Continue { .. } => tail,
+        Expr::Elvis { lhs, rhs } => {
+            break_continue_tail_only(file, *lhs, false)
+                && break_continue_tail_only(file, *rhs, tail)
+        }
+        Expr::If {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            break_continue_tail_only(file, *cond, false)
+                && break_continue_tail_only(file, *then_branch, tail)
+                && else_branch.is_none_or(|b| break_continue_tail_only(file, b, tail))
+        }
+        Expr::When { subject, arms } => {
+            subject.is_none_or(|s| break_continue_tail_only(file, s, false))
+                && arms.iter().all(|a| {
+                    a.conditions
+                        .iter()
+                        .all(|&c| break_continue_tail_only(file, c, false))
+                        && break_continue_tail_only(file, a.body, tail)
+                })
+        }
+        Expr::Block { stmts, trailing } => {
+            stmts
+                .iter()
+                .all(|&s| break_continue_stmt_tail_only(file, s))
+                && trailing.is_none_or(|t| break_continue_tail_only(file, t, tail))
+        }
+        // Any other expression's children evaluate with their values on the operand stack — a
+        // `break`/`continue` there is NOT in tail position.
+        _ => {
+            let ok = std::cell::Cell::new(true);
+            file.any_child_expr(
+                e,
+                &mut |c| {
+                    if !break_continue_tail_only(file, c, false) {
+                        ok.set(false);
+                    }
+                    false
+                },
+                &mut |s| {
+                    if !break_continue_stmt_tail_only(file, s) {
+                        ok.set(false);
+                    }
+                    false
+                },
+            );
+            ok.get()
+        }
+    }
+}
+
+fn break_continue_stmt_tail_only(file: &ast::File, s: ast::StmtId) -> bool {
+    match file.stmt(s) {
+        Stmt::Local { init, .. } | Stmt::Destructure { init, .. } => {
+            break_continue_tail_only(file, *init, true)
+        }
+        Stmt::LocalDelegate { delegate, .. } => break_continue_tail_only(file, *delegate, true),
+        Stmt::Assign { value, .. } => break_continue_tail_only(file, *value, true),
+        Stmt::AssignMember {
+            receiver, value, ..
+        } => {
+            break_continue_tail_only(file, *receiver, false)
+                && break_continue_tail_only(file, *value, true)
+        }
+        Stmt::AssignIndex {
+            array,
+            index,
+            value,
+        } => {
+            break_continue_tail_only(file, *array, false)
+                && break_continue_tail_only(file, *index, false)
+                && break_continue_tail_only(file, *value, true)
+        }
+        // A loop CONDITION / range is a dirty (non-tail) position (`while (break)`); the body is scanned
+        // like any block.
+        Stmt::While { cond, body, .. } | Stmt::DoWhile { body, cond, .. } => {
+            break_continue_tail_only(file, *cond, false)
+                && break_continue_tail_only(file, *body, true)
+        }
+        Stmt::For { range, body, .. } => {
+            break_continue_tail_only(file, range.start, false)
+                && break_continue_tail_only(file, range.end, false)
+                && break_continue_tail_only(file, *body, true)
+        }
+        Stmt::ForEach { iterable, body, .. } => {
+            break_continue_tail_only(file, *iterable, false)
+                && break_continue_tail_only(file, *body, true)
+        }
+        Stmt::Return(Some(e), _) => break_continue_tail_only(file, *e, true),
+        Stmt::Expr(e) => break_continue_tail_only(file, *e, true),
+        // No hosted expression (a bare `break`/`continue`/`return`, `lateinit`), or a nested local
+        // function whose `break`/`continue` is scoped to its own loops — nothing unsafe at this level.
+        _ => true,
+    }
+}
+
 fn ast_literal_const(file: &ast::File, e: AstExprId, ty: Ty) -> Option<crate::ir::IrConst> {
     use crate::ir::IrConst;
     use ast::Expr;
@@ -10434,6 +10539,15 @@ impl<'a> Lower<'a> {
     }
 
     fn lower_body(&mut self, body: &FunBody, ret_ty: &Ty, fid: u32) -> Option<()> {
+        // A `break`/`continue` used in a NON-tail expression position (`x + break`, a loop condition)
+        // jumps with operand-stack values the emitter doesn't clear — decline the body (skip, never
+        // miscompile). The common tail forms (an elvis RHS, a `when` arm) compile.
+        if let FunBody::Expr(be) | FunBody::Block(be) = body {
+            if !break_continue_tail_only(self.afile, *be, true) {
+                set_bail("break/continue in non-tail expression position");
+                return None;
+            }
+        }
         let prev_shared_cell_vars = std::mem::replace(
             &mut self.shared_cell_vars,
             shared_cell_vars_for_body(self.afile, body, self.info),
@@ -13233,6 +13347,21 @@ impl<'a> Lower<'a> {
                     None => None,
                 };
                 self.ir.add_expr(IrExpr::Return(v))
+            }
+            // `break`/`continue` in expression position (`m[k] ?: continue`) — the same loop jump as the
+            // statement form, lowered to `IrExpr::Break`/`Continue`. A pending `finally` between the jump
+            // and its loop isn't modeled here (as for a `return`), so bail then.
+            Expr::Break { label } => {
+                if !self.try_finally_stack.is_empty() {
+                    return None;
+                }
+                self.ir.add_expr(IrExpr::Break { label })
+            }
+            Expr::Continue { label } => {
+                if !self.try_finally_stack.is_empty() {
+                    return None;
+                }
+                self.ir.add_expr(IrExpr::Continue { label })
             }
             // `try { … } catch (e: E) { … } … [finally { f }]` (nested try already rejected by checker).
             Expr::Try {

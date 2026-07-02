@@ -1053,6 +1053,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   by joining `qualified_path(receiver)` with the name (`a/b/Ctx`), verified via `resolve_type`, then run the
   existing named/positional/reordered/omitted-default classpath-ctor resolution + `<init>$default` synthetic.
   Test: `tests/fq_ctor_call_e2e.rs`.
+- **`break` / `continue` in EXPRESSION position (`val v = x ?: continue`, a `when` arm).** Kotlin's
+  `break`/`continue` are `Nothing`-typed expressions (like `return`/`throw`), not only statements — new
+  `Expr::Break`/`Expr::Continue` (parsed in `parse_prefix`, typed `Ty::Nothing`, `expr_diverges`), lowered
+  to the same `IrExpr::Break`/`Continue` loop jump as the statement form. They are supported only in a TAIL
+  position (an elvis RHS, an `if`/`when`-branch value, a block's trailing value), where the operand stack
+  is empty at the jump; a `break`/`continue` used mid-expression (`x + break`, `inc() downTo continue`,
+  `while (break)`) would jump with operand-stack values krusty's emitter doesn't clear, so
+  `break_continue_tail_only` (a `lower_body` pre-scan) declines that body (skip, never miscompile). Test:
+  `tests/break_continue_expr_e2e.rs`.
 - **A default PARAMETER whose default VALUE is an object construction (`fun list(f: F = F(), n: Int = 2)`),
   called omitting that argument.** The `foo$default` synthetic stub re-emits an omitted parameter's default
   expression, so `toplevel_default_stub_safe` now ACCEPTS a plain `new`/object construction default (it was

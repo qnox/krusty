@@ -4311,6 +4311,34 @@ impl<'a> Parser<'a> {
                 .file
                 .add_expr(Expr::Throw { operand }, Span::new(start.lo, end.hi));
         }
+        // `break`/`continue` (with an optional `@label`) in EXPRESSION position (`m[k] ?: continue`, a
+        // `when` arm). Soft keywords (Ident), like `throw`; bottom type `Nothing`. A statement-position
+        // `break`/`continue` is handled earlier in `parse_stmt` (→ `Stmt::Break`/`Continue`).
+        if self.at(TokenKind::Ident) && (self.text() == "break" || self.text() == "continue") {
+            let is_break = self.text() == "break";
+            let mut end = self.tok().span; // the `break`/`continue` token
+            self.bump(); // 'break' / 'continue'
+            let label = if self.at(TokenKind::At) {
+                self.bump();
+                if self.at(TokenKind::Ident) {
+                    let l = self.text().to_string();
+                    end = self.tok().span; // the label token
+                    self.bump();
+                    Some(l)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            let sp = Span::new(start.lo, end.hi);
+            let e = if is_break {
+                Expr::Break { label }
+            } else {
+                Expr::Continue { label }
+            };
+            return self.file.add_expr(e, sp);
+        }
         // `return`/`return@label value` in expression position (`x ?: return null`).
         if self.at(TokenKind::KwReturn) {
             self.bump(); // 'return'

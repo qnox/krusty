@@ -4922,7 +4922,10 @@ impl<'a> Checker<'a> {
     /// exit does). Used to detect early-return guards for smart-casting the rest of a block.
     fn expr_diverges(&self, e: ExprId) -> bool {
         match self.file.expr(e) {
-            Expr::Throw { .. } | Expr::Return { .. } => true,
+            Expr::Throw { .. }
+            | Expr::Return { .. }
+            | Expr::Break { .. }
+            | Expr::Continue { .. } => true,
             Expr::Block { stmts, trailing } => {
                 if let Some(te) = trailing {
                     self.expr_diverges(*te)
@@ -5792,6 +5795,10 @@ impl<'a> Checker<'a> {
                 }
                 Ty::Nothing
             }
+            // `break`/`continue` in expression position (`m[k] ?: continue`) — a jump; bottom type
+            // `Nothing` (like `return`/`throw`), so it fits any expected type (the elvis result type is
+            // the non-null LHS).
+            Expr::Break { .. } | Expr::Continue { .. } => Ty::Nothing,
             Expr::Lambda { params, body } => {
                 // A lambda literal `{ a, b -> body }` — type is `Fun(arity)`. With no explicit
                 // parameters but a body referencing `it`, bind the implicit single parameter.
