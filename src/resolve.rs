@@ -716,6 +716,30 @@ fn wildcard_candidate(pkg: &str, name: &str) -> String {
 /// actually EXISTS, treating trailing path segments as NESTED classes (`lib/Outer$Ws`) — convert `/` → `$`
 /// from the RIGHT until `resolve_type` finds it. Returns the input unchanged when it already resolves. The
 /// signature-phase free-function twin of the checker's `Checker::nested_internal`.
+/// Signature-phase twin of the checker's `Checker::object_member_import`: if `name` is imported from a
+/// classpath `object` (`import a.b.Obj.name`), the object's internal name — so the light initializer
+/// inference can type an unqualified object-member call (`val logger = logger {}`). Recovers a nested
+/// owner (`a/b/Outer/Obj` → `a/b/Outer$Obj`) via `resolve_type`, since only [`SymbolSource`] is available
+/// here (not the richer `CompilerPlatform` `resolve_nested_internal` needs).
+fn object_member_import_sig(file: &File, name: &str, src: &dyn SymbolSource) -> Option<String> {
+    let suffix = format!(".{name}");
+    let fq = file
+        .imports
+        .iter()
+        .find(|i| !i.ends_with(".*") && i.ends_with(&suffix))?;
+    let owner_path = fq[..fq.len() - suffix.len()].replace('.', "/");
+    let mut cand = owner_path;
+    loop {
+        if src.resolve_type(&cand).is_some_and(|t| t.is_object()) {
+            return Some(cand);
+        }
+        match cand.rfind('/') {
+            Some(pos) => cand.replace_range(pos..=pos, "$"),
+            None => return None,
+        }
+    }
+}
+
 fn resolve_nested_internal(internal: &str, libraries: &dyn CompilerPlatform) -> Option<String> {
     if libraries.resolve_type(internal).is_some() {
         return Some(internal.to_string());
@@ -2847,6 +2871,14 @@ fn infer_lit_ty_p(
                     if let Some(t) = resolved_ret(src, n, None) {
                         return t;
                     }
+                    // A member of a classpath OBJECT imported unqualified (`import Obj.member`; the
+                    // top-level `val logger = logger {}` idiom): resolve the member's return on the
+                    // object's singleton type — mirroring the checker's `object_member_import`.
+                    if let Some(internal) = object_member_import_sig(file, n, src) {
+                        if let Some(t) = resolved_ret(src, n, Some(Ty::obj(&internal))) {
+                            return t;
+                        }
+                    }
                     // A GENERIC top-level function whose return type depends on its arguments
                     // (`arrayOf("a","b")` → `Array<String>`, `mapOf(1 to "x")` → `Map<Int,String>`):
                     // the return-agreement probe above can't decide it (the erased return is the same
@@ -3395,6 +3427,11 @@ pub enum ExprLowering {
     Lambda(LambdaInfo),
     /// A classpath `object` used as a value. Lowering emits `getstatic <internal>.INSTANCE`.
     ObjectValue { internal: String },
+    /// A bare-name call `m(args)` resolved to a MEMBER function of a classpath `object` that was imported
+    /// unqualified (`import Obj.m; m()`). Kotlin dispatches this on the singleton, so lowering reads
+    /// `getstatic <internal>.INSTANCE` as the receiver and invokes the member — the same shape a qualified
+    /// `Obj.m(args)` produces (a receiver whose [`ObjectValue`] lowering names `internal`).
+    ObjectMemberCall { internal: String },
     /// A `this@Label` that denotes the INNERMOST receiver (the current `this`), so it lowers as a bare
     /// `this`. Only recorded for the innermost match; an outer-receiver label is left unresolved/skipped.
     LabeledThisInner,
@@ -8149,6 +8186,24 @@ impl<'a> Checker<'a> {
             .or_else(|| self.syms.class_names.get(name).cloned())
     }
 
+    /// If `name` is imported from a classpath `object` (`import a.b.Obj.member` → `imports[member] =
+    /// a/b/Obj/member`), the object's internal name — so an unqualified call `member(args)` can dispatch
+    /// on the singleton. `None` unless the import's owner path resolves to an object carrying a member of
+    /// this name (the owner-value lowering, `getstatic Obj.INSTANCE`, requires a plain object INSTANCE).
+    fn object_member_import(&self, name: &str) -> Option<String> {
+        let full = self.imports.get(name)?;
+        let (owner_path, member) = full.rsplit_once('/')?;
+        if member != name {
+            return None;
+        }
+        let owner = self.nested_internal(owner_path)?;
+        self.syms
+            .libraries
+            .resolve_type(&owner)
+            .filter(|t| t.is_object())
+            .map(|_| owner)
+    }
+
     /// Primary-constructor parameter names of a same-file class, in declaration order (parallel to
     /// `ClassSig::ctor_params`/`ctor_defaults`) — for mapping named constructor arguments. `None` if
     /// `class_name` isn't a same-file class with a primary constructor.
@@ -8479,9 +8534,12 @@ impl<'a> Checker<'a> {
                     return Ty::Error;
                 }
                 // Java static call: `ClassName.method(args)` where ClassName is an imported class
-                // (not a local/param) resolvable on the classpath.
+                // (not a local/param) resolvable on the classpath. A top-level PROPERTY of the same name
+                // shadows the type/import in value position (`private val logger = logger {}; logger.info()`
+                // — `logger` is the KLogger value, not the imported `logger` symbol), so skip the static
+                // path and let the receiver resolve as that property value below.
                 if let Expr::Name(cls) = self.file.expr(receiver).clone() {
-                    if self.lookup(&cls).is_none() {
+                    if self.lookup(&cls).is_none() && !self.syms.props.contains_key(&cls) {
                         // `ClassName.fn(args)` — a companion (static) method call.
                         if let Some(sig) = self
                             .syms
@@ -10423,6 +10481,28 @@ impl<'a> Checker<'a> {
                             }
                             return self.ctor_result(call, &cls.internal);
                         }
+                    }
+                }
+                // An unqualified call to a MEMBER function of a classpath `object` imported through
+                // `import Obj.member` (`private val logger = logger {}`, kotlin-logging's idiom). The
+                // positional import stores `Obj/member`; if the owner is an object with a matching member,
+                // Kotlin dispatches on the singleton — record the object so LOWERING emits
+                // `getstatic Obj.INSTANCE; invokevirtual`. Args (including a trailing lambda) were typed
+                // above, so `resolve_instance_member` selects the overload.
+                if let Some(internal) = self.object_member_import(&fname) {
+                    if let Some(m) = crate::call_resolver::resolve_instance_member(
+                        &*self.syms.libraries,
+                        Ty::obj(&internal),
+                        &fname,
+                        &arg_tys,
+                    ) {
+                        crate::trace_compiler!(
+                            "resolve",
+                            "unqualified object-member import {fname}() -> {internal}.{fname}"
+                        );
+                        self.expr_lowers
+                            .insert(call, ExprLowering::ObjectMemberCall { internal });
+                        return m.ret;
                     }
                 }
                 self.diags

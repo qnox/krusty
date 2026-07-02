@@ -3703,6 +3703,51 @@ impl<'a> Lower<'a> {
         self.ir.add_expr(platform_field_expr(field))
     }
 
+    /// Lower a bare-name call to a classpath `object` member imported unqualified (`import Obj.m; m(args)`,
+    /// recorded by the checker as [`ExprLowering::ObjectMemberCall`]). Reads the singleton
+    /// (`getstatic Obj.INSTANCE`) as the dispatch receiver and invokes the member — the same shape a
+    /// qualified `Obj.m(args)` lowers to. `call_expr` is the AST call, for generic-return coercion.
+    fn lower_object_member_call(
+        &mut self,
+        internal: String,
+        name: &str,
+        args: &[AstExprId],
+        call_expr: AstExprId,
+    ) -> Option<u32> {
+        let arg_tys: Vec<Ty> = args.iter().map(|&a| self.info.ty(a)).collect();
+        let m = crate::call_resolver::resolve_instance(
+            &*self.syms.libraries,
+            &internal,
+            name,
+            &arg_tys,
+        )?;
+        let owner = m.owner.clone().unwrap_or_else(|| internal.clone());
+        let is_iface = self.library_type_is_interface(&owner);
+        let field = self.syms.libraries.object_instance_field(&internal)?;
+        let recv = self.platform_static_field(field);
+        let mut a = Vec::new();
+        for (i, &arg) in args.iter().enumerate() {
+            match m.params.get(i) {
+                Some(p) => a.push(self.lower_arg(arg, &ty_to_ir(*p))?),
+                None => a.push(self.expr(arg)?),
+            }
+        }
+        let call = self.ir.add_expr(IrExpr::Call {
+            callee: Callee::Virtual {
+                owner,
+                name: m.name,
+                descriptor: m.descriptor,
+                interface: is_iface,
+            },
+            dispatch_receiver: Some(recv),
+            args: a,
+        });
+        if m.suspend {
+            self.ir.suspend_calls.insert(call, ty_to_ir(m.ret));
+        }
+        Some(self.coerce_generic_read(call, call_expr, m.ret))
+    }
+
     fn mutable_local_ref_type(&self, elem: Ty) -> Option<Ty> {
         self.syms.libraries.mutable_local_ref_type(elem)
     }
@@ -15759,6 +15804,14 @@ impl<'a> Lower<'a> {
             Expr::Call { callee, args } => match self.afile.expr(callee).clone() {
                 // Local top-level function, or constructor `C(args)`.
                 Expr::Name(fname) => {
+                    // An unqualified call to a classpath `object` MEMBER imported via `import Obj.member`
+                    // (`logger {}`): the checker recorded the object. Dispatch on the singleton — read
+                    // `getstatic Obj.INSTANCE` as the receiver and invoke the member.
+                    if let Some(ExprLowering::ObjectMemberCall { internal }) =
+                        self.info.expr_lowers.get(&e)
+                    {
+                        return self.lower_object_member_call(internal.clone(), &fname, &args, e);
+                    }
                     // NAMED-ARGUMENT call to a CLASSPATH top-level function (`foo(b = …, a = …)`): reorder
                     // the arguments into parameter order (from the callee's `@Metadata` names) so the
                     // positional lowering below sees them positionally. Same-file/module functions have
