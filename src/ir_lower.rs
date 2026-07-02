@@ -10203,6 +10203,16 @@ impl<'a> Lower<'a> {
             // A dotted CLASSPATH nested type (`Subject.User`) → `Outer$Nested`, matching the checker's
             // `resolve_ty` — so an `is`/`as` target on such a type resolves the same internal name.
             Ty::obj(&internal)
+        } else if let Some(internal) = self
+            .cur_class
+            .as_ref()
+            .map(|c| format!("{c}${}", r.name))
+            .filter(|n| self.classes.contains_key(n))
+        {
+            // A sibling nested type unqualified within the enclosing class body (`is Inner`/`as Inner` /
+            // `Inner` type in `class Outer { class Inner }`) → `Outer$Inner`, matching the checker's
+            // nested-type scoping (`resolve_ty`/`resolve_ty_no_diag`).
+            Ty::obj(&internal)
         } else {
             return None;
         };

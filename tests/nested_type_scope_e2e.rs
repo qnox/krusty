@@ -33,6 +33,30 @@ fun box(): String = Outer().go()\n";
 }
 
 #[test]
+fn nested_type_as_is_smartcast_target() {
+    // `is Inner` (and the smart-cast) narrows `a` to the nested type, so `a.v()` resolves.
+    const SRC: &str = "class Outer {\n\
+    class Inner { fun v() = \"OK\" }\n\
+    fun m(a: Any): String = if (a is Inner) a.v() else \"F\"\n\
+    fun go(): String = m(Inner())\n\
+}\n\
+fun box(): String = Outer().go()\n";
+    assert_eq!(run(SRC).expect("nested type as is-smartcast"), "OK");
+}
+
+#[test]
+fn nested_type_as_cast_target() {
+    // `as Inner` on a nested type.
+    const SRC: &str = "class Outer {\n\
+    class Inner { fun v() = \"OK\" }\n\
+    fun m(a: Any): String = (a as Inner).v()\n\
+    fun go(): String = m(Inner())\n\
+}\n\
+fun box(): String = Outer().go()\n";
+    assert_eq!(run(SRC).expect("nested type as cast target"), "OK");
+}
+
+#[test]
 fn nested_type_as_return_type() {
     const SRC: &str = "class Outer {\n\
     class Inner(val s: String)\n\
