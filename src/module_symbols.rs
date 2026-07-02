@@ -328,6 +328,7 @@ mod tests {
             ctor_params: vec![],
             methods: HashMap::new(),
             is_interface: false,
+            is_abstract: false,
             is_fun_interface: false,
             is_sealed: false,
             inner_of: None,
