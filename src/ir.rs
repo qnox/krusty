@@ -1067,6 +1067,18 @@ pub fn toplevel_default_stub_safe(ir: &IrFile, fid: u32) -> bool {
     {
         return false;
     }
+    // An OVERLOADED top-level function (same name, multiple facade overloads) needs overload-aware routing
+    // — the `$default` synthetics share the name `<name>$default` (distinct only by descriptor), and the
+    // call site can't pick among them here. Skip (the omitted-default call falls back / skips).
+    if ir
+        .functions
+        .iter()
+        .filter(|g| g.dispatch_receiver.is_none() && g.name == f.name)
+        .count()
+        > 1
+    {
+        return false;
+    }
     let n = f.params.len() as u32;
     let Some(defaults) = ir.fn_param_defaults.get(&fid) else {
         return false;

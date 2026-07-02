@@ -7113,6 +7113,10 @@ impl<'a> Lower<'a> {
             prelude.push(decl);
             slot_temp[k] = Some(tmp);
         }
+        crate::trace_compiler!(
+            "resolve",
+            "lower_toplevel_default_call fid={fid} ir_params={ir_params:?} slot_temp={slot_temp:?}"
+        );
         // Build the `$default` argument list in slot order: provided temp, or a zero placeholder for an
         // omitted slot (with its mask bit set). Then the int mask and the null marker.
         let mut a: Vec<u32> = Vec::with_capacity(n + 2);
@@ -9064,10 +9068,26 @@ impl<'a> Lower<'a> {
     /// (the synthetic stub substitutes the real default when the mask bit is set), but its type must
     /// match the descriptor slot: `0` for a primitive, `null` for a reference.
     fn zero_placeholder(&mut self, t: Ty) -> u32 {
+        // A NON-nullable primitive stored in its `Obj("kotlin/…")` value-class form is a JVM primitive
+        // (e.g. a non-null `Int` parameter is `int`), so its zero is the primitive `0`, not a null ref.
+        let boxed_prim = match t {
+            Ty::Obj(n, _) => match n {
+                "kotlin/Long" => Some(IrConst::Long(0)),
+                "kotlin/Double" => Some(IrConst::Double(0.0)),
+                "kotlin/Float" => Some(IrConst::Float(0.0)),
+                "kotlin/Int" | "kotlin/Short" | "kotlin/Byte" | "kotlin/Char"
+                | "kotlin/Boolean" => Some(IrConst::Int(0)),
+                _ => None,
+            },
+            _ => None,
+        };
         let c = match t {
             Ty::Long => IrConst::Long(0),
             Ty::Double => IrConst::Double(0.0),
             Ty::Float => IrConst::Float(0.0),
+            // Plain JVM-int-family primitives (and a value-class type with a scalar/int repr) → `0`.
+            Ty::Int | Ty::Byte | Ty::Short | Ty::Char | Ty::Boolean => IrConst::Int(0),
+            _ if boxed_prim.is_some() => boxed_prim.unwrap(),
             t if self.has_scalar_value_repr(t) => IrConst::Int(0),
             _ => IrConst::Null,
         };

@@ -1060,14 +1060,28 @@ pub fn collect_signatures_with_cp(
                             .count()
                     };
                     let required = f.params.len() - trailing_defaults;
-                    // Call-site substitution copies the default expression to the caller, so a default
-                    // that reads another parameter can't be reproduced there — reject such functions.
-                    let pnames: std::collections::HashSet<&str> =
-                        f.params.iter().map(|p| p.name.as_str()).collect();
-                    for p in &f.params {
-                        if let Some(dx) = p.default {
-                            if expr_refs_param(file, dx, &pnames) {
-                                diags.error(f.span, "krusty: a default argument that references another parameter is not supported");
+                    // A default that reads another parameter (`c: Int = a + 1`) is realized inside the
+                    // single `foo$default` synthetic (where the parameters are in scope), so it is allowed.
+                    // EXCEPT for an OVERLOADED function: its overloads share the name `foo$default` and the
+                    // omitted-default routing isn't overload-aware, so a param-referencing default on an
+                    // overloaded function is still rejected (skip, never miscompile).
+                    // Match the IR-side gate (`ir::toplevel_default_stub_safe`), which counts every
+                    // non-member function of this name (a top-level fn AND an extension are both emitted as
+                    // facade statics), so the checker and emitter agree on which functions are "overloaded".
+                    let overloaded = file
+                        .decls
+                        .iter()
+                        .filter(|&&d| matches!(file.decl(d), Decl::Fun(g) if g.name == f.name))
+                        .count()
+                        > 1;
+                    if overloaded {
+                        let pnames: std::collections::HashSet<&str> =
+                            f.params.iter().map(|p| p.name.as_str()).collect();
+                        for p in &f.params {
+                            if let Some(dx) = p.default {
+                                if expr_refs_param(file, dx, &pnames) {
+                                    diags.error(f.span, "krusty: a default argument that references another parameter is not supported on an overloaded function");
+                                }
                             }
                         }
                     }
@@ -5004,8 +5018,8 @@ impl<'a> Checker<'a> {
         // enforced in collect_signatures), so check each in a fresh scope and populate its types.
         self.push_scope();
         for p in &f.params {
+            let pty = self.resolve_ty(&p.ty);
             if let Some(dx) = p.default {
-                let pty = self.resolve_ty(&p.ty);
                 // A default that is a LAMBDA for a function-typed parameter (`g: (Int) -> Int = { it + 1 }`)
                 // takes its parameter types from the declared function type, so `it`/named params type
                 // concretely (not the erased `Object`) — as for a typed local / HOF argument lambda.
@@ -5020,6 +5034,11 @@ impl<'a> Checker<'a> {
                 };
                 self.expect_assignable(pty, dty, self.span(dx), "default argument");
             }
+            // Declare each parameter as we go, so a LATER parameter's default may reference an EARLIER one
+            // (`fun f(a: Int, c: Int = a + 1)`) — Kotlin evaluates defaults left-to-right with preceding
+            // parameters in scope. The default is realized inside the `$default` synthetic.
+            let decl_ty = if p.is_vararg { Ty::array(pty) } else { pty };
+            self.declare(&p.name, decl_ty, false);
         }
         self.pop_scope();
         self.push_local_funs();
