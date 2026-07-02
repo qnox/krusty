@@ -124,6 +124,31 @@ coverage-gate:
 coverage-bless:
     scripts/coverage-bless.sh
 
+# Perturbation / mutation testing (test-QUALITY, not coverage): mutate the code and check a test
+# fails. A SURVIVING mutant is code that no test kills — a coverage gap, or a test that asserts
+# nothing. Run occasionally, not per-commit: each mutant rebuilds + reruns the suite, so it is slow.
+# With no args it mutates only the diff vs origin/master (recent work — tractable); pass cargo-mutants
+# args to scope otherwise, e.g. `just mutants -f src/resolve.rs`. Needs `cargo install cargo-mutants`.
+mutants *ARGS:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export PATH="$HOME/.cargo/bin:$PATH"
+    v="$(just max-version)"
+    export KRUSTY_KOTLINC="${KRUSTY_KOTLINC:-$(just kotlinc "$v")}"
+    export KRUSTY_KOTLIN_BOX_DIR="${KRUSTY_KOTLIN_BOX_DIR:-$(just box-corpus "$v")}"
+    set -- {{ARGS}}
+    if [ "$#" -eq 0 ]; then
+        mkdir -p target
+        base="$(git rev-parse -q --verify origin/master >/dev/null 2>&1 && echo origin/master || echo HEAD~1)"
+        git diff "$base"...HEAD > target/mutants.diff
+        if [ ! -s target/mutants.diff ]; then
+            echo "mutants: no diff vs $base — pass a scope, e.g. 'just mutants -f src/resolve.rs'" >&2
+            exit 0
+        fi
+        set -- --in-diff target/mutants.diff
+    fi
+    cargo mutants "$@"
+
 # Download + unpack the reference Kotlin compiler distribution into one self-contained dir
 # (.kotlinc/<ver>/), and print the path to its `bin/kotlinc`. Idempotent — a no-op once unpacked
 # (so it's cheap to cache). This is the reference toolchain the differential harness validates
