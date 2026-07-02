@@ -110,6 +110,17 @@ pub enum Expr {
         value: Option<ExprId>,
         label: Option<String>,
     },
+    /// `break` / `break@label` used in EXPRESSION position (`val v = m[k] ?: break`). An expression of
+    /// bottom type `Nothing` — it transfers control out of the enclosing (labelled) loop. (A statement-
+    /// position `break` is `Stmt::Break`.)
+    Break {
+        label: Option<String>,
+    },
+    /// `continue` / `continue@label` used in EXPRESSION position (`m[k] ?: continue`). Bottom type
+    /// `Nothing` — it jumps to the next iteration of the enclosing (labelled) loop.
+    Continue {
+        label: Option<String>,
+    },
     /// A lambda literal `{ param -> body }` / `{ body }` (implicit `it`). krusty only supports it as
     /// the trailing argument of an *inlined* scope function (`let`/`also`); `body` is a `Block`.
     Lambda {
@@ -830,6 +841,8 @@ impl File {
             | Expr::StringLit(_)
             | Expr::CharLit(_)
             | Expr::NullLit
+            | Expr::Break { .. }
+            | Expr::Continue { .. }
             | Expr::Name(_) => false,
             Expr::CallableRef { receiver, .. } => receiver.map_or(false, |r| fe(r)),
             Expr::Return { value, .. } => match value {
@@ -1037,6 +1050,20 @@ impl File {
             Expr::Throw { operand } => {
                 out.push_str("(throw ");
                 self.write_expr(*operand, out);
+                out.push(')');
+            }
+            Expr::Break { label } => {
+                out.push_str("(break");
+                if let Some(l) = label {
+                    out.push_str(&format!("@{l}"));
+                }
+                out.push(')');
+            }
+            Expr::Continue { label } => {
+                out.push_str("(continue");
+                if let Some(l) = label {
+                    out.push_str(&format!("@{l}"));
+                }
                 out.push(')');
             }
             Expr::Return { value, label } => {
