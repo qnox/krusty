@@ -4956,6 +4956,66 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Whether the block-body expression `e` transfers control out of the function on every path — a
+    /// `return`/`throw`, a `Nothing`-typed call (`error(…)`/`TODO()`/any `Nothing`-returning fn), an
+    /// `if` whose both branches do, a `when` whose every arm does, a `try` whose paths all do, or an
+    /// infinite `while (true)`. Drives the block-body missing-return check.
+    ///
+    /// Deliberately conservative TOWARD `true`: a spurious `true` only fails to flag a genuine
+    /// missing return (harmless), whereas a spurious `false` would reject a function that DOES return
+    /// (a false error). So a subject-exhaustive `when` needs no explicit `else` here, and a
+    /// `while (true)` is treated as non-terminating-fallthrough regardless of an inner `break`.
+    fn body_terminates(&self, e: ExprId) -> bool {
+        // A `Nothing`-typed expression never completes normally (the checker already resolved the
+        // result type — no hardcoded intrinsic name list). `is_nothing_ty` recognizes both the
+        // `Ty::Nothing` bottom and the `Obj("…/Void")` form the checker uses for a `Nothing` call.
+        if is_nothing_ty(self.expr_types[e.0 as usize]) {
+            return true;
+        }
+        match self.file.expr(e) {
+            Expr::Return { .. } | Expr::Throw { .. } => true,
+            Expr::Block { stmts, trailing } => {
+                if stmts.iter().any(|s| self.stmt_terminates(*s)) {
+                    return true;
+                }
+                trailing.is_some_and(|t| self.body_terminates(t))
+            }
+            Expr::If {
+                then_branch,
+                else_branch: Some(eb),
+                ..
+            } => self.body_terminates(*then_branch) && self.body_terminates(*eb),
+            Expr::When { arms, .. } => {
+                !arms.is_empty() && arms.iter().all(|a| self.body_terminates(a.body))
+            }
+            Expr::Try {
+                body,
+                catches,
+                finally,
+            } => {
+                if finally.is_some_and(|f| self.body_terminates(f)) {
+                    return true;
+                }
+                self.body_terminates(*body) && catches.iter().all(|c| self.body_terminates(c.body))
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether statement `s` guarantees the function returns/throws (for the missing-return check).
+    fn stmt_terminates(&self, s: StmtId) -> bool {
+        match self.file.stmt(s) {
+            Stmt::Return(..) => true,
+            Stmt::Expr(e) => self.body_terminates(*e),
+            // `while (true) { … }` / `do { … } while (true)` never fall through (an inner `break`
+            // only under-reports here, which is safe — it can't cause a false missing-return error).
+            Stmt::While { cond, .. } | Stmt::DoWhile { cond, .. } => {
+                matches!(self.file.expr(*cond), Expr::BoolLit(true))
+            }
+            _ => false,
+        }
+    }
+
     /// The JVM internal name of a `catch` clause's exception type: a common JDK exception, an
     /// imported class, or a declared class. `None` if krusty can't resolve it to a concrete class.
     fn catch_internal(&self, name: &str) -> Option<String> {
@@ -5344,6 +5404,18 @@ impl<'a> Checker<'a> {
             }
             FunBody::Block(e) => {
                 let _ = self.expr(*e); // block body; returns happen via `return`
+                                       // A block-body function with a non-`Unit` (non-`Nothing`) return type must return a
+                                       // value on every path — kotlinc rejects `fun f(): Int { }`. `body_terminates` errs
+                                       // toward "returns", so this only fires on a genuinely non-returning body.
+                if !matches!(self.ret_ty, Ty::Unit | Ty::Nothing | Ty::Error)
+                    && !self.body_terminates(*e)
+                {
+                    self.diags.error(
+                        f.span,
+                        "a 'return' expression required in a function with a block body ('{...}')"
+                            .to_string(),
+                    );
+                }
             }
             FunBody::None => {}
         }
