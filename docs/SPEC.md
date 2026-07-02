@@ -977,6 +977,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   in `ctor_params`), as are named/omitted-default nested ctors (later slices). The last-resort ordering
   keeps a real top-level `Inner` function/class winning. Test: `tests/nested_class_unqualified_e2e.rs`.
 
+- **Unqualified sibling nested TYPE in a type position (`fun m(i: Inner)`, `val v: Inner`, return `Inner`).**
+  Same nested-type scoping, for type references. Signature collection shadows `class_names` inside the
+  `Decl::Class` arm with a clone extended by the class's own nested types' simple names (`Inner` →
+  `Outer$Inner`, scanning hoisted `Decl::Class` named `Outer.<seg>`, one level deep), so member
+  parameter/return/field types resolve; the checker's `resolve_ty` adds the same `this_ty`-scoped fallback
+  for checker-only positions (local `val`, `as`/`is`). A nested type shadows an outer same-name type within
+  the class body (Kotlin scoping); the fallback is last-resort so a real top-level/imported type still wins.
+  Test: `tests/nested_type_scope_e2e.rs`.
 - **Named arguments to a CLASSPATH constructor (`Point(y = 2, x = 1)`).** Descriptors don't carry
   parameter names, so this needs the ctor's `@Metadata`: `metadata::class_constructor_param_names` decodes
   `Class.constructor` (field 8) → `Constructor.value_parameter` (field 2, a DIFFERENT proto shape from a

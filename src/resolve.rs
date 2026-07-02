@@ -1173,6 +1173,28 @@ pub fn collect_signatures_with_cp(
                         .cloned()
                         .unwrap_or_else(|| class_internal(file, &c.name));
                     let ctp = TParams::erased(&c.type_params);
+                    // Bring this class's own NESTED types into scope by their SIMPLE name (`Inner` →
+                    // `Outer$Inner`), so a member's parameter/return/field type may reference a sibling
+                    // nested type unqualified (`fun m(i: Inner)`) — Kotlin's nested-type scoping. A nested
+                    // type is a hoisted top-level `Decl::Class` named `Outer.Inner`; map its last segment.
+                    let class_names = {
+                        let mut ext = class_names.clone();
+                        let prefix = format!("{}.", c.name);
+                        for &nd in &file.decls {
+                            if let Decl::Class(nc) = file.decl(nd) {
+                                if let Some(seg) = nc.name.strip_prefix(&prefix) {
+                                    if !seg.contains('.') {
+                                        let ni = class_names
+                                            .get(&nc.name)
+                                            .cloned()
+                                            .unwrap_or_else(|| class_internal(file, &nc.name));
+                                        ext.insert(seg.to_string(), ni);
+                                    }
+                                }
+                            }
+                        }
+                        ext
+                    };
                     // An `init` block that calls an own member method *before* a later property
                     // initializer runs has subtle init-order semantics (cf. KT-73355) krusty doesn't
                     // model — the helper may observe/overwrite a not-yet-initialized field. Reject it.
@@ -4557,6 +4579,23 @@ impl<'a> Checker<'a> {
             self.obj_with_targs(&internal, r)
         } else if let Some(internal) = self.resolve_qualified_nested(&r.name) {
             // A dotted CLASSPATH nested type (`Subject.User`, `SlugValidation.Ok`) → `Outer$Nested`.
+            self.obj_with_targs(&internal, r)
+        } else if let Some(internal) = {
+            // An UNQUALIFIED reference to a sibling nested type within the enclosing class body (`Inner`
+            // in `class Outer { class Inner }`) → `Outer$Inner` (Kotlin nested-type scoping). Reached only
+            // when nothing else resolved, in a checker-only position (`val v: Inner`, `x as Inner`);
+            // member SIGNATURE positions are covered by the collect_signatures class-scope extension.
+            if let Some(Ty::Obj(outer, _)) = self.this_ty {
+                let nested = format!("{outer}${}", r.name);
+                self.syms
+                    .classes
+                    .values()
+                    .find(|s| s.internal == nested)
+                    .map(|s| s.internal.clone())
+            } else {
+                None
+            }
+        } {
             self.obj_with_targs(&internal, r)
         } else {
             Ty::Error
