@@ -1,0 +1,22 @@
+{
+  "regions": {
+    "covered": 83357,
+    "count": 98282,
+    "percent": 84.81410634704217
+  },
+  "functions": {
+    "covered": 3868,
+    "count": 4343,
+    "percent": 89.06285977434952
+  },
+  "lines": {
+    "covered": 46832,
+    "count": 54365,
+    "percent": 86.14365860388116
+  },
+  "branches": {
+    "covered": 8734,
+    "count": 12187,
+    "percent": 71.66652990891934
+  }
+}

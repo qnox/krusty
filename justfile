@@ -32,7 +32,9 @@ default:
     @just --list
 
 # === PR gate: the one command CI runs ===
-ci: lint test-all
+# coverage-gate runs last as the unbypassable backstop: a local `--no-verify` push can skip the
+# pre-push hook, but CI re-measures here and fails the PR if coverage dropped below master.
+ci: lint test-all coverage-gate
 
 # Lint gate (enforced locally + in CI + by the pre-commit hook): formatting must be clean, and
 # clippy must introduce NO new findings beyond the frozen baseline (clippy-baseline.tsv). Existing
@@ -90,6 +92,22 @@ test *ARGS:
     #!/usr/bin/env bash
     set -euo pipefail
     ./run-tests.sh {{ARGS}}
+
+# Measure test coverage — regions, functions, lines and BRANCHES — via LLVM source-based coverage
+# (nightly, `-Zcoverage-options=branch`). Runs an instrumented build + the own suite in parallel and
+# writes target/coverage/{full,summary}.json. External corpus/conformance suites are excluded.
+coverage:
+    scripts/coverage.sh
+
+# Enforce coverage >= the committed master baseline (coverage-baseline.json). Fails if any metric
+# regresses. This is the coverage half of the enforcing git-hook gate; run it locally the same way.
+coverage-gate:
+    scripts/coverage-gate.sh
+
+# Re-measure and overwrite coverage-baseline.json. Run only for an intentional coverage change, and
+# commit the refreshed baseline with it.
+coverage-bless:
+    scripts/coverage-bless.sh
 
 # Download + unpack the reference Kotlin compiler distribution into one self-contained dir
 # (.kotlinc/<ver>/), and print the path to its `bin/kotlinc`. Idempotent — a no-op once unpacked
