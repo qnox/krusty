@@ -969,6 +969,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (lowerer) so `is`/`as`/`when` targets and a nested-class constructor (`Subject.User("x")` → `new
   lib/Subject$User`) all resolve the same `Outer$Nested` internal. Test: `tests/classpath_object_nested_e2e.rs`.
 
+- **Unqualified sibling nested-class construction (`Inner()` inside `class Outer { class Inner }`).** Kotlin
+  scopes a nested class unqualified within its enclosing class body. When a `Name`-callee call is otherwise
+  unresolved and the enclosing class (`this_ty`) has a nested class whose internal is `Outer$Inner`, the
+  checker resolves it as constructing that class (a qualified `Outer.Inner()` already resolved). Exact-arity
+  positional only; an `inner class` is excluded (it needs the enclosing instance — a synthetic `this$0` not
+  in `ctor_params`), as are named/omitted-default nested ctors (later slices). The last-resort ordering
+  keeps a real top-level `Inner` function/class winning. Test: `tests/nested_class_unqualified_e2e.rs`.
+
 - **Named arguments to a CLASSPATH constructor (`Point(y = 2, x = 1)`).** Descriptors don't carry
   parameter names, so this needs the ctor's `@Metadata`: `metadata::class_constructor_param_names` decodes
   `Class.constructor` (field 8) → `Constructor.value_parameter` (field 2, a DIFFERENT proto shape from a
