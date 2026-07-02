@@ -7398,6 +7398,12 @@ impl<'a> Checker<'a> {
             "charArrayOf" => Some(Ty::Char),
             "byteArrayOf" => Some(Ty::Byte),
             "shortArrayOf" => Some(Ty::Short),
+            // Unsigned primitive arrays are the unboxed underlying primitive array (`[I`/`[J`) — see
+            // `ir_lower`'s `Ty::Array(UInt) → kotlin/IntArray` mapping. The element carries `UInt`/`ULong`
+            // so reads and arithmetic select the unsigned semantics (and box to the inline-class wrapper
+            // only when used generically).
+            "uintArrayOf" => Some(Ty::UInt),
+            "ulongArrayOf" => Some(Ty::ULong),
             _ => None,
         };
         if let Some(elem) = primitive_of(fname) {

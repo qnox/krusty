@@ -65,6 +65,10 @@ static TABLE: &[Synthetic] = &[
     syn("kotlin/charArrayOf", "charArrayOf", b_prim_vararg),
     syn("kotlin/byteArrayOf", "byteArrayOf", b_prim_vararg),
     syn("kotlin/shortArrayOf", "shortArrayOf", b_prim_vararg),
+    // Unsigned vararg literals — `uintArrayOf(1u, 2u): UIntArray`. The element is `UInt`/`ULong`; the
+    // physical array is the unboxed `[I`/`[J` (see `ir_lower`'s `Ty::Array(UInt)` mapping).
+    syn("kotlin/uintArrayOf", "uintArrayOf", b_prim_vararg),
+    syn("kotlin/ulongArrayOf", "ulongArrayOf", b_prim_vararg),
     // Primitive size constructors — `IntArray(n)` / `IntArray(n) { i -> e }`.
     syn("kotlin/IntArray", "IntArray", b_prim_size),
     syn("kotlin/LongArray", "LongArray", b_prim_size),
@@ -74,6 +78,9 @@ static TABLE: &[Synthetic] = &[
     syn("kotlin/CharArray", "CharArray", b_prim_size),
     syn("kotlin/ByteArray", "ByteArray", b_prim_size),
     syn("kotlin/ShortArray", "ShortArray", b_prim_size),
+    // Unsigned size constructors — `UIntArray(n) { i -> e }` (unboxed `[I`/`[J`).
+    syn("kotlin/UIntArray", "UIntArray", b_prim_size),
+    syn("kotlin/ULongArray", "ULongArray", b_prim_size),
     // Reference creators.
     syn("kotlin/arrayOf", "arrayOf", b_ref_vararg),
     syn("kotlin/Array", "Array", b_ref_array),
@@ -93,6 +100,8 @@ fn prim_elem(name: &str) -> Option<Ty> {
         "charArrayOf" | "CharArray" => Ty::Char,
         "byteArrayOf" | "ByteArray" => Ty::Byte,
         "shortArrayOf" | "ShortArray" => Ty::Short,
+        "uintArrayOf" | "UIntArray" => Ty::UInt,
+        "ulongArrayOf" | "ULongArray" => Ty::ULong,
         _ => return None,
     })
 }
@@ -132,8 +141,17 @@ fn b_prim_size(syn: &'static Synthetic, lw: &mut Lower<'_>, c: &SynthCall<'_>) -
     match c.args.len() {
         1 => {
             let size = lw.synth_expr(c.args[0])?;
+            // The allocation intrinsic keys on the PHYSICAL primitive array class. An unsigned array is
+            // the unboxed underlying signed array (`UIntArray` = `[I`, `ULongArray` = `[J`), so allocate
+            // via `kotlin/IntArray.<init>` / `kotlin/LongArray.<init>` — the emitter has no
+            // `kotlin/UIntArray.<init>`. Signed creators already name their physical class.
+            let init_fqn = match elem {
+                Ty::UInt => "kotlin/IntArray",
+                Ty::ULong => "kotlin/LongArray",
+                _ => syn.fqn,
+            };
             Some(lw.emit(IrExpr::Call {
-                callee: Callee::External(format!("{}.<init>", syn.fqn)),
+                callee: Callee::External(format!("{init_fqn}.<init>")),
                 dispatch_receiver: None,
                 args: vec![size],
             }))
@@ -229,6 +247,10 @@ mod tests {
             "longArrayOf",
             "IntArray",
             "LongArray",
+            "uintArrayOf",
+            "ulongArrayOf",
+            "UIntArray",
+            "ULongArray",
             "arrayOf",
             "Array",
             "emptyArray",
@@ -256,6 +278,10 @@ mod tests {
         assert_eq!(prim_elem("ByteArray"), Some(Ty::Byte));
         assert_eq!(prim_elem("shortArrayOf"), Some(Ty::Short));
         assert_eq!(prim_elem("ShortArray"), Some(Ty::Short));
+        assert_eq!(prim_elem("uintArrayOf"), Some(Ty::UInt));
+        assert_eq!(prim_elem("UIntArray"), Some(Ty::UInt));
+        assert_eq!(prim_elem("ulongArrayOf"), Some(Ty::ULong));
+        assert_eq!(prim_elem("ULongArray"), Some(Ty::ULong));
     }
 
     #[test]
