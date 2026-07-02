@@ -967,4 +967,88 @@ mod tests {
     fn inline_kind_default_is_none() {
         assert_eq!(InlineKind::default(), InlineKind::None);
     }
+
+    #[test]
+    fn target_runtime_defaults_are_all_absent() {
+        // The blanket `TargetRuntime` defaults model "this platform provides nothing"; a bare source
+        // (`EmptySymbolSource`) exercises every default arm.
+        let rt = EmptySymbolSource;
+        assert!(rt.function_type(1).is_none());
+        assert!(rt.property_reference_impl(1, false).is_none());
+        assert!(rt.property_reference_signature("getX", Ty::Int).is_none());
+        assert!(rt.type_descriptor(Ty::Int).is_none());
+        // ir_type_descriptor delegates to type_descriptor (also None here).
+        assert!(rt.ir_type_descriptor(Ty::Int).is_none());
+        assert!(rt.method_descriptor(&[Ty::Int], Ty::Unit).is_none());
+        assert!(rt.function_reference_impl_type().is_none());
+        assert!(rt.enum_member_accessor("name").is_none());
+        assert!(rt.object_instance_field("demo/Obj").is_none());
+        assert!(rt
+            .companion_instance_field("demo/C", "demo/C$Companion", "Companion")
+            .is_none());
+        assert!(rt.mutable_local_ref_type(Ty::Int).is_none());
+        assert!(rt.scalar_value_repr(Ty::UInt).is_none());
+        assert!(rt.unsigned_integer_box_type(Ty::UInt).is_none());
+        assert!(rt.counted_loop_info("kotlin/ranges/IntRange").is_none());
+        assert!(rt.range_construction(Ty::Int, Ty::Int).is_none());
+        assert!(rt.suspend_cps_descriptor("()V").is_none());
+        assert!(rt.runtime_callable(RuntimeOp::HashCode, Ty::Int).is_none());
+        assert!(rt.runtime_ctor(RuntimeCtor::AssertionError).is_none());
+        let callable = LibraryCallable {
+            owner: "o".into(),
+            name: "n".into(),
+            params: vec![],
+            ret: Ty::Unit,
+            physical_ret: Ty::Unit,
+            descriptor: "()V".into(),
+            inline: InlineKind::None,
+            default_call: false,
+            vararg_elem: None,
+            signature: None,
+            origin: Origin::Library,
+        };
+        assert!(!rt.is_reified_assert_fails_with_default(&callable));
+    }
+
+    #[test]
+    fn ctor_null_does_not_match_primitive_param() {
+        let mut ty = empty_type(TypeKind::Class);
+        // Only a primitive-param ctor of this arity exists.
+        ty.constructors = vec![LibraryMember::new(
+            "<init>".into(),
+            vec![Ty::Int],
+            Ty::Unit,
+            "d".into(),
+        )];
+        // `null` cannot satisfy a primitive parameter, and there is no widened/erased ctor to fall to.
+        assert!(ty.ctor(&[Ty::Null]).is_none());
+    }
+
+    #[test]
+    fn companion_member_boxing_and_prefix_fallbacks() {
+        let mut ty = empty_type(TypeKind::Class);
+        ty.companion = vec![
+            LibraryMember::new(
+                "of".into(),
+                vec![Ty::obj("kotlin/Any")],
+                Ty::Unit,
+                "d".into(),
+            ),
+            LibraryMember::new(
+                "with".into(),
+                vec![Ty::Int, Ty::String],
+                Ty::Unit,
+                "d".into(),
+            ),
+        ];
+        // Boxing: a primitive arg selects the erased `Any` overload.
+        assert!(ty.companion_member("of", &[Ty::Int]).is_some());
+        // Prefix: fewer args than a longer overload's params.
+        assert!(ty.companion_member("with", &[Ty::Int]).is_some());
+    }
+
+    #[test]
+    fn origin_default_is_library() {
+        assert_eq!(Origin::default(), Origin::Library);
+    }
 }
