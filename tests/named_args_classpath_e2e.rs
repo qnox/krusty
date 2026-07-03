@@ -6,8 +6,6 @@
 //! This is the general feature that compose-ui DEP cases need (they call androidx functions with
 //! named args). The dependency is compiled by the REAL kotlinc, so its `@Metadata` is authoritative.
 
-use std::fs;
-
 mod common;
 
 fn env(k: &str) -> Option<String> {
@@ -16,10 +14,6 @@ fn env(k: &str) -> Option<String> {
 
 #[test]
 fn named_args_to_classpath_top_level_fn_reorder_and_run() {
-    let Some(_kotlinc) = env("KRUSTY_KOTLINC") else {
-        eprintln!("skipping: set KRUSTY_KOTLINC");
-        return;
-    };
     let Some(java_home) = env("KRUSTY_REF_JAVA_HOME").or_else(|| env("JAVA_HOME")) else {
         eprintln!("skipping: set JAVA_HOME");
         return;
@@ -28,34 +22,16 @@ fn named_args_to_classpath_top_level_fn_reorder_and_run() {
         eprintln!("skipping: no kotlin-stdlib jar");
         return;
     };
-    let stdlib = stdlib_path.to_str().unwrap().to_string();
     let jdk_modules = std::path::PathBuf::from(format!("{java_home}/lib/modules"));
-
-    let work = std::env::temp_dir().join(format!("krusty_named_args_{}", std::process::id()));
-    let _ = fs::remove_dir_all(&work);
-    let libout = work.join("libout");
-    fs::create_dir_all(&libout).unwrap();
 
     // 1. A library with a plain (non-inline) top-level function, compiled by the real kotlinc so its
     //    `@Metadata` carries the source parameter NAMES.
-    let lib_kt = work.join("Lib.kt");
-    fs::write(
-        &lib_kt,
+    let Some(libout) = common::compile_lib(
+        "named_args",
         "package lib\nfun describe(name: String, count: Int): String = name + \" x\" + count\n",
-    )
-    .unwrap();
-    let kc_args = vec![
-        "-d".to_string(),
-        libout.to_string_lossy().into_owned(),
-        "-cp".to_string(),
-        stdlib.clone(),
-        lib_kt.to_string_lossy().into_owned(),
-    ];
-    match common::kotlinc_compile(&kc_args) {
-        Some((0, _)) => {}
-        Some((_, e)) => panic!("kotlinc(lib): {e}"),
-        None => return,
-    }
+    ) else {
+        return;
+    };
 
     // 2. A caller using NAMED arguments OUT OF ORDER (`count` before `name`). Correct output requires
     //    krusty to map each label to its parameter position from the callee's @Metadata names.
@@ -75,8 +51,6 @@ fn named_args_to_classpath_top_level_fn_reorder_and_run() {
         return;
     };
     assert_eq!(out.trim(), "OK", "box() returned {out:?}");
-
-    let _ = fs::remove_dir_all(&work);
 }
 
 #[test]
@@ -88,10 +62,6 @@ fn classpath_reordered_named_args_with_trailing_lambda() {
     // from the callee's @Metadata names, (2) bind the trailing lambda to the LAST parameter (not the
     // next free positional slot, which a reordered named arg may already occupy) — then emit a
     // verifying `invokestatic`.
-    let Some(_kotlinc) = env("KRUSTY_KOTLINC") else {
-        eprintln!("skipping: set KRUSTY_KOTLINC");
-        return;
-    };
     let Some(java_home) = env("KRUSTY_REF_JAVA_HOME").or_else(|| env("JAVA_HOME")) else {
         eprintln!("skipping: set JAVA_HOME");
         return;
@@ -100,35 +70,17 @@ fn classpath_reordered_named_args_with_trailing_lambda() {
         eprintln!("skipping: no kotlin-stdlib jar");
         return;
     };
-    let stdlib = stdlib_path.to_str().unwrap().to_string();
     let jdk_modules = std::path::PathBuf::from(format!("{java_home}/lib/modules"));
 
-    let work = std::env::temp_dir().join(format!("krusty_named_tl_{}", std::process::id()));
-    let _ = fs::remove_dir_all(&work);
-    let libout = work.join("libout");
-    fs::create_dir_all(&libout).unwrap();
-
-    let lib_kt = work.join("Lib.kt");
-    fs::write(
-        &lib_kt,
+    let Some(libout) = common::compile_lib(
+        "named_tl",
         "package lib\n\
          fun host(prefix: String, sep: String, block: (StringBuilder) -> Unit): String {\n\
          \x20   val sb = StringBuilder(); sb.append(prefix); sb.append(sep); block(sb); return sb.toString()\n\
          }\n",
-    )
-    .unwrap();
-    let kc_args = vec![
-        "-d".to_string(),
-        libout.to_string_lossy().into_owned(),
-        "-cp".to_string(),
-        stdlib.clone(),
-        lib_kt.to_string_lossy().into_owned(),
-    ];
-    match common::kotlinc_compile(&kc_args) {
-        Some((0, _)) => {}
-        Some((_, e)) => panic!("kotlinc(lib): {e}"),
-        None => return,
-    }
+    ) else {
+        return;
+    };
 
     // `sep` and `prefix` named OUT OF ORDER (`sep` is param 1, `prefix` is param 0), trailing lambda
     // → `block` (param 2). Result: "p" + "X" + "B" = "pXB".
@@ -146,16 +98,10 @@ fn classpath_reordered_named_args_with_trailing_lambda() {
         return;
     };
     assert_eq!(out.trim(), "OK", "box() returned {out:?}");
-
-    let _ = fs::remove_dir_all(&work);
 }
 
 #[test]
 fn named_args_to_classpath_member_fn_reorder_and_run() {
-    let Some(_kotlinc) = env("KRUSTY_KOTLINC") else {
-        eprintln!("skipping: set KRUSTY_KOTLINC");
-        return;
-    };
     let Some(java_home) = env("KRUSTY_REF_JAVA_HOME").or_else(|| env("JAVA_HOME")) else {
         eprintln!("skipping: set JAVA_HOME");
         return;
@@ -164,34 +110,16 @@ fn named_args_to_classpath_member_fn_reorder_and_run() {
         eprintln!("skipping: no kotlin-stdlib jar");
         return;
     };
-    let stdlib = stdlib_path.to_str().unwrap().to_string();
     let jdk_modules = std::path::PathBuf::from(format!("{java_home}/lib/modules"));
-
-    let work = std::env::temp_dir().join(format!("krusty_named_args_mem_{}", std::process::id()));
-    let _ = fs::remove_dir_all(&work);
-    let libout = work.join("libout");
-    fs::create_dir_all(&libout).unwrap();
 
     // A library CLASS with an instance method, compiled by kotlinc so its `@Metadata` carries the
     // member's parameter NAMES.
-    let lib_kt = work.join("Lib.kt");
-    fs::write(
-        &lib_kt,
+    let Some(libout) = common::compile_lib(
+        "named_args_mem",
         "package lib\nclass Greeter {\n    fun greet(name: String, count: Int): String = name + \" x\" + count\n}\n",
-    )
-    .unwrap();
-    let kc_args = vec![
-        "-d".to_string(),
-        libout.to_string_lossy().into_owned(),
-        "-cp".to_string(),
-        stdlib.clone(),
-        lib_kt.to_string_lossy().into_owned(),
-    ];
-    match common::kotlinc_compile(&kc_args) {
-        Some((0, _)) => {}
-        Some((_, e)) => panic!("kotlinc(lib): {e}"),
-        None => return,
-    }
+    ) else {
+        return;
+    };
 
     // A caller invoking the instance member with OUT-OF-ORDER named arguments.
     let main_src = "import lib.Greeter\n\
@@ -208,16 +136,10 @@ fn named_args_to_classpath_member_fn_reorder_and_run() {
         return;
     };
     assert_eq!(out.trim(), "OK", "box() returned {out:?}");
-
-    let _ = fs::remove_dir_all(&work);
 }
 
 #[test]
 fn named_args_to_classpath_extension_fn_reorder_and_run() {
-    let Some(_kotlinc) = env("KRUSTY_KOTLINC") else {
-        eprintln!("skipping: set KRUSTY_KOTLINC");
-        return;
-    };
     let Some(java_home) = env("KRUSTY_REF_JAVA_HOME").or_else(|| env("JAVA_HOME")) else {
         eprintln!("skipping: set JAVA_HOME");
         return;
@@ -226,34 +148,16 @@ fn named_args_to_classpath_extension_fn_reorder_and_run() {
         eprintln!("skipping: no kotlin-stdlib jar");
         return;
     };
-    let stdlib = stdlib_path.to_str().unwrap().to_string();
     let jdk_modules = std::path::PathBuf::from(format!("{java_home}/lib/modules"));
-
-    let work = std::env::temp_dir().join(format!("krusty_named_args_ext_{}", std::process::id()));
-    let _ = fs::remove_dir_all(&work);
-    let libout = work.join("libout");
-    fs::create_dir_all(&libout).unwrap();
 
     // A library top-level EXTENSION function, compiled by kotlinc so its `@Metadata` carries the source
     // value-parameter names (the receiver is a separate `receiver_type`, NOT a value parameter).
-    let lib_kt = work.join("Lib.kt");
-    fs::write(
-        &lib_kt,
+    let Some(libout) = common::compile_lib(
+        "named_args_ext",
         "package lib\nfun String.tag(name: String, count: Int): String = this + \"/\" + name + \" x\" + count\n",
-    )
-    .unwrap();
-    let kc_args = vec![
-        "-d".to_string(),
-        libout.to_string_lossy().into_owned(),
-        "-cp".to_string(),
-        stdlib.clone(),
-        lib_kt.to_string_lossy().into_owned(),
-    ];
-    match common::kotlinc_compile(&kc_args) {
-        Some((0, _)) => {}
-        Some((_, e)) => panic!("kotlinc(lib): {e}"),
-        None => return,
-    }
+    ) else {
+        return;
+    };
 
     // Call the extension with OUT-OF-ORDER named arguments (receiver positional, value params labelled).
     let main_src = "import lib.tag\n\
@@ -270,6 +174,4 @@ fn named_args_to_classpath_extension_fn_reorder_and_run() {
         return;
     };
     assert_eq!(out.trim(), "OK", "box() returned {out:?}");
-
-    let _ = fs::remove_dir_all(&work);
 }

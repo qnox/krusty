@@ -8,18 +8,12 @@
 
 mod common;
 
-use std::fs;
-
 fn env(k: &str) -> Option<String> {
     std::env::var(k).ok().filter(|v| !v.is_empty())
 }
 
 #[test]
 fn same_package_classpath_constructors_resolve_without_import() {
-    let Some(_kotlinc) = env("KRUSTY_KOTLINC") else {
-        eprintln!("skipping: set KRUSTY_KOTLINC");
-        return;
-    };
     let Some(java_home) = env("KRUSTY_REF_JAVA_HOME").or_else(|| env("JAVA_HOME")) else {
         eprintln!("skipping: set JAVA_HOME");
         return;
@@ -28,33 +22,15 @@ fn same_package_classpath_constructors_resolve_without_import() {
         eprintln!("skipping: no kotlin-stdlib jar");
         return;
     };
-    let stdlib = stdlib_path.to_str().unwrap().to_string();
     let jdk_modules = std::path::PathBuf::from(format!("{java_home}/lib/modules"));
 
-    let work = std::env::temp_dir().join(format!("krusty_same_pkg_{}", std::process::id()));
-    let _ = fs::remove_dir_all(&work);
-    let libout = work.join("libout");
-    fs::create_dir_all(&libout).unwrap();
-
     // 1. A library declaring a data class and a plain class in package `app`, compiled by real kotlinc.
-    let lib_kt = work.join("Lib.kt");
-    fs::write(
-        &lib_kt,
+    let Some(libout) = common::compile_lib(
+        "same_pkg",
         "package app\ndata class WorkspaceId(val v: String)\nclass Plain(val n: Int)\n",
-    )
-    .unwrap();
-    let kc_args = vec![
-        "-d".to_string(),
-        libout.to_string_lossy().into_owned(),
-        "-cp".to_string(),
-        stdlib.clone(),
-        lib_kt.to_string_lossy().into_owned(),
-    ];
-    match common::kotlinc_compile(&kc_args) {
-        Some((0, _)) => {}
-        Some((_, e)) => panic!("kotlinc(lib): {e}"),
-        None => return,
-    }
+    ) else {
+        return;
+    };
 
     // 2. A SAME-PACKAGE caller (package `app`, NO import) constructing both classpath siblings by name.
     let main_src = "package app\n\
@@ -72,6 +48,4 @@ fn same_package_classpath_constructors_resolve_without_import() {
         return;
     };
     assert_eq!(out.trim(), "OK", "box() returned {out:?}");
-
-    let _ = fs::remove_dir_all(&work);
 }

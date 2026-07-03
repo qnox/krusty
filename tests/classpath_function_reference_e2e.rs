@@ -2,17 +2,12 @@
 //! module — was rejected ("callable references are not supported"). Now it resolves to a
 //! `FunctionReferenceImpl` whose `invoke` calls the real `invokestatic <facade>.greet(args)`. Verified
 //! end-to-end on a real JVM (the function is in a separately kotlinc-compiled library).
-use std::fs;
 mod common;
 fn env(k: &str) -> Option<String> {
     std::env::var(k).ok().filter(|v| !v.is_empty())
 }
 #[test]
 fn classpath_function_reference_compiles_and_runs() {
-    let Some(_) = env("KRUSTY_KOTLINC") else {
-        eprintln!("skipping: set KRUSTY_KOTLINC");
-        return;
-    };
     let Some(jh) = env("KRUSTY_REF_JAVA_HOME").or_else(|| env("JAVA_HOME")) else {
         eprintln!("skipping: set JAVA_HOME");
         return;
@@ -21,29 +16,12 @@ fn classpath_function_reference_compiles_and_runs() {
         eprintln!("skipping: no kotlin-stdlib jar");
         return;
     };
-    let stdlib = sl.to_str().unwrap().to_string();
     let jdk = std::path::PathBuf::from(format!("{jh}/lib/modules"));
-    let work = std::env::temp_dir().join(format!("krusty_cfr_{}", std::process::id()));
-    let _ = fs::remove_dir_all(&work);
-    let libout = work.join("lib");
-    fs::create_dir_all(&libout).unwrap();
-    fs::write(
-        work.join("Lib.kt"),
-        "package lib\nfun add(a: Int, b: Int): Int = a + b\n",
-    )
-    .unwrap();
-    let kc = vec![
-        "-d".into(),
-        libout.to_string_lossy().into_owned(),
-        "-cp".into(),
-        stdlib,
-        work.join("Lib.kt").to_string_lossy().into_owned(),
-    ];
-    match common::kotlinc_compile(&kc) {
-        Some((0, _)) => {}
-        Some((_, e)) => panic!("kotlinc(lib): {e}"),
-        None => return,
-    }
+    let Some(libout) =
+        common::compile_lib("cfr", "package lib\nfun add(a: Int, b: Int): Int = a + b\n")
+    else {
+        return;
+    };
     let cp = vec![libout.clone(), sl.clone()];
     // `::add` bound to a val and invoked, and passed to a higher-order function.
     let main = "import lib.add\n\
