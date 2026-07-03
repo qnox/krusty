@@ -295,14 +295,10 @@ fn insn_size(insn: &Insn, at: usize) -> usize {
 /// untransformed body reproduces it byte-for-byte (switch padding is position-stable).
 /// The byte offset of each instruction (index `i` → its offset; the final entry is the total byte
 /// length), computed to a fixpoint since a switch's padding depends on its position. Lets a transform
-/// map an instruction index to its byte offset in the assembled layout.
-pub fn insn_offsets(insns: &[Insn]) -> Vec<usize> {
-    insn_offsets_at(insns, 0)
-}
-
-/// Like [`insn_offsets`] but the first instruction sits at byte offset `base` (the position this body
-/// will occupy in the final method) — switch padding aligns to 4 bytes from the METHOD start, so a
-/// spliced body containing a `tableswitch`/`lookupswitch` must be laid out at its real offset.
+/// map an instruction index to its byte offset in the assembled layout. The first instruction sits at
+/// byte offset `base` (the position this body will occupy in the final method) — switch padding aligns
+/// to 4 bytes from the METHOD start, so a spliced body containing a `tableswitch`/`lookupswitch` must
+/// be laid out at its real offset.
 pub fn insn_offsets_at(insns: &[Insn], base: usize) -> Vec<usize> {
     let mut offs = vec![base; insns.len() + 1];
     loop {
