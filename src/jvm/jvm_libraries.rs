@@ -1269,16 +1269,16 @@ impl SymbolSource for JvmLibraries {
         matches!(ty, Ty::UInt | Ty::ULong)
     }
 
-    fn jvm_descriptor_form(&self, ty: Ty) -> Option<Ty> {
+    fn jvm_descriptor_form(&self, ty: Ty) -> Ty {
         // A reference type erases to its JVM internal name (a Kotlin collection → its single
         // `java/util/*` interface) with type arguments dropped — exactly what a descriptor-read
         // constructor/method parameter carries. Arrays recurse into their element (`Array<Set<String>>`
         // → `[Ljava/util/Set;` on the descriptor side), so a nested collection element normalizes too.
         // Other kinds (primitives, `String`, function types) already compare exactly across the sides.
         match ty {
-            Ty::Obj(internal, _) => Some(Ty::obj(super::jvm_class_map::to_jvm_internal(internal))),
-            Ty::Array(e) => Some(Ty::array(self.jvm_descriptor_form(*e).unwrap_or(*e))),
-            _ => None,
+            Ty::Obj(internal, _) => Ty::obj(super::jvm_class_map::to_jvm_internal(internal)),
+            Ty::Array(e) => Ty::array(self.jvm_descriptor_form(*e)),
+            _ => ty,
         }
     }
 
