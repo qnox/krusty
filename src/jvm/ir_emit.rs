@@ -3082,6 +3082,11 @@ impl<'a> Emitter<'a> {
             || !probe.frames.is_empty()
             || lam_frames.iter().any(|f| !f.is_empty());
         if needs_frames && code.stack_height() != 0 {
+            crate::trace_compiler!(
+                "splice",
+                "unified BAIL: needs_frames but stack_height={}",
+                code.stack_height()
+            );
             return false; // frames carry no stack prefix → need an empty baseline
         }
         let ret_words = if descriptor.ends_with(")V") {
@@ -6052,6 +6057,12 @@ impl<'a> Emitter<'a> {
 
     fn emit_when(&mut self, branches: &[(Option<u32>, u32)], code: &mut CodeBuilder) {
         let end = code.new_label();
+        // The operand-stack height BEFORE any branch (the conditions consume their own operands). Each
+        // subsequent branch is reached by a JUMP from the previous condition, so it starts at THIS height,
+        // not the height the previous branch left after pushing its value (the linear counter carries the
+        // prior branch's value across `bind(next)`); reset it so a branch body emits on the right baseline
+        // (else e.g. an inline HOF splice in the SECOND branch sees a phantom operand and bails).
+        let entry_height = code.stack_height().max(0) as u16;
         let has_else = branches.iter().any(|(c, _)| c.is_none());
         // A `when` with no `else`, or one whose value is `Unit`, is a statement: branch values are
         // discarded and nothing reaches the operand stack at `end`.
@@ -6083,6 +6094,10 @@ impl<'a> Emitter<'a> {
                         end_reachable = true;
                     }
                     code.bind(next);
+                    // `next` is reached only via the conditional jump above, where the stack is back at the
+                    // pre-branch baseline — reset the linear counter (the just-emitted branch body left its
+                    // value on the counter, but not on this control path).
+                    code.set_stack(entry_height);
                 }
                 None => {
                     self.emit_value(*body, code);
