@@ -1518,3 +1518,30 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
 
 - **Multi-line `catch` parameter.** `catch (\n e: Exception\n)` now parses — the parser skips newlines
   around the catch parameter exactly as an ordinary parameter list allows (`multiline_catch_e2e`).
+
+- **Exhaustive `when` over a CLASSPATH `sealed` class with no `else`.** A `when (d) { is D.A -> …; is
+  D.B -> … }` over a classpath `sealed` `D` is exhaustive (hence an EXPRESSION) when every direct
+  subtype is covered — the same rule as a same-module sealed subject, but the subtype set now comes from
+  the classpath `@Metadata` (`Class.sealedSubclassFqName`, proto field 16, decoded by
+  `class_sealed_subclasses` behind `SymbolSource::sealed_subclasses`). `when_sealed_exhaustive` reads
+  those subclasses when the subject class isn't a same-module sealed, so an exhaustive classpath `when`
+  used as a value type-checks (a non-exhaustive one still errors). (`build702_gg1_sealed_when_e2e`)
+
+- **`suspend` `$default` member call feeding an `if`/`when` CONDITION.** A suspension in an `if`/`when`
+  CONDITION (rather than a bound `val`) is hoisted to a preceding bound temp by the coroutine pass — in
+  a `return if (…)`, a lambda's tail `if`-expression, and a `val a = if (…)` init — so the state-machine
+  builder never meets a condition-suspending `When` it can't model. A `suspend` member with a defaulted
+  parameter (`suspend fun list(f: Filt = Filt())`) is called through the `$default` synthetic, whose
+  descriptor ERASES the return to `Object`; the hoisted temp now carries the member's LOGICAL return
+  (recorded in `suspend_calls` from `fi.callable.ret`, not the `$default` descriptor return), so
+  `bind_from_r` unboxes it and a following `t == 5` compares int with int rather than Object with int
+  (which VerifyError'd). (`build702_dd1_suspend_default_e2e`)
+
+- **Fully-qualified library top-level call with a trailing lambda (`kotlinx.coroutines.runBlocking {
+  … }`).** A FQ call to a library top-level function written without an `import`, with a SYNTACTIC
+  trailing lambda whose leading parameters default, now resolves. The FQ-call path re-types the trailing
+  lambda against the callee's block parameter (a receiver / suspend SAM, `CoroutineScope.() -> T`) using
+  the same `top_level_lambda_param_types`/`top_level_lambda_receivers` shape data the bare-name
+  (`import`ed) path uses, so overload resolution binds the block's result type-parameter (`runBlocking {
+  "x" }: String`); the lowerer emits `runBlocking$default(context, block, mask, marker)`. A plain
+  no-lambda FQ call (`kotlin.math.max`) was already supported. (`build702_fq_trailing_lambda_e2e`)

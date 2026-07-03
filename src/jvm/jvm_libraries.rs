@@ -1032,6 +1032,13 @@ impl SymbolSource for JvmLibraries {
         PLATFORM_DEFAULT_IMPORT_PACKAGES
     }
 
+    fn sealed_subclasses(&self, internal: &str) -> Vec<String> {
+        self.cp
+            .find(internal)
+            .map(|ci| crate::jvm::metadata::class_sealed_subclasses(&ci))
+            .unwrap_or_default()
+    }
+
     fn physical_property_getter_name(&self, property: &str) -> Option<String> {
         let getter = property_getter_name(property);
         (getter != property).then_some(getter)

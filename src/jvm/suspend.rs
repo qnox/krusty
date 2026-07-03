@@ -174,6 +174,50 @@ fn desugar_tail_suspend(ir: &mut IrFile, b: ExprId, suspend_set: &HashSet<u32>, 
 /// suspension inside a conditional sub-expression (an `if`/`when`/elvis/loop) is left in place — those
 /// are handled structurally by the flattener (or skip the file if not yet modeled). Order of hoisted
 /// temps follows left-to-right evaluation.
+/// Whether `e` is an `if`/`when` EXPRESSION at least one of whose CONDITIONS calls a suspension — the
+/// pure guard for the arms that route to [`hoist_when_cond_suspensions`].
+fn when_cond_suspends(ir: &IrFile, e: ExprId, suspend_set: &HashSet<u32>) -> bool {
+    matches!(&ir.exprs[e as usize], IrExpr::When { branches }
+        if branches.iter().any(|(c, _)| c.is_some_and(|c| expr_calls_suspend(ir, c, suspend_set))))
+}
+
+/// If `when_expr` is an `if`/`when` EXPRESSION with a suspension in one of its CONDITIONS (which evaluate
+/// unconditionally, before any branch), hoist those conditions to preceding bound temps (pushed onto
+/// `out`) and return a NEW `When` whose conditions read the temps. `None` when `when_expr` isn't a `When`
+/// or no condition suspends — the caller keeps the original. Branch VALUES are left untouched (a
+/// branch-value suspension is the flattener's job). Shared by the tail-value / `return` / `val =` arms.
+fn hoist_when_cond_suspensions(
+    ir: &mut IrFile,
+    when_expr: ExprId,
+    suspend_set: &HashSet<u32>,
+    orig_rets: &[Ty],
+    out: &mut Vec<ExprId>,
+) -> Option<ExprId> {
+    let IrExpr::When { branches } = ir.exprs[when_expr as usize].clone() else {
+        return None;
+    };
+    let cond_suspends = branches
+        .iter()
+        .any(|(c, _)| c.is_some_and(|c| expr_calls_suspend(ir, c, suspend_set)));
+    if !cond_suspends {
+        return None;
+    }
+    let mut prelude: Vec<ExprId> = Vec::new();
+    let new_branches: Branches = branches
+        .into_iter()
+        .map(|(cond, body)| {
+            (
+                cond.map(|c| hoist_expr(ir, c, suspend_set, orig_rets, &mut prelude)),
+                body,
+            )
+        })
+        .collect();
+    out.extend(prelude);
+    Some(ir.add_expr(IrExpr::When {
+        branches: new_branches,
+    }))
+}
+
 fn hoist_suspensions(ir: &mut IrFile, b: ExprId, suspend_set: &HashSet<u32>, orig_rets: &[Ty]) {
     let IrExpr::Block { stmts, value } = ir.exprs[b as usize].clone() else {
         return;
@@ -182,7 +226,16 @@ fn hoist_suspensions(ir: &mut IrFile, b: ExprId, suspend_set: &HashSet<u32>, ori
     for s in stmts {
         hoist_stmt(ir, s, suspend_set, orig_rets, &mut out);
     }
-    ir.exprs[b as usize] = IrExpr::Block { stmts: out, value };
+    // A block's TAIL VALUE that is an `if`/`when` EXPRESSION (a lambda's tail expression, `runBlocking { …;
+    // if (susp()) a else b }`) — hoist a suspension in its CONDITIONS to a preceding temp, exactly as a
+    // `return if (susp()) …` statement above, so the flattener never meets a condition-suspending When it
+    // can't model.
+    let new_value = value
+        .map(|v| hoist_when_cond_suspensions(ir, v, suspend_set, orig_rets, &mut out).unwrap_or(v));
+    ir.exprs[b as usize] = IrExpr::Block {
+        stmts: out,
+        value: new_value,
+    };
 }
 
 /// Append `stmt` (with unconditional nested suspensions hoisted) plus its hoist temps to `out`.
@@ -222,6 +275,18 @@ fn hoist_stmt(
             out.push(nw);
             return;
         }
+        // A `return if (susp()) a else b` / `return when (susp()) { … }` — the tail `if`/`when` EXPRESSION's
+        // CONDITIONS evaluate unconditionally (before any branch), so a suspension there is hoisted to a
+        // preceding bound temp, then the `return` re-wraps the When with the hoisted condition. Without this
+        // the flattener meets a `Return(When{cond suspends})` it can't model and bails. (Only the condition
+        // is hoisted; a branch VALUE that suspends stays for the flattener / a later skip.)
+        IrExpr::Return(Some(v)) if when_cond_suspends(ir, *v, suspend_set) => {
+            let nw = hoist_when_cond_suspensions(ir, *v, suspend_set, orig_rets, out)
+                .expect("guard ensured a condition suspends");
+            let nr = ir.add_expr(IrExpr::Return(Some(nw)));
+            out.push(nr);
+            return;
+        }
         IrExpr::While { .. } => {
             out.push(stmt);
             return;
@@ -230,10 +295,27 @@ fn hoist_stmt(
             out.push(stmt);
             return;
         }
-        IrExpr::Variable { init: Some(i), .. }
-            if matches!(ir.exprs[*i as usize], IrExpr::When { .. }) =>
-        {
-            out.push(stmt); // `val a = if/when …` (conditional suspension) — flattener's job
+        IrExpr::Variable {
+            init: Some(i),
+            index,
+            ty,
+        } if matches!(ir.exprs[*i as usize], IrExpr::When { .. }) => {
+            let (i, index, ty) = (*i, *index, *ty);
+            // `val a = if (susp()) x else y` — hoist the CONDITION suspension to a preceding temp, then
+            // re-bind `a` to the When with the hoisted condition. A branch VALUE that suspends stays for
+            // the flattener's `stmt_cond_suspension` (`val a = when { … -> susp() }`), which this arm still
+            // routes to (`hoist_when_cond_suspensions` returns `None`) when the condition doesn't suspend.
+            match hoist_when_cond_suspensions(ir, i, suspend_set, orig_rets, out) {
+                Some(nw) => {
+                    let nv = ir.add_expr(IrExpr::Variable {
+                        index,
+                        ty,
+                        init: Some(nw),
+                    });
+                    out.push(nv);
+                }
+                None => out.push(stmt),
+            }
             return;
         }
         _ if is_suspend_call(ir, stmt, suspend_set) => {

@@ -4923,13 +4923,15 @@ impl<'a> Checker<'a> {
         let Some(Ty::Obj(internal, _)) = subj_ty else {
             return false;
         };
-        let Some(cs) = self.syms.class_by_internal(internal) else {
-            return false;
+        // Subclasses of the sealed subject: a SAME-MODULE sealed class walks the user-class registry
+        // (`subclasses_of`); a CLASSPATH sealed class reads its `@Metadata` `sealedSubclassFqName`
+        // (`sealed_subclasses`), so `when (d) { is D.A -> …; is D.B -> … }` over a classpath sealed `D`
+        // is proven exhaustive (an expression) the same way a same-module one is.
+        let subs = match self.syms.class_by_internal(internal) {
+            Some(cs) if cs.is_sealed => self.syms.subclasses_of(internal),
+            Some(_) => return false,
+            None => self.syms.libraries.sealed_subclasses(internal),
         };
-        if !cs.is_sealed {
-            return false;
-        }
-        let subs = self.syms.subclasses_of(internal);
         if subs.is_empty() {
             return false;
         }
@@ -8676,6 +8678,66 @@ impl<'a> Checker<'a> {
                                         }
                                     }
                                     return c.ret;
+                                }
+                            }
+                            // A FQ call with a SYNTACTIC trailing lambda where the preceding parameters
+                            // DEFAULT (`kotlinx.coroutines.runBlocking { … }`): the lambda binds the LAST
+                            // parameter and the leading (defaulted) parameters are omitted, so the positional
+                            // front-to-back resolution above saw the wrong arity and missed it.
+                            if self.file.call_has_trailing_lambda.contains(&call.0)
+                                && !arg_tys.is_empty()
+                            {
+                                // The trailing lambda was typed WITHOUT the expected-parameter hint
+                                // (`{ … }` → arity 0), but the callee's block parameter is a receiver /
+                                // suspend SAM (`kotlinx.coroutines.runBlocking`'s `CoroutineScope.() -> T`).
+                                // Re-type the lambda against that parameter — the same shape data (aligned
+                                // for the default-omitted trailing lambda) the bare-name (`import`ed) path
+                                // uses — so it takes the right arity/receiver and overload resolution then
+                                // binds its result type-parameter (`T = String`).
+                                let last = args.len() - 1;
+                                let mut partial: Vec<Option<Ty>> =
+                                    arg_tys.iter().map(|t| Some(*t)).collect();
+                                partial[last] = None;
+                                let pts = self
+                                    .resolver()
+                                    .top_level_lambda_param_types(&name, &partial);
+                                let recvs =
+                                    self.resolver().top_level_lambda_receivers(&name, &partial);
+                                if let Some(pt) = pts.as_ref().and_then(|p| p.get(last)).cloned() {
+                                    // A RECEIVER function-type block parameter (`CoroutineScope.() -> T`):
+                                    // `pt[0]` is the receiver bound as the lambda's `this`, `pt[1..]` its
+                                    // value params — matching the bare-name path's `lambda_param_types` use.
+                                    let has_recv = recvs
+                                        .as_ref()
+                                        .and_then(|r| r.get(last).copied().flatten())
+                                        .is_some();
+                                    let lam_ty = if has_recv && !pt.is_empty() {
+                                        self.check_lambda_with_receiver_labeled(
+                                            args[last],
+                                            pt[0],
+                                            &pt[1..],
+                                            None,
+                                        )
+                                    } else {
+                                        self.check_lambda_with_types(args[last], &pt)
+                                    };
+                                    let mut full = arg_tys.clone();
+                                    full[last] = lam_ty;
+                                    if let Some(c) = self
+                                        .resolver()
+                                        .resolve_top_level_callable(&name, &full, &targs)
+                                    {
+                                        if c.owner.rsplit_once('/').map(|(p, _)| p)
+                                            == Some(pkg.as_str())
+                                        {
+                                            crate::trace_compiler!(
+                                                "resolve",
+                                                "fully-qualified trailing-lambda call {pkg}.{name} -> {}",
+                                                c.owner
+                                            );
+                                            return c.ret;
+                                        }
+                                    }
                                 }
                             }
                         }
