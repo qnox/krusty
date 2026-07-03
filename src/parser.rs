@@ -713,6 +713,7 @@ impl<'a> Parser<'a> {
                         mods.iter().any(|m| m == "final"),
                         mods.iter().any(|m| m == "suspend"),
                         mods.iter().any(|m| m == "tailrec"),
+                        mods.iter().any(|m| m == "abstract"),
                     );
                     d.is_private = mods.iter().any(|m| m == "private");
                     let id = self.file.add_decl(Decl::Fun(d));
@@ -1368,6 +1369,7 @@ impl<'a> Parser<'a> {
                         mods.iter().any(|m| m == "final"),
                         mods.iter().any(|m| m == "suspend"),
                         mods.iter().any(|m| m == "tailrec"),
+                        mods.iter().any(|m| m == "abstract"),
                     );
                     d.is_private = mods.iter().any(|m| m == "private");
                     methods.push(d);
@@ -1482,6 +1484,7 @@ impl<'a> Parser<'a> {
                                 bmods.iter().any(|m| m == "final"),
                                 bmods.iter().any(|m| m == "suspend"),
                                 bmods.iter().any(|m| m == "tailrec"),
+                                bmods.iter().any(|m| m == "abstract"),
                             ));
                         } else if self.at(TokenKind::KwVal) || self.at(TokenKind::KwVar) {
                             bprops.push(
@@ -1533,6 +1536,7 @@ impl<'a> Parser<'a> {
                         emods.iter().any(|m| m == "final"),
                         emods.iter().any(|m| m == "suspend"),
                         emods.iter().any(|m| m == "tailrec"),
+                        emods.iter().any(|m| m == "abstract"),
                     )),
                     // Nested type declarations and secondary constructors in an enum body: parse
                     // them through the real grammar (no token-skipping) and discard — krusty doesn't
@@ -1684,6 +1688,7 @@ impl<'a> Parser<'a> {
         is_final: bool,
         is_suspend: bool,
         is_tailrec: bool,
+        is_abstract: bool,
     ) -> FunDecl {
         // Annotations consumed by `skip_decl_prefix` before this function, attached here (mirrors how
         // classes take them) so function-annotation plugins can see them; otherwise they are discarded.
@@ -1721,6 +1726,7 @@ impl<'a> Parser<'a> {
                 span: start,
                 is_inline: false,
                 is_final: false,
+                is_abstract: false,
                 is_private: false,
                 is_suspend: false,
                 is_tailrec: false,
@@ -1829,6 +1835,7 @@ impl<'a> Parser<'a> {
             span: Span::new(start.lo, end.hi),
             is_inline,
             is_final,
+            is_abstract,
             is_private: false,
             is_suspend,
             is_tailrec,
@@ -2044,6 +2051,7 @@ impl<'a> Parser<'a> {
                         fun_final,
                         fun_suspend,
                         mods.iter().any(|m| m == "tailrec"),
+                        mods.iter().any(|m| m == "abstract"),
                     )),
                     TokenKind::KwVal | TokenKind::KwVar => {
                         // Non-abstract body props may omit the initializer (init blocks supply the
@@ -2395,6 +2403,7 @@ impl<'a> Parser<'a> {
                             false,
                             imods.iter().any(|m| m == "suspend"),
                             imods.iter().any(|m| m == "tailrec"),
+                            imods.iter().any(|m| m == "abstract"),
                         );
                         // The interface member's modifiers were consumed into `imods` before `parse_fun`,
                         // so it never saw `private` — a private interface method is non-virtual (called via
@@ -2498,6 +2507,7 @@ impl<'a> Parser<'a> {
                         fun_final,
                         fun_suspend,
                         mods.iter().any(|m| m == "tailrec"),
+                        mods.iter().any(|m| m == "abstract"),
                     )),
                     TokenKind::KwVal | TokenKind::KwVar => {
                         let p = self.parse_top_property_c(
@@ -2640,6 +2650,7 @@ impl<'a> Parser<'a> {
                         fun_final,
                         fun_suspend,
                         mods.iter().any(|m| m == "tailrec"),
+                        mods.iter().any(|m| m == "abstract"),
                     )),
                     TokenKind::KwVal | TokenKind::KwVar => {
                         let p = self.parse_top_property_c(
@@ -3488,7 +3499,7 @@ impl<'a> Parser<'a> {
             TokenKind::KwFun => {
                 // Local functions don't carry a `suspend` modifier through this path; a local
                 // `suspend fun` is handled (skipped) downstream via the suspend guard in lowering.
-                let f = self.parse_fun(false, false, false, false);
+                let f = self.parse_fun(false, false, false, false, false);
                 self.finish_stmt(Stmt::LocalFun(f), start)
             }
             // Local class declaration inside a function body (`class`/`data class`/`enum class`/
