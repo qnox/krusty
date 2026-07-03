@@ -330,19 +330,7 @@ mod tests {
     }
 
     fn callable(owner: &str, name: &str) -> LibraryCallable {
-        LibraryCallable {
-            owner: owner.to_string(),
-            name: name.to_string(),
-            params: vec![],
-            ret: Ty::Unit,
-            physical_ret: Ty::Unit,
-            descriptor: "()V".to_string(),
-            inline: crate::libraries::InlineKind::None,
-            default_call: false,
-            vararg_elem: None,
-            signature: None,
-            origin: crate::libraries::Origin::Library,
-        }
+        LibraryCallable::library(owner, name, vec![], Ty::Unit, Ty::Unit, "()V")
     }
 
     impl SymbolSource for FakeSource {

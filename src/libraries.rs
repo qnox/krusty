@@ -309,6 +309,31 @@ pub enum Origin {
     },
 }
 
+impl LibraryCallable {
+    pub fn library(
+        owner: impl Into<String>,
+        name: impl Into<String>,
+        params: Vec<Ty>,
+        ret: Ty,
+        physical_ret: Ty,
+        descriptor: impl Into<String>,
+    ) -> Self {
+        LibraryCallable {
+            owner: owner.into(),
+            name: name.into(),
+            params,
+            ret,
+            physical_ret,
+            descriptor: descriptor.into(),
+            inline: InlineKind::None,
+            default_call: false,
+            vararg_elem: None,
+            signature: None,
+            origin: Origin::Library,
+        }
+    }
+}
+
 /// A resolved companion-object function on a classpath value class (`Result.success`). The call lowers
 /// to `getstatic <class>.<field>:L<companion>;` (the receiver) then an inline-splice of the companion
 /// INSTANCE method carried by `callable` (its `this` is the loaded singleton).

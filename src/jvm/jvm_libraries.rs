@@ -2556,45 +2556,30 @@ impl crate::libraries::TargetRuntime for JvmLibraries {
             trailing_nulls,
         };
         let until = match elem {
-            Ty::UInt => Some(LibraryCallable {
-                owner: "kotlin/ranges/URangesKt".to_string(),
-                name: "until-J1ME1BU".to_string(),
-                params: vec![elem, elem],
-                ret: Ty::obj(internal),
-                physical_ret: Ty::obj(internal),
-                descriptor: format!("({prim}{prim})L{internal};"),
-                inline: InlineKind::None,
-                default_call: false,
-                vararg_elem: None,
-                signature: None,
-                origin: Origin::Library,
-            }),
-            Ty::ULong => Some(LibraryCallable {
-                owner: "kotlin/ranges/URangesKt".to_string(),
-                name: "until-eb3DHEI".to_string(),
-                params: vec![elem, elem],
-                ret: Ty::obj(internal),
-                physical_ret: Ty::obj(internal),
-                descriptor: format!("({prim}{prim})L{internal};"),
-                inline: InlineKind::None,
-                default_call: false,
-                vararg_elem: None,
-                signature: None,
-                origin: Origin::Library,
-            }),
-            _ if trailing_nulls == 0 => Some(LibraryCallable {
-                owner: "kotlin/ranges/RangesKt".to_string(),
-                name: "until".to_string(),
-                params: vec![elem, elem],
-                ret: Ty::obj(internal),
-                physical_ret: Ty::obj(internal),
-                descriptor: format!("({prim}{prim})L{internal};"),
-                inline: InlineKind::None,
-                default_call: false,
-                vararg_elem: None,
-                signature: None,
-                origin: Origin::Library,
-            }),
+            Ty::UInt => Some(LibraryCallable::library(
+                "kotlin/ranges/URangesKt",
+                "until-J1ME1BU",
+                vec![elem, elem],
+                Ty::obj(internal),
+                Ty::obj(internal),
+                format!("({prim}{prim})L{internal};"),
+            )),
+            Ty::ULong => Some(LibraryCallable::library(
+                "kotlin/ranges/URangesKt",
+                "until-eb3DHEI",
+                vec![elem, elem],
+                Ty::obj(internal),
+                Ty::obj(internal),
+                format!("({prim}{prim})L{internal};"),
+            )),
+            _ if trailing_nulls == 0 => Some(LibraryCallable::library(
+                "kotlin/ranges/RangesKt",
+                "until",
+                vec![elem, elem],
+                Ty::obj(internal),
+                Ty::obj(internal),
+                format!("({prim}{prim})L{internal};"),
+            )),
             _ => None,
         };
         Some(RangeConstruction {
@@ -2620,19 +2605,14 @@ impl crate::libraries::TargetRuntime for JvmLibraries {
                         ret: Ty,
                         physical_ret: Ty,
                         descriptor: String| {
-            Some(LibraryCallable {
-                owner: owner.to_string(),
-                name: name.to_string(),
+            Some(LibraryCallable::library(
+                owner,
+                name,
                 params,
                 ret,
                 physical_ret,
                 descriptor,
-                inline: InlineKind::None,
-                default_call: false,
-                vararg_elem: None,
-                signature: None,
-                origin: crate::libraries::Origin::Library,
-            })
+            ))
         };
 
         match op {
