@@ -88,6 +88,89 @@ fn branchless_inline_fn_is_spliced_not_called() {
     let _ = fs::remove_dir_all(&work);
 }
 
+/// Same splice path, but the spliced bodies operate on `Long`/`Float`/`Double` (and an `Int`→`Long`
+/// widening). This drives the splice stack-type simulator's category-2 and float/double opcode arms
+/// (`lconst`/`fconst`/`dconst`, `ladd`/`dmul`/`fadd`, `i2l`, …) that the all-`Int` case never reaches.
+#[test]
+fn typed_bodies_are_spliced() {
+    let Some(kotlinc) = env("KRUSTY_KOTLINC") else {
+        eprintln!("skipping inline_splice_e2e(typed): set KRUSTY_KOTLINC");
+        return;
+    };
+    let Some(java_home) = env("KRUSTY_REF_JAVA_HOME").or_else(|| env("JAVA_HOME")) else {
+        eprintln!("skipping inline_splice_e2e(typed): set JAVA_HOME");
+        return;
+    };
+    let Some(stdlib_path) = common::stdlib_jar() else {
+        eprintln!("skipping inline_splice_e2e(typed): no kotlin-stdlib jar");
+        return;
+    };
+    let stdlib = stdlib_path.to_str().unwrap().to_string();
+    let _ = &kotlinc;
+    let jdk_modules = std::path::PathBuf::from(format!("{java_home}/lib/modules"));
+
+    let work =
+        std::env::temp_dir().join(format!("krusty_inline_splice_typed_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&work);
+    let libout = work.join("libout");
+    fs::create_dir_all(&libout).unwrap();
+
+    let lib_kt = work.join("LibTyped.kt");
+    fs::write(
+        &lib_kt,
+        "package lib\n\
+         inline fun dscale(x: Double): Double = x * 2.5\n\
+         inline fun lsum(a: Long, b: Long): Long = a + b\n\
+         inline fun fbump(x: Float): Float = x + 1.5f\n\
+         inline fun widen(x: Int): Long = x.toLong()\n",
+    )
+    .unwrap();
+    let kc_args = vec![
+        "-d".to_string(),
+        libout.to_string_lossy().into_owned(),
+        "-cp".to_string(),
+        stdlib.clone(),
+        lib_kt.to_string_lossy().into_owned(),
+    ];
+    match common::kotlinc_compile(&kc_args) {
+        Some((0, _)) => {}
+        Some((_, e)) => panic!("kotlinc(libTyped): {e}"),
+        None => return,
+    }
+
+    let main_src = "import lib.dscale\nimport lib.lsum\nimport lib.fbump\nimport lib.widen\n\
+        fun box(): String {\n\
+        \x20   val d = dscale(4.0)\n\
+        \x20   val l = lsum(3L, widen(4))\n\
+        \x20   val f = fbump(2.5f)\n\
+        \x20   return if (d == 10.0 && l == 7L && f == 4.0f) \"OK\" else \"fail:d=$d l=$l f=$f\"\n\
+        }\n";
+    let cp = vec![libout.clone(), stdlib_path.clone()];
+    let classes = common::compile_in_process(main_src, "MainTyped", &cp, Some(&jdk_modules))
+        .expect("krusty(mainTyped) failed to compile");
+
+    let main_class = &classes
+        .iter()
+        .find(|(n, _)| n == "MainTypedKt")
+        .expect("no MainTypedKt")
+        .1;
+    for callee in [&b"dscale"[..], &b"lsum"[..], &b"fbump"[..], &b"widen"[..]] {
+        assert!(
+            !contains(main_class, callee),
+            "MainTypedKt still references `{}` — spliced, not called",
+            String::from_utf8_lossy(callee)
+        );
+    }
+
+    let Some(out) = common::run_box(&classes, "MainTypedKt", &[stdlib_path]) else {
+        eprintln!("skipping: box runner unavailable");
+        return;
+    };
+    assert_eq!(out.trim(), "OK", "typed box() returned {out:?}");
+
+    let _ = fs::remove_dir_all(&work);
+}
+
 fn contains(hay: &[u8], needle: &[u8]) -> bool {
     hay.windows(needle.len()).any(|w| w == needle)
 }
