@@ -1063,6 +1063,22 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   non-suspending body, a tail suspend call, and a bound suspension (`val x = work(); …`); a suspension nested
   in an `if`/`when` CONDITION cleanly SKIPS (the pre-existing flattener limit), never miscompiles. Test:
   `tests/classpath_runblocking_e2e.rs`.
+- **A generic classpath `suspend` member returning a TYPE PARAMETER binds it from the receiver's type
+  argument** (`interface Repo<T> { suspend fun byId(): T? }` on a `Repo<Cfg>` receiver → `Cfg?`). The
+  non-suspend member path binds `T` via `member_return` (substituting the receiver's args into the generic
+  return), but the suspend path recovers its return from the `Continuation<T>` generic signature and had NO
+  substitution — so `T` erased to `Any`, and `r.byId() ?: error(…)` then `c.at` failed with "member … on
+  'kotlin/Any'". `receiver_type_bindings` computes the receiver→declaring-class formal→argument map (the same
+  hierarchy walk `member_return` performs) and `suspend_return_from_gsig` substitutes the recovered bare type
+  parameter under it. Test: `tests/generic_suspend_member_return_e2e.rs`.
+- **A classpath constructor accepts a NOMINAL-SUBTYPE argument** (`Outer(s: Sub)` called with a sealed/open
+  subclass `Sub.U(…)`). The `<init>` overload resolution matched an exact / value-class-erased /
+  JVM-collection-erased argument, and its subtype pass was gated behind `jvm_args != args` (only when a
+  collection/value-class argument changed form) — so a plain reference subtype (no erasure) skipped it and
+  `Outer` was reported unresolved. `resolve_constructor` now has a general nominal-subtype fallback (walk each
+  argument's classpath supertype closure to its parameter, via `ctor_arg_subtype_of_param`) AFTER every exact
+  pass, so the most-specific constructor still wins and a scalar parameter is never coerced (the widening is
+  restricted to reference `Ty::Obj` arg↔param pairs). Test: `tests/classpath_subtype_ctor_arg_e2e.rs`.
 - **A `suspend` body accessing a member of a suspend call's result inline (`suspend fun f(r) =
   r.all().size`).** The CPS flattener only meets a suspension at a bound-local / bare-statement position;
   a suspension nested in a `return`/member-access value must be pre-hoisted. `hoist_suspensions` now

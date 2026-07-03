@@ -1259,6 +1259,25 @@ pub fn resolve_constructor(
             return Some(m.clone());
         }
     }
+    // A reference argument may be a plain NOMINAL SUBTYPE of the parameter (`Outer(s: Sub)` called with a
+    // sealed/open subclass `Sub.U(…)`). No collection erasure is involved, so `jvm_args == args` and the
+    // subtype pass inside that block above never ran; walk each argument's classpath supertype closure to
+    // its parameter here. Runs only AFTER every exact match failed, so the most-specific constructor still
+    // wins; `ctor_arg_subtype_of_param` restricts widening to reference (`Ty::Obj`) arg↔param pairs, so a
+    // scalar parameter is never coerced.
+    if let Some(m) = t.constructors.iter().find(|m| {
+        m.params.len() == args.len()
+            && m.params
+                .iter()
+                .zip(args)
+                .all(|(p, a)| ctor_arg_subtype_of_param(lib, *a, *p))
+    }) {
+        crate::trace_compiler!(
+            "value_classes",
+            "resolve_constructor {internal} matched via nominal-subtype args {args:?}"
+        );
+        return Some(m.clone());
+    }
     // A classpath `@JvmInline value class` exposes only a PRIVATE `<init>` (its public surface is the
     // static `box-impl`/`constructor-impl`), so `ctor` finds nothing. Construction is `X(u)` over the
     // single underlying value `u`; synthesize that constructor so the call type-checks. The
