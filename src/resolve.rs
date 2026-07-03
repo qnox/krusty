@@ -3699,6 +3699,18 @@ pub fn check_file(file: &File, syms: &mut SymbolTable, diags: &mut DiagSink) -> 
                         }
                     }
                 }
+                // Duplicate class type-parameter names (`class C<T, T>`) are illegal.
+                {
+                    let mut seen = std::collections::HashSet::new();
+                    for tp in &cl.type_params {
+                        if !seen.insert(tp.as_str()) {
+                            c.diags.error(
+                                cl.span,
+                                format!("conflicting declaration: type parameter '{tp}' is declared more than once"),
+                            );
+                        }
+                    }
+                }
                 // In a class WITH a primary constructor every secondary must delegate to it (`this(…)`);
                 // `super(…)`/implicit delegation isn't emitted there, so reject it. A class with NO
                 // primary constructor admits `this(…)`/`super(…)`/implicit delegation (each becomes its
@@ -5187,6 +5199,25 @@ impl<'a> Checker<'a> {
                     );
                 }
             }
+        }
+        // Duplicate type-parameter names (`fun <T, T> f()`) are illegal (conflicting declaration).
+        {
+            let mut seen = std::collections::HashSet::new();
+            for tp in &f.type_params {
+                if !seen.insert(tp.as_str()) {
+                    self.diags.error(
+                        f.span,
+                        format!("conflicting declaration: type parameter '{tp}' is declared more than once"),
+                    );
+                }
+            }
+        }
+        // At most one `vararg` parameter is allowed (kotlinc: multiple vararg parameters not allowed).
+        if f.params.iter().filter(|p| p.is_vararg).count() > 1 {
+            self.diags.error(
+                f.span,
+                "multiple vararg parameters are not allowed".to_string(),
+            );
         }
         // The set of locals reassigned anywhere in this function (for captured-`var` boxing).
         self.fn_reassigned.clear();
