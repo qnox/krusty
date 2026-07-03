@@ -1713,7 +1713,7 @@ fn is_classpath_subtype(lib: &dyn SymbolSource, sub: &str, super_: &str, depth: 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::libraries::{CallSig, FnFlags, FunctionSet, LibraryCallable, Origin, TypeKind};
+    use crate::libraries::{CallSig, FunctionSet, LibraryCallable, Origin, TypeKind};
 
     struct FakeSource {
         name: &'static str,
@@ -1764,20 +1764,13 @@ mod tests {
             origin: Origin::Library,
         };
         FunctionInfo {
-            kind: FnKind::TopLevel,
-            receiver: None,
             ret: crate::libraries::ReturnInfo::new(false, Some(Ty::UInt)),
-            flags: FnFlags::default(),
-            callable,
-            public: true,
-            receiver_rank: 0,
-            overload_rank: 0,
-            generic_sig: None,
             call_sig: CallSig {
                 required: 0,
                 param_defaults: vec![true],
                 ..Default::default()
             },
+            ..FunctionInfo::plain(FnKind::TopLevel, None, callable)
         }
     }
 
@@ -1791,16 +1784,8 @@ mod tests {
             "()Ljava/lang/String;",
         );
         FunctionInfo {
-            kind: FnKind::TopLevel,
-            receiver: None,
             ret: crate::libraries::ReturnInfo::new(true, None),
-            flags: FnFlags::default(),
-            callable,
-            public: true,
-            receiver_rank: 0,
-            overload_rank: 0,
-            generic_sig: None,
-            call_sig: CallSig::default(),
+            ..FunctionInfo::plain(FnKind::TopLevel, None, callable)
         }
     }
 
@@ -1815,16 +1800,8 @@ mod tests {
             "(Ljava/lang/String;)Ljava/lang/String;",
         );
         FunctionInfo {
-            kind: FnKind::Extension,
-            receiver: Some(receiver),
             ret: crate::libraries::ReturnInfo::new(true, None),
-            flags: FnFlags::default(),
-            callable,
-            public: true,
-            receiver_rank: 0,
-            overload_rank: 0,
-            generic_sig: None,
-            call_sig: CallSig::default(),
+            ..FunctionInfo::plain(FnKind::Extension, Some(receiver), callable)
         }
     }
 
@@ -1839,16 +1816,8 @@ mod tests {
             "()Ljava/lang/String;",
         );
         FunctionInfo {
-            kind: FnKind::Member,
-            receiver: Some(receiver),
             ret: crate::libraries::ReturnInfo::new(true, None),
-            flags: FnFlags::default(),
-            callable,
-            public: true,
-            receiver_rank: 0,
-            overload_rank: 0,
-            generic_sig: None,
-            call_sig: CallSig::default(),
+            ..FunctionInfo::plain(FnKind::Member, Some(receiver), callable)
         }
     }
 
@@ -1863,19 +1832,11 @@ mod tests {
             "()Ljava/lang/Object;",
         );
         FunctionInfo {
-            kind: FnKind::Member,
-            receiver: Some(receiver),
             ret: crate::libraries::ReturnInfo::new(
                 false,
                 Some(Ty::obj_args("kotlin/collections/List", &[Ty::String])),
             ),
-            flags: FnFlags::default(),
-            callable,
-            public: true,
-            receiver_rank: 0,
-            overload_rank: 0,
-            generic_sig: None,
-            call_sig: CallSig::default(),
+            ..FunctionInfo::plain(FnKind::Member, Some(receiver), callable)
         }
     }
 

@@ -316,9 +316,7 @@ impl SymbolSource for CompositeSource {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::libraries::{
-        FnFlags, FnKind, FunctionInfo, LibraryCallable, LibrarySeed, LibraryType,
-    };
+    use crate::libraries::{FnKind, FunctionInfo, LibraryCallable, LibrarySeed, LibraryType};
     use crate::types::Ty;
 
     /// A minimal source: a few class names and one top-level overload of a chosen name.
@@ -344,18 +342,11 @@ mod tests {
         fn functions(&self, name: &str, receiver: Option<Ty>) -> FunctionSet {
             if receiver.is_none() && self.fn_name.as_deref() == Some(name) {
                 FunctionSet {
-                    overloads: vec![FunctionInfo {
-                        kind: FnKind::TopLevel,
-                        receiver: None,
-                        ret: crate::libraries::ReturnInfo::new(false, None),
-                        public: true,
-                        receiver_rank: 0,
-                        overload_rank: 0,
-                        generic_sig: None,
-                        call_sig: crate::libraries::CallSig::default(),
-                        flags: FnFlags::default(),
-                        callable: callable(&self.owner, name),
-                    }],
+                    overloads: vec![FunctionInfo::plain(
+                        FnKind::TopLevel,
+                        None,
+                        callable(&self.owner, name),
+                    )],
                 }
             } else {
                 FunctionSet::default()
