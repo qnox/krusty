@@ -5460,6 +5460,26 @@ impl<'a> Checker<'a> {
             let ty = if p.is_vararg { Ty::array(ty) } else { ty };
             self.declare(&p.name, ty, false);
         }
+        // Type each parameter's DEFAULT value so its type info is recorded — the `$default` stub lowering
+        // needs it to resolve a NON-literal default (a ctor call `f: Filt = Filt()`, an object read); a
+        // method's defaults were previously left unchecked (only `check_fun` did top-level ones), so a
+        // non-literal member default typed `Error` and the stub bailed ("call Filt"). A default may read
+        // `this`/members but not other parameters (the latter is rejected in `collect_signatures`).
+        for p in &f.params {
+            if let Some(dx) = p.default {
+                let pty = self.resolve_ty(&p.ty);
+                let dty = if matches!(self.file.expr(dx), Expr::Lambda { .. })
+                    && (!p.ty.fun_params.is_empty() || p.ty.name == "<fun>")
+                {
+                    let lam_pts: Vec<Ty> =
+                        p.ty.fun_params.iter().map(|r| self.resolve_ty(r)).collect();
+                    self.check_lambda_with_types(dx, &lam_pts)
+                } else {
+                    self.expr(dx)
+                };
+                self.expect_assignable(pty, dty, self.span(dx), "default argument");
+            }
+        }
         let infer_ret =
             f.ret.is_none() && object_contract_ret.is_none() && matches!(&f.body, FunBody::Expr(_));
         if infer_ret {

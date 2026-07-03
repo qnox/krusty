@@ -2301,9 +2301,11 @@ fn box_returns(ir: &mut IrFile, e: ExprId) -> bool {
         IrExpr::When { branches } => branches
             .into_iter()
             .all(|(cond, body)| cond.is_none_or(|c| box_returns(ir, c)) && box_returns(ir, body)),
-        IrExpr::Const(_) | IrExpr::GetValue(_) | IrExpr::GetStatic(_) | IrExpr::UnitInstance => {
-            true
-        }
+        IrExpr::Const(_)
+        | IrExpr::GetValue(_)
+        | IrExpr::GetStatic(_)
+        | IrExpr::ExternalStaticField { .. }
+        | IrExpr::UnitInstance => true,
         IrExpr::TypeOp { arg, .. } | IrExpr::NotNullAssert { operand: arg } => box_returns(ir, arg),
         IrExpr::Throw { operand } => box_returns(ir, operand),
         IrExpr::StringConcat(parts) => parts.into_iter().all(|p| box_returns(ir, p)),
@@ -2349,7 +2351,10 @@ fn box_returns(ir: &mut IrFile, e: ExprId) -> bool {
                 && catches.into_iter().all(|c| box_returns(ir, c.body))
                 && finally.is_none_or(|f| box_returns(ir, f))
         }
-        _ => false,
+        other => {
+            crate::trace_compiler!("suspend", "box_returns BAIL: unhandled node {other:?}");
+            false
+        }
     }
 }
 

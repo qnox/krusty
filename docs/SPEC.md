@@ -1545,3 +1545,22 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`import`ed) path uses, so overload resolution binds the block's result type-parameter (`runBlocking {
   "x" }: String`); the lowerer emits `runBlocking$default(context, block, mask, marker)`. A plain
   no-lambda FQ call (`kotlin.math.max`) was already supported. (`build702_fq_trailing_lambda_e2e`)
+
+- **A class method's DEFAULT parameter is now type-checked.** `check_method` types each parameter's
+  default expression (as `check_fun` already did for top-level functions), so a NON-literal member
+  default — a constructor call `fun list(f: Filt = Filt())`, an object read — records its type. Without
+  it the `$default` stub lowering couldn't recognize the construction (`info.ty` was `Error`) and bailed
+  ("call Filt"); a literal default (`x: Int = 5`) was unaffected. (`build722_dd1_suspend_member_default_e2e`)
+
+- **A classpath `object`'s `INSTANCE` read inside a suspend lambda.** The coroutine `box_returns` pass —
+  which boxes the returns of a CPS body / lambda state machine — now treats an `ExternalStaticField`
+  (`getstatic lib/R.INSTANCE`, reading a classpath `object`) as a leaf value, like `GetStatic`. Reading a
+  classpath object inside a `runBlocking { … Service(R) … }` block previously bailed the lambda's state
+  machine. (`build722_dd1_suspend_member_default_e2e`)
+
+- **The same inline HOF spliced in both branches of an `if`/`when`.** `emit_when` tracked the operand
+  stack with a linear counter; a branch that left its value on the counter (height 1) leaked that height
+  into the NEXT branch, which is actually reached by a conditional JUMP at the pre-branch baseline (height
+  0). A framed inline splice (e.g. `xs.find { … }`'s loop body) requires an empty operand baseline, so the
+  second branch's splice bailed ("inline splice failed"). `emit_when` now resets the stack counter to the
+  branch-entry height at each jump-reached branch. (`build722_hh1_inline_hof_both_branches_e2e`)

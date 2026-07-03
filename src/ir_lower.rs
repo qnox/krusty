@@ -1878,7 +1878,20 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                         let mut defaults = Vec::new();
                         for (p, t) in m.params.iter().zip(&sig.params) {
                             match p.default {
-                                Some(d) => defaults.push(Some(lo.lower_arg(d, &ty_to_ir(*t))?)),
+                                Some(d) => {
+                                    let lowered = lo.lower_arg(d, &ty_to_ir(*t));
+                                    crate::trace_compiler!(
+                                        "resolve",
+                                        "member default {}.{} param {} ty={:?} info_ty={:?} lowered={}",
+                                        internal,
+                                        m.name,
+                                        p.name,
+                                        t,
+                                        lo.info.ty(d),
+                                        lowered.is_some()
+                                    );
+                                    defaults.push(Some(lowered?));
+                                }
                                 None => defaults.push(None),
                             }
                         }
