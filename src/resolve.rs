@@ -3685,6 +3685,20 @@ pub fn check_file(file: &File, syms: &mut SymbolTable, diags: &mut DiagSink) -> 
                 c.tparams.clear();
             }
             Decl::Class(cl) => {
+                // Duplicate primary-constructor parameter names are illegal (kotlinc reports a
+                // conflicting declaration). `cl.props` holds every primary-ctor parameter (property
+                // and plain) in order.
+                {
+                    let mut seen = std::collections::HashSet::new();
+                    for pp in &cl.props {
+                        if !seen.insert(pp.name.as_str()) {
+                            c.diags.error(
+                                cl.span,
+                                format!("conflicting declaration: constructor parameter '{}' is declared more than once", pp.name),
+                            );
+                        }
+                    }
+                }
                 // In a class WITH a primary constructor every secondary must delegate to it (`this(…)`);
                 // `super(…)`/implicit delegation isn't emitted there, so reject it. A class with NO
                 // primary constructor admits `this(…)`/`super(…)`/implicit delegation (each becomes its
@@ -6038,6 +6052,10 @@ impl<'a> Checker<'a> {
                 let mut result = bt;
                 for c in &catches {
                     let cty = match self.catch_internal(&c.ty.name) {
+                        // A catch type SHOULD be a `Throwable` subtype, but krusty's exception-hierarchy
+                        // walk is incomplete (`NotImplementedError` and other stdlib errors don't chain
+                        // to `Throwable`), so enforcing it here false-rejects valid catches. Deferred
+                        // until the hierarchy is complete.
                         Some(i) => Ty::obj(&i),
                         None => {
                             self.diags.error(
