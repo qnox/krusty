@@ -3,7 +3,6 @@
 //!  b2 fully-qualified dotted type ref inline         (`fun f(x: lib.Thing?)`, no import)
 //!  b3 nested type in type position                   (`fun f(b: Wrap.Box)`)
 //!  b5 comparison operator on a `Comparable` classpath type (`a < b` where `a,b: Money`)
-use std::fs;
 mod common;
 
 #[test]
@@ -16,13 +15,8 @@ fn classpath_type_ref_and_operator_resolution() {
         eprintln!("skipping: no kotlin-stdlib jar");
         return;
     };
-    let stdlib = sl.to_str().unwrap().to_string();
-    let work = std::env::temp_dir().join(format!("krusty_ctr_{}", std::process::id()));
-    let _ = fs::remove_dir_all(&work);
-    let libout = work.join("lib");
-    fs::create_dir_all(&libout).unwrap();
-    fs::write(
-        work.join("Lib.kt"),
+    let Some(libout) = common::compile_lib(
+        "ctr",
         "package lib\n\
          @JvmInline value class Id(val v: String = \"x\")\n\
          class Cfg(val n: Int = 7, val s: String = \"d\")\n\
@@ -31,20 +25,9 @@ fn classpath_type_ref_and_operator_resolution() {
          class Money(val cents: Int) : Comparable<Money> {\n\
          \x20 override fun compareTo(other: Money): Int = cents - other.cents\n\
          }\n",
-    )
-    .unwrap();
-    let kc = vec![
-        "-d".into(),
-        libout.to_string_lossy().into_owned(),
-        "-cp".into(),
-        stdlib,
-        work.join("Lib.kt").to_string_lossy().into_owned(),
-    ];
-    match common::kotlinc_compile(&kc) {
-        Some((0, _)) => {}
-        Some((_, e)) => panic!("kotlinc(lib): {e}"),
-        None => return,
-    }
+    ) else {
+        return;
+    };
     let cp = vec![libout.clone(), sl.clone()];
     let main = "import lib.Id\n\
         import lib.Cfg\n\

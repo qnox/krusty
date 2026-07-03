@@ -3,7 +3,6 @@
 //! omitted fields come from the receiver. krusty previously mis-lowered it to a garbled `<init>`
 //! (VerifyError). Verified byte-identical to kotlinc's `copy$default` call.
 //! Needs the JVM toolchain + kotlin-stdlib; skips otherwise.
-use std::fs;
 mod common;
 
 #[test]
@@ -16,28 +15,12 @@ fn classpath_data_class_copy_with_omitted_fields() {
         eprintln!("skipping: no kotlin-stdlib jar");
         return;
     };
-    let stdlib = sl.to_str().unwrap().to_string();
-    let work = std::env::temp_dir().join(format!("krusty_datacopy_{}", std::process::id()));
-    let _ = fs::remove_dir_all(&work);
-    let libout = work.join("lib");
-    fs::create_dir_all(&libout).unwrap();
-    fs::write(
-        work.join("Lib.kt"),
+    let Some(libout) = common::compile_lib(
+        "datacopy",
         "package lib\ndata class Rec(val a: String, val b: String, val n: Int)\n",
-    )
-    .unwrap();
-    let kc = vec![
-        "-d".into(),
-        libout.to_string_lossy().into_owned(),
-        "-cp".into(),
-        stdlib,
-        work.join("Lib.kt").to_string_lossy().into_owned(),
-    ];
-    match common::kotlinc_compile(&kc) {
-        Some((0, _)) => {}
-        Some((_, e)) => panic!("kotlinc(lib): {e}"),
-        None => return,
-    }
+    ) else {
+        return;
+    };
     let cp = vec![libout.clone(), sl.clone()];
     let main = "import lib.Rec\n\
         fun box(): String {\n\

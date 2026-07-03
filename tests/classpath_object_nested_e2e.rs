@@ -2,7 +2,6 @@
 //! member taking a trailing lambda, a sealed-subclass constructor, and an `is Sealed.Sub` check.
 //! These were resolved as an unresolved "Java static" because the qualifier is a classpath Kotlin
 //! object / nested / sealed type rather than a companion.
-use std::fs;
 mod common;
 
 #[test]
@@ -15,15 +14,10 @@ fn classpath_object_and_nested_resolution() {
         eprintln!("skipping: no kotlin-stdlib jar");
         return;
     };
-    let stdlib = sl.to_str().unwrap().to_string();
-    let work = std::env::temp_dir().join(format!("krusty_cobj_{}", std::process::id()));
-    let _ = fs::remove_dir_all(&work);
-    let libout = work.join("lib");
-    fs::create_dir_all(&libout).unwrap();
     // A classpath library: a plain `object`, an object with a trailing-lambda member, and a sealed
     // hierarchy with nested subclasses.
-    fs::write(
-        work.join("Lib.kt"),
+    let Some(libout) = common::compile_lib(
+        "cobj",
         "package lib\n\
          object Ids { fun generate(): String = \"id-42\" }\n\
          object L { fun logger(build: () -> String): String = build() }\n\
@@ -31,20 +25,9 @@ fn classpath_object_and_nested_resolution() {
          \x20 class User(val name: String) : Subject()\n\
          \x20 object Anon : Subject()\n\
          }\n",
-    )
-    .unwrap();
-    let kc = vec![
-        "-d".into(),
-        libout.to_string_lossy().into_owned(),
-        "-cp".into(),
-        stdlib,
-        work.join("Lib.kt").to_string_lossy().into_owned(),
-    ];
-    match common::kotlinc_compile(&kc) {
-        Some((0, _)) => {}
-        Some((_, e)) => panic!("kotlinc(lib): {e}"),
-        None => return,
-    }
+    ) else {
+        return;
+    };
     let cp = vec![libout.clone(), sl.clone()];
     let main = "import lib.Ids\n\
         import lib.L\n\
