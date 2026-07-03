@@ -85,12 +85,12 @@ pub trait SymbolSource {
     /// Normalize a semantic type to the form a JVM `<init>`/method descriptor carries, so a call
     /// argument can be matched against a descriptor-read parameter. A Kotlin built-in erases to its
     /// single JVM identity (`kotlin/collections/Set<String>` → `java/util/Set`, read-only and mutable
-    /// alike) and type arguments are dropped, mirroring erasure. `None` = no platform normalization
-    /// applies (compare the type unchanged). Reference (`Ty::Obj`) types are normalized and arrays
+    /// alike) and type arguments are dropped, mirroring erasure. Sources that do not need platform
+    /// normalization return the type unchanged. Reference (`Ty::Obj`) types are normalized and arrays
     /// recurse into their element (so a nested collection normalizes too); primitives, `String` and
     /// function types already compare exactly across the two sides.
-    fn jvm_descriptor_form(&self, _ty: Ty) -> Option<Ty> {
-        None
+    fn jvm_descriptor_form(&self, ty: Ty) -> Ty {
+        ty
     }
 
     /// If values of this type can be invoked like a Kotlin function, return their arity. Plain
@@ -242,8 +242,14 @@ impl SymbolSource for CompositeSource {
         self.children.iter().any(|c| c.is_unsigned_integer_type(ty))
     }
 
-    fn jvm_descriptor_form(&self, ty: Ty) -> Option<Ty> {
-        self.children.iter().find_map(|c| c.jvm_descriptor_form(ty))
+    fn jvm_descriptor_form(&self, ty: Ty) -> Ty {
+        self.children
+            .iter()
+            .find_map(|c| {
+                let t = c.jvm_descriptor_form(ty);
+                (t != ty).then_some(t)
+            })
+            .unwrap_or(ty)
     }
 
     fn function_like_arity(&self, ty: Ty) -> Option<usize> {
@@ -468,7 +474,7 @@ mod tests {
         let s = module();
         // FakeSource does not override this, so it is `false`.
         assert!(!s.is_unsigned_integer_type(Ty::Int));
-        assert!(s.jvm_descriptor_form(Ty::Int).is_none());
+        assert_eq!(s.jvm_descriptor_form(Ty::Int), Ty::Int);
         assert!(s.property_reference_type(1, false).is_none());
         assert!(s.class_literal_type().is_none());
         assert!(s.platform_default_import_packages().is_empty());
@@ -509,7 +515,7 @@ mod tests {
         let c = CompositeSource::new(vec![Box::new(module()), Box::new(library())]);
         // No child overrides these, so the composite reports the empty/None defaults.
         assert!(!c.is_unsigned_integer_type(Ty::Int));
-        assert!(c.jvm_descriptor_form(Ty::Int).is_none());
+        assert_eq!(c.jvm_descriptor_form(Ty::Int), Ty::Int);
         assert!(c.property_reference_type(0, true).is_none());
         assert!(c.class_literal_type().is_none());
         assert!(c.platform_default_import_packages().is_empty());
