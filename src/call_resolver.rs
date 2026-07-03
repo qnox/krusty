@@ -304,7 +304,7 @@ impl<'a> CallResolver<'a> {
                 gsig_to_ty(&gsig.ret, &binds)
             })
             .unwrap_or(*ret);
-        let ret_ty = o.return_type(if o.flags.suspend { c.ret } else { ret_ty });
+        let ret_ty = o.ret.apply(if o.flags.suspend { c.ret } else { ret_ty });
 
         crate::trace_compiler!(
             "resolve",
@@ -498,9 +498,10 @@ impl<'a> CallResolver<'a> {
             })
             .unwrap_or(c.ret);
         let ret_class = o
-            .ret_class
+            .ret
+            .class
             .filter(|meta| self.lib.value_underlying(*meta).is_some());
-        let ret_ty = o.return_type_with_class(ret_class, ret_ty);
+        let ret_ty = o.ret.apply_with_class(ret_class, ret_ty);
         callable_with_return(c, ret_ty, false)
     }
 
@@ -571,7 +572,7 @@ impl<'a> CallResolver<'a> {
                         gsig_to_ty(&gsig.ret, &binds)
                     })
                     .unwrap_or(c.ret);
-                let ret_ty = o.return_type(ret_ty);
+                let ret_ty = o.ret.apply(ret_ty);
                 return Some(callable_with_return(c, ret_ty, true));
             }
         }
@@ -722,7 +723,7 @@ impl<'a> CallResolver<'a> {
                     gsig_to_ty(&gsig.ret, &binds)
                 })
                 .unwrap_or(c.ret);
-            let ret_ty = o.return_type(ret_ty);
+            let ret_ty = o.ret.apply(ret_ty);
             return Some(callable_with_return(c, ret_ty, true));
         }
         None
@@ -762,7 +763,7 @@ impl<'a> CallResolver<'a> {
                     gsig_to_ty(&gsig.ret, &binds)
                 })
                 .unwrap_or(c.ret);
-            let logical_ret = o.return_type(recovered);
+            let logical_ret = o.ret.apply(recovered);
             let mut callable = callable_with_return(c, logical_ret, false);
             callable.inline = InlineKind::MustInline;
             return Some(callable);
@@ -1461,7 +1462,7 @@ pub fn resolve_instance(
     args: &[Ty],
 ) -> Option<LibraryMember> {
     select_instance_info(lib, Ty::obj(internal), name, args).map(|o| {
-        let ret = o.return_type(o.callable.ret);
+        let ret = o.ret.apply(o.callable.ret);
         o.member_with_return(ret)
     })
 }
@@ -1504,7 +1505,7 @@ pub fn resolve_instance_member(
     } else {
         o.callable.ret
     };
-    let ret = o.return_type(ret);
+    let ret = o.ret.apply(ret);
     let member = o.member_with_return(o.callable.ret);
     Some(ResolvedMember {
         ret,
@@ -1765,8 +1766,7 @@ mod tests {
         FunctionInfo {
             kind: FnKind::TopLevel,
             receiver: None,
-            ret_nullable: false,
-            ret_class: Some(Ty::UInt),
+            ret: crate::libraries::ReturnInfo::new(false, Some(Ty::UInt)),
             flags: FnFlags::default(),
             callable,
             public: true,
@@ -1793,8 +1793,7 @@ mod tests {
         FunctionInfo {
             kind: FnKind::TopLevel,
             receiver: None,
-            ret_nullable: true,
-            ret_class: None,
+            ret: crate::libraries::ReturnInfo::new(true, None),
             flags: FnFlags::default(),
             callable,
             public: true,
@@ -1818,8 +1817,7 @@ mod tests {
         FunctionInfo {
             kind: FnKind::Extension,
             receiver: Some(receiver),
-            ret_nullable: true,
-            ret_class: None,
+            ret: crate::libraries::ReturnInfo::new(true, None),
             flags: FnFlags::default(),
             callable,
             public: true,
@@ -1843,8 +1841,7 @@ mod tests {
         FunctionInfo {
             kind: FnKind::Member,
             receiver: Some(receiver),
-            ret_nullable: true,
-            ret_class: None,
+            ret: crate::libraries::ReturnInfo::new(true, None),
             flags: FnFlags::default(),
             callable,
             public: true,
@@ -1868,8 +1865,10 @@ mod tests {
         FunctionInfo {
             kind: FnKind::Member,
             receiver: Some(receiver),
-            ret_nullable: false,
-            ret_class: Some(Ty::obj_args("kotlin/collections/List", &[Ty::String])),
+            ret: crate::libraries::ReturnInfo::new(
+                false,
+                Some(Ty::obj_args("kotlin/collections/List", &[Ty::String])),
+            ),
             flags: FnFlags::default(),
             callable,
             public: true,
