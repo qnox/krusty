@@ -10505,6 +10505,18 @@ impl<'a> Lower<'a> {
                             && self.syms.libraries.resolve_type(&cand).is_some())
                         .then_some(cand)
                     })
+                })
+                // The file's OWN package is an implicit wildcard — a same-package classpath type used
+                // UNQUALIFIED (`is V.Ok` where `V` is a classpath type in this file's package) resolves as
+                // `<pkg>/V`, matching the checker's implicit-same-package-wildcard resolution.
+                .or_else(|| {
+                    let pkg = self.afile.package.as_deref()?;
+                    let cand = format!("{}/{outer}", pkg.replace('.', "/"));
+                    self.syms
+                        .libraries
+                        .resolve_type(&cand)
+                        .is_some()
+                        .then_some(cand)
                 });
             if let Some(base) = base {
                 let candidate = format!("{base}${}", rest.replace('.', "$"));
@@ -10516,7 +10528,13 @@ impl<'a> Lower<'a> {
         // A fully-qualified PACKAGE path (`lib.Thing` → `lib/Thing`) — verified on the classpath. Mirrors
         // the checker so a qualified constructor / type ref lowers to the same internal name.
         let fq = name.replace('.', "/");
-        self.syms.libraries.resolve_type(&fq).map(|_| fq)
+        if self.syms.libraries.resolve_type(&fq).is_some() {
+            return Some(fq);
+        }
+        // An unqualified same-package classpath type (`Thing` in this file's package) → `<pkg>/Thing`.
+        let pkg = self.afile.package.as_deref()?;
+        let cand = format!("{}/{}", pkg.replace('.', "/"), name.replace('.', "$"));
+        self.syms.libraries.resolve_type(&cand).map(|_| cand)
     }
 
     fn ty_ref(&self, r: &ast::TypeRef) -> Option<Ty> {
