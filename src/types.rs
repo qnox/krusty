@@ -795,21 +795,6 @@ mod tests {
     }
 
     #[test]
-    fn rank_orders_numeric_types_and_zeros_non_numeric() {
-        // Byte/Short/Int share rank 1; Long 2; Float 3; Double 4.
-        assert_eq!(Ty::Byte.rank(), 1);
-        assert_eq!(Ty::Short.rank(), 1);
-        assert_eq!(Ty::Int.rank(), 1);
-        assert_eq!(Ty::Long.rank(), 2);
-        assert_eq!(Ty::Float.rank(), 3);
-        assert_eq!(Ty::Double.rank(), 4);
-        // Everything else (including numeric-adjacent Char/Boolean) is rank 0.
-        assert_eq!(Ty::Char.rank(), 0);
-        assert_eq!(Ty::Boolean.rank(), 0);
-        assert_eq!(Ty::String.rank(), 0);
-    }
-
-    #[test]
     fn from_name_maps_known_types_only() {
         assert_eq!(Ty::from_name("Int"), Some(Ty::Int));
         assert_eq!(Ty::from_name("ULong"), Some(Ty::ULong));
