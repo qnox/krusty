@@ -6,7 +6,6 @@
 //!   d4  ctor omitting a defaulted param    — `Cfg(1)` for `Cfg(a, b = 9)` → `<init>(int, int, mask, marker)`
 //! The library is compiled by kotlinc (the real synthetic-ctor ABI) and consumed by krusty on the
 //! classpath. Needs the JVM toolchain + kotlin-stdlib; skips otherwise.
-use std::fs;
 mod common;
 
 #[test]
@@ -19,39 +18,23 @@ fn classpath_synthetic_ctor_and_nested_type_resolution() {
         eprintln!("skipping: no kotlin-stdlib jar");
         return;
     };
-    let stdlib = sl.to_str().unwrap().to_string();
-    let work = std::env::temp_dir().join(format!("krusty_synctor_{}", std::process::id()));
-    let _ = fs::remove_dir_all(&work);
-    let libout = work.join("lib");
-    fs::create_dir_all(&libout).unwrap();
     // A classpath library exercising each synthetic/nested shape.
-    fs::write(
-        work.join("Lib.kt"),
-        "package lib\n\
+    let Some(libout) = common::compile_libs(
+        "synctor",
+        &[
+            (
+                "Lib.kt",
+                "package lib\n\
          @JvmInline value class Vid(val v: String)\n\
          class Rec(val id: Vid, val n: Int)\n\
          object Scope { class Ws(val s: String) }\n\
          class Cfg(val a: Int, val b: Int = 9, val c: String = \"z\")\n",
-    )
-    .unwrap();
-    fs::write(
-        work.join("Ab.kt"),
-        "package a.b\nclass Outer { class Inner }\n",
-    )
-    .unwrap();
-    let kc = vec![
-        "-d".into(),
-        libout.to_string_lossy().into_owned(),
-        "-cp".into(),
-        stdlib,
-        work.join("Lib.kt").to_string_lossy().into_owned(),
-        work.join("Ab.kt").to_string_lossy().into_owned(),
-    ];
-    match common::kotlinc_compile(&kc) {
-        Some((0, _)) => {}
-        Some((_, e)) => panic!("kotlinc(lib): {e}"),
-        None => return,
-    }
+            ),
+            ("Ab.kt", "package a.b\nclass Outer { class Inner }\n"),
+        ],
+    ) else {
+        return;
+    };
     let cp = vec![libout.clone(), sl.clone()];
     let main = "import lib.Rec\n\
         import lib.Vid\n\

@@ -617,20 +617,28 @@ pub fn compile_and_run_box(
 /// e2e tests use this instead of each re-implementing the kotlinc invocation.
 #[allow(dead_code)]
 pub fn compile_lib(tag: &str, lib_src: &str) -> Option<PathBuf> {
+    compile_libs(tag, &[("Lib.kt", lib_src)])
+}
+
+/// Compile one or more Kotlin source files with the REAL kotlinc into a fresh classpath dir.
+#[allow(dead_code)]
+pub fn compile_libs(tag: &str, sources: &[(&str, &str)]) -> Option<PathBuf> {
     let stdlib = stdlib_jar()?;
     let work = std::env::temp_dir().join(format!("krusty_lib_{tag}_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&work);
     let out = work.join("libout");
     std::fs::create_dir_all(&out).ok()?;
-    let lib_kt = work.join("Lib.kt");
-    std::fs::write(&lib_kt, lib_src).ok()?;
-    let args = vec![
+    let mut args = vec![
         "-d".into(),
         out.to_string_lossy().into_owned(),
         "-cp".into(),
         stdlib.to_string_lossy().into_owned(),
-        lib_kt.to_string_lossy().into_owned(),
     ];
+    for (name, src) in sources {
+        let path = work.join(name);
+        std::fs::write(&path, src).ok()?;
+        args.push(path.to_string_lossy().into_owned());
+    }
     match kotlinc_compile(&args) {
         Some((0, _)) => Some(out),
         Some((code, err)) => panic!("kotlinc(lib) failed ({code}): {err}"),
