@@ -1462,19 +1462,7 @@ pub fn resolve_instance(
 ) -> Option<LibraryMember> {
     select_instance_info(lib, Ty::obj(internal), name, args).map(|o| {
         let ret = o.return_type(o.callable.ret);
-        let mut member = LibraryMember::new(
-            o.callable.name,
-            o.callable.params,
-            ret,
-            o.callable.descriptor,
-        );
-        member.owner = Some(o.callable.owner);
-        member.physical_ret = o.callable.physical_ret;
-        member.signature = o.callable.signature;
-        member.ret_nullable = o.ret_nullable;
-        member.inline = o.flags.inline;
-        member.suspend = o.flags.suspend;
-        member
+        o.member_with_return(ret)
     })
 }
 
@@ -1497,18 +1485,6 @@ pub fn resolve_instance_member(
     args: &[Ty],
 ) -> Option<ResolvedMember> {
     let o = select_instance_info(lib, recv, name, args)?;
-    let mut member = LibraryMember::new(
-        o.callable.name.clone(),
-        o.callable.params.clone(),
-        o.callable.ret,
-        o.callable.descriptor.clone(),
-    );
-    member.owner = Some(o.callable.owner.clone());
-    member.physical_ret = o.callable.physical_ret;
-    member.signature = o.callable.signature.clone();
-    member.ret_nullable = o.ret_nullable;
-    member.inline = o.flags.inline;
-    member.suspend = o.flags.suspend;
     let ret = if o.callable.physical_ret == Ty::obj("kotlin/Any") {
         o.generic_sig
             .as_ref()
@@ -1529,6 +1505,7 @@ pub fn resolve_instance_member(
         o.callable.ret
     };
     let ret = o.return_type(ret);
+    let member = o.member_with_return(o.callable.ret);
     Some(ResolvedMember {
         ret,
         member,
