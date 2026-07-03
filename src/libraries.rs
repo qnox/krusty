@@ -449,6 +449,24 @@ pub struct FunctionInfo {
 }
 
 impl FunctionInfo {
+    /// Materialize this selected overload as an instance-member emit handle with a caller-chosen logical
+    /// return. Metadata flags that affect emission stay coupled to the selected overload.
+    pub fn member_with_return(&self, ret: Ty) -> LibraryMember {
+        let mut member = LibraryMember::new(
+            self.callable.name.clone(),
+            self.callable.params.clone(),
+            ret,
+            self.callable.descriptor.clone(),
+        );
+        member.owner = Some(self.callable.owner.clone());
+        member.physical_ret = self.callable.physical_ret;
+        member.signature = self.callable.signature.clone();
+        member.ret_nullable = self.ret_nullable;
+        member.inline = self.flags.inline;
+        member.suspend = self.flags.suspend;
+        member
+    }
+
     /// The source-visible return type after applying metadata return identity/nullability to a fallback
     /// return recovered from the descriptor or generic signature.
     pub fn return_type(&self, fallback: Ty) -> Ty {
