@@ -2828,3 +2828,217 @@ fn collect_reachable(exprs: &[IrExpr], root: ExprId, out: &mut HashSet<ExprId>) 
     }
     crate::ir::for_each_child(exprs, root, &mut |c| collect_reachable(exprs, c, out));
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A small `under` map: `Z1`=Int (primitive underlying), `S1`=String (non-null reference
+    /// underlying), `N1`=Int? (nullable underlying), `demo/Foo`=Int.
+    fn under_fixture() -> HashMap<String, Ty> {
+        let mut m = HashMap::new();
+        // Underlying types are stored in Kotlin form (`ir_ty_to_jvm` maps `kotlin/Int` → `I`).
+        m.insert("Z1".to_string(), Ty::obj("kotlin/Int"));
+        m.insert("S1".to_string(), Ty::obj("kotlin/String"));
+        m.insert("N1".to_string(), Ty::nullable(Ty::obj("kotlin/Int")));
+        m.insert("demo/Foo".to_string(), Ty::obj("kotlin/Int"));
+        m
+    }
+
+    #[test]
+    fn is_ref_classifies_reference_vs_scalar() {
+        assert!(is_ref(&Ty::nullable(Ty::Int))); // nullable is always reference-like
+        assert!(!is_ref(&Ty::obj("kotlin/Int"))); // scalar class → JVM primitive
+        assert!(is_ref(&Ty::obj("demo/Foo"))); // ordinary class → reference
+        assert!(!is_ref(&Ty::Int)); // non-Obj primitive
+    }
+
+    #[test]
+    fn is_jvm_scalar_class_and_ty_cover_all_eight() {
+        for fq in [
+            "kotlin/Int",
+            "kotlin/Long",
+            "kotlin/Short",
+            "kotlin/Byte",
+            "kotlin/Boolean",
+            "kotlin/Char",
+            "kotlin/Double",
+            "kotlin/Float",
+        ] {
+            assert!(is_jvm_scalar_class(fq), "{fq}");
+        }
+        assert!(!is_jvm_scalar_class("kotlin/String"));
+        assert!(!is_jvm_scalar_class("kotlin/UInt"));
+        for t in [
+            Ty::Int,
+            Ty::Long,
+            Ty::Short,
+            Ty::Byte,
+            Ty::Boolean,
+            Ty::Char,
+            Ty::Double,
+            Ty::Float,
+        ] {
+            assert!(is_jvm_scalar_ty(t));
+        }
+        assert!(!is_jvm_scalar_ty(Ty::UInt));
+        assert!(!is_jvm_scalar_ty(Ty::String));
+        assert!(!is_jvm_scalar_ty(Ty::obj("demo/Foo")));
+    }
+
+    #[test]
+    fn is_property_getter_bridge_name_matches_get_and_is() {
+        assert!(is_property_getter_bridge_name("getFoo"));
+        assert!(is_property_getter_bridge_name("get"));
+        assert!(is_property_getter_bridge_name("isEmpty")); // `is` + uppercase
+        assert!(!is_property_getter_bridge_name("issue")); // `is` + lowercase
+        assert!(!is_property_getter_bridge_name("is")); // no following char
+        assert!(!is_property_getter_bridge_name("foo"));
+    }
+
+    #[test]
+    fn descriptor_param_types_splits_each_parameter() {
+        assert_eq!(
+            descriptor_param_types("(ILZ1;[Ljava/lang/String;)V"),
+            vec![
+                "I".to_string(),
+                "LZ1;".to_string(),
+                "[Ljava/lang/String;".to_string()
+            ]
+        );
+        assert_eq!(descriptor_param_types("()V"), Vec::<String>::new());
+        assert_eq!(descriptor_param_types("no-paren"), Vec::<String>::new());
+    }
+
+    #[test]
+    fn descriptor_param_refs_flags_references() {
+        assert_eq!(
+            descriptor_param_refs("(ILZ1;[IJD)V"),
+            vec![false, true, true, false, false]
+        );
+        assert_eq!(descriptor_param_refs("()V"), Vec::<bool>::new());
+        assert_eq!(descriptor_param_refs("bad"), Vec::<bool>::new());
+    }
+
+    #[test]
+    fn desc_maps_types_to_descriptors() {
+        assert_eq!(desc(&Ty::obj("kotlin/Int")), "I");
+        assert_eq!(desc(&Ty::obj("kotlin/Boolean")), "Z");
+        assert_eq!(desc(&Ty::obj("demo/Foo")), "Ldemo/Foo;");
+    }
+
+    #[test]
+    fn nullable_is_boxed_depends_on_underlying() {
+        let under = under_fixture();
+        assert!(nullable_is_boxed("Z1", &under)); // primitive underlying → boxed
+        assert!(!nullable_is_boxed("S1", &under)); // non-null reference → unboxed
+        assert!(nullable_is_boxed("N1", &under)); // nullable underlying → boxed
+        assert!(!nullable_is_boxed("absent", &under)); // not a value class
+    }
+
+    #[test]
+    fn underlying_and_vc_null_capability() {
+        let under = under_fixture();
+        assert!(underlying_null_capable(&Ty::nullable(Ty::Int), &under));
+        assert!(!underlying_null_capable(&Ty::Int, &under));
+        assert!(underlying_null_capable(&Ty::obj("N1"), &under)); // chains through N1=Int?
+        assert!(!underlying_null_capable(&Ty::obj("Z1"), &under));
+
+        assert!(vc_underlying_nullable(&Ty::obj("N1"), &under));
+        assert!(!vc_underlying_nullable(&Ty::obj("Z1"), &under));
+        assert!(!vc_underlying_nullable(&Ty::Int, &under)); // not an Obj
+    }
+
+    #[test]
+    fn boxed_vc_only_for_boxed_nullable_value_classes() {
+        let under = under_fixture();
+        assert_eq!(
+            boxed_vc(&Ty::nullable(Ty::obj("Z1")), &under),
+            Some("Z1".to_string())
+        );
+        assert_eq!(boxed_vc(&Ty::obj("Z1"), &under), None); // not nullable
+        assert_eq!(boxed_vc(&Ty::nullable(Ty::obj("S1")), &under), None); // unboxed nullable
+        assert_eq!(boxed_vc(&Ty::nullable(Ty::obj("absent")), &under), None);
+    }
+
+    #[test]
+    fn erase_unwraps_value_classes() {
+        let under = under_fixture();
+        // Non-null Z1 erases to its (Kotlin-form) primitive underlying.
+        assert_eq!(erase(&Ty::obj("Z1"), &under), Ty::obj("kotlin/Int"));
+        // A boxed nullable Z1? stays boxed (Nullable(Obj Z1)).
+        assert_eq!(
+            erase(&Ty::nullable(Ty::obj("Z1")), &under),
+            Ty::nullable(Ty::obj("Z1"))
+        );
+        // An unboxed nullable S1? erases through to its reference underlying.
+        assert_eq!(
+            erase(&Ty::nullable(Ty::obj("S1")), &under),
+            Ty::obj("kotlin/String")
+        );
+        // A non-value-class type is returned unchanged.
+        assert_eq!(erase(&Ty::Int, &under), Ty::Int);
+    }
+
+    #[test]
+    fn erase_descriptor_rewrites_value_class_params() {
+        let under = under_fixture();
+        assert_eq!(
+            erase_descriptor("(LZ1;)Ljava/lang/String;", &under),
+            "(I)Ljava/lang/String;"
+        );
+        // Non-value-class references are left intact.
+        assert_eq!(
+            erase_descriptor("(Ljava/lang/Object;I)V", &under),
+            "(Ljava/lang/Object;I)V"
+        );
+    }
+
+    #[test]
+    fn repr_of_ty_classifies_representation() {
+        let under = under_fixture();
+        assert!(matches!(repr_of_ty(&Ty::obj("Z1"), &under), Repr::Unboxed(ref s) if s == "Z1"));
+        assert!(
+            matches!(repr_of_ty(&Ty::nullable(Ty::obj("Z1")), &under), Repr::Boxed(ref s) if s == "Z1")
+        );
+        assert!(matches!(repr_of_ty(&Ty::obj("S1"), &under), Repr::Unboxed(ref s) if s == "S1"));
+        assert!(matches!(repr_of_ty(&Ty::Int, &under), Repr::NotVc));
+        assert!(matches!(
+            repr_of_ty(&Ty::obj("kotlin/String"), &under),
+            Repr::NotVc
+        ));
+    }
+
+    #[test]
+    fn mangling_info_reports_value_and_nullability() {
+        let under = under_fixture();
+        let i = mangling_info(&Ty::obj("demo/Foo"), &under);
+        assert!(i.is_value);
+        assert_eq!(i.fq_name, "demo.Foo"); // dotted
+        assert!(!i.is_nullable);
+        let n = mangling_info(&Ty::nullable(Ty::obj("demo/Foo")), &under);
+        assert!(n.is_nullable);
+        let plain = mangling_info(&Ty::Int, &under);
+        assert!(!plain.is_value);
+        assert_eq!(plain.fq_name, "");
+    }
+
+    #[test]
+    fn vc_mangle_keeps_plain_name_without_value_types() {
+        let under = under_fixture();
+        // No value-class parameter or return → the base name is unchanged.
+        assert_eq!(
+            vc_mangle(
+                "foo",
+                &[Ty::Int, Ty::obj("kotlin/String")],
+                &Ty::Int,
+                &under,
+                false
+            ),
+            "foo"
+        );
+        // A value-class parameter triggers kotlinc's `base-<hash>` mangling.
+        let mangled = vc_mangle("foo", &[Ty::obj("Z1")], &Ty::Int, &under, false);
+        assert!(mangled.starts_with("foo-"), "got {mangled}");
+    }
+}

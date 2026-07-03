@@ -919,4 +919,72 @@ mod tests {
         assert_eq!(mc.handlers[0].catch_type, cat);
         assert!(mc.stackmap.is_none()); // no frames added
     }
+
+    #[test]
+    fn method_and_field_access_predicates() {
+        let pub_static = MethodSig {
+            access: ACC_PUBLIC | ACC_STATIC,
+            name: "f".into(),
+            descriptor: "()V".into(),
+            signature: None,
+        };
+        assert!(pub_static.is_public());
+        assert!(pub_static.is_static());
+        let priv_instance = MethodSig {
+            access: 0x0002, // ACC_PRIVATE
+            name: "g".into(),
+            descriptor: "()V".into(),
+            signature: None,
+        };
+        assert!(!priv_instance.is_public());
+        assert!(!priv_instance.is_static());
+    }
+
+    #[test]
+    fn classinfo_method_lookup_hit_and_overloads() {
+        let mk = |name: &str, desc: &str| MethodSig {
+            access: ACC_PUBLIC,
+            name: name.into(),
+            descriptor: desc.into(),
+            signature: None,
+        };
+        let info = ClassInfo {
+            major: 52,
+            access: ACC_PUBLIC,
+            this_class: "demo/C".into(),
+            super_class: Some("java/lang/Object".into()),
+            interfaces: vec![],
+            fields: vec![],
+            methods: vec![mk("m", "()V"), mk("m", "(I)V"), mk("n", "()V")],
+            kotlin_d1: vec![],
+            kotlin_d2: vec![],
+            signature: None,
+        };
+        assert_eq!(
+            info.method("m", "(I)V").map(|m| m.descriptor.as_str()),
+            Some("(I)V")
+        );
+        assert!(info.method("m", "(J)V").is_none()); // no matching descriptor
+        assert!(info.method("absent", "()V").is_none());
+        assert_eq!(info.methods_named("m").len(), 2);
+        assert_eq!(info.methods_named("n").len(), 1);
+        assert!(info.methods_named("zz").is_empty());
+        assert!(!info.is_interface()); // plain class
+    }
+
+    #[test]
+    fn decode_modified_utf8_fallback_branches() {
+        // A truncated 2-byte lead falls back to U+FFFD (no continuation byte follows).
+        assert_eq!(decode_modified_utf8(&[0xC3]), "\u{fffd}");
+        // A truncated 3-byte lead (only 2 bytes) falls back on the lead, then the stray
+        // continuation byte matches no pattern → a second replacement char.
+        assert_eq!(decode_modified_utf8(&[0xE2, 0x82]), "\u{fffd}\u{fffd}");
+        // A lone continuation byte (0x80) matches none of the lead patterns → replacement char.
+        assert_eq!(decode_modified_utf8(&[0x80]), "\u{fffd}");
+        // Mixed: ASCII then a good 2-byte sequence then a bad trailing lead.
+        assert_eq!(
+            decode_modified_utf8(&[b'a', 0xC3, 0xA9, 0xE2]),
+            "a\u{00e9}\u{fffd}"
+        );
+    }
 }

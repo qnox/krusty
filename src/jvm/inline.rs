@@ -3086,6 +3086,371 @@ mod tests {
     }
 
     #[test]
+    fn cp_accessor_helpers_resolve_and_reject() {
+        let cp = vec![
+            C::Other,              // 0
+            C::Utf8("Foo".into()), // 1
+            C::Class(1),           // 2
+            C::Utf8("bar".into()), // 3
+            C::Utf8("()V".into()), // 4
+            C::NameAndType(3, 4),  // 5
+        ];
+        assert_eq!(utf8(&cp, 1), Some("Foo"));
+        assert_eq!(utf8(&cp, 2), None); // not a Utf8
+        assert_eq!(utf8(&cp, 99), None); // out of range
+        assert_eq!(class_name(&cp, 2), Some("Foo"));
+        assert_eq!(class_name(&cp, 1), None); // Utf8, not Class
+        assert_eq!(name_and_type(&cp, 5), Some(("bar", "()V")));
+        assert_eq!(name_and_type(&cp, 3), None); // not a NameAndType
+    }
+
+    #[test]
+    fn disassemble_assemble_roundtrips_branch_body() {
+        // iload_0; ifeq +6; iconst_1; ireturn; iconst_0; ireturn
+        let code = [0x1a, 0x99, 0x00, 0x06, 0x04, 0xac, 0x03, 0xac];
+        let insns = disassemble(&code).unwrap();
+        assert!(matches!(
+            insns[1],
+            Insn::Branch {
+                op: 0x99,
+                target: 5
+            }
+        ));
+        assert_eq!(assemble(&insns), code);
+    }
+
+    #[test]
+    fn disassemble_assemble_roundtrips_tableswitch() {
+        // tableswitch at pc 0 with 2 offsets all targeting the switch itself.
+        let mut code = vec![0xaa, 0, 0, 0]; // op + 3 pad
+        code.extend_from_slice(&[0, 0, 0, 0]); // default → pc 0
+        code.extend_from_slice(&[0, 0, 0, 0]); // low = 0
+        code.extend_from_slice(&[0, 0, 0, 1]); // high = 1
+        code.extend_from_slice(&[0, 0, 0, 0]); // offset[0] → pc 0
+        code.extend_from_slice(&[0, 0, 0, 0]); // offset[1] → pc 0
+        let insns = disassemble(&code).unwrap();
+        assert!(matches!(insns[0], Insn::TableSwitch { low: 0, .. }));
+        assert_eq!(assemble(&insns), code.as_slice());
+    }
+
+    #[test]
+    fn disassemble_assemble_roundtrips_lookupswitch_and_gotow() {
+        // goto_w +9 (→ the lookupswitch), then lookupswitch (1 pair) both landing on itself.
+        let mut code = vec![0xc8, 0, 0, 0, 9]; // goto_w to offset 5+... actually to lookupswitch at 8
+                                               // pad goto_w target math: goto_w at 0 len 5 → next at 5; lookupswitch must be 4-aligned at 8.
+        code.extend_from_slice(&[0x00, 0x00, 0x00]); // 3 nops to reach offset 8
+                                                     // fix goto_w to point at offset 8.
+        code[1] = 0;
+        code[2] = 0;
+        code[3] = 0;
+        code[4] = 8;
+        // lookupswitch at pc 8: pc+1=9, pad=(4-(9%4))%4=3.
+        code.push(0xab);
+        code.extend_from_slice(&[0, 0, 0]); // pad
+        code.extend_from_slice(&[0, 0, 0, 0]); // default → pc 8
+        code.extend_from_slice(&[0, 0, 0, 1]); // npairs = 1
+        code.extend_from_slice(&[0, 0, 0, 7]); // match
+        code.extend_from_slice(&[0, 0, 0, 0]); // offset → pc 8
+        let insns = disassemble(&code).unwrap();
+        assert!(matches!(insns[0], Insn::BranchW { op: 0xc8, .. }));
+        assert!(matches!(insns.last(), Some(Insn::LookupSwitch { pairs, .. }) if pairs.len() == 1));
+        assert_eq!(assemble(&insns), code.as_slice());
+    }
+
+    #[test]
+    fn insn_offsets_tracks_variable_sizes() {
+        // iload_0(1); goto(3); return(1) → offsets [0,1,4,5].
+        let insns = vec![
+            Insn::Plain {
+                op: 0x1a,
+                operands: vec![],
+            },
+            Insn::Branch {
+                op: 0xa7,
+                target: 2,
+            },
+            Insn::Plain {
+                op: 0xb1,
+                operands: vec![],
+            },
+        ];
+        assert_eq!(insn_offsets(&insns), vec![0, 1, 4, 5]);
+        // At base 10 the offsets shift accordingly.
+        assert_eq!(insn_offsets_at(&insns, 10), vec![10, 11, 14, 15]);
+    }
+
+    #[test]
+    fn old_offsets_maps_bytes_and_bails_on_truncation() {
+        // bipush(2); iadd(1) → offsets [0, 2, 3].
+        assert_eq!(old_offsets(&[0x10, 0x05, 0x60]), Some(vec![0, 2, 3]));
+        // sipush truncated → None.
+        assert_eq!(old_offsets(&[0x11, 0x00]), None);
+    }
+
+    #[test]
+    fn shift_targets_moves_all_target_kinds() {
+        let mut insns = vec![
+            Insn::Branch {
+                op: 0xa7,
+                target: 1,
+            },
+            Insn::BranchW {
+                op: 0xc8,
+                target: 2,
+            },
+            Insn::TableSwitch {
+                default: 0,
+                low: 0,
+                targets: vec![1, 2],
+            },
+            Insn::LookupSwitch {
+                default: 0,
+                pairs: vec![(9, 3)],
+            },
+            Insn::Plain {
+                op: 0x00,
+                operands: vec![],
+            },
+        ];
+        shift_targets(&mut insns, 3);
+        assert!(matches!(insns[0], Insn::Branch { target: 4, .. }));
+        assert!(matches!(insns[1], Insn::BranchW { target: 5, .. }));
+        assert!(
+            matches!(&insns[2], Insn::TableSwitch { default: 3, targets, .. } if targets == &[4, 5])
+        );
+        assert!(
+            matches!(&insns[3], Insn::LookupSwitch { default: 3, pairs } if pairs == &[(9, 6)])
+        );
+    }
+
+    #[test]
+    fn methodref_target_names_class_and_method() {
+        let cp = vec![
+            C::Other,
+            C::Utf8("Foo".into()),       // 1
+            C::Class(1),                 // 2
+            C::Utf8("bar".into()),       // 3
+            C::Utf8("()V".into()),       // 4
+            C::NameAndType(3, 4),        // 5
+            C::Methodref(2, 5),          // 6
+            C::InterfaceMethodref(2, 5), // 7
+        ];
+        assert_eq!(methodref_target(&cp, 6), Some(("Foo", "bar")));
+        assert_eq!(methodref_target(&cp, 7), Some(("Foo", "bar")));
+        assert_eq!(methodref_target(&cp, 5), None); // not a method ref
+    }
+
+    #[test]
+    fn ret_vtype_maps_return_descriptors() {
+        let mut cw = ClassWriter::new("T", "java/lang/Object");
+        assert_eq!(ret_vtype("()V", &mut cw), Some(None));
+        assert_eq!(ret_vtype("()I", &mut cw), Some(Some(VType::Int)));
+        assert_eq!(ret_vtype("()Z", &mut cw), Some(Some(VType::Int)));
+        assert_eq!(ret_vtype("()J", &mut cw), Some(Some(VType::Long)));
+        assert_eq!(ret_vtype("()F", &mut cw), Some(Some(VType::Float)));
+        assert_eq!(ret_vtype("()D", &mut cw), Some(Some(VType::Double)));
+        let obj = cw.class_ref("java/lang/String");
+        assert_eq!(
+            ret_vtype("()Ljava/lang/String;", &mut cw),
+            Some(Some(VType::Object(obj)))
+        );
+        let arr = cw.class_ref("[I");
+        assert_eq!(ret_vtype("()[I", &mut cw), Some(Some(VType::Object(arr))));
+        assert_eq!(ret_vtype("()Q", &mut cw), None);
+        assert_eq!(ret_vtype("no-paren", &mut cw), None);
+    }
+
+    #[test]
+    fn relocate_vtype_relocates_object_and_rejects_uninit() {
+        let src_cp = vec![C::Utf8("demo/Foo".into()), C::Class(0)];
+        let mut cw = ClassWriter::new("T", "java/lang/Object");
+        let want = cw.class_ref("demo/Foo");
+        assert_eq!(
+            relocate_vtype(&VType::Object(1), &src_cp, &mut cw),
+            Some(VType::Object(want))
+        );
+        assert_eq!(
+            relocate_vtype(&VType::Int, &src_cp, &mut cw),
+            Some(VType::Int)
+        );
+        assert_eq!(relocate_vtype(&VType::Uninit(3), &src_cp, &mut cw), None);
+        assert_eq!(relocate_vtype(&VType::UninitThis, &src_cp, &mut cw), None);
+    }
+
+    #[test]
+    fn ldc_and_ldc2_vtype_classify_constants() {
+        let cp = vec![
+            C::Integer(1),                      // 0
+            C::Float(1.0f32.to_bits()),         // 1
+            C::Utf8("hi".into()),               // 2
+            C::String(2),                       // 3
+            C::Long(9),                         // 4
+            C::Double(2.0f64.to_bits()),        // 5
+            C::Utf8("java/lang/String".into()), // 6
+            C::Class(6),                        // 7
+        ];
+        // ldc (1-byte index)
+        assert_eq!(ldc_vtype(&[0], 0x12, &cp), Some(VType::Int));
+        assert_eq!(ldc_vtype(&[1], 0x12, &cp), Some(VType::Float));
+        // String resolves to the pool's String class Object.
+        assert_eq!(ldc_vtype(&[3], 0x12, &cp), Some(VType::Object(7)));
+        // ldc_w (2-byte index) pointing at Integer.
+        assert_eq!(ldc_vtype(&[0, 0], 0x13, &cp), Some(VType::Int));
+        // A Long is not a valid ldc constant.
+        assert_eq!(ldc_vtype(&[4], 0x12, &cp), None);
+        // ldc2_w
+        assert_eq!(ldc2_vtype(&[0, 4], &cp), Some(VType::Long));
+        assert_eq!(ldc2_vtype(&[0, 5], &cp), Some(VType::Double));
+        assert_eq!(ldc2_vtype(&[0, 0], &cp), None); // Integer is not ldc2
+    }
+
+    #[test]
+    fn fieldref_and_methodref_desc_effects() {
+        let cp = vec![
+            C::Other,                // 0
+            C::Utf8("Foo".into()),   // 1
+            C::Class(1),             // 2
+            C::Utf8("count".into()), // 3
+            C::Utf8("I".into()),     // 4
+            C::NameAndType(3, 4),    // 5
+            C::Fieldref(2, 5),       // 6
+            C::Utf8("m".into()),     // 7
+            C::Utf8("(II)J".into()), // 8
+            C::NameAndType(7, 8),    // 9
+            C::Methodref(2, 9),      // 10
+        ];
+        assert_eq!(fieldref_vtype(&[0, 6], &cp), Some(VType::Int));
+        assert_eq!(fieldref_vtype(&[0, 5], &cp), None); // not a fieldref
+        assert_eq!(methodref_desc_effect(&cp, 10), Some((2, Some(VType::Long))));
+        assert_eq!(methodref_desc_effect(&cp, 5), None); // not a methodref
+    }
+
+    #[test]
+    fn param_vtypes_target_creates_class_refs() {
+        let mut cw = ClassWriter::new("T", "java/lang/Object");
+        let got = param_vtypes_target("(IJDFLjava/lang/String;[I)V", &mut cw).expect("parses");
+        assert_eq!(got[0], VType::Int);
+        assert_eq!(got[1], VType::Long);
+        assert_eq!(got[2], VType::Double);
+        assert_eq!(got[3], VType::Float);
+        assert_eq!(got[4], VType::Object(cw.class_ref("java/lang/String")));
+        assert_eq!(got[5], VType::Object(cw.class_ref("[I")));
+        assert_eq!(param_vtypes_target("no-paren", &mut cw), None);
+    }
+
+    #[test]
+    fn strip_param_null_checks_removes_check_triple() {
+        // aload_1 ; ldc "x" ; invokestatic Intrinsics.checkNotNullParameter ; return
+        let cp = vec![
+            C::Other,
+            C::Utf8("kotlin/jvm/internal/Intrinsics".into()), // 1
+            C::Class(1),                                      // 2
+            C::Utf8("checkNotNullParameter".into()),          // 3
+            C::Utf8("(Ljava/lang/Object;Ljava/lang/String;)V".into()), // 4
+            C::NameAndType(3, 4),                             // 5
+            C::Methodref(2, 5),                               // 6
+            C::Utf8("x".into()),                              // 7
+            C::String(7),                                     // 8
+        ];
+        let mut insns = vec![
+            Insn::Plain {
+                op: 0x2b,
+                operands: vec![],
+            }, // aload_1
+            Insn::Plain {
+                op: 0x12,
+                operands: vec![8],
+            }, // ldc "x"
+            Insn::Plain {
+                op: 0xb8,
+                operands: vec![0x00, 0x06],
+            }, // invokestatic check
+            Insn::Plain {
+                op: 0xb1,
+                operands: vec![],
+            }, // return
+        ];
+        strip_param_null_checks(&mut insns, &cp);
+        assert_eq!(insns.len(), 1);
+        assert!(matches!(insns[0], Insn::Plain { op: 0xb1, .. }));
+    }
+
+    #[test]
+    fn is_lambda_spliceable_positive_and_negatives() {
+        let cp = vec![
+            C::Other,
+            C::Utf8("kotlin/jvm/functions/Function1".into()), // 1
+            C::Class(1),                                      // 2
+            C::Utf8("invoke".into()),                         // 3
+            C::Utf8("(Ljava/lang/Object;)Ljava/lang/Object;".into()), // 4
+            C::NameAndType(3, 4),                             // 5
+            C::InterfaceMethodref(2, 5),                      // 6
+        ];
+        // aload_1 ; invokeinterface Function1.invoke #6 ; areturn
+        let good = MethodCode {
+            max_stack: 2,
+            max_locals: 2,
+            code: vec![0x2b, 0xb9, 0x00, 0x06, 0x01, 0x00, 0xb0],
+            source_cp: cp.clone(),
+            stackmap: None,
+            handlers: vec![],
+        };
+        assert!(is_lambda_spliceable(&good));
+
+        // Handlers present → not spliceable.
+        let mut with_handler = good.clone();
+        with_handler.handlers = vec![crate::jvm::classreader::ExcEntry {
+            start_pc: 0,
+            end_pc: 1,
+            handler_pc: 1,
+            catch_type: 0,
+        }];
+        assert!(!is_lambda_spliceable(&with_handler));
+
+        // A branch instruction disqualifies it (not all-Plain).
+        let branchy = MethodCode {
+            max_stack: 1,
+            max_locals: 1,
+            code: vec![0xa7, 0x00, 0x03, 0xb1],
+            source_cp: vec![C::Other],
+            stackmap: None,
+            handlers: vec![],
+        };
+        assert!(!is_lambda_spliceable(&branchy));
+
+        // No invoke site → not spliceable.
+        let no_invoke = MethodCode {
+            max_stack: 1,
+            max_locals: 1,
+            code: vec![0x03, 0xac],
+            source_cp: vec![C::Other],
+            stackmap: None,
+            handlers: vec![],
+        };
+        assert!(!is_lambda_spliceable(&no_invoke));
+    }
+
+    #[test]
+    fn set_pool_operand_patches_only_pool_ops() {
+        // invokestatic has a 2-byte pool operand: patch it.
+        let mut good = Insn::Plain {
+            op: 0xb8,
+            operands: vec![0x00, 0x01],
+        };
+        set_pool_operand(&mut good, 0x0203);
+        assert!(
+            matches!(good, Insn::Plain { op: 0xb8, ref operands } if operands == &[0x02, 0x03])
+        );
+        // A non-pool op (iadd) is left untouched.
+        let mut plain = Insn::Plain {
+            op: 0x60,
+            operands: vec![],
+        };
+        set_pool_operand(&mut plain, 0x0203);
+        assert!(matches!(plain, Insn::Plain { op: 0x60, ref operands } if operands.is_empty()));
+    }
+
+    #[test]
     fn is_aload_of_matches_all_aload_forms() {
         // aload_0..aload_3 compact forms.
         assert!(is_aload_of(

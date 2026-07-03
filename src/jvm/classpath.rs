@@ -2150,4 +2150,31 @@ mod fq_tests {
         );
         assert!(!amb.contains("Widget"));
     }
+
+    #[test]
+    fn builtins_path_for_derives_fragment_name() {
+        // A nested package uses its LAST path segment as the fragment stem.
+        assert_eq!(
+            Classpath::builtins_path_for("kotlin/collections/List"),
+            "kotlin/collections/collections.kotlin_builtins"
+        );
+        // A single-segment package repeats itself.
+        assert_eq!(
+            Classpath::builtins_path_for("kotlin/Unit"),
+            "kotlin/kotlin.kotlin_builtins"
+        );
+    }
+
+    #[test]
+    fn empty_classpath_queries_miss_cleanly() {
+        let cp = Classpath::empty();
+        // No collection hierarchy is available, so nothing is a Kotlin collection.
+        assert!(!cp.is_kotlin_collection("kotlin/collections/List"));
+        // The reflexive case still holds; a non-reflexive query has no hierarchy to walk.
+        assert!(cp.kotlin_subtype("X", "X"));
+        assert!(!cp.kotlin_subtype("kotlin/collections/MutableList", "kotlin/collections/List"));
+        // No builtins fragment on disk → no supertypes and no extension owners.
+        assert!(cp.builtin_supertypes("kotlin/collections/List").is_empty());
+        assert!(cp.find_extension_owners("Ljava/lang/String;").is_empty());
+    }
 }

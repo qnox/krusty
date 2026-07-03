@@ -8020,3 +8020,260 @@ mod pure_helper_tests {
         assert!(collapse_locals(&expanded) == collapsed);
     }
 }
+
+#[cfg(test)]
+mod deep_emit_tests {
+    //! White-box coverage of the bytecode-emitting free helpers: they take a `CodeBuilder`
+    //! (and sometimes a `ClassWriter`) and append opcodes. Each test asserts the exact bytes.
+    use super::*;
+    use crate::ir::{IrConst, IrExpr, IrFile};
+    use crate::jvm::classfile::{ClassWriter, CodeBuilder, VerifType};
+    use crate::types::Ty;
+
+    fn code() -> CodeBuilder {
+        CodeBuilder::new(8)
+    }
+
+    // --- emit_num_conv: numeric-conversion opcode selection ---
+
+    #[test]
+    fn emit_num_conv_same_type_emits_nothing() {
+        let mut c = code();
+        emit_num_conv(Ty::Int, Ty::Int, &mut c);
+        assert!(c.bytes.is_empty());
+        emit_num_conv(Ty::Double, Ty::Double, &mut c);
+        assert!(c.bytes.is_empty());
+    }
+
+    #[test]
+    fn emit_num_conv_widening_opcodes() {
+        for (from, to, op) in [
+            (Ty::Int, Ty::Long, 0x85u8),
+            (Ty::Int, Ty::Float, 0x86),
+            (Ty::Int, Ty::Double, 0x87),
+            (Ty::Long, Ty::Float, 0x89),
+            (Ty::Long, Ty::Double, 0x8a),
+            (Ty::Float, Ty::Double, 0x8d),
+        ] {
+            let mut c = code();
+            emit_num_conv(from, to, &mut c);
+            assert_eq!(c.bytes, vec![op], "{from:?}->{to:?}");
+        }
+    }
+
+    #[test]
+    fn emit_num_conv_narrowing_opcodes() {
+        for (from, to, op) in [
+            (Ty::Long, Ty::Int, 0x88u8),
+            (Ty::Float, Ty::Int, 0x8b),
+            (Ty::Float, Ty::Long, 0x8c),
+            (Ty::Double, Ty::Int, 0x8e),
+            (Ty::Double, Ty::Long, 0x8f),
+            (Ty::Double, Ty::Float, 0x90),
+        ] {
+            let mut c = code();
+            emit_num_conv(from, to, &mut c);
+            assert_eq!(c.bytes, vec![op], "{from:?}->{to:?}");
+        }
+    }
+
+    #[test]
+    fn emit_num_conv_int_to_subint_truncates() {
+        for (to, op) in [(Ty::Byte, 0x91u8), (Ty::Char, 0x92), (Ty::Short, 0x93)] {
+            let mut c = code();
+            emit_num_conv(Ty::Int, to, &mut c);
+            assert_eq!(c.bytes, vec![op], "Int->{to:?}");
+        }
+    }
+
+    #[test]
+    fn emit_num_conv_subint_to_int_is_noop() {
+        // Byte/Short/Char are already `int` on the JVM stack — no conversion opcode.
+        let mut c = code();
+        emit_num_conv(Ty::Byte, Ty::Int, &mut c);
+        assert!(c.bytes.is_empty());
+    }
+
+    #[test]
+    fn emit_num_conv_long_to_byte_narrows_then_truncates() {
+        // Long -> Byte: l2i (0x88) collapses to the int category, then i2b (0x91) truncates.
+        let mut c = code();
+        emit_num_conv(Ty::Long, Ty::Byte, &mut c);
+        assert_eq!(c.bytes, vec![0x88, 0x91]);
+    }
+
+    // --- push_zero: default-arg placeholder value ---
+
+    #[test]
+    fn push_zero_selects_typed_zero_constant() {
+        let mut cw = ClassWriter::new("T", "java/lang/Object");
+        for (t, want) in [
+            (Ty::Int, vec![0x03u8]),   // iconst_0
+            (Ty::Boolean, vec![0x03]), // iconst_0
+            (Ty::Char, vec![0x03]),    // iconst_0
+            (Ty::Long, vec![0x09]),    // lconst_0
+            (Ty::Double, vec![0x0e]),  // dconst_0
+            (Ty::Float, vec![0x0b]),   // fconst_0
+            (Ty::String, vec![0x01]),  // aconst_null (reference)
+        ] {
+            let mut c = code();
+            push_zero(t, &mut c, &mut cw);
+            assert_eq!(c.bytes, want, "{t:?}");
+        }
+    }
+
+    // --- load / store: slot-form selection ---
+
+    #[test]
+    fn load_uses_compact_form_for_low_slots() {
+        let mut c = code();
+        load(Ty::Int, 0, &mut c); // iload_0
+        assert_eq!(c.bytes, vec![0x1a]);
+        let mut c = code();
+        load(Ty::Long, 0, &mut c); // lload_0 = 0x1a + 4
+        assert_eq!(c.bytes, vec![0x1e]);
+        let mut c = code();
+        load(Ty::String, 0, &mut c); // aload_0 = 0x1a + 16
+        assert_eq!(c.bytes, vec![0x2a]);
+    }
+
+    #[test]
+    fn load_uses_wide_form_for_high_slots() {
+        let mut c = code();
+        load(Ty::Int, 5, &mut c); // iload 5
+        assert_eq!(c.bytes, vec![0x15, 0x05]);
+        let mut c = code();
+        load(Ty::Double, 6, &mut c); // dload 6
+        assert_eq!(c.bytes, vec![0x18, 0x06]);
+    }
+
+    #[test]
+    fn store_uses_compact_form_for_low_slots() {
+        let mut c = code();
+        store(Ty::Int, 1, &mut c); // istore_1 = 0x3b + 1
+        assert_eq!(c.bytes, vec![0x3c]);
+        let mut c = code();
+        store(Ty::Float, 2, &mut c); // fstore_2 = 0x3b + 8 + 2
+        assert_eq!(c.bytes, vec![0x45]);
+        let mut c = code();
+        store(Ty::String, 3, &mut c); // astore_3 = 0x3b + 12 + 3
+        assert_eq!(c.bytes, vec![0x4e]);
+    }
+
+    // --- emit_return: return-opcode selection ---
+
+    #[test]
+    fn emit_return_selects_typed_return() {
+        for (t, op) in [
+            (Ty::Int, 0xacu8),
+            (Ty::Boolean, 0xac),
+            (Ty::Long, 0xad),
+            (Ty::Float, 0xae),
+            (Ty::Double, 0xaf),
+            (Ty::String, 0xb0),
+            (Ty::Unit, 0xb1),
+            (Ty::Nothing, 0xb1),
+        ] {
+            let mut c = code();
+            emit_return(t, &mut c);
+            assert_eq!(c.bytes, vec![op], "{t:?}");
+        }
+    }
+
+    // --- discard: pop by slot-width ---
+
+    #[test]
+    fn discard_pops_by_width() {
+        let mut c = code();
+        discard(Ty::Long, &mut c); // pop2
+        assert_eq!(c.bytes, vec![0x58]);
+        let mut c = code();
+        discard(Ty::Int, &mut c); // pop
+        assert_eq!(c.bytes, vec![0x57]);
+        let mut c = code();
+        discard(Ty::Unit, &mut c); // nothing (0 words)
+        assert!(c.bytes.is_empty());
+    }
+
+    // --- box_prim_free / unbox_prim: valueOf + checkcast/xValue shapes ---
+
+    #[test]
+    fn box_prim_free_emits_invokestatic_for_primitives() {
+        let mut cw = ClassWriter::new("T", "java/lang/Object");
+        let mut c = code();
+        box_prim_free(&mut cw, &mut c, Ty::Int);
+        // invokestatic (0xb8) + 2-byte methodref index.
+        assert_eq!(c.bytes.len(), 3);
+        assert_eq!(c.bytes[0], 0xb8);
+    }
+
+    #[test]
+    fn box_prim_free_ignores_non_primitive() {
+        let mut cw = ClassWriter::new("T", "java/lang/Object");
+        let mut c = code();
+        box_prim_free(&mut cw, &mut c, Ty::String);
+        assert!(c.bytes.is_empty());
+    }
+
+    #[test]
+    fn unbox_prim_emits_checkcast_then_invokevirtual() {
+        let mut cw = ClassWriter::new("T", "java/lang/Object");
+        let mut c = code();
+        unbox_prim(&mut cw, &mut c, Ty::Int);
+        // checkcast (0xc0 + 2) then invokevirtual (0xb6 + 2) = 6 bytes.
+        assert_eq!(c.bytes.len(), 6);
+        assert_eq!(c.bytes[0], 0xc0);
+        assert_eq!(c.bytes[3], 0xb6);
+    }
+
+    #[test]
+    fn unbox_prim_ignores_non_primitive() {
+        let mut cw = ClassWriter::new("T", "java/lang/Object");
+        let mut c = code();
+        unbox_prim(&mut cw, &mut c, Ty::String);
+        assert!(c.bytes.is_empty());
+    }
+
+    // --- verif_for_jvm_free: Ty -> verification type ---
+
+    #[test]
+    fn verif_for_jvm_free_maps_primitive_categories() {
+        let mut cw = ClassWriter::new("T", "java/lang/Object");
+        for t in [Ty::Int, Ty::Boolean, Ty::Byte, Ty::Short, Ty::Char] {
+            assert!(
+                verif_for_jvm_free(&mut cw, t) == VerifType::Integer,
+                "{t:?}"
+            );
+        }
+        assert!(verif_for_jvm_free(&mut cw, Ty::Long) == VerifType::Long);
+        assert!(verif_for_jvm_free(&mut cw, Ty::Double) == VerifType::Double);
+        assert!(verif_for_jvm_free(&mut cw, Ty::Float) == VerifType::Float);
+        assert!(verif_for_jvm_free(&mut cw, Ty::Null) == VerifType::Null);
+        // Unit has no verification type -> Top.
+        assert!(verif_for_jvm_free(&mut cw, Ty::Unit) == VerifType::Top);
+    }
+
+    #[test]
+    fn verif_for_jvm_free_interns_reference_class() {
+        let mut cw = ClassWriter::new("T", "java/lang/Object");
+        let idx = cw.class_ref("demo/Foo");
+        assert!(verif_for_jvm_free(&mut cw, Ty::obj("demo/Foo")) == VerifType::Object(idx));
+        let sidx = cw.class_ref("java/lang/String");
+        assert!(verif_for_jvm_free(&mut cw, Ty::String) == VerifType::Object(sidx));
+    }
+
+    // --- const_value_idx_peek: ConstantValue eligibility ---
+
+    #[test]
+    fn const_value_idx_peek_true_for_literals_false_for_null_and_nonconst() {
+        let mut ir = IrFile::default();
+        let int_lit = ir.add_expr(IrExpr::Const(IrConst::Int(3)));
+        let str_lit = ir.add_expr(IrExpr::Const(IrConst::String("s".into())));
+        let null_lit = ir.add_expr(IrExpr::Const(IrConst::Null));
+        let non_const = ir.add_expr(IrExpr::GetValue(0));
+        assert!(const_value_idx_peek(&ir, int_lit));
+        assert!(const_value_idx_peek(&ir, str_lit));
+        assert!(!const_value_idx_peek(&ir, null_lit));
+        assert!(!const_value_idx_peek(&ir, non_const));
+    }
+}
