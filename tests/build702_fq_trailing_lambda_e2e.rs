@@ -9,17 +9,12 @@
 //! -> T`, via the same `top_level_lambda_param_types`/`receivers` shape data the bare-name `import`ed path
 //! uses), so resolution binds the result type-parameter (`runBlocking { "x" }: String`), and the lowerer
 //! emits the `runBlocking$default(context, block, mask, marker)` `invokestatic`.
-use std::path::PathBuf;
 mod common;
 
 fn run(main: &str) -> Option<String> {
     let jdk = common::jdk_modules()?;
     let sl = common::stdlib_jar()?;
-    let coro =
-        PathBuf::from("target/cache/kotlinc/2.4.0/kotlinc/lib/kotlinx-coroutines-core-jvm.jar");
-    if !coro.exists() {
-        return None;
-    }
+    let coro = common::coroutines_jar()?;
     common::compile_and_run_box(main, "Main", &[sl, coro, jdk.clone()], Some(&jdk))
 }
 

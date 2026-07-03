@@ -8,7 +8,6 @@
 //!  2. The coroutine `box_returns` pass didn't handle an `ExternalStaticField` node (reading a classpath
 //!     `object`'s `INSTANCE`, e.g. `Service(R)` where `R` is a classpath object) → the suspend lambda's
 //!     state machine bailed. `box_returns` now treats it as a leaf value.
-use std::path::PathBuf;
 mod common;
 
 const LIB: &str = "package lib\n\
@@ -19,11 +18,7 @@ const LIB: &str = "package lib\n\
 fn run(tag: &str, main: &str) -> Option<String> {
     let jdk = common::jdk_modules()?;
     let sl = common::stdlib_jar()?;
-    let coro =
-        PathBuf::from("target/cache/kotlinc/2.4.0/kotlinc/lib/kotlinx-coroutines-core-jvm.jar");
-    if !coro.exists() {
-        return None;
-    }
+    let coro = common::coroutines_jar()?;
     let lo = common::compile_lib(tag, LIB)?;
     common::compile_and_run_box(main, "Main", &[lo, sl, coro, jdk.clone()], Some(&jdk))
 }

@@ -3,7 +3,6 @@
 //! builds typed the elvis result `Any` (losing the non-null branch type) → "member 'at' on Any". This
 //! faithful shape (interface `Repo` implemented by a classpath `object`) already compiles and runs; the
 //! test guards against regression, and is the root of several further `member … on Any` cascades.
-use std::path::PathBuf;
 mod common;
 
 const LIB: &str = "package lib\n\
@@ -14,11 +13,7 @@ const LIB: &str = "package lib\n\
 fn run(tag: &str, main: &str) -> Option<String> {
     let jdk = common::jdk_modules()?;
     let sl = common::stdlib_jar()?;
-    let coro =
-        PathBuf::from("target/cache/kotlinc/2.4.0/kotlinc/lib/kotlinx-coroutines-core-jvm.jar");
-    if !coro.exists() {
-        return None;
-    }
+    let coro = common::coroutines_jar()?;
     let lo = common::compile_lib(tag, LIB)?;
     common::compile_and_run_box(main, "Main", &[lo, sl, coro, jdk.clone()], Some(&jdk))
 }
