@@ -5116,6 +5116,16 @@ impl<'a> Checker<'a> {
             self.tparams.erase(&r.name)
         } else if let Some(cs) = self.syms.classes.get(&r.name) {
             Ty::obj(&cs.internal)
+        } else if let Some(internal) = self
+            .imported_type_internal(&r.name)
+            .or_else(|| self.resolve_qualified_nested(&r.name))
+        {
+            // A CLASSPATH type (imported `is Ok`, or a qualified nested `is V.Ok`) — resolved the same way
+            // `resolve_ty` resolves it, so an `is`/`as` smart-cast to a classpath sealed/open subclass
+            // narrows (`val v: V; if (v is V.Ok) v.v`). Without this the type erased to `Ty::Error`, the
+            // narrowing was dropped, and every member access on the smart-cast value failed ("member … on
+            // <parent>").
+            Ty::obj(&internal)
         } else if let Some(Ty::Obj(outer, _)) = self.this_ty {
             // A sibling nested type unqualified within the enclosing class body (`is Inner` in
             // `class Outer { class Inner }`) → `Outer$Inner`, so a nested-type `is`/`as` smart-cast

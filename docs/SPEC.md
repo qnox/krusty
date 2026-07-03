@@ -1079,6 +1079,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   argument's classpath supertype closure to its parameter, via `ctor_arg_subtype_of_param`) AFTER every exact
   pass, so the most-specific constructor still wins and a scalar parameter is never coerced (the widening is
   restricted to reference `Ty::Obj` arg↔param pairs). Test: `tests/classpath_subtype_ctor_arg_e2e.rs`.
+- **An `is`-check smart-cast narrows to a CLASSPATH subtype** (`val v: V; if (v is V.Ok) v.v`, where `V`/
+  `V.Ok` are classpath types). The speculative narrowing type resolver `resolve_ty_no_diag` resolved only
+  same-module (user) classes, type parameters, and a sibling nested type of the enclosing class — a classpath
+  / imported type erased to `Ty::Error`, so the narrowing was dropped and `v` kept its parent type ("member
+  … on `<parent>`"). It now also resolves an imported classpath type and a qualified nested one
+  (`imported_type_internal` / `resolve_qualified_nested` — the same resolvers `resolve_ty` uses), so both a
+  positive `is` and a negated `!is`/else narrowing work. (`as` casts already resolved classpath types.) Test:
+  `tests/classpath_is_smartcast_e2e.rs`.
 - **A `suspend` body accessing a member of a suspend call's result inline (`suspend fun f(r) =
   r.all().size`).** The CPS flattener only meets a suspension at a bound-local / bare-statement position;
   a suspension nested in a `return`/member-access value must be pre-hoisted. `hoist_suspensions` now
