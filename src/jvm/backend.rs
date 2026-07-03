@@ -43,9 +43,7 @@ impl Backend for JvmBackend {
         // (The legacy direct AST emitter has been removed — IR is the sole JVM codegen path.)
         let facade_name = file_class_name(stem, file.package.as_deref());
         let Some(mut ir) = crate::ir_lower::lower_file(file, info, syms) else {
-            if std::env::var("KRUSTY_IR_DEBUG").ok().as_deref() == Some("1") {
-                eprintln!("lower bail: {}", crate::ir_lower::lower_bail_reason());
-            }
+            crate::trace_compiler!("lower", "bail: {}", crate::ir_lower::lower_bail_reason());
             diags.error(
                 crate::diag::Span::new(0, 0),
                 "krusty: this construct is not yet supported by the IR backend".to_string(),
