@@ -19736,3 +19736,145 @@ fn bin_to_ir(op: BinOp) -> Option<IrBinOp> {
         BinOp::Or => IrBinOp::Or,
     })
 }
+
+#[cfg(test)]
+mod pure_helper_tests {
+    use super::*;
+    use crate::ir::IrConst;
+    use crate::types::Ty;
+    use std::collections::HashMap;
+
+    // --- is_conversion_call_name ---
+
+    #[test]
+    fn is_conversion_call_name_covers_every_conversion() {
+        for n in [
+            "toInt", "toByte", "toShort", "toLong", "toFloat", "toDouble", "toChar", "toUInt",
+            "toULong",
+        ] {
+            assert!(is_conversion_call_name(n), "{n} should be a conversion");
+        }
+        assert!(!is_conversion_call_name("toString"));
+        assert!(!is_conversion_call_name("length"));
+    }
+
+    // --- bail_variant ---
+
+    #[test]
+    fn bail_variant_strips_at_first_delimiter() {
+        assert_eq!(bail_variant("Call { callee: 3 }"), "Call");
+        assert_eq!(bail_variant("New(4)"), "New");
+        assert_eq!(bail_variant("Literal 5"), "Literal");
+        assert_eq!(bail_variant("Bare"), "Bare");
+    }
+
+    // --- has_byte_or_short_param ---
+
+    #[test]
+    fn has_byte_or_short_param_detects_direct_and_array_elements() {
+        assert!(has_byte_or_short_param(&[Ty::Byte]));
+        assert!(has_byte_or_short_param(&[Ty::Int, Ty::Short]));
+        assert!(has_byte_or_short_param(&[Ty::array(Ty::Byte)]));
+        assert!(has_byte_or_short_param(&[Ty::array(Ty::Short)]));
+        assert!(!has_byte_or_short_param(&[Ty::Int, Ty::Long]));
+        assert!(!has_byte_or_short_param(&[Ty::array(Ty::Int)]));
+        assert!(!has_byte_or_short_param(&[]));
+    }
+
+    // --- vararg_arity ---
+
+    #[test]
+    fn vararg_arity_fixed_prefix_and_exact_match() {
+        // vararg fun f(a: Int, vararg xs: Int): 1 fixed param, accepts >= 1 arg.
+        assert_eq!(vararg_arity(true, 2, 1), Some(1));
+        assert_eq!(vararg_arity(true, 2, 5), Some(1));
+        // Too few args for the fixed prefix.
+        assert_eq!(vararg_arity(true, 2, 0), None);
+        // A pure-vararg function (only the vararg param) accepts zero args.
+        assert_eq!(vararg_arity(true, 1, 0), Some(0));
+        // Non-vararg requires exact arity.
+        assert_eq!(vararg_arity(false, 3, 3), Some(3));
+        assert_eq!(vararg_arity(false, 3, 2), None);
+    }
+
+    // --- widen_const_to ---
+
+    #[test]
+    fn widen_const_to_promotes_across_numeric_targets() {
+        assert_eq!(widen_const_to(IrConst::Int(7), Ty::Long), IrConst::Long(7));
+        assert_eq!(widen_const_to(IrConst::Byte(7), Ty::Long), IrConst::Long(7));
+        assert_eq!(
+            widen_const_to(IrConst::Short(7), Ty::Long),
+            IrConst::Long(7)
+        );
+        assert_eq!(
+            widen_const_to(IrConst::Int(7), Ty::Double),
+            IrConst::Double(7.0)
+        );
+        assert_eq!(
+            widen_const_to(IrConst::Long(7), Ty::Double),
+            IrConst::Double(7.0)
+        );
+        assert_eq!(
+            widen_const_to(IrConst::Float(2.5), Ty::Double),
+            IrConst::Double(2.5)
+        );
+        assert_eq!(
+            widen_const_to(IrConst::Int(7), Ty::Float),
+            IrConst::Float(7.0)
+        );
+        assert_eq!(
+            widen_const_to(IrConst::Long(7), Ty::Float),
+            IrConst::Float(7.0)
+        );
+        // No applicable widening → passthrough.
+        assert_eq!(widen_const_to(IrConst::Int(7), Ty::Int), IrConst::Int(7));
+        assert_eq!(
+            widen_const_to(IrConst::String("x".into()), Ty::Long),
+            IrConst::String("x".into())
+        );
+    }
+
+    // --- visible_locals ---
+
+    #[test]
+    fn visible_locals_inner_scope_shadows_outer() {
+        let outer: HashMap<String, bool> = [("a".to_string(), false)].into_iter().collect();
+        let inner: HashMap<String, bool> = [("a".to_string(), true), ("b".to_string(), false)]
+            .into_iter()
+            .collect();
+        let got = visible_locals(&[outer, inner]);
+        // The inner `a` (a `var`) wins over the outer `a` (a `val`); `b` is present.
+        assert!(got.contains(&("a".to_string(), true)));
+        assert!(got.contains(&("b".to_string(), false)));
+        // Only one entry for the shadowed name.
+        assert_eq!(got.iter().filter(|(n, _)| n == "a").count(), 1);
+    }
+
+    #[test]
+    fn visible_locals_empty_is_empty() {
+        assert!(visible_locals(&[]).is_empty());
+    }
+
+    // --- bin_to_ir ---
+
+    #[test]
+    fn bin_to_ir_maps_representative_operators() {
+        assert_eq!(bin_to_ir(BinOp::Add), Some(IrBinOp::Add));
+        assert_eq!(bin_to_ir(BinOp::Div), Some(IrBinOp::Div));
+        assert_eq!(bin_to_ir(BinOp::Lt), Some(IrBinOp::Lt));
+        assert_eq!(bin_to_ir(BinOp::Eq), Some(IrBinOp::Eq));
+        assert_eq!(bin_to_ir(BinOp::RefEq), Some(IrBinOp::RefEq));
+        assert_eq!(bin_to_ir(BinOp::RefNe), Some(IrBinOp::RefNe));
+        assert_eq!(bin_to_ir(BinOp::And), Some(IrBinOp::And));
+        assert_eq!(bin_to_ir(BinOp::Or), Some(IrBinOp::Or));
+    }
+
+    // --- set_bail / lower_bail_reason (thread-local diagnostic) ---
+
+    #[test]
+    fn set_bail_round_trips_through_lower_bail_reason() {
+        set_bail("unsupported-thing");
+        assert_eq!(lower_bail_reason(), "unsupported-thing");
+    }
+}

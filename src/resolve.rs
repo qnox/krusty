@@ -12222,4 +12222,456 @@ mod tests {
         let g = parse_file("fun box(): String = \"OK\"");
         assert_eq!(class_internal(&g, "Bar"), "Bar");
     }
+
+    // --- TypeRef fixtures ----------------------------------------------------------------------
+
+    fn tref(name: &str) -> TypeRef {
+        TypeRef {
+            name: name.to_string(),
+            nullable: false,
+            arg: None,
+            targs: Vec::new(),
+            span: crate::diag::Span::new(0, 0),
+            fun_params: Vec::new(),
+            fun_has_receiver: false,
+            fun_suspend: false,
+        }
+    }
+
+    // --- map_call_args: exhaustive branch coverage --------------------------------------------
+
+    fn names_of(strs: &[&str]) -> Vec<String> {
+        strs.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn map_call_args_positional_fills_in_order() {
+        let params = names_of(&["a", "b"]);
+        let args = [ExprId(10), ExprId(11)];
+        let got = map_call_args(&args, None, &params, 2, &[]).unwrap();
+        assert_eq!(got, vec![Some(ExprId(10)), Some(ExprId(11))]);
+    }
+
+    #[test]
+    fn map_call_args_named_reorders_and_rejects_unknown_and_duplicate() {
+        let params = names_of(&["a", "b"]);
+        // Named, out of order → placed by name.
+        let names = vec![Some("b".to_string()), Some("a".to_string())];
+        let args = [ExprId(1), ExprId(2)];
+        let got = map_call_args(&args, Some(&names), &params, 2, &[]).unwrap();
+        assert_eq!(got, vec![Some(ExprId(2)), Some(ExprId(1))]);
+        // Unknown parameter name.
+        let bad = vec![Some("z".to_string())];
+        let e = map_call_args(&[ExprId(1)], Some(&bad), &params, 2, &[]).unwrap_err();
+        assert!(e.contains("no parameter named 'z'"), "{e}");
+        // Duplicate binding of the same parameter.
+        let dup = vec![Some("a".to_string()), Some("a".to_string())];
+        let e = map_call_args(&[ExprId(1), ExprId(2)], Some(&dup), &params, 2, &[]).unwrap_err();
+        assert!(e.contains("already passed for 'a'"), "{e}");
+    }
+
+    #[test]
+    fn map_call_args_trailing_lambda_after_named_fills_last_slot() {
+        let params = names_of(&["a", "cb"]);
+        // f(a = 1, { .. }) — a positional trailing lambda is allowed to fill the final param.
+        let names = vec![Some("a".to_string()), None];
+        let args = [ExprId(1), ExprId(9)];
+        let got = map_call_args(&args, Some(&names), &params, 2, &[]).unwrap();
+        assert_eq!(got, vec![Some(ExprId(1)), Some(ExprId(9))]);
+    }
+
+    #[test]
+    fn map_call_args_positional_after_named_is_rejected() {
+        let params = names_of(&["a", "b", "c"]);
+        // f(a = 1, 2, 3): a positional that is NOT the final argument after a named one → error.
+        let names = vec![Some("a".to_string()), None, None];
+        let args = [ExprId(1), ExprId(2), ExprId(3)];
+        let e = map_call_args(&args, Some(&names), &params, 3, &[]).unwrap_err();
+        assert!(e.contains("positional argument cannot follow"), "{e}");
+    }
+
+    #[test]
+    fn map_call_args_positional_after_named_last_slot_taken_is_rejected() {
+        let params = names_of(&["a", "b"]);
+        // f(a = 1, b = 2, 3): the final positional's slot is already filled → error.
+        let names = vec![Some("a".to_string()), Some("b".to_string()), None];
+        let args = [ExprId(1), ExprId(2), ExprId(3)];
+        let e = map_call_args(&args, Some(&names), &params, 2, &[]).unwrap_err();
+        assert!(e.contains("positional argument cannot follow"), "{e}");
+    }
+
+    #[test]
+    fn map_call_args_too_many_positional() {
+        let params = names_of(&["a"]);
+        let args = [ExprId(1), ExprId(2)];
+        let e = map_call_args(&args, None, &params, 1, &[]).unwrap_err();
+        assert!(e.contains("too many arguments: expected at most 1"), "{e}");
+    }
+
+    #[test]
+    fn map_call_args_missing_required_via_prefix_count() {
+        let params = names_of(&["a", "b"]);
+        // Only one arg, both required (required = 2, no per-param defaults) → b missing.
+        let e = map_call_args(&[ExprId(1)], None, &params, 2, &[]).unwrap_err();
+        assert!(
+            e.contains("no value passed for required parameter 'b'"),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn map_call_args_trailing_default_via_prefix_count() {
+        let params = names_of(&["a", "b"]);
+        // required = 1 → b (index 1 >= required) is defaulted, so one arg is fine.
+        let got = map_call_args(&[ExprId(1)], None, &params, 1, &[]).unwrap();
+        assert_eq!(got, vec![Some(ExprId(1)), None]);
+    }
+
+    #[test]
+    fn map_call_args_per_param_defaults_allow_required_after_defaulted() {
+        let params = names_of(&["a", "b", "c"]);
+        // a defaulted, b required, c defaulted. Passing only b (by name) must succeed.
+        let defaults = [true, false, true];
+        let names = vec![Some("b".to_string())];
+        let got = map_call_args(&[ExprId(5)], Some(&names), &params, 0, &defaults).unwrap();
+        assert_eq!(got, vec![None, Some(ExprId(5)), None]);
+        // Omitting the required middle param (only a supplied) → error naming 'b'.
+        let names_a = vec![Some("a".to_string())];
+        let e = map_call_args(&[ExprId(5)], Some(&names_a), &params, 0, &defaults).unwrap_err();
+        assert!(e.contains("required parameter 'b'"), "{e}");
+    }
+
+    #[test]
+    fn map_call_args_empty_call_all_defaults() {
+        let params = names_of(&["a"]);
+        let got = map_call_args(&[], None, &params, 0, &[true]).unwrap();
+        assert_eq!(got, vec![None]);
+    }
+
+    // --- extract_ctor_default: one arm per literal + Name paths -------------------------------
+
+    fn first_default_of(src: &str) -> Option<CtorDefaultValue> {
+        // Parse a single-param class whose ctor param has a default; return the extracted default.
+        let f = parse_file(src);
+        let cn = ClassNames::default();
+        let empty = EmptySymbolSource;
+        // Find the default expression: the FIRST class decl's first prop/param default.
+        for &d in &f.decls {
+            if let Decl::Class(c) = f.decl(d) {
+                for p in &c.props {
+                    if let Some(dx) = p.default {
+                        return extract_ctor_default(&f, dx, &cn, &empty);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn extract_ctor_default_literal_arms() {
+        assert_eq!(
+            first_default_of("class C(val a: Int = 7)"),
+            Some(CtorDefaultValue::Int(7))
+        );
+        assert_eq!(
+            first_default_of("class C(val a: Long = 7L)"),
+            Some(CtorDefaultValue::Long(7))
+        );
+        assert_eq!(
+            first_default_of("class C(val a: Double = 1.5)"),
+            Some(CtorDefaultValue::Double(1.5))
+        );
+        assert_eq!(
+            first_default_of("class C(val a: Boolean = true)"),
+            Some(CtorDefaultValue::Bool(true))
+        );
+        assert_eq!(
+            first_default_of("class C(val a: Char = 'z')"),
+            Some(CtorDefaultValue::Char('z'))
+        );
+        assert_eq!(
+            first_default_of("class C(val a: String = \"hi\")"),
+            Some(CtorDefaultValue::Str("hi".to_string()))
+        );
+        assert_eq!(
+            first_default_of("class C(val a: String? = null)"),
+            Some(CtorDefaultValue::Null)
+        );
+    }
+
+    #[test]
+    fn extract_ctor_default_name_unresolved_and_non_expr_yield_none() {
+        // A bare Name not in class_names (EmptySymbolSource resolves nothing) → None.
+        assert_eq!(first_default_of("class C(val a: Int = SOME_CONST)"), None);
+        // A non-literal, non-name default (a call) → the `_ => None` arm.
+        assert_eq!(first_default_of("class C(val a: Int = f())"), None);
+    }
+
+    // --- tparam_bound_erasure: every bound category ------------------------------------------
+
+    #[test]
+    fn tparam_bound_erasure_categories() {
+        let none = |_: &str| None;
+        // No bound → Any.
+        assert_eq!(tparam_bound_erasure(None, &none), Ty::obj("kotlin/Any"));
+        // Nullable bound → Any (conservative).
+        let mut nb = tref("CharSequence");
+        nb.nullable = true;
+        assert_eq!(
+            tparam_bound_erasure(Some(&nb), &none),
+            Ty::obj("kotlin/Any")
+        );
+        // Integral primitive bound specializes to that primitive.
+        assert_eq!(tparam_bound_erasure(Some(&tref("Int")), &none), Ty::Int);
+        // String/Any reference "primitive" name erases to itself.
+        assert_eq!(
+            tparam_bound_erasure(Some(&tref("String")), &none),
+            Ty::String
+        );
+        // Non-specializable primitive (Double) → Any.
+        assert_eq!(
+            tparam_bound_erasure(Some(&tref("Double")), &none),
+            Ty::obj("kotlin/Any")
+        );
+        // Unsigned (not specializable) → Any.
+        assert_eq!(
+            tparam_bound_erasure(Some(&tref("UInt")), &none),
+            Ty::obj("kotlin/Any")
+        );
+        // A resolvable user class bound → its internal Obj.
+        let resolve = |n: &str| (n == "Widget").then(|| "demo/Widget".to_string());
+        assert_eq!(
+            tparam_bound_erasure(Some(&tref("Widget")), &resolve),
+            Ty::obj("demo/Widget")
+        );
+        // An unresolvable class bound → Any.
+        assert_eq!(
+            tparam_bound_erasure(Some(&tref("Unknown")), &resolve),
+            Ty::obj("kotlin/Any")
+        );
+    }
+
+    // --- typeref_leaf: primitive / array / function / none ------------------------------------
+
+    #[test]
+    fn typeref_leaf_primitive_and_array_and_none() {
+        let mut rec = |_: &TypeRef| Ty::Error;
+        assert_eq!(typeref_leaf(&tref("Int"), &mut rec), Some(Ty::Int));
+        assert_eq!(typeref_leaf(&tref("String"), &mut rec), Some(Ty::String));
+        // Primitive array name → Array of its element.
+        assert_eq!(
+            typeref_leaf(&tref("IntArray"), &mut rec),
+            Some(Ty::array(Ty::Int))
+        );
+        // A user/class name that is neither a primitive nor a primitive-array → None (leaf can't decide).
+        assert_eq!(typeref_leaf(&tref("Widget"), &mut rec), None);
+    }
+
+    #[test]
+    fn typeref_leaf_function_types_use_recurse() {
+        // (Int) -> String : recurse maps params/return; the leaf builds the Fun type.
+        let mut f = tref("<fun>");
+        f.fun_params = vec![tref("Int")];
+        f.arg = Some(Box::new(tref("String")));
+        let mut rec = |r: &TypeRef| Ty::from_name(&r.name).unwrap_or(Ty::Error);
+        assert_eq!(
+            typeref_leaf(&f, &mut rec),
+            Some(Ty::fun(vec![Ty::Int], Ty::String))
+        );
+        // A suspend function type keeps its suspend marker.
+        let mut fs = f.clone();
+        fs.fun_suspend = true;
+        assert_eq!(
+            typeref_leaf(&fs, &mut rec),
+            Some(Ty::fun_suspend(vec![Ty::Int], Ty::String))
+        );
+        // No explicit return → Unit.
+        let mut fnoret = tref("<fun>");
+        fnoret.fun_params = vec![tref("Int")];
+        assert_eq!(
+            typeref_leaf(&fnoret, &mut rec),
+            Some(Ty::fun(vec![Ty::Int], Ty::Unit))
+        );
+    }
+
+    // --- unify_ref: type-param, function, and generic-class binding ---------------------------
+
+    #[test]
+    fn unify_ref_binds_type_param() {
+        let mut binds = HashMap::new();
+        unify_ref(&tref("T"), Ty::String, &["T".to_string()], &mut binds);
+        assert_eq!(binds.get("T"), Some(&Ty::String));
+        // A name that is not a type param binds nothing.
+        let mut binds2 = HashMap::new();
+        unify_ref(&tref("Int"), Ty::Int, &["T".to_string()], &mut binds2);
+        assert!(binds2.is_empty());
+    }
+
+    #[test]
+    fn unify_ref_binds_through_function_type() {
+        // (T) -> R against Fun([Int], String) binds T=Int, R=String.
+        let mut fr = tref("<fun>");
+        fr.fun_params = vec![tref("T")];
+        fr.arg = Some(Box::new(tref("R")));
+        let mut binds = HashMap::new();
+        let tps = vec!["T".to_string(), "R".to_string()];
+        unify_ref(&fr, Ty::fun(vec![Ty::Int], Ty::String), &tps, &mut binds);
+        assert_eq!(binds.get("T"), Some(&Ty::Int));
+        assert_eq!(binds.get("R"), Some(&Ty::String));
+    }
+
+    #[test]
+    fn unify_ref_binds_through_generic_class_args() {
+        // List<T> against Obj("List", [Int]) binds T=Int.
+        let mut lr = tref("List");
+        lr.targs = vec![tref("T")];
+        let mut binds = HashMap::new();
+        unify_ref(
+            &lr,
+            Ty::obj_args("kotlin/collections/List", &[Ty::Int]),
+            &["T".to_string()],
+            &mut binds,
+        );
+        assert_eq!(binds.get("T"), Some(&Ty::Int));
+    }
+
+    #[test]
+    fn unify_ref_first_binding_wins() {
+        // `or_insert` keeps the first bound value for a repeated type param.
+        let mut binds = HashMap::new();
+        binds.insert("T".to_string(), Ty::Int);
+        unify_ref(&tref("T"), Ty::String, &["T".to_string()], &mut binds);
+        assert_eq!(binds.get("T"), Some(&Ty::Int));
+    }
+
+    // --- collect_typeref_names: recursion through args / fun params ---------------------------
+
+    #[test]
+    fn collect_typeref_names_recurses_and_skips_fun_marker() {
+        let mut out = std::collections::HashSet::new();
+        // Map<K, V> with an arg and targs, plus a function param.
+        let mut r = tref("Map");
+        r.targs = vec![tref("K"), tref("V")];
+        r.arg = Some(Box::new(tref("Elem")));
+        collect_typeref_names(&r, &mut out);
+        assert!(out.contains("Map"));
+        assert!(out.contains("K"));
+        assert!(out.contains("V"));
+        assert!(out.contains("Elem"));
+        // The `<fun>` synthetic name and empty names are never collected.
+        let mut fr = tref("<fun>");
+        fr.fun_params = vec![tref("Arg")];
+        let mut out2 = std::collections::HashSet::new();
+        collect_typeref_names(&fr, &mut out2);
+        assert!(!out2.contains("<fun>"));
+        assert!(out2.contains("Arg"));
+    }
+
+    // --- class_internal_resolver: user class vs merged class-name map -------------------------
+
+    #[test]
+    fn class_internal_resolver_prefers_user_then_class_names() {
+        let mut syms = SymbolTable::default();
+        syms.class_names.insert("Foo".into(), "demo/Foo".into());
+        let resolve = class_internal_resolver(&syms);
+        assert_eq!(resolve("Foo"), Some("demo/Foo".to_string()));
+        assert_eq!(resolve("Missing"), None);
+    }
+
+    // --- erased_params_semantic_key ----------------------------------------------------------
+
+    #[test]
+    fn erased_params_semantic_key_maps_each_param() {
+        let s = sig(vec![Ty::UInt, Ty::String], Ty::Unit, false, 2);
+        let keys = erased_params_semantic_key(&s);
+        assert_eq!(
+            keys,
+            vec![
+                ErasedTypeKey::Ty(Ty::Int),
+                ErasedTypeKey::Ty(Ty::obj("kotlin/String")),
+            ]
+        );
+    }
+
+    // --- resolve_nested_internal / object_member_import_sig: None paths ------------------------
+
+    #[test]
+    fn resolve_nested_internal_none_when_unresolvable() {
+        // EmptySymbolSource resolves nothing, so no `$`-nesting attempt can succeed.
+        assert_eq!(
+            resolve_nested_internal("a/b/Outer/Ws", &EmptySymbolSource),
+            None
+        );
+    }
+
+    #[test]
+    fn object_member_import_sig_none_without_matching_import_or_object() {
+        let empty = EmptySymbolSource;
+        // No import at all → early `?` returns None.
+        let f = parse_file("fun box(): String = \"OK\"");
+        assert_eq!(object_member_import_sig(&f, "logger", &empty), None);
+        // A matching import exists but the owner never resolves to an object → None.
+        let g = parse_file("import a.b.Obj.logger\nfun box(): String = \"OK\"");
+        assert_eq!(object_member_import_sig(&g, "logger", &empty), None);
+    }
+
+    // --- common_lit_ty extra branch (Long+Int widen) -----------------------------------------
+
+    #[test]
+    fn common_lit_ty_widens_long_and_rejects_ref() {
+        assert_eq!(common_lit_ty(Ty::Long, Ty::Int), Ty::Long);
+        assert_eq!(common_lit_ty(Ty::Double, Ty::Int), Ty::Double);
+        assert_eq!(
+            common_lit_ty(Ty::obj("demo/A"), Ty::obj("demo/A")),
+            Ty::obj("demo/A")
+        );
+        assert_eq!(
+            common_lit_ty(Ty::obj("demo/A"), Ty::obj("demo/B")),
+            Ty::Error
+        );
+    }
+
+    // --- import_map / import_wildcards extra edges -------------------------------------------
+
+    #[test]
+    fn import_map_empty_file_is_empty() {
+        let f = parse_file("fun box(): String = \"OK\"");
+        assert!(import_map(&f).is_empty());
+    }
+
+    #[test]
+    fn import_wildcards_includes_platform_defaults() {
+        let f = parse_file("fun box(): String = \"OK\"");
+        let ws = import_wildcards(&f, &["java.lang"]);
+        assert!(ws.iter().any(|w| w == "java/lang"));
+        assert!(ws.iter().any(|w| w == "kotlin/collections"));
+    }
+
+    // --- is_builtin_operator_method / assign_op_name extra names ------------------------------
+
+    #[test]
+    fn is_builtin_operator_method_covers_more_names() {
+        assert!(is_builtin_operator_method("minus"));
+        assert!(is_builtin_operator_method("times"));
+        assert!(is_builtin_operator_method("div"));
+        assert!(is_builtin_operator_method("rem"));
+        assert!(!is_builtin_operator_method("length"));
+    }
+
+    #[test]
+    fn arg_assignable_simple_reference_to_reference_is_permissive() {
+        // Two unrelated references: permitted (subtype not checked here).
+        assert!(arg_assignable_simple(Ty::obj("demo/A"), Ty::obj("demo/B")));
+        // Nothing fits anything.
+        assert!(arg_assignable_simple(Ty::Int, Ty::Nothing));
+    }
+
+    // --- is_nothing_ty extra false-branch ----------------------------------------------------
+
+    #[test]
+    fn is_nothing_ty_rejects_string_and_unit() {
+        assert!(!is_nothing_ty(Ty::String));
+        assert!(!is_nothing_ty(Ty::Unit));
+    }
 }
