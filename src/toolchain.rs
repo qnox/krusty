@@ -289,6 +289,17 @@ pub fn kotlin_test_jar() -> Option<PathBuf> {
         .or_else(|| ensure_maven("org.jetbrains.kotlin", "kotlin-test", &kotlin_version()))
 }
 
+/// Locate the coroutines runtime jar used by classpath suspend tests.
+pub fn coroutines_jar() -> Option<PathBuf> {
+    dist_jar("kotlinx-coroutines-core-jvm.jar").or_else(|| {
+        ensure_maven(
+            "org.jetbrains.kotlinx",
+            "kotlinx-coroutines-core-jvm",
+            "1.9.0",
+        )
+    })
+}
+
 /// The JDK `lib/modules` jimage (the bootclasspath the front-end resolves `java.*` against). Explicit
 /// `KRUSTY_SURVEY_JDK_MODULES` override, else derived from `JAVA_HOME`/`KRUSTY_REF_JAVA_HOME`.
 pub fn jdk_modules() -> Option<PathBuf> {

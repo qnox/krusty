@@ -9,23 +9,12 @@
 //! `synthetic_default_member` now also recognises the suspend shape (Continuation before mask/marker) and
 //! `append_continuation` INSERTS the continuation value at that position for a `$default` call. Runs
 //! end-to-end via `runBlocking`.
-use std::path::PathBuf;
 mod common;
-
-fn coroutines_jar() -> Option<PathBuf> {
-    let kc = std::env::var("KRUSTY_KOTLINC").ok()?;
-    let jar = PathBuf::from(kc)
-        .parent()?
-        .parent()?
-        .join("lib")
-        .join("kotlinx-coroutines-core-jvm.jar");
-    jar.exists().then_some(jar)
-}
 
 fn run(tag: &str, lib: &str, main: &str) -> Option<String> {
     let jdk = common::jdk_modules()?;
     let sl = common::stdlib_jar()?;
-    let corou = coroutines_jar()?;
+    let corou = common::coroutines_jar()?;
     let libout = common::compile_lib(tag, lib)?;
     common::compile_and_run_box(main, "Main", &[libout, sl, corou, jdk.clone()], Some(&jdk))
 }

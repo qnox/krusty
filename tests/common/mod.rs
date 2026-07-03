@@ -217,8 +217,8 @@ fn hash_str(s: &str) -> u64 {
 // tests do — one implementation, no drift. Re-exported here under the names the test files already use.
 #[allow(unused_imports)]
 pub use krusty::toolchain::{
-    box_corpus_dir, classpath_jars_for, dist_jar, ensure_maven, find_jar, jdk_modules,
-    kotlin_test_jar, kotlin_version, kotlinc_lib_dir, stdlib_classpath, stdlib_jar,
+    box_corpus_dir, classpath_jars_for, coroutines_jar, dist_jar, ensure_maven, find_jar,
+    jdk_modules, kotlin_test_jar, kotlin_version, kotlinc_lib_dir, stdlib_classpath, stdlib_jar,
 };
 
 /// Whether a box-test directive (`// NAME` …) is present. Single source of truth in the lib
