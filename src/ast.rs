@@ -1541,6 +1541,37 @@ mod tests {
         assert_eq!(BinOp::from_arith_operator_name(""), None);
     }
 
+    #[test]
+    fn binop_symbol_covers_every_operator() {
+        let pairs = [
+            (BinOp::Add, "+"),
+            (BinOp::Sub, "-"),
+            (BinOp::Mul, "*"),
+            (BinOp::Div, "/"),
+            (BinOp::Rem, "%"),
+            (BinOp::Eq, "=="),
+            (BinOp::Ne, "!="),
+            (BinOp::Lt, "<"),
+            (BinOp::Le, "<="),
+            (BinOp::Gt, ">"),
+            (BinOp::Ge, ">="),
+            (BinOp::And, "&&"),
+            (BinOp::Or, "||"),
+            (BinOp::RefEq, "==="),
+            (BinOp::RefNe, "!=="),
+        ];
+        for (op, sym) in pairs {
+            assert_eq!(binop(op), sym);
+        }
+    }
+
+    #[test]
+    fn unop_symbol_covers_every_operator() {
+        assert_eq!(unop(UnOp::Neg), "neg");
+        assert_eq!(unop(UnOp::Not), "not");
+        assert_eq!(unop(UnOp::Plus), "plus");
+    }
+
     // ---- Modality accessors --------------------------------------------------
 
     #[test]
