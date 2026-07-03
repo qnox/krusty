@@ -146,41 +146,6 @@ fn pool_operand(op: u8) -> Option<(usize, usize)> {
     }
 }
 
-/// Relocate every constant-pool reference in an inline body's `code` into `cw`'s pool, returning the
-/// rewritten bytecode. Branch offsets are unaffected (instruction lengths are preserved). `None` if a
-/// reference can't be relocated (`invokedynamic`, or a relocated `ldc` index exceeding a byte — that
-/// would need an `ldc`→`ldc_w` rewrite that shifts offsets), so the caller falls back to a real call.
-pub fn relocate_code(code: &[u8], src_cp: &[C], cw: &mut ClassWriter) -> Option<Vec<u8>> {
-    let mut out = code.to_vec();
-    let mut pc = 0;
-    while pc < code.len() {
-        let op = code[pc];
-        let len = instruction_len(code, pc)?;
-        if let Some((off, width)) = pool_operand(op) {
-            if op == 0xba {
-                return None; // invokedynamic: bootstrap-method relocation not modeled
-            }
-            let src_idx = if width == 1 {
-                code[pc + off] as u16
-            } else {
-                (code[pc + off] as u16) << 8 | code[pc + off + 1] as u16
-            };
-            let new = relocate_const(src_cp, src_idx, cw)?;
-            if width == 1 {
-                if new > 0xff {
-                    return None; // would need ldc→ldc_w (offset-shifting) — bail
-                }
-                out[pc + off] = new as u8;
-            } else {
-                out[pc + off] = (new >> 8) as u8;
-                out[pc + off + 1] = (new & 0xff) as u8;
-            }
-        }
-        pc += len;
-    }
-    Some(out)
-}
-
 /// A decoded instruction with branch targets resolved to *instruction indices*, not byte offsets —
 /// so transforms that change an instruction's size (local remap, `ldc`→`ldc_w`) don't invalidate
 /// jump targets: the assembler recomputes every offset from the final layout.
@@ -926,64 +891,6 @@ fn is_aload_of(insn: &Insn, slot: u16) -> bool {
             _ => false,
         },
         _ => false,
-    }
-}
-
-/// Whether a lambda-bearing `inline fun` body can be spliced (gates routing a `let`/`also`/… call to the
-/// inliner): branchless, no exception handlers, exactly one `FunctionN.invoke` call, and a single
-/// trailing return (after stripping the entry `checkNotNullParameter` null-checks). The front end routes
-/// a call to [`splice_unified`] ONLY when this holds — required because an `@InlineOnly` callee has no
-/// runtime body to fall back to.
-pub fn is_lambda_spliceable(body: &MethodCode) -> bool {
-    if !body.handlers.is_empty() {
-        return false;
-    }
-    let Some(mut insns) = disassemble(&body.code) else {
-        return false;
-    };
-    if insns.iter().any(|i| !matches!(i, Insn::Plain { .. })) {
-        return false;
-    }
-    strip_param_null_checks(&mut insns, &body.source_cp);
-    if function_invoke_sites(&insns, &body.source_cp).len() != 1 {
-        return false;
-    }
-    let returns = insns
-        .iter()
-        .filter(|i| matches!(i, Insn::Plain { op, .. } if (0xac..=0xb1).contains(op)))
-        .count();
-    returns == 1
-        && matches!(insns.last(), Some(Insn::Plain { op, .. }) if (0xac..=0xb1).contains(op))
-}
-
-/// Remove kotlinc's entry `Intrinsics.checkNotNullParameter`/`checkNotNullExpressionValue` null-checks
-/// (the value push + name `ldc` + the call). Shared by the splice and the spliceability check.
-fn strip_param_null_checks(insns: &mut Vec<Insn>, src_cp: &[C]) {
-    let mut drop = vec![false; insns.len()];
-    for (i, insn) in insns.iter().enumerate() {
-        if let Insn::Plain { op: 0xb8, operands } = insn {
-            let idx = (operands.first().copied().unwrap_or(0) as u16) << 8
-                | operands.get(1).copied().unwrap_or(0) as u16;
-            if let Some(("kotlin/jvm/internal/Intrinsics", n)) = methodref_target(src_cp, idx) {
-                if n == "checkNotNullParameter" || n == "checkNotNullExpressionValue" {
-                    drop[i] = true;
-                    if i >= 1 {
-                        drop[i - 1] = true;
-                    }
-                    if i >= 2 {
-                        drop[i - 2] = true;
-                    }
-                }
-            }
-        }
-    }
-    if drop.iter().any(|&d| d) {
-        *insns = std::mem::take(insns)
-            .into_iter()
-            .zip(drop)
-            .filter(|(_, d)| !d)
-            .map(|(x, _)| x)
-            .collect();
     }
 }
 
@@ -2581,31 +2488,6 @@ mod tests {
         // An unrelocatable kind (a bare NameAndType / Utf8) returns None.
         assert!(relocate_const(&src_cp, 5, &mut cw).is_none());
         assert!(relocate_const(&src_cp, 1, &mut cw).is_none());
-    }
-
-    #[test]
-    fn relocates_code_pool_refs() {
-        let src_cp = vec![
-            C::Other,
-            C::Utf8("Foo".into()), // 1
-            C::Class(1),           // 2
-            C::Utf8("bar".into()), // 3
-            C::Utf8("()V".into()), // 4
-            C::NameAndType(3, 4),  // 5
-            C::Methodref(2, 5),    // 6
-        ];
-        // invokestatic #6 ; return
-        let code = [0xb8, 0x00, 0x06, 0xb1];
-        let mut cw = ClassWriter::new("T", "java/lang/Object");
-        let out = relocate_code(&code, &src_cp, &mut cw).expect("relocate");
-        assert_eq!(out.len(), code.len(), "instruction lengths preserved");
-        let expected = cw.methodref("Foo", "bar", "()V");
-        assert_eq!(
-            (out[1] as u16) << 8 | out[2] as u16,
-            expected,
-            "index points at target methodref"
-        );
-        assert_eq!(out[3], 0xb1, "return opcode unchanged");
     }
 
     #[test]
