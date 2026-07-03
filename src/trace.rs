@@ -18,13 +18,14 @@
 //! The category is the first macro argument (a string literal). The canonical set — keep new sites to
 //! these so `KRUSTY_TRACE=<cat>` stays predictable (see [`CATEGORIES`]):
 //! - `resolve` — name/overload/type resolution in the checker.
+//! - `lower` — frontend-to-IR lowering decisions and bail reasons.
 //! - `suspend` — coroutine / suspend-function lowering (`jvm/suspend.rs`).
 //! - `value_classes` — inline/value-class transform (`jvm/value_classes.rs`).
 //! - `splice` — inline-function bytecode splicing (`jvm/ir_emit.rs`).
 
 /// The canonical trace categories (see the module docs). Listed here so the set is discoverable in one
 /// place; `KRUSTY_TRACE=all` enables every category regardless.
-pub const CATEGORIES: &[&str] = &["resolve", "suspend", "value_classes", "splice"];
+pub const CATEGORIES: &[&str] = &["resolve", "lower", "suspend", "value_classes", "splice"];
 
 #[cfg(feature = "trace")]
 mod imp {

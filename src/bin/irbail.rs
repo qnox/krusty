@@ -1,6 +1,6 @@
 //! In-process IR-lowering bail tally (untracked dev tool). One process, no classpath scan — fast.
-//! Iterates a box dir, runs the frontend, and counts which files `lower_file` bails on (set
-//! KRUSTY_IR_DEBUG=1 to see the per-construct reason via ir_lower's eprintln).
+//! Iterates a box dir, runs the frontend, and counts which files `lower_file` bails on. For backend
+//! lowering traces, build with `--features trace` and set `KRUSTY_TRACE=lower`.
 use krusty::diag::DiagSink;
 use krusty::ir_lower::lower_file;
 use krusty::lexer::lex;

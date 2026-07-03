@@ -68,8 +68,8 @@ Optional profiling knobs:
 Optional compiler trace:
 
 - `KRUSTY_TRACE=resolve` prints selected classpath call-resolution decisions.
+- `KRUSTY_TRACE=lower` prints IR lowerer bail reasons when the JVM backend skips a file.
 - `KRUSTY_TRACE=all` enables every compiler trace category.
-- `KRUSTY_IR_DEBUG=1` prints the lowerer bail reason when the JVM backend skips a file.
 
 Trace output is disabled by default, reads the environment once, and does not format trace messages
 unless the requested category is enabled.
