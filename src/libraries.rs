@@ -448,6 +448,36 @@ pub struct FunctionInfo {
     pub call_sig: CallSig,
 }
 
+impl FunctionInfo {
+    /// The source-visible return type after applying metadata return identity/nullability to a fallback
+    /// return recovered from the descriptor or generic signature.
+    pub fn return_type(&self, fallback: Ty) -> Ty {
+        self.return_type_with_class(self.ret_class, fallback)
+    }
+
+    /// Like [`Self::return_type`], but with a caller-filtered metadata return class. This keeps the
+    /// nullability rule coupled to the metadata-return rule while allowing deliberately narrower paths.
+    pub fn return_type_with_class(&self, ret_class: Option<Ty>, fallback: Ty) -> Ty {
+        let ret = ret_class
+            .map(|meta| {
+                if meta.type_args().is_empty() && !fallback.type_args().is_empty() {
+                    Ty::obj_args(meta.name(), fallback.type_args())
+                } else {
+                    meta
+                }
+            })
+            .unwrap_or(fallback);
+        if self.ret_nullable
+            && !ret.is_nullable()
+            && (ret.boxed_ref().is_some() || ret.is_reference())
+        {
+            Ty::nullable(ret)
+        } else {
+            ret
+        }
+    }
+}
+
 /// How a callable relates to bytecode inlining — the single state that replaces the old
 /// `inline` + `inline_only`/`must_inline` boolean pairs (one per layer: [`FnFlags`],
 /// [`LibraryCallable`], and `ir::Callee::Static`). Ordered weakest→strongest; the splice obligation

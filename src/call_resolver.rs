@@ -129,25 +129,6 @@ fn default_omit_lambda_param_indices(
     None
 }
 
-fn metadata_ret_with_args(meta: Ty, fallback_args: &[Ty]) -> Ty {
-    match meta {
-        Ty::Obj(internal, args) if args.is_empty() && !fallback_args.is_empty() => {
-            Ty::obj_args(internal, fallback_args)
-        }
-        other => other,
-    }
-}
-
-fn logical_ret_from_metadata(ret_class: Option<Ty>, fallback: Ty) -> Ty {
-    ret_class
-        .map(|meta| metadata_ret_with_args(meta, fallback.type_args()))
-        .unwrap_or(fallback)
-}
-
-fn selected_return_type(ret_class: Option<Ty>, ret_nullable: bool, fallback: Ty) -> Ty {
-    nullable_return_type(logical_ret_from_metadata(ret_class, fallback), ret_nullable)
-}
-
 /// The arg-dependent binding layer over a [`SymbolSource`]: it selects overloads and binds generics for
 /// a specific call site. Holds the oracle by reference — cheap to construct per query.
 pub struct CallResolver<'a> {
@@ -290,11 +271,7 @@ impl<'a> CallResolver<'a> {
                 gsig_to_ty(&gsig.ret, &binds)
             })
             .unwrap_or(*ret);
-        let ret_ty = selected_return_type(
-            o.ret_class,
-            o.ret_nullable,
-            if o.flags.suspend { c.ret } else { ret_ty },
-        );
+        let ret_ty = o.return_type(if o.flags.suspend { c.ret } else { ret_ty });
 
         crate::trace_compiler!(
             "resolve",
@@ -490,7 +467,7 @@ impl<'a> CallResolver<'a> {
         let ret_class = o
             .ret_class
             .filter(|meta| self.lib.value_underlying(*meta).is_some());
-        let ret_ty = selected_return_type(ret_class, o.ret_nullable, ret_ty);
+        let ret_ty = o.return_type_with_class(ret_class, ret_ty);
         LibraryCallable {
             owner: c.owner.clone(),
             name: c.name.clone(),
@@ -573,7 +550,7 @@ impl<'a> CallResolver<'a> {
                         gsig_to_ty(&gsig.ret, &binds)
                     })
                     .unwrap_or(c.ret);
-                let ret_ty = selected_return_type(o.ret_class, o.ret_nullable, ret_ty);
+                let ret_ty = o.return_type(ret_ty);
                 return Some(LibraryCallable {
                     owner: c.owner.clone(),
                     name: c.name.clone(),
@@ -736,7 +713,7 @@ impl<'a> CallResolver<'a> {
                     gsig_to_ty(&gsig.ret, &binds)
                 })
                 .unwrap_or(c.ret);
-            let ret_ty = selected_return_type(o.ret_class, o.ret_nullable, ret_ty);
+            let ret_ty = o.return_type(ret_ty);
             return Some(LibraryCallable {
                 owner: c.owner.clone(),
                 name: c.name.clone(),
@@ -788,7 +765,7 @@ impl<'a> CallResolver<'a> {
                     gsig_to_ty(&gsig.ret, &binds)
                 })
                 .unwrap_or(c.ret);
-            let logical_ret = selected_return_type(o.ret_class, o.ret_nullable, recovered);
+            let logical_ret = o.return_type(recovered);
             return Some(LibraryCallable {
                 owner: c.owner.clone(),
                 name: c.name.clone(),
@@ -1493,7 +1470,7 @@ pub fn resolve_instance(
     args: &[Ty],
 ) -> Option<LibraryMember> {
     select_instance_info(lib, Ty::obj(internal), name, args).map(|o| {
-        let ret = selected_return_type(o.ret_class, o.ret_nullable, o.callable.ret);
+        let ret = o.return_type(o.callable.ret);
         let mut member = LibraryMember::new(
             o.callable.name,
             o.callable.params,
@@ -1560,23 +1537,12 @@ pub fn resolve_instance_member(
     } else {
         o.callable.ret
     };
-    let ret = selected_return_type(o.ret_class, o.ret_nullable, ret);
+    let ret = o.return_type(ret);
     Some(ResolvedMember {
         ret,
         member,
         suspend: o.flags.suspend,
     })
-}
-
-fn nullable_return_type(ret: Ty, ret_nullable: bool) -> Ty {
-    if !ret_nullable || ret.is_nullable() {
-        return ret;
-    }
-    if ret.boxed_ref().is_some() || ret.is_reference() {
-        Ty::nullable(ret)
-    } else {
-        ret
-    }
 }
 
 /// Resolve a zero-arg property read on `recv`. The semantic Kotlin property name is tried first; if
