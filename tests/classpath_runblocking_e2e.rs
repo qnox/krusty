@@ -14,22 +14,13 @@
 //!     detection consults the library for classpath members.
 //!
 //! Requires the coroutines runtime jar; skipped when it (or the toolchain) is unavailable.
-use std::path::PathBuf;
 mod common;
-
-fn coroutines_jar() -> Option<PathBuf> {
-    // The reference kotlinc bundles the coroutines core jar; use it for the runtime driver.
-    let kc = std::env::var("KRUSTY_KOTLINC").ok()?;
-    let dir = PathBuf::from(kc).parent()?.parent()?.join("lib");
-    let jar = dir.join("kotlinx-coroutines-core-jvm.jar");
-    jar.exists().then_some(jar)
-}
 
 fn run(lib: Option<(&str, &str)>, main: &str) -> Option<String> {
     let jdk = common::jdk_modules()?;
     let sl = common::stdlib_jar()?;
-    let corou = coroutines_jar()?;
-    let mut cp: Vec<PathBuf> = vec![sl, corou, jdk.clone()];
+    let corou = common::coroutines_jar()?;
+    let mut cp = vec![sl, corou, jdk.clone()];
     if let Some((tag, src)) = lib {
         cp.insert(0, common::compile_lib(tag, src)?);
     }

@@ -8,18 +8,7 @@
 //!
 //! The suspend variants assert LOWERING (a coroutine RUN needs a driver); one full RUN goes through
 //! `runBlocking` when the coroutines runtime jar is available.
-use std::path::PathBuf;
 mod common;
-
-fn coroutines_jar() -> Option<PathBuf> {
-    let kc = std::env::var("KRUSTY_KOTLINC").ok()?;
-    let jar = PathBuf::from(kc)
-        .parent()?
-        .parent()?
-        .join("lib")
-        .join("kotlinx-coroutines-core-jvm.jar");
-    jar.exists().then_some(jar)
-}
 
 const LIB: &str = "package lib\n\
     class Cfg(val at: String)\n\
@@ -72,13 +61,13 @@ fn generic_suspend_return_runs_via_runblocking() {
     let Some(sl) = common::stdlib_jar() else {
         return;
     };
-    let Some(corou) = coroutines_jar() else {
+    let Some(corou) = common::coroutines_jar() else {
         return;
     };
     let Some(libout) = common::compile_lib("aa1_run", LIB) else {
         return;
     };
-    let cp: Vec<PathBuf> = vec![libout, sl, corou, jdk.clone()];
+    let cp = vec![libout, sl, corou, jdk.clone()];
     const MAIN: &str = "import lib.Repo\nimport lib.RealRepo\nimport lib.Cfg\n\
         import kotlinx.coroutines.runBlocking\n\
         fun box(): String = runBlocking {\n\

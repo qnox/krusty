@@ -9,23 +9,12 @@
 //! so its now-`GetValue(1)` reads referenced an unallocated slot. A class method (threshold 1) escaped
 //! because the lambda's `it` at index 0 was below the threshold. `shift_locals` no longer descends into a
 //! `Lambda` body (a separate value-index scope; its captures are closure fields, not enclosing-frame reads).
-use std::path::PathBuf;
 mod common;
-
-fn coroutines_jar() -> Option<PathBuf> {
-    let kc = std::env::var("KRUSTY_KOTLINC").ok()?;
-    let jar = PathBuf::from(kc)
-        .parent()?
-        .parent()?
-        .join("lib")
-        .join("kotlinx-coroutines-core-jvm.jar");
-    jar.exists().then_some(jar)
-}
 
 fn run(tag: &str, main: &str) -> Option<String> {
     let jdk = common::jdk_modules()?;
     let sl = common::stdlib_jar()?;
-    let corou = coroutines_jar()?;
+    let corou = common::coroutines_jar()?;
     let libout = common::compile_lib(tag, "package lib\nclass Z\n")?;
     common::compile_and_run_box(main, "Main", &[libout, sl, corou, jdk.clone()], Some(&jdk))
 }
