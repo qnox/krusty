@@ -1141,15 +1141,30 @@ impl<'a> CallResolver<'a> {
 // The inherited-member walk over a library type's hierarchy — arg-dependent binding, so it lives in
 // this layer (not the oracle). `resolve` and `ir_lower` share one implementation, backend-agnostic.
 
-/// Resolve a constructor on a library type by argument types (with the type's own widening).
-/// Whether a call argument `arg` fits a constructor parameter `param` after both are reduced to their
-/// JVM-descriptor identity — accepting a reference argument that is a SUBTYPE of the parameter's JVM
+fn descriptor_form(lib: &dyn SymbolSource, ty: Ty) -> Ty {
+    lib.jvm_descriptor_form(ty).unwrap_or(ty)
+}
+
+fn descriptor_args(lib: &dyn SymbolSource, args: &[Ty]) -> Vec<Ty> {
+    args.iter().map(|a| descriptor_form(lib, *a)).collect()
+}
+
+fn params_match_descriptor_form(lib: &dyn SymbolSource, params: &[Ty], args: &[Ty]) -> bool {
+    params.len() == args.len()
+        && params
+            .iter()
+            .zip(args)
+            .all(|(p, a)| descriptor_form(lib, *p) == *a)
+}
+
+/// Whether a call argument `arg` fits a parameter `param` after both are reduced to their platform
+/// descriptor identity — accepting a reference argument that is a SUBTYPE of the parameter's descriptor
 /// interface (`java/util/List` argument → `java/util/Collection` parameter). Non-reference sides only
-/// match on identity. The supertype closure is walked through the classpath (`resolve_type`); no
-/// collection relationships are hardcoded.
-fn ctor_arg_subtype_of_param(lib: &dyn SymbolSource, arg: Ty, param: Ty) -> bool {
-    let pj = lib.jvm_descriptor_form(param).unwrap_or(param);
-    let aj = lib.jvm_descriptor_form(arg).unwrap_or(arg);
+/// match on identity. The supertype closure is walked through the symbol source; no collection
+/// relationships are hardcoded here.
+fn descriptor_arg_subtype_of_param(lib: &dyn SymbolSource, arg: Ty, param: Ty) -> bool {
+    let pj = descriptor_form(lib, param);
+    let aj = descriptor_form(lib, arg);
     if aj == pj {
         return true;
     }
@@ -1179,6 +1194,15 @@ fn ctor_arg_subtype_of_param(lib: &dyn SymbolSource, arg: Ty, param: Ty) -> bool
     false
 }
 
+fn params_match_descriptor_subtype(lib: &dyn SymbolSource, params: &[Ty], args: &[Ty]) -> bool {
+    params.len() == args.len()
+        && params
+            .iter()
+            .zip(args)
+            .all(|(p, a)| descriptor_arg_subtype_of_param(lib, *a, *p))
+}
+
+/// Resolve a constructor on a library type by argument types (with the type's own widening).
 pub fn resolve_constructor(
     lib: &dyn SymbolSource,
     internal: &str,
@@ -1216,68 +1240,36 @@ pub fn resolve_constructor(
             return Some(m.clone());
         }
     }
-    // A parameter typed as a Kotlin COLLECTION erases in the `<init>` descriptor to its single JVM
-    // interface with the type argument dropped (`Set<String>` → `Ljava/util/Set;`), but the call passes
-    // the Kotlin type itself (`Rule(setOf("a"))` → arg `kotlin/collections/Set<String>`). Retry matching
-    // both parameter and argument in their JVM-descriptor form — the collection identity is bridged and
-    // type arguments erased — so the exact-`Ty` compare above (which sees `java/util/Set` vs
-    // `kotlin/collections/Set<String>`) can succeed. Normalizing BOTH sides keeps overloads distinct
-    // (`java/util/List` ≠ `java/util/Set`) and never coerces a scalar parameter.
-    let jvm_args: Vec<Ty> = args
-        .iter()
-        .map(|a| lib.jvm_descriptor_form(*a).unwrap_or(*a))
-        .collect();
-    if jvm_args != args {
-        // First pass — EXACT JVM-descriptor form on every parameter. This is tried before the
-        // subtype pass so a `Rule(List)` overload always wins over a `Rule(Collection)` one when the
-        // call passes a `List` (the most-specific constructor).
-        if let Some(m) = t.constructors.iter().find(|m| {
-            m.params.len() == jvm_args.len()
-                && m.params
-                    .iter()
-                    .zip(&jvm_args)
-                    .all(|(p, a)| lib.jvm_descriptor_form(*p).unwrap_or(*p) == *a)
-        }) {
+    // Descriptor-form matching bridges Kotlin collection identity and drops type arguments without
+    // hardcoding collection relationships. Exact descriptor identity runs before subtype widening so the
+    // most-specific overload still wins.
+    let jvm_args = descriptor_args(lib, args);
+    if jvm_args.as_slice() != args {
+        if let Some(m) = t
+            .constructors
+            .iter()
+            .find(|m| params_match_descriptor_form(lib, &m.params, &jvm_args))
+        {
             crate::trace_compiler!(
                 "value_classes",
                 "resolve_constructor {internal} matched via jvm-descriptor-form args {args:?} -> {jvm_args:?}"
             );
             return Some(m.clone());
         }
-        // Second pass — a reference argument may be a SUBTYPE of the parameter's JVM identity
-        // (`Rule(val c: Collection<String>)` called with `listOf(…)`: `java/util/List` is-a
-        // `java/util/Collection`). Walk each argument's supertype closure (in the classpath, no
-        // hardcoded relationships) to the parameter's erased JVM interface.
-        if let Some(m) = t.constructors.iter().find(|m| {
-            m.params.len() == jvm_args.len()
-                && m.params
-                    .iter()
-                    .zip(args)
-                    .all(|(p, a)| ctor_arg_subtype_of_param(lib, *a, *p))
-        }) {
-            crate::trace_compiler!(
-                "value_classes",
-                "resolve_constructor {internal} matched via jvm-subtype form args {args:?}"
-            );
-            return Some(m.clone());
-        }
     }
-    // A reference argument may be a plain NOMINAL SUBTYPE of the parameter (`Outer(s: Sub)` called with a
-    // sealed/open subclass `Sub.U(…)`). No collection erasure is involved, so `jvm_args == args` and the
-    // subtype pass inside that block above never ran; walk each argument's classpath supertype closure to
-    // its parameter here. Runs only AFTER every exact match failed, so the most-specific constructor still
-    // wins; `ctor_arg_subtype_of_param` restricts widening to reference (`Ty::Obj`) arg↔param pairs, so a
-    // scalar parameter is never coerced.
-    if let Some(m) = t.constructors.iter().find(|m| {
-        m.params.len() == args.len()
-            && m.params
-                .iter()
-                .zip(args)
-                .all(|(p, a)| ctor_arg_subtype_of_param(lib, *a, *p))
-    }) {
+    if let Some(m) = t
+        .constructors
+        .iter()
+        .find(|m| params_match_descriptor_subtype(lib, &m.params, args))
+    {
+        let mode = if jvm_args.as_slice() != args {
+            "jvm-subtype"
+        } else {
+            "nominal-subtype"
+        };
         crate::trace_compiler!(
             "value_classes",
-            "resolve_constructor {internal} matched via nominal-subtype args {args:?}"
+            "resolve_constructor {internal} matched via {mode} args {args:?}"
         );
         return Some(m.clone());
     }
@@ -1458,7 +1450,7 @@ pub fn resolve_synthetic_constructor(
         // allows for a plain constructor, here composed with the value-class-erased synthetic-marker ctor
         // (which a plain subtype pass skips because of the trailing marker parameter).
         if !erased.iter().zip(real_params).all(|(a, p)| {
-            crate::libraries::arg_assignable(p, a) || ctor_arg_subtype_of_param(lib, *a, *p)
+            crate::libraries::arg_assignable(p, a) || descriptor_arg_subtype_of_param(lib, *a, *p)
         }) {
             continue;
         }
@@ -1670,27 +1662,16 @@ fn select_instance_info(
             return Some(o.clone());
         }
     }
-    // Fourth pass — JVM-descriptor form on BOTH sides, mirroring the constructor path
-    // (`resolve_constructor`). A parameter typed as a Kotlin COLLECTION erases in the method descriptor to
-    // its single JVM interface with the type argument dropped (`List<String>` → `Ljava/util/List;`), but the
-    // call passes the Kotlin type itself (`h.size(listOf("a"))` → arg `kotlin/collections/List<String>`).
-    // The exact/widened/subtype passes above all see `java/util/List` vs `kotlin/collections/List<String>`
-    // and miss. Normalizing both sides bridges the collection identity and erases type arguments, while
-    // keeping distinct interfaces distinct (`java/util/List` ≠ `java/util/Set`) and never coercing a scalar.
-    let jvm_args: Vec<Ty> = args
-        .iter()
-        .map(|a| lib.jvm_descriptor_form(*a).unwrap_or(*a))
-        .collect();
-    if jvm_args != args {
+    // Descriptor-form pass, shared with constructor resolution: bridge Kotlin collection identity and
+    // erase type arguments after exact, widened, and source-level subtype matching have failed.
+    let jvm_args = descriptor_args(lib, args);
+    if jvm_args.as_slice() != args {
         for members in by_rank.values() {
-            if let Some(o) = members.iter().copied().find(|o| {
-                o.callable.params.len() == jvm_args.len()
-                    && o.callable
-                        .params
-                        .iter()
-                        .zip(&jvm_args)
-                        .all(|(p, a)| lib.jvm_descriptor_form(*p).unwrap_or(*p) == *a)
-            }) {
+            if let Some(o) = members
+                .iter()
+                .copied()
+                .find(|o| params_match_descriptor_form(lib, &o.callable.params, &jvm_args))
+            {
                 crate::trace_compiler!(
                     "resolve",
                     "select_instance_info {} matched via jvm-descriptor-form args {args:?} -> {jvm_args:?}",
