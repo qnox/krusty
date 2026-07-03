@@ -691,6 +691,12 @@ fn build_state_machine(ir: &mut IrFile, facade: &str, fid: u32, b: ExprId) -> bo
         .filter(|(idx, _)| param_ty(*idx).is_some())
         .cloned()
         .collect();
+    crate::trace_compiler!(
+        "suspend",
+        "build_state_machine fid={fid} this_offset={this_offset} completion_idx={completion_idx} spilled={:?} param_caps={:?}",
+        spilled.iter().map(|(i, _)| *i).collect::<Vec<_>>(),
+        param_caps.iter().map(|(i, _)| *i).collect::<Vec<_>>()
+    );
 
     let fname = ir.functions[fid as usize].name.clone();
     let cont_internal = format!("{facade}${fname}$1");
