@@ -433,6 +433,40 @@ pub struct CallSig {
     pub vararg: bool,
 }
 
+#[derive(Clone, Copy, Default)]
+pub struct ReturnInfo {
+    pub nullable: bool,
+    pub class: Option<Ty>,
+}
+
+impl ReturnInfo {
+    pub fn new(nullable: bool, class: Option<Ty>) -> Self {
+        ReturnInfo { nullable, class }
+    }
+
+    pub fn apply(self, fallback: Ty) -> Ty {
+        self.apply_with_class(self.class, fallback)
+    }
+
+    pub fn apply_with_class(self, class: Option<Ty>, fallback: Ty) -> Ty {
+        let ret = class
+            .map(|meta| {
+                if meta.type_args().is_empty() && !fallback.type_args().is_empty() {
+                    Ty::obj_args(meta.name(), fallback.type_args())
+                } else {
+                    meta
+                }
+            })
+            .unwrap_or(fallback);
+        if self.nullable && !ret.is_nullable() && (ret.boxed_ref().is_some() || ret.is_reference())
+        {
+            Ty::nullable(ret)
+        } else {
+            ret
+        }
+    }
+}
+
 /// One overload in a [`FunctionSet`]: the full platform-neutral shape of a single function the front end
 /// needs, in ONE place — no follow-up metadata calls. `callable` is the opaque emit handle (the platform
 /// emitter consumes it; the front end never inspects it).
@@ -441,12 +475,7 @@ pub struct FunctionInfo {
     pub kind: FnKind,
     /// The extension/member receiver type; `None` for a top-level function.
     pub receiver: Option<Ty>,
-    /// Whether the Kotlin return type is nullable (`T?`) — the JVM signature erases this.
-    pub ret_nullable: bool,
-    /// Kotlin metadata return type, when the platform descriptor/signature erases source identity
-    /// (notably read-only vs mutable collection returns). Kept on the overload so consumers do not
-    /// perform owner/name metadata probes after selection.
-    pub ret_class: Option<Ty>,
+    pub ret: ReturnInfo,
     /// `inline`, `@InlineOnly` (`inline_only`), and friends — from `@Metadata`.
     pub flags: FnFlags,
     /// The opaque platform callable (owner/name/descriptor on JVM) + its resolved `params`/`ret`. Reuses
@@ -486,38 +515,10 @@ impl FunctionInfo {
         member.owner = Some(self.callable.owner.clone());
         member.physical_ret = self.callable.physical_ret;
         member.signature = self.callable.signature.clone();
-        member.ret_nullable = self.ret_nullable;
+        member.ret_nullable = self.ret.nullable;
         member.inline = self.flags.inline;
         member.suspend = self.flags.suspend;
         member
-    }
-
-    /// The source-visible return type after applying metadata return identity/nullability to a fallback
-    /// return recovered from the descriptor or generic signature.
-    pub fn return_type(&self, fallback: Ty) -> Ty {
-        self.return_type_with_class(self.ret_class, fallback)
-    }
-
-    /// Like [`Self::return_type`], but with a caller-filtered metadata return class. This keeps the
-    /// nullability rule coupled to the metadata-return rule while allowing deliberately narrower paths.
-    pub fn return_type_with_class(&self, ret_class: Option<Ty>, fallback: Ty) -> Ty {
-        let ret = ret_class
-            .map(|meta| {
-                if meta.type_args().is_empty() && !fallback.type_args().is_empty() {
-                    Ty::obj_args(meta.name(), fallback.type_args())
-                } else {
-                    meta
-                }
-            })
-            .unwrap_or(fallback);
-        if self.ret_nullable
-            && !ret.is_nullable()
-            && (ret.boxed_ref().is_some() || ret.is_reference())
-        {
-            Ty::nullable(ret)
-        } else {
-            ret
-        }
     }
 }
 

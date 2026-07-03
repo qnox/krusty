@@ -13,7 +13,7 @@ use crate::libraries::{
     CountedLoopInfo, FnFlags, FnKind, FunctionInfo, FunctionSet, GSig, GenericSig, InlineKind,
     LibConst, LibraryCallable, LibraryConst, LibraryMember, LibrarySeed, LibraryType,
     PlatformAccessor, PlatformCtor, PlatformField, PlatformRangeCtor, RangeConstruction,
-    RuntimeCtor, RuntimeOp,
+    ReturnInfo, RuntimeCtor, RuntimeOp,
 };
 use crate::symbol_source::SymbolSource;
 use crate::types::Ty;
@@ -905,6 +905,36 @@ fn metadata_return_ty(class: Option<&str>) -> Option<Ty> {
     class.map(super::classpath::kotlin_name_to_ty)
 }
 
+fn metadata_return_info(class: Option<&str>, nullable: bool) -> ReturnInfo {
+    ReturnInfo::new(nullable, metadata_return_ty(class))
+}
+
+fn classpath_return_info(meta: Option<&super::classpath::MetadataReturn>) -> ReturnInfo {
+    meta.map_or_else(ReturnInfo::default, |m| {
+        metadata_return_info(m.class.as_deref(), m.nullable)
+    })
+}
+
+fn nullable_scalar_return(info: ReturnInfo, ret: Ty) -> Ty {
+    if info.nullable && ret.is_jvm_scalar() {
+        Ty::nullable(ret)
+    } else {
+        ret
+    }
+}
+
+fn suspend_metadata_return(info: ReturnInfo, physical_ret: Ty) -> Ty {
+    match info.class {
+        Some(ty) if ty.is_jvm_scalar() && info.nullable => {
+            super::jvm_class_map::wrapper_internal(ty)
+                .map(Ty::obj)
+                .unwrap_or(ty)
+        }
+        Some(ty) => ty,
+        None => physical_ret,
+    }
+}
+
 /// Parse a class generic signature into its formal type-parameter names and its supertypes (the
 /// superclass followed by interfaces) as signature nodes, e.g. `java/util/List`'s
 /// `<E:Ljava/lang/Object;>Ljava/lang/Object;Ljava/util/Collection<TE;>;` → (`[E]`, `[Object,
@@ -1588,8 +1618,7 @@ impl SymbolSource for JvmLibraries {
                             overloads.push(FunctionInfo {
                                 kind: FnKind::Extension,
                                 receiver: Some(receiver),
-                                ret_nullable: false,
-                                ret_class: None,
+                                ret: ReturnInfo::new(false, None),
                                 public: c.public,
                                 // The lambda-return family is resolved by return type, never through the
                                 // arg-binding extension selector — mark it so it can't preempt a real rung.
@@ -1712,10 +1741,9 @@ impl SymbolSource for JvmLibraries {
                     let inline =
                         self.cp
                             .is_inline_callable(&c.owner, &c.name, &c.descriptor, &params);
-                    let meta_ret = self.cp.metadata_return(&c.owner, meta_name);
-                    let ret_nullable = meta_ret.as_ref().is_some_and(|r| r.nullable);
-                    let ret_class =
-                        metadata_return_ty(meta_ret.as_ref().and_then(|r| r.class.as_deref()));
+                    let ret_metadata = classpath_return_info(
+                        self.cp.metadata_return(&c.owner, meta_name).as_ref(),
+                    );
                     // Logical return, recovered RECEIVER-substituted (arg-independent): `<T> T.takeIf(…): T?`
                     // → `receiver`. A type var the receiver doesn't bind (`fold`'s `R`) stays as the erased
                     // physical type — arg-binding selection in `CallResolver` refines that.
@@ -1731,15 +1759,8 @@ impl SymbolSource for JvmLibraries {
                             gsig_to_ty(&gsig.ret, &binds)
                         })
                         .unwrap_or(pret);
-                    // A nullable Kotlin return over a PRIMITIVE receiver is the first-class
-                    // `Ty::Nullable(prim)`, so a `?:`/null-check on the result is preserved (see
-                    // `extension_callable`); the emit boxes it.
-                    let ret = if ret.is_jvm_scalar() && ret_nullable {
-                        crate::types::Ty::nullable(ret)
-                    } else {
-                        ret
-                    };
-                    let ret = match ret_class {
+                    let ret = nullable_scalar_return(ret_metadata, ret);
+                    let ret = match ret_metadata.class {
                         Some(meta) if self.value_underlying(meta).is_some() => match meta {
                             Ty::Obj(class, _) => Ty::obj_args(class, ret.type_args()),
                             _ => meta,
@@ -1765,8 +1786,7 @@ impl SymbolSource for JvmLibraries {
                     overloads.push(FunctionInfo {
                         kind: FnKind::Extension,
                         receiver: Some(receiver),
-                        ret_nullable,
-                        ret_class,
+                        ret: ret_metadata,
                         public,
                         receiver_rank: rank as u32,
                         overload_rank: descriptor_narrowing(&c.descriptor) as u32,
@@ -1839,8 +1859,7 @@ impl SymbolSource for JvmLibraries {
                         overloads.push(FunctionInfo {
                             kind: FnKind::Extension,
                             receiver: Some(receiver),
-                            ret_nullable: false,
-                            ret_class: None,
+                            ret: ReturnInfo::new(false, None),
                             public: true,
                             receiver_rank: 0,
                             overload_rank: descriptor_narrowing(&c.descriptor) as u32,
@@ -1899,9 +1918,11 @@ impl SymbolSource for JvmLibraries {
                                 }
                                 for c in self.cp.find_extensions(&recv_desc, &mf.jvm_name) {
                                     let (params, pret) = parse_method_desc(&c.descriptor);
-                                    let ret_nullable = mf.ret_nullable;
-                                    let ret_class = metadata_return_ty(mf.ret_class.as_deref());
-                                    let ret = ret_class.unwrap_or(pret);
+                                    let ret_metadata = metadata_return_info(
+                                        mf.ret_class.as_deref(),
+                                        mf.ret_nullable,
+                                    );
+                                    let ret = ret_metadata.class.unwrap_or(pret);
                                     let inline_kind = InlineKind::from_flags(
                                         mf.is_inline,
                                         mf.is_inline && !c.public,
@@ -1909,8 +1930,7 @@ impl SymbolSource for JvmLibraries {
                                     overloads.push(FunctionInfo {
                                         kind: FnKind::Extension,
                                         receiver: Some(receiver),
-                                        ret_nullable,
-                                        ret_class,
+                                        ret: ret_metadata,
                                         public: true,
                                         // The value class is the most-specific receiver rung.
                                         receiver_rank: 0,
@@ -1989,8 +2009,9 @@ impl SymbolSource for JvmLibraries {
                                 }
                                 let mut params = vec![phys_params[0]];
                                 params.extend(logical_params.iter().copied());
-                                let ret_class = metadata_return_ty(mf.ret_class.as_deref());
-                                let ret = ret_class.unwrap_or(pret);
+                                let ret_metadata =
+                                    metadata_return_info(mf.ret_class.as_deref(), mf.ret_nullable);
+                                let ret = ret_metadata.class.unwrap_or(pret);
                                 crate::trace_compiler!(
                                     "resolve",
                                     "value-class-param ext {name} -> {}.{} on {recv_desc} params={params:?} inline={}",
@@ -2001,8 +2022,7 @@ impl SymbolSource for JvmLibraries {
                                 overloads.push(FunctionInfo {
                                     kind: FnKind::Extension,
                                     receiver: Some(receiver),
-                                    ret_nullable: mf.ret_nullable,
-                                    ret_class,
+                                    ret: ret_metadata,
                                     public: true,
                                     receiver_rank: rank as u32,
                                     overload_rank: descriptor_narrowing(&c.descriptor) as u32,
@@ -2214,15 +2234,12 @@ impl SymbolSource for JvmLibraries {
                             overloads.push(FunctionInfo {
                                 kind: FnKind::Member,
                                 receiver: Some(receiver),
-                                // A suspend `T?` return applies nullability only for a PRIMITIVE (a
-                                // nullable primitive is a distinct BOXED type). A nullable REFERENCE keeps
-                                // its plain erased `Ty` — exactly as the non-suspend member path and
-                                // `resolve_ty` treat a declared `String?` — so a recovered suspend return
-                                // matches the source-spelled reference return instead of diverging.
-                                ret_nullable: m.ret_nullable
-                                    || builtin_ret_nullable
-                                    || (suspend_ret_nullable && !ret.is_reference()),
-                                ret_class: None,
+                                ret: ReturnInfo::new(
+                                    m.ret_nullable
+                                        || builtin_ret_nullable
+                                        || (suspend_ret_nullable && !ret.is_reference()),
+                                    None,
+                                ),
                                 public: true,
                                 receiver_rank: rung,
                                 overload_rank: descriptor_narrowing(&m.descriptor) as u32,
@@ -2349,33 +2366,17 @@ impl SymbolSource for JvmLibraries {
                         ..Default::default()
                     },
                 };
-                let meta_ret = self.cp.metadata_return(&c.owner, meta_name);
-                let ret_class =
-                    metadata_return_ty(meta_ret.as_ref().and_then(|r| r.class.as_deref()));
-                let ret_nullable = meta_ret.as_ref().is_some_and(|r| r.nullable);
-                // A suspend method's physical return is erased to `Object`; recover the LOGICAL Kotlin
-                // return type from the selected metadata return class (`helper(): Int`), so the call types
-                // correctly. The physical (erased) return stays `Object` for the emit.
+                let ret_metadata =
+                    classpath_return_info(self.cp.metadata_return(&c.owner, meta_name).as_ref());
                 let ret = if suspend {
-                    ret_class
-                        .map(|ty| {
-                            if ty.is_jvm_scalar() && meta_ret.as_ref().is_some_and(|r| r.nullable) {
-                                super::jvm_class_map::wrapper_internal(ty)
-                                    .map(Ty::obj)
-                                    .unwrap_or(ty)
-                            } else {
-                                ty
-                            }
-                        })
-                        .unwrap_or(physical_ret)
+                    suspend_metadata_return(ret_metadata, physical_ret)
                 } else {
                     physical_ret
                 };
                 overloads.push(FunctionInfo {
                     kind: FnKind::TopLevel,
                     receiver: None,
-                    ret_nullable,
-                    ret_class,
+                    ret: ret_metadata,
                     public: c.public,
                     receiver_rank: 0,
                     overload_rank: descriptor_narrowing(&c.descriptor) as u32,

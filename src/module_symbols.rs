@@ -8,7 +8,7 @@
 
 use crate::libraries::{
     CallSig, FnFlags, FnKind, FunctionInfo, FunctionSet, InlineKind, LibraryCallable,
-    LibraryMember, LibrarySeed, LibraryType, Origin,
+    LibraryMember, LibrarySeed, LibraryType, Origin, ReturnInfo,
 };
 use crate::resolve::{ClassSig, Signature, SymbolTable};
 use crate::symbol_source::SymbolSource;
@@ -110,8 +110,7 @@ fn fn_info(
     FunctionInfo {
         kind,
         receiver,
-        ret_nullable: false,
-        ret_class: None,
+        ret: ReturnInfo::new(false, None),
         public: true,
         receiver_rank: rank,
         overload_rank: 0,

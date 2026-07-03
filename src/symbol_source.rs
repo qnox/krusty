@@ -347,8 +347,7 @@ mod tests {
                     overloads: vec![FunctionInfo {
                         kind: FnKind::TopLevel,
                         receiver: None,
-                        ret_nullable: false,
-                        ret_class: None,
+                        ret: crate::libraries::ReturnInfo::new(false, None),
                         public: true,
                         receiver_rank: 0,
                         overload_rank: 0,
