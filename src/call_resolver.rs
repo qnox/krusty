@@ -1141,12 +1141,8 @@ impl<'a> CallResolver<'a> {
 // The inherited-member walk over a library type's hierarchy — arg-dependent binding, so it lives in
 // this layer (not the oracle). `resolve` and `ir_lower` share one implementation, backend-agnostic.
 
-fn descriptor_form(lib: &dyn SymbolSource, ty: Ty) -> Ty {
-    lib.jvm_descriptor_form(ty).unwrap_or(ty)
-}
-
 fn descriptor_args(lib: &dyn SymbolSource, args: &[Ty]) -> Vec<Ty> {
-    args.iter().map(|a| descriptor_form(lib, *a)).collect()
+    args.iter().map(|a| lib.jvm_descriptor_form(*a)).collect()
 }
 
 fn params_match_descriptor_form(lib: &dyn SymbolSource, params: &[Ty], args: &[Ty]) -> bool {
@@ -1154,7 +1150,7 @@ fn params_match_descriptor_form(lib: &dyn SymbolSource, params: &[Ty], args: &[T
         && params
             .iter()
             .zip(args)
-            .all(|(p, a)| descriptor_form(lib, *p) == *a)
+            .all(|(p, a)| lib.jvm_descriptor_form(*p) == *a)
 }
 
 /// Whether a call argument `arg` fits a parameter `param` after both are reduced to their platform
@@ -1163,8 +1159,8 @@ fn params_match_descriptor_form(lib: &dyn SymbolSource, params: &[Ty], args: &[T
 /// match on identity. The supertype closure is walked through the symbol source; no collection
 /// relationships are hardcoded here.
 fn descriptor_arg_subtype_of_param(lib: &dyn SymbolSource, arg: Ty, param: Ty) -> bool {
-    let pj = descriptor_form(lib, param);
-    let aj = descriptor_form(lib, arg);
+    let pj = lib.jvm_descriptor_form(param);
+    let aj = lib.jvm_descriptor_form(arg);
     if aj == pj {
         return true;
     }
@@ -1182,7 +1178,8 @@ fn descriptor_arg_subtype_of_param(lib: &dyn SymbolSource, arg: Ty, param: Ty) -
         // such as `kotlin/collections/Collection` erases to `java/util/Collection`).
         let cur_jvm = lib
             .jvm_descriptor_form(Ty::obj(&cur))
-            .and_then(|t| t.obj_internal().map(str::to_string))
+            .obj_internal()
+            .map(str::to_string)
             .unwrap_or_else(|| cur.clone());
         if cur_jvm == param_jvm {
             return true;
