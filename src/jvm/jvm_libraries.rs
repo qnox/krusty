@@ -1783,9 +1783,21 @@ impl SymbolSource for JvmLibraries {
                         }
                         _ => crate::libraries::CallSig::default(),
                     };
+                    let inline_kind = InlineKind::from_flags(inline, inline && !c.public);
+                    let callable = LibraryCallable {
+                        inline: inline_kind,
+                        default_call: is_default,
+                        signature: c.signature.clone(),
+                        ..LibraryCallable::library(
+                            c.owner.clone(),
+                            c.name.clone(),
+                            params,
+                            ret,
+                            pret,
+                            c.descriptor.clone(),
+                        )
+                    };
                     overloads.push(FunctionInfo {
-                        kind: FnKind::Extension,
-                        receiver: Some(receiver),
                         ret: ret_metadata,
                         public,
                         receiver_rank: rank as u32,
@@ -1793,22 +1805,10 @@ impl SymbolSource for JvmLibraries {
                         generic_sig: c.signature.as_deref().and_then(parse_method_gsig),
                         call_sig,
                         flags: FnFlags {
-                            inline: InlineKind::from_flags(inline, inline && !c.public),
+                            inline: inline_kind,
                             suspend: self.cp.is_suspend_method(&c.owner, &c.name),
                         },
-                        callable: LibraryCallable {
-                            inline: InlineKind::from_flags(inline, inline && !c.public),
-                            default_call: is_default,
-                            signature: c.signature.clone(),
-                            ..LibraryCallable::library(
-                                c.owner.clone(),
-                                c.name.clone(),
-                                params,
-                                ret,
-                                pret,
-                                c.descriptor.clone(),
-                            )
-                        },
+                        ..FunctionInfo::plain(FnKind::Extension, Some(receiver), callable)
                     });
                 }
             }
@@ -2226,16 +2226,25 @@ impl SymbolSource for JvmLibraries {
                                     &m.name,
                                     params.len(),
                                 );
+                            let callable = LibraryCallable {
+                                inline: m.inline,
+                                signature: m.signature.clone(),
+                                ..LibraryCallable::library(
+                                    m.owner.clone().unwrap_or_else(|| cn.clone()),
+                                    m.physical_name.clone().unwrap_or_else(|| m.name.clone()),
+                                    params,
+                                    ret,
+                                    m.physical_ret,
+                                    descriptor,
+                                )
+                            };
                             overloads.push(FunctionInfo {
-                                kind: FnKind::Member,
-                                receiver: Some(receiver),
                                 ret: ReturnInfo::new(
                                     m.ret_nullable
                                         || builtin_ret_nullable
                                         || (suspend_ret_nullable && !ret.is_reference()),
                                     None,
                                 ),
-                                public: true,
                                 receiver_rank: rung,
                                 overload_rank: descriptor_narrowing(&m.descriptor) as u32,
                                 generic_sig,
@@ -2244,18 +2253,7 @@ impl SymbolSource for JvmLibraries {
                                     inline: m.inline,
                                     suspend,
                                 },
-                                callable: LibraryCallable {
-                                    inline: m.inline,
-                                    signature: m.signature.clone(),
-                                    ..LibraryCallable::library(
-                                        m.owner.clone().unwrap_or_else(|| cn.clone()),
-                                        m.physical_name.clone().unwrap_or_else(|| m.name.clone()),
-                                        params,
-                                        ret,
-                                        m.physical_ret,
-                                        descriptor,
-                                    )
-                                },
+                                ..FunctionInfo::plain(FnKind::Member, Some(receiver), callable)
                             });
                         }
                     }
@@ -2368,32 +2366,31 @@ impl SymbolSource for JvmLibraries {
                 } else {
                     physical_ret
                 };
+                let inline_kind = InlineKind::from_flags(inline, inline && !c.public);
+                let callable = LibraryCallable {
+                    inline: inline_kind,
+                    default_call: is_default,
+                    signature: c.signature.clone(),
+                    ..LibraryCallable::library(
+                        c.owner.clone(),
+                        c.name.clone(),
+                        params,
+                        ret,
+                        physical_ret,
+                        descriptor,
+                    )
+                };
                 overloads.push(FunctionInfo {
-                    kind: FnKind::TopLevel,
-                    receiver: None,
                     ret: ret_metadata,
                     public: c.public,
-                    receiver_rank: 0,
                     overload_rank: descriptor_narrowing(&c.descriptor) as u32,
                     generic_sig: c.signature.as_deref().and_then(parse_method_gsig),
                     call_sig,
                     flags: FnFlags {
-                        inline: InlineKind::from_flags(inline, inline && !c.public),
+                        inline: inline_kind,
                         suspend,
                     },
-                    callable: LibraryCallable {
-                        inline: InlineKind::from_flags(inline, inline && !c.public),
-                        default_call: is_default,
-                        signature: c.signature.clone(),
-                        ..LibraryCallable::library(
-                            c.owner.clone(),
-                            c.name.clone(),
-                            params,
-                            ret,
-                            physical_ret,
-                            descriptor,
-                        )
-                    },
+                    ..FunctionInfo::plain(FnKind::TopLevel, None, callable)
                 });
             }
         }
