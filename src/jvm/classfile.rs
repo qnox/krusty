@@ -683,12 +683,6 @@ impl CodeBuilder {
         self.needs_stackmap = true;
     }
 
-    /// Whether any StackMapTable frame has been recorded (the body has a branch target). Used to reject
-    /// splicing a branchy lambda body, whose internal frames the host splice doesn't yet relocate.
-    pub fn has_frames(&self) -> bool {
-        !self.frames.is_empty()
-    }
-
     /// The recorded frames resolved to byte offsets: `(offset, locals, stack)` for each bound label.
     /// Used to relocate a spliced lambda body's own frames into the host method. Unbound labels (offset
     /// `usize::MAX`) are dropped.
@@ -1339,20 +1333,6 @@ impl CodeBuilder {
     }
     pub fn invokespecial(&mut self, methodref: u16, arg_words: i32, ret_words: i32) {
         self.op_u2(0xb7, methodref, ret_words - arg_words - 1);
-    }
-
-    /// Emit a numeric widening conversion from `from` to `to` (Int<Long<Double). No-op if equal.
-    pub fn widen(&mut self, from: crate::types::Ty, to: crate::types::Ty) {
-        use crate::types::Ty::*;
-        match (from, to) {
-            (Int, Long) => self.i2l(),
-            (Int, Double) => self.i2d(),
-            (Long, Double) => self.l2d(),
-            (Int, Float) => self.i2f(),
-            (Long, Float) => self.l2f(),
-            (Float, Double) => self.f2d(),
-            _ => {}
-        }
     }
 }
 
