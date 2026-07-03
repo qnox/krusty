@@ -268,22 +268,6 @@ pub(crate) fn jvm_can_emit(ir: &IrFile) -> bool {
     })
 }
 
-/// Back-compat single-facade entry (used where a file has only functions).
-pub fn emit_file(ir: &IrFile, facade: &str, bodies: &dyn MethodBodies) -> Vec<u8> {
-    let mut cw = ClassWriter::new(facade, "java/lang/Object");
-    for (i, f) in ir.functions.iter().enumerate() {
-        if f.dispatch_receiver.is_none() && f.body.is_some() {
-            emit_method(ir, i as u32, facade, facade, &mut cw, false, bodies);
-            if crate::ir::toplevel_default_stub_safe(ir, i as u32) {
-                let defaults = &ir.fn_param_defaults[&(i as u32)];
-                emit_facade_default_stub(ir, i as u32, facade, &mut cw, defaults, bodies);
-            }
-        }
-    }
-    emit_statics(ir, facade, &mut cw, bodies);
-    cw.finish()
-}
-
 /// Emit the facade's top-level properties as `public static` fields plus a `<clinit>` that runs
 /// their initializers in declaration order.
 /// Convert the inliner's `VType` (a relocated frame verification type) to the class-writer's
