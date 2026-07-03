@@ -11,7 +11,7 @@ use crate::call_resolver::{arg_fits, function_input_types, gsig_to_ty, unify_gsi
 use crate::jvm::names::{method_descriptor, property_getter_name, type_descriptor};
 use crate::libraries::{
     CountedLoopInfo, FnFlags, FnKind, FunctionInfo, FunctionSet, GSig, GenericSig, InlineKind,
-    LibConst, LibraryCallable, LibraryConst, LibraryMember, LibrarySeed, LibraryType, Origin,
+    LibConst, LibraryCallable, LibraryConst, LibraryMember, LibrarySeed, LibraryType,
     PlatformAccessor, PlatformCtor, PlatformField, PlatformRangeCtor, RangeConstruction,
     RuntimeCtor, RuntimeOp,
 };
@@ -425,20 +425,18 @@ impl JvmLibraries {
                     companion_internal: companion_internal.clone(),
                     companion_field: companion_field.clone(),
                     callable: LibraryCallable {
-                        owner: companion_internal.clone(),
-                        name: m.jvm_name,
-                        params,
                         // The logical return is the value class itself (`Result`); its type argument
                         // stays erased, matching kotlinc (a generic companion result flows as the
                         // erased underlying).
-                        ret: Ty::obj(internal),
-                        physical_ret: Ty::obj("kotlin/Any"),
-                        descriptor,
                         inline: InlineKind::MustInline,
-                        default_call: false,
-                        vararg_elem: None,
-                        signature: None,
-                        origin: Origin::Library,
+                        ..LibraryCallable::library(
+                            companion_internal.clone(),
+                            m.jvm_name,
+                            params,
+                            Ty::obj(internal),
+                            Ty::obj("kotlin/Any"),
+                            descriptor,
+                        )
                     },
                 })
             })
@@ -1604,18 +1602,17 @@ impl SymbolSource for JvmLibraries {
                                     suspend: self.cp.is_suspend_method(&c.owner, &c.name),
                                 },
                                 callable: LibraryCallable {
-                                    name: c.name.clone(),
-                                    owner: c.owner.clone(),
-                                    params,
-                                    ret,
-                                    physical_ret: pret,
-                                    descriptor: c.descriptor.clone(),
                                     // Package-private `@InlineOnly` — splice or skip, never `invokestatic`.
                                     inline: InlineKind::from_flags(true, !c.public),
-                                    default_call: false,
-                                    vararg_elem: None,
                                     signature: c.signature.clone(),
-                                    origin: crate::libraries::Origin::Library,
+                                    ..LibraryCallable::library(
+                                        c.owner.clone(),
+                                        c.name.clone(),
+                                        params,
+                                        ret,
+                                        pret,
+                                        c.descriptor.clone(),
+                                    )
                                 },
                             });
                         }
@@ -1780,17 +1777,17 @@ impl SymbolSource for JvmLibraries {
                             suspend: self.cp.is_suspend_method(&c.owner, &c.name),
                         },
                         callable: LibraryCallable {
-                            name: c.name.clone(),
-                            owner: c.owner.clone(),
-                            params,
-                            ret,
-                            physical_ret: pret,
-                            descriptor: c.descriptor.clone(),
                             inline: InlineKind::from_flags(inline, inline && !c.public),
                             default_call: is_default,
-                            vararg_elem: None,
                             signature: c.signature.clone(),
-                            origin: crate::libraries::Origin::Library,
+                            ..LibraryCallable::library(
+                                c.owner.clone(),
+                                c.name.clone(),
+                                params,
+                                ret,
+                                pret,
+                                c.descriptor.clone(),
+                            )
                         },
                     });
                 }
@@ -1854,17 +1851,15 @@ impl SymbolSource for JvmLibraries {
                                 suspend: false,
                             },
                             callable: LibraryCallable {
-                                name: c.name.clone(),
-                                owner: c.owner.clone(),
-                                params,
-                                ret: pret,
-                                physical_ret: pret,
-                                descriptor: c.descriptor.clone(),
-                                inline: InlineKind::None,
-                                default_call: false,
-                                vararg_elem: None,
                                 signature: c.signature.clone(),
-                                origin: crate::libraries::Origin::Library,
+                                ..LibraryCallable::library(
+                                    c.owner.clone(),
+                                    c.name.clone(),
+                                    params,
+                                    pret,
+                                    pret,
+                                    c.descriptor.clone(),
+                                )
                             },
                         });
                     }
@@ -1930,17 +1925,16 @@ impl SymbolSource for JvmLibraries {
                                             suspend: mf.is_suspend,
                                         },
                                         callable: LibraryCallable {
-                                            name: c.name.clone(),
-                                            owner: c.owner.clone(),
-                                            params,
-                                            ret,
-                                            physical_ret: pret,
-                                            descriptor: c.descriptor.clone(),
                                             inline: inline_kind,
-                                            default_call: false,
-                                            vararg_elem: None,
                                             signature: c.signature.clone(),
-                                            origin: crate::libraries::Origin::Library,
+                                            ..LibraryCallable::library(
+                                                c.owner.clone(),
+                                                c.name.clone(),
+                                                params,
+                                                ret,
+                                                pret,
+                                                c.descriptor.clone(),
+                                            )
                                         },
                                     });
                                 }
@@ -2023,17 +2017,16 @@ impl SymbolSource for JvmLibraries {
                                         suspend: mf.is_suspend,
                                     },
                                     callable: LibraryCallable {
-                                        name: c.name.clone(),
-                                        owner: c.owner.clone(),
-                                        params,
-                                        ret,
-                                        physical_ret: pret,
-                                        descriptor: c.descriptor.clone(),
                                         inline: InlineKind::from_flags(mf.is_inline, mf.is_inline),
-                                        default_call: false,
-                                        vararg_elem: None,
                                         signature: c.signature.clone(),
-                                        origin: crate::libraries::Origin::Library,
+                                        ..LibraryCallable::library(
+                                            c.owner.clone(),
+                                            c.name.clone(),
+                                            params,
+                                            ret,
+                                            pret,
+                                            c.descriptor.clone(),
+                                        )
                                     },
                                 });
                             }
@@ -2240,17 +2233,16 @@ impl SymbolSource for JvmLibraries {
                                     suspend,
                                 },
                                 callable: LibraryCallable {
-                                    name: m.physical_name.clone().unwrap_or_else(|| m.name.clone()),
-                                    owner: m.owner.clone().unwrap_or_else(|| cn.clone()),
-                                    params,
-                                    ret,
-                                    physical_ret: m.physical_ret,
-                                    descriptor,
                                     inline: m.inline,
-                                    default_call: false,
-                                    vararg_elem: None,
                                     signature: m.signature.clone(),
-                                    origin: crate::libraries::Origin::Library,
+                                    ..LibraryCallable::library(
+                                        m.owner.clone().unwrap_or_else(|| cn.clone()),
+                                        m.physical_name.clone().unwrap_or_else(|| m.name.clone()),
+                                        params,
+                                        ret,
+                                        m.physical_ret,
+                                        descriptor,
+                                    )
                                 },
                             });
                         }
@@ -2394,17 +2386,17 @@ impl SymbolSource for JvmLibraries {
                         suspend,
                     },
                     callable: LibraryCallable {
-                        name: c.name.clone(),
-                        owner: c.owner.clone(),
-                        params,
-                        ret,
-                        physical_ret,
-                        descriptor,
                         inline: InlineKind::from_flags(inline, inline && !c.public),
                         default_call: is_default,
-                        vararg_elem: None,
                         signature: c.signature.clone(),
-                        origin: crate::libraries::Origin::Library,
+                        ..LibraryCallable::library(
+                            c.owner.clone(),
+                            c.name.clone(),
+                            params,
+                            ret,
+                            physical_ret,
+                            descriptor,
+                        )
                     },
                 });
             }
