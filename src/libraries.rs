@@ -503,6 +503,21 @@ pub struct FunctionInfo {
 }
 
 impl FunctionInfo {
+    pub fn plain(kind: FnKind, receiver: Option<Ty>, callable: LibraryCallable) -> Self {
+        FunctionInfo {
+            kind,
+            receiver,
+            ret: ReturnInfo::default(),
+            flags: FnFlags::default(),
+            callable,
+            public: true,
+            receiver_rank: 0,
+            overload_rank: 0,
+            generic_sig: None,
+            call_sig: CallSig::default(),
+        }
+    }
+
     /// Materialize this selected overload as an instance-member emit handle with a caller-chosen logical
     /// return. Metadata flags that affect emission stay coupled to the selected overload.
     pub fn member_with_return(&self, ret: Ty) -> LibraryMember {
