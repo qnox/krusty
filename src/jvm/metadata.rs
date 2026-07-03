@@ -1922,7 +1922,7 @@ mod pure_helper_tests {
 #[cfg(test)]
 mod proto_fixture_tests {
     use super::*;
-    use crate::jvm::classreader::ClassInfo;
+    use crate::jvm::classreader::{ClassInfo, MethodSig};
 
     // --- minimal protobuf wire-format builders ------------------------------------------------
 
@@ -2349,5 +2349,240 @@ mod proto_fixture_tests {
         assert!(suspend_method_names(&ci).is_empty());
         assert!(inline_methods(&ci).is_empty());
         assert!(inline_method_names(&ci).is_empty());
+    }
+
+    // --- resolve_string: predefined-index + replace branches (untested elsewhere) ---------------
+
+    #[test]
+    fn resolve_string_uses_predefined_index_and_replace() {
+        // predefined_index selects PREDEFINED_STRINGS[1] == "kotlin/Nothing".
+        let recs = vec![Rec {
+            predefined_index: Some(1),
+            ..Default::default()
+        }];
+        assert_eq!(
+            resolve_string(&recs, &[], 0).as_deref(),
+            Some("kotlin/Nothing")
+        );
+        // replace maps every '.' to '/' — resolve_string DOES apply replace (only `operation` differs).
+        let recs = vec![Rec {
+            string: Some("a.b.c".to_string()),
+            replace: Some(('.' as u32, '/' as u32)),
+            ..Default::default()
+        }];
+        assert_eq!(resolve_string(&recs, &[], 0).as_deref(), Some("a/b/c"));
+    }
+
+    #[test]
+    fn resolve_class_name_replace_with_invalid_codepoint_is_noop() {
+        // 0xD800 is a lone surrogate → char::from_u32 returns None → replacement is skipped.
+        let recs = vec![Rec {
+            string: Some("a$b".to_string()),
+            replace: Some((0xD800, '/' as u32)),
+            ..Default::default()
+        }];
+        assert_eq!(resolve_class_name(&recs, &[], 0).as_deref(), Some("a$b"));
+    }
+
+    // --- parse_type_class_name / parse_type_recv_fun: skip length-delimited + annotation-only -----
+
+    #[test]
+    fn parse_type_class_name_skips_length_delimited_field() {
+        // A preceding length-delimited (wire 2) field must be skipped, not mis-read as class_name.
+        let body = cat(&[&flen(1, b"junk"), &fvar(6, 9)]);
+        assert_eq!(parse_type_class_name(&body), Some(9));
+    }
+
+    #[test]
+    fn parse_type_recv_fun_annotation_without_argument() {
+        // Only Type.annotation (field 100) present, no Type.argument → (Some(id), None).
+        let type_body = flen(100, &fvar(1, 5));
+        assert_eq!(parse_type_recv_fun(&type_body), (Some(5), None));
+    }
+
+    // --- decode_functions: bytecode-descriptor fallback when metadata omits the signature ---------
+
+    fn ci_meta_methods(d1: Vec<String>, d2: Vec<String>, methods: Vec<MethodSig>) -> ClassInfo {
+        let mut ci = ci_meta(d1, d2);
+        ci.methods = methods;
+        ci
+    }
+
+    fn method(name: &str, desc: &str) -> MethodSig {
+        MethodSig {
+            access: 0,
+            name: name.to_string(),
+            descriptor: desc.to_string(),
+            signature: None,
+        }
+    }
+
+    #[test]
+    fn decode_functions_falls_back_to_single_bytecode_descriptor() {
+        // A Function with NO method_signature extension (field 100 absent). jvm_name == kotlin_name;
+        // jvm_desc is recovered from the sole matching bytecode method.
+        let func = cat(&[&fvar(2, 0), &fvar(9, VIS_PUBLIC << 1)]); // name id 0, plain public flags
+        let package = flen(3, &func);
+        let ci = ci_meta_methods(
+            vec![d1_from_message(&package)],
+            vec!["run".to_string()],
+            vec![method("run", "()V")],
+        );
+        let fns = package_functions(&ci);
+        assert_eq!(fns.len(), 1);
+        assert_eq!(fns[0].jvm_name, "run");
+        assert_eq!(fns[0].jvm_desc.as_deref(), Some("()V"));
+    }
+
+    #[test]
+    fn decode_functions_ambiguous_bytecode_name_leaves_descriptor_none() {
+        // Two bytecode methods share the JVM name → the fallback is ambiguous, jvm_desc stays None.
+        let func = cat(&[&fvar(2, 0), &fvar(9, VIS_PUBLIC << 1)]);
+        let package = flen(3, &func);
+        let ci = ci_meta_methods(
+            vec![d1_from_message(&package)],
+            vec!["f".to_string()],
+            vec![method("f", "()V"), method("f", "(I)V")],
+        );
+        let fns = package_functions(&ci);
+        assert_eq!(fns.len(), 1);
+        assert!(fns[0].jvm_desc.is_none());
+    }
+
+    // --- class_inline: @JvmInline value class markers (fields 17/18/19) --------------------------
+
+    #[test]
+    fn class_inline_reads_property_and_underlying_type() {
+        // field 17 = underlying property name id; field 18 = underlying Type{class_name}.
+        let class_msg = cat(&[&fvar(17, 0), &flen(18, &fvar(6, 1))]);
+        let d2 = vec!["value".to_string(), "kotlin/Int".to_string()];
+        let ci = ci_meta(vec![d1_from_message(&class_msg)], d2);
+        let ic = class_inline(&ci).unwrap();
+        assert_eq!(ic.property_name.as_deref(), Some("value"));
+        assert_eq!(ic.underlying_class.as_deref(), Some("kotlin/Int"));
+    }
+
+    #[test]
+    fn class_inline_type_id_marker_only() {
+        // field 19 = underlying_type_id: marks a value class, but leaves the underlying unresolved.
+        let class_msg = fvar(19, 4);
+        let ci = ci_meta(vec![d1_from_message(&class_msg)], vec![]);
+        let ic = class_inline(&ci).unwrap();
+        assert!(ic.underlying_class.is_none());
+        assert!(ic.property_name.is_none());
+    }
+
+    #[test]
+    fn class_inline_none_for_ordinary_class() {
+        // No value-class marker → None. Also None when metadata is absent.
+        let class_msg = fvar(4, 0); // just a companion name field, not a value-class marker
+        let ci = ci_meta(
+            vec![d1_from_message(&class_msg)],
+            vec!["Companion".to_string()],
+        );
+        assert!(class_inline(&ci).is_none());
+        assert!(class_inline(&ci_meta(vec![], vec![])).is_none());
+    }
+
+    // --- class_companion_name: Class.companion_object_name = 4 -----------------------------------
+
+    #[test]
+    fn class_companion_name_end_to_end() {
+        let class_msg = fvar(4, 0);
+        let ci = ci_meta(
+            vec![d1_from_message(&class_msg)],
+            vec!["Companion".to_string()],
+        );
+        assert_eq!(class_companion_name(&ci).as_deref(), Some("Companion"));
+        // No companion field present → None.
+        let empty = ci_meta(vec![d1_from_message(&[])], vec![]);
+        assert!(class_companion_name(&empty).is_none());
+        assert!(class_companion_name(&ci_meta(vec![], vec![])).is_none());
+    }
+
+    // --- class_property_return_classes: inline return type + return_type_id path ------------------
+
+    #[test]
+    fn class_property_return_classes_inline_type() {
+        // Property{ name id 0, return_type = Type{class_name 1} } → { "MAX" : "kotlin/UInt" }.
+        let property = cat(&[&fvar(2, 0), &flen(3, &fvar(6, 1))]);
+        let class_msg = flen(10, &property);
+        let d2 = vec!["MAX".to_string(), "kotlin/UInt".to_string()];
+        let ci = ci_meta(vec![d1_from_message(&class_msg)], d2);
+        let map = class_property_return_classes(&ci);
+        assert_eq!(map.get("MAX").map(String::as_str), Some("kotlin/UInt"));
+    }
+
+    #[test]
+    fn class_property_return_classes_via_type_table_id() {
+        // Property{ name id 0, return_type_id (field 9) = 0 } resolved through the type_table (field 30).
+        let type_table = flen(1, &fvar(6, 1)); // types[0] = Type{class_name 1}
+        let property = cat(&[&fvar(2, 0), &fvar(9, 0)]);
+        let class_msg = cat(&[&flen(30, &type_table), &flen(10, &property)]);
+        let d2 = vec!["N".to_string(), "kotlin/Int".to_string()];
+        let ci = ci_meta(vec![d1_from_message(&class_msg)], d2);
+        let map = class_property_return_classes(&ci);
+        assert_eq!(map.get("N").map(String::as_str), Some("kotlin/Int"));
+    }
+
+    // --- parse_builtins / builtins_supertypes: full .kotlin_builtins fragment --------------------
+
+    #[test]
+    fn parse_builtins_supertypes_and_members() {
+        // StringTable strings, indexed 0..=4.
+        let string_table = flen(
+            1,
+            &cat(&[
+                &flen(1, b"p"),
+                &flen(1, b"List"),
+                &flen(1, b"Collection"),
+                &flen(1, b"size"),
+                &flen(1, b"Int"),
+            ]),
+        );
+        // QualifiedNameTable: p(pkg), List(class under p), Collection(class under p), Int(class under p).
+        let q0 = cat(&[&fvar(2, 0), &fvar(3, 1)]); // short "p", kind PACKAGE, parent default -1
+        let q1 = cat(&[&fvar(1, 0), &fvar(2, 1), &fvar(3, 0)]); // parent p, "List", CLASS
+        let q2 = cat(&[&fvar(1, 0), &fvar(2, 2), &fvar(3, 0)]); // parent p, "Collection", CLASS
+        let q3 = cat(&[&fvar(1, 0), &fvar(2, 4), &fvar(3, 0)]); // parent p, "Int", CLASS
+        let qname_table = flen(
+            2,
+            &cat(&[&flen(1, &q0), &flen(1, &q1), &flen(1, &q2), &flen(1, &q3)]),
+        );
+        // Class List: fq=1, supertype_id [0], one function `size(): Int`, type_table[0]=Collection,[1]=Int.
+        let func = cat(&[&fvar(2, 3), &fvar(7, 1)]); // name "size", return_type_id 1
+        let type_table = flen(30, &cat(&[&flen(1, &fvar(6, 2)), &flen(1, &fvar(6, 3))]));
+        let class_body = cat(&[
+            &fvar(3, 1),           // fq_name = qname 1 (List)
+            &flen(2, &uvarint(0)), // supertype_id packed [0]
+            &flen(9, &func),       // function
+            &type_table,           // type_table (field 30)
+        ]);
+        let class_msg = flen(4, &class_body);
+        // Header: BuiltInsBinaryVersion word-count = 0 → 4-byte header only, then the fragment.
+        let fragment = cat(&[&string_table, &qname_table, &class_msg]);
+        let data = cat(&[&[0u8, 0, 0, 0][..], &fragment]);
+
+        let sup = builtins_supertypes(&data);
+        assert_eq!(sup.get("p/List"), Some(&vec!["p/Collection".to_string()]));
+
+        let classes = parse_builtins(&data);
+        let c = classes.get("p/List").unwrap();
+        assert_eq!(c.supertypes, vec!["p/Collection".to_string()]);
+        assert!(c
+            .members
+            .iter()
+            .any(|m| m.name == "size" && m.ret == "p/Int" && !m.is_property));
+        assert!(c
+            .member_ret_nullable
+            .iter()
+            .any(|(n, arity, nullable)| n == "size" && *arity == 0 && !*nullable));
+    }
+
+    #[test]
+    fn parse_builtins_empty_for_missing_header() {
+        // Too-short buffer (no valid BuiltInsBinaryVersion header) → empty map.
+        assert!(parse_builtins(&[0, 0]).is_empty());
+        assert!(builtins_supertypes(&[0, 0]).is_empty());
     }
 }

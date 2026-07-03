@@ -6017,4 +6017,281 @@ mod tests {
         assert_eq!(file.package.as_deref(), Some("demo"));
         assert_eq!(file.decls.len(), 2);
     }
+
+    // ---- Pure helper unit tests ---------------------------------------------------------------
+    // The following exercise the standalone token/string/literal helpers directly (no Parser needed),
+    // covering every match arm and edge case.
+
+    #[test]
+    fn modality_of_precedence() {
+        use crate::ast::Modality;
+        // `sealed` wins over everything.
+        assert_eq!(modality_of(true, true, true), Modality::Sealed);
+        assert_eq!(modality_of(false, false, true), Modality::Sealed);
+        // `abstract` wins over `open`.
+        assert_eq!(modality_of(true, true, false), Modality::Abstract);
+        assert_eq!(modality_of(false, true, false), Modality::Abstract);
+        // `open` when only open.
+        assert_eq!(modality_of(true, false, false), Modality::Open);
+        // default is `final`.
+        assert_eq!(modality_of(false, false, false), Modality::Final);
+    }
+
+    #[test]
+    fn is_modifier_recognizes_and_rejects() {
+        for m in [
+            "public",
+            "private",
+            "internal",
+            "protected",
+            "open",
+            "final",
+            "abstract",
+            "inline",
+            "noinline",
+            "crossinline",
+            "operator",
+            "override",
+            "suspend",
+            "tailrec",
+            "lateinit",
+            "infix",
+            "reified",
+            "vararg",
+            "const",
+            "sealed",
+            "actual",
+            "expect",
+            "value",
+            "inner",
+        ] {
+            assert!(is_modifier(m), "expected {m} to be a modifier");
+        }
+        // `external` is deliberately NOT a skippable modifier; nor are keywords/identifiers/empty.
+        for m in ["external", "fun", "class", "data", "companion", "foo", ""] {
+            assert!(!is_modifier(m), "expected {m} to NOT be a modifier");
+        }
+    }
+
+    #[test]
+    fn compound_op_maps_all_and_none() {
+        assert_eq!(compound_op(TokenKind::PlusEq), Some(BinOp::Add));
+        assert_eq!(compound_op(TokenKind::MinusEq), Some(BinOp::Sub));
+        assert_eq!(compound_op(TokenKind::StarEq), Some(BinOp::Mul));
+        assert_eq!(compound_op(TokenKind::SlashEq), Some(BinOp::Div));
+        assert_eq!(compound_op(TokenKind::PercentEq), Some(BinOp::Rem));
+        // A non-compound token falls into the `_ => None` arm.
+        assert_eq!(compound_op(TokenKind::Plus), None);
+        assert_eq!(compound_op(TokenKind::Eof), None);
+    }
+
+    #[test]
+    fn infix_op_maps_all_and_none() {
+        assert_eq!(infix_op(TokenKind::OrOr), Some(BinOp::Or));
+        assert_eq!(infix_op(TokenKind::AndAnd), Some(BinOp::And));
+        assert_eq!(infix_op(TokenKind::EqEq), Some(BinOp::Eq));
+        assert_eq!(infix_op(TokenKind::NotEq), Some(BinOp::Ne));
+        assert_eq!(infix_op(TokenKind::RefEq), Some(BinOp::RefEq));
+        assert_eq!(infix_op(TokenKind::RefNe), Some(BinOp::RefNe));
+        assert_eq!(infix_op(TokenKind::Lt), Some(BinOp::Lt));
+        assert_eq!(infix_op(TokenKind::LtEq), Some(BinOp::Le));
+        assert_eq!(infix_op(TokenKind::Gt), Some(BinOp::Gt));
+        assert_eq!(infix_op(TokenKind::GtEq), Some(BinOp::Ge));
+        assert_eq!(infix_op(TokenKind::Plus), Some(BinOp::Add));
+        assert_eq!(infix_op(TokenKind::Minus), Some(BinOp::Sub));
+        assert_eq!(infix_op(TokenKind::Star), Some(BinOp::Mul));
+        assert_eq!(infix_op(TokenKind::Slash), Some(BinOp::Div));
+        assert_eq!(infix_op(TokenKind::Percent), Some(BinOp::Rem));
+        // A non-infix token yields None.
+        assert_eq!(infix_op(TokenKind::Eof), None);
+        assert_eq!(infix_op(TokenKind::LParen), None);
+    }
+
+    #[test]
+    fn infix_bp_tables_and_left_assoc() {
+        // Exact binding powers for each precedence tier.
+        assert_eq!(infix_bp(BinOp::Or), (1, 2));
+        assert_eq!(infix_bp(BinOp::And), (3, 4));
+        assert_eq!(infix_bp(BinOp::Eq), (5, 6));
+        assert_eq!(infix_bp(BinOp::Ne), (5, 6));
+        assert_eq!(infix_bp(BinOp::RefEq), (5, 6));
+        assert_eq!(infix_bp(BinOp::RefNe), (5, 6));
+        assert_eq!(infix_bp(BinOp::Lt), (7, 8));
+        assert_eq!(infix_bp(BinOp::Le), (7, 8));
+        assert_eq!(infix_bp(BinOp::Gt), (7, 8));
+        assert_eq!(infix_bp(BinOp::Ge), (7, 8));
+        assert_eq!(infix_bp(BinOp::Add), (9, 10));
+        assert_eq!(infix_bp(BinOp::Sub), (9, 10));
+        assert_eq!(infix_bp(BinOp::Mul), (11, 12));
+        assert_eq!(infix_bp(BinOp::Div), (11, 12));
+        assert_eq!(infix_bp(BinOp::Rem), (11, 12));
+        // Every operator is left-associative: rbp == lbp + 1, and tiers strictly increase.
+        for op in [
+            BinOp::Or,
+            BinOp::And,
+            BinOp::Eq,
+            BinOp::Lt,
+            BinOp::Add,
+            BinOp::Mul,
+        ] {
+            let (l, r) = infix_bp(op);
+            assert_eq!(r, l + 1, "op {op:?} must be left-assoc");
+        }
+    }
+
+    #[test]
+    fn starts_expr_true_and_false() {
+        for k in [
+            TokenKind::Ident,
+            TokenKind::IntLit,
+            TokenKind::LongLit,
+            TokenKind::UIntLit,
+            TokenKind::ULongLit,
+            TokenKind::DoubleLit,
+            TokenKind::FloatLit,
+            TokenKind::StringLit,
+            TokenKind::CharLit,
+            TokenKind::TemplateStart,
+            TokenKind::KwTrue,
+            TokenKind::KwFalse,
+            TokenKind::KwNull,
+            TokenKind::KwIf,
+            TokenKind::KwWhen,
+            TokenKind::LParen,
+            TokenKind::LBrace,
+            TokenKind::Minus,
+            TokenKind::Not,
+        ] {
+            assert!(starts_expr(k), "expected {k:?} to start an expression");
+        }
+        // Tokens that cannot begin an expression.
+        for k in [
+            TokenKind::RParen,
+            TokenKind::Colon,
+            TokenKind::Dot,
+            TokenKind::Eof,
+            TokenKind::Plus,
+        ] {
+            assert!(!starts_expr(k), "expected {k:?} to NOT start an expression");
+        }
+    }
+
+    #[test]
+    fn unquote_char_plain_and_escapes() {
+        assert_eq!(unquote_char("'a'"), 'a');
+        assert_eq!(unquote_char("'\\n'"), '\n');
+        assert_eq!(unquote_char("'\\t'"), '\t');
+        assert_eq!(unquote_char("'\\r'"), '\r');
+        assert_eq!(unquote_char("'\\b'"), '\u{0008}');
+        assert_eq!(unquote_char("'\\\\'"), '\\');
+        assert_eq!(unquote_char("'\\''"), '\'');
+        assert_eq!(unquote_char("'\\\"'"), '"');
+        assert_eq!(unquote_char("'\\0'"), '\0');
+        assert_eq!(unquote_char("'\\$'"), '$');
+    }
+
+    #[test]
+    fn unquote_char_unicode_and_edges() {
+        // Valid \uXXXX code unit.
+        assert_eq!(unquote_char("'\\u0041'"), 'A');
+        // Invalid hex in \u falls back to NUL.
+        assert_eq!(unquote_char("'\\uZZZZ'"), '\0');
+        // Unknown escape yields the escaped char verbatim.
+        assert_eq!(unquote_char("'\\q'"), 'q');
+        // Empty inner -> NUL (None on first char).
+        assert_eq!(unquote_char("''"), '\0');
+        // Lone trailing backslash -> NUL (None after '\\').
+        assert_eq!(unquote_char("'\\'"), '\0');
+        // No surrounding quotes: unwrap_or(raw) fallback, first char returned.
+        assert_eq!(unquote_char("x"), 'x');
+    }
+
+    #[test]
+    fn unescape_chunk_all_arms() {
+        assert_eq!(unescape_chunk("plain"), "plain");
+        assert_eq!(unescape_chunk("a\\nb\\tc"), "a\nb\tc");
+        assert_eq!(unescape_chunk("\\r\\b"), "\r\u{0008}");
+        assert_eq!(unescape_chunk("\\\\"), "\\");
+        assert_eq!(unescape_chunk("\\\""), "\"");
+        assert_eq!(unescape_chunk("\\'"), "'");
+        assert_eq!(unescape_chunk("\\$"), "$");
+        assert_eq!(unescape_chunk("\\0"), "\0");
+        // Valid + invalid unicode; the invalid one pushes nothing.
+        assert_eq!(unescape_chunk("\\u0041"), "A");
+        assert_eq!(unescape_chunk("x\\uZZZZy"), "xy");
+        // Unknown escape passes the char through; a dangling backslash is dropped.
+        assert_eq!(unescape_chunk("\\q"), "q");
+        assert_eq!(unescape_chunk("end\\"), "end");
+    }
+
+    #[test]
+    fn parse_int_literal_radices_and_separators() {
+        assert_eq!(parse_int_literal("123"), 123);
+        assert_eq!(parse_int_literal("0x1F"), 31);
+        assert_eq!(parse_int_literal("0X1f"), 31);
+        assert_eq!(parse_int_literal("0b1010"), 10);
+        assert_eq!(parse_int_literal("0B1010"), 10);
+        assert_eq!(parse_int_literal("1_000_000"), 1_000_000);
+        assert_eq!(parse_int_literal("0xFF_FF"), 0xFFFF);
+    }
+
+    #[test]
+    fn parse_int_literal_suffixes_and_invalid() {
+        assert_eq!(parse_int_literal("100L"), 100);
+        assert_eq!(parse_int_literal("0xFFu"), 255);
+        assert_eq!(parse_int_literal("42uL"), 42);
+        // 64-bit hex reinterpreted as signed i64.
+        assert_eq!(parse_int_literal("0xFFFFFFFFFFFFFFFF"), -1);
+        // Unparseable digits fall back to 0.
+        assert_eq!(parse_int_literal("0xZZ"), 0);
+        assert_eq!(parse_int_literal("abc"), 0);
+    }
+
+    #[test]
+    fn parse_unsigned_literal_bits_cases() {
+        assert_eq!(parse_unsigned_literal_bits("123"), 123);
+        assert_eq!(parse_unsigned_literal_bits("0x1F"), 31);
+        assert_eq!(parse_unsigned_literal_bits("0X1f"), 31);
+        assert_eq!(parse_unsigned_literal_bits("0b1010"), 10);
+        assert_eq!(parse_unsigned_literal_bits("0B1010"), 10);
+        assert_eq!(parse_unsigned_literal_bits("1_000u"), 1000);
+        assert_eq!(parse_unsigned_literal_bits("255uL"), 255);
+        // Full-width unsigned value is preserved (unlike the signed reinterpretation).
+        assert_eq!(parse_unsigned_literal_bits("0xFFFFFFFFFFFFFFFF"), u64::MAX);
+        // Invalid digits -> 0.
+        assert_eq!(parse_unsigned_literal_bits("0xZZ"), 0);
+    }
+
+    #[test]
+    fn unquote_raw_and_escaped_strings() {
+        // Raw triple-quoted string is verbatim (escapes NOT processed).
+        assert_eq!(unquote("\"\"\"a\\nb\"\"\""), "a\\nb");
+        // Ordinary string processes escapes.
+        assert_eq!(unquote("\"a\\nb\""), "a\nb");
+        assert_eq!(unquote("\"\\t\\r\\b\""), "\t\r\u{0008}");
+        assert_eq!(unquote("\"\\\\\\\"\\'\\$\\0\""), "\\\"'$\0");
+        // Valid + invalid unicode.
+        assert_eq!(unquote("\"\\u0041\""), "A");
+        assert_eq!(unquote("\"\\uZZZZ\""), "");
+        // Unknown escape passes through; dangling backslash dropped.
+        assert_eq!(unquote("\"\\q\""), "q");
+        assert_eq!(unquote("\"tail\\\""), "tail");
+        // No surrounding quotes: unwrap_or(raw) fallback.
+        assert_eq!(unquote("bare"), "bare");
+    }
+
+    #[test]
+    fn simple_type_ref_shape() {
+        let span = Span::new(3, 7);
+        let t = simple_type_ref("Int", span);
+        assert_eq!(t.name, "Int");
+        assert!(!t.nullable);
+        assert!(t.arg.is_none());
+        assert!(t.targs.is_empty());
+        assert!(t.fun_params.is_empty());
+        assert!(!t.fun_has_receiver);
+        assert!(!t.fun_suspend);
+        assert_eq!(t.span.lo, 3);
+        assert_eq!(t.span.hi, 7);
+    }
 }
