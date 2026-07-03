@@ -1066,9 +1066,6 @@ impl CodeBuilder {
     pub fn irem(&mut self) {
         self.op(0x70, -1);
     }
-    pub fn ineg(&mut self) {
-        self.op(0x74, 0);
-    }
     pub fn ladd(&mut self) {
         self.op(0x61, -2);
     }
@@ -1083,9 +1080,6 @@ impl CodeBuilder {
     }
     pub fn lrem(&mut self) {
         self.op(0x71, -2);
-    }
-    pub fn lneg(&mut self) {
-        self.op(0x75, 0);
     }
     pub fn dadd(&mut self) {
         self.op(0x63, -2);
@@ -1102,9 +1096,6 @@ impl CodeBuilder {
     pub fn drem(&mut self) {
         self.op(0x73, -2);
     }
-    pub fn dneg(&mut self) {
-        self.op(0x77, 0);
-    }
     pub fn fadd(&mut self) {
         self.op(0x62, -1);
     }
@@ -1119,9 +1110,6 @@ impl CodeBuilder {
     }
     pub fn frem(&mut self) {
         self.op(0x72, -1);
-    }
-    pub fn fneg(&mut self) {
-        self.op(0x76, 0);
     }
     /// `fcmpg`: pops two floats, pushes an int (-1/0/1).
     pub fn fcmpg(&mut self) {
