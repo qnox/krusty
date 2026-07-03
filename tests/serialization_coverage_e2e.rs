@@ -244,3 +244,33 @@ fun box(): String {
     );
     eprintln!("pure-krusty nullable nested + nullable list OK");
 }
+
+#[test]
+fn standalone_enum_round_trips_in_krusty() {
+    // A top-level `@Serializable enum` serialized directly via its own `.serializer()` (NOT as a field
+    // of another class — that nested-enum wiring is the still-open gap noted above). kotlinx encodes an
+    // enum entry to its name as a JSON string; decode maps back to the entry. Exercises the plugin's
+    // enum-serializer accessor path.
+    let src = r#"import kotlinx.serialization.*
+import kotlinx.serialization.json.*
+
+@Serializable
+enum class Color { RED, GREEN, BLUE }
+
+fun box(): String {
+    val j = Json.encodeToString(Color.serializer(), Color.GREEN)
+    if (j != "\"GREEN\"") return "enc=$j"
+    val back = Json.decodeFromString(Color.serializer(), j)
+    return if (back == Color.GREEN) "OK" else "back=$back"
+}
+"#;
+    let Some((stdout, stderr)) = run_box_in_krusty(src, "SerEnum") else {
+        eprintln!("skipping: serialization runtime / JAVA_HOME not located");
+        return;
+    };
+    assert!(
+        stdout == "OK",
+        "standalone enum round-trip wrong.\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    eprintln!("pure-krusty standalone enum round-trip OK");
+}
