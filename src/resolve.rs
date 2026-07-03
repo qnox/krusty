@@ -5285,6 +5285,14 @@ impl<'a> Checker<'a> {
                 "multiple vararg parameters are not allowed".to_string(),
             );
         }
+        // A `reified` type parameter is only allowed on an `inline` function (kotlinc rejects it
+        // otherwise — reification needs the body inlined at the call site).
+        if !f.reified_type_params.is_empty() && !f.is_inline {
+            self.diags.error(
+                f.span,
+                "'reified' type parameter is only allowed on an 'inline' function".to_string(),
+            );
+        }
         // The set of locals reassigned anywhere in this function (for captured-`var` boxing).
         self.fn_reassigned.clear();
         if let FunBody::Expr(b) | FunBody::Block(b) = &f.body {
