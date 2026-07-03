@@ -129,6 +129,39 @@ fn default_omit_lambda_param_indices(
     None
 }
 
+fn is_default_ctor_marker(ty: Ty) -> bool {
+    matches!(
+        ty,
+        Ty::Obj("kotlin/jvm/internal/DefaultConstructorMarker", _)
+    )
+}
+
+fn is_continuation(ty: Ty) -> bool {
+    matches!(ty, Ty::Obj("kotlin/coroutines/Continuation", _))
+}
+
+fn has_default_tail(params: &[Ty], mask_idx: usize, marker: impl FnOnce(Ty) -> bool) -> bool {
+    params.len() == mask_idx + 2
+        && params[mask_idx] == Ty::Int
+        && params.get(mask_idx + 1).copied().is_some_and(marker)
+}
+
+fn callable_with_return(c: &LibraryCallable, ret: Ty, default_call: bool) -> LibraryCallable {
+    LibraryCallable {
+        owner: c.owner.clone(),
+        name: c.name.clone(),
+        params: c.params.clone(),
+        ret,
+        physical_ret: c.physical_ret,
+        descriptor: c.descriptor.clone(),
+        inline: c.inline,
+        default_call,
+        vararg_elem: None,
+        signature: c.signature.clone(),
+        origin: c.origin.clone(),
+    }
+}
+
 /// The arg-dependent binding layer over a [`SymbolSource`]: it selects overloads and binds generics for
 /// a specific call site. Holds the oracle by reference — cheap to construct per query.
 pub struct CallResolver<'a> {
@@ -468,19 +501,7 @@ impl<'a> CallResolver<'a> {
             .ret_class
             .filter(|meta| self.lib.value_underlying(*meta).is_some());
         let ret_ty = o.return_type_with_class(ret_class, ret_ty);
-        LibraryCallable {
-            owner: c.owner.clone(),
-            name: c.name.clone(),
-            params: c.params.clone(),
-            ret: ret_ty,
-            physical_ret: c.physical_ret,
-            descriptor: c.descriptor.clone(),
-            inline: c.inline,
-            default_call: false,
-            vararg_elem: None,
-            signature: c.signature.clone(),
-            origin: c.origin.clone(),
-        }
+        callable_with_return(c, ret_ty, false)
     }
 
     fn resolve_extension_default_callable(
@@ -551,19 +572,7 @@ impl<'a> CallResolver<'a> {
                     })
                     .unwrap_or(c.ret);
                 let ret_ty = o.return_type(ret_ty);
-                return Some(LibraryCallable {
-                    owner: c.owner.clone(),
-                    name: c.name.clone(),
-                    params: params.clone(),
-                    ret: ret_ty,
-                    physical_ret: c.physical_ret,
-                    descriptor: c.descriptor.clone(),
-                    inline: c.inline,
-                    default_call: true,
-                    vararg_elem: None,
-                    signature: c.signature.clone(),
-                    origin: c.origin.clone(),
-                });
+                return Some(callable_with_return(c, ret_ty, true));
             }
         }
         None
@@ -714,19 +723,7 @@ impl<'a> CallResolver<'a> {
                 })
                 .unwrap_or(c.ret);
             let ret_ty = o.return_type(ret_ty);
-            return Some(LibraryCallable {
-                owner: c.owner.clone(),
-                name: c.name.clone(),
-                params: params.clone(),
-                ret: ret_ty,
-                physical_ret: c.physical_ret,
-                descriptor: c.descriptor.clone(),
-                inline: c.inline,
-                default_call: true,
-                vararg_elem: None,
-                signature: c.signature.clone(),
-                origin: c.origin.clone(),
-            });
+            return Some(callable_with_return(c, ret_ty, true));
         }
         None
     }
@@ -766,19 +763,9 @@ impl<'a> CallResolver<'a> {
                 })
                 .unwrap_or(c.ret);
             let logical_ret = o.return_type(recovered);
-            return Some(LibraryCallable {
-                owner: c.owner.clone(),
-                name: c.name.clone(),
-                params: params.clone(),
-                ret: logical_ret,
-                physical_ret: c.physical_ret,
-                descriptor: c.descriptor.clone(),
-                inline: InlineKind::MustInline,
-                default_call: false,
-                vararg_elem: None,
-                signature: c.signature.clone(),
-                origin: c.origin.clone(),
-            });
+            let mut callable = callable_with_return(c, logical_ret, false);
+            callable.inline = InlineKind::MustInline;
+            return Some(callable);
         }
         None
     }
@@ -1323,10 +1310,10 @@ pub fn synthetic_default_ctor(
     arity: usize,
 ) -> Option<(String, Vec<Ty>)> {
     let t = lib.resolve_type(internal)?;
-    let is_marker = |ty: &Ty| matches!(ty, Ty::Obj(n, _) if *n == "kotlin/jvm/internal/DefaultConstructorMarker");
-    let m = t.constructors.iter().find(|m| {
-        m.params.len() == arity + 2 && is_marker(&m.params[arity + 1]) && m.params[arity] == Ty::Int
-    })?;
+    let m = t
+        .constructors
+        .iter()
+        .find(|m| has_default_tail(&m.params, arity, is_default_ctor_marker))?;
     Some((m.descriptor.clone(), m.params[..arity].to_vec()))
 }
 
@@ -1342,17 +1329,14 @@ pub fn synthetic_default_member(
 ) -> Option<(String, Vec<Ty>, Ty, bool)> {
     let t = lib.resolve_type(owner)?;
     let dname = format!("{name}$default");
-    let is_continuation =
-        |ty: &Ty| matches!(ty, Ty::Obj(n, _) if *n == "kotlin/coroutines/Continuation");
     // Shape `(Owner receiver, <real params…>, int mask, Object marker)`: exactly `arity` real params, an
     // `int` mask, and a reference marker. Match by `arity` (not just name) so an overloaded `name$default`
     // of a different parameter count can't be picked.
-    if let Some(m) = t.companion.iter().find(|m| {
-        m.name == dname
-            && m.params.len() == arity + 3
-            && m.params[arity + 1] == Ty::Int
-            && m.params[arity + 2].is_reference()
-    }) {
+    if let Some(m) = t
+        .companion
+        .iter()
+        .find(|m| m.name == dname && has_default_tail(&m.params, arity + 1, Ty::is_reference))
+    {
         return Some((
             m.descriptor.clone(),
             m.params[1..arity + 1].to_vec(),
@@ -1366,10 +1350,11 @@ pub fn synthetic_default_member(
     // continuation in place; the coroutine pass threads the value there (see `append_continuation`).
     let m = t.companion.iter().find(|m| {
         m.name == dname
-            && m.params.len() == arity + 4
-            && is_continuation(&m.params[arity + 1])
-            && m.params[arity + 2] == Ty::Int
-            && m.params[arity + 3].is_reference()
+            && m.params
+                .get(arity + 1)
+                .copied()
+                .is_some_and(is_continuation)
+            && has_default_tail(&m.params, arity + 2, Ty::is_reference)
     })?;
     Some((
         m.descriptor.clone(),
@@ -1388,14 +1373,17 @@ pub fn resolve_synthetic_constructor(
     args: &[Ty],
 ) -> Option<SyntheticCtorCall> {
     let t = lib.resolve_type(internal)?;
-    let is_marker = |ty: &Ty| matches!(ty, Ty::Obj(n, _) if *n == "kotlin/jvm/internal/DefaultConstructorMarker");
     // A value-class argument is passed as its erased underlying (`Vid` arg → `String` param).
     let erased: Vec<Ty> = args
         .iter()
         .map(|a| lib.value_underlying(*a).unwrap_or(*a))
         .collect();
     for m in &t.constructors {
-        if m.params.last().is_none_or(|p| !is_marker(p)) {
+        if m.params
+            .last()
+            .copied()
+            .is_none_or(|p| !is_default_ctor_marker(p))
+        {
             continue;
         }
         let leading = &m.params[..m.params.len() - 1];
@@ -1405,7 +1393,10 @@ pub fn resolve_synthetic_constructor(
         let (real_params, has_mask): (&[Ty], bool) = if leading.last() == Some(&Ty::Int)
             && !leading.is_empty()
             && t.constructors.iter().any(|s| {
-                s.params.last().is_none_or(|p| !is_marker(p))
+                s.params
+                    .last()
+                    .copied()
+                    .is_none_or(|p| !is_default_ctor_marker(p))
                     && s.params == leading[..leading.len() - 1]
             }) {
             (&leading[..leading.len() - 1], true)
