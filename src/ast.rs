@@ -433,6 +433,8 @@ pub struct FunDecl {
     /// `final` modifier — cannot be overridden. Data-class synthesis skips methods a parent marks
     /// `final` (overriding them would produce wrong behavior).
     pub is_final: bool,
+    /// `abstract` modifier — a member with no body, only valid in an abstract class or interface.
+    pub is_abstract: bool,
     /// `private` visibility. Public/internal/protected functions get `Intrinsics.checkNotNullParameter`
     /// guards on their non-null reference parameters (kotlinc does); private ones do not.
     pub is_private: bool,
@@ -2126,6 +2128,7 @@ mod tests {
                 span: sp(),
                 is_inline: false,
                 is_final: false,
+                is_abstract: false,
                 is_private: false,
                 is_suspend: false,
                 is_tailrec: false,
@@ -2189,6 +2192,7 @@ mod tests {
             span: sp(),
             is_inline: false,
             is_final: false,
+            is_abstract: false,
             is_private: false,
             is_suspend: false,
             is_tailrec: false,
@@ -2226,6 +2230,7 @@ mod tests {
             span: sp(),
             is_inline: false,
             is_final: false,
+            is_abstract: false,
             is_private: false,
             is_suspend: false,
             is_tailrec: false,
@@ -2255,6 +2260,7 @@ mod tests {
             span: sp(),
             is_inline: false,
             is_final: false,
+            is_abstract: false,
             is_private: false,
             is_suspend: false,
             is_tailrec: false,
@@ -2503,6 +2509,7 @@ mod tests {
                 span: sp(),
                 is_inline: false,
                 is_final: false,
+                is_abstract: false,
                 is_private: false,
                 is_suspend: false,
                 is_tailrec: false,
@@ -2671,6 +2678,7 @@ mod tests {
                 span: sp(),
                 is_inline: false,
                 is_final: false,
+                is_abstract: false,
                 is_private: false,
                 is_suspend: false,
                 is_tailrec: false,
@@ -2702,6 +2710,7 @@ mod tests {
                 span: sp(),
                 is_inline: false,
                 is_final: false,
+                is_abstract: false,
                 is_private: false,
                 is_suspend: false,
                 is_tailrec: false,
@@ -2729,6 +2738,7 @@ mod tests {
             span: sp(),
             is_inline: false,
             is_final: false,
+            is_abstract: false,
             is_private: false,
             is_suspend: false,
             is_tailrec: false,

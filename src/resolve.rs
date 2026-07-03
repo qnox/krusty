@@ -3711,6 +3711,22 @@ pub fn check_file(file: &File, syms: &mut SymbolTable, diags: &mut DiagSink) -> 
                         }
                     }
                 }
+                // An `abstract` member is only allowed in an abstract class, an interface, or an enum
+                // class (whose entries override the abstract member per-entry) — kotlinc rejects it in a
+                // final class: "modifier 'abstract' is not applicable inside a final class".
+                if !cl.is_abstract() && !cl.is_interface() && !cl.is_enum() {
+                    for m in &cl.methods {
+                        if m.is_abstract {
+                            c.diags.error(
+                                m.span,
+                                format!(
+                                    "abstract member '{}' is not allowed in a non-abstract class",
+                                    m.name
+                                ),
+                            );
+                        }
+                    }
+                }
                 // In a class WITH a primary constructor every secondary must delegate to it (`this(…)`);
                 // `super(…)`/implicit delegation isn't emitted there, so reject it. A class with NO
                 // primary constructor admits `this(…)`/`super(…)`/implicit delegation (each becomes its
