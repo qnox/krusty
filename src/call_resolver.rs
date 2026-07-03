@@ -1782,19 +1782,14 @@ mod tests {
     }
 
     fn top_level_nullable_string_info() -> FunctionInfo {
-        let callable = LibraryCallable {
-            owner: "kotlin/FooKt".to_string(),
-            name: "maybe".to_string(),
-            params: vec![],
-            ret: Ty::String,
-            physical_ret: Ty::String,
-            descriptor: "()Ljava/lang/String;".to_string(),
-            inline: InlineKind::None,
-            default_call: false,
-            vararg_elem: None,
-            signature: None,
-            origin: Origin::Library,
-        };
+        let callable = LibraryCallable::library(
+            "kotlin/FooKt",
+            "maybe",
+            vec![],
+            Ty::String,
+            Ty::String,
+            "()Ljava/lang/String;",
+        );
         FunctionInfo {
             kind: FnKind::TopLevel,
             receiver: None,
@@ -1812,19 +1807,14 @@ mod tests {
 
     fn extension_nullable_string_info() -> FunctionInfo {
         let receiver = Ty::String;
-        let callable = LibraryCallable {
-            owner: "kotlin/text/StringsKt".to_string(),
-            name: "maybeSuffix".to_string(),
-            params: vec![receiver],
-            ret: Ty::String,
-            physical_ret: Ty::String,
-            descriptor: "(Ljava/lang/String;)Ljava/lang/String;".to_string(),
-            inline: InlineKind::None,
-            default_call: false,
-            vararg_elem: None,
-            signature: None,
-            origin: Origin::Library,
-        };
+        let callable = LibraryCallable::library(
+            "kotlin/text/StringsKt",
+            "maybeSuffix",
+            vec![receiver],
+            Ty::String,
+            Ty::String,
+            "(Ljava/lang/String;)Ljava/lang/String;",
+        );
         FunctionInfo {
             kind: FnKind::Extension,
             receiver: Some(receiver),
@@ -1842,19 +1832,14 @@ mod tests {
 
     fn member_nullable_string_info() -> FunctionInfo {
         let receiver = Ty::obj("demo/Box");
-        let callable = LibraryCallable {
-            owner: "demo/Box".to_string(),
-            name: "maybe".to_string(),
-            params: vec![],
-            ret: Ty::String,
-            physical_ret: Ty::String,
-            descriptor: "()Ljava/lang/String;".to_string(),
-            inline: InlineKind::None,
-            default_call: false,
-            vararg_elem: None,
-            signature: None,
-            origin: Origin::Library,
-        };
+        let callable = LibraryCallable::library(
+            "demo/Box",
+            "maybe",
+            vec![],
+            Ty::String,
+            Ty::String,
+            "()Ljava/lang/String;",
+        );
         FunctionInfo {
             kind: FnKind::Member,
             receiver: Some(receiver),
@@ -1872,19 +1857,14 @@ mod tests {
 
     fn member_metadata_class_info() -> FunctionInfo {
         let receiver = Ty::obj("demo/Box");
-        let callable = LibraryCallable {
-            owner: "demo/Box".to_string(),
-            name: "names".to_string(),
-            params: vec![],
-            ret: Ty::obj("kotlin/Any"),
-            physical_ret: Ty::obj("kotlin/Any"),
-            descriptor: "()Ljava/lang/Object;".to_string(),
-            inline: InlineKind::None,
-            default_call: false,
-            vararg_elem: None,
-            signature: None,
-            origin: Origin::Library,
-        };
+        let callable = LibraryCallable::library(
+            "demo/Box",
+            "names",
+            vec![],
+            Ty::obj("kotlin/Any"),
+            Ty::obj("kotlin/Any"),
+            "()Ljava/lang/Object;",
+        );
         FunctionInfo {
             kind: FnKind::Member,
             receiver: Some(receiver),
