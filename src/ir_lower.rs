@@ -19899,6 +19899,224 @@ mod deep_lower_tests {
         }
     }
 
+    // --- body-property shape predicates -------------------------------------------------------
+
+    fn prop() -> ast::PropDecl {
+        ast::PropDecl {
+            name: "x".to_string(),
+            receiver: None,
+            ty: None,
+            is_var: false,
+            init: None,
+            is_lateinit: false,
+            getter: None,
+            setter: None,
+            is_const: false,
+            is_abstract: false,
+            delegate: None,
+            span: Span::new(0, 0),
+        }
+    }
+
+    fn body_setter() -> ast::PropAccessor {
+        ast::PropAccessor {
+            param: Some("v".to_string()),
+            body: Some(ast::FunBody::Expr(ast::ExprId(0))),
+            is_private: false,
+        }
+    }
+
+    #[test]
+    fn is_plain_body_prop_requires_init_no_receiver_no_getter_no_body_setter() {
+        let mut p = prop();
+        p.init = Some(ast::ExprId(0));
+        assert!(is_plain_body_prop(&p)); // val x = init
+                                         // A visibility-only setter is still plain.
+        p.setter = Some(ast::PropAccessor {
+            param: None,
+            body: None,
+            is_private: true,
+        });
+        assert!(is_plain_body_prop(&p));
+        // A setter WITH a body is not plain.
+        p.setter = Some(body_setter());
+        assert!(!is_plain_body_prop(&p));
+        // A getter, a receiver, lateinit, or a missing init each disqualify it.
+        let mut g = prop();
+        g.init = Some(ast::ExprId(0));
+        g.getter = Some(ast::FunBody::Expr(ast::ExprId(0)));
+        assert!(!is_plain_body_prop(&g));
+        let mut r = prop();
+        r.init = Some(ast::ExprId(0));
+        r.receiver = Some(tref("String"));
+        assert!(!is_plain_body_prop(&r));
+        let mut l = prop();
+        l.init = Some(ast::ExprId(0));
+        l.is_lateinit = true;
+        assert!(!is_plain_body_prop(&l));
+        let noinit = prop();
+        assert!(!is_plain_body_prop(&noinit));
+    }
+
+    #[test]
+    fn is_deferred_val_prop_is_typed_immutable_no_init_no_accessors() {
+        let mut p = prop();
+        p.ty = Some(tref("Int"));
+        assert!(is_deferred_val_prop(&p)); // val a: Int
+                                           // A var, an initializer, an abstract, or a missing type each disqualify it.
+        let mut v = p.clone();
+        v.is_var = true;
+        assert!(!is_deferred_val_prop(&v));
+        let mut i = p.clone();
+        i.init = Some(ast::ExprId(0));
+        assert!(!is_deferred_val_prop(&i));
+        let mut a = p.clone();
+        a.is_abstract = true;
+        assert!(!is_deferred_val_prop(&a));
+        let mut untyped = p.clone();
+        untyped.ty = None;
+        assert!(!is_deferred_val_prop(&untyped));
+    }
+
+    #[test]
+    fn is_lateinit_prop_is_typed_mutable_lateinit_no_init() {
+        let mut p = prop();
+        p.is_lateinit = true;
+        p.is_var = true;
+        p.ty = Some(tref("String"));
+        assert!(is_lateinit_prop(&p));
+        // Not a var, or with an initializer, disqualifies it.
+        let mut nv = p.clone();
+        nv.is_var = false;
+        assert!(!is_lateinit_prop(&nv));
+        let mut wi = p.clone();
+        wi.init = Some(ast::ExprId(0));
+        assert!(!is_lateinit_prop(&wi));
+    }
+
+    #[test]
+    fn is_computed_prop_has_getter_no_init_no_setter() {
+        let mut p = prop();
+        p.getter = Some(ast::FunBody::Expr(ast::ExprId(0)));
+        assert!(is_computed_prop(&p)); // val x get() = ...
+                                       // A setter, an initializer, or a var disqualifies it.
+        let mut s = p.clone();
+        s.setter = Some(body_setter());
+        assert!(!is_computed_prop(&s));
+        let mut i = p.clone();
+        i.init = Some(ast::ExprId(0));
+        assert!(!is_computed_prop(&i));
+        let mut v = p.clone();
+        v.is_var = true;
+        assert!(!is_computed_prop(&v));
+    }
+
+    #[test]
+    fn is_backing_field_prop_excludes_const_computed_abstract_delegated() {
+        // A plain val with an initializer has a backing field.
+        let mut p = prop();
+        p.init = Some(ast::ExprId(0));
+        assert!(is_backing_field_prop(&p));
+        // const / abstract / delegated / computed each have no instance backing field.
+        let mut c = p.clone();
+        c.is_const = true;
+        assert!(!is_backing_field_prop(&c));
+        let mut a = p.clone();
+        a.is_abstract = true;
+        assert!(!is_backing_field_prop(&a));
+        let mut d = p.clone();
+        d.delegate = Some(ast::ExprId(0));
+        assert!(!is_backing_field_prop(&d));
+        let mut comp = prop();
+        comp.getter = Some(ast::FunBody::Expr(ast::ExprId(0)));
+        assert!(!is_backing_field_prop(&comp));
+    }
+
+    #[test]
+    fn is_field_accessor_prop_needs_init_plus_custom_accessor() {
+        // Backing field + init + a custom getter (or a bodied setter).
+        let mut g = prop();
+        g.init = Some(ast::ExprId(0));
+        g.getter = Some(ast::FunBody::Expr(ast::ExprId(0)));
+        assert!(is_field_accessor_prop(&g));
+        let mut s = prop();
+        s.init = Some(ast::ExprId(0));
+        s.setter = Some(body_setter());
+        assert!(is_field_accessor_prop(&s));
+        // A plain backing field (no custom accessor) is not a field-accessor property.
+        let mut plain = prop();
+        plain.init = Some(ast::ExprId(0));
+        assert!(!is_field_accessor_prop(&plain));
+    }
+
+    // --- class_internal: package qualification + name mangling --------------------------------
+
+    #[test]
+    fn class_internal_qualifies_and_mangles() {
+        let mut f = ast::File::default();
+        // No package: nested name '.' becomes '$'.
+        assert_eq!(class_internal(&f, "Outer.Inner"), "Outer$Inner");
+        // A package prefixes with '/'-joined segments.
+        f.package = Some("a.b".to_string());
+        assert_eq!(class_internal(&f, "Foo"), "a/b/Foo");
+        assert_eq!(class_internal(&f, "Outer.Inner"), "a/b/Outer$Inner");
+        // An empty package string behaves like no package.
+        f.package = Some(String::new());
+        assert_eq!(class_internal(&f, "Foo"), "Foo");
+    }
+
+    // --- ast_init_is_jvm_default: zero-literal detection --------------------------------------
+
+    #[test]
+    fn ast_init_is_jvm_default_recognizes_zero_literals_and_conversions() {
+        let mut f = ast::File::default();
+        let sp = Span::new(0, 0);
+        let zero = f.add_expr(Expr::IntLit(0), sp);
+        let one = f.add_expr(Expr::IntLit(1), sp);
+        let null = f.add_expr(Expr::NullLit, sp);
+        let ffalse = f.add_expr(Expr::BoolLit(false), sp);
+        let ftrue = f.add_expr(Expr::BoolLit(true), sp);
+        let dzero = f.add_expr(Expr::DoubleLit(0.0), sp);
+        assert!(ast_init_is_jvm_default(&f, zero));
+        assert!(!ast_init_is_jvm_default(&f, one));
+        assert!(ast_init_is_jvm_default(&f, null));
+        assert!(ast_init_is_jvm_default(&f, ffalse));
+        assert!(!ast_init_is_jvm_default(&f, ftrue));
+        assert!(ast_init_is_jvm_default(&f, dzero));
+        // `0.toByte()` — a conversion call of a zero literal is still the default.
+        let member = f.add_expr(
+            Expr::Member {
+                receiver: zero,
+                name: "toByte".to_string(),
+            },
+            sp,
+        );
+        let conv = f.add_expr(
+            Expr::Call {
+                callee: member,
+                args: vec![],
+            },
+            sp,
+        );
+        assert!(ast_init_is_jvm_default(&f, conv));
+        // `1.toByte()` is not the default.
+        let member2 = f.add_expr(
+            Expr::Member {
+                receiver: one,
+                name: "toByte".to_string(),
+            },
+            sp,
+        );
+        let conv2 = f.add_expr(
+            Expr::Call {
+                callee: member2,
+                args: vec![],
+            },
+            sp,
+        );
+        assert!(!ast_init_is_jvm_default(&f, conv2));
+    }
+
     // --- ty_to_ir: Kotlin-Ty -> IR-Ty (the front-end normalizing map) ---
 
     #[test]

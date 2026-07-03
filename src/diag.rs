@@ -144,6 +144,22 @@ mod tests {
     }
 
     #[test]
+    fn render_one_labels_warning_severity() {
+        // `error(...)` only produces Error diagnostics, so build a Warning by hand to hit that arm.
+        let s = DiagSink::new();
+        let d = Diagnostic {
+            span: Span::new(0, 1),
+            severity: Severity::Warning,
+            msg: "heads up".to_string(),
+            file: 0,
+        };
+        assert_eq!(
+            s.render_one(&d, "W.kt", "abc"),
+            "W.kt:1:1: warning: heads up\n"
+        );
+    }
+
+    #[test]
     fn render_all_attributes_each_diag_to_its_own_file() {
         // Two files; an error in each. `render_all` must render each against ITS OWN source — not the
         // whole list against every file (the multi-file mis-attribution bug).

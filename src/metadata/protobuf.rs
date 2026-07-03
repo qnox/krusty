@@ -104,6 +104,31 @@ mod tests {
     }
 
     #[test]
+    fn is_empty_and_into_bytes() {
+        let p = Pb::new();
+        assert!(p.is_empty());
+        let mut p2 = Pb::new();
+        p2.field_varint(1, 150);
+        assert!(!p2.is_empty());
+        // into_bytes consumes and yields the same buffer as_bytes reports.
+        assert_eq!(p2.into_bytes(), vec![0x08, 0x96, 0x01]);
+    }
+
+    #[test]
+    fn repeated_message_emits_tag_and_body_per_element() {
+        // repeated field 3 : two inner { field 1 = 150 } messages, each length-delimited.
+        let mut inner = Pb::new();
+        inner.field_varint(1, 150);
+        let mut p = Pb::new();
+        p.repeated_message(3, &inner);
+        p.repeated_message(3, &inner);
+        assert_eq!(
+            p.as_bytes(),
+            &[0x1a, 0x03, 0x08, 0x96, 0x01, 0x1a, 0x03, 0x08, 0x96, 0x01]
+        );
+    }
+
+    #[test]
     fn nested_message() {
         // outer { field 3 : inner { field 1 = 150 } } => 1a 03 08 96 01
         let mut inner = Pb::new();

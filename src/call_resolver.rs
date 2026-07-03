@@ -2441,4 +2441,147 @@ mod tests {
         let cands = [mismatch];
         assert!(best_member_overload(cands.iter(), "m", &[Ty::Int]).is_none());
     }
+
+    // --- flag predicates: extension/top-level inline & suspend --------------------------------
+
+    fn flagged_info(kind: FnKind, receiver: Option<Ty>, flags: FnFlags) -> FunctionInfo {
+        let callable = LibraryCallable {
+            owner: "demo/Kt".to_string(),
+            name: "f".to_string(),
+            params: receiver.into_iter().collect(),
+            ret: Ty::Unit,
+            physical_ret: Ty::Unit,
+            descriptor: "()V".to_string(),
+            inline: flags.inline,
+            default_call: false,
+            vararg_elem: None,
+            signature: None,
+            origin: Origin::Library,
+        };
+        FunctionInfo {
+            kind,
+            receiver,
+            ret_nullable: false,
+            ret_class: None,
+            flags,
+            callable,
+            public: true,
+            receiver_rank: 0,
+            overload_rank: 0,
+            generic_sig: None,
+            call_sig: CallSig::default(),
+        }
+    }
+
+    #[test]
+    fn toplevel_is_inline_reflects_can_inline_flag() {
+        let inline = flagged_info(
+            FnKind::TopLevel,
+            None,
+            FnFlags {
+                inline: InlineKind::CanInline,
+                suspend: false,
+            },
+        );
+        let src = FakeSource {
+            name: "f",
+            receiver: None,
+            info: inline,
+        };
+        let cr = CallResolver::new(&src);
+        assert!(cr.toplevel_is_inline("f"));
+        assert!(!cr.toplevel_is_inline("other"));
+        assert!(!cr.toplevel_has_must_inline("f")); // CanInline is not MustInline
+
+        let plain = flagged_info(FnKind::TopLevel, None, FnFlags::default());
+        let src2 = FakeSource {
+            name: "f",
+            receiver: None,
+            info: plain,
+        };
+        let cr2 = CallResolver::new(&src2);
+        assert!(!cr2.toplevel_is_inline("f"));
+    }
+
+    #[test]
+    fn toplevel_has_must_inline_reflects_must_inline_flag() {
+        let must = flagged_info(
+            FnKind::TopLevel,
+            None,
+            FnFlags {
+                inline: InlineKind::MustInline,
+                suspend: false,
+            },
+        );
+        let src = FakeSource {
+            name: "f",
+            receiver: None,
+            info: must,
+        };
+        let cr = CallResolver::new(&src);
+        assert!(cr.toplevel_has_must_inline("f"));
+        assert!(cr.toplevel_is_inline("f")); // MustInline implies can_inline
+    }
+
+    #[test]
+    fn toplevel_is_suspend_reflects_suspend_flag() {
+        let susp = flagged_info(
+            FnKind::TopLevel,
+            None,
+            FnFlags {
+                inline: InlineKind::None,
+                suspend: true,
+            },
+        );
+        let src = FakeSource {
+            name: "f",
+            receiver: None,
+            info: susp,
+        };
+        let cr = CallResolver::new(&src);
+        assert!(cr.toplevel_is_suspend("f"));
+        assert!(!cr.toplevel_is_suspend("other"));
+    }
+
+    #[test]
+    fn extension_is_inline_and_suspend_require_extension_kind() {
+        let recv = Ty::String;
+        // An Extension overload with both inline and suspend set.
+        let ext = flagged_info(
+            FnKind::Extension,
+            Some(recv),
+            FnFlags {
+                inline: InlineKind::CanInline,
+                suspend: true,
+            },
+        );
+        let src = FakeSource {
+            name: "f",
+            receiver: Some(recv),
+            info: ext,
+        };
+        let cr = CallResolver::new(&src);
+        assert!(cr.extension_is_inline(recv, "f"));
+        assert!(cr.extension_is_suspend(recv, "f"));
+        // A different receiver does not match.
+        assert!(!cr.extension_is_inline(Ty::Int, "f"));
+
+        // A Member (non-Extension) overload with the same flags is NOT an extension inline/suspend.
+        let member = flagged_info(
+            FnKind::Member,
+            Some(recv),
+            FnFlags {
+                inline: InlineKind::CanInline,
+                suspend: true,
+            },
+        );
+        let src2 = FakeSource {
+            name: "f",
+            receiver: Some(recv),
+            info: member,
+        };
+        let cr2 = CallResolver::new(&src2);
+        assert!(!cr2.extension_is_inline(recv, "f"));
+        assert!(!cr2.extension_is_suspend(recv, "f"));
+    }
 }
