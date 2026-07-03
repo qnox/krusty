@@ -3965,7 +3965,12 @@ impl<'a> Emitter<'a> {
                 // A slot that was never allocated means the lowering produced malformed IR (e.g. an
                 // unsupported suspend shape). Don't panic — flag the file unemittable and skip it.
                 let Some(&(slot, jt)) = self.slots.get(i) else {
-                    crate::trace_compiler!("suspend", "EMIT_BAIL GetValue unallocated slot i={i}");
+                    crate::trace_compiler!(
+                        "suspend",
+                        "EMIT_BAIL GetValue unallocated slot i={i} owner={} known={:?}",
+                        self.owner,
+                        self.slots.keys().collect::<Vec<_>>()
+                    );
                     EMIT_BAIL.with(|b| b.set(true));
                     return;
                 };
