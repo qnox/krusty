@@ -35,8 +35,8 @@ jobs="${KRUSTY_TEST_JOBS:-$(nproc)}"
 # suites (which need the stdlib jar / JVM runtime) don't silently skip and undercount coverage.
 if command -v just >/dev/null 2>&1; then
   v="$(just max-version)"
-  export KRUSTY_KOTLINC="${KRUSTY_KOTLINC:-$(just kotlinc "$v")}"
-  export KRUSTY_KOTLIN_BOX_DIR="${KRUSTY_KOTLIN_BOX_DIR:-$(just box-corpus "$v")}"
+  just kotlinc "$v" >/dev/null
+  just box-corpus "$v" >/dev/null
 fi
 
 is_excluded() { local n="$1" e; for e in "${EXCLUDE[@]}"; do [ "$n" = "$e" ] && return 0; done; return 1; }

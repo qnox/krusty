@@ -4,23 +4,13 @@
 
 use krusty::jvm::classpath::Classpath;
 use krusty::jvm::metadata::{builtins_supertypes, package_functions};
-use std::path::PathBuf;
 
-fn stdlib() -> Option<PathBuf> {
-    let kc = std::env::var("KRUSTY_KOTLINC")
-        .ok()
-        .filter(|s| !s.is_empty())?;
-    let jar = PathBuf::from(&kc)
-        .parent()?
-        .parent()?
-        .join("lib/kotlin-stdlib.jar");
-    jar.exists().then_some(jar)
-}
+mod common;
 
 #[test]
 fn collection_factory_return_types_distinguish_mutable() {
-    let Some(jar) = stdlib() else {
-        eprintln!("skip: set KRUSTY_KOTLINC");
+    let Some(jar) = common::stdlib_jar() else {
+        eprintln!("skip: no kotlin-stdlib jar");
         return;
     };
     let cp = Classpath::new(vec![jar]);
@@ -51,8 +41,8 @@ fn collection_factory_return_types_distinguish_mutable() {
 
 #[test]
 fn nullable_type_parameter_return_metadata_is_kept() {
-    let Some(jar) = stdlib() else {
-        eprintln!("skip: set KRUSTY_KOTLINC");
+    let Some(jar) = common::stdlib_jar() else {
+        eprintln!("skip: no kotlin-stdlib jar");
         return;
     };
     let cp = Classpath::new(vec![jar]);
@@ -72,8 +62,8 @@ fn nullable_type_parameter_return_metadata_is_kept() {
 /// descriptor. Parsed straight from the jar entry (`PackageFragment` + `QualifiedNameTable`).
 #[test]
 fn builtins_supertypes_decode_collection_hierarchy() {
-    let Some(jar) = stdlib() else {
-        eprintln!("skip: set KRUSTY_KOTLINC");
+    let Some(jar) = common::stdlib_jar() else {
+        eprintln!("skip: no kotlin-stdlib jar");
         return;
     };
     let mut zip = zip::ZipArchive::new(std::fs::File::open(&jar).unwrap()).unwrap();
@@ -106,8 +96,8 @@ fn builtins_supertypes_decode_collection_hierarchy() {
 /// the `get(Int): Char` operator, `length: Int`, `plus(Any?): String`, `compareTo(String): Int`.
 #[test]
 fn builtins_string_members_from_metadata() {
-    let Some(jar) = stdlib() else {
-        eprintln!("skip: set KRUSTY_KOTLINC");
+    let Some(jar) = common::stdlib_jar() else {
+        eprintln!("skip: no kotlin-stdlib jar");
         return;
     };
     let mut zip = zip::ZipArchive::new(std::fs::File::open(&jar).unwrap()).unwrap();
@@ -139,8 +129,8 @@ fn builtins_string_members_from_metadata() {
 /// `MutableList` receiver and not to a `List`. A non-builtin name (`ArrayList`) is not in the hierarchy.
 #[test]
 fn kotlin_collection_subtyping() {
-    let Some(jar) = stdlib() else {
-        eprintln!("skip: set KRUSTY_KOTLINC");
+    let Some(jar) = common::stdlib_jar() else {
+        eprintln!("skip: no kotlin-stdlib jar");
         return;
     };
     let cp = Classpath::new(vec![jar]);
@@ -166,8 +156,8 @@ fn kotlin_collection_subtyping() {
 /// overload resolution reject `plusAssign` on a read-only `List` (no `Mutable*` receiver is its supertype).
 #[test]
 fn plus_assign_receiver_is_mutable() {
-    let Some(jar) = stdlib() else {
-        eprintln!("skip: set KRUSTY_KOTLINC");
+    let Some(jar) = common::stdlib_jar() else {
+        eprintln!("skip: no kotlin-stdlib jar");
         return;
     };
     let cp = Classpath::new(vec![jar]);
