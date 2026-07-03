@@ -187,15 +187,6 @@ impl<'a> CallResolver<'a> {
             .any(|o| o.flags.suspend)
     }
 
-    /// Whether `name` has a `suspend` extension overload on `receiver`.
-    pub fn extension_is_suspend(&self, receiver: Ty, name: &str) -> bool {
-        self.lib
-            .functions(name, Some(receiver))
-            .overloads
-            .iter()
-            .any(|o| o.kind == FnKind::Extension && o.flags.suspend)
-    }
-
     /// Resolve a receiver-less top-level library callable for a concrete call site. This is the
     /// compatibility boundary for the older arg-dependent selector while checker/lowerer are moved to
     /// `FunctionSet`-backed resolution.

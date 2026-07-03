@@ -300,11 +300,6 @@ impl Ty {
         }))
     }
 
-    /// Whether this is a `suspend` function type.
-    pub fn is_suspend_fun(self) -> bool {
-        matches!(self, Ty::Fun(s) if s.suspend)
-    }
-
     /// Arity of a function type.
     pub fn fun_arity(self) -> Option<u8> {
         match self {
