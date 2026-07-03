@@ -2,7 +2,6 @@
 //!  c4 enum entry from a classpath enum (`k == Kind.PENDING`)
 //!  c5 stdlib `Regex(...).matches(s: String)` (a `CharSequence`-param member; `String <: CharSequence`)
 //!  c6 a property whose type is a classpath `@JvmInline value class` (`h.id` where `Holder(val id: Vid)`)
-use std::fs;
 mod common;
 
 #[test]
@@ -15,32 +14,16 @@ fn classpath_enum_regex_and_value_class_property() {
         eprintln!("skipping: no kotlin-stdlib jar");
         return;
     };
-    let stdlib = sl.to_str().unwrap().to_string();
-    let work = std::env::temp_dir().join(format!("krusty_cervc_{}", std::process::id()));
-    let _ = fs::remove_dir_all(&work);
-    let libout = work.join("lib");
-    fs::create_dir_all(&libout).unwrap();
-    fs::write(
-        work.join("Lib.kt"),
+    let Some(libout) = common::compile_lib(
+        "cervc",
         "package lib\n\
          enum class Kind { PENDING, DONE }\n\
          @JvmInline value class Vid(val v: String)\n\
          class Holder(val id: Vid)\n\
          fun makeHolder(): Holder = Holder(Vid(\"x42\"))\n",
-    )
-    .unwrap();
-    let kc = vec![
-        "-d".into(),
-        libout.to_string_lossy().into_owned(),
-        "-cp".into(),
-        stdlib,
-        work.join("Lib.kt").to_string_lossy().into_owned(),
-    ];
-    match common::kotlinc_compile(&kc) {
-        Some((0, _)) => {}
-        Some((_, e)) => panic!("kotlinc(lib): {e}"),
-        None => return,
-    }
+    ) else {
+        return;
+    };
     let cp = vec![libout.clone(), sl.clone()];
     let main = "import lib.Kind\n\
         import lib.Vid\n\
