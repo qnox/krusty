@@ -1099,6 +1099,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `invokestatic` of an inline body (that is never correct, and a reified extension's bytecode is only a
   throwing stub). A reified inline extension whose body krusty cannot yet splice from bytecode therefore
   skips at lowering rather than miscompiling. Test: `tests/classpath_valueclass_param_ext_e2e.rs`.
+- **A TOP-LEVEL `suspend fun` applying an inline collection HOF to a suspend call's result** (`suspend fun
+  f() = source().filter { it > 0 }`) emits (the class-method form already worked). The CPS transform appends
+  a `Continuation` parameter and shifts every body value-index `>= threshold` up by one (`shift_locals`);
+  the threshold is 0 for a top-level function (no `this`). The old shift descended into the NESTED lambda
+  body, bumping the `filter`/`map` predicate's own `it` (value-index 0 → 1) — the lambda is extracted to a
+  method whose parameter stays at index 0, so its now-`GetValue(1)` read referenced an unallocated slot (a
+  class method escaped because its lambda `it`=0 was below the threshold 1). `shift_locals` now delegates to
+  `ir::shift_value_indices`, which shifts a lambda's CAPTURES (enclosing-frame reads) but NOT its body (a
+  separate value-index scope) — so a capturing predicate (`filter { it > k }`, `k` a body local) still works.
+  Test: `tests/build688_ff1_suspend_hof_e2e.rs`.
 - **A classpath `suspend` method with a defaulted parameter, called with that argument OMITTED**
   (`class S(r) { suspend fun list(f: Filt = Filt()): Int }`, called `s.list()`). A suspend method's
   `$default` synthetic carries the `Continuation` as a real trailing parameter of the original method —

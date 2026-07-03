@@ -2295,12 +2295,13 @@ fn visit_subtree(exprs: &[IrExpr], e: ExprId, f: &mut impl FnMut(&IrExpr)) {
 /// without aliasing a body local. `GetStatic` holds a static-field index (a different namespace) and is
 /// left untouched.
 fn shift_locals(ir: &mut IrFile, e: ExprId, threshold: u32) {
-    rewrite_subtree(ir, e, &mut |node| match node {
-        IrExpr::GetValue(i) if *i >= threshold => *i += 1,
-        IrExpr::SetValue { var, .. } if *var >= threshold => *var += 1,
-        IrExpr::Variable { index, .. } if *index >= threshold => *index += 1,
-        _ => {}
-    });
+    // Delegate to the shared index-shifter, which correctly treats a nested `Lambda` as a separate
+    // value-index scope: it shifts the lambda's CAPTURES (enclosing-frame reads) but NOT its body/params
+    // (numbered independently). The previous `rewrite_subtree` here descended into the lambda body too —
+    // for a TOP-LEVEL suspend fn (threshold 0) that shifted a `filter { it > 0 }` predicate's own `it`
+    // from 0 to 1, leaving `GetValue(1)` unallocated in the extracted lambda method (a class method escaped
+    // because its lambda `it`=0 was below the threshold 1).
+    crate::ir::shift_value_indices(ir, e, threshold, 1);
 }
 
 /// Resolve every `CurrentContinuation` placeholder in `e` to read the continuation value at `slot` (the
