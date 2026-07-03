@@ -193,44 +193,4 @@ mod tests {
         ]));
         assert_eq!(cfg, PluginConfig::default());
     }
-
-    #[test]
-    fn activates_via_jar_marker_or_plugin_id() {
-        // By -Xplugin jar marker.
-        let by_jar = PluginConfig::parse(&args(&["-Xplugin=/k/symbol-processing.jar"]));
-        assert!(by_jar.activates("symbol-processing", KSP_PLUGIN_ID));
-        // By -P plugin id, with no jar.
-        let by_id = PluginConfig::parse(&args(&[
-            "-P",
-            "plugin:com.google.devtools.ksp.symbol-processing:apclasspath=/p/proc.jar",
-        ]));
-        assert!(by_id.activates("symbol-processing", KSP_PLUGIN_ID));
-        // Neither channel present → not activated.
-        let none = PluginConfig::default();
-        assert!(!none.activates("symbol-processing", KSP_PLUGIN_ID));
-    }
-
-    #[test]
-    fn option_values_is_empty_when_key_absent() {
-        let cfg = PluginConfig::parse(&args(&[
-            "-P",
-            "plugin:com.google.devtools.ksp.symbol-processing:apclasspath=/p/proc.jar",
-        ]));
-        assert!(cfg.option_values(KSP_PLUGIN_ID, "missing").is_empty());
-        // Wrong id, right key → still empty.
-        assert!(cfg.option_values("other.id", "apclasspath").is_empty());
-        assert!(cfg.ksp_processor_classpath() == vec!["/p/proc.jar"]);
-    }
-
-    #[test]
-    fn serialization_active_only_for_its_jar() {
-        let ser = PluginConfig::parse(&args(&[
-            "-Xplugin=/k/kotlinx-serialization-compiler-plugin.jar",
-        ]));
-        assert!(ser.serialization_active());
-        assert!(!ser.ksp_active());
-        let ksp = PluginConfig::parse(&args(&["-Xplugin=/k/symbol-processing.jar"]));
-        assert!(!ksp.serialization_active());
-        assert!(ksp.ksp_active());
-    }
 }

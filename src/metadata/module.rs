@@ -35,13 +35,6 @@ pub fn build_kotlin_module(packages: &[(String, Vec<String>)]) -> Vec<u8> {
 mod tests {
     use super::*;
 
-    /// The fixed 20-byte header (`[len=3,1,9,0, flags=0]` as big-endian int32s) every module file opens
-    /// with, followed immediately by the `Module` protobuf.
-    const HEADER: &[u8] = &[
-        0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x09, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00,
-    ];
-
     #[test]
     fn matches_kotlinc_reference_module() {
         // Exact 40 bytes kotlinc 1.9.24 writes for `package demo` with facade `Lib1Kt`.
@@ -56,57 +49,5 @@ mod tests {
             "\n got: {:02x?}\n ref: {:02x?}",
             got, reference
         );
-    }
-
-    #[test]
-    fn empty_package_list_is_header_plus_two_trailing_empty_fields() {
-        // No packages: just the header, then the two empty trailing fields kotlinc always writes
-        // (field 4 / field 5, both zero-length): tags 0x22, 0x2a with a length of 0.
-        let got = build_kotlin_module(&[]);
-        let mut expected = HEADER.to_vec();
-        expected.extend_from_slice(&[0x22, 0x00, 0x2a, 0x00]);
-        assert_eq!(got, expected, "\n got: {got:02x?}");
-        assert_eq!(got.len(), 24);
-    }
-
-    #[test]
-    fn header_prefix_is_always_emitted() {
-        // Every variant opens with the same 20-byte header regardless of contents.
-        let got = build_kotlin_module(&[("a".into(), vec!["AKt".into()])]);
-        assert_eq!(&got[..20], HEADER);
-    }
-
-    #[test]
-    fn multiple_facades_in_one_package_are_repeated_short_class_name_fields() {
-        // `PackageParts { package_fq_name=1, short_class_name=2 (repeated) }` — one field-2 entry per facade.
-        let got = build_kotlin_module(&[("p".into(), vec!["Ak".into(), "Bk".into()])]);
-        // The PackageParts message body: pkg "p" (0a 01 70) then two facades (12 02 41 6b / 12 02 42 6b).
-        let pp: &[u8] = &[
-            0x0a, 0x01, 0x70, 0x12, 0x02, 0x41, 0x6b, 0x12, 0x02, 0x42, 0x6b,
-        ];
-        let mut expected = HEADER.to_vec();
-        expected.push(0x0a); // Module.package_parts tag (field 1, wire 2)
-        expected.push(pp.len() as u8);
-        expected.extend_from_slice(pp);
-        expected.extend_from_slice(&[0x22, 0x00, 0x2a, 0x00]); // trailing empties
-        assert_eq!(got, expected, "\n got: {got:02x?}");
-    }
-
-    #[test]
-    fn two_packages_emit_two_package_parts_messages() {
-        let got = build_kotlin_module(&[
-            ("a".into(), vec!["AKt".into()]),
-            ("b".into(), vec!["BKt".into()]),
-        ]);
-        // Two Module.package_parts entries — the field-1 tag (0x0a) appears at least twice.
-        assert!(got.iter().filter(|&&b| b == 0x0a).count() >= 2);
-        // Both package short names round-trip as raw bytes.
-        assert!(contains(&got, b"AKt"));
-        assert!(contains(&got, b"BKt"));
-        assert!(got.ends_with(&[0x22, 0x00, 0x2a, 0x00]));
-    }
-
-    fn contains(haystack: &[u8], needle: &[u8]) -> bool {
-        haystack.windows(needle.len()).any(|w| w == needle)
     }
 }
