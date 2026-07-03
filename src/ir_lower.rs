@@ -4490,20 +4490,62 @@ impl<'a> Lower<'a> {
         }
         let pkg = crate::resolve::qualified_path(self.afile, receiver)?;
         let arg_tys: Vec<Ty> = args.iter().map(|&a| self.info.ty(a)).collect();
+        // A trailing lambda was typed against its (receiver/suspend SAM) block parameter by the checker,
+        // so its stored type already carries the right arity for overload resolution here.
+        let has_trailing_lambda =
+            self.afile.call_has_trailing_lambda.contains(&e.0) && !arg_tys.is_empty();
         let c = self
             .resolver()
             .resolve_top_level_callable(name, &arg_tys, &[])?;
         if c.owner.rsplit_once('/').map(|(p, _)| p) != Some(pkg.as_str()) {
             return None;
         }
-        // Plain fixed-arity call only — a vararg/defaulted FQ call is a later slice (sound skip).
+        // A vararg FQ call is a later slice (sound skip).
         let last_is_array = c.params.last().is_some_and(|p| p.array_elem().is_some());
-        if c.default_call || last_is_array || c.params.len() != args.len() {
+        if last_is_array {
             return None;
         }
         let mut a = Vec::new();
-        for (i, &arg) in args.iter().enumerate() {
-            a.push(self.lower_arg(arg, &ty_to_ir(c.params[i]))?);
+        if c.default_call {
+            // A `name$default` FQ call: fill the provided prefix, place a TRAILING LAMBDA in the last slot
+            // (middle parameters default) or append trailing placeholders, then an `int` bit-mask (a bit
+            // per omitted parameter) and a `null` marker. Mirrors the bare-name top-level `$default` path.
+            if has_trailing_lambda && args.len() < c.params.len() {
+                let prefix_len = args.len() - 1;
+                let last = c.params.len() - 1;
+                for j in 0..c.params.len() {
+                    let pj = ty_to_ir(c.params[j]);
+                    if j < prefix_len {
+                        a.push(self.lower_arg(args[j], &pj)?);
+                    } else if j == last {
+                        a.push(self.lower_arg(args[prefix_len], &pj)?);
+                    } else {
+                        a.push(self.zero_placeholder(c.params[j]));
+                    }
+                }
+                let mask: i32 = (prefix_len..last).map(|j| 1i32 << j).sum();
+                a.push(self.ir.add_expr(IrExpr::Const(IrConst::Int(mask))));
+                a.push(self.ir.add_expr(IrExpr::Const(IrConst::Null)));
+            } else if args.len() <= c.params.len() {
+                for (i, &arg) in args.iter().enumerate() {
+                    a.push(self.lower_arg(arg, &ty_to_ir(c.params[i]))?);
+                }
+                for j in args.len()..c.params.len() {
+                    a.push(self.zero_placeholder(c.params[j]));
+                }
+                let mask: i32 = (args.len()..c.params.len()).map(|j| 1i32 << j).sum();
+                a.push(self.ir.add_expr(IrExpr::Const(IrConst::Int(mask))));
+                a.push(self.ir.add_expr(IrExpr::Const(IrConst::Null)));
+            } else {
+                return None;
+            }
+        } else {
+            if c.params.len() != args.len() {
+                return None;
+            }
+            for (i, &arg) in args.iter().enumerate() {
+                a.push(self.lower_arg(arg, &ty_to_ir(c.params[i]))?);
+            }
         }
         let call = self.ir.add_expr(IrExpr::Call {
             callee: Callee::Static {
@@ -9964,6 +10006,10 @@ impl<'a> Lower<'a> {
         // The `@Metadata`/synthetic key on the JVM name: a value-class-param-MANGLED member (`copy` →
         // `copy-<hash>`, with `copy-<hash>$default`) is looked up by its physical name.
         let phys = fi.callable.name.clone();
+        // The member's LOGICAL return (e.g. `Int`) — a `suspend` `$default` descriptor erases its return to
+        // `Object`, so record the logical type for the coroutine pass to unbox the suspension result by (a
+        // hoisted `if (s.list() == 5)` else compares the erased `Object` against an int → VerifyError).
+        let logical_ret = fi.callable.ret;
         let arg_names = self.afile.call_arg_names.get(&call.0).cloned();
         // Only this path when an argument is actually OMITTED (else the plain member call is emitted).
         if arg_names.is_none() && args.len() == cs.param_names.len() {
@@ -9977,7 +10023,7 @@ impl<'a> Lower<'a> {
             &cs.param_defaults,
         )
         .ok()?;
-        let (desc, real, ret, suspend) = crate::call_resolver::synthetic_default_member(
+        let (desc, real, _ret, suspend) = crate::call_resolver::synthetic_default_member(
             &*self.syms.libraries,
             &owner,
             &phys,
@@ -10013,7 +10059,7 @@ impl<'a> Lower<'a> {
         // mask/marker); record the call so the coroutine pass INSERTS the continuation value there (see
         // `append_continuation`, `$default` arm) rather than appending it after the marker.
         if suspend {
-            self.ir.suspend_calls.insert(call, ty_to_ir(ret));
+            self.ir.suspend_calls.insert(call, ty_to_ir(logical_ret));
         }
         Some(call)
     }

@@ -58,6 +58,13 @@ pub trait SymbolSource {
         None
     }
 
+    /// The direct subclasses (JVM internal names) of a classpath `sealed` class, from its `@Metadata`.
+    /// Empty for a non-sealed / unknown / non-classpath type. Lets the checker prove that an exhaustive
+    /// `when` over a classpath sealed subject (no explicit `else`) is used as an expression.
+    fn sealed_subclasses(&self, _internal: &str) -> Vec<String> {
+        Vec::new()
+    }
+
     /// The value-class underlying type for a semantic type, when this source knows it. The default
     /// handles ordinary reference-named value classes through `resolve_type`; platform providers can
     /// add builtins whose source type is not represented as `Ty::Obj`.
