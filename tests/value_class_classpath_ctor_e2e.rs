@@ -9,18 +9,12 @@
 
 mod common;
 
-use std::fs;
-
 fn env(k: &str) -> Option<String> {
     std::env::var(k).ok().filter(|v| !v.is_empty())
 }
 
 #[test]
 fn classpath_value_class_constructed_by_name() {
-    let Some(_kotlinc) = env("KRUSTY_KOTLINC") else {
-        eprintln!("skipping: set KRUSTY_KOTLINC");
-        return;
-    };
     let Some(java_home) = env("KRUSTY_REF_JAVA_HOME").or_else(|| env("JAVA_HOME")) else {
         eprintln!("skipping: set JAVA_HOME");
         return;
@@ -29,35 +23,20 @@ fn classpath_value_class_constructed_by_name() {
         eprintln!("skipping: no kotlin-stdlib jar");
         return;
     };
-    let stdlib = stdlib_path.to_str().unwrap().to_string();
     let jdk_modules = std::path::PathBuf::from(format!("{java_home}/lib/modules"));
-
-    let work = std::env::temp_dir().join(format!("krusty_vc_ctor_{}", std::process::id()));
-    let _ = fs::remove_dir_all(&work);
-    let libout = work.join("libout");
-    fs::create_dir_all(&libout).unwrap();
 
     // 1. A library with a reference-underlying @JvmInline value class, compiled by the real kotlinc so
     //    its @Metadata carries the value-class marker + underlying type (in the type table).
-    let lib_kt = work.join("Ids.kt");
-    fs::write(
-        &lib_kt,
-        "package ids\n@JvmInline\nvalue class RoleId(val v: String)\n\
+    let Some(libout) = common::compile_libs(
+        "vc_ctor",
+        &[(
+            "Ids.kt",
+            "package ids\n@JvmInline\nvalue class RoleId(val v: String)\n\
          @JvmInline\nvalue class Count(val n: Int)\n",
-    )
-    .unwrap();
-    let kc_args = vec![
-        "-d".to_string(),
-        libout.to_string_lossy().into_owned(),
-        "-cp".to_string(),
-        stdlib.clone(),
-        lib_kt.to_string_lossy().into_owned(),
-    ];
-    match common::kotlinc_compile(&kc_args) {
-        Some((0, _)) => {}
-        Some((_, e)) => panic!("kotlinc(lib): {e}"),
-        None => return,
-    }
+        )],
+    ) else {
+        return;
+    };
 
     // 2. A consumer constructing the classpath value class by name and reading its sole property.
     // Constructs both a REFERENCE-underlying (String) and a SCALAR-underlying (Int) classpath value
@@ -81,6 +60,4 @@ fn classpath_value_class_constructed_by_name() {
         return;
     };
     assert_eq!(out.trim(), "OK", "box() returned {out:?}");
-
-    let _ = fs::remove_dir_all(&work);
 }
