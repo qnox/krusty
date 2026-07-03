@@ -13972,6 +13972,23 @@ impl<'a> Lower<'a> {
                     if let Some(crate::resolve::ExprLowering::ClassLiteral { unbound }) =
                         self.info.expr_lowers.get(&e).cloned()
                     {
+                        // `T::class` on a REIFIED type parameter: inside an expanded `<reified T>` inline
+                        // body the receiver name resolves to the call-site type via `reified_subst`, so
+                        // emit that concrete class constant (`Prov::class`) rather than the erased marker.
+                        if let Some(recv) = receiver {
+                            if let Expr::Name(n) = self.afile.expr(recv).clone() {
+                                let sub = self
+                                    .reified_subst
+                                    .iter()
+                                    .rev()
+                                    .find_map(|frame| frame.get(&n).cloned());
+                                if let Some(sub) = sub {
+                                    let ty = self.ty_ref(&sub)?;
+                                    let internal = self.class_literal_ldc_internal(ty)?;
+                                    return Some(self.ir.add_expr(IrExpr::ClassConst { internal }));
+                                }
+                            }
+                        }
                         return match unbound {
                             Some(ty) => {
                                 let internal = self.class_literal_ldc_internal(ty)?;

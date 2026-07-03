@@ -3539,6 +3539,7 @@ fn make_checker<'a>(file: &'a File, syms: &'a SymbolTable, diags: &'a mut DiagSi
         imports,
         import_wildcards,
         tparams: Default::default(),
+        reified_tparams: std::collections::HashSet::new(),
         this_ty: None,
         this_labels: Vec::new(),
         field_ty: None,
@@ -3575,8 +3576,10 @@ pub fn check_file(file: &File, syms: &mut SymbolTable, diags: &mut DiagSink) -> 
                     let resolve = class_internal_resolver(pre.syms);
                     pre.tparams =
                         TParams::from_decl_with(&f.type_params, &f.type_param_bounds, &resolve);
+                    pre.reified_tparams = f.reified_type_params.iter().cloned().collect();
                     pre.check_fun(f);
                     pre.tparams.clear();
+                    pre.reified_tparams.clear();
                 }
             } else if let Decl::Class(cl) = file.decl(d) {
                 let Some(internal) = pre.syms.classes.get(&cl.name).map(|s| s.internal.clone())
@@ -3589,8 +3592,10 @@ pub fn check_file(file: &File, syms: &mut SymbolTable, diags: &mut DiagSink) -> 
                         let resolve = class_internal_resolver(pre.syms);
                         pre.tparams =
                             TParams::from_decl_with(&m.type_params, &m.type_param_bounds, &resolve);
+                        pre.reified_tparams = m.reified_type_params.iter().cloned().collect();
                         pre.check_method(m, &[]);
                         pre.tparams.clear();
+                        pre.reified_tparams.clear();
                     }
                 }
                 pre.this_ty = None;
@@ -3658,8 +3663,10 @@ pub fn check_file(file: &File, syms: &mut SymbolTable, diags: &mut DiagSink) -> 
             Decl::Fun(f) => {
                 let resolve = class_internal_resolver(c.syms);
                 c.tparams = TParams::from_decl_with(&f.type_params, &f.type_param_bounds, &resolve);
+                c.reified_tparams = f.reified_type_params.iter().cloned().collect();
                 c.check_fun(f);
                 c.tparams.clear();
+                c.reified_tparams.clear();
             }
             Decl::Class(cl) => {
                 // Duplicate primary-constructor parameter names are illegal (kotlinc reports a
@@ -4288,6 +4295,9 @@ struct Checker<'a> {
     import_wildcards: Vec<String>,
     /// Generic type parameters in scope (erased to `java/lang/Object`).
     tparams: TParams,
+    /// The `reified` type parameters in scope (a subset of `tparams`, from the enclosing `inline fun`).
+    /// A class literal `T::class` is only valid on a reified `T` (kotlinc rejects it otherwise).
+    reified_tparams: std::collections::HashSet<String>,
     /// The type of `this` when checking class members (`None` at top level).
     this_ty: Option<Ty>,
     /// Stack of labeled receivers in scope, innermost LAST. Each entry is `(label, ty, is_class)`:
@@ -5411,6 +5421,12 @@ impl<'a> Checker<'a> {
         let added = self
             .tparams
             .insert_decl_with(&f.type_params, &f.type_param_bounds, &resolve);
+        let reified_added: Vec<String> = f
+            .reified_type_params
+            .iter()
+            .filter(|t| self.reified_tparams.insert((*t).clone()))
+            .cloned()
+            .collect();
         let object_contract_ret = match (f.name.as_str(), f.params.len()) {
             ("compareTo", 1) => Some(Ty::Int),
             ("equals", 1) => Some(Ty::Boolean),
@@ -5513,6 +5529,9 @@ impl<'a> Checker<'a> {
         self.pop_local_funs();
         for t in added {
             self.tparams.remove(&t);
+        }
+        for t in reified_added {
+            self.reified_tparams.remove(&t);
         }
     }
 
@@ -7180,7 +7199,12 @@ impl<'a> Checker<'a> {
                     // receiver — a non-reference receiver (a primitive `Int::class`, an unresolved name) is
                     // skipped, not mis-read.
                     let unbound = if let Expr::Name(n) = self.file.expr(recv).clone() {
+                        // `T::class` on a REIFIED type parameter is an unbound literal: the lowerer
+                        // substitutes `T` to the call-site type (`reified_subst`) when it expands the inline
+                        // body. Recorded as `Obj(T)`, a marker the lowerer resolves by name. Only a REIFIED
+                        // `T` is accepted — kotlinc rejects a class literal on a non-reified type parameter.
                         self.class_literal_unbound_ty(&n)
+                            .or_else(|| self.reified_tparams.contains(&n).then(|| Ty::obj(&n)))
                     } else {
                         None
                     };

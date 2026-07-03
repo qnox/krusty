@@ -1564,3 +1564,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   0). A framed inline splice (e.g. `xs.find { … }`'s loop body) requires an empty operand baseline, so the
   second branch's splice bailed ("inline splice failed"). `emit_when` now resets the stack counter to the
   branch-entry height at each jump-reached branch. (`build722_hh1_inline_hof_both_branches_e2e`)
+
+- **A class literal on a REIFIED type parameter (`T::class`).** Inside an `inline fun <reified T>`, a
+  class literal `T::class` is now accepted (a non-reified `T::class` still errors, as kotlinc rejects it —
+  the checker tracks the enclosing function's `reified` parameters in `reified_tparams`). It records an
+  unbound class literal marked with the parameter name; the lowerer, expanding the inline body with
+  `reified_subst` bound to the call's type argument, substitutes `T` to that concrete type and emits its
+  class constant (`nameOf<Widget>()` → `Widget::class`). (`build722_reified_class_literal_e2e`)
+
+  PARTIAL — ee1 (reified extension delegating to a member with a `KClass<T>` parameter,
+  `getFor(id, T::class)`) still does NOT run: passing a class literal to a `kotlin.reflect.KClass<T>`
+  PARAMETER needs (a) overload resolution to accept `java/lang/Class` for a `KClass` parameter AND (b) the
+  lowerer to wrap it in `Reflection.getOrCreateKotlinClass` so the runtime value is a real `KClass` (krusty
+  models a class literal as `java/lang/Class`, correct for `==`/`getClass`/`.simpleName` but not as a
+  `KClass` argument) — plus (c) selecting the 1-parameter reified EXTENSION over the same-named 2-parameter
+  value-class-mangled classpath MEMBER by arity, and (d) binding the extension's reified return `T` at the
+  call site. Those remain a follow-up.
