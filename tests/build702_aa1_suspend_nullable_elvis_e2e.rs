@@ -2,7 +2,6 @@
 //! non-null, then a member accessed on the result — `val c = r.byId(id) ?: error("none"); c.at`. Earlier
 //! builds typed the elvis result as `Any` (losing the non-null branch type), so `c.at` failed with
 //! "member 'at' on Any". This exercises the faithful shape end-to-end to guard against regression.
-use std::path::PathBuf;
 mod common;
 
 const LIB: &str = "package lib\n\
@@ -12,11 +11,7 @@ const LIB: &str = "package lib\n\
 fn run(tag: &str, main: &str) -> Option<String> {
     let jdk = common::jdk_modules()?;
     let sl = common::stdlib_jar()?;
-    let coro =
-        PathBuf::from("target/cache/kotlinc/2.4.0/kotlinc/lib/kotlinx-coroutines-core-jvm.jar");
-    if !coro.exists() {
-        return None;
-    }
+    let coro = common::coroutines_jar()?;
     let lo = common::compile_lib(tag, LIB)?;
     common::compile_and_run_box(main, "Main", &[lo, sl, coro, jdk.clone()], Some(&jdk))
 }
