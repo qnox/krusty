@@ -3064,10 +3064,6 @@ impl TParams {
     /// → `java/lang/CharSequence`, not `Object`). `resolve` maps a bound's simple class name to its JVM
     /// internal name (primitive/`String` bounds need no resolver). Without a resolver (`from_decl`) only
     /// primitive bounds are recovered — a reference bound stays `Any`.
-    pub fn from_decl(names: &[String], bounds: &[(String, TypeRef)]) -> Self {
-        TParams::from_decl_with(names, bounds, &|_| None)
-    }
-
     pub fn from_decl_with(
         names: &[String],
         bounds: &[(String, TypeRef)],
@@ -3083,11 +3079,6 @@ impl TParams {
         TParams { erasure }
     }
 
-    /// Extend with another scope's parameters (a method inside a generic class sees both).
-    pub fn extended(&self, names: &[String], bounds: &[(String, TypeRef)]) -> Self {
-        self.extended_with(names, bounds, &|_| None)
-    }
-
     pub fn extended_with(
         &self,
         names: &[String],
@@ -3098,12 +3089,6 @@ impl TParams {
         out.erasure
             .extend(TParams::from_decl_with(names, bounds, resolve).erasure);
         out
-    }
-
-    /// Insert a scope's parameters (with their erasures), returning the names that were NEWLY added
-    /// (so the caller can `remove` exactly those on scope exit). Mirrors the old `HashSet::insert`-filter.
-    pub fn insert_decl(&mut self, names: &[String], bounds: &[(String, TypeRef)]) -> Vec<String> {
-        self.insert_decl_with(names, bounds, &|_| None)
     }
 
     pub fn insert_decl_with(
@@ -3524,14 +3509,6 @@ impl TypeInfo {
             StmtLowering::LocalFunction(info) => Some(info.as_ref()),
             _ => None,
         }
-    }
-    /// If call `e` was resolved to a local function, return its mangled name and signature.
-    pub fn local_fun_for_call(&self, e: ExprId) -> Option<(&str, &Signature)> {
-        let ExprLowering::LocalFunction { stmt_id } = self.expr_lowers.get(&e)? else {
-            return None;
-        };
-        let info = self.local_fun(*stmt_id)?;
-        Some((info.mangled.as_str(), &info.sig))
     }
 }
 
