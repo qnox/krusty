@@ -497,11 +497,21 @@ fn append_continuation(ir: &mut IrFile, call_e: ExprId, cont: ExprId) -> ExprId 
     match &mut ir.exprs[call_e as usize] {
         IrExpr::Call {
             args,
-            callee: Callee::Static { descriptor, .. },
+            callee: Callee::Static {
+                descriptor, name, ..
+            },
             ..
         } => {
-            *descriptor = cps_descriptor(descriptor);
-            args.push(cont);
+            // A `suspend` method's `$default` synthetic already spells the `Continuation` in its descriptor
+            // — BEFORE the trailing `int mask` and `Object marker`. Insert the continuation VALUE at that
+            // position (two before the end) and leave the descriptor unchanged, rather than appending it
+            // after the marker (which would pass the mask where the `Continuation` is expected).
+            if name.ends_with("$default") && args.len() >= 2 {
+                args.insert(args.len() - 2, cont);
+            } else {
+                *descriptor = cps_descriptor(descriptor);
+                args.push(cont);
+            }
         }
         // A sibling-file suspend callee: its CPS signature appends a `Continuation` parameter and erases
         // the return to `Object` (the JVM backend builds the descriptor from these `Ty`s).

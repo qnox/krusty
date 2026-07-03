@@ -9977,7 +9977,7 @@ impl<'a> Lower<'a> {
             &cs.param_defaults,
         )
         .ok()?;
-        let (desc, real, _ret) = crate::call_resolver::synthetic_default_member(
+        let (desc, real, ret, suspend) = crate::call_resolver::synthetic_default_member(
             &*self.syms.libraries,
             &owner,
             &phys,
@@ -9999,7 +9999,7 @@ impl<'a> Lower<'a> {
             .sum();
         a.push(self.ir.add_expr(IrExpr::Const(IrConst::Int(mask))));
         a.push(self.ir.add_expr(IrExpr::Const(IrConst::Null))); // omitted-default marker
-        Some(self.ir.add_expr(IrExpr::Call {
+        let call = self.ir.add_expr(IrExpr::Call {
             callee: Callee::Static {
                 owner,
                 name: format!("{phys}$default"),
@@ -10008,7 +10008,14 @@ impl<'a> Lower<'a> {
             },
             dispatch_receiver: None,
             args: a,
-        }))
+        });
+        // A `suspend` method's `$default` already spells the `Continuation` in its descriptor (BEFORE the
+        // mask/marker); record the call so the coroutine pass INSERTS the continuation value there (see
+        // `append_continuation`, `$default` arm) rather than appending it after the marker.
+        if suspend {
+            self.ir.suspend_calls.insert(call, ty_to_ir(ret));
+        }
+        Some(call)
     }
 
     /// Lower a CALL `recv.name(args)` that resolves to a top-level EXTENSION function on `rt` — the

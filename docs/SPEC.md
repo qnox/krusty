@@ -1099,6 +1099,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `invokestatic` of an inline body (that is never correct, and a reified extension's bytecode is only a
   throwing stub). A reified inline extension whose body krusty cannot yet splice from bytecode therefore
   skips at lowering rather than miscompiling. Test: `tests/classpath_valueclass_param_ext_e2e.rs`.
+- **A classpath `suspend` method with a defaulted parameter, called with that argument OMITTED**
+  (`class S(r) { suspend fun list(f: Filt = Filt()): Int }`, called `s.list()`). A suspend method's
+  `$default` synthetic carries the `Continuation` as a real trailing parameter of the original method —
+  `list$default(S, Filt, Continuation, int mask, Object marker)`, the `Continuation` BEFORE the mask/marker.
+  The default-member lowering matched only the non-suspend shape (`… int, Object`) and the coroutine pass
+  APPENDED the continuation after the marker, so the `int` mask landed in the `Continuation` slot
+  (VerifyError). `synthetic_default_member` now also recognises the suspend shape (Continuation before
+  mask/marker) and `append_continuation` INSERTS the continuation value at that position for a `$default`
+  call rather than appending it. Test: `tests/suspend_default_param_e2e.rs`.
 - **A `suspend` body accessing a member of a suspend call's result inline (`suspend fun f(r) =
   r.all().size`).** The CPS flattener only meets a suspension at a bound-local / bare-statement position;
   a suspension nested in a `return`/member-access value must be pre-hoisted. `hoist_suspensions` now

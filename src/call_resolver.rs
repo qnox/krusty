@@ -1382,19 +1382,44 @@ pub fn synthetic_default_member(
     owner: &str,
     name: &str,
     arity: usize,
-) -> Option<(String, Vec<Ty>, Ty)> {
+) -> Option<(String, Vec<Ty>, Ty, bool)> {
     let t = lib.resolve_type(owner)?;
     let dname = format!("{name}$default");
+    let is_continuation =
+        |ty: &Ty| matches!(ty, Ty::Obj(n, _) if *n == "kotlin/coroutines/Continuation");
     // Shape `(Owner receiver, <real params…>, int mask, Object marker)`: exactly `arity` real params, an
     // `int` mask, and a reference marker. Match by `arity` (not just name) so an overloaded `name$default`
     // of a different parameter count can't be picked.
-    let m = t.companion.iter().find(|m| {
+    if let Some(m) = t.companion.iter().find(|m| {
         m.name == dname
             && m.params.len() == arity + 3
             && m.params[arity + 1] == Ty::Int
             && m.params[arity + 2].is_reference()
+    }) {
+        return Some((
+            m.descriptor.clone(),
+            m.params[1..arity + 1].to_vec(),
+            m.ret,
+            false,
+        ));
+    }
+    // A `suspend` method's `$default` carries the `Continuation` as a real trailing parameter of the
+    // original method, so its shape is `(Owner, <real params…>, Continuation, int mask, Object marker)` —
+    // one longer, with the `Continuation` BEFORE the mask/marker. The descriptor already spells the
+    // continuation in place; the coroutine pass threads the value there (see `append_continuation`).
+    let m = t.companion.iter().find(|m| {
+        m.name == dname
+            && m.params.len() == arity + 4
+            && is_continuation(&m.params[arity + 1])
+            && m.params[arity + 2] == Ty::Int
+            && m.params[arity + 3].is_reference()
     })?;
-    Some((m.descriptor.clone(), m.params[1..arity + 1].to_vec(), m.ret))
+    Some((
+        m.descriptor.clone(),
+        m.params[1..arity + 1].to_vec(),
+        m.ret,
+        true,
+    ))
 }
 
 /// Resolve a classpath construction that a plain [`resolve_constructor`] can't match because it needs a
