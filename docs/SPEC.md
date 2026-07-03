@@ -1087,6 +1087,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`imported_type_internal` / `resolve_qualified_nested` — the same resolvers `resolve_ty` uses), so both a
   positive `is` and a negated `!is`/else narrowing work. (`as` casts already resolved classpath types.) Test:
   `tests/classpath_is_smartcast_e2e.rs`.
+- **A classpath EXTENSION whose value parameter is a VALUE CLASS resolves** (`inline fun <reified T>
+  Reg.getFor(id: Id): T`, `Id` `@JvmInline`). The value-class parameter `@JvmName`-mangles the extension's
+  bytecode name (`getFor-<hash>`) and erases the parameter to its underlying, so the literal-name extension
+  index missed it and the argument (`Id`) failed to match the erased-underlying (`String`) parameter →
+  "unresolved method". A new extension-query handler maps the source name → the mangled `jvm_name` via
+  `@Metadata` (extension receiver == the receiver, at least one value-class value parameter) and exposes it
+  with LOGICAL value-class parameter types; `bound_logical_params` prefers a value-class logical parameter
+  over the erased-underlying `Signature` so the value-class argument matches. An inline extension is marked
+  `must_inline` — an inline function MUST be spliced (or the call SKIPS); krusty never falls back to an
+  `invokestatic` of an inline body (that is never correct, and a reified extension's bytecode is only a
+  throwing stub). A reified inline extension whose body krusty cannot yet splice from bytecode therefore
+  skips at lowering rather than miscompiling. Test: `tests/classpath_valueclass_param_ext_e2e.rs`.
 - **A `suspend` body accessing a member of a suspend call's result inline (`suspend fun f(r) =
   r.all().size`).** The CPS flattener only meets a suspension at a bound-local / bare-statement position;
   a suspension nested in a `return`/member-access value must be pre-hoisted. `hoist_suspensions` now

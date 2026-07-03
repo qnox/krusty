@@ -1944,6 +1944,98 @@ impl SymbolSource for JvmLibraries {
                     }
                 }
             }
+            // A metadata-mangled extension whose mangling comes from a value-class PARAMETER (not the
+            // receiver): `inline fun <reified T> Reg.getFor(id: Id): T` compiles to the `@JvmName`-mangled
+            // `getFor-<hash>(Reg, String)` (the value-class `Id` param mangles the name and erases to its
+            // underlying). The receiver `Reg` is a PLAIN class, so the value-class-RECEIVER handler above
+            // doesn't apply, and the literal-name `find_extensions(name)` misses the mangled bytecode name.
+            // Map `name` → the mangled `jvm_name` via `@Metadata` (extension receiver == this receiver) and
+            // expose it with LOGICAL (value-class) parameter types so a value-class argument matches; the
+            // value-classes pass unboxes it at the erased call. Bounded to a genuine value-class-param mangle.
+            if let Some(recv_internal) = source_internal_of_ty(receiver) {
+                for (rank, recv_desc) in supertype_descriptors(&self.cp, receiver)
+                    .into_iter()
+                    .enumerate()
+                {
+                    for owner in self.cp.find_extension_owners(&recv_desc) {
+                        for mf in self.cp.meta_functions(&owner).iter() {
+                            if mf.kotlin_name != name
+                                || mf.jvm_name == name
+                                || !mf.is_public
+                                || mf.receiver_class.as_deref() != Some(recv_internal)
+                            {
+                                continue;
+                            }
+                            // Only when a value-class PARAMETER caused the mangling — else leave other
+                            // `@JvmName` manglings to their own handlers.
+                            let logical_params: Vec<Ty> = mf
+                                .value_param_types
+                                .iter()
+                                .map(|vt| {
+                                    vt.as_deref()
+                                        .map(super::classpath::kotlin_name_to_ty)
+                                        .unwrap_or(Ty::obj("kotlin/Any"))
+                                })
+                                .collect();
+                            if !logical_params
+                                .iter()
+                                .any(|p| self.value_underlying(*p).is_some())
+                            {
+                                continue;
+                            }
+                            for c in self.cp.find_extensions(&recv_desc, &mf.jvm_name) {
+                                let (phys_params, pret) = parse_method_desc(&c.descriptor);
+                                if phys_params.len() != logical_params.len() + 1 {
+                                    continue;
+                                }
+                                let mut params = vec![phys_params[0]];
+                                params.extend(logical_params.iter().copied());
+                                let ret_class = metadata_return_ty(mf.ret_class.as_deref());
+                                let ret = ret_class.unwrap_or(pret);
+                                crate::trace_compiler!(
+                                    "resolve",
+                                    "value-class-param ext {name} -> {}.{} on {recv_desc} params={params:?} inline={}",
+                                    c.owner,
+                                    c.name,
+                                    mf.is_inline
+                                );
+                                overloads.push(FunctionInfo {
+                                    kind: FnKind::Extension,
+                                    receiver: Some(receiver),
+                                    ret_nullable: mf.ret_nullable,
+                                    ret_class,
+                                    public: true,
+                                    receiver_rank: rank as u32,
+                                    overload_rank: descriptor_narrowing(&c.descriptor) as u32,
+                                    generic_sig: c.signature.as_deref().and_then(parse_method_gsig),
+                                    call_sig: crate::libraries::CallSig::default(),
+                                    flags: FnFlags {
+                                        // An inline extension MUST be inlined — `must_inline` makes the
+                                        // lowerer splice it or SKIP (never `invokestatic`; falling back to a
+                                        // call to an inline function's body is never correct, and a reified
+                                        // one has only a throwing stub).
+                                        inline: InlineKind::from_flags(mf.is_inline, mf.is_inline),
+                                        suspend: mf.is_suspend,
+                                    },
+                                    callable: LibraryCallable {
+                                        name: c.name.clone(),
+                                        owner: c.owner.clone(),
+                                        params,
+                                        ret,
+                                        physical_ret: pret,
+                                        descriptor: c.descriptor.clone(),
+                                        inline: InlineKind::from_flags(mf.is_inline, mf.is_inline),
+                                        default_call: false,
+                                        vararg_elem: None,
+                                        signature: c.signature.clone(),
+                                        origin: crate::libraries::Origin::Library,
+                                    },
+                                });
+                            }
+                        }
+                    }
+                }
+            }
             // Member functions of the receiver's type (own + inherited) — "functions inside types". A member
             // wins over an extension; the caller uses `FnKind::Member` for that precedence. The inherited-
             // member walk is BREADTH-FIRST (a subtype's override before a supertype's), and each member

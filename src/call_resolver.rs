@@ -454,7 +454,19 @@ impl<'a> CallResolver<'a> {
                 if let Some(recv_sig) = gsig.params.first() {
                     unify_gsig(recv_sig, receiver, &mut binds);
                 }
-                gsig.params.iter().map(|p| gsig_to_ty(p, &binds)).collect()
+                let mut out: Vec<Ty> = gsig.params.iter().map(|p| gsig_to_ty(p, &binds)).collect();
+                // A VALUE-CLASS parameter is spelled as its ERASED underlying in the JVM `Signature`
+                // (`Id` → `kotlin/String`), but the callable's LOGICAL parameter carries the value-class
+                // type — prefer it so a value-class ARGUMENT (`getFor(id: Id)`) matches rather than being
+                // compared against the erased underlying.
+                for (i, p) in out.iter_mut().enumerate() {
+                    if let Some(cp) = o.callable.params.get(i) {
+                        if self.lib.value_underlying(*cp).is_some() {
+                            *p = *cp;
+                        }
+                    }
+                }
+                out
             })
             .unwrap_or_else(|| o.callable.params.clone())
     }
