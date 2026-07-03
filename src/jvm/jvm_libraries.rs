@@ -321,6 +321,58 @@ impl JvmLibraries {
         None
     }
 
+    /// The type-parameter bindings a receiver induces at `target_internal` (`Repo<Cfg>` at `lib/Repo` →
+    /// `{T: Cfg}`), by walking the generic hierarchy from the receiver and propagating each class's type
+    /// arguments through every `extends`/`implements` edge — the same walk `member_return` performs, but
+    /// exposed so a `suspend` member's return (recovered from `Continuation<T>`, which `member_return`
+    /// cannot use because the JVM return is erased to `Object`) can be substituted under the same bindings.
+    /// Empty when the receiver carries no type arguments or `target_internal` is not reached.
+    fn receiver_type_bindings(
+        &self,
+        receiver: Ty,
+        target_internal: &str,
+    ) -> std::collections::HashMap<String, Ty> {
+        let Ty::Obj(start, start_args) = receiver else {
+            return std::collections::HashMap::new();
+        };
+        if start_args.is_empty() {
+            return std::collections::HashMap::new();
+        }
+        let target = to_jvm_internal(target_internal);
+        let mut seen = std::collections::HashSet::new();
+        let mut q = std::collections::VecDeque::new();
+        q.push_back((to_jvm_internal(start).to_string(), start_args.to_vec()));
+        while let Some((internal, targs)) = q.pop_front() {
+            if !seen.insert(internal.clone()) {
+                continue;
+            }
+            let Some(ci) = self.cp.find(&internal) else {
+                continue;
+            };
+            let (formals, supers) = ci.signature.as_deref().and_then(parse_class_gsig).unzip();
+            let formals = formals.unwrap_or_default();
+            let binds: std::collections::HashMap<String, Ty> =
+                formals.iter().cloned().zip(targs.iter().copied()).collect();
+            if internal == target {
+                return binds;
+            }
+            if let Some(supers) = supers {
+                for sup in supers {
+                    if let GSig::Class(sup_internal, sup_args) = sup {
+                        let sup_targs: Vec<Ty> =
+                            sup_args.iter().map(|a| gsig_to_ty(a, &binds)).collect();
+                        q.push_back((to_jvm_internal(&sup_internal).to_string(), sup_targs));
+                    }
+                }
+            } else {
+                for i in ci.interfaces.iter().chain(ci.super_class.iter()) {
+                    q.push_back((i.clone(), vec![]));
+                }
+            }
+        }
+        std::collections::HashMap::new()
+    }
+
     fn sam_method_for_class(&self, internal: &str) -> Option<LibraryMember> {
         let ci = self.cp.find(internal)?;
         if !ci.is_interface() {
@@ -630,7 +682,10 @@ fn concrete_generic_ret(gsig: &GenericSig) -> Option<Ty> {
 /// The LOGICAL return of a `suspend` method, recovered from its generic signature: the last parameter is
 /// `Continuation<-T>`, whose type argument `T` is the source return type (`Continuation<-Config>` →
 /// `Config`). A `Continuation<-Unit>` maps to `Ty::Unit` (the source `Unit` return).
-fn suspend_return_from_gsig(gsig: &GenericSig) -> Option<Ty> {
+fn suspend_return_from_gsig(
+    gsig: &GenericSig,
+    binds: &std::collections::HashMap<String, Ty>,
+) -> Option<Ty> {
     match gsig.params.last()? {
         GSig::Class(n, args) if n == "kotlin/coroutines/Continuation" => match args.first()? {
             // A bare class → its CANONICAL `Ty` (`kotlin/String` → `Ty::String`, `kotlin/Int` → `Ty::Int`,
@@ -652,9 +707,12 @@ fn suspend_return_from_gsig(gsig: &GenericSig) -> Option<Ty> {
             // collection name the signature spelled in Java terms (`java/util/List`) is canonicalized to
             // its Kotlin type (`kotlin/collections/List`) so a `.map { … }` / `.first()` extension — keyed
             // on the Kotlin collection — resolves on the recovered suspend result (a member such as `.size`
-            // already resolved on either form).
+            // already resolved on either form). A BARE type parameter (`Continuation<T>` from a generic
+            // `suspend fun byId(): T` on a `Repo<Cfg>` receiver) is substituted under `binds` to the
+            // receiver's concrete argument (`T` → `Cfg`) — otherwise it erases to `Any` and every member
+            // access on the result fails ("member … on Any").
             other => Some(canonicalize_jvm_collections(
-                crate::call_resolver::gsig_to_ty(other, &std::collections::HashMap::new()),
+                crate::call_resolver::gsig_to_ty(other, binds),
             )),
         },
         _ => None,
@@ -1942,9 +2000,13 @@ impl SymbolSource for JvmLibraries {
                                     params.len(),
                                 );
                             let ret = if suspend {
+                                // A generic `suspend` member returns a type parameter (`byId(): T`) via
+                                // `Continuation<T>`; bind `T` to the receiver's concrete argument
+                                // (`Repo<Cfg>` → `T = Cfg`) so the return isn't erased to `Any`.
+                                let recv_binds = self.receiver_type_bindings(receiver, &cn);
                                 let base = generic_sig
                                     .as_ref()
-                                    .and_then(suspend_return_from_gsig)
+                                    .and_then(|g| suspend_return_from_gsig(g, &recv_binds))
                                     .unwrap_or(m.ret);
                                 // `suspend_return_from_gsig` canonicalized a collection return to its
                                 // READ-ONLY Kotlin form (the JVM signature erases read-only vs mutable).

@@ -17954,6 +17954,22 @@ impl<'a> Lower<'a> {
                                 })
                             })
                     } {
+                        // Fewer arguments than the resolved member has parameters means a DEFAULTED
+                        // argument was omitted, but the `$default` path above (`lower_library_default_member_
+                        // call`) could not fill it — e.g. a method inherited through DELEGATION (`class C(x:
+                        // A) : A by x`, whose default lives on interface `A`, with no `C.f$default`
+                        // synthetic). The plain call below only lowers the PROVIDED arguments, so the emitted
+                        // invocation would be arity-short and load an uninitialized slot for the missing one
+                        // (VerifyError). Bail — skip, don't miscompile. A trailing vararg (array) parameter
+                        // legitimately accepts fewer arguments, so it is excluded.
+                        // `mparams` is the LOGICAL parameter list (a `suspend` member's trailing
+                        // `Continuation` is threaded separately by the coroutine pass, not counted here), so
+                        // this applies uniformly to suspend and non-suspend members.
+                        if args.len() < mparams.len()
+                            && mparams.last().is_none_or(|p| p.array_elem().is_none())
+                        {
+                            return None;
+                        }
                         let recv = self.expr(receiver)?;
                         // The receiver's PRIMITIVE element type (`ArrayList<Byte>` → `Byte`,
                         // `ArrayList<Long>` → `Long`). `coll.add(0)` must box the value as THAT wrapper
