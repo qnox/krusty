@@ -8,7 +8,7 @@
 
 use crate::libraries::{
     CallSig, FnFlags, FnKind, FunctionInfo, FunctionSet, InlineKind, LibraryCallable,
-    LibraryMember, LibrarySeed, LibraryType, Origin, ReturnInfo,
+    LibraryMember, LibrarySeed, LibraryType, Origin,
 };
 use crate::resolve::{ClassSig, Signature, SymbolTable};
 use crate::symbol_source::SymbolSource;
@@ -107,14 +107,21 @@ fn fn_info(
         params.push(r);
     }
     params.extend(sig.params.iter().copied());
+    let callable = LibraryCallable {
+        owner,
+        name: name.to_string(),
+        descriptor: String::new(),
+        params,
+        ret: sig.ret,
+        physical_ret: sig.ret,
+        inline: InlineKind::from_flags(sig.is_inline, false),
+        default_call: false,
+        vararg_elem: None,
+        signature: None,
+        origin,
+    };
     FunctionInfo {
-        kind,
-        receiver,
-        ret: ReturnInfo::new(false, None),
-        public: true,
         receiver_rank: rank,
-        overload_rank: 0,
-        generic_sig: None,
         // The call shape mirrors the source Signature, parallel to the LOGICAL params (no receiver).
         call_sig: CallSig {
             param_names: sig.param_names.clone(),
@@ -148,19 +155,7 @@ fn fn_info(
             // reports suspend-ness uniformly with classpath callees (whose flag comes from @Metadata).
             suspend: sig.is_suspend,
         },
-        callable: LibraryCallable {
-            owner,
-            name: name.to_string(),
-            descriptor: String::new(),
-            params,
-            ret: sig.ret,
-            physical_ret: sig.ret,
-            inline: InlineKind::from_flags(sig.is_inline, false),
-            default_call: false,
-            vararg_elem: None,
-            signature: None,
-            origin,
-        },
+        ..FunctionInfo::plain(kind, receiver, callable)
     }
 }
 
