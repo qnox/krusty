@@ -1907,6 +1907,10 @@ impl SymbolSource for JvmLibraries {
                                     let ret_nullable = mf.ret_nullable;
                                     let ret_class = metadata_return_ty(mf.ret_class.as_deref());
                                     let ret = ret_class.unwrap_or(pret);
+                                    let inline_kind = InlineKind::from_flags(
+                                        mf.is_inline,
+                                        mf.is_inline && !c.public,
+                                    );
                                     overloads.push(FunctionInfo {
                                         kind: FnKind::Extension,
                                         receiver: Some(receiver),
@@ -1922,10 +1926,7 @@ impl SymbolSource for JvmLibraries {
                                             .and_then(parse_method_gsig),
                                         call_sig: crate::libraries::CallSig::default(),
                                         flags: FnFlags {
-                                            inline: InlineKind::from_flags(
-                                                mf.is_inline,
-                                                mf.is_inline && !c.public,
-                                            ),
+                                            inline: inline_kind,
                                             suspend: mf.is_suspend,
                                         },
                                         callable: LibraryCallable {
@@ -1935,10 +1936,7 @@ impl SymbolSource for JvmLibraries {
                                             ret,
                                             physical_ret: pret,
                                             descriptor: c.descriptor.clone(),
-                                            inline: InlineKind::from_flags(
-                                                mf.is_inline,
-                                                mf.is_inline && !c.public,
-                                            ),
+                                            inline: inline_kind,
                                             default_call: false,
                                             vararg_elem: None,
                                             signature: c.signature.clone(),
