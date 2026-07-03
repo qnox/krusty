@@ -3727,6 +3727,22 @@ pub fn check_file(file: &File, syms: &mut SymbolTable, diags: &mut DiagSink) -> 
                         }
                     }
                 }
+                // `abstract` modifier consistency (illegal in any class kind): an abstract member has no
+                // body, and cannot also be `final` (kotlinc rejects each).
+                for m in &cl.methods {
+                    if m.is_abstract && !matches!(m.body, FunBody::None) {
+                        c.diags.error(
+                            m.span,
+                            format!("abstract member '{}' cannot have a body", m.name),
+                        );
+                    }
+                    if m.is_abstract && m.is_final {
+                        c.diags.error(
+                            m.span,
+                            format!("member '{}' cannot be both 'abstract' and 'final'", m.name),
+                        );
+                    }
+                }
                 // In a class WITH a primary constructor every secondary must delegate to it (`this(…)`);
                 // `super(…)`/implicit delegation isn't emitted there, so reject it. A class with NO
                 // primary constructor admits `this(…)`/`super(…)`/implicit delegation (each becomes its
