@@ -8,8 +8,8 @@ cd "$(dirname "$0")"
 
 if command -v just >/dev/null 2>&1; then
   v="$(just max-version)"
-  export KRUSTY_KOTLINC="${KRUSTY_KOTLINC:-$(just kotlinc "$v")}"
-  export KRUSTY_KOTLIN_BOX_DIR="${KRUSTY_KOTLIN_BOX_DIR:-$(just box-corpus "$v")}"
+  just kotlinc "$v" >/dev/null
+  just box-corpus "$v" >/dev/null
 fi
 
 # Default to the fast-iteration `gate` profile (unoptimized → seconds-long rebuilds, but with

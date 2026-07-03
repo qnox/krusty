@@ -5,7 +5,8 @@
 //! conformance gate does — a survey run can't drift from the gate by reimplementing jar location.
 //!
 //! Jars are taken, in order of fidelity: the reference `kotlinc` dist `lib/` (the exact jars the
-//! gate runs, located via `KRUSTY_KOTLINC`), then the local Gradle/Maven caches, then a download
+//! gate runs, located via `KRUSTY_KOTLINC` or the provisioned `target/cache` dist), then the local
+//! Gradle/Maven caches, then a download
 //! from Maven Central (cached under `~/.cache/krusty-deps`). Each is optional — a missing jar just
 //! (correctly) leaves the cases needing it blocked, never falsely blocks the rest.
 
@@ -103,14 +104,29 @@ fn collect_named_jars(
     }
 }
 
-/// The `lib/` dir of the kotlinc dist we differential-test against (`KRUSTY_KOTLINC` points at its
-/// `bin/kotlinc`). Its jars are the **exact** ones the reference compiler ships — the truest match,
-/// so we prefer them over Maven/gradle copies. `None` when `KRUSTY_KOTLINC` is unset.
+fn max_reference_version() -> &'static str {
+    include_str!("../kotlin-versions")
+        .lines()
+        .filter_map(|line| line.split('#').next()?.split_whitespace().next())
+        .next_back()
+        .unwrap_or("2.0.21")
+}
+
+/// The `lib/` dir of the kotlinc dist we differential-test against. Its jars are the **exact** ones
+/// the reference compiler ships — the truest match, so we prefer them over Maven/gradle copies.
+/// `KRUSTY_KOTLINC` is only an override; the normal harness uses the provisioned `target/cache` dist.
 pub fn kotlinc_lib_dir() -> Option<PathBuf> {
     let kc = std::env::var("KRUSTY_KOTLINC")
         .ok()
-        .filter(|s| !s.is_empty())?;
-    let lib = PathBuf::from(kc).parent()?.parent()?.join("lib");
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!(
+                "target/cache/kotlinc/{}/kotlinc/bin/kotlinc",
+                max_reference_version()
+            ))
+        });
+    let lib = kc.is_file().then_some(kc)?.parent()?.parent()?.join("lib");
     lib.is_dir().then_some(lib)
 }
 
@@ -141,7 +157,22 @@ pub fn kotlin_version() -> String {
                 .and_then(|s| s.strip_suffix(".jar"))
                 .map(String::from)
         })
-        .unwrap_or_else(|| "2.0.21".to_string())
+        .unwrap_or_else(|| max_reference_version().to_string())
+}
+
+/// The provisioned Kotlin codegen/box corpus root, with `KRUSTY_KOTLIN_BOX_DIR` as an override.
+pub fn box_corpus_dir() -> Option<PathBuf> {
+    let p = std::env::var("KRUSTY_KOTLIN_BOX_DIR")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!(
+                "target/cache/box-corpus/{}/compiler/testData/codegen/box",
+                max_reference_version()
+            ))
+        });
+    p.is_dir().then_some(p)
 }
 
 /// Locate a dependency jar, downloading it from **Maven Central** into a local cache if not already

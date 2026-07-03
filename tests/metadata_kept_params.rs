@@ -11,23 +11,13 @@
 
 use krusty::jvm::classpath::Classpath;
 use krusty::types::Ty;
-use std::path::PathBuf;
 
-fn stdlib() -> Option<PathBuf> {
-    let kc = std::env::var("KRUSTY_KOTLINC")
-        .ok()
-        .filter(|s| !s.is_empty())?;
-    let jar = PathBuf::from(&kc)
-        .parent()?
-        .parent()?
-        .join("lib/kotlin-stdlib.jar");
-    jar.exists().then_some(jar)
-}
+mod common;
 
 #[test]
 fn vararg_factory_keeps_its_array_param() {
-    let Some(jar) = stdlib() else {
-        eprintln!("skip: set KRUSTY_KOTLINC");
+    let Some(jar) = common::stdlib_jar() else {
+        eprintln!("skip: no kotlin-stdlib jar");
         return;
     };
     let cp = Classpath::new(vec![jar]);
@@ -51,8 +41,8 @@ fn vararg_factory_keeps_its_array_param() {
 
 #[test]
 fn empty_factory_keeps_zero_params() {
-    let Some(jar) = stdlib() else {
-        eprintln!("skip: set KRUSTY_KOTLINC");
+    let Some(jar) = common::stdlib_jar() else {
+        eprintln!("skip: no kotlin-stdlib jar");
         return;
     };
     let cp = Classpath::new(vec![jar]);

@@ -217,8 +217,8 @@ fn hash_str(s: &str) -> u64 {
 // tests do — one implementation, no drift. Re-exported here under the names the test files already use.
 #[allow(unused_imports)]
 pub use krusty::toolchain::{
-    classpath_jars_for, dist_jar, ensure_maven, find_jar, jdk_modules, kotlin_test_jar,
-    kotlin_version, kotlinc_lib_dir, stdlib_classpath, stdlib_jar,
+    box_corpus_dir, classpath_jars_for, dist_jar, ensure_maven, find_jar, jdk_modules,
+    kotlin_test_jar, kotlin_version, kotlinc_lib_dir, stdlib_classpath, stdlib_jar,
 };
 
 /// Whether a box-test directive (`// NAME` …) is present. Single source of truth in the lib
@@ -672,19 +672,6 @@ pub fn checker_diags_against(tag: &str, lib_src: &str, main: &str) -> Option<Vec
     let mut syms = collect_signatures_with_cp(&files, platform, &mut diags);
     let _ = check_file(&files[0], &mut syms, &mut diags);
     Some(diags.diags.iter().map(|m| m.msg.clone()).collect())
-}
-
-/// The provisioned Kotlin codegen/box corpus directory (`KRUSTY_KOTLIN_BOX_DIR`), if present — the
-/// SAME corpus the differential conformance gate runs over. Lets an e2e pin a SPECIFIC real corpus
-/// case as a named regression test (instead of a hand-written snippet that may hit a lowering edge the
-/// corpus case doesn't). `None` when the corpus isn't provisioned, so the test skips rather than fails.
-#[allow(dead_code)]
-pub fn box_corpus_dir() -> Option<PathBuf> {
-    let d = std::env::var("KRUSTY_KOTLIN_BOX_DIR")
-        .ok()
-        .filter(|s| !s.is_empty())?;
-    let p = PathBuf::from(d);
-    p.is_dir().then_some(p)
 }
 
 /// Whether both the JVM toolchain AND the box corpus are provisioned (an e2e that runs a corpus case
