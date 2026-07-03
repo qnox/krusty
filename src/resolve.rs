@@ -7079,6 +7079,13 @@ impl<'a> Checker<'a> {
                 let subj_ty = subject.map(|s| self.expr(s));
                 let mut result: Option<Ty> = None;
                 let mut has_else = false;
+                // A `when` may have at most one `else` branch (kotlinc rejects a second one).
+                if arms.iter().filter(|a| a.conditions.is_empty()).count() > 1 {
+                    self.diags.error(
+                        self.span(e),
+                        "'when' expression must contain at most one 'else' branch".to_string(),
+                    );
+                }
                 for arm in &arms {
                     if arm.conditions.is_empty() {
                         has_else = true;
