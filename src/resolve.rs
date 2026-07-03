@@ -3699,6 +3699,18 @@ pub fn check_file(file: &File, syms: &mut SymbolTable, diags: &mut DiagSink) -> 
                         }
                     }
                 }
+                // A `data class`'s primary-constructor parameters must all be `val`/`var` (kotlinc:
+                // "data class primary constructor must have only property (val / var) parameters").
+                if cl.is_data {
+                    for pp in &cl.props {
+                        if !pp.is_property {
+                            c.diags.error(
+                                cl.span,
+                                format!("data class primary-constructor parameter '{}' must be 'val' or 'var'", pp.name),
+                            );
+                        }
+                    }
+                }
                 // Duplicate class type-parameter names (`class C<T, T>`) are illegal.
                 {
                     let mut seen = std::collections::HashSet::new();
@@ -3707,6 +3719,18 @@ pub fn check_file(file: &File, syms: &mut SymbolTable, diags: &mut DiagSink) -> 
                             c.diags.error(
                                 cl.span,
                                 format!("conflicting declaration: type parameter '{tp}' is declared more than once"),
+                            );
+                        }
+                    }
+                }
+                // Duplicate enum entry names (`enum class E { A, B, A }`) are illegal.
+                {
+                    let mut seen = std::collections::HashSet::new();
+                    for entry in &cl.enum_entries {
+                        if !seen.insert(entry.name.as_str()) {
+                            c.diags.error(
+                                cl.span,
+                                format!("conflicting declaration: enum entry '{}' is declared more than once", entry.name),
                             );
                         }
                     }
