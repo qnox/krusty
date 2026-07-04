@@ -453,11 +453,8 @@ impl JvmLibraries {
                 // Value-class implementation methods are static and take the erased receiver as their
                 // first JVM parameter. Source member resolution sees only the value parameters.
                 let logical_params = params.get(1..).unwrap_or(&[]).to_vec();
-                let ret = m
-                    .ret_class
-                    .as_deref()
-                    .map(kotlin_name_to_ty)
-                    .unwrap_or(physical_ret);
+                let ret = metadata_return_info(m.ret_class.as_deref(), m.ret_nullable)
+                    .apply(physical_ret);
                 let mut member = LibraryMember::new(m.kotlin_name, logical_params, ret, descriptor);
                 member.owner = Some(ci.this_class.clone());
                 member.physical_name = Some(m.jvm_name);
@@ -1354,11 +1351,8 @@ impl SymbolSource for JvmLibraries {
             if mf.is_suspend {
                 logical.push(Ty::obj("kotlin/coroutines/Continuation"));
             }
-            let ret = mf
-                .ret_class
-                .as_deref()
-                .map(kotlin_name_to_ty)
-                .unwrap_or(physical_ret);
+            let ret =
+                metadata_return_info(mf.ret_class.as_deref(), mf.ret_nullable).apply(physical_ret);
             let mut member =
                 LibraryMember::new(mf.kotlin_name.clone(), logical, ret, desc.to_string());
             member.physical_name = Some(mf.jvm_name.clone());
