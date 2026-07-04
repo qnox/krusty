@@ -15,18 +15,16 @@ mod common;
 /// Single-compilation box run: everything lives in one source, cross-referencing declarations (which
 /// still drives the checker/`types` resolution heavily).
 fn run(src: &str, stem: &str) -> Option<String> {
-    let jh = common::java_home()?;
     let sl = common::stdlib_jar()?;
-    let jdk = std::path::PathBuf::from(format!("{jh}/lib/modules"));
+    let jdk = common::jdk_modules()?;
     common::compile_and_run_box(src, stem, &[sl], Some(&jdk))
 }
 
 /// Compile `lib_src` with krusty (emitting `@Metadata`), persist its classfiles to a fresh classpath
 /// dir, then compile+run `main` against that dir — a genuine krusty-emit → krusty-decode round-trip.
 fn roundtrip(tag: &str, lib_src: &str, main: &str) -> Option<String> {
-    let jh = common::java_home()?;
     let sl = common::stdlib_jar()?;
-    let jdk = std::path::PathBuf::from(format!("{jh}/lib/modules"));
+    let jdk = common::jdk_modules()?;
     let lib_classes =
         common::compile_in_process(lib_src, "Lib", std::slice::from_ref(&sl), Some(&jdk))?;
     let dir = std::env::temp_dir().join(format!("krusty_cov10_{tag}_{}", std::process::id()));

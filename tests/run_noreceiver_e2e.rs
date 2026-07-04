@@ -4,9 +4,8 @@
 mod common;
 
 fn run_box(src: &str) -> Option<String> {
-    let jh = common::java_home()?;
     let sl = common::stdlib_jar()?;
-    let jdk = std::path::PathBuf::from(format!("{jh}/lib/modules"));
+    let jdk = common::jdk_modules()?;
     common::compile_and_run_box(src, "C", &[sl], Some(&jdk))
 }
 
