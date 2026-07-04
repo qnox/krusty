@@ -6,9 +6,7 @@
 mod common;
 
 fn run(src: &str) -> Option<String> {
-    let sl = common::stdlib_jar()?;
-    let jdk = common::jdk_modules()?;
-    common::compile_and_run_box(src, "P", &[sl], Some(&jdk))
+    common::compile_and_run_with_stdlib(src, "P")
 }
 
 /// The JVM + stdlib jar this e2e needs. When absent (a machine without `JAVA_HOME`/stdlib), the test
