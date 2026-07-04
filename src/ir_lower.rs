@@ -1965,7 +1965,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                                 .push(("this".to_string(), this_v, Ty::obj(&internal)));
                             let v_v = lo.fresh_value();
                             lo.scope.push((
-                                setter.param.clone().unwrap_or_else(|| "value".to_string()),
+                                ast::setter_param_or_value(setter.param.as_ref()),
                                 v_v,
                                 pty,
                             ));
@@ -2995,10 +2995,9 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                         lo.lambda_seq = 0;
                         let pty = body_prop_ty(file, info, p);
                         let custom = p.setter.as_ref().filter(|s| s.body.is_some()).cloned();
-                        let pname = custom
-                            .as_ref()
-                            .and_then(|s| s.param.clone())
-                            .unwrap_or_else(|| "value".to_string());
+                        let pname = ast::setter_param_or_value(
+                            custom.as_ref().and_then(|s| s.param.as_ref()),
+                        );
                         let v_v = lo.fresh_value();
                         lo.scope.push((pname, v_v, pty));
                         lo.cur_static_field = Some((sidx, ir_ty));
@@ -4416,7 +4415,7 @@ impl<'a> Lower<'a> {
             rhs: gn,
         });
         // body: a[i] = <lambda body with the index param bound to i>
-        let pname = params.first().cloned().unwrap_or_else(|| "it".to_string());
+        let pname = ast::first_lambda_param_or_it(&params);
         let depth = self.scope.len();
         self.scope.push((pname, i_v, Ty::Int));
         let body_val = self.lower_arg(body, &value_ir);
@@ -5289,15 +5288,7 @@ impl<'a> Lower<'a> {
         }
         // Bound parameter names: explicit, or the implicit single `it` for a unary lambda. For a receiver
         // lambda these are the VALUE parameters only (the receiver binds as `this`, separately).
-        let bind_names: Vec<String> = if !params.is_empty() {
-            params.to_vec()
-        } else if value_arity == 1 {
-            vec!["it".to_string()]
-        } else if value_arity == 0 {
-            vec![]
-        } else {
-            return None;
-        };
+        let bind_names = ast::lambda_params_or_implicit(params, value_arity)?;
         if bind_names.len() != value_arity {
             return None;
         }
@@ -9370,15 +9361,8 @@ impl<'a> Lower<'a> {
                         body,
                     } = self.afile.expr(arg).clone()
                     {
-                        let bind_names: Vec<String> = if !lparams.is_empty() {
-                            lparams
-                        } else if value_params.len() == 1 {
-                            vec!["it".to_string()]
-                        } else if value_params.is_empty() {
-                            vec![]
-                        } else {
-                            return None;
-                        };
+                        let bind_names =
+                            ast::lambda_params_or_implicit(&lparams, value_params.len())?;
                         if bind_names.len() == value_params.len() {
                             return self.lower_suspend_lambda(body, &value_params, bind_names);
                         }
@@ -9423,15 +9407,7 @@ impl<'a> Lower<'a> {
                 } = self.afile.expr(arg).clone()
                 {
                     // Bind names: explicit, or the implicit single `it`, or none (arity 0).
-                    let bind_names: Vec<String> = if !lparams.is_empty() {
-                        lparams.clone()
-                    } else if params.len() == 1 {
-                        vec!["it".to_string()]
-                    } else if params.is_empty() {
-                        vec![]
-                    } else {
-                        return None;
-                    };
+                    let bind_names = ast::lambda_params_or_implicit(&lparams, params.len())?;
                     // Parameter `Ty`s come from the lambda's checked type (the expected suspend type drives
                     // them); fall back to the erased IR param types only if absent.
                     let ty_params: Vec<Ty> = self
@@ -10551,14 +10527,8 @@ impl<'a> Lower<'a> {
             return None;
         };
         let (pname, returns_receiver) = match name {
-            "let" => (
-                params.first().cloned().unwrap_or_else(|| "it".to_string()),
-                false,
-            ),
-            "also" => (
-                params.first().cloned().unwrap_or_else(|| "it".to_string()),
-                true,
-            ),
+            "let" => (ast::first_lambda_param_or_it(&params), false),
+            "also" => (ast::first_lambda_param_or_it(&params), true),
             "run" if params.is_empty() => ("this".to_string(), false),
             "apply" if params.is_empty() => ("this".to_string(), true),
             _ => return None,
@@ -12926,11 +12896,7 @@ impl<'a> Lower<'a> {
                 ) = (splice, arg_expr)
                 {
                     // A single-parameter lambda may name its parameter implicitly as `it`.
-                    let params = if params.is_empty() && fnsig.params.len() == 1 {
-                        vec!["it".to_string()]
-                    } else {
-                        params
-                    };
+                    let params = ast::lambda_params_or_implicit(&params, fnsig.params.len())?;
                     // A bare `return` (non-local) or a `return@other` in the lambda body isn't modeled —
                     // bail. A `return@<thisInlineFn>` IS modeled (a local return from the spliced lambda,
                     // handled by the `inline_lambda_ret` frame set up at the invoke site), so it's allowed.
@@ -16104,7 +16070,7 @@ impl<'a> Lower<'a> {
                 let ast::Expr::Lambda { params, body } = self.afile.expr(args[0]).clone() else {
                     return None;
                 };
-                let cont_name = params.first().cloned().unwrap_or_else(|| "it".to_string());
+                let cont_name = ast::first_lambda_param_or_it(&params);
                 if name_used_as_value(self.afile, body, &cont_name) {
                     // The block reads its continuation (`c.resume(t)`): bind `c` to the enclosing suspend
                     // function's own `Continuation` via the `CurrentContinuation` placeholder — the CPS
@@ -17322,8 +17288,7 @@ impl<'a> Lower<'a> {
                                         || self.has_library_iterator_extension(rty)
                                 });
                             if iterable {
-                                let param =
-                                    params.first().cloned().unwrap_or_else(|| "it".to_string());
+                                let param = ast::first_lambda_param_or_it(&params);
                                 return self.lower_for_each(&param, receiver, lbody, None);
                             }
                         }
@@ -17411,7 +17376,7 @@ impl<'a> Lower<'a> {
                             let pname = if is_recv_lambda {
                                 "this".to_string()
                             } else {
-                                params.first().cloned().unwrap_or_else(|| "it".to_string())
+                                ast::first_lambda_param_or_it(&params)
                             };
                             // An inlined receiver lambda runs in the *caller's* method, so the receiver's
                             // members are accessed externally (getter/setter), never as the enclosing

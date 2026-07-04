@@ -4059,7 +4059,7 @@ pub fn check_file(file: &File, syms: &mut SymbolTable, diags: &mut DiagSink) -> 
                             c.ret_ty = Ty::Unit;
                             c.field_ty = Some(prop_ty);
                             c.push_scope();
-                            let pname = setter.param.clone().unwrap_or_else(|| "value".to_string());
+                            let pname = crate::ast::setter_param_or_value(setter.param.as_ref());
                             c.declare(&pname, prop_ty, true);
                             match body {
                                 FunBody::Expr(g) | FunBody::Block(g) => {

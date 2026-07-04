@@ -10,6 +10,26 @@ pub struct StmtId(pub u32);
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub struct DeclId(pub u32);
 
+pub fn first_lambda_param_or_it(params: &[String]) -> String {
+    params.first().cloned().unwrap_or_else(|| "it".to_string())
+}
+
+pub fn lambda_params_or_implicit(params: &[String], arity: usize) -> Option<Vec<String>> {
+    if !params.is_empty() {
+        Some(params.to_vec())
+    } else if arity == 1 {
+        Some(vec![first_lambda_param_or_it(params)])
+    } else if arity == 0 {
+        Some(Vec::new())
+    } else {
+        None
+    }
+}
+
+pub fn setter_param_or_value(param: Option<&String>) -> String {
+    param.cloned().unwrap_or_else(|| "value".to_string())
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum BinOp {
     Add,
@@ -1083,7 +1103,7 @@ impl File {
                 out.push_str(&format!(
                     "(lambda {} ",
                     if params.is_empty() {
-                        "it".to_string()
+                        first_lambda_param_or_it(params)
                     } else {
                         params.join(",")
                     }
