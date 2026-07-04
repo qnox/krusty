@@ -941,7 +941,12 @@ impl<'a> Parser<'a> {
                     self.pending_annotations.push(name);
                     self.pending_annotation_args.push(args);
                 }
-            } else if self.at(TokenKind::Ident) && is_modifier(self.text()) {
+            } else if self.at(TokenKind::Ident)
+                && is_modifier(self.text())
+                && self.t.get(self.i + 1).map(|t| t.kind) != Some(TokenKind::Colon)
+            {
+                // A modifier soft keyword immediately followed by `:` is a NAME, not a modifier
+                // (`fun f(open: Int)`, `@Anno sealed: T`) — a real modifier is never followed by a colon.
                 mods.push(self.text().to_string());
                 self.bump();
             } else {
@@ -1853,7 +1858,9 @@ impl<'a> Parser<'a> {
             let mut pmods = Vec::new();
             let mut pannos = Vec::new();
             let mut pannos_args = Vec::new();
-            // `value` is a valid parameter name in Kotlin; only collect real parameter modifiers.
+            // `value` is a valid parameter name in Kotlin; only collect real parameter modifiers. A modifier
+            // soft keyword used as a NAME (`fun f(open: Int)`) is left for the name parse below —
+            // `skip_decl_prefix` stops before a modifier-ident that is immediately followed by `:`.
             if self.at(TokenKind::At)
                 || (self.at(TokenKind::Ident) && is_modifier(self.text()) && self.text() != "value")
             {
