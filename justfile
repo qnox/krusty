@@ -160,7 +160,6 @@ mutants *ARGS:
 # (target/cache/kotlinc/<ver>/), and print the path to its `bin/kotlinc`. Idempotent — a no-op once unpacked
 # (so it's cheap to cache). This is the reference toolchain the differential harness validates
 # against; its `lib/kotlin-stdlib.jar` is also what the box e2e tests put on the runtime classpath.
-# Point KRUSTY_KOTLINC at the printed path:  export KRUSTY_KOTLINC="$(just kotlinc)"
 kotlinc VERSION=`just max-version`:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -184,7 +183,7 @@ kotlinc VERSION=`just max-version`:
 # print the path to compiler/testData/codegen/box. Blobless + sparse clone of just that directory at
 # the matching tag — small and idempotent (no-op once present, cheap to cache). Mirrors `kotlinc`:
 # the conformance test FAILS (not skips) without it, so the harness provisions it rather than
-# silently skipping. Point KRUSTY_KOTLIN_BOX_DIR at the printed path.
+# silently skipping.
 box-corpus VERSION=`just max-version`:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -197,7 +196,7 @@ box-corpus VERSION=`just max-version`:
     git clone --depth 1 --filter=blob:none --sparse --branch "v${ver}" \
         https://github.com/JetBrains/kotlin.git "$root" >&2 \
         || { echo "failed to clone JetBrains/kotlin v${ver}" >&2; rm -rf "$root"; exit 1; }
-    git -C "$root" sparse-checkout set compiler/testData/codegen/box >&2
+    git -C "$root" sparse-checkout set --no-cone compiler/testData/codegen/box >&2
     [ -d "$box" ] || { echo "box dir missing after sparse checkout: $box" >&2; exit 1; }
     echo "$box"
 
