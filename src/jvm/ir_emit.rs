@@ -4318,7 +4318,15 @@ impl<'a> Emitter<'a> {
                         .map(|&a| slot_words(self.value_ty(a)) as i32)
                         .sum();
                     let ret = ty_from_descriptor_ret(&descriptor);
-                    let m = self.cw.methodref(&owner, &name, &descriptor);
+                    // A static method DECLARED ON AN INTERFACE (a Kotlin interface's `foo$default` synthetic,
+                    // reached when a call omits an interface-declared default) must be an `InterfaceMethodref`
+                    // even for `invokestatic` — else the JVM throws `IncompatibleClassChangeError`. Classes
+                    // (stdlib facades, the common case) stay `Methodref`.
+                    let m = if self.bodies.owner_is_interface(&owner) {
+                        self.cw.interface_methodref(&owner, &name, &descriptor)
+                    } else {
+                        self.cw.methodref(&owner, &name, &descriptor)
+                    };
                     code.invokestatic(m, aw, slot_words(ret) as i32);
                 }
                 Callee::Virtual {

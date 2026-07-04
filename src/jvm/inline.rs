@@ -16,6 +16,13 @@ use std::collections::HashMap;
 pub trait MethodBodies {
     /// The compiled `Code` body of `owner.name descriptor`, or `None` if absent/abstract/native.
     fn body(&self, owner: &str, name: &str, descriptor: &str) -> Option<MethodCode>;
+    /// Whether `owner` (a JVM internal name) is an INTERFACE — a static method on an interface (a Kotlin
+    /// interface's `foo$default` synthetic) must be referenced by an `InterfaceMethodref` constant even for
+    /// `invokestatic`, else the JVM throws `IncompatibleClassChangeError`. Default `false` (a class owner);
+    /// the classpath overrides it. Only meaningful for a resolved-classpath `Callee::Static` owner.
+    fn owner_is_interface(&self, _owner: &str) -> bool {
+        false
+    }
 }
 
 fn utf8(cp: &[C], i: u16) -> Option<&str> {

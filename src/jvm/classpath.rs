@@ -1287,6 +1287,12 @@ impl super::inline::MethodBodies for Classpath {
     fn body(&self, owner: &str, name: &str, descriptor: &str) -> Option<MethodCode> {
         self.method_code(owner, name, descriptor)
     }
+    fn owner_is_interface(&self, owner: &str) -> bool {
+        self.find(owner)
+            .map(|ci| ci.is_interface())
+            .or_else(|| crate::jvm::jvm_class_map::jvm_mapped_builtin_is_interface(owner))
+            .unwrap_or(false)
+    }
 }
 
 /// A lean per-class record for building the extension index — only what's needed to follow facade
