@@ -288,6 +288,16 @@ impl SymbolSource for CompositeSource {
             .find_map(|c| c.constructor_param_names(internal, arity))
     }
 
+    fn constructor_named_params(
+        &self,
+        internal: &str,
+        min_arity: usize,
+    ) -> Option<(Vec<String>, Vec<bool>)> {
+        self.children
+            .iter()
+            .find_map(|c| c.constructor_named_params(internal, min_arity))
+    }
+
     fn infer_constructor_type_args(&self, internal: &str, arg_tys: &[Ty]) -> Option<Vec<Ty>> {
         self.children
             .iter()
@@ -505,6 +515,35 @@ mod tests {
         assert!(c.value_class_property_member("shared", "id").is_none());
         assert!(c.value_underlying(Ty::obj("shared")).is_none());
         assert!(c.function_like_arity(Ty::Int).is_none());
+    }
+
+    #[test]
+    fn composite_delegates_constructor_named_params_to_children() {
+        struct CtorSource;
+        impl SymbolSource for CtorSource {
+            fn constructor_named_params(
+                &self,
+                internal: &str,
+                min_arity: usize,
+            ) -> Option<(Vec<String>, Vec<bool>)> {
+                (internal == "lib/Cfg" && min_arity <= 2).then(|| {
+                    (
+                        vec!["host".to_string(), "port".to_string()],
+                        vec![false, true],
+                    )
+                })
+            }
+        }
+
+        let c = CompositeSource::new(vec![Box::new(module()), Box::new(CtorSource)]);
+        assert_eq!(
+            c.constructor_named_params("lib/Cfg", 1),
+            Some((
+                vec!["host".to_string(), "port".to_string()],
+                vec![false, true]
+            ))
+        );
+        assert!(c.constructor_named_params("lib/Cfg", 3).is_none());
     }
 
     #[test]

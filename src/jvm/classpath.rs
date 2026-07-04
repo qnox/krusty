@@ -584,25 +584,26 @@ impl Classpath {
         arity: usize,
     ) -> Option<Vec<String>> {
         let ci = self.find(internal)?;
-        super::metadata::class_constructor_param_names(&ci)
+        super::metadata::class_constructor_params(&ci)
             .into_iter()
+            .map(|(names, _)| names)
             .find(|names| names.len() == arity && !names.iter().any(String::is_empty))
     }
 
     /// The primary ctor's SOURCE parameter names + per-parameter default flags, for a constructor with at
-    /// least `min_arity` parameters (so a NAMED call may omit a defaulted one). Pairs the parallel
-    /// name/default decodes and picks the first constructor whose named parameter list is long enough.
+    /// least `min_arity` parameters (so a NAMED call may omit a defaulted one). Reads both facts from one
+    /// constructor metadata record and picks the first named parameter list long enough.
     pub fn metadata_constructor_named_params(
         &self,
         internal: &str,
         min_arity: usize,
     ) -> Option<(Vec<String>, Vec<bool>)> {
         let ci = self.find(internal)?;
-        let names = super::metadata::class_constructor_param_names(&ci);
-        let defaults = super::metadata::class_constructor_param_defaults(&ci);
-        names.into_iter().zip(defaults).find(|(n, d)| {
-            n.len() >= min_arity && n.len() == d.len() && !n.iter().any(String::is_empty)
-        })
+        super::metadata::class_constructor_params(&ci)
+            .into_iter()
+            .find(|(n, d)| {
+                n.len() >= min_arity && n.len() == d.len() && !n.iter().any(String::is_empty)
+            })
     }
 
     /// The source-level call and return facts of class MEMBER `internal.jvm_name/arity`, from the class's
