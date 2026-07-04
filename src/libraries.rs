@@ -470,13 +470,7 @@ impl CallSig {
         names: Option<Vec<String>>,
         defaults: Vec<bool>,
     ) -> Self {
-        let defaults = metadata_defaults(defaults, param_count);
-        CallSig {
-            required: required_arity(param_count, &defaults),
-            param_names: metadata_names(names, param_count),
-            param_defaults: defaults,
-            ..Default::default()
-        }
+        CallSig::metadata_base(param_count, names, defaults)
     }
 
     pub fn metadata_top_level(
@@ -487,16 +481,11 @@ impl CallSig {
         lambda_receiver_params: Vec<bool>,
         lambda_materialized: Vec<bool>,
     ) -> Self {
-        let defaults = metadata_defaults(defaults, param_count);
-        CallSig {
-            required: required_arity(param_count, &defaults),
-            param_names: metadata_names(names, param_count),
-            param_defaults: defaults,
-            lambda_receivers: vec_for_arity(lambda_receivers, param_count),
-            lambda_receiver_params: vec_for_arity(lambda_receiver_params, param_count),
-            lambda_materialized: vec_for_arity(lambda_materialized, param_count),
-            ..Default::default()
-        }
+        let mut sig = CallSig::metadata_base(param_count, names, defaults);
+        sig.lambda_receivers = vec_for_arity(lambda_receivers, param_count);
+        sig.lambda_receiver_params = vec_for_arity(lambda_receiver_params, param_count);
+        sig.lambda_materialized = vec_for_arity(lambda_materialized, param_count);
+        sig
     }
 
     pub fn metadata_extension(physical_param_count: usize, names: Option<Vec<String>>) -> Self {
@@ -511,6 +500,16 @@ impl CallSig {
                 }
             })
             .unwrap_or_default()
+    }
+
+    fn metadata_base(param_count: usize, names: Option<Vec<String>>, defaults: Vec<bool>) -> Self {
+        let defaults = metadata_defaults(defaults, param_count);
+        CallSig {
+            required: required_arity(param_count, &defaults),
+            param_names: metadata_names(names, param_count),
+            param_defaults: defaults,
+            ..Default::default()
+        }
     }
 }
 
