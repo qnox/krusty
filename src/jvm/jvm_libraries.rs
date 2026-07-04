@@ -929,12 +929,6 @@ fn metadata_return_info(class: Option<&str>, nullable: bool) -> ReturnInfo {
     ReturnInfo::new(nullable, metadata_return_ty(class))
 }
 
-fn classpath_return_info(meta: Option<&super::classpath::MetadataReturn>) -> ReturnInfo {
-    meta.map_or_else(ReturnInfo::default, |m| {
-        metadata_return_info(m.class.as_deref(), m.nullable)
-    })
-}
-
 fn nullable_scalar_return(info: ReturnInfo, ret: Ty) -> Ty {
     if info.nullable && ret.is_jvm_scalar() {
         Ty::nullable(ret)
@@ -1727,7 +1721,7 @@ impl SymbolSource for JvmLibraries {
                     let inline =
                         self.cp
                             .is_inline_callable(&c.owner, &c.name, &c.descriptor, &params);
-                    let ret_metadata = classpath_return_info(meta.ret.as_ref());
+                    let ret_metadata = meta.ret;
                     // Logical return, recovered RECEIVER-substituted (arg-independent): `<T> T.takeIf(…): T?`
                     // → `receiver`. A type var the receiver doesn't bind (`fold`'s `R`) stays as the erased
                     // physical type — arg-binding selection in `CallResolver` refines that.
@@ -2074,8 +2068,7 @@ impl SymbolSource for JvmLibraries {
                             // A `suspend` member's return facts are erased twice (to `Object`, then via the
                             // `Continuation<T>` type argument), so recover nullability and exact source
                             // classifier from the same class `@Metadata` member record.
-                            let member_ret_metadata =
-                                suspend.then_some(member_facts.ret.as_ref()).flatten();
+                            let member_ret_metadata = suspend.then_some(member_facts.ret);
                             let suspend_ret_nullable =
                                 suspend && member_ret_metadata.is_some_and(|m| m.nullable);
                             let ret = if suspend {
@@ -2093,29 +2086,25 @@ impl SymbolSource for JvmLibraries {
                                 // member's `@Metadata` return classifier — which preserves it — keeping the
                                 // gsig's (already-canonicalized) type arguments, so `.add(…)` on a declared
                                 // `MutableList` return still resolves.
-                                let base = match (base, member_ret_metadata) {
+                                let base = match (base, member_ret_metadata.and_then(|m| m.class)) {
                                     // Override the outer name ONLY when the metadata classifier is the SAME
                                     // JVM collection as the gsig-recovered base — i.e. its read-only/mutable
                                     // sibling (`List`/`MutableList` both erase to `java/util/List`). This
                                     // guarantees the same collection family and arity, so keeping the gsig's
                                     // type arguments is sound; a divergent classifier (stale metadata) is
                                     // ignored rather than forming an arity-mismatched type.
-                                    (Ty::Obj(base_name, args), Some(meta)) => match meta
-                                        .class
-                                        .as_deref()
-                                    {
-                                        Some(meta_cls)
-                                            if meta_cls.starts_with("kotlin/collections/")
-                                                && super::jvm_class_map::to_jvm_internal(
-                                                    meta_cls,
-                                                ) == super::jvm_class_map::to_jvm_internal(
+                                    (Ty::Obj(base_name, args), Some(Ty::Obj(meta_cls, _)))
+                                        if meta_cls.starts_with("kotlin/collections/")
+                                            && super::jvm_class_map::to_jvm_internal(meta_cls)
+                                                == super::jvm_class_map::to_jvm_internal(
                                                     base_name,
                                                 ) =>
-                                        {
-                                            Ty::obj_args(meta_cls, args)
-                                        }
-                                        _ => Ty::obj_args(base_name, args),
-                                    },
+                                    {
+                                        Ty::obj_args(meta_cls, args)
+                                    }
+                                    (Ty::Obj(base_name, args), Some(Ty::Obj(_, _))) => {
+                                        Ty::obj_args(base_name, args)
+                                    }
                                     (b, _) => b,
                                 };
                                 crate::trace_compiler!(
@@ -2250,7 +2239,7 @@ impl SymbolSource for JvmLibraries {
                     .cp
                     .is_inline_callable(&c.owner, meta_name, &inline_desc, &params);
                 let call_sig = meta.call_sig;
-                let ret_metadata = classpath_return_info(meta.ret.as_ref());
+                let ret_metadata = meta.ret;
                 let ret = if suspend {
                     suspend_metadata_return(ret_metadata, physical_ret)
                 } else {
