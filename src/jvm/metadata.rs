@@ -1142,16 +1142,6 @@ pub fn class_inline(ci: &ClassInfo) -> Option<InlineClass> {
     })
 }
 
-/// One `@JvmName`-mangled overload of a Kotlin function name: the JVM method name, JVM descriptor, and the
-/// Kotlin return-type class. The data `@OverloadResolutionByLambdaReturnType` needs to pick `sumOf` →
-/// `sumOfInt`/`sumOfLong`/… by the lambda's return type.
-#[derive(Clone, Debug)]
-pub struct JvmOverload {
-    pub jvm_name: String,
-    pub jvm_desc: String,
-    pub ret_class: String,
-}
-
 // === `.kotlin_builtins` supertype reader ==========================================================
 // A `.kotlin_builtins` resource (e.g. `kotlin/collections/collections.kotlin_builtins`) stores a
 // `BuiltInsProtoBuf.PackageFragment` preceded by a `BuiltInsBinaryVersion` header — a big-endian int
