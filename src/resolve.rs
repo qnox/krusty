@@ -6313,7 +6313,7 @@ impl<'a> Checker<'a> {
                     // A value/unsigned-class operand (`1U as? Int`) boxes to its OWN wrapper
                     // (`kotlin/UInt`, not `Integer`) — its `instanceof` against the target wrapper
                     // is not the plain-primitive shape the lowerer boxes, so leave it skipped.
-                    && !self.syms.libraries.is_unsigned_integer_type(ot)
+                    && !ot.is_unsigned()
                     && !self.ty_is_value_class(ot)
                     && (tt.is_reference() || tt.boxed_ref().is_some());
                 if (!(tt.is_reference() || prim_unbox)
@@ -7498,10 +7498,9 @@ impl<'a> Checker<'a> {
         if lt == Ty::Error || rt == Ty::Error {
             return Ty::Error;
         }
-        // Unsigned arithmetic: both operands the same unsigned library integer type. The source owns which
-        // types those are (`UInt`/`ULong` on the JVM stdlib); mixed signed/unsigned falls through to the
-        // ordinary type error.
-        if self.syms.libraries.is_unsigned_integer_type(lt) && lt == rt {
+        // Unsigned arithmetic: both operands the same unsigned library integer type. `Ty` owns which
+        // types those are; mixed signed/unsigned falls through to the ordinary type error.
+        if lt.is_unsigned() && lt == rt {
             return match op {
                 BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem => lt,
                 BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge | BinOp::Eq | BinOp::Ne => {
@@ -8004,7 +8003,7 @@ impl<'a> Checker<'a> {
             && binds.values().any(|t| {
                 self.ty_is_value_class(*t)
                     || self.syms.libraries.value_underlying(*t).is_some()
-                    || self.syms.libraries.is_unsigned_integer_type(*t)
+                    || t.is_unsigned()
             })
         {
             return None;

@@ -3832,7 +3832,7 @@ impl<'a> Lower<'a> {
     }
 
     fn is_unsigned_integer_type(&self, ty: Ty) -> bool {
-        self.syms.libraries.is_unsigned_integer_type(ty)
+        ty.is_unsigned()
     }
 
     fn unsigned_integer_box_type(&self, ty: Ty) -> Option<Ty> {
