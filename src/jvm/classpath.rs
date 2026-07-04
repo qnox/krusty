@@ -225,10 +225,9 @@ type MetaFnsCache = RefCell<HashMap<String, std::rc::Rc<ClassMeta>>>;
 struct MetaCallable {
     kotlin_name: String,
     jvm_name: String,
-    ret_class: Option<String>,
     receiver_class: Option<String>,
     is_extension: bool,
-    ret_nullable: bool,
+    ret: ReturnInfo,
     value_param_types: Vec<Ty>,
     value_param_names: Vec<String>,
     value_param_has_default: Vec<bool>,
@@ -277,11 +276,8 @@ fn aligned_meta_callable<'a>(
         .max_by_key(|(end, _)| *end)
 }
 
-fn metadata_return_of(c: &MetaCallable) -> ReturnInfo {
-    ReturnInfo::new(
-        c.ret_nullable,
-        c.ret_class.as_deref().map(kotlin_name_to_ty),
-    )
+pub(super) fn metadata_return_info(class: Option<&str>, nullable: bool) -> ReturnInfo {
+    ReturnInfo::new(nullable, class.map(kotlin_name_to_ty))
 }
 
 fn metadata_param_names_of(c: &MetaCallable) -> Option<Vec<String>> {
@@ -454,10 +450,9 @@ impl Classpath {
             .map(|f| MetaCallable {
                 kotlin_name: f.kotlin_name.clone(),
                 jvm_name: f.jvm_name.clone(),
-                ret_class: f.ret_class.clone(),
                 receiver_class: f.receiver_class.clone(),
                 is_extension: f.is_extension,
-                ret_nullable: f.ret_nullable,
+                ret: metadata_return_info(f.ret_class.as_deref(), f.ret_nullable),
                 value_param_types: f
                     .value_param_types
                     .iter()
@@ -543,7 +538,7 @@ impl Classpath {
             } else {
                 metadata_top_level_call_sig(end, c)
             },
-            ret: metadata_return_of(c),
+            ret: c.ret,
         }
     }
 
@@ -608,10 +603,7 @@ impl Classpath {
         MetadataCallFacts {
             kept_params: None,
             call_sig: CallSig::metadata_member(arity, names, defaults),
-            ret: ReturnInfo::new(
-                f.ret_nullable,
-                f.ret_class.as_deref().map(kotlin_name_to_ty),
-            ),
+            ret: metadata_return_info(f.ret_class.as_deref(), f.ret_nullable),
         }
     }
 
