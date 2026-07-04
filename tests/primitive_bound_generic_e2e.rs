@@ -3,14 +3,11 @@
 //! unsigned, and value bounds are NOT specialized (their boxed-vs-primitive `==`/unsigned semantics
 //! differ) and stay rejected, so a default-flags drop-in skips them rather than miscompile.
 
-use std::path::PathBuf;
-
 mod common;
 
 fn classes(src: &str) -> Option<Vec<(String, Vec<u8>)>> {
-    let java_home = common::java_home()?;
     let stdlib = common::stdlib_jar()?;
-    let jdk = PathBuf::from(format!("{java_home}/lib/modules"));
+    let jdk = common::jdk_modules()?;
     common::compile_in_process(src, "P", &[stdlib], Some(&jdk))
 }
 

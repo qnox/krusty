@@ -3,14 +3,11 @@
 //! krusty must too, for bytecode parity. A non-generic function gets no Signature. The exact strings
 //! are verified byte-identical to kotlinc in the differential harness; here we assert krusty's output.
 
-use std::path::PathBuf;
-
 mod common;
 
 fn classes(src: &str) -> Option<Vec<(String, Vec<u8>)>> {
-    let java_home = common::java_home()?;
     let stdlib = common::stdlib_jar()?;
-    let jdk = PathBuf::from(format!("{java_home}/lib/modules"));
+    let jdk = common::jdk_modules()?;
     common::compile_in_process(src, "G", &[stdlib], Some(&jdk))
 }
 
