@@ -476,6 +476,34 @@ impl Ty {
         matches!(self, Ty::Byte | Ty::Short | Ty::Int)
     }
 
+    /// Loop counter type for a same-typed Kotlin range bound, if krusty can lower it as counted.
+    pub fn range_counter_type(self) -> Option<Ty> {
+        Some(match self {
+            Ty::Byte | Ty::Short => Ty::Int,
+            Ty::Int | Ty::Long | Ty::UInt | Ty::ULong | Ty::Char => self,
+            _ => return None,
+        })
+    }
+
+    /// Kotlin range value type for `lo..hi`/`lo..<hi`, if the operand pair is supported.
+    pub fn range_value_type(lo: Ty, hi: Ty) -> Option<Ty> {
+        Some(match (lo, hi) {
+            (Ty::Char, Ty::Char) => Ty::obj("kotlin/ranges/CharRange"),
+            (Ty::UInt, Ty::UInt) => Ty::obj("kotlin/ranges/UIntRange"),
+            (Ty::ULong, Ty::ULong) => Ty::obj("kotlin/ranges/ULongRange"),
+            (l, r) if l.is_int_range_operand() && r.is_int_range_operand() => {
+                Ty::obj("kotlin/ranges/IntRange")
+            }
+            (l, r)
+                if (l.is_int_range_operand() || l == Ty::Long)
+                    && (r.is_int_range_operand() || r == Ty::Long) =>
+            {
+                Ty::obj("kotlin/ranges/LongRange")
+            }
+            _ => return None,
+        })
+    }
+
     /// True for scalar slots whose update arithmetic runs as `Int` and narrows back on store.
     pub fn narrows_int_update(self) -> bool {
         matches!(self, Ty::Byte | Ty::Short | Ty::Char)

@@ -2977,20 +2977,7 @@ fn infer_lit_ty_p(
         Expr::RangeTo { lo, hi, .. } => {
             let lt = infer_lit_ty_p(file, *lo, class_names, fun_rets, props, src);
             let rt = infer_lit_ty_p(file, *hi, class_names, fun_rets, props, src);
-            match (lt, rt) {
-                (Ty::Char, Ty::Char) => Ty::obj("kotlin/ranges/CharRange"),
-                (Ty::UInt, Ty::UInt) => Ty::obj("kotlin/ranges/UIntRange"),
-                (Ty::ULong, Ty::ULong) => Ty::obj("kotlin/ranges/ULongRange"),
-                _ if lt.is_int_range_operand() && rt.is_int_range_operand() => {
-                    Ty::obj("kotlin/ranges/IntRange")
-                }
-                _ if (lt.is_int_range_operand() || lt == Ty::Long)
-                    && (rt.is_int_range_operand() || rt == Ty::Long) =>
-                {
-                    Ty::obj("kotlin/ranges/LongRange")
-                }
-                _ => Ty::Error,
-            }
+            Ty::range_value_type(lt, rt).unwrap_or(Ty::Error)
         }
         // A top-level function reference `::foo` initializing a property (`val x = ::Test`). Its type is
         // the function type `(params) -> ret` of the referenced function. Only a receiver-less,
@@ -6351,28 +6338,15 @@ impl<'a> Checker<'a> {
                 // `CharRange`; the integer family widens like kotlinc's `rangeTo` overloads — any of
                 // `Byte`/`Short`/`Int` yields an `IntRange`, and if either operand is `Long` a
                 // `LongRange`. Unsigned and floating ranges are not modeled here (the file is skipped).
-                match (lt, rt) {
-                    (Ty::Char, Ty::Char) => Ty::obj("kotlin/ranges/CharRange"),
-                    // Unsigned ranges are their own stdlib classes (`UIntRange`/`ULongRange`), iterated
-                    // with unsigned comparison and mangled inline-class getters.
-                    (Ty::UInt, Ty::UInt) => Ty::obj("kotlin/ranges/UIntRange"),
-                    (Ty::ULong, Ty::ULong) => Ty::obj("kotlin/ranges/ULongRange"),
-                    _ if lt.is_int_range_operand() && rt.is_int_range_operand() => {
-                        Ty::obj("kotlin/ranges/IntRange")
-                    }
-                    _ if (lt.is_int_range_operand() || lt == Ty::Long)
-                        && (rt.is_int_range_operand() || rt == Ty::Long) =>
-                    {
-                        Ty::obj("kotlin/ranges/LongRange")
-                    }
-                    _ => {
-                        self.diags.error(
-                            self.span(e),
-                            "krusty: range expression is only supported for Int/Long/Char operands"
-                                .to_string(),
-                        );
-                        Ty::Error
-                    }
+                if let Some(ty) = Ty::range_value_type(lt, rt) {
+                    ty
+                } else {
+                    self.diags.error(
+                        self.span(e),
+                        "krusty: range expression is only supported for Int/Long/Char operands"
+                            .to_string(),
+                    );
+                    Ty::Error
                 }
             }
             Expr::IncDec { target, .. } => {
@@ -11592,17 +11566,16 @@ impl<'a> Checker<'a> {
                 // unsigned `UInt`/`ULong` (whose loop the backend emits with unsigned comparison).
                 // A `Byte`/`Short` range widens to an `IntRange` (kotlinc's `Short.rangeTo(Short): IntRange`),
                 // so the counter is `Int` and the bounds coerce up — exactly like a range *value*.
-                let elem = if st == et
-                    && matches!(st, Ty::Int | Ty::Long | Ty::UInt | Ty::ULong | Ty::Char)
-                {
-                    st
-                } else if st == et && matches!(st, Ty::Byte | Ty::Short) {
-                    Ty::Int
+                let elem = if st == et {
+                    st.range_counter_type()
                 } else {
+                    None
+                }
+                .unwrap_or_else(|| {
                     self.expect_assignable(Ty::Int, st, self.span(range.start), "range start");
                     self.expect_assignable(Ty::Int, et, self.span(range.end), "range end");
                     Ty::Int
-                };
+                });
                 self.push_scope();
                 self.declare(&name, elem, true); // loop variable (mutated by the lowering)
                 if let Some(l) = &label {
