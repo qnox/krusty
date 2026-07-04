@@ -6,14 +6,6 @@ mod common;
 
 #[test]
 fn generic_fns_run() {
-    let Some(java_home) = common::java_home() else {
-        eprintln!("skipping generic_fn_e2e: set JAVA_HOME");
-        return;
-    };
-    let Some(stdlib) = common::stdlib_jar() else {
-        eprintln!("skipping generic_fn_e2e: no kotlin-stdlib jar found");
-        return;
-    };
     let src = "fun <T> id(x: T): T = x\n\
 fun <T> firstOf(a: T, b: T): T = a\n\
 fun <T> eval(fn: () -> T): T = fn()\n\
@@ -24,11 +16,7 @@ if (firstOf(\"X\", \"Y\") != \"X\") return \"f2\"\n\
 if (eval { \"Z\" } != \"Z\") return \"f3\"\n\
 return id(\"OK\")\n\
 }\n";
-    let jdk = std::path::PathBuf::from(format!("{java_home}/lib/modules"));
-    let Some(out) = common::compile_and_run_box(src, "G", &[stdlib], Some(&jdk)) else {
-        return;
-    };
-    assert_eq!(out, "OK");
+    common::assert_box_ok_with_stdlib(src, "G");
 }
 
 /// A property declared as a class type parameter (`class Box<T>(val x: T)`) erases to `Object`, but a
@@ -37,14 +25,6 @@ return id(\"OK\")\n\
 /// Covers a primitive argument (unbox), a reference argument (checkcast), and positional indexing.
 #[test]
 fn generic_property_substitution_runs() {
-    let Some(java_home) = common::java_home() else {
-        eprintln!("skipping generic_property_substitution: set JAVA_HOME");
-        return;
-    };
-    let Some(stdlib) = common::stdlib_jar() else {
-        eprintln!("skipping generic_property_substitution: no kotlin-stdlib jar found");
-        return;
-    };
     let src = "class Box<T>(val x: T)\n\
 class Pair2<A, B>(val a: A, val b: B)\n\
 fun box(): String {\n\
@@ -57,11 +37,7 @@ if (p.a != 7) return \"f3\"\n\
 if (p.b != \"hi\") return \"f4\"\n\
 return \"OK\"\n\
 }\n";
-    let jdk = std::path::PathBuf::from(format!("{java_home}/lib/modules"));
-    let Some(out) = common::compile_and_run_box(src, "G", &[stdlib], Some(&jdk)) else {
-        return;
-    };
-    assert_eq!(out, "OK");
+    common::assert_box_ok_with_stdlib(src, "G");
 }
 
 /// A generic instance method with its OWN type parameter and a function parameter
@@ -72,14 +48,6 @@ return \"OK\"\n\
 /// `R` inferred to both a primitive (`Int`) and a reference (`String`).
 #[test]
 fn generic_hof_method_substitution_runs() {
-    let Some(java_home) = common::java_home() else {
-        eprintln!("skipping generic_hof_method_substitution: set JAVA_HOME");
-        return;
-    };
-    let Some(stdlib) = common::stdlib_jar() else {
-        eprintln!("skipping generic_hof_method_substitution: no kotlin-stdlib jar found");
-        return;
-    };
     let src = "class Box<T>(val v: T) { fun <R> map(f: (T) -> R): R = f(v) }\n\
 fun box(): String {\n\
 val bs: Box<String> = Box(\"hi\")\n\
@@ -92,11 +60,7 @@ val s: String = bi.map { it.toString() }\n\
 if (s != \"21\") return \"f3\"\n\
 return \"OK\"\n\
 }\n";
-    let jdk = std::path::PathBuf::from(format!("{java_home}/lib/modules"));
-    let Some(out) = common::compile_and_run_box(src, "G", &[stdlib], Some(&jdk)) else {
-        return;
-    };
-    assert_eq!(out, "OK");
+    common::assert_box_ok_with_stdlib(src, "G");
 }
 
 /// A NON-inline top-level generic higher-order function (`fun <T, R> transform(x: T, f: (T) -> R): R`)
@@ -106,12 +70,6 @@ return \"OK\"\n\
 /// `checkcast`s the parameter — sound for a reference/class binding.
 #[test]
 fn non_inline_generic_hof_binds_lambda_param() {
-    let Some(java_home) = common::java_home() else {
-        return;
-    };
-    let Some(stdlib) = common::stdlib_jar() else {
-        return;
-    };
     let src = "class Item(val name: String)\n\
 fun <T, R> transform(x: T, f: (T) -> R): R = f(x)\n\
 fun box(): String {\n\
@@ -119,9 +77,5 @@ val r: String = transform(Item(\"k\")) { it.name }\n\
 val n: Int = transform(listOf(1, 2, 3)) { it.size }\n\
 return if (r == \"k\" && n == 3) \"OK\" else \"FAIL: $r/$n\"\n\
 }\n";
-    let jdk = std::path::PathBuf::from(format!("{java_home}/lib/modules"));
-    let Some(out) = common::compile_and_run_box(src, "G", &[stdlib], Some(&jdk)) else {
-        return;
-    };
-    assert_eq!(out, "OK");
+    common::assert_box_ok_with_stdlib(src, "G");
 }
