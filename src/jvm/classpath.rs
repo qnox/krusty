@@ -575,29 +575,6 @@ impl Classpath {
         }
     }
 
-    /// The Kotlin return metadata of member `name` (its JVM or source name) of `arity` LOGICAL value
-    /// parameters on class/interface `internal`, decoded from one class `@Metadata` function record.
-    /// Descriptors erase nullability and read-only vs mutable collection identity; `suspend` members erase
-    /// further through `Continuation<T>`, so keep the member return facts together.
-    pub fn metadata_member_return(
-        &self,
-        internal: &str,
-        name: &str,
-        arity: usize,
-    ) -> Option<MetadataReturn> {
-        self.find(internal)
-            .map(|ci| super::metadata::class_functions(&ci))
-            .into_iter()
-            .flatten()
-            .find(|f| {
-                (f.jvm_name == name || f.kotlin_name == name) && f.value_param_types.len() == arity
-            })
-            .map(|f| MetadataReturn {
-                class: f.ret_class,
-                nullable: f.ret_nullable,
-            })
-    }
-
     /// The SOURCE value-parameter names of the classpath class `internal`'s constructor of `arity`
     /// parameters, from its `@Metadata` — for mapping NAMED constructor arguments onto positions. Prefers
     /// an exact-arity constructor (a class may have several); `None` if none records complete names.
@@ -628,23 +605,32 @@ impl Classpath {
         })
     }
 
-    /// The source-level call shape of class MEMBER `internal.jvm_name/arity`, from the class's own
-    /// `@Metadata` function record. Names and default flags come from the SAME member record, so a
-    /// data-class `copy` or value-class-mangled member cannot drift across separate metadata lookups.
-    pub fn metadata_member_call_sig(
+    /// The source-level call and return facts of class MEMBER `internal.jvm_name/arity`, from the class's
+    /// own `@Metadata` function record. Names, default flags, return classifier, and nullability come
+    /// from the SAME member record, so a data-class `copy`, value-class-mangled member, or `suspend`
+    /// return cannot drift across separate metadata lookups.
+    pub fn metadata_member_call_facts(
         &self,
         internal: &str,
         jvm_name: &str,
         arity: usize,
-    ) -> CallSig {
+    ) -> MetadataCallFacts {
         let Some(ci) = self.find(internal) else {
-            return CallSig::metadata_member(arity, None, Vec::new());
+            return MetadataCallFacts {
+                kept_params: None,
+                call_sig: CallSig::metadata_member(arity, None, Vec::new()),
+                ret: None,
+            };
         };
         let Some(f) = super::metadata::class_functions(&ci)
             .into_iter()
             .find(|f| f.jvm_name == jvm_name && f.value_param_types.len() == arity)
         else {
-            return CallSig::metadata_member(arity, None, Vec::new());
+            return MetadataCallFacts {
+                kept_params: None,
+                call_sig: CallSig::metadata_member(arity, None, Vec::new()),
+                ret: None,
+            };
         };
         let names = if !f.value_param_names.is_empty()
             && f.value_param_names.len() == arity
@@ -661,7 +647,14 @@ impl Classpath {
         } else {
             Vec::new()
         };
-        CallSig::metadata_member(arity, names, defaults)
+        MetadataCallFacts {
+            kept_params: None,
+            call_sig: CallSig::metadata_member(arity, names, defaults),
+            ret: Some(MetadataReturn {
+                class: f.ret_class,
+                nullable: f.ret_nullable,
+            }),
+        }
     }
 
     /// All Kotlin extension-receiver internal names of `fn_name` in `internal` (`plusAssign` →

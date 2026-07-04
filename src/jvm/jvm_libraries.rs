@@ -2068,14 +2068,20 @@ impl SymbolSource for JvmLibraries {
                             } else {
                                 m.descriptor.clone()
                             };
+                            // Member metadata is keyed by the physical JVM name for value-class-param
+                            // mangled members (`copy` → `copy-<hash>`), and by the source/JVM name for
+                            // ordinary members.
+                            let meta_name = m.physical_name.as_deref().unwrap_or(&m.name);
+                            let member_facts =
+                                self.cp
+                                    .metadata_member_call_facts(&cn, meta_name, params.len());
                             // A `suspend` member's return facts are erased twice (to `Object`, then via the
                             // `Continuation<T>` type argument), so recover nullability and exact source
                             // classifier from the same class `@Metadata` member record.
-                            let member_ret_metadata = suspend
-                                .then(|| self.cp.metadata_member_return(&cn, &m.name, params.len()))
-                                .flatten();
+                            let member_ret_metadata =
+                                suspend.then_some(member_facts.ret.as_ref()).flatten();
                             let suspend_ret_nullable =
-                                suspend && member_ret_metadata.as_ref().is_some_and(|m| m.nullable);
+                                suspend && member_ret_metadata.is_some_and(|m| m.nullable);
                             let ret = if suspend {
                                 // A generic `suspend` member returns a type parameter (`byId(): T`) via
                                 // `Continuation<T>`; bind `T` to the receiver's concrete argument
@@ -2091,7 +2097,7 @@ impl SymbolSource for JvmLibraries {
                                 // member's `@Metadata` return classifier — which preserves it — keeping the
                                 // gsig's (already-canonicalized) type arguments, so `.add(…)` on a declared
                                 // `MutableList` return still resolves.
-                                let base = match (base, member_ret_metadata.as_ref()) {
+                                let base = match (base, member_ret_metadata) {
                                     // Override the outer name ONLY when the metadata classifier is the SAME
                                     // JVM collection as the gsig-recovered base — i.e. its read-only/mutable
                                     // sibling (`List`/`MutableList` both erase to `java/util/List`). This
@@ -2149,12 +2155,7 @@ impl SymbolSource for JvmLibraries {
                                 );
                                 recovered.unwrap_or(m.ret)
                             };
-                            // Member call shape from the class's `@Metadata`. A value-class-param-mangled
-                            // member (`copy` → `copy-<hash>`) is keyed by its physical JVM name.
-                            let meta_name = m.physical_name.as_deref().unwrap_or(&m.name);
-                            let call_sig =
-                                self.cp
-                                    .metadata_member_call_sig(&cn, meta_name, params.len());
+                            let call_sig = member_facts.call_sig;
                             // A generic-return builtin member (`Map.get(K): V?`) resolves to the erased
                             // classpath method (`java/util/Map.get` → `Object`), which carries no Kotlin
                             // nullability. Recover the source `V?` from the builtin `@Metadata`. Applied
