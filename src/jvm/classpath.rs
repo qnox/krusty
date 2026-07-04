@@ -568,16 +568,16 @@ impl Classpath {
         )
     }
 
-    /// Whether member `name` (its JVM or source name) of `arity` LOGICAL value parameters on class/
-    /// interface `internal` has a NULLABLE return, per the class's `@Metadata` (`Class.function`, field 9).
-    /// Descriptors erase nullability; a `suspend` member's return is further erased to `Object`, so this is
-    /// the only source of `T?` for such a member. Arity disambiguates overloads of the same name.
-    pub fn metadata_member_return_nullable(
+    /// The Kotlin return metadata of member `name` (its JVM or source name) of `arity` LOGICAL value
+    /// parameters on class/interface `internal`, decoded from one class `@Metadata` function record.
+    /// Descriptors erase nullability and read-only vs mutable collection identity; `suspend` members erase
+    /// further through `Continuation<T>`, so keep the member return facts together.
+    pub fn metadata_member_return(
         &self,
         internal: &str,
         name: &str,
         arity: usize,
-    ) -> bool {
+    ) -> Option<MetadataReturn> {
         self.find(internal)
             .map(|ci| super::metadata::class_functions(&ci))
             .into_iter()
@@ -585,27 +585,10 @@ impl Classpath {
             .find(|f| {
                 (f.jvm_name == name || f.kotlin_name == name) && f.value_param_types.len() == arity
             })
-            .is_some_and(|f| f.ret_nullable)
-    }
-
-    /// The SOURCE return-type CLASSIFIER of the classpath member `internal.name/arity`, from its
-    /// `@Metadata` (`kotlin/collections/List` vs `kotlin/collections/MutableList`, …) — the read-only vs
-    /// mutable distinction the JVM signature erases (both to `java/util/List`). Used to recover the exact
-    /// collection type of a `suspend` member's return; `None` when no such member/return is recorded.
-    pub fn metadata_member_return_class(
-        &self,
-        internal: &str,
-        name: &str,
-        arity: usize,
-    ) -> Option<String> {
-        self.find(internal)
-            .map(|ci| super::metadata::class_functions(&ci))
-            .into_iter()
-            .flatten()
-            .find(|f| {
-                (f.jvm_name == name || f.kotlin_name == name) && f.value_param_types.len() == arity
+            .map(|f| MetadataReturn {
+                class: f.ret_class,
+                nullable: f.ret_nullable,
             })
-            .and_then(|f| f.ret_class)
     }
 
     /// The SOURCE value-parameter names of the classpath class `internal`'s constructor of `arity`
