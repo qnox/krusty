@@ -71,6 +71,22 @@ pub enum CtorDefaultValue {
     Object(String),
 }
 
+impl CtorDefaultValue {
+    fn fills_param_ty(&self, ty: Ty) -> bool {
+        match self {
+            CtorDefaultValue::Int(_) => matches!(ty, Ty::Int | Ty::Byte | Ty::Short | Ty::Char),
+            CtorDefaultValue::Long(_) => ty == Ty::Long,
+            CtorDefaultValue::Double(_) => ty == Ty::Double,
+            CtorDefaultValue::Float(_) => ty == Ty::Float,
+            CtorDefaultValue::Bool(_) => ty == Ty::Boolean,
+            CtorDefaultValue::Char(_) => ty == Ty::Char,
+            CtorDefaultValue::Str(_) => ty == Ty::String,
+            CtorDefaultValue::Null => ty.is_reference(),
+            CtorDefaultValue::Object(_) => false,
+        }
+    }
+}
+
 /// Capture a primary-constructor parameter default in the file-independent [`CtorDefaultValue`] form, or
 /// `None` for an unmodeled default (a non-literal/non-object — kept conservative so behavior matches the
 /// previous literal-only handling). Resolves an object-singleton `Name` (`= EmptyCoroutineContext`) to its
@@ -4202,7 +4218,8 @@ pub fn check_file(file: &File, syms: &mut SymbolTable, diags: &mut DiagSink) -> 
                                 c.field_ty = Some(prop_ty);
                             }
                             c.push_scope();
-                            c.declare(setter.param.as_deref().unwrap_or("value"), prop_ty, true);
+                            let pname = crate::ast::setter_param_or_value(setter.param.as_ref());
+                            c.declare(&pname, prop_ty, true);
                             match body {
                                 FunBody::Expr(g) | FunBody::Block(g) => {
                                     let _ = c.expr(*g);
@@ -10433,30 +10450,12 @@ impl<'a> Checker<'a> {
                         let got = arg_tys.len();
                         let ok_arity = got <= ctor_params.len()
                             && (got..ctor_params.len()).all(|i| {
-                                // Match on the file-independent default value (no cross-file `ExprId`
-                                // deref). A direct call-site fill emits only an exact-type literal (an
-                                // object-singleton default is filled only by the `super(…)` path); keep
-                                // that conservative behavior — `Object` here stays unmodeled (`false`).
-                                match cls.ctor_defaults.get(i).and_then(|o| o.as_ref()) {
-                                    Some(dv) => {
-                                        let pt = ctor_params[i];
-                                        match dv {
-                                            CtorDefaultValue::Int(_) => matches!(
-                                                pt,
-                                                Ty::Int | Ty::Byte | Ty::Short | Ty::Char
-                                            ),
-                                            CtorDefaultValue::Long(_) => pt == Ty::Long,
-                                            CtorDefaultValue::Double(_) => pt == Ty::Double,
-                                            CtorDefaultValue::Float(_) => pt == Ty::Float,
-                                            CtorDefaultValue::Bool(_) => pt == Ty::Boolean,
-                                            CtorDefaultValue::Char(_) => pt == Ty::Char,
-                                            CtorDefaultValue::Str(_) => pt == Ty::String,
-                                            CtorDefaultValue::Null => pt.is_reference(),
-                                            CtorDefaultValue::Object(_) => false,
-                                        }
-                                    }
-                                    None => false,
-                                }
+                                // Match on the file-independent default value; lowering only fills
+                                // directly-emittable defaults.
+                                cls.ctor_defaults
+                                    .get(i)
+                                    .and_then(|o| o.as_ref())
+                                    .is_some_and(|dv| dv.fills_param_ty(ctor_params[i]))
                             });
                         // The arguments don't match the primary — try a secondary constructor. Prefer one
                         // whose parameter TYPES accept the arguments (`A(123)` is the `Int` secondary, not
