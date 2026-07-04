@@ -433,6 +433,69 @@ pub struct CallSig {
     pub vararg: bool,
 }
 
+impl CallSig {
+    pub fn metadata_member(
+        param_count: usize,
+        names: Option<Vec<String>>,
+        defaults: Vec<bool>,
+    ) -> Self {
+        CallSig {
+            required: required_arity(param_count, &defaults),
+            param_names: names.unwrap_or_default(),
+            param_defaults: defaults,
+            ..Default::default()
+        }
+    }
+
+    pub fn metadata_top_level(
+        param_count: usize,
+        names: Option<Vec<String>>,
+        defaults: Vec<bool>,
+        lambda_receivers: Vec<Option<Ty>>,
+        lambda_receiver_params: Vec<bool>,
+        lambda_materialized: Vec<bool>,
+    ) -> Self {
+        CallSig {
+            required: required_arity(param_count, &defaults),
+            param_names: names
+                .filter(|names| names.len() == param_count)
+                .unwrap_or_default(),
+            param_defaults: defaults,
+            lambda_receivers: vec_for_arity(lambda_receivers, param_count),
+            lambda_receiver_params: vec_for_arity(lambda_receiver_params, param_count),
+            lambda_materialized: vec_for_arity(lambda_materialized, param_count),
+            ..Default::default()
+        }
+    }
+
+    pub fn metadata_extension(physical_param_count: usize, names: Option<Vec<String>>) -> Self {
+        names
+            .filter(|names| names.len() + 1 == physical_param_count)
+            .map(|names| CallSig {
+                required: names.len(),
+                param_names: names,
+                ..Default::default()
+            })
+            .unwrap_or_default()
+    }
+}
+
+fn required_arity(param_count: usize, defaults: &[bool]) -> usize {
+    if defaults.is_empty() {
+        param_count
+    } else {
+        defaults.iter().filter(|d| !**d).count()
+    }
+}
+
+fn vec_for_arity<T>(items: Vec<T>, param_count: usize) -> Vec<T> {
+    if items.len() == param_count {
+        items
+    } else {
+        Vec::new()
+    }
+}
+
 #[derive(Clone, Copy, Default)]
 pub struct ReturnInfo {
     pub nullable: bool,

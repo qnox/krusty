@@ -10,8 +10,8 @@ use super::jvm_class_map::{
 use crate::call_resolver::{arg_fits, function_input_types, gsig_to_ty, unify_gsig};
 use crate::jvm::names::{method_descriptor, property_getter_name, type_descriptor};
 use crate::libraries::{
-    CountedLoopInfo, FnFlags, FnKind, FunctionInfo, FunctionSet, GSig, GenericSig, InlineKind,
-    LibConst, LibraryCallable, LibraryConst, LibraryMember, LibrarySeed, LibraryType,
+    CallSig, CountedLoopInfo, FnFlags, FnKind, FunctionInfo, FunctionSet, GSig, GenericSig,
+    InlineKind, LibConst, LibraryCallable, LibraryConst, LibraryMember, LibrarySeed, LibraryType,
     PlatformAccessor, PlatformCtor, PlatformField, PlatformRangeCtor, RangeConstruction,
     ReturnInfo, RuntimeCtor, RuntimeOp,
 };
@@ -935,22 +935,6 @@ fn suspend_metadata_return(info: ReturnInfo, physical_ret: Ty) -> Ty {
     }
 }
 
-fn required_arity(params_len: usize, defaults: &[bool]) -> usize {
-    if defaults.is_empty() {
-        params_len
-    } else {
-        defaults.iter().filter(|d| !**d).count()
-    }
-}
-
-fn metadata_vec_for_params<T>(items: Vec<T>, params_len: usize) -> Vec<T> {
-    if items.len() == params_len {
-        items
-    } else {
-        Vec::new()
-    }
-}
-
 /// Parse a class generic signature into its formal type-parameter names and its supertypes (the
 /// superclass followed by interfaces) as signature nodes, e.g. `java/util/List`'s
 /// `<E:Ljava/lang/Object;>Ljava/lang/Object;Ljava/util/Collection<TE;>;` → (`[E]`, `[Object,
@@ -1783,22 +1767,10 @@ impl SymbolSource for JvmLibraries {
                         },
                         _ => ret,
                     };
-                    // Source value-parameter NAMES (from `@Metadata`) for named-argument resolution. An
-                    // extension's `callable.params` PREPENDS the receiver, but `CallSig.param_names` is the
-                    // LOGICAL list (receiver excluded) — `metadata_param_names` returns exactly that (it
-                    // aligns past the receiver via the metadata `has_recv` offset), so the names are
-                    // `c.params.len() - 1` long. Defaults aren't recovered (named call supplies all).
-                    let call_sig = match self.cp.metadata_param_names(&c.owner, meta_name, &params)
-                    {
-                        Some(names) if names.len() + 1 == params.len() => {
-                            crate::libraries::CallSig {
-                                required: names.len(),
-                                param_names: names,
-                                ..Default::default()
-                            }
-                        }
-                        _ => crate::libraries::CallSig::default(),
-                    };
+                    let call_sig = CallSig::metadata_extension(
+                        params.len(),
+                        self.cp.metadata_param_names(&c.owner, meta_name, &params),
+                    );
                     let inline_kind = InlineKind::from_flags(inline, inline && !c.public);
                     let callable = LibraryCallable {
                         inline: inline_kind,
@@ -2204,20 +2176,12 @@ impl SymbolSource for JvmLibraries {
                                 .cp
                                 .metadata_member_param_defaults(&cn, meta_name, params.len())
                                 .unwrap_or_default();
-                            let required = required_arity(params.len(), &param_defaults);
-                            let call_sig = match self.cp.metadata_member_param_names(
-                                &cn,
-                                meta_name,
+                            let call_sig = CallSig::metadata_member(
                                 params.len(),
-                            ) {
-                                Some(names) => crate::libraries::CallSig {
-                                    required,
-                                    param_names: names,
-                                    param_defaults,
-                                    ..Default::default()
-                                },
-                                _ => crate::libraries::CallSig::default(),
-                            };
+                                self.cp
+                                    .metadata_member_param_names(&cn, meta_name, params.len()),
+                                param_defaults,
+                            );
                             // A generic-return builtin member (`Map.get(K): V?`) resolves to the erased
                             // classpath method (`java/util/Map.get` → `Object`), which carries no Kotlin
                             // nullability. Recover the source `V?` from the builtin `@Metadata`. Applied
@@ -2312,50 +2276,22 @@ impl SymbolSource for JvmLibraries {
                 let inline = self
                     .cp
                     .is_inline_callable(&c.owner, meta_name, &inline_desc, &params);
-                // Source value-parameter NAMES (from `@Metadata`) for named-argument resolution, and the
-                // REQUIRED arity (non-defaulted param count) so a call may OMIT trailing defaulted args.
-                // A top-level function has no receiver, so the logical params equal the (truncated) source
-                // params — only wire names when the count aligns.
                 let param_defaults = self
                     .cp
                     .metadata_param_defaults(&c.owner, meta_name, &params)
                     .unwrap_or_default();
-                let required = required_arity(params.len(), &param_defaults);
-                let lambda_receivers = metadata_vec_for_params(
+                let call_sig = CallSig::metadata_top_level(
+                    params.len(),
+                    self.cp.metadata_param_names(&c.owner, meta_name, &params),
+                    param_defaults,
                     self.cp
                         .metadata_param_recv_funs(&c.owner, meta_name)
                         .into_iter()
                         .map(|o| o.map(|internal| Ty::obj(&internal)))
                         .collect(),
-                    params.len(),
-                );
-                let lambda_receiver_params = metadata_vec_for_params(
                     self.cp.metadata_param_recv_fun_flags(&c.owner, meta_name),
-                    params.len(),
-                );
-                let lambda_materialized = metadata_vec_for_params(
                     self.cp.metadata_param_materialized(&c.owner, meta_name),
-                    params.len(),
                 );
-                let call_sig = match self.cp.metadata_param_names(&c.owner, meta_name, &params) {
-                    Some(names) if names.len() == params.len() => crate::libraries::CallSig {
-                        required,
-                        param_names: names,
-                        param_defaults,
-                        lambda_receivers,
-                        lambda_receiver_params,
-                        lambda_materialized,
-                        ..Default::default()
-                    },
-                    _ => crate::libraries::CallSig {
-                        required,
-                        param_defaults,
-                        lambda_receivers,
-                        lambda_receiver_params,
-                        lambda_materialized,
-                        ..Default::default()
-                    },
-                };
                 let ret_metadata =
                     classpath_return_info(self.cp.metadata_return(&c.owner, meta_name).as_ref());
                 let ret = if suspend {
