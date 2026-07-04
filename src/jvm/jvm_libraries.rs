@@ -2083,15 +2083,14 @@ impl SymbolSource for JvmLibraries {
                             } else {
                                 m.descriptor.clone()
                             };
-                            // A `suspend` member's `T?` return is erased twice (to `Object`, then via the
-                            // `Continuation<T>` type argument which drops nullability), so recover it from
-                            // the class `@Metadata` — the only place a member's return nullability survives.
-                            let suspend_ret_nullable = suspend
-                                && self.cp.metadata_member_return_nullable(
-                                    &cn,
-                                    &m.name,
-                                    params.len(),
-                                );
+                            // A `suspend` member's return facts are erased twice (to `Object`, then via the
+                            // `Continuation<T>` type argument), so recover nullability and exact source
+                            // classifier from the same class `@Metadata` member record.
+                            let member_ret_metadata = suspend
+                                .then(|| self.cp.metadata_member_return(&cn, &m.name, params.len()))
+                                .flatten();
+                            let suspend_ret_nullable =
+                                suspend && member_ret_metadata.as_ref().is_some_and(|m| m.nullable);
                             let ret = if suspend {
                                 // A generic `suspend` member returns a type parameter (`byId(): T`) via
                                 // `Continuation<T>`; bind `T` to the receiver's concrete argument
@@ -2107,29 +2106,29 @@ impl SymbolSource for JvmLibraries {
                                 // member's `@Metadata` return classifier — which preserves it — keeping the
                                 // gsig's (already-canonicalized) type arguments, so `.add(…)` on a declared
                                 // `MutableList` return still resolves.
-                                let base = match (
-                                    base,
-                                    self.cp.metadata_member_return_class(
-                                        &cn,
-                                        &m.name,
-                                        params.len(),
-                                    ),
-                                ) {
+                                let base = match (base, member_ret_metadata.as_ref()) {
                                     // Override the outer name ONLY when the metadata classifier is the SAME
                                     // JVM collection as the gsig-recovered base — i.e. its read-only/mutable
                                     // sibling (`List`/`MutableList` both erase to `java/util/List`). This
                                     // guarantees the same collection family and arity, so keeping the gsig's
                                     // type arguments is sound; a divergent classifier (stale metadata) is
                                     // ignored rather than forming an arity-mismatched type.
-                                    (Ty::Obj(base_name, args), Some(meta_cls))
-                                        if meta_cls.starts_with("kotlin/collections/")
-                                            && super::jvm_class_map::to_jvm_internal(&meta_cls)
-                                                == super::jvm_class_map::to_jvm_internal(
+                                    (Ty::Obj(base_name, args), Some(meta)) => match meta
+                                        .class
+                                        .as_deref()
+                                    {
+                                        Some(meta_cls)
+                                            if meta_cls.starts_with("kotlin/collections/")
+                                                && super::jvm_class_map::to_jvm_internal(
+                                                    meta_cls,
+                                                ) == super::jvm_class_map::to_jvm_internal(
                                                     base_name,
                                                 ) =>
-                                    {
-                                        Ty::obj_args(&meta_cls, args)
-                                    }
+                                        {
+                                            Ty::obj_args(meta_cls, args)
+                                        }
+                                        _ => Ty::obj_args(base_name, args),
+                                    },
                                     (b, _) => b,
                                 };
                                 crate::trace_compiler!(
