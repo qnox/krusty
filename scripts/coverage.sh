@@ -37,6 +37,11 @@ fi
 is_excluded() { local n="$1" e; for e in "${EXCLUDE[@]}"; do [ "$n" = "$e" ] && return 0; done; return 1; }
 
 echo "coverage: instrumenting (nightly, branch), building test binaries…" >&2
+if ! cargo +nightly llvm-cov --version >/dev/null 2>&1; then
+  echo "coverage: cargo-llvm-cov is required; install with \`cargo install cargo-llvm-cov --locked\`" >&2
+  echo "coverage: nightly llvm-tools are also required: \`rustup component add llvm-tools-preview --toolchain nightly\`" >&2
+  exit 2
+fi
 # Instrument the whole build (source-based coverage) for the rest of this script's cargo invocations.
 source <(cargo +nightly llvm-cov show-env --sh --branch 2>/dev/null)
 mkdir -p target/coverage
