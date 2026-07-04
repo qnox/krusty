@@ -280,33 +280,6 @@ pub(super) fn metadata_return_info(class: Option<&str>, nullable: bool) -> Retur
     ReturnInfo::new(nullable, class.map(kotlin_name_to_ty))
 }
 
-fn metadata_param_names_of(c: &MetaCallable) -> Option<Vec<String>> {
-    (!c.value_param_names.is_empty() && !c.value_param_names.iter().any(String::is_empty))
-        .then(|| c.value_param_names.clone())
-}
-
-fn metadata_defaults_of(c: &MetaCallable) -> Vec<bool> {
-    if c.value_param_has_default.iter().any(|d| *d) {
-        c.value_param_has_default.clone()
-    } else {
-        Vec::new()
-    }
-}
-
-fn metadata_top_level_call_sig(param_count: usize, c: &MetaCallable) -> CallSig {
-    CallSig::metadata_top_level(
-        param_count,
-        metadata_param_names_of(c),
-        metadata_defaults_of(c),
-        c.value_param_recv_funs
-            .iter()
-            .map(|o| o.as_deref().map(Ty::obj))
-            .collect(),
-        c.value_param_recv_fun_flags.clone(),
-        c.value_param_materialized.clone(),
-    )
-}
-
 /// Per-class `@Metadata` cache: class internal name → Kotlin function names that participate in
 /// `@OverloadResolutionByLambdaReturnType` (`sumOf`, …). The resolver derives and verifies the concrete
 /// JVM method (`sumOfInt`/`sumOfLong`/…) from the lambda return type, so the cache only needs membership.
@@ -534,9 +507,19 @@ impl Classpath {
         MetadataCallFacts {
             kept_params: Some(end),
             call_sig: if extension {
-                CallSig::metadata_extension(end, metadata_param_names_of(c))
+                CallSig::metadata_extension(end, Some(c.value_param_names.clone()))
             } else {
-                metadata_top_level_call_sig(end, c)
+                CallSig::metadata_top_level(
+                    end,
+                    Some(c.value_param_names.clone()),
+                    c.value_param_has_default.clone(),
+                    c.value_param_recv_funs
+                        .iter()
+                        .map(|o| o.as_deref().map(Ty::obj))
+                        .collect(),
+                    c.value_param_recv_fun_flags.clone(),
+                    c.value_param_materialized.clone(),
+                )
             },
             ret: c.ret,
         }
@@ -585,24 +568,13 @@ impl Classpath {
                 ret: ReturnInfo::default(),
             };
         };
-        let names = if !f.value_param_names.is_empty()
-            && f.value_param_names.len() == arity
-            && !f.value_param_names.iter().any(String::is_empty)
-        {
-            Some(f.value_param_names)
-        } else {
-            None
-        };
-        let defaults = if f.value_param_has_default.len() == arity
-            && f.value_param_has_default.iter().any(|d| *d)
-        {
-            f.value_param_has_default
-        } else {
-            Vec::new()
-        };
         MetadataCallFacts {
             kept_params: None,
-            call_sig: CallSig::metadata_member(arity, names, defaults),
+            call_sig: CallSig::metadata_member(
+                arity,
+                Some(f.value_param_names),
+                f.value_param_has_default,
+            ),
             ret: metadata_return_info(f.ret_class.as_deref(), f.ret_nullable),
         }
     }

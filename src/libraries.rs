@@ -470,9 +470,10 @@ impl CallSig {
         names: Option<Vec<String>>,
         defaults: Vec<bool>,
     ) -> Self {
+        let defaults = metadata_defaults(defaults, param_count);
         CallSig {
             required: required_arity(param_count, &defaults),
-            param_names: names.unwrap_or_default(),
+            param_names: metadata_names(names, param_count),
             param_defaults: defaults,
             ..Default::default()
         }
@@ -486,11 +487,10 @@ impl CallSig {
         lambda_receiver_params: Vec<bool>,
         lambda_materialized: Vec<bool>,
     ) -> Self {
+        let defaults = metadata_defaults(defaults, param_count);
         CallSig {
             required: required_arity(param_count, &defaults),
-            param_names: names
-                .filter(|names| names.len() == param_count)
-                .unwrap_or_default(),
+            param_names: metadata_names(names, param_count),
             param_defaults: defaults,
             lambda_receivers: vec_for_arity(lambda_receivers, param_count),
             lambda_receiver_params: vec_for_arity(lambda_receiver_params, param_count),
@@ -500,14 +500,32 @@ impl CallSig {
     }
 
     pub fn metadata_extension(physical_param_count: usize, names: Option<Vec<String>>) -> Self {
-        names
-            .filter(|names| names.len() + 1 == physical_param_count)
-            .map(|names| CallSig {
-                required: names.len(),
-                param_names: names,
-                ..Default::default()
+        physical_param_count
+            .checked_sub(1)
+            .map(|param_count| {
+                let names = metadata_names(names, param_count);
+                CallSig {
+                    required: names.len(),
+                    param_names: names,
+                    ..Default::default()
+                }
             })
             .unwrap_or_default()
+    }
+}
+
+fn metadata_names(names: Option<Vec<String>>, param_count: usize) -> Vec<String> {
+    names
+        .filter(|names| names.len() == param_count && !names.iter().any(String::is_empty))
+        .unwrap_or_default()
+}
+
+fn metadata_defaults(defaults: Vec<bool>, param_count: usize) -> Vec<bool> {
+    let defaults = vec_for_arity(defaults, param_count);
+    if defaults.iter().any(|d| *d) {
+        defaults
+    } else {
+        Vec::new()
     }
 }
 
