@@ -483,19 +483,24 @@ impl Ty {
 
     /// True for Kotlin scalar values that the JVM backend carries in primitive slots.
     pub fn is_jvm_scalar(self) -> bool {
-        matches!(
-            self,
+        self.scalar_value_repr().is_some()
+    }
+
+    /// The primitive representation used for built-in scalar values.
+    pub fn scalar_value_repr(self) -> Option<Ty> {
+        Some(match self {
             Ty::Int
-                | Ty::Byte
-                | Ty::Short
-                | Ty::Long
-                | Ty::Float
-                | Ty::Double
-                | Ty::Boolean
-                | Ty::Char
-                | Ty::UInt
-                | Ty::ULong
-        )
+            | Ty::Byte
+            | Ty::Short
+            | Ty::Long
+            | Ty::Float
+            | Ty::Double
+            | Ty::Boolean
+            | Ty::Char => self,
+            Ty::UInt => Ty::Int,
+            Ty::ULong => Ty::Long,
+            _ => return None,
+        })
     }
 
     /// A primitive whose generic upper bound (`fun <T: Int>`) krusty specializes a FUNCTION type
