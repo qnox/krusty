@@ -627,6 +627,22 @@ pub fn assert_box_ok_with_stdlib(src: &str, stem: &str) {
     }
 }
 
+/// Like [`assert_box_ok_with_stdlib`], but treats a compile/run `None` as a regression once
+/// stdlib + JDK modules are provisioned.
+#[allow(dead_code)]
+pub fn expect_box_ok_with_stdlib(src: &str, stem: &str) {
+    let Some(stdlib) = stdlib_jar() else {
+        return;
+    };
+    let Some(jdk) = jdk_modules() else {
+        return;
+    };
+    let Some(out) = compile_and_run_box(src, stem, &[stdlib], Some(&jdk)) else {
+        panic!("{stem}: compile/run returned None");
+    };
+    assert_eq!(out, "OK", "{stem}");
+}
+
 /// Compile Kotlin `lib_src` with the REAL kotlinc into a fresh classpath dir (tagged by `tag` +
 /// process id), returning the output dir for a `-classpath`. `None` (→ skip the test) when the kotlinc
 /// toolchain / stdlib isn't provisioned. The single shared "build a dependency jar" helper — classpath
