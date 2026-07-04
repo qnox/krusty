@@ -5,24 +5,10 @@
 
 mod common;
 
-use std::path::PathBuf;
-
 /// Compile `src` (which must define `fun box(): String`) and assert it returns "OK".
 /// Skips silently (returns) when the JVM/stdlib toolchain isn't provisioned.
 fn run_ok(src: &str, stem: &str) {
-    let Some(java_home) = common::java_home() else {
-        eprintln!("skipping feature_coverage_e_e2e::{stem}: set JAVA_HOME");
-        return;
-    };
-    let Some(stdlib) = common::stdlib_jar() else {
-        eprintln!("skipping feature_coverage_e_e2e::{stem}: no kotlin-stdlib jar found");
-        return;
-    };
-    let jdk = PathBuf::from(format!("{java_home}/lib/modules"));
-    let Some(out) = common::compile_and_run_box(src, stem, &[stdlib], Some(&jdk)) else {
-        return;
-    };
-    assert_eq!(out, "OK");
+    common::assert_box_ok_with_stdlib(src, stem);
 }
 
 #[test]
