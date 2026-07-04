@@ -1106,8 +1106,9 @@ impl<'a> CallResolver<'a> {
 // The inherited-member walk over a library type's hierarchy — arg-dependent binding, so it lives in
 // this layer (not the oracle). `resolve` and `ir_lower` share one implementation, backend-agnostic.
 
-fn descriptor_args(lib: &dyn SymbolSource, args: &[Ty]) -> Vec<Ty> {
-    args.iter().map(|a| lib.jvm_descriptor_form(*a)).collect()
+fn descriptor_form_args(lib: &dyn SymbolSource, args: &[Ty]) -> Option<Vec<Ty>> {
+    let out: Vec<Ty> = args.iter().map(|a| lib.jvm_descriptor_form(*a)).collect();
+    (out.as_slice() != args).then_some(out)
 }
 
 fn params_match_descriptor_form(lib: &dyn SymbolSource, params: &[Ty], args: &[Ty]) -> bool {
@@ -1205,12 +1206,12 @@ pub fn resolve_constructor(
     // Descriptor-form matching bridges Kotlin collection identity and drops type arguments without
     // hardcoding collection relationships. Exact descriptor identity runs before subtype widening so the
     // most-specific overload still wins.
-    let jvm_args = descriptor_args(lib, args);
-    if jvm_args.as_slice() != args {
+    let jvm_args = descriptor_form_args(lib, args);
+    if let Some(jvm_args) = &jvm_args {
         if let Some(m) = t
             .constructors
             .iter()
-            .find(|m| params_match_descriptor_form(lib, &m.params, &jvm_args))
+            .find(|m| params_match_descriptor_form(lib, &m.params, jvm_args))
         {
             crate::trace_compiler!(
                 "value_classes",
@@ -1224,11 +1225,9 @@ pub fn resolve_constructor(
         .iter()
         .find(|m| params_match_descriptor_subtype(lib, &m.params, args))
     {
-        let mode = if jvm_args.as_slice() != args {
-            "jvm-subtype"
-        } else {
-            "nominal-subtype"
-        };
+        let mode = jvm_args
+            .as_ref()
+            .map_or("nominal-subtype", |_| "jvm-subtype");
         crate::trace_compiler!(
             "value_classes",
             "resolve_constructor {internal} matched via {mode} args {args:?}"
@@ -1596,8 +1595,7 @@ fn select_instance_info(
     }
     // Descriptor-form pass, shared with constructor resolution: bridge Kotlin collection identity and
     // erase type arguments after exact, widened, and source-level subtype matching have failed.
-    let jvm_args = descriptor_args(lib, args);
-    if jvm_args.as_slice() != args {
+    if let Some(jvm_args) = descriptor_form_args(lib, args) {
         for members in by_rank.values() {
             if let Some(o) = members
                 .iter()
