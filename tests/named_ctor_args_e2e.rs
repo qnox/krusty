@@ -8,13 +8,9 @@ fn run(src: &str) -> Option<String> {
     common::compile_and_run_with_stdlib(src, "P")
 }
 
-fn toolchain_ready() -> bool {
-    common::java_home().is_some() && common::stdlib_jar().is_some()
-}
-
 #[test]
 fn named_constructor_args_map_and_fill_defaults() {
-    if !toolchain_ready() {
+    if !common::stdlib_toolchain_ready() {
         return;
     }
     const SRC: &str = "// WITH_STDLIB\n\
@@ -34,7 +30,7 @@ fun box(): String {\n\
 
 #[test]
 fn named_ctor_call_targets_primary_not_a_colliding_secondary() {
-    if !toolchain_ready() {
+    if !common::stdlib_toolchain_ready() {
         return;
     }
     // A named call (`C(b = 9)`) references the PRIMARY ctor's parameter names — it must NOT be routed

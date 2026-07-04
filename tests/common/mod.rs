@@ -228,6 +228,11 @@ pub fn directive(src: &str, name: &str) -> bool {
     krusty::conformance::directive(src, name)
 }
 
+#[allow(dead_code)]
+pub fn stdlib_toolchain_ready() -> bool {
+    stdlib_jar().is_some() && jdk_modules().is_some()
+}
+
 // ---------------------------------------------------------------------------
 // Persistent JVM box-runner.
 //

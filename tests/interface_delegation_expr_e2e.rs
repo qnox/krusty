@@ -8,13 +8,9 @@ fn run(src: &str) -> Option<String> {
     common::compile_and_run_with_stdlib(src, "P")
 }
 
-fn toolchain_ready() -> bool {
-    common::java_home().is_some() && common::stdlib_jar().is_some()
-}
-
 #[test]
 fn delegate_to_constructor_call_expression() {
-    if !toolchain_ready() {
+    if !common::stdlib_toolchain_ready() {
         return;
     }
     const SRC: &str = "// WITH_STDLIB\n\
@@ -30,7 +26,7 @@ fun box(): String = D().greet()\n";
 
 #[test]
 fn delegate_expression_referencing_constructor_param() {
-    if !toolchain_ready() {
+    if !common::stdlib_toolchain_ready() {
         return;
     }
     // The delegate expression is evaluated in the constructor, so it may reference a ctor parameter.
@@ -48,7 +44,7 @@ fun box(): String = D(\"OK\").greet()\n";
 
 #[test]
 fn delegate_expression_with_class_body() {
-    if !toolchain_ready() {
+    if !common::stdlib_toolchain_ready() {
         return;
     }
     // The `{ … }` after `by Impl()` is the CLASS BODY, not a trailing lambda on the delegate call.
