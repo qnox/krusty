@@ -106,6 +106,28 @@ fn char_arithmetic_and_compare() {
 }
 
 #[test]
+fn captured_narrow_incdec_expression() {
+    let src = "fun box(): String {\n\
+        var b: Byte = 127.toByte()\n\
+        fun postB(): Byte = b++\n\
+        if (postB() != 127.toByte()) return \"b-post\"\n\
+        if (b != (-128).toByte()) return \"b-wrap\"\n\
+        fun preB(): Byte = ++b\n\
+        if (preB() != (-127).toByte()) return \"b-pre\"\n\
+        var s: Short = 32767.toShort()\n\
+        fun postS(): Short = s++\n\
+        if (postS() != 32767.toShort()) return \"s-post\"\n\
+        if (s != (-32768).toShort()) return \"s-wrap\"\n\
+        var c: Char = 'A'\n\
+        fun postC(): Char = c++\n\
+        if (postC() != 'A') return \"c-post\"\n\
+        if (c != 'B') return \"c-next\"\n\
+        return \"OK\"\n\
+    }\n";
+    run(src, "CapturedNarrowIncDec");
+}
+
+#[test]
 fn string_escapes() {
     let src = "fun box(): String {\n\
         if (\"\\n\".length != 1) return \"nl\"\n\

@@ -3849,6 +3849,29 @@ impl<'a> Lower<'a> {
         })
     }
 
+    fn implicit_coercion(&mut self, arg: u32, ty: Ty) -> u32 {
+        self.ir.add_expr(IrExpr::TypeOp {
+            op: IrTypeOp::ImplicitCoercion,
+            arg,
+            type_operand: ty_to_ir(ty),
+        })
+    }
+
+    fn scalar_update_value(&mut self, current: u32, ty: Ty, op: IrBinOp, one: IrConst) -> u32 {
+        let lhs = if ty.narrows_int_update() {
+            self.implicit_coercion(current, Ty::Int)
+        } else {
+            current
+        };
+        let rhs = self.ir.add_expr(IrExpr::Const(one));
+        let sum = self.ir.add_expr(IrExpr::PrimitiveBinOp { op, lhs, rhs });
+        if ty.narrows_int_update() {
+            self.implicit_coercion(sum, ty)
+        } else {
+            sum
+        }
+    }
+
     /// The class-constant name for an UNBOUND class literal `T::class` (`ldc <name>.class`): the JVM
     /// internal of a reference type (`kotlin/String` → `java/lang/String`), or the array descriptor used
     /// verbatim as a class constant (`Array<Any>::class` → `[Ljava/lang/Object;`).
@@ -11785,21 +11808,7 @@ impl<'a> Lower<'a> {
                         holder: hv,
                         elem: ty_to_ir(elem),
                     });
-                    let one = self.ir.add_expr(IrExpr::Const(one));
-                    let sum = self.ir.add_expr(IrExpr::PrimitiveBinOp {
-                        op,
-                        lhs: cur,
-                        rhs: one,
-                    });
-                    let nv = if matches!(elem, Ty::Byte | Ty::Short | Ty::Char) {
-                        self.ir.add_expr(IrExpr::TypeOp {
-                            op: IrTypeOp::ImplicitCoercion,
-                            arg: sum,
-                            type_operand: ty_to_ir(elem),
-                        })
-                    } else {
-                        sum
-                    };
+                    let nv = self.scalar_update_value(cur, elem, op, one);
                     let hv2 = self.ir.add_expr(IrExpr::GetValue(holder));
                     return Some(self.ir.add_expr(IrExpr::RefSet {
                         holder: hv2,
@@ -11853,30 +11862,7 @@ impl<'a> Lower<'a> {
                             args: vec![],
                         })
                     };
-                    let one = self.ir.add_expr(IrExpr::Const(one_c));
-                    let nv = if matches!(fty, Ty::Byte | Ty::Short | Ty::Char) {
-                        let cur_i = self.ir.add_expr(IrExpr::TypeOp {
-                            op: IrTypeOp::ImplicitCoercion,
-                            arg: cur_val,
-                            type_operand: ty_to_ir(Ty::Int),
-                        });
-                        let sum = self.ir.add_expr(IrExpr::PrimitiveBinOp {
-                            op,
-                            lhs: cur_i,
-                            rhs: one,
-                        });
-                        self.ir.add_expr(IrExpr::TypeOp {
-                            op: IrTypeOp::ImplicitCoercion,
-                            arg: sum,
-                            type_operand: ty_to_ir(fty),
-                        })
-                    } else {
-                        self.ir.add_expr(IrExpr::PrimitiveBinOp {
-                            op,
-                            lhs: cur_val,
-                            rhs: one,
-                        })
-                    };
+                    let nv = self.scalar_update_value(cur_val, fty, op, one_c);
                     let recv2 = self.ir.add_expr(IrExpr::GetValue(this_v));
                     return Some(if let Some((class, idx)) = own {
                         self.ir.add_expr(IrExpr::SetField {
@@ -11899,35 +11885,8 @@ impl<'a> Lower<'a> {
                 let (v, ty) = self.lookup(&name)?;
                 let one = self.scalar_one_const(ty)?;
                 let op = if dec { IrBinOp::Sub } else { IrBinOp::Add };
-                let one = self.ir.add_expr(IrExpr::Const(one));
-                let nv = if matches!(ty, Ty::Byte | Ty::Short | Ty::Char) {
-                    // `Byte`/`Short`/`Char` arithmetic widens to `Int`, then narrows back so the value
-                    // wraps in its own width (`Byte.MAX_VALUE++` = `Byte.MIN_VALUE`, not 128). The widen
-                    // forces an `Int`-typed result so the final narrow actually emits `i2b`/`i2s`/`i2c`.
-                    let cur = self.ir.add_expr(IrExpr::GetValue(v));
-                    let cur_i = self.ir.add_expr(IrExpr::TypeOp {
-                        op: IrTypeOp::ImplicitCoercion,
-                        arg: cur,
-                        type_operand: ty_to_ir(Ty::Int),
-                    });
-                    let sum = self.ir.add_expr(IrExpr::PrimitiveBinOp {
-                        op,
-                        lhs: cur_i,
-                        rhs: one,
-                    });
-                    self.ir.add_expr(IrExpr::TypeOp {
-                        op: IrTypeOp::ImplicitCoercion,
-                        arg: sum,
-                        type_operand: ty_to_ir(ty),
-                    })
-                } else {
-                    let cur = self.ir.add_expr(IrExpr::GetValue(v));
-                    self.ir.add_expr(IrExpr::PrimitiveBinOp {
-                        op,
-                        lhs: cur,
-                        rhs: one,
-                    })
-                };
+                let cur = self.ir.add_expr(IrExpr::GetValue(v));
+                let nv = self.scalar_update_value(cur, ty, op, one);
                 Some(self.ir.add_expr(IrExpr::SetValue { var: v, value: nv }))
             }
             // `receiver.field = value` → `IrSetField` (var property of a class in this IR).
@@ -15613,12 +15572,7 @@ impl<'a> Lower<'a> {
                     return None;
                 };
                 // A boxed mutable-capture local: `var++`/`++var` as a value, through its `Ref` holder.
-                // (A `Byte`/`Short`/`Char` boxed inc-as-expression is rare — skip it rather than model
-                // the narrowing here.)
                 if let Some(elem) = self.boxed_elem.get(&name).cloned() {
-                    if matches!(elem, Ty::Byte | Ty::Short | Ty::Char) {
-                        return None;
-                    }
                     let one_c = self.scalar_one_const(elem)?;
                     let (holder, _) = self.lookup(&name)?;
                     let elem_ir = ty_to_ir(elem);
@@ -15629,12 +15583,7 @@ impl<'a> Lower<'a> {
                         holder: h1,
                         elem: elem_ir.clone(),
                     });
-                    let one1 = self.ir.add_expr(IrExpr::Const(one_c.clone()));
-                    let nv = self.ir.add_expr(IrExpr::PrimitiveBinOp {
-                        op,
-                        lhs: cur,
-                        rhs: one1,
-                    });
+                    let nv = self.scalar_update_value(cur, elem, op, one_c.clone());
                     let h2 = self.ir.add_expr(IrExpr::GetValue(holder));
                     let set = self.ir.add_expr(IrExpr::RefSet {
                         holder: h2,
@@ -15649,12 +15598,7 @@ impl<'a> Lower<'a> {
                     let value = if prefix {
                         read
                     } else {
-                        let one2 = self.ir.add_expr(IrExpr::Const(one_c));
-                        self.ir.add_expr(IrExpr::PrimitiveBinOp {
-                            op: undo,
-                            lhs: read,
-                            rhs: one2,
-                        })
+                        self.scalar_update_value(read, elem, undo, one_c)
                     };
                     return Some(self.ir.add_expr(IrExpr::Block {
                         stmts: vec![set],
@@ -15663,34 +15607,13 @@ impl<'a> Lower<'a> {
                 }
                 let (v, ty) = self.lookup(&name)?;
                 let op = if dec { IrBinOp::Sub } else { IrBinOp::Add };
-                if matches!(ty, Ty::Byte | Ty::Short | Ty::Char) {
+                if ty.narrows_int_update() {
                     // `Byte`/`Short`/`Char` narrow on update (wrap in their own width). No temp slot (a
                     // `Variable` inside an operand `Block` trips the verifier in a template/argument
                     // position): the postfix value is `narrow(new ∓ 1)`, which wraps back to the old value
                     // even at the boundary (`Byte` 127++: new = narrow(128) = -128; narrow(-128 - 1) = 127).
-                    let narrow = |this: &mut Self, val: u32| {
-                        this.ir.add_expr(IrExpr::TypeOp {
-                            op: IrTypeOp::ImplicitCoercion,
-                            arg: val,
-                            type_operand: ty_to_ir(ty),
-                        })
-                    };
-                    let widen = |this: &mut Self, val: u32| {
-                        this.ir.add_expr(IrExpr::TypeOp {
-                            op: IrTypeOp::ImplicitCoercion,
-                            arg: val,
-                            type_operand: ty_to_ir(Ty::Int),
-                        })
-                    };
                     let cur = self.ir.add_expr(IrExpr::GetValue(v));
-                    let cur_i = widen(self, cur);
-                    let one = self.ir.add_expr(IrExpr::Const(IrConst::Int(1)));
-                    let sum = self.ir.add_expr(IrExpr::PrimitiveBinOp {
-                        op,
-                        lhs: cur_i,
-                        rhs: one,
-                    });
-                    let narrowed = narrow(self, sum);
+                    let narrowed = self.scalar_update_value(cur, ty, op, IrConst::Int(1));
                     let set = self.ir.add_expr(IrExpr::SetValue {
                         var: v,
                         value: narrowed,
@@ -15699,15 +15622,8 @@ impl<'a> Lower<'a> {
                         self.ir.add_expr(IrExpr::GetValue(v))
                     } else {
                         let read = self.ir.add_expr(IrExpr::GetValue(v));
-                        let read_i = widen(self, read);
-                        let one2 = self.ir.add_expr(IrExpr::Const(IrConst::Int(1)));
                         let undo = if dec { IrBinOp::Add } else { IrBinOp::Sub };
-                        let back = self.ir.add_expr(IrExpr::PrimitiveBinOp {
-                            op: undo,
-                            lhs: read_i,
-                            rhs: one2,
-                        });
-                        narrow(self, back)
+                        self.scalar_update_value(read, ty, undo, IrConst::Int(1))
                     };
                     return Some(self.ir.add_expr(IrExpr::Block {
                         stmts: vec![set],
