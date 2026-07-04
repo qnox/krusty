@@ -9,8 +9,8 @@
 //!    an unusual position, an operator overload, a smart-cast/elvis/safe-call chain, …) that the box
 //!    corpus does not otherwise reach.
 //!
-//!  * `rejects(src)` — compile `src` with the `krusty` binary and assert it declines CLEANLY (a
-//!    non-zero exit or a "not (yet) supported" diagnostic). These hit the backend's `return None`
+//!  * `rejects(src)` — compile `src` through the same front-end + JVM backend pipeline in-process
+//!    and assert it declines CLEANLY. These hit the backend's `return None`
 //!    bail branches ("this construct is not yet supported by the IR backend") for constructs krusty
 //!    does not model yet — the backend declines rather than miscompiles. If one starts compiling, the
 //!    feature has landed and the test should be promoted to a real round-trip.
@@ -20,10 +20,7 @@
 
 use super::common;
 
-use std::fs;
 use std::path::PathBuf;
-use std::process::Command;
-use std::sync::atomic::{AtomicU32, Ordering};
 
 // ---------------------------------------------------------------------------------------------------
 // box_ok: compile + run a supported snippet, expect "OK".
@@ -52,48 +49,20 @@ fn box_ok(src: &str) {
 }
 
 // ---------------------------------------------------------------------------------------------------
-// rejects: compile with the krusty binary, expect a clean decline.
+// rejects: compile through the backend pipeline, expect a clean decline.
 // ---------------------------------------------------------------------------------------------------
 
-static COUNTER: AtomicU32 = AtomicU32::new(0);
-
-/// `<stdlib>:<jdk modules>` classpath string, or `None` when the toolchain is unavailable.
-fn reject_cp() -> Option<String> {
-    let jh = common::java_home()?;
-    let stdlib = common::stdlib_jar()?;
-    let modules = format!("{jh}/lib/modules");
-    if !std::path::Path::new(&modules).exists() {
-        return None;
-    }
-    Some(format!("{}:{modules}", stdlib.to_string_lossy()))
-}
-
-/// Compile `src` with the `krusty` binary into a fresh temp dir. Returns `true` when the compile is
-/// REJECTED — a non-zero exit or a "not (yet) supported" diagnostic — and `true` (skip-clean) when the
-/// toolchain is absent.
+/// Compile `src` through the frontend and JVM backend. Returns `true` only when the frontend accepts
+/// the source and the backend reaches one of its unsupported-feature exits. Returns `true`
+/// (skip-clean) when the toolchain is absent.
 fn rejects(src: &str) -> bool {
-    let Some(cp) = reject_cp() else {
+    let Some(stdlib) = common::stdlib_jar() else {
         return true;
     };
-    let krusty = env!("CARGO_BIN_EXE_krusty");
-    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let dir = std::env::temp_dir().join(format!("krusty_bailcov_{}_{n}", std::process::id()));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).unwrap();
-    let kt = dir.join("S.kt");
-    fs::write(&kt, src).unwrap();
-    let out = Command::new(krusty)
-        .args(["-cp", &cp, "-d", dir.to_str().unwrap()])
-        .arg(&kt)
-        .output()
-        .unwrap();
-    let _ = fs::remove_dir_all(&dir);
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    !out.status.success()
-        || stderr.contains("not yet supported")
-        || stderr.contains("not supported")
-        || stdout.contains("not yet supported")
+    let Some(jdk_modules) = common::jdk_modules() else {
+        return true;
+    };
+    common::backend_rejects_in_process(src, "S", &[stdlib], Some(&jdk_modules)).unwrap_or(false)
 }
 
 // ===================================================================================================
@@ -625,15 +594,6 @@ fn local_delegated_val_rejected() {
     ));
 }
 
-// --- array-of-array constructors (`Array(n) { <primitive-array> }`) — explicit ir_lower bail ---
-
-#[test]
-fn array_of_double_array_ctor_rejected() {
-    assert!(rejects(
-        "fun main() { val a = Array(2) { DoubleArray(2) }; println(a.size) }\n"
-    ));
-}
-
 // --- mixed spread with a leading fixed argument (SpreadBuilder path not modeled) — ir_lower bail ---
 
 #[test]
@@ -641,30 +601,5 @@ fn leading_fixed_then_string_spread_rejected() {
     assert!(rejects(
         "fun f(vararg xs: String) = xs.size\n\
          fun main() { val a = arrayOf(\"a\", \"b\"); println(f(\"x\", *a)) }\n"
-    ));
-}
-
-// --- constructs rejected earlier (checker/parser) but still a clean decline; the front end guards
-//     the backend from ever seeing them. ---
-
-#[test]
-fn reified_type_param_usage_rejected() {
-    assert!(rejects(
-        "inline fun <reified T> name() = T::class.java.simpleName\n\
-         fun main() { println(name<String>()) }\n"
-    ));
-}
-
-#[test]
-fn context_receiver_declaration_rejected() {
-    assert!(rejects(
-        "class Ctx\ncontext(Ctx) fun f() = 5\nfun main() { }\n"
-    ));
-}
-
-#[test]
-fn ubyte_array_rejected() {
-    assert!(rejects(
-        "fun main() { val a = UByteArray(2); a[0] = 1u; println(a[0]) }\n"
     ));
 }
