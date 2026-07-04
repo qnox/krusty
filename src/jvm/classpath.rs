@@ -568,12 +568,6 @@ impl Classpath {
         )
     }
 
-    /// Source parameter NAMES of the class instance MEMBER `internal.jvm_name` of source arity `arity`,
-    /// from the class's own `@Metadata` `Function` records (decoded by `class_functions`, field 9 — NOT
-    /// `package_functions`, which is for a package-facade's top-level functions). Drives named-argument
-    /// resolution of a classpath instance-member call (`g.greet(b = …, a = …)`). Matches by JVM name and
-    /// source arity (the member's `@Metadata` value-parameter count). `None` if no member matches or its
-    /// names are unrecorded.
     /// Whether member `name` (its JVM or source name) of `arity` LOGICAL value parameters on class/
     /// interface `internal` has a NULLABLE return, per the class's `@Metadata` (`Class.function`, field 9).
     /// Descriptors erase nullability; a `suspend` member's return is further erased to `Object`, so this is
@@ -644,42 +638,40 @@ impl Classpath {
         })
     }
 
-    pub fn metadata_member_param_names(
+    /// The source-level call shape of class MEMBER `internal.jvm_name/arity`, from the class's own
+    /// `@Metadata` function record. Names and default flags come from the SAME member record, so a
+    /// data-class `copy` or value-class-mangled member cannot drift across separate metadata lookups.
+    pub fn metadata_member_call_sig(
         &self,
         internal: &str,
         jvm_name: &str,
         arity: usize,
-    ) -> Option<Vec<String>> {
-        let ci = self.find(internal)?;
-        super::metadata::class_functions(&ci)
+    ) -> CallSig {
+        let Some(ci) = self.find(internal) else {
+            return CallSig::metadata_member(arity, None, Vec::new());
+        };
+        let Some(f) = super::metadata::class_functions(&ci)
             .into_iter()
-            .find(|f| {
-                f.jvm_name == jvm_name
-                    && f.value_param_names.len() == arity
-                    && !f.value_param_names.is_empty()
-                    && !f.value_param_names.iter().any(String::is_empty)
-            })
-            .map(|f| f.value_param_names)
-    }
-
-    /// Which parameters of a class MEMBER (`jvm_name`, `arity` value params) DECLARE A DEFAULT VALUE,
-    /// from the CLASS's `@Metadata` functions (field 9). Package-facade call-shape metadata is separate;
-    /// this member path is what makes data-class `copy` defaults visible.
-    pub fn metadata_member_param_defaults(
-        &self,
-        internal: &str,
-        jvm_name: &str,
-        arity: usize,
-    ) -> Option<Vec<bool>> {
-        let ci = self.find(internal)?;
-        super::metadata::class_functions(&ci)
-            .into_iter()
-            .find(|f| {
-                f.jvm_name == jvm_name
-                    && f.value_param_has_default.len() == arity
-                    && f.value_param_has_default.iter().any(|d| *d)
-            })
-            .map(|f| f.value_param_has_default)
+            .find(|f| f.jvm_name == jvm_name && f.value_param_types.len() == arity)
+        else {
+            return CallSig::metadata_member(arity, None, Vec::new());
+        };
+        let names = if !f.value_param_names.is_empty()
+            && f.value_param_names.len() == arity
+            && !f.value_param_names.iter().any(String::is_empty)
+        {
+            Some(f.value_param_names)
+        } else {
+            None
+        };
+        let defaults = if f.value_param_has_default.len() == arity
+            && f.value_param_has_default.iter().any(|d| *d)
+        {
+            f.value_param_has_default
+        } else {
+            Vec::new()
+        };
+        CallSig::metadata_member(arity, names, defaults)
     }
 
     /// All Kotlin extension-receiver internal names of `fn_name` in `internal` (`plusAssign` →
