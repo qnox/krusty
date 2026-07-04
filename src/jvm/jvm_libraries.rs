@@ -893,12 +893,6 @@ fn mapped_builtin_fallback(internal: &str) -> Option<LibraryType> {
     })
 }
 
-fn nonpublic_ext_receiver_is_typevar(signature: Option<&str>) -> bool {
-    signature
-        .and_then(parse_method_gsig)
-        .is_some_and(|gsig| matches!(gsig.params.first(), Some(GSig::Var(_))))
-}
-
 /// Parse a class generic signature into its formal type-parameter names and its supertypes (the
 /// superclass followed by interfaces) as signature nodes, e.g. `java/util/List`'s
 /// `<E:Ljava/lang/Object;>Ljava/lang/Object;Ljava/util/Collection<TE;>;` → (`[E]`, `[Object,
@@ -1638,7 +1632,11 @@ impl SymbolSource for JvmLibraries {
                     // `List.map`; value-class-specific mangled lookup below handles the real receiver.
                     if !public
                         && recv_desc == "Ljava/lang/Object;"
-                        && !nonpublic_ext_receiver_is_typevar(c.signature.as_deref())
+                        && !c
+                            .signature
+                            .as_deref()
+                            .and_then(parse_method_gsig)
+                            .is_some_and(|gsig| matches!(gsig.params.first(), Some(GSig::Var(_))))
                     {
                         continue;
                     }
