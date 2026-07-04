@@ -13,34 +13,6 @@ use crate::jvm::names::{
 };
 use crate::types::Ty;
 
-trait JvmScalarTy {
-    fn is_jvm_scalar(&self) -> bool;
-}
-
-impl JvmScalarTy for Ty {
-    fn is_jvm_scalar(&self) -> bool {
-        matches!(
-            *self,
-            Ty::Int
-                | Ty::Byte
-                | Ty::Short
-                | Ty::Long
-                | Ty::Float
-                | Ty::Double
-                | Ty::Boolean
-                | Ty::Char
-                | Ty::UInt
-                | Ty::ULong
-        )
-    }
-}
-
-impl JvmScalarTy for &Ty {
-    fn is_jvm_scalar(&self) -> bool {
-        (*self).is_jvm_scalar()
-    }
-}
-
 struct InlineStaticTarget<'a> {
     owner: &'a str,
     name: &'a str,

@@ -36,28 +36,6 @@ fn default_import_packages_internal() -> std::collections::HashSet<String> {
         .collect()
 }
 
-trait JvmScalarTy {
-    fn is_jvm_scalar(&self) -> bool;
-}
-
-impl JvmScalarTy for Ty {
-    fn is_jvm_scalar(&self) -> bool {
-        matches!(
-            *self,
-            Ty::Int
-                | Ty::Byte
-                | Ty::Short
-                | Ty::Long
-                | Ty::Float
-                | Ty::Double
-                | Ty::Boolean
-                | Ty::Char
-                | Ty::UInt
-                | Ty::ULong
-        )
-    }
-}
-
 /// A platform backed by a JVM classpath (dirs + jars + the JDK jimage). The classpath is shared
 /// (`Rc`) with the JVM backend/emitter so the bytecode inliner reads inline-function bodies through
 /// the same lazily-populated caches — all within the `jvm` module, never through the `SymbolSource`
