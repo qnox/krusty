@@ -839,25 +839,6 @@ fn split_one(s: &str) -> Option<(&str, &str)> {
     }
 }
 
-/// Whether a non-public (`@InlineOnly`) extension's generic-signature RECEIVER is a type variable
-/// (`<T> T.takeIf(…)`) — the scope-fn family that applies to ANY receiver. A concrete-class receiver
-/// (a value class like `Result.map`, erased to `Object`) would otherwise wrongly match an unrelated
-/// receiver through the erased lookup key, so only a type-variable receiver may match this way.
-/// The Kotlin simple type name of a numeric primitive `Ty` (`Int` → `"Int"`), used to derive the
-/// `@OverloadResolutionByLambdaReturnType` `@JvmName` (`sumOf` + `Int` → `sumOfInt`). `None` for unsigned
-/// (`UInt`/`ULong`) and non-numeric types — krusty can't model an unsigned `sumOf` result, so it bails.
-fn kotlin_simple_name_of_ty(t: Ty) -> Option<&'static str> {
-    Some(match t {
-        Ty::Int => "Int",
-        Ty::Long => "Long",
-        Ty::Double => "Double",
-        Ty::Float => "Float",
-        Ty::Byte => "Byte",
-        Ty::Short => "Short",
-        _ => return None,
-    })
-}
-
 /// Curated JVM ABI for the well-known mapped builtins, used only when the classpath cannot supply the
 /// mapped JVM class (a no-classpath compile, e.g. a self-contained snippet with no `-cp`). This keeps
 /// the Kotlin↔JVM mapping a *backend* fact: the member's JVM owner/descriptor live here, so the compiler
@@ -1512,17 +1493,14 @@ impl SymbolSource for JvmLibraries {
                     }
                     // The `@JvmName`-mangled method is `name` + the return type's simple name (`sumOf` +
                     // `Int` → `sumOfInt`); DERIVE it per numeric return and VERIFY against the real method.
-                    for ret in [
-                        Ty::Int,
-                        Ty::Long,
-                        Ty::Double,
-                        Ty::Float,
-                        Ty::Byte,
-                        Ty::Short,
+                    for (ret, simple) in [
+                        (Ty::Int, "Int"),
+                        (Ty::Long, "Long"),
+                        (Ty::Double, "Double"),
+                        (Ty::Float, "Float"),
+                        (Ty::Byte, "Byte"),
+                        (Ty::Short, "Short"),
                     ] {
-                        let Some(simple) = kotlin_simple_name_of_ty(ret) else {
-                            continue;
-                        };
                         let jname = format!("{name}{simple}");
                         for c in self.cp.find_extensions(&recv_desc, &jname) {
                             let (params, pret) = parse_method_desc(&c.descriptor);
