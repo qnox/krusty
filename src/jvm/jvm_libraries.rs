@@ -666,9 +666,16 @@ fn concrete_generic_ret(gsig: &GenericSig) -> Option<Ty> {
         }
     }
     match &gsig.ret {
-        GSig::Class(_, args) if !args.is_empty() && is_concrete(&gsig.ret) => Some(
-            crate::call_resolver::gsig_to_ty(&gsig.ret, &std::collections::HashMap::new()),
-        ),
+        GSig::Class(_, args) if !args.is_empty() && is_concrete(&gsig.ret) => {
+            // Canonicalize the recovered type to Kotlin form (`java/util/List<java/lang/Integer>` →
+            // `kotlin/collections/List<kotlin/Int>`), so a member/`for`/extension keyed on the Kotlin
+            // collection + a primitive element resolves and unboxes — mirroring the suspend path. Without
+            // it, a classpath property `items: List<Int>` reads as raw `java/util/List<Integer>`:
+            // `xs.sum()` is unresolved and `for (x in xs) { s += x }` compares `Int` vs `java/lang/Integer`.
+            Some(canonicalize_jvm_collections(
+                crate::call_resolver::gsig_to_ty(&gsig.ret, &std::collections::HashMap::new()),
+            ))
+        }
         _ => None,
     }
 }
@@ -715,7 +722,23 @@ fn suspend_return_from_gsig(
 /// `kotlin/collections/List<T>`), leaving every other type and the type arguments' own structure intact.
 fn canonicalize_jvm_collections(ty: Ty) -> Ty {
     match ty {
+        // A boxed primitive wrapper (`java/lang/Integer`) — always a type ARGUMENT here (a top-level
+        // return is a collection with args, or handled by the suspend bare-class path). Its Kotlin type is
+        // the PRIMITIVE (`kotlin/Int` → `Ty::Int`), not a boxed `Obj("kotlin/Int")`: a signature spells a
+        // generic argument's primitive in its boxed JVM form (`List<Integer>`), but `List<Int>`'s element
+        // is `Int`, so `for (x in xs) { s += x }` / `xs.sum()` resolve and the element unboxes rather than
+        // comparing `Int` against a boxed reference.
+        Ty::Obj(name, args)
+            if args.is_empty() && super::jvm_class_map::wrapper_to_kotlin_prim(name).is_some() =>
+        {
+            super::classpath::kotlin_name_to_ty(
+                super::jvm_class_map::wrapper_to_kotlin_prim(name).unwrap(),
+            )
+        }
         Ty::Obj(name, args) => {
+            // Canonicalize a JVM collection to its Kotlin form (`java/util/List` →
+            // `kotlin/collections/List`), so a member/`for`/extension keyed on the Kotlin collection
+            // resolves on the recovered type.
             let kname = super::jvm_class_map::jvm_collection_to_kotlin(name).unwrap_or(name);
             let cargs: Vec<Ty> = args
                 .iter()

@@ -64,6 +64,8 @@ mod build775_aa1_suspend_iface_param_elvis_e2e;
 mod build775_ee1_reified_vc_ext_e2e;
 #[path = "build775_ii1_suspend_for_loop_e2e.rs"]
 mod build775_ii1_suspend_for_loop_e2e;
+#[path = "build840_collection_property_element_e2e.rs"]
+mod build840_collection_property_element_e2e;
 #[path = "builtin_intrinsics_coverage_e2e.rs"]
 mod builtin_intrinsics_coverage_e2e;
 #[path = "bytecode_parity_e2e.rs"]
