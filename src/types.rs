@@ -504,9 +504,12 @@ impl Ty {
         })
     }
 
-    /// True for scalar slots whose update arithmetic runs as `Int` and narrows back on store.
-    pub fn narrows_int_update(self) -> bool {
-        matches!(self, Ty::Byte | Ty::Short | Ty::Char)
+    /// Scalar type used while evaluating Kotlin operations that widen small integral values to `Int`.
+    pub fn int_arithmetic_repr(self) -> Ty {
+        match self {
+            Ty::Byte | Ty::Short | Ty::Char => Ty::Int,
+            t => t,
+        }
     }
 
     /// Whether a numeric `actual` can be assigned to this numeric target in source checking.

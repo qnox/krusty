@@ -2473,10 +2473,7 @@ impl crate::libraries::TargetRuntime for JvmLibraries {
             ),
             RuntimeOp::UIntToLong => None,
             RuntimeOp::PrimitiveCompare if ty != Ty::Boolean => {
-                let cmp_ty = match ty {
-                    Ty::Byte | Ty::Short | Ty::Char => Ty::Int,
-                    t => t,
-                };
+                let cmp_ty = ty.int_arithmetic_repr();
                 let (cmp_owner, cmp_prim) = match cmp_ty {
                     Ty::Int => ("java/lang/Integer", "I"),
                     Ty::Long => ("java/lang/Long", "J"),

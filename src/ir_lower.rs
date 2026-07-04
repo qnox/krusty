@@ -3840,7 +3840,7 @@ impl<'a> Lower<'a> {
 
     fn scalar_one_const(&self, ty: Ty) -> Option<IrConst> {
         Some(match self.scalar_value_repr(ty).unwrap_or(ty) {
-            Ty::Int | Ty::Byte | Ty::Short | Ty::Char => IrConst::Int(1),
+            t if t.int_arithmetic_repr() == Ty::Int => IrConst::Int(1),
             Ty::Long => IrConst::Long(1),
             Ty::Double => IrConst::Double(1.0),
             Ty::Float => IrConst::Float(1.0),
@@ -3857,14 +3857,15 @@ impl<'a> Lower<'a> {
     }
 
     fn scalar_update_value(&mut self, current: u32, ty: Ty, op: IrBinOp, one: IrConst) -> u32 {
-        let lhs = if ty.narrows_int_update() {
-            self.implicit_coercion(current, Ty::Int)
+        let arithmetic_ty = ty.int_arithmetic_repr();
+        let lhs = if arithmetic_ty != ty {
+            self.implicit_coercion(current, arithmetic_ty)
         } else {
             current
         };
         let rhs = self.ir.add_expr(IrExpr::Const(one));
         let sum = self.ir.add_expr(IrExpr::PrimitiveBinOp { op, lhs, rhs });
-        if ty.narrows_int_update() {
+        if arithmetic_ty != ty {
             self.implicit_coercion(sum, ty)
         } else {
             sum
@@ -15570,7 +15571,7 @@ impl<'a> Lower<'a> {
                 }
                 let (v, ty) = self.lookup(&name)?;
                 let op = if dec { IrBinOp::Sub } else { IrBinOp::Add };
-                if ty.narrows_int_update() {
+                if ty.int_arithmetic_repr() != ty {
                     // `Byte`/`Short`/`Char` narrow on update (wrap in their own width). No temp slot (a
                     // `Variable` inside an operand `Block` trips the verifier in a template/argument
                     // position): the postfix value is `narrow(new ∓ 1)`, which wraps back to the old value
