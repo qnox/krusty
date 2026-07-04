@@ -1227,16 +1227,6 @@ fn strip_builtins_header(data: &[u8]) -> Option<&[u8]> {
     data.get(4 + 4 * count..)
 }
 
-/// Read a `.kotlin_builtins` resource into the direct-supertype map of every `Class` it declares
-/// (`kotlin/collections/MutableList` → `[…/List, …/MutableCollection]`) — the Kotlin collection
-/// hierarchy as kotlinc stores it. A thin view over [`parse_builtins`] (which also yields members).
-pub fn builtins_supertypes(data: &[u8]) -> std::collections::HashMap<String, Vec<String>> {
-    parse_builtins(data)
-        .into_iter()
-        .map(|(k, c)| (k, c.supertypes))
-        .collect()
-}
-
 /// One member of a builtins `Class`: its Kotlin name, value-parameter type names, and return type name
 /// — all Kotlin internal names (`kotlin/Int`, `kotlin/String`, …) resolved from the fragment's tables.
 pub struct BuiltinMember {
