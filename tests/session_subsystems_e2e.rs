@@ -13,15 +13,11 @@ fn run(src: &str) -> Option<String> {
     common::compile_and_run_with_stdlib(src, "P")
 }
 
-fn toolchain_ready() -> bool {
-    common::java_home().is_some() && common::stdlib_jar().is_some()
-}
-
 /// A generic class with a `var T` field storing two different concrete types — forces the
 /// erased-field + checkcast-on-read path (not just a value round-trip), pinning erasure-to-Object.
 #[test]
 fn generic_var_field_erasure() {
-    if !toolchain_ready() {
+    if !common::stdlib_toolchain_ready() {
         return;
     }
     const SRC: &str = "// WITH_STDLIB\n\
@@ -46,7 +42,7 @@ fun box(): String {\n\
 /// `@JvmInline value class` arithmetic — the unboxed underlying representation.
 #[test]
 fn value_class_unboxed_arith() {
-    if !toolchain_ready() {
+    if !common::stdlib_toolchain_ready() {
         return;
     }
     const SRC: &str = "// WITH_STDLIB\n\
@@ -66,7 +62,7 @@ fun box(): String {\n\
 /// against a desync after merging `IrClass`'s five field-parallel `Vec`s into one `Vec<IrField>`.
 #[test]
 fn data_class_multifield_copy() {
-    if !toolchain_ready() {
+    if !common::stdlib_toolchain_ready() {
         return;
     }
     const SRC: &str = "// WITH_STDLIB\n\
@@ -93,7 +89,7 @@ fun box(): String {\n\
 /// value (the per-access null-check passes). Pins the field-flag fold.
 #[test]
 fn lateinit_var_set_then_get() {
-    if !toolchain_ready() {
+    if !common::stdlib_toolchain_ready() {
         return;
     }
     const SRC: &str = "// WITH_STDLIB\n\
@@ -111,7 +107,7 @@ fun box(): String {\n\
 /// Enum — `IrClass` enum-entry fields + `values()`/`valueOf`/`ordinal`/`name`.
 #[test]
 fn enum_entries_and_values() {
-    if !toolchain_ready() {
+    if !common::stdlib_toolchain_ready() {
         return;
     }
     const SRC: &str = "// WITH_STDLIB\n\

@@ -10,13 +10,9 @@ fn run(src: &str) -> Option<String> {
 }
 
 /// Skip (not fail) when the JVM + stdlib jar this e2e needs is absent.
-fn toolchain_ready() -> bool {
-    common::java_home().is_some() && common::stdlib_jar().is_some()
-}
-
 #[test]
 fn nullable_reference_cast_passes_null_and_checkcasts() {
-    if !toolchain_ready() {
+    if !common::stdlib_toolchain_ready() {
         return;
     }
     const SRC: &str = "// WITH_STDLIB\n\

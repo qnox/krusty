@@ -11,13 +11,9 @@ fn run(src: &str) -> Option<String> {
 
 /// The JVM + stdlib jar this e2e needs. When absent (a machine without `JAVA_HOME`/stdlib), the test
 /// SKIPS rather than fails — only a present toolchain that still returns the wrong answer is a bug.
-fn toolchain_ready() -> bool {
-    common::java_home().is_some() && common::stdlib_jar().is_some()
-}
-
 #[test]
 fn unbounded_type_param_cast_is_erased_noop() {
-    if !toolchain_ready() {
+    if !common::stdlib_toolchain_ready() {
         return;
     }
     // `<T>` is `<T : Any?>` — `null as T` is a no-op (no null check, no checkcast).
@@ -36,7 +32,7 @@ fun box(): String {\n\
 
 #[test]
 fn nonnull_bounded_type_param_cast_throws_on_null() {
-    if !toolchain_ready() {
+    if !common::stdlib_toolchain_ready() {
         return;
     }
     // `<T : Any>` — `null as T` null-checks and throws (a `NullPointerException`).
@@ -56,7 +52,7 @@ fun box(): String {\n\
 
 #[test]
 fn class_bounded_type_param_cast_checkcasts() {
-    if !toolchain_ready() {
+    if !common::stdlib_toolchain_ready() {
         return;
     }
     // `<T : CharSequence>` — null-check then `checkcast CharSequence`; a wrong type throws CCE.
@@ -76,7 +72,7 @@ fun box(): String {\n\
 
 #[test]
 fn safe_cast_to_type_param_is_erased() {
-    if !toolchain_ready() {
+    if !common::stdlib_toolchain_ready() {
         return;
     }
     // `x as? T` (safe cast to a type parameter). `T` is erased, so the runtime cannot actually test it

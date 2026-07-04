@@ -9,13 +9,9 @@ fn run(src: &str) -> Option<String> {
     common::compile_and_run_with_stdlib(src, "Main")
 }
 
-fn ready() -> bool {
-    common::java_home().is_some() && common::stdlib_jar().is_some()
-}
-
 #[test]
 fn when_statement_with_throwing_else() {
-    if !ready() {
+    if !common::stdlib_toolchain_ready() {
         return;
     }
     // `is` subject smart-cast, assignment in the match arm, `throw` in the `else`.
@@ -39,7 +35,7 @@ fun box(): String {\n\
 
 #[test]
 fn when_value_subject_with_throwing_else() {
-    if !ready() {
+    if !common::stdlib_toolchain_ready() {
         return;
     }
     // A value-subject `when` statement: matched arm assigns, `else` diverges.

@@ -8,13 +8,9 @@ fn run(src: &str) -> Option<String> {
     common::compile_and_run_with_stdlib(src, "P")
 }
 
-fn toolchain_ready() -> bool {
-    common::java_home().is_some() && common::stdlib_jar().is_some()
-}
-
 #[test]
 fn primitive_to_reference_cast_boxes() {
-    if !toolchain_ready() {
+    if !common::stdlib_toolchain_ready() {
         return;
     }
     const SRC: &str = "// WITH_STDLIB\n\
@@ -36,7 +32,7 @@ fun box(): String {\n\
 
 #[test]
 fn impossible_primitive_cast_is_rejected_not_miscompiled() {
-    if !toolchain_ready() {
+    if !common::stdlib_toolchain_ready() {
         return;
     }
     // `1 as String` can never succeed (kotlinc rejects it). krusty must NOT box an `Integer` into a

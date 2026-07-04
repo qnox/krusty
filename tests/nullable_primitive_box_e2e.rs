@@ -12,13 +12,9 @@ fn run(src: &str) -> Option<String> {
 }
 
 /// Skip (not fail) when the JVM + stdlib jar this e2e needs is absent.
-fn toolchain_ready() -> bool {
-    common::java_home().is_some() && common::stdlib_jar().is_some()
-}
-
 #[test]
 fn boxed_nullable_int_equality() {
-    if !toolchain_ready() {
+    if !common::stdlib_toolchain_ready() {
         return;
     }
     const SRC: &str = "// WITH_STDLIB\n\
@@ -39,7 +35,7 @@ fun box(): String {\n\
 
 #[test]
 fn not_null_assert_on_nullable_int_arith() {
-    if !toolchain_ready() {
+    if !common::stdlib_toolchain_ready() {
         return;
     }
     const SRC: &str = "// WITH_STDLIB\n\
@@ -53,7 +49,7 @@ fun box(): String {\n\
 
 #[test]
 fn elvis_on_nullable_int() {
-    if !toolchain_ready() {
+    if !common::stdlib_toolchain_ready() {
         return;
     }
     const SRC: &str = "// WITH_STDLIB\n\
@@ -69,7 +65,7 @@ fun box(): String {\n\
 
 #[test]
 fn nullable_int_returned_from_function() {
-    if !toolchain_ready() {
+    if !common::stdlib_toolchain_ready() {
         return;
     }
     const SRC: &str = "// WITH_STDLIB\n\
@@ -87,7 +83,7 @@ fun box(): String {\n\
 
 #[test]
 fn data_class_with_nullable_int_field() {
-    if !toolchain_ready() {
+    if !common::stdlib_toolchain_ready() {
         return;
     }
     const SRC: &str = "// WITH_STDLIB\n\
@@ -109,7 +105,7 @@ fun box(): String {\n\
 
 #[test]
 fn boxed_nullable_long() {
-    if !toolchain_ready() {
+    if !common::stdlib_toolchain_ready() {
         return;
     }
     const SRC: &str = "// WITH_STDLIB\n\

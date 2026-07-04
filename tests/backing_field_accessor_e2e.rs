@@ -9,13 +9,9 @@ fn run(src: &str) -> Option<String> {
     common::compile_and_run_with_stdlib(src, "P")
 }
 
-fn toolchain_ready() -> bool {
-    common::java_home().is_some() && common::stdlib_jar().is_some()
-}
-
 #[test]
 fn val_backing_field_custom_getter() {
-    if !toolchain_ready() {
+    if !common::stdlib_toolchain_ready() {
         return;
     }
     const SRC: &str = "// WITH_STDLIB\n\
@@ -32,7 +28,7 @@ fun box(): String = My().my\n";
 
 #[test]
 fn var_backing_field_custom_accessors() {
-    if !toolchain_ready() {
+    if !common::stdlib_toolchain_ready() {
         return;
     }
     const SRC: &str = "// WITH_STDLIB\n\
@@ -56,7 +52,7 @@ fun box(): String {\n\
 
 #[test]
 fn internal_read_and_write_go_through_custom_accessors() {
-    if !toolchain_ready() {
+    if !common::stdlib_toolchain_ready() {
         return;
     }
     // An IN-CLASS read/write of a custom-accessor property must call `getX`/`setX` — NOT read/write
@@ -85,7 +81,7 @@ fun box(): String = My().selfTest()\n";
 
 #[test]
 fn incdec_on_custom_accessor_var_goes_through_accessors() {
-    if !toolchain_ready() {
+    if !common::stdlib_toolchain_ready() {
         return;
     }
     // `v++` on a custom-accessor `var` is `v = v + 1` = `setV(getV() + 1)` — it must run both

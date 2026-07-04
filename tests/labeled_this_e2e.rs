@@ -9,13 +9,9 @@ fn run(src: &str) -> Option<String> {
     common::compile_and_run_with_stdlib(src, "Main")
 }
 
-fn ready() -> bool {
-    common::java_home().is_some() && common::stdlib_jar().is_some()
-}
-
 #[test]
 fn self_labeled_this_in_lambda() {
-    if !ready() {
+    if !common::stdlib_toolchain_ready() {
         return;
     }
     // `this@C` inside a lambda in C's own method resolves to C's receiver.
@@ -31,7 +27,7 @@ fun box(): String = C(\"OK\").foo()\n";
 /// `this$0`. Both the bare member (`v`) and the qualified `this@B.v` must read the outer instance.
 #[test]
 fn inner_class_outer_labeled_this() {
-    if !ready() {
+    if !common::stdlib_toolchain_ready() {
         return;
     }
     const SRC: &str = "class B {\n\
