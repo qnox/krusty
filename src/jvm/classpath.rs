@@ -492,14 +492,7 @@ impl Classpath {
                 call_sig: if extension {
                     CallSig::default()
                 } else {
-                    CallSig::metadata_top_level(
-                        desc_params.len(),
-                        Vec::new(),
-                        Vec::new(),
-                        Vec::new(),
-                        Vec::new(),
-                        Vec::new(),
-                    )
+                    CallSig::metadata_plain(desc_params.len())
                 },
                 ret: ReturnInfo::default(),
             };
@@ -554,7 +547,7 @@ impl Classpath {
         let Some(ci) = self.find(internal) else {
             return MetadataCallFacts {
                 kept_params: None,
-                call_sig: CallSig::metadata_member(arity, Vec::new(), Vec::new()),
+                call_sig: CallSig::metadata_plain(arity),
                 ret: ReturnInfo::default(),
             };
         };
@@ -564,7 +557,7 @@ impl Classpath {
         else {
             return MetadataCallFacts {
                 kept_params: None,
-                call_sig: CallSig::metadata_member(arity, Vec::new(), Vec::new()),
+                call_sig: CallSig::metadata_plain(arity),
                 ret: ReturnInfo::default(),
             };
         };

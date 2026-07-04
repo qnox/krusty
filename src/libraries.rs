@@ -469,6 +469,10 @@ impl CallSig {
         CallSig::metadata_base(param_count, names, defaults)
     }
 
+    pub fn metadata_plain(param_count: usize) -> Self {
+        CallSig::metadata_base(param_count, Vec::new(), Vec::new())
+    }
+
     pub fn metadata_top_level(
         param_count: usize,
         names: Vec<String>,
