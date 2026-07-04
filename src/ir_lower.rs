@@ -3839,6 +3839,16 @@ impl<'a> Lower<'a> {
         self.syms.libraries.unsigned_integer_box_type(ty)
     }
 
+    fn scalar_one_const(&self, ty: Ty) -> Option<IrConst> {
+        Some(match self.scalar_value_repr(ty).unwrap_or(ty) {
+            Ty::Int | Ty::Byte | Ty::Short | Ty::Char => IrConst::Int(1),
+            Ty::Long => IrConst::Long(1),
+            Ty::Double => IrConst::Double(1.0),
+            Ty::Float => IrConst::Float(1.0),
+            _ => return None,
+        })
+    }
+
     /// The class-constant name for an UNBOUND class literal `T::class` (`ldc <name>.class`): the JVM
     /// internal of a reference type (`kotlin/String` → `java/lang/String`), or the array descriptor used
     /// verbatim as a class constant (`Array<Any>::class` → `[Ljava/lang/Object;`).
@@ -8835,11 +8845,7 @@ impl<'a> Lower<'a> {
         let gi2 = self.ir.add_expr(IrExpr::GetValue(i_v));
         let one = self
             .ir
-            .add_expr(IrExpr::Const(if matches!(elem, Ty::Long | Ty::ULong) {
-                IrConst::Long(1)
-            } else {
-                IrConst::Int(1)
-            }));
+            .add_expr(IrExpr::Const(self.scalar_one_const(elem)?));
         let inc = self.ir.add_expr(IrExpr::PrimitiveBinOp {
             op: IrBinOp::Add,
             lhs: gi2,
@@ -11772,13 +11778,7 @@ impl<'a> Lower<'a> {
                 // A boxed mutable-capture local: `x++`/`x--` reads/writes through its `Ref` holder.
                 if let Some(elem) = self.boxed_elem.get(&name).cloned() {
                     let (holder, _) = self.lookup(&name)?;
-                    let one = match elem {
-                        Ty::Int | Ty::Byte | Ty::Short | Ty::Char => IrConst::Int(1),
-                        Ty::Long => IrConst::Long(1),
-                        Ty::Double => IrConst::Double(1.0),
-                        Ty::Float => IrConst::Float(1.0),
-                        _ => return None,
-                    };
+                    let one = self.scalar_one_const(elem)?;
                     let op = if dec { IrBinOp::Sub } else { IrBinOp::Add };
                     let hv = self.ir.add_expr(IrExpr::GetValue(holder));
                     let cur = self.ir.add_expr(IrExpr::RefGet {
@@ -11818,13 +11818,7 @@ impl<'a> Lower<'a> {
                     if !is_var {
                         return None;
                     }
-                    let one_c = match fty {
-                        Ty::Int | Ty::Byte | Ty::Short | Ty::Char => IrConst::Int(1),
-                        Ty::Long => IrConst::Long(1),
-                        Ty::Double => IrConst::Double(1.0),
-                        Ty::Float => IrConst::Float(1.0),
-                        _ => return None,
-                    };
+                    let one_c = self.scalar_one_const(fty)?;
                     let op = if dec { IrBinOp::Sub } else { IrBinOp::Add };
                     // A field of *this* class is read/written directly; an inherited one (or an external
                     // `this`), or a CUSTOM-accessor property, goes through its getter/setter accessors.
@@ -11903,13 +11897,7 @@ impl<'a> Lower<'a> {
                     });
                 }
                 let (v, ty) = self.lookup(&name)?;
-                let one = match ty {
-                    Ty::Int | Ty::Byte | Ty::Short | Ty::Char => IrConst::Int(1),
-                    Ty::Long => IrConst::Long(1),
-                    Ty::Double => IrConst::Double(1.0),
-                    Ty::Float => IrConst::Float(1.0),
-                    _ => return None,
-                };
+                let one = self.scalar_one_const(ty)?;
                 let op = if dec { IrBinOp::Sub } else { IrBinOp::Add };
                 let one = self.ir.add_expr(IrExpr::Const(one));
                 let nv = if matches!(ty, Ty::Byte | Ty::Short | Ty::Char) {
@@ -12133,11 +12121,7 @@ impl<'a> Lower<'a> {
                     t => t,
                 };
                 let elem_ir = ty_to_ir(elem);
-                let one = if matches!(elem, Ty::Long | Ty::ULong) {
-                    IrConst::Long(1)
-                } else {
-                    IrConst::Int(1)
-                };
+                let one = self.scalar_one_const(elem)?;
                 // loop var = start. The bounds may be erased (`l[0]` → `Object`); coerce them to the
                 // counter's primitive type so the value is unboxed before the slot store.
                 let start = self.lower_arg(range.start, &elem_ir)?;
@@ -15632,13 +15616,10 @@ impl<'a> Lower<'a> {
                 // (A `Byte`/`Short`/`Char` boxed inc-as-expression is rare — skip it rather than model
                 // the narrowing here.)
                 if let Some(elem) = self.boxed_elem.get(&name).cloned() {
-                    let one_c = match elem {
-                        Ty::Int => IrConst::Int(1),
-                        Ty::Long => IrConst::Long(1),
-                        Ty::Double => IrConst::Double(1.0),
-                        Ty::Float => IrConst::Float(1.0),
-                        _ => return None,
-                    };
+                    if matches!(elem, Ty::Byte | Ty::Short | Ty::Char) {
+                        return None;
+                    }
+                    let one_c = self.scalar_one_const(elem)?;
                     let (holder, _) = self.lookup(&name)?;
                     let elem_ir = ty_to_ir(elem);
                     let op = if dec { IrBinOp::Sub } else { IrBinOp::Add };
@@ -15733,13 +15714,7 @@ impl<'a> Lower<'a> {
                         value: Some(value),
                     }));
                 }
-                let one = match ty {
-                    Ty::Int => IrConst::Int(1),
-                    Ty::Long => IrConst::Long(1),
-                    Ty::Double => IrConst::Double(1.0),
-                    Ty::Float => IrConst::Float(1.0),
-                    _ => return None,
-                };
+                let one = self.scalar_one_const(ty)?;
                 // i = i ± 1 (no temp: wraparound is consistent for Int/Long/Float/Double)
                 let cur = self.ir.add_expr(IrExpr::GetValue(v));
                 let one1 = self.ir.add_expr(IrExpr::Const(one.clone()));
@@ -17774,11 +17749,7 @@ impl<'a> Lower<'a> {
                             if self.is_unsigned_integer_type(rty)
                                 && matches!(name.as_str(), "inc" | "dec")
                             {
-                                let one = if self.scalar_value_repr(rty) == Some(Ty::Long) {
-                                    IrConst::Long(1)
-                                } else {
-                                    IrConst::Int(1)
-                                };
+                                let one = self.scalar_one_const(rty)?;
                                 let r = self.expr(receiver)?;
                                 let o = self.ir.add_expr(IrExpr::Const(one));
                                 let op = if name == "dec" {
