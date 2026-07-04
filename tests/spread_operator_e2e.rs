@@ -2,14 +2,11 @@
 //! spread to a top-level vararg function (`foo(*a)`) via `Arrays.copyOf` + `checkcast` — byte-identical
 //! to kotlinc; any other shape (mixed spreads, member/library callee, primitive element) cleanly skips.
 
-use std::path::PathBuf;
-
 mod common;
 
 fn run(src: &str) -> Option<String> {
-    let java_home = common::java_home()?;
     let stdlib = common::stdlib_jar()?;
-    let jdk = PathBuf::from(format!("{java_home}/lib/modules"));
+    let jdk = common::jdk_modules()?;
     common::compile_and_run_box(src, "Sp", &[stdlib], Some(&jdk))
 }
 

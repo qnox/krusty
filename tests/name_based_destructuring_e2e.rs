@@ -4,14 +4,11 @@
 //! experimental" without the flag. Both `[a, b]` and `(a, b)` desugar to the same positional
 //! `componentN` calls (proven byte-identical against kotlinc), so the compiled-and-run result is "OK".
 
-use std::path::PathBuf;
-
 mod common;
 
 fn run(src: &str) -> Option<String> {
-    let java_home = common::java_home()?;
     let stdlib = common::stdlib_jar()?;
-    let jdk = PathBuf::from(format!("{java_home}/lib/modules"));
+    let jdk = common::jdk_modules()?;
     common::compile_and_run_box(src, "Nb", &[stdlib], Some(&jdk))
 }
 
@@ -68,18 +65,9 @@ fn name_based_destructuring_rejected_without_flag() {
     // `None`), exactly as default-flags kotlinc does. A `Some` here would mean we wrongly accepted it.
     let src = FOR_AND_VAL.replace("// LANGUAGE: +NameBasedDestructuring\n", "");
     // Only meaningful when the toolchain is present (otherwise both branches skip).
-    if common::java_home().is_some() && common::stdlib_jar().is_some() {
+    if let (Some(stdlib), Some(jdk)) = (common::stdlib_jar(), common::jdk_modules()) {
         assert!(
-            common::compile_in_process(
-                &src,
-                "Nb",
-                &[common::stdlib_jar().unwrap()],
-                Some(&PathBuf::from(format!(
-                    "{}/lib/modules",
-                    common::java_home().unwrap()
-                ))),
-            )
-            .is_none(),
+            common::compile_in_process(&src, "Nb", &[stdlib], Some(&jdk),).is_none(),
             "krusty accepted `[a, b]` destructuring without +NameBasedDestructuring"
         );
     }

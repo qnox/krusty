@@ -4,14 +4,11 @@
 //! instead of `extends java.lang.Enum<Color>`. Verified byte-identical to kotlinc in the differential
 //! harness (`when/enumOptimization/*`); here we assert krusty's emitted attribute directly.
 
-use std::path::PathBuf;
-
 mod common;
 
 fn classes(src: &str) -> Option<Vec<(String, Vec<u8>)>> {
-    let java_home = common::java_home()?;
     let stdlib = common::stdlib_jar()?;
-    let jdk = PathBuf::from(format!("{java_home}/lib/modules"));
+    let jdk = common::jdk_modules()?;
     common::compile_in_process(src, "E", &[stdlib], Some(&jdk))
 }
 

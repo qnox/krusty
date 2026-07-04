@@ -4,14 +4,11 @@
 //! type `T`. (Previously the bound was dropped to `kotlin/Any`, so member access failed and the
 //! descriptor/signature erased to `Object`.)
 
-use std::path::PathBuf;
-
 mod common;
 
 fn classes(src: &str) -> Option<Vec<(String, Vec<u8>)>> {
-    let java_home = common::java_home()?;
     let stdlib = common::stdlib_jar()?;
-    let jdk = PathBuf::from(format!("{java_home}/lib/modules"));
+    let jdk = common::jdk_modules()?;
     // Toolchain present ⇒ compilation MUST succeed (a `None` here is a real failure, not a skip).
     let cs = common::compile_in_process(src, "P", &[stdlib], Some(&jdk));
     assert!(cs.is_some(), "krusty failed to compile:\n{src}");
@@ -86,12 +83,12 @@ fn comparable_operator_bounded_generic_called_with_primitive_is_declined() {
     // `Comparable`-erased parameter slot — krusty does not yet emit that box (a raw `int` reaching a
     // `Comparable` parameter is a `VerifyError`). So it must DECLINE (skip), not miscompile. The bound
     // itself IS recovered (descriptor/member resolution); only the primitive-into-bound call is unsupported.
-    if common::java_home().is_none() || common::stdlib_jar().is_none() {
+    let Some(stdlib) = common::stdlib_jar() else {
         return;
-    }
-    let java_home = common::java_home().unwrap();
-    let stdlib = common::stdlib_jar().unwrap();
-    let jdk = PathBuf::from(format!("{java_home}/lib/modules"));
+    };
+    let Some(jdk) = common::jdk_modules() else {
+        return;
+    };
     let src = "fun <T : Comparable<T>> maxOf2(a: T, b: T): T = if (a > b) a else b\nfun box(): String = if (maxOf2(3, 5) == 5) \"OK\" else \"no\"\n";
     assert!(
         common::compile_in_process(src, "P", &[stdlib], Some(&jdk)).is_none(),
