@@ -366,8 +366,8 @@ impl Ty {
     /// The BOXED reference form of a primitive, used as the element type of a `Array<Int>` (a
     /// `[Ljava/lang/Integer;`, distinct from the unboxed `IntArray` = `[I`). Carried in the front end
     /// as the Kotlin primitive name (`kotlin/Int`); it erases to the JVM wrapper only at emit (see
-    /// `jvm_class_map::to_jvm_internal`). `None` for a non-primitive (already a reference) or for the
-    /// unsigned inline-class primitives (their boxing is handled by the value-class path).
+    /// `jvm_class_map::to_jvm_internal`). Unsigned primitives box to their own inline-class wrappers.
+    /// `None` for a non-primitive (already a reference).
     pub fn boxed_ref(self) -> Option<Ty> {
         Some(Ty::obj(match self {
             Ty::Int => "kotlin/Int",
@@ -384,6 +384,11 @@ impl Ty {
             Ty::ULong => "kotlin/ULong",
             _ => return None,
         }))
+    }
+
+    /// Boxed JVM wrapper for a primitive (`Int` -> `kotlin/Int`), excluding unsigned inline classes.
+    pub fn jvm_boxed_ref(self) -> Option<Ty> {
+        self.boxed_ref().filter(|_| !self.is_unsigned())
     }
 
     /// Inverse of [`boxed_ref`]: if `self` is the boxed-reference form of a primitive (the element of a
