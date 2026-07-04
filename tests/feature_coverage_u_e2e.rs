@@ -6,7 +6,7 @@
 //! compiles a self-contained Kotlin program whose `fun box(): String` returns "OK", runs it on the
 //! JVM, and asserts the result. Only kotlin-stdlib is on the classpath.
 
-mod common;
+use super::common;
 
 /// Compile `src` (stem `stem`) against kotlin-stdlib + JDK modules and run its `box()`, asserting
 /// "OK". Skips (returns) when the toolchain / stdlib / JDK isn't provisioned so the suite still runs.

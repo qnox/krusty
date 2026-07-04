@@ -7,7 +7,7 @@
 //! (3) the lowerer emits `constructor-impl` (unboxed) with `x.v` rewritten to identity. Round-tripped on
 //! the JVM against a kotlinc-compiled value class (so its @Metadata/ABI is authoritative).
 
-mod common;
+use super::common;
 
 fn env(k: &str) -> Option<String> {
     std::env::var(k).ok().filter(|v| !v.is_empty())

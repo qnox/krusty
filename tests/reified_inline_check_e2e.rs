@@ -1,7 +1,7 @@
 //! A `reified` type parameter is only allowed on an `inline` function (kotlinc rejects it otherwise).
 //! Covers the check_fun reified/inline check.
 
-mod common;
+use super::common;
 
 fn diags(src: &str) -> Vec<String> {
     common::front_end_diagnostics(src, &[], None)

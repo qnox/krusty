@@ -5,7 +5,7 @@
 //! regression lock over the interaction of: value-class `init`, a classpath object with `const val`s, a
 //! `when`-returning classpath sealed type, and an `is`-smart-cast `require` in the value-class constructor.
 //! Built by the real kotlinc via the shared `common::run_box_against` harness.
-mod common;
+use super::common;
 
 const LIB: &str = "package lib\n\
      sealed class SlugValidation {\n\

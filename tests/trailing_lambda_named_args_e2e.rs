@@ -3,7 +3,7 @@
 //! named argument" in both the checker (`map_call_args`) and the lowering (`lower_args_defaulted`).
 //! Now the trailing lambda fills the last slot. Round-tripped on a real JVM, including a reordered call.
 
-mod common;
+use super::common;
 
 #[test]
 fn trailing_lambda_after_named_args_runs() {

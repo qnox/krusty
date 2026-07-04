@@ -6,9 +6,9 @@ parameters.
 ## Agent Quick Reference
 
 - Use `./run-tests.sh` for the full suite; it provisions kotlinc and the Kotlin codegen/box corpus.
-- Use focused harness runs, not raw `cargo test`, while iterating: `./run-tests.sh --test <name> -- --nocapture`.
+- Use focused harness runs, not raw `cargo test`, while iterating. Standalone suites still use `./run-tests.sh --test <name> -- --nocapture`; grouped e2e tests use a test-name filter, e.g. `./run-tests.sh --test e2e lambda_e2e::lambdas_run -- --nocapture`.
 - Do not pass `--release`; the gate profile is the intended fast edit/build/test loop.
-- For conformance changes, run `./run-tests.sh --test kotlin_box_ir_jvm_conformance -- --nocapture` and keep `FAIL: 0`.
+- For Kotlin box conformance changes, run `./run-tests.sh --test conformance kotlin_codegen_box_conformance -- --nocapture` and keep `FAIL: 0`.
 - For performance work, start with the harness timing output or `KRUSTY_NO_RUN=1 KRUSTY_FLAMEGRAPH=1`.
 
 ## Normal Runs
@@ -30,9 +30,14 @@ Do not use `--release` for tests. The release build cycle takes longer than it s
 Pass normal Cargo test arguments through the harness:
 
 ```sh
-./run-tests.sh --test metadata_return_types
-./run-tests.sh --test kotlin_box_ir_jvm_conformance -- --nocapture
+./run-tests.sh --test conformance -- --nocapture
+./run-tests.sh --test e2e lambda_e2e::lambdas_run -- --nocapture
 ```
+
+Product e2e files are grouped into one `e2e` integration-test binary; external corpus/reference-toolchain suites are grouped into a separate `conformance` binary. Cargo compiles each
+top-level `tests/*.rs` file as a separate crate, so grouping keeps link count and build artifacts
+bounded. Focus a grouped test with a module/test-name filter (`lambda_e2e::lambdas_run`, a test function
+name, or any normal libtest substring). The conformance suite remains available by `--test conformance` and is excluded from fast/coverage runs before it executes.
 
 Any argument switches the harness to Cargo's normal focused runner with `--profile gate`. This is
 useful for development, but use the no-argument harness for full-suite validation because it builds
@@ -52,7 +57,7 @@ or inventing custom loops.
 For compiler-only conformance profiling, use:
 
 ```sh
-KRUSTY_NO_RUN=1 KRUSTY_FLAMEGRAPH=1 ./run-tests.sh --test kotlin_box_ir_jvm_conformance -- --nocapture
+KRUSTY_NO_RUN=1 KRUSTY_FLAMEGRAPH=1 ./run-tests.sh --test conformance kotlin_codegen_box_conformance -- --nocapture
 ```
 
 This skips JVM execution in the conformance test, prints phase timing, and writes

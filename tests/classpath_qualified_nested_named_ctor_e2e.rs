@@ -5,7 +5,7 @@
 //! which the named-arg gate wrongly tried to type as a value — and the omitted-default positional form
 //! was "unresolved" (no `<init>$default` synthetic on the nested path). The library is built by the real
 //! kotlinc via the shared `common::run_box_against` harness.
-mod common;
+use super::common;
 
 const LIB: &str = "package lib\n\
      sealed class Op {\n\

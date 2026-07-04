@@ -5,7 +5,7 @@
 //! Now `append_top` treats the String class as `String`. These run on a real JVM to guard the result;
 //! byte-parity itself is checked by the differential harness (`bytediff dataClasses/equals/intarray`).
 
-mod common;
+use super::common;
 
 fn run(src: &str) -> Option<String> {
     let jdk = common::jdk_modules()?;

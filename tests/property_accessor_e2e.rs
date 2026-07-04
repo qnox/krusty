@@ -2,7 +2,7 @@
 //! accessors; access from outside the declaring class goes through them (`c.x`/`c.x = v`), while inside
 //! the class the field is used directly. Round-tripped under `-Xverify:all`.
 
-mod common;
+use super::common;
 
 #[test]
 fn property_accessors_run() {

@@ -99,14 +99,14 @@ test *ARGS:
 test-fast:
     #!/usr/bin/env bash
     set -euo pipefail
-    export KRUSTY_TEST_EXCLUDE="kotlin_box_ir_jvm_conformance,box_corpus_regression_e2e,ir_blockers,box_vendored_e2e,serialization_conformance,ksp_real_e2e"
+    export KRUSTY_TEST_EXCLUDE="conformance"
     ./run-tests.sh
 
 # Run ONLY the Kotlin box/codegen conformance suite, plain (no coverage instrumentation) — the
 # "conformance without coverage" half of the pre-push gate. Provisions kotlinc + corpus via the
 # harness. The suite is internally rayon-parallel, so it uses all cores on its own.
 conformance-plain:
-    ./run-tests.sh --test kotlin_box_ir_jvm_conformance
+    ./run-tests.sh --test conformance kotlin_codegen_box_conformance
 
 # Measure test coverage — regions, functions, lines and BRANCHES — via LLVM source-based coverage
 # (nightly, `-Zcoverage-options=branch`). Runs an instrumented build + the own suite in parallel and
@@ -238,9 +238,15 @@ ksp-corpus KSP_REF="main":
 # CI alike. Parallelization lives here, not in a CI matrix, so `just test-all` behaves identically
 # everywhere and needs no GitHub-Actions infra. Each version gets its own CARGO_TARGET_DIR (so the
 # concurrent cargo runs don't fight over the build lock) and its own log; KRUSTY_LANGUAGE_VERSION is
-# exported for the differential harness. Set KRUSTY_KOTLINC_<ver> (dots->underscores) to point a
-# version at a specific kotlinc, else the vendored dist from `just kotlinc` (.kotlinc/<ver>/...) is
-# used automatically, else the ambient KRUSTY_KOTLINC.
+# exported for the differential harness. The actual suite still goes through `run-tests.sh`, which uses
+# the disk-lean `gate` profile instead of Cargo's default debug test profile. Parallel sessions stay
+# isolated by the per-version target dirs; do not recycle space by deleting a tree another run may use.
+# Incremental state is disabled for these per-version CI-style targets; deps and test binaries are still
+# retained and reused, but Cargo skips the largest low-value cache layer.
+#
+# Set KRUSTY_KOTLINC_<ver> (dots->underscores) to point a version at a specific kotlinc, else the
+# vendored dist from `just kotlinc` (.kotlinc/<ver>/...) is used automatically, else the ambient
+# KRUSTY_KOTLINC.
 test-all *ARGS:
     #!/usr/bin/env bash
     set -uo pipefail
@@ -261,10 +267,11 @@ test-all *ARGS:
         [ -z "$kc" ] && [ -x "$vendored" ] && kc="$vendored"
         [ -z "$kc" ] && kc="${KRUSTY_KOTLINC:-}"
         ( CARGO_TARGET_DIR="target/kt-$v" \
+          CARGO_INCREMENTAL="${CARGO_INCREMENTAL:-0}" \
           KRUSTY_LANGUAGE_VERSION="$v" \
           KRUSTY_KOTLINC="$kc" \
           KRUSTY_KOTLIN_BOX_DIR="$PWD/target/cache/box-corpus/$v/compiler/testData/codegen/box" \
-          cargo test {{ARGS}} > "target/test-$v.log" 2>&1 ) &
+          ./run-tests.sh {{ARGS}} > "target/test-$v.log" 2>&1 ) &
         pids+=("$!"); tags+=("$v")
     done < <(just kotlin-versions)
     [ "${#pids[@]}" -gt 0 ] || { echo "no Kotlin versions in the manifest" >&2; exit 1; }
@@ -291,7 +298,7 @@ conformance:
     v="$(just max-version)"
     export KRUSTY_KOTLINC="${KRUSTY_KOTLINC:-$(just kotlinc "$v")}"
     export KRUSTY_KOTLIN_BOX_DIR="${KRUSTY_KOTLIN_BOX_DIR:-$(just box-corpus "$v")}"
-    out=$(cargo test --profile gate --test kotlin_box_ir_jvm_conformance -- --nocapture 2>&1 || true)
+    out=$(cargo test --profile gate --test conformance kotlin_codegen_box_conformance -- --nocapture 2>&1 || true)
     line=$(printf '%s\n' "$out" | grep -E 'box\(\)=OK:' | tail -1)
     [ -n "$line" ] || { echo "no conformance summary — set KRUSTY_KOTLIN_BOX_DIR and JAVA_HOME" >&2; exit 1; }
     scanned=$(printf '%s' "$line" | sed -E 's/.*scanned: ([0-9]+).*/\1/')

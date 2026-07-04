@@ -2,7 +2,7 @@
 //! expression used as a cast operand yields the `Unit.INSTANCE` singleton; `Unit` as a cast target is
 //! `kotlin/Unit`. Round-tripped on the JVM.
 
-mod common;
+use super::common;
 
 fn run(src: &str) -> Option<String> {
     common::compile_and_run_with_stdlib(src, "Main")

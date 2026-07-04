@@ -2,7 +2,7 @@
 //! (`[I`). Covers `arrayOf`, `Array(n){}`, declared `Array<T>` (param/return/getter/delegate), `.size`,
 //! `for`, index get/set, and an explicit type argument. Round-tripped on the JVM.
 
-mod common;
+use super::common;
 
 fn run(src: &str) -> Option<String> {
     common::compile_and_run_with_stdlib(src, "Main")

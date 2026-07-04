@@ -5,7 +5,7 @@
 //!   f4  suspend interface method with a value-class param    — `p.get(id)` (`get-<h>(String, Continuation)`)
 //! Library compiled by kotlinc (the real mangled/synthetic ABI); consumed by krusty.
 //! Needs the JVM toolchain + kotlin-stdlib; skips otherwise.
-mod common;
+use super::common;
 
 const LIB: &str = "package lib\n\
      @JvmInline value class Vid(val v: String)\n\

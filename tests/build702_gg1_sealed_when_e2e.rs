@@ -9,7 +9,7 @@
 //! (`Class.sealedSubclassFqName`, via `class_sealed_subclasses` / `SymbolSource::sealed_subclasses`), so an
 //! exhaustive classpath `when` is proven an expression the same way a same-module one is. A NON-exhaustive
 //! `when` used as a value still errors.
-mod common;
+use super::common;
 
 fn run(tag: &str, lib: &str, main: &str) -> Option<String> {
     let jdk = common::jdk_modules()?;

@@ -5,7 +5,7 @@
 //! (`CtorDefaultValue`: literals + object singletons), so a cross-file fill emits the literal / `getstatic
 //! …INSTANCE` directly. Compiled as ONE module (shared signatures) and round-tripped on the JVM.
 
-mod common;
+use super::common;
 
 use krusty::diag::DiagSink;
 use krusty::jvm::names::file_class_name;

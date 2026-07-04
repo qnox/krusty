@@ -4,7 +4,7 @@
 //! function type params in scope, so a class type-param cast bailed and the whole file was skipped.
 //! Round-tripped on the JVM.
 
-mod common;
+use super::common;
 
 fn run(src: &str) -> Option<String> {
     common::compile_and_run_with_stdlib(src, "Main")

@@ -5,7 +5,7 @@
 //! `Unit`, rejecting the body with a spurious "expected 'Unit', actual 'Int'". Round-tripped under
 //! `-Xverify:all`.
 
-mod common;
+use super::common;
 
 fn run(src: &str) -> Option<String> {
     common::compile_and_run_with_stdlib(src, "C")

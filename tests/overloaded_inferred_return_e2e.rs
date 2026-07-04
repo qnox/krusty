@@ -4,7 +4,7 @@
 //! Before the fix the override map was keyed by name alone, so the second overload clobbered the first
 //! and `f("hi")` was mis-typed as `Int` ("operator cannot be applied to Int and String").
 
-mod common;
+use super::common;
 
 #[test]
 fn overloaded_inferred_returns_dont_clobber() {

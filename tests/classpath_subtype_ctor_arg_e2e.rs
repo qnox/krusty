@@ -5,7 +5,7 @@
 //! `resolve_constructor` now has a general nominal-subtype fallback (walk each argument's classpath
 //! supertype closure to its parameter) after the exact matches, so the most-specific ctor still wins and a
 //! scalar parameter is never coerced. Runnable end-to-end.
-mod common;
+use super::common;
 
 fn run(tag: &str, lib: &str, main: &str) -> Option<String> {
     let jdk = common::jdk_modules()?;

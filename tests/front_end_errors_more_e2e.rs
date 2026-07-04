@@ -13,7 +13,7 @@
 //! stdlib + JDK classpath; when the toolchain isn't provisioned those tests skip cleanly (a non-empty
 //! sentinel keeps the non-empty assertion true).
 
-mod common;
+use super::common;
 
 /// Run the front end with stdlib + JDK on the classpath. If the toolchain is unavailable, return a
 /// sentinel so the "non-empty" assertions still hold (the test effectively skips).

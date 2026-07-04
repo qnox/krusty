@@ -3,7 +3,7 @@
 //! `@Metadata`. Validated against the real stdlib `kotlin.Result`, whose `Companion.success`/`failure`
 //! and the `ResultKt` extensions (`getOrThrow`, …) are all public `inline`.
 
-mod common;
+use super::common;
 
 use krusty::call_resolver::CallResolver;
 use krusty::jvm::classpath::Classpath;

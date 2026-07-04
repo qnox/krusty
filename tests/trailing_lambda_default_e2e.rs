@@ -4,7 +4,7 @@
 //! lambda fills `builder`). Both the checker (arity/assignability) and lowering (`$default` slot
 //! placement) must route the lambda to the last slot, not the next free positional one.
 
-mod common;
+use super::common;
 
 #[test]
 fn trailing_lambda_skips_defaulted_middle_param() {

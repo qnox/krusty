@@ -5,7 +5,7 @@
 //! interfaces. (A companion with a base CLASS — `companion object : Base()` — still needs a `super(args)`
 //! call the registration pass doesn't build, so that shape skips, never miscompiles.)
 
-mod common;
+use super::common;
 
 use std::path::PathBuf;
 

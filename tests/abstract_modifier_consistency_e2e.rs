@@ -1,7 +1,7 @@
 //! `abstract` modifier consistency: an abstract member has no body and cannot also be `private` or
 //! `final` (kotlinc rejects each). Covers the class-arm consistency loop.
 
-mod common;
+use super::common;
 
 fn diags(src: &str) -> Vec<String> {
     common::front_end_diagnostics(src, &[], None)

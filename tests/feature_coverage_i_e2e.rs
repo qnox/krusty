@@ -2,7 +2,7 @@
 //! `fun box(): String` with krusty, runs it on a real JVM under verification, and asserts `"OK"`.
 //! Targets `src/jvm/value_classes.rs` and `src/jvm/inline.rs`.
 
-mod common;
+use super::common;
 
 fn run(src: &str, stem: &str) -> Option<String> {
     common::compile_and_run_with_stdlib(src, stem)

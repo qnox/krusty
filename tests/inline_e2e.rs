@@ -2,7 +2,7 @@
 //! compiled body from kotlin-stdlib, splice it with the reified type bound to `String`, and check the
 //! `reifiedOperationMarker` was resolved away into a concrete `anewarray`.
 
-mod common;
+use super::common;
 
 use krusty::jvm::classfile::ClassWriter;
 use krusty::jvm::classpath::Classpath;

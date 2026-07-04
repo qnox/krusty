@@ -8,7 +8,7 @@
 //! `feature_coverage_*` / `*coverage*e2e` suites: those focus on generic signatures / `@Metadata` /
 //! class-body shapes; this suite drills resolution + parsing corner cases.
 
-mod common;
+use super::common;
 
 /// Single-compilation box run against kotlin-stdlib + JDK modules. Returns `None` (→ skip) when the
 /// toolchain isn't provisioned.

@@ -3,7 +3,7 @@
 //! The backing field is a facade static; the synthesized `getX`/`setX` run the custom body
 //! (with `field` bound to that static), and reads/writes route through those accessors.
 
-mod common;
+use super::common;
 
 fn run(src: &str) -> Option<String> {
     common::compile_and_run_with_stdlib(src, "Main")

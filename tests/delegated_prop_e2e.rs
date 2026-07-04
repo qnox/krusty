@@ -3,7 +3,7 @@
 //! `x$kprop` (a `PropertyReference0Impl`) statics + a `getX()` calling `delegate.getValue(null, kprop)`.
 //! Round-tripped under `-Xverify:all`.
 
-mod common;
+use super::common;
 
 #[test]
 fn delegated_property_runs() {

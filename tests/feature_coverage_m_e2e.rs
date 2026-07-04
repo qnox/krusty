@@ -4,7 +4,7 @@
 //! `@JvmStatic`, `@JvmName`), anonymous object expressions capturing a local, and SAM conversion. Each
 //! test compiles a `fun box(): String` returning "OK" and runs it on a real JVM.
 
-mod common;
+use super::common;
 
 fn run(src: &str, stem: &str) -> Option<String> {
     common::compile_and_run_with_stdlib(src, stem)

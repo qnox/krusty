@@ -4,7 +4,7 @@
 //! `super(…)` call — the same defaults a `new A()` construction fills at the call site (krusty has no
 //! synthetic `$default` ctor). Round-tripped on the JVM.
 
-mod common;
+use super::common;
 
 use std::path::PathBuf;
 

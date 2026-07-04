@@ -4,7 +4,7 @@
 use std::fs;
 use std::process::Command;
 
-mod common;
+use super::common;
 
 /// Extract the first `error: <msg>` text (without the `file:line:col:` prefix) from compiler output.
 fn first_error(output: &str) -> Option<String> {

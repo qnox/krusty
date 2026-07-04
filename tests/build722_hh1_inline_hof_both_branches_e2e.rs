@@ -7,7 +7,7 @@
 //! (height 0) — was emitted while the counter still read 1. A framed inline splice (`find`'s loop body)
 //! requires an empty operand baseline, so it bailed. `emit_when` now resets the counter to the branch
 //! entry height at each jump-reached branch.
-mod common;
+use super::common;
 
 fn run(main: &str) -> Option<String> {
     let jdk = common::jdk_modules()?;

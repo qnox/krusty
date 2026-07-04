@@ -7,7 +7,7 @@
 //! `x.member()` type-checks. Three, a top-level property whose NAME equals the imported member
 //! (`val logger = logger {}`) shadows the import in value position, so `logger.member()` reads the
 //! property. The library is built by the real kotlinc via the shared `common::run_box_against` harness.
-mod common;
+use super::common;
 
 const LIB: &str = "package lib\n\
      class KLogger(val tag: String) { fun info(): String = tag }\n\

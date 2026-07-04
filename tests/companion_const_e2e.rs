@@ -3,7 +3,7 @@
 //! `getstatic C.X`. Previously a companion with ANY property bailed the whole file. A companion with
 //! both `const val`s and methods works (the const fields on C, methods on `C$Companion`). Round-tripped.
 
-mod common;
+use super::common;
 
 fn run(src: &str) -> Option<String> {
     common::compile_and_run_with_stdlib(src, "Main")

@@ -1,7 +1,7 @@
 //! A numeric primitive is assignable to `Number` (it boxes to its wrapper, which is a `Number`):
 //! `fun f(n: Number)` accepts an `Int`, `val n: Number = 5`. Round-tripped under `-Xverify:all`.
 
-mod common;
+use super::common;
 
 fn run(src: &str) -> Option<String> {
     common::compile_and_run_with_stdlib(src, "C")

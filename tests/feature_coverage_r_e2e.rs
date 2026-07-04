@@ -2,7 +2,7 @@
 //! expressions, companion objects, and typealiases. Each test compiles a self-contained
 //! `fun box(): String` returning "OK" and runs it on the JVM under the persistent box runner.
 
-mod common;
+use super::common;
 
 /// Compile `src` (with a `box()` returning "OK") under `stem` against the stdlib + JDK modules and
 /// assert it prints "OK". Skips (returns) when the toolchain isn't provisioned.

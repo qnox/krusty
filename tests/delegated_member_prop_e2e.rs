@@ -3,7 +3,7 @@
 //! calling `this.x$delegate.getValue(this, x$kprop)` (and `setX` via `setValue` for `var`). The
 //! delegate's `getValue`/`setValue` here ignore the property argument. Round-tripped under `-Xverify:all`.
 
-mod common;
+use super::common;
 
 #[test]
 fn member_delegated_val_runs() {

@@ -2,7 +2,7 @@
 //! module — was rejected ("callable references are not supported"). Now it resolves to a
 //! `FunctionReferenceImpl` whose `invoke` calls the real `invokestatic <facade>.greet(args)`. Verified
 //! end-to-end on a real JVM (the function is in a separately kotlinc-compiled library).
-mod common;
+use super::common;
 fn env(k: &str) -> Option<String> {
     std::env::var(k).ok().filter(|v| !v.is_empty())
 }

@@ -1,7 +1,7 @@
 //! A REORDERED named-argument call (`f(b = …, a = …)`) evaluates its arguments in SOURCE order
 //! (Kotlin semantics), then binds them to parameter positions. Side effects must run in written order.
 
-mod common;
+use super::common;
 
 fn run(src: &str) -> Option<String> {
     common::compile_and_run_with_stdlib(src, "Main")

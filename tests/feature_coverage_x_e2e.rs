@@ -10,7 +10,7 @@
 //! the classfiles to a classpath dir, then compile+run a SECOND source that references those
 //! declarations — driving krusty's own metadata DECODE over metadata krusty itself EMITTED.
 
-mod common;
+use super::common;
 
 /// Single-compilation box run: everything lives in one source, cross-referencing declarations (which
 /// still drives the checker/`types` resolution heavily).

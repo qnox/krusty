@@ -4,7 +4,7 @@
 //! of objects exhaustive in a `when (s) { is A -> … }` (the objects are now registered as subclasses of
 //! the sealed base). An object with BOTH a base class and interfaces (qualified `super<T>`) skips.
 
-mod common;
+use super::common;
 
 fn run(src: &str) -> Option<String> {
     common::compile_and_run_with_stdlib(src, "Main")

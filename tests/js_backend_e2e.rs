@@ -5,7 +5,7 @@
 //! Skips cleanly when the kotlin-stdlib jar / JDK modules (needed for front-end resolution) or `node`
 //! are unavailable.
 
-mod common;
+use super::common;
 
 /// Lower `src`, emit JS, append `console.log(box())`, run on Node. Returns Node's stdout, or `None`
 /// to skip (toolchain/node missing or a front-end gap).

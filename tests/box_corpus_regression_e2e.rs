@@ -6,7 +6,7 @@
 //!
 //! Needs the provisioned box corpus + JVM toolchain; skips otherwise.
 
-mod common;
+use super::common;
 
 /// Single-file `// WITH_STDLIB` box cases from the corpus that regressed under the nullable rework and
 /// must stay `box()=OK`. (Multi-file `// FILE:` cases and ones needing features krusty skips are left

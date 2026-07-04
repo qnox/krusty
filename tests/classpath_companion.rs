@@ -3,7 +3,7 @@
 //! This tests the library-layer detection (`LibraryType::companion_object`) — the substrate the
 //! resolver/lowering use to emit `getstatic C.field:LcompanionType;` for such a bare reference.
 
-mod common;
+use super::common;
 
 use krusty::jvm::classpath::Classpath;
 use krusty::jvm::jvm_libraries::JvmLibraries;

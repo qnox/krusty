@@ -5,7 +5,7 @@
 //! (Value-class through a generic HOF key selector such as `groupBy { it }` is a separate, still-open
 //! generic-boundary boxing case and is intentionally not covered here.)
 
-mod common;
+use super::common;
 
 fn run_ok(stem: &str, decls: &str, body: &str) {
     let src = format!("{decls}\nfun box(): String {{\n{body}\n}}\n");

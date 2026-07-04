@@ -3,7 +3,7 @@
 //! can't distinguish a discarded statement from a value use → inconsistent frames), but a `Nothing`
 //! branch pushes nothing at the merge, so it is exempt. Round-tripped on the JVM.
 
-mod common;
+use super::common;
 
 #[test]
 fn when_statement_with_throwing_else() {

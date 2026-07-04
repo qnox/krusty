@@ -1,7 +1,7 @@
 //! Expression-parser completeness: unary `+` (identity on numerics) and `return`/`throw` used in
 //! expression position (`x ?: return y`). Round-tripped under `-Xverify:all`.
 
-mod common;
+use super::common;
 
 fn run(src: &str) -> Option<String> {
     common::compile_and_run_with_stdlib(src, "P")

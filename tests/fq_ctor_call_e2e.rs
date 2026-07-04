@@ -5,7 +5,7 @@
 //! and lowerer's `qualified_nested_ctor_internal` / `nested_ctor_internal` now resolve a dotted package
 //! path `a.b.Ctx` to `a/b/Ctx` (verified on the classpath) and construct it — named, positional, reordered
 //! and omitted-default forms. Built by the real kotlinc via the shared `common::run_box_against` harness.
-mod common;
+use super::common;
 
 const LIB: &str = "package a.b\n\
      class Ctx(val x: Int, val y: Int = 9, val z: String = \"d\")\n";

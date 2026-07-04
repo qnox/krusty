@@ -2,7 +2,7 @@
 //! parameter — kotlinc synthesizes a `private final $$delegate_N` field holding it, stored in the ctor,
 //! and forwards each interface method through it. Round-tripped under `-Xverify:all`.
 
-mod common;
+use super::common;
 
 fn run(src: &str) -> Option<String> {
     common::compile_and_run_with_stdlib(src, "C")

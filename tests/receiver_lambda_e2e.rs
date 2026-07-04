@@ -3,7 +3,7 @@
 //! `buildFoo { … }` DSL/builder shape. Previously the marker `TypeRef.fun_has_receiver` was parsed but
 //! never consumed, so such a body's unqualified calls were "unresolved". Round-tripped on a real JVM.
 
-mod common;
+use super::common;
 
 #[test]
 fn member_receiver_lambda_runs() {

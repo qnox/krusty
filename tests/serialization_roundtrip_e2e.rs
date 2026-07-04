@@ -13,8 +13,6 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::rc::Rc;
 
-mod common;
-
 /// Recursively locate a `<prefix>*.jar` (no `-sources`) under a root.
 fn walk(dir: &std::path::Path, prefix: &str, depth: usize, out: &mut Option<PathBuf>) {
     if out.is_some() || depth > 10 {

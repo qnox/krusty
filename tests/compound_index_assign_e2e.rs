@@ -2,7 +2,7 @@
 //! receiver and index EXACTLY ONCE (a side-effecting `a[f()] += v` calls `f()` once). krusty spills a
 //! non-pure receiver/index to a temp before the read-modify-write. Round-tripped on the JVM.
 
-mod common;
+use super::common;
 
 fn run(src: &str) -> Option<String> {
     common::compile_and_run_with_stdlib(src, "Main")

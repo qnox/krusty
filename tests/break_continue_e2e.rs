@@ -2,7 +2,7 @@
 //! `for`-loop increment) runs at the `continue` target so `continue` advances rather than skipping it.
 //! Round-tripped under `-Xverify:all`.
 
-mod common;
+use super::common;
 
 #[test]
 fn break_continue_runs() {

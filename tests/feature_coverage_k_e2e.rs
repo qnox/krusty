@@ -4,7 +4,7 @@
 //! property delegates (`val` and `var`). Each program exposes `fun box(): String` returning "OK"
 //! and is round-tripped on the JVM.
 
-mod common;
+use super::common;
 
 fn run(src: &str, stem: &str) -> Option<String> {
     common::compile_and_run_with_stdlib(src, stem)

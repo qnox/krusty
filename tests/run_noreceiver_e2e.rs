@@ -1,7 +1,7 @@
 //! No-receiver `run { … }` (stdlib `inline fun <R> run(block: () -> R): R`): the lambda body is inlined
 //! directly as the value, including a branchy body (`run { if … }` / `run { when … }`). Round-tripped.
 
-mod common;
+use super::common;
 
 fn run_box(src: &str) -> Option<String> {
     common::compile_and_run_with_stdlib(src, "C")

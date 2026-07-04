@@ -5,7 +5,7 @@
 //! `Classpath::builtin_member_ret_nullable` recovers that flag and the member walk null-annotates the
 //! resolved (primitive) return, so `m[k]` types as `Int?` and the elvis null-checks before unboxing —
 //! rather than unboxing a null `Integer` (NPE). A nullable REFERENCE value already null-checks regardless.
-mod common;
+use super::common;
 
 fn run(src: &str) -> Option<String> {
     common::compile_and_run_with_stdlib(src, "Main")

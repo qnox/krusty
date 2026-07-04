@@ -3,7 +3,7 @@
 //! first invoke param), bound via `StaticBound` (receiver captured, passed as the first static arg).
 //! Both carry real reference EQUALITY. Round-tripped on the JVM.
 
-mod common;
+use super::common;
 
 fn run(src: &str) -> Option<String> {
     common::compile_and_run_with_stdlib(src, "Main")

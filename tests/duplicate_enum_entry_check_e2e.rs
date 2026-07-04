@@ -1,7 +1,7 @@
 //! Duplicate enum entry names (`enum class E { A, B, A }`) are illegal (conflicting declaration).
 //! Covers the class-arm enum-entry duplicate scan.
 
-mod common;
+use super::common;
 
 fn diags(src: &str) -> Vec<String> {
     common::front_end_diagnostics(src, &[], None)

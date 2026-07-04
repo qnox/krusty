@@ -3,7 +3,7 @@
 //! it like a once-assigned `var`: a synthetic default is written at the declaration and overwritten
 //! before any read. (A nullable `val?` is excluded — it needs smart-cast-after-assignment.) Round-tripped.
 
-mod common;
+use super::common;
 
 fn run(src: &str) -> Option<String> {
     common::compile_and_run_with_stdlib(src, "Main")

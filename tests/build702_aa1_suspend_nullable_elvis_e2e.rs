@@ -2,7 +2,7 @@
 //! non-null, then a member accessed on the result — `val c = r.byId(id) ?: error("none"); c.at`. Earlier
 //! builds typed the elvis result as `Any` (losing the non-null branch type), so `c.at` failed with
 //! "member 'at' on Any". This exercises the faithful shape end-to-end to guard against regression.
-mod common;
+use super::common;
 
 const LIB: &str = "package lib\n\
     class Card(val at: Int)\n\

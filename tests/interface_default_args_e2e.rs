@@ -2,7 +2,7 @@
 //! through an implementor while omitting that argument (`FooImpl().foo()`). kotlinc emits a static
 //! `Foo.foo$default(Foo, params, int mask, Object marker)` that applies the defaults then dispatches to
 //! the real method; a caller omitting defaults invokes it. Verified by running `box()` on a real JVM.
-mod common;
+use super::common;
 fn run(src: &str) -> Option<String> {
     let stdlib = common::stdlib_jar()?;
     let jdk = std::env::var("JAVA_HOME")

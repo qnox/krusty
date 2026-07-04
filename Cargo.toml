@@ -3,6 +3,7 @@ name = "krusty"
 version = "0.0.1"
 edition = "2021"
 description = "Memory-lean Kotlin->JVM compiler PoC (per-file streaming pipeline)"
+autotests = false
 
 [dependencies]
 # Read `.class` entries from `.jar` classpath entries (Java/Kotlin library support).
@@ -47,3 +48,16 @@ overflow-checks = false
 debug-assertions = false
 debug = false
 incremental = true
+
+# Integration test binaries are explicit because Cargo otherwise treats every tests/*.rs file
+# as a separate executable. Product e2e tests are grouped into one e2e binary, while external
+# corpus/reference-toolchain suites are grouped into one conformance binary that fast/coverage
+# runs can skip before executing it.
+
+[[test]]
+name = "e2e"
+path = "tests/e2e.rs"
+
+[[test]]
+name = "conformance"
+path = "tests/conformance.rs"

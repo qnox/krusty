@@ -14,7 +14,7 @@
 //! and the plain nominal-subtype pass skipped the marker constructor (its trailing marker breaks the arity),
 //! so a subclass argument left `Outer` unresolved. The synthetic-constructor matcher now also accepts a
 //! reference nominal-subtype argument (`ctor_arg_subtype_of_param`).
-mod common;
+use super::common;
 
 fn run(tag: &str, lib: &str, main: &str) -> Option<String> {
     let jdk = common::jdk_modules()?;

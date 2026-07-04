@@ -3,7 +3,7 @@
 //! checkcast (the primitive overload returns the exact array type) — byte-identical to kotlinc. The
 //! reference-array spread (`Object[]` copyOf + checkcast) was already supported. Round-tripped on the JVM.
 
-mod common;
+use super::common;
 
 fn run(src: &str) -> Option<String> {
     common::compile_and_run_with_stdlib(src, "Main")

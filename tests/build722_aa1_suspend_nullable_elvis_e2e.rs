@@ -3,7 +3,7 @@
 //! builds typed the elvis result `Any` (losing the non-null branch type) → "member 'at' on Any". This
 //! faithful shape (interface `Repo` implemented by a classpath `object`) already compiles and runs; the
 //! test guards against regression, and is the root of several further `member … on Any` cascades.
-mod common;
+use super::common;
 
 const LIB: &str = "package lib\n\
     data class Ch(val at: Int)\n\

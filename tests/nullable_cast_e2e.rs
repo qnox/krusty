@@ -3,7 +3,7 @@
 //! `ClassCastException`, and a matching value casts. (Contrast `x as Foo`, which null-checks first.)
 //! Round-tripped on the JVM.
 
-mod common;
+use super::common;
 
 #[test]
 fn nullable_reference_cast_passes_null_and_checkcasts() {

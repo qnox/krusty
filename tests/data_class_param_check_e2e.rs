@@ -1,7 +1,7 @@
 //! A `data class`'s primary-constructor parameters must all be `val`/`var` (kotlinc rejects a plain
 //! parameter). Covers the class-arm data-class parameter check.
 
-mod common;
+use super::common;
 
 fn diags(src: &str) -> Vec<String> {
     common::front_end_diagnostics(src, &[], None)

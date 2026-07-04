@@ -4,7 +4,7 @@
 //! lambda in a class member was rejected. Round-tripped on the JVM (the captured `this` reads real
 //! state; a `var` it mutates is `Ref`-boxed; a vararg member call wraps its argument).
 
-mod common;
+use super::common;
 
 fn run(src: &str) -> Option<String> {
     common::compile_and_run_with_stdlib(src, "Main")

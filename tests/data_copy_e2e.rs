@@ -2,7 +2,7 @@
 //! backend emits a `copy$default(self, fields…, mask, marker)` stub (byte-identical to kotlinc), and a
 //! call with omitted args passes a mask. Round-tripped under `-Xverify:all`.
 
-mod common;
+use super::common;
 
 #[test]
 fn data_class_copy_runs() {

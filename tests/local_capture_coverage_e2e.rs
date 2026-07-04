@@ -3,7 +3,7 @@
 //! lambda_uses_enclosing_this, collect_locals, body_declares_local, outer_local_access_expr,
 //! body_has_labeled_return, expr_has_try/finally) that the box corpus does not reach.
 
-mod common;
+use super::common;
 
 fn run_ok(stem: &str, body: &str) {
     common::expect_box_ok_with_stdlib(body, stem);

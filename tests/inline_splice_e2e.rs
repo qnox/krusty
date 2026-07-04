@@ -3,7 +3,7 @@
 //! the library function survives, and the result is correct under the JVM verifier. Proves the
 //! `Emitter::try_inline_static` → `inline::splice_branchless` path end-to-end.
 
-mod common;
+use super::common;
 
 fn env(k: &str) -> Option<String> {
     std::env::var(k).ok().filter(|v| !v.is_empty())

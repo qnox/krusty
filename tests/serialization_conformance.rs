@@ -23,7 +23,7 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::rc::Rc;
 
-mod common;
+use super::common;
 
 /// Gap #7 emit diagnostic: lower a real `@Serializable Foo`, run the serialization plugin, then run
 /// krusty's ACTUAL emitter over the result — does it produce a well-formed `Foo$serializer.class`?

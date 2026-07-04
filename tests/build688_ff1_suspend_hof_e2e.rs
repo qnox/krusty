@@ -9,7 +9,7 @@
 //! so its now-`GetValue(1)` reads referenced an unallocated slot. A class method (threshold 1) escaped
 //! because the lambda's `it` at index 0 was below the threshold. `shift_locals` no longer descends into a
 //! `Lambda` body (a separate value-index scope; its captures are closure fields, not enclosing-frame reads).
-mod common;
+use super::common;
 
 fn run(tag: &str, main: &str) -> Option<String> {
     let jdk = common::jdk_modules()?;

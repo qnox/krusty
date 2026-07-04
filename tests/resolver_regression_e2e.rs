@@ -1,7 +1,7 @@
 //! Focused classpath resolver regressions. These duplicate a few cases from the larger feature bundle so
 //! resolver/provider cleanup gets a small, direct failure when metadata or inline-overload selection drifts.
 
-mod common;
+use super::common;
 
 fn run(src: &str, stem: &str) -> Option<String> {
     common::compile_and_run_with_stdlib(src, stem)

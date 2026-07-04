@@ -4,7 +4,7 @@
 //! so in expression position they were parsed as bare identifiers → "unresolved reference 'continue'".
 //! They are now `Expr::Break`/`Expr::Continue` (bottom type `Nothing`, like `return`/`throw`), lowered to
 //! the same `IrExpr::Break`/`Continue` loop jump as the statement form. Same-file, runnable.
-mod common;
+use super::common;
 
 fn run(src: &str) -> Option<String> {
     common::compile_and_run_with_stdlib(src, "Main")

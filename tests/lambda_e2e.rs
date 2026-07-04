@@ -2,7 +2,7 @@
 //! `invokedynamic` + `LambdaMetafactory` producing a `kotlin/jvm/functions/FunctionN`, then invoked
 //! through `FunctionN.invoke`. Round-tripped against the JVM under `-Xverify:all`.
 
-mod common;
+use super::common;
 
 #[test]
 fn lambdas_run() {

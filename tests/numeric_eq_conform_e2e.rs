@@ -6,7 +6,7 @@
 //! (The smart-cast form `x is Double? && y is Int? && x == y` additionally needs chained-`&&` narrowing
 //! in the checker — a separate piece — to reach this conform.)
 
-mod common;
+use super::common;
 
 fn run(src: &str) -> Option<String> {
     common::compile_and_run_with_stdlib(src, "Main")

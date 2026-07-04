@@ -3,7 +3,7 @@
 //! the JVM needs to dispatch an interface-typed call. (A generic method satisfied only by per-entry
 //! overrides skips — the bridge would belong on each entry subclass.) Round-tripped via the INTERFACE.
 
-mod common;
+use super::common;
 
 fn run(src: &str) -> Option<String> {
     common::compile_and_run_with_stdlib(src, "Z")

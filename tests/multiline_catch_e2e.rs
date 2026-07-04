@@ -1,7 +1,7 @@
 //! Repro b4: a `catch` whose parameter sits on the next line(s) inside the parens
 //! (`catch (\n e: Exception\n)`) failed to parse ("expected catch parameter name"). The parser now
 //! skips newlines around the catch parameter, exactly as an ordinary parameter list allows.
-mod common;
+use super::common;
 
 #[test]
 fn multiline_catch_parameter() {

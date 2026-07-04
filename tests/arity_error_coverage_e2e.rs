@@ -2,7 +2,7 @@
 //! function with the wrong number of arguments, and constructing a qualified nested type with the
 //! wrong number of arguments. Both emit a checker diagnostic (`… expects N args, got M`).
 
-mod common;
+use super::common;
 
 fn diags(src: &str) -> Vec<String> {
     let stdlib = match common::stdlib_jar() {

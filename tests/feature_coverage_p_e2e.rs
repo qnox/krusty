@@ -4,7 +4,7 @@
 //! and `if`/`when`/`try` as nested expressions. Each test compiles a `fun box(): String`
 //! returning "OK" and runs it on the JVM.
 
-mod common;
+use super::common;
 
 /// Compile `src` (which must define `fun box(): String`), run it, and assert it returns "OK".
 /// Skips (returns without failing) when the JDK / kotlin-stdlib toolchain is unavailable.

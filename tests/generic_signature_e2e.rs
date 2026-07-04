@@ -3,7 +3,7 @@
 //! krusty must too, for bytecode parity. A non-generic function gets no Signature. The exact strings
 //! are verified byte-identical to kotlinc in the differential harness; here we assert krusty's output.
 
-mod common;
+use super::common;
 
 fn classes(src: &str) -> Option<Vec<(String, Vec<u8>)>> {
     let stdlib = common::stdlib_jar()?;

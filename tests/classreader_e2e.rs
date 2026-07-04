@@ -2,20 +2,23 @@
 //! and check the recovered public signatures. This is the basis for resolving Java/JDK deps.
 
 use std::fs;
+use std::path::PathBuf;
 use std::process::Command;
 
 use krusty::jvm::classreader::parse_class;
 
-fn have(tool: &str) -> bool {
-    Command::new(tool).arg("-version").output().is_ok()
+use super::common;
+
+fn javac() -> Option<PathBuf> {
+    common::java_home().map(|home| PathBuf::from(home).join("bin/javac"))
 }
 
 #[test]
 fn reads_real_javac_class() {
-    if !have("javac") {
+    let Some(javac_bin) = javac() else {
         eprintln!("skipping: javac unavailable");
         return;
-    }
+    };
     let dir = std::env::temp_dir().join(format!("krusty_cr_{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
@@ -30,7 +33,7 @@ fn reads_real_javac_class() {
     )
     .unwrap();
 
-    let javac = Command::new("javac")
+    let javac = Command::new(javac_bin)
         .args(["J.java"])
         .current_dir(&dir)
         .output()
@@ -69,10 +72,10 @@ fn reads_real_javac_class() {
 
 #[test]
 fn reads_method_body_lazily() {
-    if !have("javac") {
+    let Some(javac_bin) = javac() else {
         eprintln!("skipping: javac unavailable");
         return;
-    }
+    };
     let dir = std::env::temp_dir().join(format!("krusty_crb_{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
@@ -81,7 +84,7 @@ fn reads_method_body_lazily() {
         "public class B { public static int add(int a, int b) { return a + b; } }",
     )
     .unwrap();
-    let javac = Command::new("javac")
+    let javac = Command::new(javac_bin)
         .args(["B.java"])
         .current_dir(&dir)
         .output()
@@ -118,10 +121,10 @@ fn reads_method_body_lazily() {
 
 #[test]
 fn classpath_method_code_caches() {
-    if !have("javac") {
+    let Some(javac_bin) = javac() else {
         eprintln!("skipping: javac unavailable");
         return;
-    }
+    };
     let dir = std::env::temp_dir().join(format!("krusty_cpc_{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
@@ -130,7 +133,7 @@ fn classpath_method_code_caches() {
         "public class C { public static int id(int a) { return a; } }",
     )
     .unwrap();
-    assert!(Command::new("javac")
+    assert!(Command::new(javac_bin)
         .args(["C.java"])
         .current_dir(&dir)
         .output()
@@ -148,10 +151,10 @@ fn classpath_method_code_caches() {
 
 #[test]
 fn assembler_round_trips_real_bytecode() {
-    if !have("javac") {
+    let Some(javac_bin) = javac() else {
         eprintln!("skipping: javac unavailable");
         return;
-    }
+    };
     let dir = std::env::temp_dir().join(format!("krusty_asm_{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
@@ -167,7 +170,7 @@ fn assembler_round_trips_real_bytecode() {
     }"#,
     )
     .unwrap();
-    assert!(Command::new("javac")
+    assert!(Command::new(javac_bin)
         .args(["A.java"])
         .current_dir(&dir)
         .output()

@@ -2,7 +2,7 @@
 //! (`build(b: Box.() -> Unit)` in a dependency jar) binds its implicit `this` to the receiver, so a bare
 //! member call inside resolves against it. krusty decodes the `@ExtensionFunctionType` annotation + the
 //! receiver type argument from the callee's `@Metadata` (emitted by real kotlinc). Round-tripped on a JVM.
-mod common;
+use super::common;
 fn env(k: &str) -> Option<String> {
     std::env::var(k).ok().filter(|v| !v.is_empty())
 }

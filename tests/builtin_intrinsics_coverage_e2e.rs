@@ -4,7 +4,7 @@
 //! box corpus leaves several primitive variants untouched. Values are checked against their documented
 //! results (self-consistency for the bit-pattern float hashes).
 
-mod common;
+use super::common;
 
 fn run_ok(stem: &str, body: &str) {
     common::expect_box_ok_with_stdlib(body, stem);

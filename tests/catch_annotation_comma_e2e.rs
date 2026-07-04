@@ -1,6 +1,6 @@
 //! Repros c1/c2: a `catch` parameter with a leading annotation (`catch (@Marker e: E)`) and a trailing
 //! comma (`catch (e: E,)`). Both previously failed to parse; now accepted, matching Kotlin.
-mod common;
+use super::common;
 
 #[test]
 fn catch_parameter_annotation_and_trailing_comma() {

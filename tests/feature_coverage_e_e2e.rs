@@ -3,7 +3,7 @@
 //! functions, and destructuring in a for-loop over a map. Each test compiles Kotlin in-process
 //! and round-trips `box()` on the persistent JVM under `-Xverify:all`.
 
-mod common;
+use super::common;
 
 /// Compile `src` (which must define `fun box(): String`) and assert it returns "OK".
 /// Skips silently (returns) when the JVM/stdlib toolchain isn't provisioned.

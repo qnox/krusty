@@ -3,7 +3,7 @@
 //! backing field. `var` extension properties (custom setter) and extension-delegated properties skip
 //! cleanly. Round-tripped on the JVM.
 
-mod common;
+use super::common;
 
 fn run(src: &str) -> Option<String> {
     common::compile_and_run_with_stdlib(src, "Main")

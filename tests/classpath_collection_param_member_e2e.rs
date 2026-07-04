@@ -12,8 +12,8 @@
 //! (a `suspend` interface method returning `List<CustomType>` — its `get(ids: List<Int>)` param was the
 //! actual failure, not the return). The suspend case is asserted to LOWER end-to-end (a coroutine RUN needs
 //! a driver); the non-suspend cases run their `box()` on the JVM.
+use super::common;
 use std::path::PathBuf;
-mod common;
 
 fn run_with_lib(tag: &str, lib: &str, main: &str) -> Option<String> {
     common::run_box_against(tag, lib, main)

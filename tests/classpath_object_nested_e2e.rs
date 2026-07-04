@@ -2,7 +2,7 @@
 //! member taking a trailing lambda, a sealed-subclass constructor, and an `is Sealed.Sub` check.
 //! These were resolved as an unresolved "Java static" because the qualifier is a classpath Kotlin
 //! object / nested / sealed type rather than a companion.
-mod common;
+use super::common;
 
 #[test]
 fn classpath_object_and_nested_resolution() {

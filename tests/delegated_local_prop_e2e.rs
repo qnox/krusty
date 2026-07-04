@@ -2,7 +2,7 @@
 //! the delegate; reads route to `getValue(null, propref)`, a `var`'s writes to `setValue`. The
 //! delegate's getValue/setValue here ignore the property argument. Round-tripped under `-Xverify:all`.
 
-mod common;
+use super::common;
 
 #[test]
 fn local_delegated_val_runs() {

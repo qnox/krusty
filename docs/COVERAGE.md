@@ -43,17 +43,10 @@ reference compiler are **excluded**, because counting them measures kotlinc's co
 testdata rather than the quality of krusty-authored tests. The excluded set lives in
 `scripts/coverage.sh` (`EXCLUDE=(...)`):
 
-- `kotlin_box_ir_jvm_conformance` — Kotlin box/codegen corpus, differential vs kotlinc
-- `box_corpus_regression_e2e` — pinned subset of the same corpus
-- `ir_blockers` — survey over the external box corpus
-- `box_vendored_e2e` — external corpus box files run on the JVM
-- `serialization_conformance` — kotlinx.serialization corpus + real kotlinc driver
-- `ksp_real_e2e` — external KSP processor corpus + real toolchain
+- `conformance` — external corpus/reference-toolchain suites: Kotlin box/codegen, pinned box regressions, IR blockers, vendored box cases, serialization conformance, and KSP real-toolchain checks
 
 Everything else counts, including project-authored e2e suites (`feature_box_e2e`, the `metadata_*`
-e2e, …) whose *inputs live in-repo* even though they exercise the JVM runtime. Binaries are kept by
-default, so a **new** test file counts automatically — adding a new external suite must be paired
-with an explicit entry in `EXCLUDE`, visible in review. Coverage is reported for the product library
+e2e, …) whose *inputs live in-repo* even though they exercise the JVM runtime. The product `e2e` binary is kept by default, so new product tests count automatically. Adding a new external suite should go under the `conformance` binary or be paired with an explicit `EXCLUDE` entry, visible in review. Coverage is reported for the product library
 (`src/`); the test harness (`tests/`) and CLI/survey tooling (`src/main.rs`, `src/bin/`) are ignored.
 
 ## The regression gate

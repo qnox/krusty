@@ -9,7 +9,7 @@
 //! `synthetic_default_member` now also recognises the suspend shape (Continuation before mask/marker) and
 //! `append_continuation` INSERTS the continuation value at that position for a `$default` call. Runs
 //! end-to-end via `runBlocking`.
-mod common;
+use super::common;
 
 fn run(tag: &str, lib: &str, main: &str) -> Option<String> {
     let jdk = common::jdk_modules()?;

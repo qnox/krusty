@@ -4,7 +4,7 @@
 //! experimental" without the flag. Both `[a, b]` and `(a, b)` desugar to the same positional
 //! `componentN` calls (proven byte-identical against kotlinc), so the compiled-and-run result is "OK".
 
-mod common;
+use super::common;
 
 fn run(src: &str) -> Option<String> {
     common::compile_and_run_with_stdlib(src, "Nb")

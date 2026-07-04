@@ -3,7 +3,7 @@
 //! (`run { this@C.bar() }`) — resolves to the current `this`. Outer-class / receiver-lambda / accessor
 //! labels need a receiver-label stack krusty does not track yet (those files skip, never miscompile).
 
-mod common;
+use super::common;
 
 #[test]
 fn self_labeled_this_in_lambda() {

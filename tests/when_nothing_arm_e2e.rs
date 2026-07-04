@@ -3,7 +3,7 @@
 //! represents that arm's type as the mapped `Void` object, so the lowerer's "mixes Unit with a value"
 //! bail must recognize it as diverging. Round-tripped on the JVM.
 
-mod common;
+use super::common;
 
 fn run(src: &str) -> Option<String> {
     common::compile_and_run_with_stdlib(src, "Main")

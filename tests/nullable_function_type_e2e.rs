@@ -3,7 +3,7 @@
 //! function-type parameter list and demand a `->`). Parses, type-checks, and runs on a real JVM: the
 //! defaulted-null parameter and a lambda argument both behave correctly.
 
-mod common;
+use super::common;
 
 #[test]
 fn nullable_parenthesized_function_type_param_compiles_and_runs() {

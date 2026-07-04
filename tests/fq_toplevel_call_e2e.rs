@@ -4,7 +4,7 @@
 //! value → "unresolved reference 'a'". Now the checker resolves the top-level overload and confirms its
 //! owning facade sits in the receiver's package; the lowerer emits the `invokestatic` to the facade.
 //! Built by the real kotlinc via the shared `common::run_box_against` harness.
-mod common;
+use super::common;
 
 const LIB: &str = "package a.b\n\
      fun helper(): Int = 42\n\

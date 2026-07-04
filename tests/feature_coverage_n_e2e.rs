@@ -3,7 +3,7 @@
 //! projection, reified inline, and nested generics. Each test compiles a `fun box(): String`
 //! that returns "OK", then runs it on the JVM. Round-tripped against the real runtime.
 
-mod common;
+use super::common;
 
 /// Shared harness: compile `src`'s `box()` under `stem` and assert it returns "OK".
 /// Returns without asserting (skips) when the toolchain/stdlib/JDK is unavailable.

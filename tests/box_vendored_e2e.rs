@@ -11,7 +11,7 @@ use std::process::Command;
 
 use krusty::jvm::classreader::parse_class;
 
-mod common;
+use super::common;
 
 fn find_box_class(dir: &Path) -> Option<String> {
     let mut found = None;

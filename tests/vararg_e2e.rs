@@ -2,7 +2,7 @@
 //! element stores) passed as the array parameter — plus `for (x in arr)` array iteration to consume
 //! it. Round-tripped against the JVM under `-Xverify:all`.
 
-mod common;
+use super::common;
 
 #[test]
 fn vararg_and_array_iteration_run() {

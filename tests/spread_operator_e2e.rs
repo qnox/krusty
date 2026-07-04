@@ -2,7 +2,7 @@
 //! spread to a top-level vararg function (`foo(*a)`) via `Arrays.copyOf` + `checkcast` — byte-identical
 //! to kotlinc; any other shape (mixed spreads, member/library callee, primitive element) cleanly skips.
 
-mod common;
+use super::common;
 
 fn run(src: &str) -> Option<String> {
     common::compile_and_run_with_stdlib(src, "Sp")

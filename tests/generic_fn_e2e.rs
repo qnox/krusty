@@ -2,7 +2,7 @@
 //! site inserts a `checkcast` to the inferred concrete type — matching kotlinc. Includes a generic
 //! higher-order function (`fun <T> eval(fn: () -> T) = fn()`). Round-tripped under `-Xverify:all`.
 
-mod common;
+use super::common;
 
 #[test]
 fn generic_fns_run() {

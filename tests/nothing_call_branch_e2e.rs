@@ -3,7 +3,7 @@
 //! `KotlinNothingValueException`. Without that, the diverging branch leaks a `Void` into the merge frame
 //! (VerifyError: inconsistent stackmap frames). Round-tripped on the JVM.
 
-mod common;
+use super::common;
 
 fn run(src: &str) -> Option<String> {
     common::compile_and_run_with_stdlib(src, "Main")

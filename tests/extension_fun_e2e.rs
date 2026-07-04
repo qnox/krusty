@@ -3,7 +3,7 @@
 //! collide (dispatched by receiver). A user `operator fun` extension overrides the builtin operator.
 //! Round-tripped under `-Xverify:all`.
 
-mod common;
+use super::common;
 
 #[test]
 fn extension_functions_run() {

@@ -5,7 +5,7 @@
 //! <parent>". `resolve_ty_no_diag` now also resolves an imported classpath type and a qualified nested one
 //! (`imported_type_internal` / `resolve_qualified_nested`, the same resolvers `resolve_ty` uses), so the
 //! smart-cast narrows. Runnable end-to-end.
-mod common;
+use super::common;
 
 fn run(tag: &str, lib: &str, main: &str) -> Option<String> {
     let jdk = common::jdk_modules()?;

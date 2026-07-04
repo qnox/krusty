@@ -12,7 +12,7 @@ use std::fs;
 use std::process::Command;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-mod common;
+use super::common;
 
 /// `<stdlib>:<jdk modules>` classpath, or `None` when the toolchain is unavailable (test skips clean).
 fn classpath() -> Option<std::ffi::OsString> {

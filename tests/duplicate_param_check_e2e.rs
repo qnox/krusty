@@ -1,7 +1,7 @@
 //! Duplicate function parameter names are illegal (kotlinc: conflicting declaration). Covers the
 //! `check_fun` parameter-name check.
 
-mod common;
+use super::common;
 
 fn diags(src: &str) -> Vec<String> {
     common::front_end_diagnostics(src, &[], None)

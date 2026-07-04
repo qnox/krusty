@@ -16,7 +16,7 @@
 
 use std::path::PathBuf;
 
-mod common;
+use super::common;
 
 /// (stdlib jar, jdk `lib/modules` jimage) for the `box()` harness, or `None` → skip.
 fn env() -> Option<(PathBuf, PathBuf)> {

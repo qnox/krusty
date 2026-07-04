@@ -3,7 +3,7 @@
 //! properties, and string templates. Each test compiles a `box()` snippet with krusty, runs it on
 //! the JVM, and asserts it returns "OK" only when the internal value checks hold.
 
-mod common;
+use super::common;
 
 /// Compile `src`, run `box()` on the JVM, and assert it returns "OK". Skips (does not fail) when the
 /// toolchain is unavailable so the suite stays green off a provisioned machine.

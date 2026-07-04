@@ -7,7 +7,7 @@
 //! resolution+lowering of the leaf shapes (a full coroutine `box()` round-trip additionally needs the
 //! companion-object-as-value completion, a separate piece).
 
-mod common;
+use super::common;
 
 use std::path::PathBuf;
 

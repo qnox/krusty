@@ -1,7 +1,7 @@
 //! `throw` of a classpath exception constructed via `IrExpr::NewExternal` (`new` + `<init>` resolved
 //! from the classpath), plus `athrow`. Round-tripped against the JVM under `-Xverify:all`.
 
-mod common;
+use super::common;
 
 #[test]
 fn throw_runs() {

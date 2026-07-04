@@ -1,7 +1,7 @@
 //! `tailrec` value-returning functions: tail self-calls are rewritten into a `while(true)` loop, so
 //! deep recursion runs without a stack overflow. Round-tripped under `-Xverify:all`.
 
-mod common;
+use super::common;
 
 fn run(src: &str) -> Option<String> {
     common::compile_and_run_with_stdlib(src, "C")

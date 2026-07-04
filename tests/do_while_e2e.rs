@@ -1,7 +1,7 @@
 //! `do … while` (post-test loop): the body always runs once, the condition is tested at the bottom.
 //! `continue` jumps to that bottom test; `break` exits. Round-tripped under `-Xverify:all`.
 
-mod common;
+use super::common;
 
 #[test]
 fn do_while_runs() {

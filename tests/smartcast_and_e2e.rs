@@ -1,7 +1,7 @@
 //! Smart-cast within an `&&` condition: after `x is T` (or `x != null`) on the left, `x` is `T` while
 //! evaluating the right operand (`x is String && x.length == 1`). Round-tripped under `-Xverify:all`.
 
-mod common;
+use super::common;
 
 fn run(src: &str) -> Option<String> {
     common::compile_and_run_with_stdlib(src, "C")

@@ -17,7 +17,7 @@ use krusty::lexer::lex;
 use krusty::parser::parse;
 use krusty::resolve::{check_file, collect_signatures};
 
-mod common;
+use super::common;
 
 const ACC_STATIC: u16 = 0x0008;
 

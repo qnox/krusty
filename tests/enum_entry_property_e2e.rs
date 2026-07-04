@@ -2,7 +2,7 @@
 //! property becomes a private backing field + getter on the `E$A` subclass, initialized in its
 //! constructor after `super(name, ordinal)`. The override reads it as `this.y`. Round-tripped on the JVM.
 
-mod common;
+use super::common;
 
 fn run(src: &str) -> Option<String> {
     common::compile_and_run_with_stdlib(src, "E")

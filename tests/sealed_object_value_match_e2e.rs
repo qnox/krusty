@@ -3,7 +3,7 @@
 //! subject's; an object subtype (`object A : S()`) is a valid `==` operand against `s: S` (one type is a
 //! subtype of the other), so `when_objs_comparable` now permits it. Round-tripped on the JVM.
 
-mod common;
+use super::common;
 
 fn run(src: &str) -> Option<String> {
     common::compile_and_run_with_stdlib(src, "Main")

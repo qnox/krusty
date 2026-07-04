@@ -3,7 +3,7 @@
 //! type. Previously `in` (a real keyword, unlike the soft `out`) was not skipped, so `Box<in T>` failed
 //! to parse. Round-tripped on the JVM.
 
-mod common;
+use super::common;
 
 fn run(src: &str) -> Option<String> {
     common::compile_and_run_with_stdlib(src, "Main")

@@ -4,7 +4,7 @@
 //! type `T`. (Previously the bound was dropped to `kotlin/Any`, so member access failed and the
 //! descriptor/signature erased to `Object`.)
 
-mod common;
+use super::common;
 
 fn classes(src: &str) -> Option<Vec<(String, Vec<u8>)>> {
     let stdlib = common::stdlib_jar()?;

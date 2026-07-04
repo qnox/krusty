@@ -1,7 +1,7 @@
 //! A `when` may have at most one `else` branch (kotlinc rejects a second). Covers the `Expr::When`
 //! else-count check.
 
-mod common;
+use super::common;
 
 fn diags(src: &str) -> Vec<String> {
     common::front_end_diagnostics(src, &[], None)

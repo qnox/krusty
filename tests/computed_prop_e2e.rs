@@ -2,7 +2,7 @@
 //! `getX()`; class `val y get() = …` → instance `getX()` (`obj.y`/unqualified `y`). Round-tripped
 //! under `-Xverify:all`.
 
-mod common;
+use super::common;
 
 #[test]
 fn computed_properties_run() {

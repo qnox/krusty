@@ -10,7 +10,7 @@
 //! These are DIFFERENT scenarios from `tests/suspend_e2e.rs` (which drives the raw CPS ABI from a
 //! hand-written Java `Continuation`): here we exercise the end-user `runBlocking { … }` surface.
 
-mod common;
+use super::common;
 
 /// Coroutine driver + intrinsics, prepended to every program. A synchronous `runBlocking` built on
 /// `startCoroutine`, exactly like the box corpus injects for `// WITH_COROUTINES` tests.

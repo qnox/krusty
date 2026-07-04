@@ -3,7 +3,7 @@
 //! string ops, exotic control-flow shapes, collection/array operations, and misc language
 //! constructs. Each `box()` returns "OK"; compiled in-process and round-tripped on the JVM.
 
-mod common;
+use super::common;
 
 use std::path::PathBuf;
 

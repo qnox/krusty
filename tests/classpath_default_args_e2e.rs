@@ -3,7 +3,7 @@
 //! function"), because krusty didn't recover the per-parameter `DECLARES_DEFAULT_VALUE` flag from the
 //! callee's `@Metadata`. Now the omitted trailing default resolves and lowers to the `host$default`
 //! synthetic. Verified end-to-end on a real JVM (the function is in a separately kotlinc-compiled lib).
-mod common;
+use super::common;
 fn env(k: &str) -> Option<String> {
     std::env::var(k).ok().filter(|v| !v.is_empty())
 }

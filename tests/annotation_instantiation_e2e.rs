@@ -4,7 +4,7 @@
 //! `Float`/`Double` NaN/`-0.0` semantics). krusty emits the annotation as a JVM annotation interface plus
 //! a synthetic impl class implementing that contract. Verified by running `box()` on a real JVM.
 
-mod common;
+use super::common;
 
 fn run(src: &str) -> Option<String> {
     let stdlib = common::stdlib_jar()?;

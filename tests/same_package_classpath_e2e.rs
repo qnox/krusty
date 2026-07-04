@@ -6,7 +6,7 @@
 //! resolves and round-trips on the JVM. The dependency is compiled by the real kotlinc, so its
 //! `@Metadata`/bytecode is authoritative.
 
-mod common;
+use super::common;
 
 fn env(k: &str) -> Option<String> {
     std::env::var(k).ok().filter(|v| !v.is_empty())

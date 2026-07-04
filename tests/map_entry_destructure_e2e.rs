@@ -4,7 +4,7 @@
 //! are typed `Any` (the entry's type arguments are erased), so they are used here through `Any`-valid
 //! operations (string templates, which call `toString`). Round-tripped on the JVM.
 
-mod common;
+use super::common;
 
 fn run(src: &str) -> Option<String> {
     common::compile_and_run_with_stdlib(src, "Main")

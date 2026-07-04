@@ -1,7 +1,7 @@
 //! `Unit` is a subtype of `Any` — a `Unit` value used where `Any`/`Any?` is expected materializes the
 //! `kotlin/Unit` singleton (the expression runs for effect, then `Unit.INSTANCE` is pushed). Round-tripped.
 
-mod common;
+use super::common;
 
 fn run(src: &str) -> Option<String> {
     common::compile_and_run_with_stdlib(src, "Main")

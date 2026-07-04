@@ -3,7 +3,7 @@
 //! read/write on the unboxed underlying primitive array (`[I`/`[J`). Round-tripped on the JVM under
 //! `-Xverify:all` via `compile_and_run_box`.
 
-mod common;
+use super::common;
 
 fn run_ok(stem: &str, body: &str) {
     let src = format!("fun box(): String {{\n{body}\n}}\n");

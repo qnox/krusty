@@ -2,7 +2,7 @@
 //! `when` as an expression, ranges/progressions, labeled loops, elvis/safe-cast, and nested
 //! if-as-expression. Each test compiles a `box()` in-process and round-trips it on the JVM.
 
-mod common;
+use super::common;
 
 /// Compile `src`'s `box()` under `stem` and assert it returns "OK". Skips (returns) when the
 /// JDK / stdlib toolchain isn't provisioned.

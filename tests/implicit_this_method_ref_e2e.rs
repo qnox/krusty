@@ -2,7 +2,7 @@
 //! receiver — `this::m`. It captures `this` and lowers to the same `FunctionReferenceImpl` as `obj::m`.
 //! Round-tripped on the JVM.
 
-mod common;
+use super::common;
 
 fn run(src: &str) -> Option<String> {
     common::compile_and_run_with_stdlib(src, "Main")

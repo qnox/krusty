@@ -2,7 +2,7 @@
 //! evaluates the receiver first, then the arguments in written (source) order, binding each label to its
 //! parameter position.
 
-mod common;
+use super::common;
 
 fn run(src: &str) -> Option<String> {
     common::compile_and_run_with_stdlib(src, "Main")

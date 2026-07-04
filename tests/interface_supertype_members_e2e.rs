@@ -7,7 +7,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
-mod common;
+use super::common;
 
 /// Build `src` with the real kotlinc into a fresh dir under `work`, returning it for the `-classpath`.
 /// `None` (→ skip) when the kotlinc toolchain isn't provisioned.

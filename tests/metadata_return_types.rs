@@ -5,7 +5,7 @@
 use krusty::jvm::classpath::Classpath;
 use krusty::jvm::metadata::{builtins_supertypes, package_functions};
 
-mod common;
+use super::common;
 
 #[test]
 fn collection_factory_return_types_distinguish_mutable() {

@@ -2,7 +2,7 @@
 //! (not class members). The checker resolves them via the module's extension functions and the lowerer
 //! emits each as a static extension call. Round-tripped on the JVM.
 
-mod common;
+use super::common;
 
 fn run(src: &str) -> Option<String> {
     common::compile_and_run_with_stdlib(src, "Main")

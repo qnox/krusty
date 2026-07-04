@@ -4,7 +4,7 @@
 //! of the match arms untouched. Each escape is checked against its `\uXXXX` equivalent so a wrong
 //! decode fails loudly.
 
-mod common;
+use super::common;
 
 fn run_ok(stem: &str, body: &str) {
     common::expect_box_ok_with_stdlib(body, stem);

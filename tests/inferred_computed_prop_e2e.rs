@@ -2,7 +2,7 @@
 //! type comes from the getter body. Covers both a plain class and a value-class member. Round-tripped
 //! under `-Xverify:all`.
 
-mod common;
+use super::common;
 
 fn run(src: &str) -> Option<String> {
     common::compile_and_run_with_stdlib(src, "C")

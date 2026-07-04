@@ -3,7 +3,7 @@
 //! so resolution maps the Kotlin name + receiver via metadata, then calls the mangled method. The
 //! signed-`Int` extension must NOT shadow it. Round-tripped under `-Xverify:all`.
 
-mod common;
+use super::common;
 
 fn run(src: &str) -> Option<String> {
     common::compile_and_run_with_stdlib(src, "C")

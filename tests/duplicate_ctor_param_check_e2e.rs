@@ -1,7 +1,7 @@
 //! Duplicate primary-constructor parameter names are illegal (kotlinc: conflicting declaration).
 //! Covers the class-check `cl.props` duplicate scan.
 
-mod common;
+use super::common;
 
 fn diags(src: &str) -> Vec<String> {
     common::front_end_diagnostics(src, &[], None)
