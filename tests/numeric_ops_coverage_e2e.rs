@@ -4,7 +4,7 @@
 //! corpus reaches the add/sub/mul emitters but never these — operands go through param-taking helpers
 //! so the compiler cannot const-fold the operation away and must emit the real opcode.
 
-mod common;
+use super::common;
 
 fn run_ok(stem: &str, body: &str) {
     common::expect_box_ok_with_stdlib(body, stem);

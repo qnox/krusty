@@ -2,7 +2,7 @@
 //! Identical to the parenthesized `{ (a, b) -> … }` form — binds one synthetic parameter and prepends
 //! `val [a, b] = it`. Round-tripped on the JVM.
 
-mod common;
+use super::common;
 
 fn run(src: &str) -> Option<String> {
     common::compile_and_run_with_stdlib(src, "Main")

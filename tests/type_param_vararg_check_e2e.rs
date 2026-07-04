@@ -2,7 +2,7 @@
 //! are illegal (kotlinc: conflicting declaration / multiple vararg parameters not allowed). Covers
 //! the check_fun and class-arm scans.
 
-mod common;
+use super::common;
 
 fn diags(src: &str) -> Vec<String> {
     common::front_end_diagnostics(src, &[], None)

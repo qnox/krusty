@@ -13,7 +13,7 @@
 //! suspension points, suspend lambda parameters invoked in loops, generic/mutually-recursive suspend
 //! funs, `try`/`finally` around suspension, and suspend extension functions.
 
-mod common;
+use super::common;
 
 /// Coroutine driver + intrinsics, prepended to every program. A synchronous `runBlocking` built on
 /// `startCoroutine`, exactly like the box corpus injects for `// WITH_COROUTINES` tests.

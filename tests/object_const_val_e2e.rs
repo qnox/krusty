@@ -4,7 +4,7 @@
 //! const-inlining — a method read could observe an uninitialized backing field. Now every literal-valued
 //! object `const val` is inlined at each read site (like kotlinc), so the read is a constant and the
 //! object lowers. Same-file only (no classpath), runnable directly.
-mod common;
+use super::common;
 
 fn run(src: &str) -> Option<String> {
     common::compile_and_run_with_stdlib(src, "Main")

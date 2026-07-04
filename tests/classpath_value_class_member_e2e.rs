@@ -3,7 +3,7 @@
 //! mangled JVM name + the logical `Vid` parameter type from `@Metadata`, and the call must pass the
 //! unboxed underlying — exactly kotlinc's `invokeinterface Port.get-<hash>(String)`.
 //! Needs the JVM toolchain + kotlin-stdlib; skips otherwise.
-mod common;
+use super::common;
 
 #[test]
 fn classpath_value_class_param_member_resolves_mangled() {

@@ -3,7 +3,7 @@
 //! The corpus exercises a couple; this walks all six relations with a runtime operand (a parameter, so
 //! the comparison isn't const-folded) in both true and false outcomes.
 
-mod common;
+use super::common;
 
 fn run_ok(stem: &str, body: &str) {
     common::expect_box_ok_with_stdlib(body, stem);

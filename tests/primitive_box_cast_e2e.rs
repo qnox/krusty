@@ -2,7 +2,7 @@
 //! is a boxing operation — the primitive is boxed to its wrapper (`Integer`/`Character`/`Byte`), which
 //! is-a the (always assignable, per the checker) reference target. Round-tripped on the JVM.
 
-mod common;
+use super::common;
 
 #[test]
 fn primitive_to_reference_cast_boxes() {

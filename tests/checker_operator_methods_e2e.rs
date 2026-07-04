@@ -3,7 +3,7 @@
 //! `vararg` call whose every element is checked against the element type. The corpus reaches the
 //! operator syntax but not these explicit method forms.
 
-mod common;
+use super::common;
 
 fn run_ok(stem: &str, body: &str) {
     common::expect_box_ok_with_stdlib(body, stem);

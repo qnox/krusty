@@ -6,8 +6,8 @@
 //! hoists each suspension to a preceding bound temp (`val tmp = r.all(); return tmp.size`), the shape the
 //! flattener handles. Running a coroutine needs a driver, so this asserts the bodies LOWER end-to-end
 //! (they were skipped before), which is where the bug lived; the library is built by real kotlinc.
+use super::common;
 use std::path::PathBuf;
-mod common;
 
 const LIB: &str = "package lib\n\
      interface Repo {\n\

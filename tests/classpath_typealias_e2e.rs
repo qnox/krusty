@@ -3,7 +3,7 @@
 //! type alias lands in its FILE FACADE's `@Metadata` (`LibKt`), not only the stdlib's dedicated
 //! `*TypeAliasesKt` files, so the classpath scan must read `Package.typeAlias` from every `*Kt` facade.
 //! The library is built by the real kotlinc via the shared `common::run_box_against` harness.
-mod common;
+use super::common;
 
 const LIB: &str = "package lib\n\
      class Real(val n: Int) { fun get(): Int = n }\n\

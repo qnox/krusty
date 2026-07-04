@@ -15,7 +15,7 @@
 //! with an equality subject (`when (x) { 1 -> ... }`), `is Int` (JS has no `Int` class), and String
 //! `.length`/index that lower to virtual `length()`/`get()` calls rather than the handled externals.
 
-mod common;
+use super::common;
 
 use std::path::PathBuf;
 

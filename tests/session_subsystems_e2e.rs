@@ -7,7 +7,7 @@
 //! value-class-through-erased-generic are exercised by the conformance corpus, not the in-process e2e
 //! harness, so they are not duplicated here.)
 
-mod common;
+use super::common;
 
 /// A generic class with a `var T` field storing two different concrete types — forces the
 /// erased-field + checkcast-on-read path (not just a value round-trip), pinning erasure-to-Object.

@@ -10,8 +10,8 @@
 //!        reference must keep its plain erased `Ty`; only a nullable PRIMITIVE stays boxed.
 //! These are CHECKER-level type-recovery defects; a full coroutine run needs a driver, so the tests
 //! assert the checker is clean and the bodies compile end-to-end (the library is built by real kotlinc).
+use super::common;
 use std::path::PathBuf;
-mod common;
 
 const LIB: &str = "package lib\n\
      interface Repo {\n\

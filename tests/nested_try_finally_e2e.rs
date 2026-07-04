@@ -2,7 +2,7 @@
 //! plain nested try + non-diverging finally with no catch. (A diverging finally or a catch in the nest
 //! still bails — the inlined finally would run twice — and is rejected by the checker.) Round-tripped.
 
-mod common;
+use super::common;
 
 fn run(src: &str) -> Option<String> {
     common::compile_and_run_with_stdlib(src, "Main")

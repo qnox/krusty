@@ -4,7 +4,7 @@
 //! a zlib Deflate stream; krusty inflates it transparently. Without that, every JDK type is unresolvable
 //! (e.g. `kotlin/collections/List` → `java/util/List` can't be found, so `for (x in listOf(...))` breaks).
 
-mod common;
+use super::common;
 
 use krusty::jvm::classpath::Classpath;
 use std::path::PathBuf;

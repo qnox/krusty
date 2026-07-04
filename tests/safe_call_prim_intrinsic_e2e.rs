@@ -3,7 +3,7 @@
 //! (unnecessary) safe `?.` call on a non-null primitive receiver compile to the same `iand`/`ishl`.
 //! Before consolidation the bitwise arm lived only in the `.` waterfall, so `a?.and(b)` was declined.
 
-mod common;
+use super::common;
 
 fn run(src: &str) -> Option<String> {
     common::compile_and_run_with_stdlib(src, "Main")

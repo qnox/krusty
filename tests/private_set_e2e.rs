@@ -1,7 +1,7 @@
 //! A property with a visibility-only setter (`var x = 0; private set`) is a plain backing-field
 //! property whose setter is emitted `private`. Round-tripped under `-Xverify:all`.
 
-mod common;
+use super::common;
 
 fn run(src: &str) -> Option<String> {
     common::compile_and_run_with_stdlib(src, "C")

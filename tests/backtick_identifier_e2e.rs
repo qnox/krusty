@@ -2,7 +2,7 @@
 //! using a keyword (or otherwise-illegal name) as an identifier. The lexer reads the content between the
 //! backticks as a plain `Ident` (never re-mapped to a keyword). Round-tripped on the JVM.
 
-mod common;
+use super::common;
 
 fn run(src: &str) -> Option<String> {
     common::compile_and_run_with_stdlib(src, "Main")

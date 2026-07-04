@@ -10,7 +10,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-mod common;
+use super::common;
 
 /// Recursively find a `<prefix>*.jar` (no `-sources`) under `dir`.
 fn walk(dir: &Path, prefix: &str, depth: usize, out: &mut Option<PathBuf>) {

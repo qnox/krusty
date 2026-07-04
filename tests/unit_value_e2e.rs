@@ -2,7 +2,7 @@
 //! operand (materializes `Unit.INSTANCE`), and a `Unit`-typed data-class component (its field/ctor-param/
 //! getter use the `kotlin/Unit` reference, not the illegal `V` descriptor). Round-tripped on the JVM.
 
-mod common;
+use super::common;
 
 fn run(src: &str) -> Option<String> {
     common::compile_and_run_with_stdlib(src, "Main")

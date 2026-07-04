@@ -1,7 +1,7 @@
 //! Safe calls `?.`: `recv?.member` / `recv?.method(args)` evaluate to `null` when the receiver is
 //! null, else the member/call result — composing with the Elvis operator `?:`.
 
-mod common;
+use super::common;
 
 #[test]
 fn safe_calls_run() {

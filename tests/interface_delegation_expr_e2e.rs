@@ -2,7 +2,7 @@
 //! parameter. The expression is evaluated once and stored in a synthesized `$$delegate` field; each of
 //! `I`'s methods forwards to it. Round-tripped on the JVM.
 
-mod common;
+use super::common;
 
 #[test]
 fn delegate_to_constructor_call_expression() {

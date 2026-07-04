@@ -11,7 +11,7 @@
 //!       omitted-default, all-provided, reordered, positional, and deeply-nested forms.
 //! Both were `unresolved`/`named arguments … only top-level` before. The library is built by the real
 //! kotlinc via the shared `common::run_box_against` harness (skips when the toolchain is absent).
-mod common;
+use super::common;
 
 const LIB: &str = "package lib\n\
      class Rule(val v: Set<String>)\n\

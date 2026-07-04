@@ -9,7 +9,7 @@
 //! Every snippet needs no library symbols, so it never touches the classpath and never skips: a
 //! genuine lex/parse diagnostic is required for each assertion to hold.
 
-mod common;
+use super::common;
 
 /// Run the front end with NO classpath — these are lexer/parser-level errors that need no library
 /// symbols, so `collect`/`check` never run (they are gated on `!diags.has_errors()`).

@@ -8,7 +8,7 @@
 //!
 //! The suspend variants assert LOWERING (a coroutine RUN needs a driver); one full RUN goes through
 //! `runBlocking` when the coroutines runtime jar is available.
-mod common;
+use super::common;
 
 const LIB: &str = "package lib\n\
     class Cfg(val at: String)\n\

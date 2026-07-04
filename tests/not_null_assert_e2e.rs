@@ -1,7 +1,7 @@
 //! The not-null assertion `x!!` — `kotlin/jvm/internal/Intrinsics.checkNotNull` on a duplicate of the
 //! value (yields the value, throwing on null). Round-tripped against the JVM under `-Xverify:all`.
 
-mod common;
+use super::common;
 
 #[test]
 fn not_null_assert_runs() {

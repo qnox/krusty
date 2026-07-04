@@ -2,7 +2,7 @@
 //! Combined with the `ConstantValue` field + omitted `<clinit>` (P450), a pure const read is now
 //! byte-identical to kotlinc. Verified by parsing `box()` (no `getstatic` of the const) + JVM run.
 
-mod common;
+use super::common;
 
 use krusty::jvm::classreader::parse_class;
 

@@ -3,7 +3,7 @@
 //! argument, so `2 * V(3)` / `2.times(V(3))` must resolve to the extension — not be rejected as an
 //! unsupported builtin operator. Round-tripped on the JVM.
 
-mod common;
+use super::common;
 
 fn run(src: &str) -> Option<String> {
     common::compile_and_run_with_stdlib(src, "Main")

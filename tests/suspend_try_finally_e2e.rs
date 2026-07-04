@@ -7,7 +7,7 @@
 //! finally-across-resume-states shape), and a `catch` clause in a function that also builds a state
 //! machine. Those remain separate, larger pieces of work.
 
-mod common;
+use super::common;
 
 const BUILDER: &str = "import kotlin.coroutines.*\n\
 import kotlin.coroutines.intrinsics.*\n\

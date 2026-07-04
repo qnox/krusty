@@ -4,7 +4,7 @@
 //! public field rather than a `getX()` call — are exercised by the conformance gate's
 //! `properties/const/anotherFile.kt`.) Round-tripped on the JVM.
 
-mod common;
+use super::common;
 
 fn run(src: &str) -> Option<String> {
     common::compile_and_run_with_stdlib(src, "Main")

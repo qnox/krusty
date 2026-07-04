@@ -2,7 +2,7 @@
 //! `<!DIAGNOSTIC_NAME!>expr<!>` (and the bare close `<!>`). The lexer strips them as trivia (real
 //! Kotlin never has `<!` adjacent), so a marker-annotated source compiles. Round-tripped on the JVM.
 
-mod common;
+use super::common;
 
 fn run(src: &str) -> Option<String> {
     common::compile_and_run_with_stdlib(src, "Main")

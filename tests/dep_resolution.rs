@@ -2,7 +2,7 @@
 //! first, then Maven Central — so `// WITH_STDLIB` assertions (`kotlin.test.*`) actually resolve
 //! rather than silently skipping.
 
-mod common;
+use super::common;
 
 #[test]
 fn with_stdlib_resolves_kotlin_test() {

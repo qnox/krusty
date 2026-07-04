@@ -3,7 +3,7 @@
 //! per secondary ctor; a super-reaching ctor runs the field initializers + `init {}` blocks (in
 //! source order) before its own body, a `this(...)`-delegating ctor runs only its body.
 
-mod common;
+use super::common;
 
 fn run_box(name: &str, src: &str) {
     if let Some(out) = common::compile_and_run_with_stdlib(src, "B") {

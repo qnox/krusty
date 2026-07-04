@@ -3,7 +3,7 @@
 //! `T?`, leaving a dangling `:`. Now a `?` immediately before `:` is left for the caller (it's elvis, not
 //! a nullable-type marker). Round-tripped on the JVM.
 
-mod common;
+use super::common;
 
 fn run(src: &str) -> Option<String> {
     common::compile_and_run_with_stdlib(src, "Main")

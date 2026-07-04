@@ -1,7 +1,7 @@
 //! `Pair`/`Triple` constructors (`Pair(a, b)`, `Triple(a, b, c)`) — auto-imported kotlin built-ins
 //! constructed directly. Round-tripped under `-Xverify:all`.
 
-mod common;
+use super::common;
 
 fn run(src: &str) -> Option<String> {
     common::compile_and_run_with_stdlib(src, "C")

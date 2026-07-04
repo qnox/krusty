@@ -26,7 +26,7 @@
 use std::fs;
 use std::process::Command;
 
-mod common;
+use super::common;
 
 // ============================================================================
 // Box harness (inline + value classes).

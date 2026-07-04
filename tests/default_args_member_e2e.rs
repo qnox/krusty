@@ -3,7 +3,7 @@
 //! omitted args passes a mask. One node — `MethodCall` with `args[i] = None` for an omitted argument.
 //! Round-tripped under `-Xverify:all`.
 
-mod common;
+use super::common;
 
 #[test]
 fn member_default_args_run() {

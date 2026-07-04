@@ -6,7 +6,7 @@
 //! as kotlinc rejects it), recording it as an unbound class literal; the lowerer, expanding the inline body
 //! with `reified_subst` bound to the call-site type argument, substitutes `T` to that concrete type and
 //! emits its class constant (`Prov::class` → `ldc Prov.class`).
-mod common;
+use super::common;
 
 fn run(main: &str) -> Option<String> {
     let jdk = common::jdk_modules()?;

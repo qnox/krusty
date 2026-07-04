@@ -2,7 +2,7 @@
 //! `Number.toByte/toShort/toInt/toLong` → `byteValue/…` mapping (called on a `Number`-typed value),
 //! `Map.entries` → `entrySet`, and a secondary constructor delegating to the primary via `this(...)`.
 
-mod common;
+use super::common;
 
 fn run_ok(stem: &str, body: &str) {
     common::expect_box_ok_with_stdlib(body, stem);

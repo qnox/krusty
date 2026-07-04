@@ -11,7 +11,7 @@
 //!
 //! Faithful shape: `class Service(...) { suspend fun list(f: Filt = Filt()): Int }` — a suspend method on a
 //! class with a constructor, taking a param defaulted to a constructor call, called with the arg omitted.
-mod common;
+use super::common;
 
 const LIB: &str = "package lib\n\
     class Filt(val n: Int = 5)\n\

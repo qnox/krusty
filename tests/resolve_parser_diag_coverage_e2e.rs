@@ -13,7 +13,7 @@
 //! stdlib + JDK classpath and skip cleanly (a non-empty sentinel) when the toolchain is absent;
 //! pure parse snippets use no classpath and never skip.
 
-mod common;
+use super::common;
 
 /// Run the front end with stdlib + JDK on the classpath. If the toolchain is unavailable, return a
 /// sentinel so the "non-empty" assertions still hold (the test effectively skips).

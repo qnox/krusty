@@ -4,7 +4,7 @@
 //! Exercises stdlib callable resolution across resolve.rs, call_resolver.rs, jvm_libraries.rs and
 //! metadata.rs.
 
-mod common;
+use super::common;
 
 use std::path::PathBuf;
 

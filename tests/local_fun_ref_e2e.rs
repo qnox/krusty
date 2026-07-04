@@ -3,7 +3,7 @@
 //! so `::loc` (where `loc` reads an enclosing `val`) carries that capture into the closure. Round-tripped
 //! under `-Xverify:all`.
 
-mod common;
+use super::common;
 
 fn run(src: &str) -> Option<String> {
     common::compile_and_run_with_stdlib(src, "C")

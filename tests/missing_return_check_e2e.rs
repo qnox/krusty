@@ -5,7 +5,7 @@
 //! against the analysis regressing into false positives on valid terminating shapes (exhaustive
 //! `when`, `while (true)`, `Nothing`-returning calls, `try`/`finally`, `throw`).
 
-mod common;
+use super::common;
 
 fn diags(src: &str) -> Vec<String> {
     let Some(stdlib) = common::stdlib_jar() else {

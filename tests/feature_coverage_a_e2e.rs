@@ -4,7 +4,7 @@
 //! name/entries), generics (generic fun + generic class), and `when` with ranges / `in`.
 //! Each snippet is self-contained (only kotlin-stdlib) and returns "OK" iff every assert holds.
 
-mod common;
+use super::common;
 
 /// Compile `src` (containing `fun box(): String`) with krusty, run on the JVM, expect "OK".
 fn run_ok(src: &str, stem: &str) {

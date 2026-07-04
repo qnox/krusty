@@ -1,7 +1,7 @@
 //! SAM conversion: a lambda passed where a (simple, non-generic) `fun interface` is expected becomes an
 //! instance of that interface whose single abstract method runs the lambda. Round-tripped on the JVM.
 
-mod common;
+use super::common;
 
 fn run(src: &str) -> Option<String> {
     common::compile_and_run_with_stdlib(src, "Main")

@@ -9,7 +9,7 @@
 //! -> T`, via the same `top_level_lambda_param_types`/`receivers` shape data the bare-name `import`ed path
 //! uses), so resolution binds the result type-parameter (`runBlocking { "x" }: String`), and the lowerer
 //! emits the `runBlocking$default(context, block, mask, marker)` `invokestatic`.
-mod common;
+use super::common;
 
 fn run(main: &str) -> Option<String> {
     let jdk = common::jdk_modules()?;

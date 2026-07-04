@@ -1,6 +1,6 @@
 //! Shared test helpers.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io::{Read as _, Write as _};
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
@@ -191,17 +191,26 @@ pub fn run_js(js: &str) -> Option<String> {
 
 fn which_node() -> Option<PathBuf> {
     if let Ok(p) = std::env::var("KRUSTY_NODE") {
-        if !p.is_empty() && Path::new(&p).exists() {
-            return Some(PathBuf::from(p));
+        let p = PathBuf::from(p);
+        if node_works(&p) {
+            return Some(p);
         }
     }
     for dir in std::env::var("PATH").ok()?.split(':') {
         let cand = Path::new(dir).join("node");
-        if cand.exists() {
+        if node_works(&cand) {
             return Some(cand);
         }
     }
     None
+}
+
+fn node_works(path: &Path) -> bool {
+    path.exists()
+        && Command::new(path)
+            .arg("--version")
+            .output()
+            .is_ok_and(|out| out.status.success())
 }
 
 fn hash_str(s: &str) -> u64 {
@@ -381,11 +390,19 @@ fn setup_runner(java_home: &str) -> Option<PathBuf> {
 /// only by the JVM worker pool), so a multi-threaded test binary overlaps its JVM round-trips instead
 /// of serialising on one lock.
 struct BoxRunner {
-    _child: Child,
+    child: Child,
     stdin: Mutex<ChildStdin>,
     waiters: Arc<Mutex<HashMap<u64, mpsc::Sender<Vec<u8>>>>>,
     next_id: AtomicU64,
     alive: Arc<AtomicBool>,
+}
+
+impl Drop for BoxRunner {
+    fn drop(&mut self) {
+        self.alive.store(false, Ordering::SeqCst);
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
 }
 
 impl BoxRunner {
@@ -427,7 +444,7 @@ impl BoxRunner {
             w2.lock().unwrap().clear();
         });
         Some(BoxRunner {
-            _child: child,
+            child,
             stdin: Mutex::new(stdin),
             waiters,
             next_id: AtomicU64::new(1),
@@ -545,7 +562,68 @@ pub fn find_box_class(classes: &[(String, Vec<u8>)]) -> Option<String> {
     None
 }
 
-type RunnerPool = Mutex<HashMap<String, Arc<BoxRunner>>>;
+struct RunnerPool {
+    runners: HashMap<String, Arc<BoxRunner>>,
+    order: VecDeque<String>,
+}
+
+impl RunnerPool {
+    fn new() -> Self {
+        RunnerPool {
+            runners: HashMap::new(),
+            order: VecDeque::new(),
+        }
+    }
+
+    fn touch(&mut self, cp: &str) {
+        self.order.retain(|k| k != cp);
+        self.order.push_back(cp.to_string());
+    }
+
+    fn insert(&mut self, cp: String, runner: Arc<BoxRunner>) {
+        self.runners.insert(cp.clone(), runner);
+        self.touch(&cp);
+        self.prune();
+    }
+
+    fn get(&mut self, cp: &str) -> Option<Arc<BoxRunner>> {
+        let runner = self.runners.get(cp).cloned();
+        if runner.is_some() {
+            self.touch(cp);
+        }
+        runner
+    }
+
+    fn remove(&mut self, cp: &str) {
+        self.runners.remove(cp);
+        self.order.retain(|k| k != cp);
+    }
+
+    fn prune(&mut self) {
+        self.runners.retain(|_, r| r.alive.load(Ordering::SeqCst));
+        self.order.retain(|k| self.runners.contains_key(k));
+        let max = std::env::var("KRUSTY_BOX_RUNNER_POOL")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|&v| v > 0)
+            .unwrap_or(2);
+        while self.runners.len() > max {
+            let Some(old) = self.order.pop_front() else {
+                break;
+            };
+            let removable = self
+                .runners
+                .get(&old)
+                .is_some_and(|r| Arc::strong_count(r) == 1);
+            if removable {
+                self.runners.remove(&old);
+            } else {
+                self.order.push_back(old);
+                break;
+            }
+        }
+    }
+}
 
 /// Run `box()` on already-compiled classes via a persistent JVM keyed by `cp_jars` (the runtime
 /// classpath — typically the stdlib jar so loaded classes resolve `kotlin.jvm.internal.*`). Returns
@@ -559,7 +637,7 @@ pub fn run_box(
     box_class: &str,
     cp_jars: &[PathBuf],
 ) -> Option<String> {
-    static POOL: OnceLock<RunnerPool> = OnceLock::new();
+    static POOL: OnceLock<Mutex<RunnerPool>> = OnceLock::new();
     let java_home = java_home()?;
     let java = format!("{java_home}/bin/java");
     if !Path::new(&java).exists() {
@@ -571,16 +649,19 @@ pub fn run_box(
         cp.push(':');
         cp.push_str(&j.to_string_lossy());
     }
-    let pool = POOL.get_or_init(|| Mutex::new(HashMap::new()));
+    let pool = POOL.get_or_init(|| Mutex::new(RunnerPool::new()));
 
     // Fetch (or spin up) the runner for this classpath under the pool lock, then release the lock so
-    // the actual round-trip runs concurrently with other threads' calls.
+    // the actual round-trip runs concurrently with other threads' calls. The pool is capped because a
+    // single grouped e2e binary can see many short-lived temp classpaths; without recycling, each one
+    // leaves behind a persistent JVM for the rest of the process.
     let get_runner = || -> Option<Arc<BoxRunner>> {
         let mut map = pool.lock().unwrap();
-        if map.get(&cp).is_none_or(|r| !r.alive.load(Ordering::SeqCst)) {
+        let needs_runner = map.get(&cp).is_none_or(|r| !r.alive.load(Ordering::SeqCst));
+        if needs_runner {
             map.insert(cp.clone(), Arc::new(BoxRunner::new(&java, &cp)?));
         }
-        map.get(&cp).cloned()
+        map.get(&cp)
     };
 
     let runner = get_runner()?;
@@ -591,7 +672,11 @@ pub fn run_box(
             // and retry once on a fresh one.
             {
                 let mut map = pool.lock().unwrap();
-                if map.get(&cp).is_some_and(|r| Arc::ptr_eq(r, &runner)) {
+                if map
+                    .runners
+                    .get(&cp)
+                    .is_some_and(|r| Arc::ptr_eq(r, &runner))
+                {
                     map.remove(&cp);
                 }
             }

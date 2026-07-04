@@ -24,19 +24,11 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use super::common;
+
 fn tooldir() -> Option<PathBuf> {
-    // Prefer JAVA_HOME/bin; fall back to PATH.
-    if let Ok(home) = std::env::var("JAVA_HOME") {
-        let b = PathBuf::from(home).join("bin");
-        if b.join("javac").exists() {
-            return Some(b);
-        }
-    }
-    // PATH lookup via `which`-style probe.
-    if Command::new("javac").arg("-version").output().is_ok() {
-        return Some(PathBuf::from(""));
-    }
-    None
+    let b = PathBuf::from(common::java_home()?).join("bin");
+    b.join("javac").exists().then_some(b)
 }
 
 fn tool(dir: &Path, name: &str) -> Command {

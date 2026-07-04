@@ -1,7 +1,7 @@
 //! Extension-function DEFAULT ARGUMENTS: `fun T.foo(a: Int = 1)` called while omitting the defaulted
 //! argument (`x.foo()`) — or naming it (`x.foo(a = 2)`). krusty fills the omitted constant defaults at
 //! the call site (the extension lowers to a static `Facade.foo($receiver, args…)`). Verified on a real JVM.
-mod common;
+use super::common;
 fn run(src: &str) -> Option<String> {
     let stdlib = common::stdlib_jar()?;
     let jdk = std::env::var("JAVA_HOME")

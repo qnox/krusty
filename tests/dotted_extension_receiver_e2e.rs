@@ -2,7 +2,7 @@
 //! Foo.Companion.bar()` — was a parse error ("expected '('"); the parser read only the first segment as
 //! the receiver. Now the receiver type may be a dotted path. Verified end-to-end on a real JVM for the
 //! nested-class case.
-mod common;
+use super::common;
 #[test]
 fn nested_class_dotted_extension_receiver_compiles_and_runs() {
     let Some(stdlib) = common::stdlib_jar() else {

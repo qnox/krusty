@@ -4,7 +4,7 @@
 //! `Char` operator-method result boxed into `Any` (`'A'.plus(1)` is `Char`, must box as `Character`).
 //! Round-tripped on the JVM.
 
-mod common;
+use super::common;
 
 fn run(src: &str) -> Option<String> {
     common::compile_and_run_with_stdlib(src, "Main")

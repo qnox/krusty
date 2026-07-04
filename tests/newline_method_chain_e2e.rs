@@ -3,7 +3,7 @@
 //! newline, so `B()\n  .a()\n  .r()` failed with "expected an expression" at the leading `.`. It now
 //! peeks past the newline(s); a following `.`/`?.` continues the chain. Round-tripped on the JVM.
 
-mod common;
+use super::common;
 
 fn run(src: &str) -> Option<String> {
     common::compile_and_run_with_stdlib(src, "Main")

@@ -6,16 +6,16 @@ use std::process::Command;
 
 use krusty::jvm::classfile::*;
 
-fn have(tool: &str) -> bool {
-    Command::new(tool).arg("-version").output().is_ok()
-}
+use super::common;
 
 #[test]
 fn emitted_add_class_verifies_and_runs() {
-    if !have("javac") || !have("java") {
+    let Some(java_home) = common::java_home() else {
         eprintln!("skipping: javac/java not available");
         return;
-    }
+    };
+    let javac_bin = format!("{java_home}/bin/javac");
+    let java_bin = format!("{java_home}/bin/java");
 
     // FooKt.add(int,int):int = a + b
     let mut cw = ClassWriter::new("FooKt", "java/lang/Object");
@@ -37,7 +37,7 @@ fn emitted_add_class_verifies_and_runs() {
     )
     .unwrap();
 
-    let javac = Command::new("javac")
+    let javac = Command::new(&javac_bin)
         .args(["-cp", dir.to_str().unwrap(), "Main.java"])
         .current_dir(&dir)
         .output()
@@ -49,7 +49,7 @@ fn emitted_add_class_verifies_and_runs() {
     );
 
     // -Xverify:all forces full bytecode verification of the loaded krusty class.
-    let run = Command::new("java")
+    let run = Command::new(&java_bin)
         .args(["-Xverify:all", "-cp", dir.to_str().unwrap(), "Main"])
         .output()
         .expect("run java");

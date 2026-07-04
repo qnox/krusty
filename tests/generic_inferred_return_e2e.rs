@@ -6,7 +6,7 @@
 //! `Unit`-defaulted return for a body that returns a `String` (`-Xverify:all` failure). This pins the
 //! generic case the same-name-overload test doesn't reach.
 
-mod common;
+use super::common;
 
 #[test]
 fn generic_param_inferred_return_keeps_override() {

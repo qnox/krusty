@@ -5,7 +5,7 @@
 //! under the base's own (erased) type parameters. Round-tripped on the JVM (the override's covariant
 //! return drives a bridge to the erased base signature).
 
-mod common;
+use super::common;
 
 fn run(src: &str) -> Option<String> {
     common::compile_and_run_with_stdlib(src, "Main")

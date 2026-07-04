@@ -14,7 +14,7 @@
 //!     detection consults the library for classpath members.
 //!
 //! Requires the coroutines runtime jar; skipped when it (or the toolchain) is unavailable.
-mod common;
+use super::common;
 
 fn run(lib: Option<(&str, &str)>, main: &str) -> Option<String> {
     let jdk = common::jdk_modules()?;

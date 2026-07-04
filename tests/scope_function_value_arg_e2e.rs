@@ -2,7 +2,7 @@
 //! receiver lambdas (`x.apply { ... }`). The stdlib `apply` body is private `@InlineOnly`, so resolution
 //! must accept the function value and the backend must splice the real body.
 
-mod common;
+use super::common;
 
 #[test]
 fn apply_accepts_receiver_function_value_argument() {

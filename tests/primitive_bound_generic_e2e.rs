@@ -3,7 +3,7 @@
 //! unsigned, and value bounds are NOT specialized (their boxed-vs-primitive `==`/unsigned semantics
 //! differ) and stay rejected, so a default-flags drop-in skips them rather than miscompile.
 
-mod common;
+use super::common;
 
 fn classes(src: &str) -> Option<Vec<(String, Vec<u8>)>> {
     let stdlib = common::stdlib_jar()?;

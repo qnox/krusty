@@ -2,7 +2,7 @@
 //! and `init { }` blocks — initialized in the primary constructor, accessible from member methods.
 //! Plus open-property virtual dispatch (an `open val` read inside the class calls the getter).
 
-mod common;
+use super::common;
 
 fn run_box(_name: &str, src: &str) {
     common::assert_box_ok_with_stdlib(src, "B");

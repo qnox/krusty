@@ -15,12 +15,7 @@
 # EXCLUDED: their INPUT is an external corpus or the reference compiler, so counting them would
 # measure kotlinc's coverage of its own testdata. To exclude a new external suite, add it here.
 EXCLUDE=(
-  kotlin_box_ir_jvm_conformance   # Kotlin box/codegen corpus (differential vs kotlinc)
-  box_corpus_regression_e2e       # pinned subset of the same external box corpus
-  ir_blockers                     # survey over the external box corpus
-  box_vendored_e2e                # runs external corpus box files on the JVM
-  serialization_conformance       # kotlinx.serialization corpus + real kotlinc driver
-  ksp_real_e2e                    # external KSP processor corpus + real toolchain
+  conformance   # external corpus/reference-toolchain suites (Kotlin box, serialization, KSP)
 )
 
 set -euo pipefail
@@ -62,7 +57,7 @@ for b in "${bins[@]}"; do
   is_excluded "$name" && continue
   run+=("$b")
 done
-echo "coverage: running ${#run[@]} test binaries in parallel (-P $jobs), ${#EXCLUDE[@]} external suites excluded" >&2
+echo "coverage: running ${#run[@]} test binaries in parallel (-P $jobs), conformance binary excluded" >&2
 
 # Run the binaries in parallel; each writes its own profraw (LLVM_PROFILE_FILE has a %p pid slot).
 # A non-zero exit from any binary (a failing test) fails the whole run — the tests are the workload.

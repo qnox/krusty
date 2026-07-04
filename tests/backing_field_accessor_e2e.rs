@@ -3,7 +3,7 @@
 //! `field`. Distinct from a computed property (no backing field) and a plain field (default accessors).
 //! Round-tripped on the JVM.
 
-mod common;
+use super::common;
 
 #[test]
 fn val_backing_field_custom_getter() {

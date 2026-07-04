@@ -2,7 +2,7 @@
 //! `getName(Recv): T` and setter `setName(Recv, T)`; a read `x.name` → `getName(x)`, a write
 //! `x.name = v` → `setName(x, v)`. No backing field. Round-tripped on the JVM.
 
-mod common;
+use super::common;
 
 fn run(src: &str) -> Option<String> {
     common::compile_and_run_with_stdlib(src, "Main")

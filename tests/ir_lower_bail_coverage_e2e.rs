@@ -18,7 +18,7 @@
 //! Both helpers SKIP CLEAN (pass) when the vendored kotlinc/JDK toolchain is unavailable, so the suite
 //! never fails spuriously on a machine without it.
 
-mod common;
+use super::common;
 
 use std::fs;
 use std::path::PathBuf;

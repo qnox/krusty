@@ -3,7 +3,7 @@
 //!  b2 fully-qualified dotted type ref inline         (`fun f(x: lib.Thing?)`, no import)
 //!  b3 nested type in type position                   (`fun f(b: Wrap.Box)`)
 //!  b5 comparison operator on a `Comparable` classpath type (`a < b` where `a,b: Money`)
-mod common;
+use super::common;
 
 #[test]
 fn classpath_type_ref_and_operator_resolution() {

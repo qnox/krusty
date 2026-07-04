@@ -2,7 +2,7 @@
 //! (`fun m(i: Inner)`), a local `val v: Inner`, etc. — resolve to `Outer$Inner` (Kotlin nested-type
 //! scoping). Construction was already handled; this covers TYPE positions.
 
-mod common;
+use super::common;
 
 fn run(src: &str) -> Option<String> {
     common::compile_and_run_with_stdlib(src, "Main")

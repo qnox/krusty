@@ -12,7 +12,7 @@
 use krusty::jvm::classpath::Classpath;
 use krusty::types::Ty;
 
-mod common;
+use super::common;
 
 #[test]
 fn vararg_factory_keeps_its_array_param() {

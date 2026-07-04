@@ -4,7 +4,7 @@
 //! nested lambdas — while an INLINE-spliced lambda keeps shallow captures (it accesses the variable
 //! directly). Round-tripped on a real JVM.
 
-mod common;
+use super::common;
 
 #[test]
 fn nested_closure_capture_runs() {

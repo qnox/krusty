@@ -2,7 +2,7 @@
 //! `getOrThrow()`. Both are `inline` (private in bytecode), so kotlinc inlines them; krusty must
 //! resolve them via @Metadata (which marks them public inline) and splice their classpath bodies.
 
-mod common;
+use super::common;
 
 fn run(src: &str) -> Option<String> {
     common::compile_and_run_with_stdlib(src, "C")

@@ -8,10 +8,10 @@
 //! against a separately `javac`-compiled generic class (Kotlin warns on such shadowing, so it is
 //! absent from the same-file box corpus — a `javac` dependency is the faithful reproduction).
 
+use super::common;
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
-mod common;
 
 fn env(k: &str) -> Option<String> {
     std::env::var(k).ok().filter(|v| !v.is_empty())

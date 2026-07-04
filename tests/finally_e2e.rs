@@ -2,7 +2,7 @@
 //! exception, and (via a catch-all that re-throws) on an uncaught one. Round-tripped under
 //! `-Xverify:all`; the run order is asserted via a log string.
 
-mod common;
+use super::common;
 
 #[test]
 fn finally_runs() {

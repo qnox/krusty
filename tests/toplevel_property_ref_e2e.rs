@@ -3,7 +3,7 @@
 //! dispatch via `invokestatic` to the file-facade accessor; `.name` is inherited from the base.
 //! Round-tripped on a real JVM under `-Xverify:all`.
 
-mod common;
+use super::common;
 
 #[test]
 fn toplevel_property_refs_run() {

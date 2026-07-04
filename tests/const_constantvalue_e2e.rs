@@ -3,7 +3,7 @@
 //! NO `<clinit>` at all — exactly kotlinc's output (previously krusty emitted no `ConstantValue` and a
 //! `<clinit>` with `putstatic`). Verified by parsing the emitted facade class.
 
-mod common;
+use super::common;
 
 use krusty::jvm::classreader::parse_class;
 

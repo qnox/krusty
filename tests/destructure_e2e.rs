@@ -6,7 +6,7 @@ use krusty::lexer::lex;
 use krusty::parser::parse;
 use krusty::resolve::{check_file, collect_signatures};
 
-mod common;
+use super::common;
 
 /// Run the checker only, returning its diagnostics (for the rejection test).
 fn check(src: &str) -> Vec<String> {

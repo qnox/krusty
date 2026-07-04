@@ -8,7 +8,7 @@
 //!  2. The coroutine `box_returns` pass didn't handle an `ExternalStaticField` node (reading a classpath
 //!     `object`'s `INSTANCE`, e.g. `Service(R)` where `R` is a classpath object) → the suspend lambda's
 //!     state machine bailed. `box_returns` now treats it as a leaf value.
-mod common;
+use super::common;
 
 const LIB: &str = "package lib\n\
     data class Filt(val a: Int = 0)\n\

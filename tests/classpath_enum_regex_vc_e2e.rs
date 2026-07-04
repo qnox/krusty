@@ -2,7 +2,7 @@
 //!  c4 enum entry from a classpath enum (`k == Kind.PENDING`)
 //!  c5 stdlib `Regex(...).matches(s: String)` (a `CharSequence`-param member; `String <: CharSequence`)
 //!  c6 a property whose type is a classpath `@JvmInline value class` (`h.id` where `Holder(val id: Vid)`)
-mod common;
+use super::common;
 
 #[test]
 fn classpath_enum_regex_and_value_class_property() {

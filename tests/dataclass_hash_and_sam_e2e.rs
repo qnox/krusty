@@ -3,7 +3,7 @@
 //! `Float.hashCode` helpers) and a lambda converted to a `void`-returning SAM interface (`Runnable`),
 //! whose bridge body loads `Unit.INSTANCE` after the call.
 
-mod common;
+use super::common;
 
 fn run_ok(stem: &str, body: &str) {
     common::expect_box_ok_with_stdlib(body, stem);

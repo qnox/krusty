@@ -3,7 +3,7 @@
 //! `last` element is recomputed by the stdlib (`getProgressionLastElement`) for each `step`, so the
 //! iterated values match kotlinc exactly. Round-tripped on the JVM under `-Xverify:all`.
 
-mod common;
+use super::common;
 
 #[test]
 fn stepped_progressions_run() {

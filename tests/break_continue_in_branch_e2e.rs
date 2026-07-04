@@ -2,7 +2,7 @@
 //! position (`s += if (c) x else break`): the branch lowers to a loop goto, and the branch-merge takes
 //! its value from the non-diverging branches. Round-tripped on the JVM.
 
-mod common;
+use super::common;
 
 fn run(src: &str) -> Option<String> {
     common::compile_and_run_with_stdlib(src, "Main")

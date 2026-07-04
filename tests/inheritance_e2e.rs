@@ -2,7 +2,7 @@
 //! `extends` the base, its constructor calls `super(args)`, and it inherits the base's methods and
 //! properties (open members are non-`final`). Compiled by krusty, run on a real JVM.
 
-mod common;
+use super::common;
 
 #[test]
 fn subclass_inherits_and_overrides() {

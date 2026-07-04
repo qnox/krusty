@@ -2,7 +2,7 @@
 //! The checker resolves the index against the class's `get`/`set` member; the lowering emits the
 //! corresponding instance method call (the same `invokevirtual` kotlinc emits). Round-tripped on the JVM.
 
-mod common;
+use super::common;
 
 fn run(src: &str) -> Option<String> {
     common::compile_and_run_with_stdlib(src, "Main")

@@ -2,7 +2,7 @@
 //! <internal>.INSTANCE`. `EmptyCoroutineContext` is a public `object` in the stdlib; its `toString()`
 //! is the singleton's own. Round-tripped under `-Xverify:all`.
 
-mod common;
+use super::common;
 
 fn run(src: &str) -> Option<String> {
     common::compile_and_run_with_stdlib(src, "C")

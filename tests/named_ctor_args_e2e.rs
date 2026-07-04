@@ -2,7 +2,7 @@
 //! whose default is a simple literal — the same name→position mapping top-level functions already get.
 //! Round-tripped on the JVM.
 
-mod common;
+use super::common;
 
 #[test]
 fn named_constructor_args_map_and_fill_defaults() {

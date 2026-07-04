@@ -6,7 +6,7 @@
 //! protocol is byte-identical to kotlinc (`java/util/List.iterator()` / `Iterator.hasNext()`/`next()`).
 //! Round-tripped on the JVM.
 
-mod common;
+use super::common;
 
 fn run(src: &str) -> Option<String> {
     common::compile_and_run_with_stdlib(src, "Main")

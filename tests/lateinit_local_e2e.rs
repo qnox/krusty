@@ -1,7 +1,7 @@
 //! `lateinit var` LOCALS: a mutable local with no initializer (slot defaults to null); a read while
 //! still null throws `UninitializedPropertyAccessException`. Mirrors the member-field lateinit guard.
 
-mod common;
+use super::common;
 
 fn run(src: &str) -> Option<String> {
     common::compile_and_run_with_stdlib(src, "Main")

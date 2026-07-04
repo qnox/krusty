@@ -10,7 +10,7 @@
 //! value-class argument matches. (The reified inline extension itself must be inlined at each call site —
 //! krusty cannot splice a reified body from its throwing bytecode stub, so the CALL lowers to a clean skip
 //! rather than a direct invocation; this test asserts the RESOLUTION, the reported failure.)
-mod common;
+use super::common;
 
 #[test]
 fn valueclass_param_reified_extension_resolves() {

@@ -2,7 +2,7 @@
 //! a `public static final Companion` field on the outer class built in its `<clinit>`, and
 //! `C.foo()` → `getstatic C.Companion; invokevirtual`. Round-tripped under `-Xverify:all`.
 
-mod common;
+use super::common;
 
 #[test]
 fn companion_methods_run() {

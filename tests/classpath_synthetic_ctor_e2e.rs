@@ -6,7 +6,7 @@
 //!   d4  ctor omitting a defaulted param    — `Cfg(1)` for `Cfg(a, b = 9)` → `<init>(int, int, mask, marker)`
 //! The library is compiled by kotlinc (the real synthetic-ctor ABI) and consumed by krusty on the
 //! classpath. Needs the JVM toolchain + kotlin-stdlib; skips otherwise.
-mod common;
+use super::common;
 
 #[test]
 fn classpath_synthetic_ctor_and_nested_type_resolution() {

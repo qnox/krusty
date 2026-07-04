@@ -10,7 +10,7 @@
 //! toolchain isn't provisioned those tests skip cleanly (a non-empty sentinel is returned so
 //! the non-empty assertion still holds). Parse-level snippets need no classpath and never skip.
 
-mod common;
+use super::common;
 
 /// Run the front end with stdlib + JDK on the classpath. If the toolchain is unavailable, return a
 /// sentinel so the "non-empty" assertions still hold (the test effectively skips).

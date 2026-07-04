@@ -2,7 +2,7 @@
 //! It is valid as a parameter, a local (a 1-slot reference, tracked in frames), and a closure result, and
 //! compares with `null`. Round-tripped on the JVM.
 
-mod common;
+use super::common;
 
 fn run(src: &str) -> Option<String> {
     common::compile_and_run_with_stdlib(src, "Main")

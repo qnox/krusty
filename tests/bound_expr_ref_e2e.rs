@@ -4,7 +4,7 @@
 //! functions each holding such a reference — their synthesized impls must not clash (named by the ref's
 //! unique AST id, not a per-function counter). Round-tripped under `-Xverify:all`.
 
-mod common;
+use super::common;
 
 fn run(src: &str) -> Option<String> {
     common::compile_and_run_with_stdlib(src, "C")

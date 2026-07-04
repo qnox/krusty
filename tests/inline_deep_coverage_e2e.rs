@@ -18,7 +18,7 @@
 //! Each test compiles a self-contained Kotlin program whose `fun box(): String` returns "OK", runs it
 //! on the JVM, and asserts the result. Only kotlin-stdlib is on the classpath.
 
-mod common;
+use super::common;
 
 use std::path::PathBuf;
 

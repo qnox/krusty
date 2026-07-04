@@ -3,7 +3,7 @@
 //! custom accessors / `lateinit` / `by lazy`. Each case compiles a `box(): String` with krusty and
 //! round-trips it on the JVM, asserting real computed values.
 
-mod common;
+use super::common;
 
 /// Compile+run `src`'s `box()` under a fresh stem; assert it returns "OK". Skips (returns) when the
 /// toolchain isn't present, matching the other e2e tests.

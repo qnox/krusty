@@ -4,7 +4,7 @@
 //! differs from one with a different receiver and from the unbound reference. Round-tripped under
 //! `-Xverify:all`.
 
-mod common;
+use super::common;
 
 fn run(src: &str) -> Option<String> {
     common::compile_and_run_with_stdlib(src, "C")

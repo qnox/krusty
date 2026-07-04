@@ -3,7 +3,7 @@
 //! (a capturing one — e.g. a super-constructor argument referencing an outer local — stays unsupported
 //! and the file skips, never miscompiles). Round-tripped under `-Xverify:all`.
 
-mod common;
+use super::common;
 
 fn run(src: &str) -> Option<String> {
     common::compile_and_run_with_stdlib(src, "C")

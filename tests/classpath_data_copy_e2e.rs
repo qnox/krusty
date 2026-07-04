@@ -3,7 +3,7 @@
 //! omitted fields come from the receiver. krusty previously mis-lowered it to a garbled `<init>`
 //! (VerifyError). Verified byte-identical to kotlinc's `copy$default` call.
 //! Needs the JVM toolchain + kotlin-stdlib; skips otherwise.
-mod common;
+use super::common;
 
 #[test]
 fn classpath_data_class_copy_with_omitted_fields() {

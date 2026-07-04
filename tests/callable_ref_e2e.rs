@@ -2,7 +2,7 @@
 //! same `invokedynamic` + `LambdaMetafactory` machinery as a lambda, with the impl method handle
 //! pointing directly at the referenced function. Round-tripped against the JVM under `-Xverify:all`.
 
-mod common;
+use super::common;
 
 #[test]
 fn callable_refs_run() {

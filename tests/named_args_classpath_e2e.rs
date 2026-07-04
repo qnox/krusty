@@ -6,7 +6,7 @@
 //! This is the general feature that compose-ui DEP cases need (they call androidx functions with
 //! named args). The dependency is compiled by the REAL kotlinc, so its `@Metadata` is authoritative.
 
-mod common;
+use super::common;
 
 fn env(k: &str) -> Option<String> {
     std::env::var(k).ok().filter(|v| !v.is_empty())

@@ -4,7 +4,7 @@
 //! the `?.` path skipped that coercion, so a chained use (`box?.v.length`, an `Int` field arithmetic)
 //! would leave an erased `Object` on the stack. Round-tripped under `-Xverify:all`.
 
-mod common;
+use super::common;
 
 #[test]
 fn safe_call_generic_field_coerces() {

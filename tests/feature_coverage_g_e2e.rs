@@ -2,7 +2,7 @@
 //! `src/parser.rs`) plus the arithmetic/bitwise/conversion emit paths. Each test compiles a
 //! `fun box(): String` with `krusty`, runs it on the JVM under `-Xverify:all`, and asserts `OK`.
 
-mod common;
+use super::common;
 
 /// Compile `src` (with entry `box`) under class `stem` and run it, asserting the return is `"OK"`.
 /// Skips (returns) when the toolchain env is unavailable — matching the other e2e tests.

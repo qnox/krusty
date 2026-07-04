@@ -2,7 +2,7 @@
 //! Regression guard for the eager-`iand`/`ior` miscompile (`x != 0 && 10/x > 0` must not divide when
 //! `x == 0`). Compiled by the krusty binary, run on a real JVM under `-Xverify:all`.
 
-mod common;
+use super::common;
 
 /// Compile `src` in-process and run `SCKt.box()` on the shared persistent JVM (stdlib + JDK jimage on
 /// the classpath). `None` ⇒ environment unavailable (skip) or krusty couldn't emit.

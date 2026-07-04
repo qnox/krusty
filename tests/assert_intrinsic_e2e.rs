@@ -7,7 +7,7 @@
 //! kotlinc's default. A failing `assert` therefore must NOT throw (the guard skips it), and the
 //! condition's side effects must NOT run.
 
-mod common;
+use super::common;
 
 fn run(src: &str) -> Option<String> {
     common::compile_and_run_with_stdlib(src, "Main")

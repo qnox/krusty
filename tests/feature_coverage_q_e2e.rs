@@ -4,7 +4,7 @@
 //! `List` element access. Each test compiles a `fun box(): String` with krusty, runs it on a real JVM
 //! under verification, and asserts `"OK"`. Targets `src/jvm/value_classes.rs`.
 
-mod common;
+use super::common;
 
 fn run(src: &str, stem: &str) -> Option<String> {
     common::compile_and_run_with_stdlib(src, stem)

@@ -5,7 +5,7 @@
 //! hand-written e2e missed it; this file covers the boxing/comparison/data-class/elvis/return patterns the
 //! corpus exercises, round-tripped on the JVM.
 
-mod common;
+use super::common;
 
 #[test]
 fn boxed_nullable_int_equality() {

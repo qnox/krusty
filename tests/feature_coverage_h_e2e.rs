@@ -6,7 +6,7 @@
 //! Each test compiles a self-contained program with a `box(): String` entry point, runs it on the
 //! persistent JVM under verification, and asserts the returned value. Requires only kotlin-stdlib.
 
-mod common;
+use super::common;
 
 /// Compile `src` (entry `box()`), run it, and assert the result is `"OK"`. Skips (returns) when the
 /// JDK / stdlib toolchain isn't provisioned, matching the other `*_e2e` tests.

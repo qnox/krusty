@@ -1,7 +1,7 @@
 //! Cannot construct an abstract class, sealed class, or interface directly (kotlinc rejects it; the
 //! JVM would throw at `new`). Covers the `ctor_result` construction check.
 
-mod common;
+use super::common;
 
 fn diags(src: &str) -> Vec<String> {
     let Some(stdlib) = common::stdlib_jar() else {

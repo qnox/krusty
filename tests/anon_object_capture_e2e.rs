@@ -2,7 +2,7 @@
 //! anonymous-object capture analysis (anon_bound_names / anon_body_uses / anon_body_writes /
 //! rewrite_anon_captures), a path the box corpus does not reach.
 
-mod common;
+use super::common;
 
 fn run_ok(stem: &str, body: &str) {
     common::expect_box_ok_with_stdlib(body, stem);

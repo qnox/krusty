@@ -7,7 +7,7 @@
 //! nested recursion, and vararg forwarding via spread. Each test compiles a `fun box(): String`
 //! returning "OK" and round-trips it on the JVM.
 
-mod common;
+use super::common;
 
 fn run(src: &str, stem: &str) -> Option<String> {
     common::compile_and_run_with_stdlib(src, stem)

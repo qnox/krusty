@@ -6,8 +6,8 @@
 //! (a lambda / `RefNew` / `invoke` default — which reaches captured/spilled state the static stub can't —
 //! stays rejected). Same-file runnable; the suspend service shape (AuditService) is compile-asserted since
 //! running a coroutine needs a driver.
+use super::common;
 use std::path::PathBuf;
-mod common;
 
 fn run(src: &str) -> Option<String> {
     common::compile_and_run_with_stdlib(src, "Main")

@@ -3,7 +3,7 @@
 //! a `Nothing` call, and `expr ?: default` on a `Nothing?` lhs takes the default (the lhs is always null).
 //! A branch whose type is a `Nothing`-returning call joins as the bottom type. Round-tripped on the JVM.
 
-mod common;
+use super::common;
 
 fn run(src: &str) -> Option<String> {
     common::compile_and_run_with_stdlib(src, "Main")

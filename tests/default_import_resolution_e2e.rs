@@ -4,7 +4,7 @@
 //! arbitrary classpath class in a non-default package (which would silently bind `Comparator` to
 //! `java.util.Comparator` without an import, the over-match bug). Round-tripped against the JDK.
 
-mod common;
+use super::common;
 
 fn run(src: &str) -> Option<String> {
     common::compile_and_run_with_stdlib(src, "Main")

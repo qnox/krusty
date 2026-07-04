@@ -4,7 +4,7 @@
 use std::fs;
 use std::process::Command;
 
-mod common;
+use super::common;
 
 fn env(k: &str) -> Option<String> {
     std::env::var(k).ok().filter(|v| !v.is_empty())

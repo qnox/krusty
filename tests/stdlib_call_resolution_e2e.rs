@@ -8,7 +8,7 @@
 //! the survey reuses `toolchain::classpath_jars_for`, a missing core jar (or a future drift) fails
 //! here instead of masquerading as a krusty capability gap in the survey output.
 
-mod common;
+use super::common;
 
 use krusty::diag::DiagSink;
 use krusty::resolve::{check_file, collect_signatures_with_cp};

@@ -1,7 +1,7 @@
 //! `try { … } catch (e: E) { … }` as both expression and statement, including a throwing body caught
 //! by the handler. Round-tripped against the JVM under `-Xverify:all`.
 
-mod common;
+use super::common;
 
 #[test]
 fn try_catch_runs() {

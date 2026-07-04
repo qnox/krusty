@@ -4,7 +4,7 @@
 //! exercises those arms. Only a plain member is referenced, so nothing depends on the nested types
 //! being lowered.
 
-mod common;
+use super::common;
 
 #[test]
 fn object_body_with_nested_decls() {

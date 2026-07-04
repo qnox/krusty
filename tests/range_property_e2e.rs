@@ -1,7 +1,7 @@
 //! Range-typed top-level/local properties (`val r = 1..10`) infer their stdlib range type and can be
 //! iterated/used. Round-tripped under `-Xverify:all`.
 
-mod common;
+use super::common;
 
 fn run(src: &str) -> Option<String> {
     common::compile_and_run_with_stdlib(src, "P")

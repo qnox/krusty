@@ -17,7 +17,7 @@ use krusty::plugins::serialization::{SerializationPlugin, SERIALIZABLE_FQ};
 use krusty::plugins::{PluginContext, PluginHost};
 use krusty::resolve::{check_file, collect_signatures_with_cp};
 
-mod common;
+use super::common;
 
 /// Lower a source through krusty's full front end to its parsed `File` + real `IrFile`, or `None` if
 /// it can't compile (or no stdlib is available).

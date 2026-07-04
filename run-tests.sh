@@ -80,40 +80,25 @@ run_one() {
 }
 export -f run_one
 
-# The conformance gate is internally rayon-parallel, so run it alone before the parallel batch to avoid
-# core contention with the rest of the suite.
-gate="$(printf '%s\n' "${bins[@]}" | grep kotlin_box_ir_jvm_conformance || true)"
-[ -n "$gate" ] && run_one "$logdir" "$gate"
+# The conformance binary contains external corpus/reference-toolchain suites. Run it alone before
+# the product test binary to avoid core contention and to keep fast/coverage exclusion binary-scoped.
+gate="$(printf '%s\n' "${bins[@]}" | grep '/conformance-' || true)"
+[ -n "$gate" ] && run_one "$logdir" "$gate::--test-threads=1"
 
 ncpu="$(nproc 2>/dev/null || sysctl -n hw.ncpu)"
 jobs="${KRUSTY_TEST_JOBS:-$ncpu}"
-# Per-binary test threads. With ~190 binaries the jobs-wide across-binary parallelism already fills
-# the cores (separate processes → no shared-state contention), so 1 thread/binary is fastest; raising
-# it oversubscribes and slows the whole run. The knob exists mainly to thread a small binary subset
-# (where across-binary parallelism has run out) via the now-concurrent JVM box-runner.
+# Per-binary test threads. Keep the default at 1 because many formerly separate e2e files now
+# share one process; callers can raise KRUSTY_TEST_THREADS after checking for temp-dir/state races.
 threads="${KRUSTY_TEST_THREADS:-1}"
 rest=()
 while IFS= read -r b; do
   rest+=("$b")
-done < <(printf '%s\n' "${bins[@]}" | grep -v kotlin_box_ir_jvm_conformance)
+done < <(printf '%s\n' "${bins[@]}" | grep -v '/conformance-')
 
 # Long-running binaries first: otherwise alphabetical order leaves slow binaries to start late, creating
 # a long tail on 4-core machines.
 priority=(
-  serialization_krusty_only_e2e
-  suspend_e2e
-  bytecode_parity_e2e
-  top_level_property_e2e
-  classpath_receiver_lambda_e2e
-  cli_dropin_e2e
-  named_args_classpath_e2e
-  classpath_default_args_e2e
-  classpath_function_reference_e2e
-  inline_splice_e2e
-  diagnostics_match_kotlinc
-  classreader_e2e
-  codegen_host_e2e
-  feature_box_e2e
+  e2e
 )
 ordered=()
 for p in "${priority[@]}"; do

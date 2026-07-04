@@ -37,7 +37,7 @@ use krusty::jvm::names::file_class_name;
 use krusty::lexer::lex;
 use krusty::resolve::{check_file, collect_signatures_with_cp};
 
-mod common;
+use super::common;
 
 // BoxRunner.java source embedded at compile time; compiled once at test start.
 const BOX_RUNNER_SRC: &str = r#"

@@ -3,7 +3,7 @@
 //! the `Intrinsics.checkNotNull` null assertion kotlinc emits (throws on `null`), then a `checkcast`
 //! to the erased bound when that bound is a concrete reference type. Round-tripped on the JVM.
 
-mod common;
+use super::common;
 
 #[test]
 fn unbounded_type_param_cast_is_erased_noop() {

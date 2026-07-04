@@ -6,7 +6,7 @@
 //! diverged from kotlinc. Verified byte-identical in the differential harness; here we assert the
 //! members exist and the enum still runs.
 
-mod common;
+use super::common;
 
 fn classes(src: &str) -> Option<Vec<(String, Vec<u8>)>> {
     let stdlib = common::stdlib_jar()?;

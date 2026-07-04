@@ -1,7 +1,7 @@
 //! An `abstract` member is only allowed in an abstract class or an interface (kotlinc rejects
 //! `class C { abstract fun f() }`). Covers the class-arm abstract-member check.
 
-mod common;
+use super::common;
 
 fn diags(src: &str) -> Vec<String> {
     common::front_end_diagnostics(src, &[], None)

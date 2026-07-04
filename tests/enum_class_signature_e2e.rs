@@ -4,7 +4,7 @@
 //! instead of `extends java.lang.Enum<Color>`. Verified byte-identical to kotlinc in the differential
 //! harness (`when/enumOptimization/*`); here we assert krusty's emitted attribute directly.
 
-mod common;
+use super::common;
 
 fn classes(src: &str) -> Option<Vec<(String, Vec<u8>)>> {
     let stdlib = common::stdlib_jar()?;

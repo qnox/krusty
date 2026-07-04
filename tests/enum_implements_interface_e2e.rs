@@ -3,7 +3,7 @@
 //! own method, by a per-entry override, or by a default. Generic interfaces (need erased bridges) and
 //! unsatisfied abstract members skip cleanly. Round-tripped on the JVM via the INTERFACE type.
 
-mod common;
+use super::common;
 
 fn run(src: &str) -> Option<String> {
     common::compile_and_run_with_stdlib(src, "E")

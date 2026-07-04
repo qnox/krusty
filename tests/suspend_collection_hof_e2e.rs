@@ -9,8 +9,8 @@
 //! is a separate impl function, not a `return` of the suspend fn), so it is now a leaf there.
 //! Running a coroutine needs a driver, so this asserts the bodies LOWER end-to-end (they were skipped
 //! before); the library is built by real kotlinc.
+use super::common;
 use std::path::PathBuf;
-mod common;
 
 const LIB: &str = "package lib\n\
      class Item(val value: String)\n\
