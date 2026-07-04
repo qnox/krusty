@@ -2303,19 +2303,7 @@ impl crate::libraries::TargetRuntime for JvmLibraries {
     }
 
     fn scalar_value_repr(&self, ty: Ty) -> Option<Ty> {
-        Some(match ty {
-            Ty::Int
-            | Ty::Byte
-            | Ty::Short
-            | Ty::Long
-            | Ty::Float
-            | Ty::Double
-            | Ty::Boolean
-            | Ty::Char => ty,
-            Ty::UInt => Ty::Int,
-            Ty::ULong => Ty::Long,
-            _ => return None,
-        })
+        ty.scalar_value_repr()
     }
 
     fn unsigned_integer_box_type(&self, ty: Ty) -> Option<Ty> {

@@ -1481,7 +1481,7 @@ fn func_ref_call_stack_prefix(
 
 fn verif_for_jvm_free(cw: &mut ClassWriter, t: Ty) -> VerifType {
     match t {
-        Ty::Int | Ty::Boolean | Ty::Byte | Ty::Short | Ty::Char => VerifType::Integer,
+        t if is_jvm_int_category(t) => VerifType::Integer,
         Ty::Long => VerifType::Long,
         Ty::Double => VerifType::Double,
         Ty::Float => VerifType::Float,
@@ -6428,7 +6428,7 @@ impl<'a> Emitter<'a> {
 
     fn verif_single(&mut self, ty: Ty) -> VerifType {
         match ty {
-            Ty::Int | Ty::Boolean | Ty::Byte | Ty::Short | Ty::Char => VerifType::Integer,
+            t if is_jvm_int_category(t) => VerifType::Integer,
             Ty::Long => VerifType::Long,
             Ty::Double => VerifType::Double,
             Ty::Float => VerifType::Float,
@@ -6765,11 +6765,13 @@ fn push_zero(t: Ty, code: &mut CodeBuilder, cw: &mut ClassWriter) {
         Ty::Long => code.lconst_0(),
         Ty::Double => code.dconst_0(),
         Ty::Float => code.fconst_0(),
-        Ty::Int | Ty::Boolean | Ty::Byte | Ty::Short | Ty::Char => {
-            code.push_int(0, cw);
-        }
+        t if is_jvm_int_category(t) => code.push_int(0, cw),
         _ => code.aconst_null(),
     }
+}
+
+fn is_jvm_int_category(t: Ty) -> bool {
+    matches!(t, Ty::Int | Ty::Boolean | Ty::Byte | Ty::Short | Ty::Char)
 }
 
 fn array_store_op(elem: Ty) -> (u8, i32) {
@@ -6941,7 +6943,7 @@ fn load(t: Ty, slot: u16, code: &mut CodeBuilder) {
         Ty::Long => code.lload(slot),
         Ty::Double => code.dload(slot),
         Ty::Float => code.fload(slot),
-        Ty::Int | Ty::Boolean | Ty::Byte | Ty::Short | Ty::Char => code.iload(slot),
+        t if is_jvm_int_category(t) => code.iload(slot),
         _ => code.aload(slot),
     }
 }
@@ -6951,7 +6953,7 @@ fn store(t: Ty, slot: u16, code: &mut CodeBuilder) {
         Ty::Long => code.lstore(slot),
         Ty::Double => code.dstore(slot),
         Ty::Float => code.fstore(slot),
-        Ty::Int | Ty::Boolean | Ty::Byte | Ty::Short | Ty::Char => code.istore(slot),
+        t if is_jvm_int_category(t) => code.istore(slot),
         _ => code.astore(slot),
     }
 }
@@ -6961,7 +6963,7 @@ fn emit_return(t: Ty, code: &mut CodeBuilder) {
         Ty::Long => code.lreturn(),
         Ty::Double => code.dreturn(),
         Ty::Float => code.freturn(),
-        Ty::Int | Ty::Boolean | Ty::Byte | Ty::Short | Ty::Char => code.ireturn(),
+        t if is_jvm_int_category(t) => code.ireturn(),
         Ty::Unit | Ty::Nothing => code.ret_void(),
         _ => code.areturn(),
     }
