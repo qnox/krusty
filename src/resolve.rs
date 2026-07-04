@@ -5723,14 +5723,7 @@ impl<'a> Checker<'a> {
                     || p == Ty::obj("kotlin/Any")
                     || a == Ty::obj("kotlin/Any")
                     || matches!((p, a), (Ty::Obj(e, _), Ty::Obj(x, _)) if self.obj_is_subtype(x, e))
-                    || (p == Ty::Long && matches!(a, Ty::Int | Ty::Byte | Ty::Short | Ty::Char))
-                    || (matches!(p, Ty::Byte | Ty::Short)
-                        && matches!(a, Ty::Int | Ty::Byte | Ty::Short))
-                    || (matches!(p, Ty::Float | Ty::Double)
-                        && matches!(
-                            a,
-                            Ty::Int | Ty::Long | Ty::Byte | Ty::Short | Ty::Char | Ty::Float
-                        ))
+                    || p.accepts_numeric(a)
             })
     }
 
@@ -5833,24 +5826,8 @@ impl<'a> Checker<'a> {
                 return;
             }
         }
-        // An `Int` (typically a constant) is assignable to `Byte`/`Short` (Kotlin narrows integer
-        // literals); codegen emits `i2b`/`i2s`. `Byte`/`Short` are interchangeable with `Int` here.
-        if matches!(expected, Ty::Byte | Ty::Short)
-            && matches!(actual, Ty::Int | Ty::Byte | Ty::Short)
-        {
-            return;
-        }
-        // Int/Byte/Short/Char are assignable to Long (integer widening); codegen emits i2l.
-        if expected == Ty::Long && matches!(actual, Ty::Int | Ty::Byte | Ty::Short | Ty::Char) {
-            return;
-        }
-        // Int/Byte/Short/Char/Long are assignable to Float/Double (widening); codegen emits i2f etc.
-        if matches!(expected, Ty::Float | Ty::Double)
-            && matches!(
-                actual,
-                Ty::Int | Ty::Long | Ty::Byte | Ty::Short | Ty::Char | Ty::Float
-            )
-        {
+        // Numeric literal narrowing and primitive widening; emit sites insert the conversion.
+        if expected.accepts_numeric(actual) {
             return;
         }
         // A primitive is assignable to its boxed wrapper — i.e. to the matching nullable primitive
