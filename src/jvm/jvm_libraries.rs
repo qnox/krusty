@@ -1361,20 +1361,20 @@ impl SymbolSource for JvmLibraries {
             };
             let (params, physical_ret) = parse_method_desc(desc);
             // A `suspend` member appends a `Continuation` JVM parameter the SOURCE signature
-            // (`value_param_types`) excludes — drop it (the CPS pass re-threads it) and match the leading
+            // (`value_params`) excludes — drop it (the CPS pass re-threads it) and match the leading
             // value parameters. Any OTHER count mismatch (`@Composable`, …) isn't a plain mangled member.
             let value_params = if mf.is_suspend && !params.is_empty() {
                 &params[..params.len() - 1]
             } else {
                 &params[..]
             };
-            if value_params.len() != mf.value_param_types.len() {
+            if value_params.len() != mf.value_params.len() {
                 continue;
             }
             let mut logical: Vec<Ty> = value_params
                 .iter()
-                .zip(&mf.value_param_types)
-                .map(|(p, vt)| vt.as_deref().map(kotlin_name_to_ty).unwrap_or(*p))
+                .zip(&mf.value_params)
+                .map(|(p, vp)| vp.ty.as_deref().map(kotlin_name_to_ty).unwrap_or(*p))
                 .collect();
             // A `suspend` member's `params` carry the trailing `Continuation` (the resolver strips it when
             // matching a call, exactly as for a non-mangled suspend member); the logical value parameters
@@ -1879,10 +1879,11 @@ impl SymbolSource for JvmLibraries {
                             // Only when a value-class PARAMETER caused the mangling — else leave other
                             // `@JvmName` manglings to their own handlers.
                             let logical_params: Vec<Ty> = mf
-                                .value_param_types
+                                .value_params
                                 .iter()
-                                .map(|vt| {
-                                    vt.as_deref()
+                                .map(|vp| {
+                                    vp.ty
+                                        .as_deref()
                                         .map(kotlin_name_to_ty)
                                         .unwrap_or(Ty::obj("kotlin/Any"))
                                 })

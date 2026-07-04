@@ -58,7 +58,11 @@ fn class_member_value_params_round_trip() {
     // The SOURCE value-parameter types must round-trip — this is what cross-module resolution reads to
     // recover a call's matchable arity (drop any synthetic trailing params the descriptor appends).
     assert_eq!(
-        greet.value_param_types,
+        greet
+            .value_params
+            .iter()
+            .map(|p| p.ty.clone())
+            .collect::<Vec<_>>(),
         vec![
             Some("kotlin/String".to_string()),
             Some("kotlin/Int".to_string())
@@ -92,7 +96,10 @@ fn package_value_param_defaults_round_trip() {
         .find(|f| f.kotlin_name == "host")
         .expect("the decoded package metadata must list `host`");
     assert_eq!(
-        host.value_param_has_default,
+        host.value_params
+            .iter()
+            .map(|p| p.has_default)
+            .collect::<Vec<_>>(),
         vec![false, true],
         "build_package → package_functions must preserve each param's DECLARES_DEFAULT_VALUE flag"
     );
@@ -133,7 +140,7 @@ fn package_extension_receiver_round_trips() {
         "the extension receiver class must round-trip"
     );
     assert_eq!(
-        f.value_param_types.len(),
+        f.value_params.len(),
         1,
         "only the logical value param `route` is recorded — the receiver is NOT a value parameter"
     );
@@ -164,7 +171,10 @@ fn package_receiver_function_type_param_round_trips() {
         .find(|f| f.kotlin_name == "NavHost")
         .expect("the decoded package metadata must list `NavHost`");
     assert_eq!(
-        f.value_param_recv_funs,
+        f.value_params
+            .iter()
+            .map(|p| p.recv_fun_receiver.clone())
+            .collect::<Vec<_>>(),
         vec![Some("androidx/navigation/NavGraphBuilder".to_string())],
         "the receiver-function-type param's @ExtensionFunctionType + receiver class must round-trip"
     );

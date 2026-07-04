@@ -419,6 +419,16 @@ fn flags_visibility(flags: u64) -> u64 {
 }
 const VIS_PUBLIC: u64 = 3;
 
+/// One source `ValueParameter` decoded from metadata. Keeping these facts together avoids the parser's
+/// old parallel vectors drifting as more parameter-level facts are added.
+struct ParsedValueParam {
+    class_id: Option<u64>,
+    name_id: u64,
+    has_default: bool,
+    materialized: bool,
+    recv_fun: (Option<u64>, Option<u64>),
+}
+
 /// A decoded `Function` message: whether it's `inline`, whether it's `suspend`, its name string id, its
 /// explicit JVM `(name id, desc id)` signature (if present), and its return type's class_name id.
 struct ParsedFunction {
@@ -438,25 +448,9 @@ struct ParsedFunction {
     /// descriptor/`Signature` erase this; only `@Metadata` carries it. Drives the elvis null-check for a
     /// nullable-returning scope fn (`takeIf`/`takeUnless` return `T?`).
     ret_nullable: bool,
-    /// Each SOURCE value parameter's type `class_name` id (`None` for a type-parameter/builtin param).
-    /// The COUNT is the source arity (excludes synthetic descriptor params); resolved to names downstream.
-    value_param_classes: Vec<Option<u64>>,
-    /// Each SOURCE value parameter's NAME (`ValueParameter.name = 2`, a string-table id) — parallel to
-    /// `value_param_classes`. Drives NAMED-ARGUMENT resolution for a classpath function call (the call
-    /// `foo(b = …, a = …)` maps each label to a position via these names). `0` when absent.
-    value_param_names: Vec<u64>,
-    /// Whether each SOURCE value parameter `DECLARES_DEFAULT_VALUE` (`ValueParameter.flags = 1`, bit 1) —
-    /// parallel to `value_param_classes`. Lets a classpath CALL omit a defaulted argument (resolved via
-    /// the count of NON-defaulted params; the omitted call lowers to the `<name>$default` synthetic).
-    value_param_has_default: Vec<bool>,
-    /// Whether each SOURCE value parameter is `crossinline`/`noinline` (`ValueParameter.flags` bits 2/3)
-    /// — i.e. its lambda argument is MATERIALIZED, not inline-spliced. Parallel to `value_param_classes`.
-    value_param_materialized: Vec<bool>,
-    /// Per SOURCE value parameter: `(type_annotation_id, first_type_argument_class_id)` — for a RECEIVER
-    /// function-type param (`Recv.() -> R`), the `@ExtensionFunctionType` annotation id and the receiver
-    /// class id. Resolved downstream: when the annotation is `kotlin/ExtensionFunctionType`, the param is
-    /// a receiver-lambda param whose `this` is the first type argument. Parallel to `value_param_classes`.
-    value_param_recv_ids: Vec<(Option<u64>, Option<u64>)>,
+    /// SOURCE value parameters in declaration order. The COUNT is the source arity (excludes synthetic
+    /// descriptor params); fields are resolved to names downstream.
+    value_params: Vec<ParsedValueParam>,
 }
 
 /// Parse one `Function` message. The return type is `Function.return_type = 3` and the extension
@@ -470,12 +464,7 @@ fn parse_function(body: &[u8]) -> Option<ParsedFunction> {
     let mut recv_class = None;
     let mut has_receiver = false;
     let mut ret_nullable = false;
-    let mut value_param_classes: Vec<Option<u64>> = Vec::new();
-    let mut value_param_names: Vec<u64> = Vec::new();
-    let mut value_param_has_default: Vec<bool> = Vec::new();
-    let mut value_param_materialized: Vec<bool> = Vec::new();
-    #[allow(clippy::type_complexity)]
-    let mut value_param_recv_ids: Vec<(Option<u64>, Option<u64>)> = Vec::new();
+    let mut value_params: Vec<ParsedValueParam> = Vec::new();
     while !pb.at_end() {
         let tag = pb.varint()?;
         match (tag >> 3, tag & 7) {
@@ -524,12 +513,14 @@ fn parse_function(body: &[u8]) -> Option<ParsedFunction> {
                         (_, w) => vp.skip(w)?,
                     }
                 }
-                value_param_classes.push(tid);
-                value_param_names.push(nid);
-                value_param_recv_ids.push(recv_ids);
                 // `DECLARES_DEFAULT_VALUE` is bit 1 of the ValueParameter flags (HAS_ANNOTATIONS is bit 0).
-                value_param_has_default.push(vflags & DECLARES_DEFAULT_VALUE_BIT != 0);
-                value_param_materialized.push(vflags & (IS_CROSSINLINE_BIT | IS_NOINLINE_BIT) != 0);
+                value_params.push(ParsedValueParam {
+                    class_id: tid,
+                    name_id: nid,
+                    has_default: vflags & DECLARES_DEFAULT_VALUE_BIT != 0,
+                    materialized: vflags & (IS_CROSSINLINE_BIT | IS_NOINLINE_BIT) != 0,
+                    recv_fun: recv_ids,
+                });
             }
             (100, 2) => {
                 // method_signature extension
@@ -550,11 +541,7 @@ fn parse_function(body: &[u8]) -> Option<ParsedFunction> {
         recv_class,
         has_receiver,
         ret_nullable,
-        value_param_classes,
-        value_param_names,
-        value_param_has_default,
-        value_param_materialized,
-        value_param_recv_ids,
+        value_params,
     })
 }
 
@@ -574,6 +561,16 @@ fn parse_type_nullable(body: &[u8]) -> bool {
         }
     }
     false
+}
+
+#[derive(Clone, Debug)]
+pub struct MetaValueParam {
+    pub ty: Option<String>,
+    pub name: String,
+    pub has_default: bool,
+    pub materialized: bool,
+    pub recv_fun: bool,
+    pub recv_fun_receiver: Option<String>,
 }
 
 /// A function decoded from a `Class`/`Package` `@Metadata` message — the *metadata-truth* signature
@@ -604,30 +601,9 @@ pub struct MetaFn {
     /// erase this; only `@Metadata` carries it. Drives the elvis null-check for a nullable-returning scope
     /// fn (`takeIf`/`takeUnless` return `T?`).
     pub ret_nullable: bool,
-    /// Each SOURCE value parameter's Kotlin type internal name (`kotlin/Function0` for `remember`'s
-    /// `calculation`); `None` for a type-parameter/unresolved param. The LENGTH is the SOURCE arity — it
-    /// EXCLUDES the synthetic params the JVM descriptor appends (`suspend` Continuation, `@Composable`
-    /// Composer/int). The resolver matches a call against THIS signature; the descriptor drives emit.
-    pub value_param_types: Vec<Option<String>>,
-    /// Each SOURCE value parameter's NAME (parallel to `value_param_types`), for NAMED-ARGUMENT resolution
-    /// of a classpath call. Empty string when metadata omits the name. LENGTH = source arity.
-    pub value_param_names: Vec<String>,
-    /// Whether each SOURCE value parameter declares a default value (parallel to `value_param_types`).
-    /// A classpath call may omit a trailing run of these; the resolver counts the NON-defaulted params as
-    /// the required arity, and the omitted call lowers to the `<name>$default` synthetic.
-    pub value_param_has_default: Vec<bool>,
-    /// Whether each SOURCE value parameter is `crossinline`/`noinline` — its lambda argument is
-    /// MATERIALIZED (a real `FunctionN`/nested class), not inline-spliced. Parallel to `value_param_types`.
-    /// A mutable local captured by such a lambda must be `Ref`-boxed (ordinary-closure capture).
-    pub value_param_materialized: Vec<bool>,
-    /// Per SOURCE value parameter: whether it is a RECEIVER function-type param, carrying
-    /// `@ExtensionFunctionType`. This is true even when the receiver is generic and has no class id.
-    pub value_param_recv_fun_flags: Vec<bool>,
-    /// Per SOURCE value parameter: `Some(receiver_internal)` when it is a RECEIVER function-type param
-    /// with a concrete receiver class (`Recv.() -> R`). Generic receivers (`T.() -> R`) use
-    /// [`MetaFn::value_param_recv_fun_flags`] plus the generic signature for substitution.
-    /// Parallel to `value_param_types`; `None` for an ordinary or generic-receiver parameter.
-    pub value_param_recv_funs: Vec<Option<String>>,
+    /// SOURCE value parameters in declaration order. The LENGTH is the source arity: it excludes
+    /// synthetic JVM descriptor params such as suspend `Continuation` or Compose `Composer`/masks.
+    pub value_params: Vec<MetaValueParam>,
 }
 
 /// Decode every `Function` (proto field `fn_field`: 9 in a `Class`, 3 in a `Package`) of this class's
@@ -686,41 +662,36 @@ fn decode_functions(ci: &ClassInfo, fn_field: u64) -> Vec<MetaFn> {
                     let ret_class = pf
                         .ret_class
                         .and_then(|id| resolve_class_name(&records, d2, id as usize));
-                    let value_param_types: Vec<Option<String>> = pf
-                        .value_param_classes
+                    let value_params: Vec<MetaValueParam> = pf
+                        .value_params
                         .iter()
-                        .map(|o| o.and_then(|id| resolve_class_name(&records, d2, id as usize)))
-                        .collect();
-                    // Param names are plain string-table entries (like the JVM name/desc), NOT class names.
-                    let value_param_names: Vec<String> = pf
-                        .value_param_names
-                        .iter()
-                        .map(|&id| resolve_string(&records, d2, id as usize).unwrap_or_default())
-                        .collect();
-                    // A RECEIVER function-type param: the type annotation must resolve to
-                    // `kotlin/ExtensionFunctionType`. A concrete receiver is the first type argument's
-                    // class; a generic receiver keeps only the receiver-function flag and is substituted
-                    // from the generic signature during call resolution.
-                    let recv_fun_info: Vec<(bool, Option<String>)> = pf
-                        .value_param_recv_ids
-                        .iter()
-                        .map(|(anno_id, arg0)| {
-                            let is_ext_fun = anno_id
+                        .map(|p| {
+                            let recv_fun = p
+                                .recv_fun
+                                .0
                                 .and_then(|id| resolve_class_name(&records, d2, id as usize))
                                 .as_deref()
                                 == Some("kotlin/ExtensionFunctionType");
-                            let recv = if is_ext_fun {
-                                arg0.and_then(|id| resolve_class_name(&records, d2, id as usize))
-                            } else {
-                                None
-                            };
-                            (is_ext_fun, recv)
+                            MetaValueParam {
+                                ty: p
+                                    .class_id
+                                    .and_then(|id| resolve_class_name(&records, d2, id as usize)),
+                                // Param names are plain string-table entries (like the JVM name/desc), not class names.
+                                name: resolve_string(&records, d2, p.name_id as usize)
+                                    .unwrap_or_default(),
+                                has_default: p.has_default,
+                                materialized: p.materialized,
+                                recv_fun,
+                                recv_fun_receiver: if recv_fun {
+                                    p.recv_fun.1.and_then(|id| {
+                                        resolve_class_name(&records, d2, id as usize)
+                                    })
+                                } else {
+                                    None
+                                },
+                            }
                         })
                         .collect();
-                    let value_param_recv_fun_flags =
-                        recv_fun_info.iter().map(|(is_recv, _)| *is_recv).collect();
-                    let value_param_recv_funs =
-                        recv_fun_info.into_iter().map(|(_, recv)| recv).collect();
                     out.push(MetaFn {
                         kotlin_name,
                         jvm_name,
@@ -732,12 +703,7 @@ fn decode_functions(ci: &ClassInfo, fn_field: u64) -> Vec<MetaFn> {
                         is_extension: pf.has_receiver,
                         ret_class,
                         ret_nullable: pf.ret_nullable,
-                        value_param_types,
-                        value_param_names,
-                        value_param_has_default: pf.value_param_has_default,
-                        value_param_materialized: pf.value_param_materialized,
-                        value_param_recv_fun_flags,
-                        value_param_recv_funs,
+                        value_params,
                     });
                 }
             }

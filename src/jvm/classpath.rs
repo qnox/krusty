@@ -98,11 +98,6 @@ fn is_kotlin_array_class(name: &str) -> bool {
     )
 }
 
-/// Whether every `@Metadata` source value param prefix-matches the corresponding descriptor param.
-fn compat_prefix(meta: &[Ty], desc: &[Ty]) -> bool {
-    meta.len() == desc.len() && meta.iter().zip(desc).all(|(m, d)| ty_compat(m, d))
-}
-
 enum Entry {
     Dir(PathBuf),
     Jar(PathBuf),
@@ -228,12 +223,16 @@ struct MetaCallable {
     receiver_class: Option<String>,
     is_extension: bool,
     ret: ReturnInfo,
-    value_param_types: Vec<Ty>,
-    value_param_names: Vec<String>,
-    value_param_has_default: Vec<bool>,
-    value_param_materialized: Vec<bool>,
-    value_param_recv_fun_flags: Vec<bool>,
-    value_param_recv_funs: Vec<Option<String>>,
+    value_params: Vec<MetaCallableParam>,
+}
+
+struct MetaCallableParam {
+    ty: Ty,
+    name: String,
+    has_default: bool,
+    materialized: bool,
+    recv_fun: bool,
+    recv_fun_receiver: Option<String>,
 }
 
 #[derive(Clone)]
@@ -278,9 +277,12 @@ fn aligned_meta_callable<'a>(
         .filter_map(|&i| {
             let c = &meta.callables[i];
             let off = c.is_extension as usize;
-            let end = off + c.value_param_types.len();
+            let end = off + c.value_params.len();
             (end <= desc_params.len()
-                && compat_prefix(&c.value_param_types, &desc_params[off..end]))
+                && c.value_params
+                    .iter()
+                    .zip(&desc_params[off..end])
+                    .all(|(m, d)| ty_compat(&m.ty, d)))
             .then_some((end, c))
         })
         .max_by_key(|(end, _)| *end)
@@ -436,16 +438,18 @@ impl Classpath {
                 receiver_class: f.receiver_class.clone(),
                 is_extension: f.is_extension,
                 ret: metadata_return_info(f.ret_class.as_deref(), f.ret_nullable),
-                value_param_types: f
-                    .value_param_types
+                value_params: f
+                    .value_params
                     .iter()
-                    .map(|o| meta_param_ty(o.as_deref()))
+                    .map(|p| MetaCallableParam {
+                        ty: meta_param_ty(p.ty.as_deref()),
+                        name: p.name.clone(),
+                        has_default: p.has_default,
+                        materialized: p.materialized,
+                        recv_fun: p.recv_fun,
+                        recv_fun_receiver: p.recv_fun_receiver.clone(),
+                    })
                     .collect(),
-                value_param_names: f.value_param_names.clone(),
-                value_param_has_default: f.value_param_has_default.clone(),
-                value_param_materialized: f.value_param_materialized.clone(),
-                value_param_recv_fun_flags: f.value_param_recv_fun_flags.clone(),
-                value_param_recv_funs: f.value_param_recv_funs.clone(),
             })
             .collect();
         let mut by_kotlin_name: HashMap<String, Vec<usize>> = HashMap::new();
@@ -506,18 +510,21 @@ impl Classpath {
         MetadataCallFacts {
             kept_params: Some(end),
             call_sig: if extension {
-                CallSig::metadata_extension(end, c.value_param_names.clone())
+                CallSig::metadata_extension(
+                    end,
+                    c.value_params.iter().map(|p| p.name.clone()).collect(),
+                )
             } else {
                 CallSig::metadata_top_level(
                     end,
-                    c.value_param_names.clone(),
-                    c.value_param_has_default.clone(),
-                    c.value_param_recv_funs
+                    c.value_params.iter().map(|p| p.name.clone()).collect(),
+                    c.value_params.iter().map(|p| p.has_default).collect(),
+                    c.value_params
                         .iter()
-                        .map(|o| o.as_deref().map(Ty::obj))
+                        .map(|p| p.recv_fun_receiver.as_deref().map(Ty::obj))
                         .collect(),
-                    c.value_param_recv_fun_flags.clone(),
-                    c.value_param_materialized.clone(),
+                    c.value_params.iter().map(|p| p.recv_fun).collect(),
+                    c.value_params.iter().map(|p| p.materialized).collect(),
                 )
             },
             ret: c.ret,
@@ -555,7 +562,7 @@ impl Classpath {
         };
         let Some(f) = super::metadata::class_functions(&ci)
             .into_iter()
-            .find(|f| f.jvm_name == jvm_name && f.value_param_types.len() == arity)
+            .find(|f| f.jvm_name == jvm_name && f.value_params.len() == arity)
         else {
             return MetadataCallFacts::fallback(CallSig::metadata_plain(arity));
         };
@@ -563,8 +570,8 @@ impl Classpath {
             kept_params: None,
             call_sig: CallSig::metadata_member(
                 arity,
-                f.value_param_names,
-                f.value_param_has_default,
+                f.value_params.iter().map(|p| p.name.clone()).collect(),
+                f.value_params.iter().map(|p| p.has_default).collect(),
             ),
             ret: metadata_return_info(f.ret_class.as_deref(), f.ret_nullable),
         }
@@ -1078,14 +1085,13 @@ impl Classpath {
             if f.jvm_desc.is_some() {
                 return false;
             }
-            let params: Vec<Ty> = f
-                .value_param_types
-                .iter()
-                .map(|o| meta_param_ty(o.as_deref()))
-                .collect();
             let off = f.is_extension as usize;
-            let end = off + params.len();
-            end == desc_params.len() && compat_prefix(&params, &desc_params[off..end])
+            let end = off + f.value_params.len();
+            end == desc_params.len()
+                && f.value_params
+                    .iter()
+                    .zip(&desc_params[off..end])
+                    .all(|(m, d)| ty_compat(&meta_param_ty(m.ty.as_deref()), d))
         })
     }
 

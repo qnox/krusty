@@ -174,12 +174,15 @@ fn metadata_decodes_value_parameter_names() {
         .find(|f| f.kotlin_name == "copy")
         .expect("Pair.copy in metadata");
     assert_eq!(
-        copy.value_param_names,
+        copy.value_params
+            .iter()
+            .map(|p| p.name.clone())
+            .collect::<Vec<_>>(),
         vec!["first".to_string(), "second".to_string()],
         "copy's value-parameter names decode from @Metadata"
     );
-    // Names are parallel to types (same length = source arity).
-    assert_eq!(copy.value_param_names.len(), copy.value_param_types.len());
+    // Value-parameter facts are one record per source parameter.
+    assert_eq!(copy.value_params.len(), 2);
     let equals = fns.iter().find(|f| f.kotlin_name == "equals").unwrap();
-    assert_eq!(equals.value_param_names, vec!["other".to_string()]);
+    assert_eq!(equals.value_params[0].name, "other");
 }
