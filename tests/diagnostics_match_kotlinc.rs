@@ -1,14 +1,10 @@
 //! krusty's diagnostics should read like kotlinc's. For a set of erroneous snippets, compile with
-//! both and assert the first `error:` message text matches exactly. Gated by KRUSTY_KOTLINC.
+//! both and assert the first `error:` message text matches exactly.
 
 use std::fs;
 use std::process::Command;
 
 mod common;
-
-fn env(k: &str) -> Option<String> {
-    std::env::var(k).ok().filter(|v| !v.is_empty())
-}
 
 /// Extract the first `error: <msg>` text (without the `file:line:col:` prefix) from compiler output.
 fn first_error(output: &str) -> Option<String> {
@@ -19,11 +15,6 @@ fn first_error(output: &str) -> Option<String> {
 
 #[test]
 fn error_messages_match_kotlinc() {
-    let Some(kotlinc) = env("KRUSTY_KOTLINC") else {
-        eprintln!("skipping diagnostics_match_kotlinc: set KRUSTY_KOTLINC");
-        return;
-    };
-    let _ = &kotlinc;
     let krusty = env!("CARGO_BIN_EXE_krusty");
 
     // Snippets within krusty's subset that produce a diagnostic kotlinc also produces identically.

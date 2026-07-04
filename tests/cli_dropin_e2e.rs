@@ -61,48 +61,41 @@ fn compiles_directory_to_jar_consumable_by_kotlinc() {
 
     // Real kotlinc compiles a consumer against the krusty jar (only works if the jar's @Metadata +
     // .kotlin_module are well-formed), then we run it.
-    let Some(kotlinc) = env("KRUSTY_KOTLINC") else {
-        eprintln!("krusty jar produced; set KRUSTY_KOTLINC to also verify kotlinc consumption");
-        let _ = fs::remove_dir_all(&root);
-        return;
-    };
     fs::write(
         root.join("Consumer.kt"),
         "import demo.mk\nfun main() { println(mk(4).sum()) }\n",
     )
     .unwrap();
-    let mut cmd = Command::new(&kotlinc);
-    cmd.arg(root.join("Consumer.kt")).args([
-        "-cp",
-        jar.to_str().unwrap(),
-        "-d",
-        root.join("cout").to_str().unwrap(),
-    ]);
-    if let Some(jh) = env("KRUSTY_REF_JAVA_HOME") {
-        cmd.env("JAVA_HOME", jh);
-    }
-    let kc = cmd.output().expect("run kotlinc");
+    let args = vec![
+        root.join("Consumer.kt").to_string_lossy().into_owned(),
+        "-cp".to_string(),
+        jar.to_string_lossy().into_owned(),
+        "-d".to_string(),
+        root.join("cout").to_string_lossy().into_owned(),
+    ];
+    let Some((code, stderr)) = common::kotlinc_compile(&args) else {
+        eprintln!("krusty jar produced; provisioned kotlinc server unavailable");
+        let _ = fs::remove_dir_all(&root);
+        return;
+    };
     // A *Kotlin* consumer importing top-level declarations needs krusty's `@Metadata` to fully describe
     // the facade's functions/properties (a protobuf blob); krusty emits a minimal `@Metadata` so the jar
     // is JVM-runnable, but full kotlinc-source consumption isn't complete yet. Skip (don't fail) that
     // step until `@Metadata` is complete — the jar-production assertions above are the kept guarantee.
-    if !kc.status.success() {
-        eprintln!(
-            "skip (kotlinc consumer needs complete @Metadata, not emitted yet): {}",
-            String::from_utf8_lossy(&kc.stderr)
-        );
+    if code != 0 {
+        eprintln!("skip (kotlinc consumer needs complete @Metadata, not emitted yet): {stderr}");
         let _ = fs::remove_dir_all(&root);
         return;
     }
 
-    if let Some(stdlib) = env("KRUSTY_KOTLIN_STDLIB") {
+    if let (Some(java_home), Some(stdlib)) = (common::java_home(), common::stdlib_jar()) {
         let cp = format!(
             "{}:{}:{}",
             root.join("cout").to_str().unwrap(),
             jar.to_str().unwrap(),
-            stdlib
+            stdlib.to_string_lossy()
         );
-        let run = Command::new("java")
+        let run = Command::new(format!("{java_home}/bin/java"))
             .args(["-cp", &cp, "ConsumerKt"])
             .output()
             .expect("java");
