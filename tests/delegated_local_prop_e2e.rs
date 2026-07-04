@@ -6,14 +6,6 @@ mod common;
 
 #[test]
 fn local_delegated_val_runs() {
-    let Some(java_home) = common::java_home() else {
-        eprintln!("skipping: set JAVA_HOME");
-        return;
-    };
-    let Some(stdlib) = common::stdlib_jar() else {
-        eprintln!("skipping: no kotlin-stdlib jar found");
-        return;
-    };
     // Corpus local/localVal.kt + localValNoExplicitType.kt shapes.
     const SRC: &str = "import kotlin.reflect.KProperty\n\
 class Delegate {\n\
@@ -24,22 +16,11 @@ fun box(): String {\n\
     val inferred by Delegate()\n\
     return if (prop == 1 && inferred == 1) \"OK\" else \"fail\"\n\
 }\n";
-    let jdk = std::path::PathBuf::from(format!("{java_home}/lib/modules"));
-    let out = common::compile_and_run_box(SRC, "P", &[stdlib], Some(&jdk))
-        .expect("local delegated val should compile + run");
-    assert_eq!(out, "OK");
+    common::expect_box_ok_with_stdlib(SRC, "P");
 }
 
 #[test]
 fn local_delegated_var_runs() {
-    let Some(java_home) = common::java_home() else {
-        eprintln!("skipping: set JAVA_HOME");
-        return;
-    };
-    let Some(stdlib) = common::stdlib_jar() else {
-        eprintln!("skipping: no kotlin-stdlib jar found");
-        return;
-    };
     // Corpus local/localVar.kt shape.
     const SRC: &str = "import kotlin.reflect.KProperty\n\
 class Delegate {\n\
@@ -54,8 +35,5 @@ fun box(): String {\n\
     if (prop != 2) return \"fail set\"\n\
     return \"OK\"\n\
 }\n";
-    let jdk = std::path::PathBuf::from(format!("{java_home}/lib/modules"));
-    let out = common::compile_and_run_box(SRC, "P", &[stdlib], Some(&jdk))
-        .expect("local delegated var should compile + run");
-    assert_eq!(out, "OK");
+    common::expect_box_ok_with_stdlib(SRC, "P");
 }
