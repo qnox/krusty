@@ -8,19 +8,7 @@ mod common;
 /// Shared harness: compile `src`'s `box()` under `stem` and assert it returns "OK".
 /// Returns without asserting (skips) when the toolchain/stdlib/JDK is unavailable.
 fn run(src: &str, stem: &str) {
-    let Some(java_home) = common::java_home() else {
-        eprintln!("skipping feature_coverage_n_e2e: set JAVA_HOME");
-        return;
-    };
-    let Some(stdlib) = common::stdlib_jar() else {
-        eprintln!("skipping feature_coverage_n_e2e: no kotlin-stdlib jar found");
-        return;
-    };
-    let jdk = std::path::PathBuf::from(format!("{java_home}/lib/modules"));
-    let Some(out) = common::compile_and_run_box(src, stem, &[stdlib], Some(&jdk)) else {
-        return;
-    };
-    assert_eq!(out, "OK", "stem={stem}");
+    common::assert_box_ok_with_stdlib(src, stem);
 }
 
 // --- exceptions ---------------------------------------------------------------------------

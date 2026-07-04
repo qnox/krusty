@@ -4,24 +4,10 @@
 
 mod common;
 
-use std::path::PathBuf;
-
 /// Compile `src`'s `box()` under `stem` and assert it returns "OK". Skips (returns) when the
 /// JDK / stdlib toolchain isn't provisioned.
 fn check(stem: &str, src: &str) {
-    let Some(java_home) = common::java_home() else {
-        eprintln!("skipping {stem}: set JAVA_HOME");
-        return;
-    };
-    let Some(stdlib) = common::stdlib_jar() else {
-        eprintln!("skipping {stem}: no kotlin-stdlib jar found");
-        return;
-    };
-    let jdk = PathBuf::from(format!("{java_home}/lib/modules"));
-    let Some(out) = common::compile_and_run_box(src, stem, &[stdlib], Some(&jdk)) else {
-        return;
-    };
-    assert_eq!(out, "OK", "box() mismatch for {stem}");
+    common::assert_box_ok_with_stdlib(src, stem);
 }
 
 #[test]

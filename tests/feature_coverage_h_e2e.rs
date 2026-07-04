@@ -8,22 +8,10 @@
 
 mod common;
 
-use std::path::PathBuf;
-
 /// Compile `src` (entry `box()`), run it, and assert the result is `"OK"`. Skips (returns) when the
 /// JDK / stdlib toolchain isn't provisioned, matching the other `*_e2e` tests.
 fn run_ok(src: &str, stem: &str) {
-    let Some(java_home) = common::java_home() else {
-        return;
-    };
-    let Some(stdlib) = common::stdlib_jar() else {
-        return;
-    };
-    let jdk = PathBuf::from(format!("{java_home}/lib/modules"));
-    let Some(out) = common::compile_and_run_box(src, stem, &[stdlib], Some(&jdk)) else {
-        return;
-    };
-    assert_eq!(out, "OK");
+    common::assert_box_ok_with_stdlib(src, stem);
 }
 
 #[test]

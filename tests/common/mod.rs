@@ -623,7 +623,7 @@ pub fn compile_and_run_with_stdlib(src: &str, stem: &str) -> Option<String> {
 #[allow(dead_code)]
 pub fn assert_box_ok_with_stdlib(src: &str, stem: &str) {
     if let Some(out) = compile_and_run_with_stdlib(src, stem) {
-        assert_eq!(out, "OK");
+        assert_eq!(out, "OK", "box() for {stem} returned {out:?}");
     }
 }
 

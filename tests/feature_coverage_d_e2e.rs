@@ -5,22 +5,10 @@
 
 mod common;
 
-use std::path::{Path, PathBuf};
-
 /// Compile+run `src`'s `box()` under a fresh stem; assert it returns "OK". Skips (returns) when the
 /// toolchain isn't present, matching the other e2e tests.
 fn run(src: &str, stem: &str) {
-    let Some(java_home) = common::java_home() else {
-        return;
-    };
-    let Some(stdlib) = common::stdlib_jar() else {
-        return;
-    };
-    let jdk = PathBuf::from(format!("{java_home}/lib/modules"));
-    let Some(out) = common::compile_and_run_box(src, stem, &[stdlib], Some::<&Path>(&jdk)) else {
-        return;
-    };
-    assert_eq!(out, "OK");
+    common::assert_box_ok_with_stdlib(src, stem);
 }
 
 #[test]
