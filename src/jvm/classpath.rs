@@ -433,29 +433,8 @@ impl Classpath {
         self.functions.borrow_mut().insert(key, set);
     }
 
-    /// The Kotlin return metadata of function `fn_name` declared in class `internal`, decoded from the
-    /// same `@Metadata` callable record (`mutableListOf` → `MutableList`; `takeIf` → nullable `T`). The
-    /// JVM descriptor/`Signature` erase class identity and nullability; only `@Metadata` carries them.
-    /// A multifile FACADE (`CollectionsKt`) has no function metadata of its own — its `@Metadata` `d1`
-    /// lists the PART class names, which hold the functions; merge the parts.
-    pub fn metadata_return(&self, internal: &str, fn_name: &str) -> Option<MetadataReturn> {
-        let meta = self.class_meta(internal);
-        meta.by_kotlin_name.get(fn_name).and_then(|idxs| {
-            idxs.iter()
-                .rev()
-                .map(|&i| {
-                    let c = &meta.callables[i];
-                    MetadataReturn {
-                        class: c.ret_class.clone(),
-                        nullable: c.ret_nullable,
-                    }
-                })
-                .next()
-        })
-    }
-
     /// The decoded `@Metadata` function lookups for `internal` (facade parts merged), decoded once and
-    /// cached. The single `d1` decode that `metadata_return`/`metadata_receiver_types`/
+    /// cached. The single `d1` decode that `meta_functions`/`metadata_receiver_types`/
     /// `metadata_call_facts` all project over.
     fn class_meta(&self, internal: &str) -> std::rc::Rc<ClassMeta> {
         if let Some(m) = self.meta_fns.borrow().get(internal) {

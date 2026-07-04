@@ -48,13 +48,18 @@ fn nullable_type_parameter_return_metadata_is_kept() {
     let cp = Classpath::new(vec![jar]);
     let ret = ["kotlin/StandardKt", "kotlin/StandardKt__StandardKt"]
         .iter()
-        .find_map(|owner| cp.metadata_return(owner, "takeIf"))
+        .find_map(|owner| {
+            cp.meta_functions(owner)
+                .iter()
+                .find(|f| f.kotlin_name == "takeIf")
+                .cloned()
+        })
         .expect("takeIf metadata return");
     assert!(
-        ret.class.is_none(),
+        ret.ret_class.is_none(),
         "takeIf returns a type parameter, not a concrete class"
     );
-    assert!(ret.nullable, "takeIf returns T? in metadata");
+    assert!(ret.ret_nullable, "takeIf returns T? in metadata");
 }
 
 /// The Kotlin collection hierarchy is read from `collections.kotlin_builtins` exactly as kotlinc stores
