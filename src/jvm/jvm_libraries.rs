@@ -242,18 +242,12 @@ impl JvmLibraries {
             .cp
             .find(internal)
             .and_then(|ci| metadata::class_inline(&ci))?;
-        Some(match ic.underlying_class.as_deref() {
-            Some("kotlin/Boolean") => "Z".into(),
-            Some("kotlin/Byte") => "B".into(),
-            Some("kotlin/Short") => "S".into(),
-            Some("kotlin/Int") => "I".into(),
-            Some("kotlin/Long") => "J".into(),
-            Some("kotlin/Char") => "C".into(),
-            Some("kotlin/Float") => "F".into(),
-            Some("kotlin/Double") => "D".into(),
-            Some(other) => format!("L{other};"),
-            None => "Ljava/lang/Object;".into(),
-        })
+        Some(type_descriptor(
+            ic.underlying_class
+                .as_deref()
+                .map(kotlin_name_to_ty)
+                .unwrap_or_else(|| Ty::obj("kotlin/Any")),
+        ))
     }
 
     fn metadata_receivers_allow(&self, owner: &str, name: &str, receiver: Ty) -> bool {
