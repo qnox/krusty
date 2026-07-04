@@ -3,7 +3,7 @@
 //! `java/util/List`. This is the foundation for distinguishing read-only vs mutable collections.
 
 use krusty::jvm::classpath::Classpath;
-use krusty::jvm::metadata::{builtins_supertypes, package_functions};
+use krusty::jvm::metadata::{package_functions, parse_builtins};
 
 use super::common;
 
@@ -66,7 +66,7 @@ fn nullable_type_parameter_return_metadata_is_kept() {
 /// it — the read-only/mutable supertyping (`MutableList : List, MutableCollection`) that exists in no JVM
 /// descriptor. Parsed straight from the jar entry (`PackageFragment` + `QualifiedNameTable`).
 #[test]
-fn builtins_supertypes_decode_collection_hierarchy() {
+fn builtins_decode_collection_hierarchy() {
     let Some(jar) = common::stdlib_jar() else {
         eprintln!("skip: no kotlin-stdlib jar");
         return;
@@ -77,9 +77,10 @@ fn builtins_supertypes_decode_collection_hierarchy() {
         .expect("collections.kotlin_builtins in stdlib jar");
     let mut bytes = Vec::new();
     std::io::Read::read_to_end(&mut entry, &mut bytes).unwrap();
-    let h = builtins_supertypes(&bytes);
+    let h = parse_builtins(&bytes);
     assert_eq!(
-        h.get("kotlin/collections/MutableList").map(Vec::as_slice),
+        h.get("kotlin/collections/MutableList")
+            .map(|c| c.supertypes.as_slice()),
         Some(
             &[
                 "kotlin/collections/List".to_string(),
@@ -88,11 +89,13 @@ fn builtins_supertypes_decode_collection_hierarchy() {
         )
     );
     assert_eq!(
-        h.get("kotlin/collections/List").map(Vec::as_slice),
+        h.get("kotlin/collections/List")
+            .map(|c| c.supertypes.as_slice()),
         Some(&["kotlin/collections/Collection".to_string()][..])
     );
     assert_eq!(
-        h.get("kotlin/collections/MutableMap").map(Vec::as_slice),
+        h.get("kotlin/collections/MutableMap")
+            .map(|c| c.supertypes.as_slice()),
         Some(&["kotlin/collections/Map".to_string()][..])
     );
 }
