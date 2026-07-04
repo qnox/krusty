@@ -7,14 +7,6 @@ mod common;
 
 #[test]
 fn member_receiver_lambda_runs() {
-    let Some(java_home) = common::java_home() else {
-        eprintln!("skipping: set JAVA_HOME");
-        return;
-    };
-    let Some(stdlib) = common::stdlib_jar() else {
-        eprintln!("skipping: no kotlin-stdlib jar");
-        return;
-    };
     // `build { set(42); put(99) }` — `set` is a MEMBER, `put` an EXTENSION, both on the lambda's `this`.
     const SRC: &str = "class Box { var v: Int = 0; fun set(x: Int) { v = x } }\n\
 fun Box.put(x: Int) { v = v + x }\n\
@@ -23,9 +15,5 @@ fun box(): String {\n\
     val r = build { set(42); put(8) }\n\
     return if (r.v == 50) \"OK\" else \"FAIL ${r.v}\"\n\
 }\n";
-    let jdk = std::path::PathBuf::from(format!("{java_home}/lib/modules"));
-    let Some(out) = common::compile_and_run_box(SRC, "B", &[stdlib], Some(&jdk)) else {
-        return;
-    };
-    assert_eq!(out, "OK");
+    common::assert_box_ok_with_stdlib(SRC, "B");
 }
