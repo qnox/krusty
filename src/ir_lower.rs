@@ -19609,7 +19609,7 @@ fn ty_of(file: &ast::File, r: &ast::TypeRef) -> Ty {
             .unwrap_or_else(|| Ty::obj("kotlin/Any"));
         if elem.is_reference() {
             return Ty::array(elem);
-        } else if elem.boxed_ref().is_some() && !matches!(elem, Ty::UInt | Ty::ULong) {
+        } else if elem.jvm_boxed_ref().is_some() {
             // A boxed primitive `Array<Int>` = `Integer[]` — `Obj("kotlin/Array", [Int])`, the same
             // logical form as `arrayOf(1)`/`Array(n){…}` (element read unboxed, backend boxes).
             return Ty::obj_args("kotlin/Array", &[elem]);

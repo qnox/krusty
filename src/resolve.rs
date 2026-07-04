@@ -3295,7 +3295,7 @@ fn ty_of_ref_with(
                 let e = ty_of_ref_with(a, classes, tparams, ctx, diags);
                 if e.is_reference() {
                     Ty::array(e)
-                } else if e.boxed_ref().is_some() && !matches!(e, Ty::UInt | Ty::ULong) {
+                } else if e.jvm_boxed_ref().is_some() {
                     // `Array<Int>` is an array of BOXED `Integer` (`[Ljava/lang/Integer;`, distinct from
                     // the unboxed `IntArray` = `[I`). Model it as `Obj("kotlin/Array", [Int])` — the SAME
                     // logical form as `arrayOf(1)`/`Array(n){…}`, element read unboxed (the backend boxes).
@@ -4709,10 +4709,9 @@ impl<'a> Checker<'a> {
                     let e = self.resolve_ty(a);
                     if e.is_reference() {
                         Ty::array(e)
-                    } else if e.boxed_ref().is_some() && !matches!(e, Ty::UInt | Ty::ULong) {
+                    } else if e.jvm_boxed_ref().is_some() {
                         // A boxed primitive `Array<Int>` = `Integer[]` — the SAME logical form as
                         // `arrayOf(1)`/`Array(n){…}` (`Obj("kotlin/Array", [Int])`, element read unboxed).
-                        // Unsigned arrays box to their own inline-class wrapper — left unsupported.
                         Ty::obj_args("kotlin/Array", &[e])
                     } else {
                         Ty::Error
@@ -6309,11 +6308,7 @@ impl<'a> Checker<'a> {
                 // wrapper, then `instanceof` the target wrapper/class — `null` on a mismatch (an `Int` box
                 // is not a `Byte`). Sound for any known target (reference or boxable primitive).
                 let prim_operand_safe_cast = nullable
-                    && ot.boxed_ref().is_some()
-                    // A value/unsigned-class operand (`1U as? Int`) boxes to its OWN wrapper
-                    // (`kotlin/UInt`, not `Integer`) — its `instanceof` against the target wrapper
-                    // is not the plain-primitive shape the lowerer boxes, so leave it skipped.
-                    && !ot.is_unsigned()
+                    && ot.jvm_boxed_ref().is_some()
                     && !self.ty_is_value_class(ot)
                     && (tt.is_reference() || tt.boxed_ref().is_some());
                 if (!(tt.is_reference() || prim_unbox)
@@ -7221,8 +7216,7 @@ impl<'a> Checker<'a> {
                     if unbound.is_none() {
                         // Bound: a reference receiver, or a boxable primitive (boxed then `getClass`).
                         let rt = self.expr(recv);
-                        let boxable =
-                            !matches!(rt, Ty::UInt | Ty::ULong) && rt.boxed_ref().is_some();
+                        let boxable = rt.jvm_boxed_ref().is_some();
                         if !rt.is_reference() && !boxable {
                             return unsupported(self);
                         }
@@ -7696,9 +7690,7 @@ impl<'a> Checker<'a> {
                 // `intArrayOf(…)` = `[I`). Model it as `Obj("kotlin/Array", [Int])` — the SAME logical form
                 // as `Array(n) { … }`, so the element reads as the unboxed primitive `Int` (the backend owns
                 // the physical boxed layout, un/boxing at access).
-                // Unsigned arrays box to their own inline-class wrapper, not a `java/lang/*` — unsupported,
-                // consistent with the other array-type resolvers.
-                Some(e) if e.boxed_ref().is_some() && !matches!(e, Ty::UInt | Ty::ULong) => {
+                Some(e) if e.jvm_boxed_ref().is_some() => {
                     return Some(Ty::obj_args("kotlin/Array", &[e]))
                 }
                 Some(_) => {
@@ -10408,9 +10400,7 @@ impl<'a> Checker<'a> {
                                 .unwrap_or_else(|| Ty::obj("kotlin/Any"));
                             if elem.is_reference() {
                                 return Ty::array(elem);
-                            } else if elem.boxed_ref().is_some()
-                                && !matches!(elem, Ty::UInt | Ty::ULong)
-                            {
+                            } else if elem.jvm_boxed_ref().is_some() {
                                 // `Array<Int?>` = `Integer[]` of nulls — the element is the NULLABLE
                                 // primitive (so `arr[i] == null` type-checks), allocated boxed.
                                 return Ty::obj_args("kotlin/Array", &[Ty::nullable(elem)]);
