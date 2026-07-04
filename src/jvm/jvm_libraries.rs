@@ -3,7 +3,7 @@
 //! `java/lang ↔ kotlin` name normalization live here — the front end (`resolve`, `ir_lower`) sees
 //! only Kotlin-level `Ty`s and opaque descriptor tokens through the trait.
 
-use super::classpath::Classpath;
+use super::classpath::{metadata_return_info, Classpath};
 use super::jvm_class_map::{
     kotlin_builtin_to_internal, to_jvm_internal, to_kotlin_internal, BUILTIN_MAPPED_NAMES,
 };
@@ -923,10 +923,6 @@ fn nonpublic_ext_receiver_is_typevar(signature: Option<&str>) -> bool {
 
 fn metadata_return_ty(class: Option<&str>) -> Option<Ty> {
     class.map(super::classpath::kotlin_name_to_ty)
-}
-
-fn metadata_return_info(class: Option<&str>, nullable: bool) -> ReturnInfo {
-    ReturnInfo::new(nullable, metadata_return_ty(class))
 }
 
 fn nullable_scalar_return(info: ReturnInfo, ret: Ty) -> Ty {
