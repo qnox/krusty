@@ -12075,10 +12075,7 @@ impl<'a> Lower<'a> {
                 // The counter type is the bound type (`Int`, `Long`, or unsigned `UInt`/`ULong`). A
                 // `Byte`/`Short` range widens to an `IntRange`, so the counter is `Int` and the bounds
                 // coerce up (matching the checker and `Short.rangeTo(Short): IntRange`).
-                let elem = match self.info.ty(range.start) {
-                    Ty::Byte | Ty::Short => Ty::Int,
-                    t => t,
-                };
+                let elem = self.info.ty(range.start).range_counter_type()?;
                 let elem_ir = ty_to_ir(elem);
                 let one = self.scalar_one_const(elem)?;
                 // loop var = start. The bounds may be erased (`l[0]` → `Object`); coerce them to the
