@@ -1617,6 +1617,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   the inline path). Passing tests only masked this: `fun box(): String = runBlocking { … }` supplied the
   result type from `box`'s return. (`build775_aa1_suspend_iface_param_elvis_e2e`)
 
+- **A classpath collection property with a PRIMITIVE element canonicalizes to Kotlin form (build.840).** A
+  data-class property `data class Ch(val items: List<Int>)` had its type recovered from the getter's
+  generic signature verbatim — `java/util/List<java/lang/Integer>` — so the collection typed as raw
+  `java/util/List` (not `kotlin/collections/List`) and the element as boxed `java/lang/Integer` (not `Int`):
+  `for (x in c.items) { s += x }` reported "operator cannot be applied to 'Int' and 'java/lang/Integer'",
+  `c.items.sum()` was "unresolved method 'sum' on 'java/util/List'". `concrete_generic_ret` (the non-suspend
+  member-return recovery) now runs its result through `canonicalize_jvm_collections`, which maps the JVM
+  collection to its Kotlin form AND a boxed primitive wrapper in a type-ARGUMENT position to the Kotlin
+  PRIMITIVE (`java/lang/Integer` → `Ty::Int`) — mirroring the suspend-return path. So the member/`for`/
+  extension resolves on the recovered Kotlin type and the element unboxes. (Element nullability stays a
+  known gap — a JVM signature doesn't encode `List<Int?>` vs `List<Int>`.)
+  (`build840_collection_property_element_e2e`)
+
 - **A static method DECLARED ON AN INTERFACE uses an `InterfaceMethodref` constant.** A Kotlin interface's
   `foo$default` synthetic (reached when a call OMITS an interface-declared default arg — `interface A { fun
   f(x: String = "OK") }`, `class C(val x: A) : A by x`, `C(B()).f()` → `A.f$default(...)`) is a `static`
