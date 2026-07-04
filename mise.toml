@@ -4,3 +4,4 @@
 [tools]
 just = "latest"
 lefthook = "latest"
+"aqua:BurntSushi/ripgrep" = "latest"

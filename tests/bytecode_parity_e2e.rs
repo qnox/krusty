@@ -1,9 +1,9 @@
 //! Bytecode-parity TDD: assert krusty emits the SAME JVM instruction shapes kotlinc does for the
 //! patterns closed in phases 397–400. Two kinds of check:
 //!   * shape assertions on krusty's own `javap -c` output (no kotlinc needed) — the regression guard;
-//!   * a differential full-class normalized-equality check vs the real kotlinc (gated on KRUSTY_KOTLINC).
+//!   * a differential full-class normalized-equality check vs the provisioned real kotlinc.
 //!
-//! Run with `JAVA_HOME` set; the kotlinc differential parts also need `KRUSTY_KOTLINC`.
+//! Run with `JAVA_HOME` set; kotlinc path overrides are optional.
 
 use std::fs;
 use std::process::Command;
@@ -448,15 +448,14 @@ fn diff_cases() -> Vec<DiffCase> {
 
 /// Compile ALL differential cases with kotlinc ONCE and krusty ONCE (fresh — so it tracks whatever
 /// kotlinc version/config is configured, no committed goldens to go stale), disassemble each side, and
-/// cache `name → (krusty_disasm, kotlinc_disasm)` for the whole test process. `None` when the kotlinc
-/// differential env is unavailable (the tests then skip).
+/// cache `name → (krusty_disasm, kotlinc_disasm)` for the whole test process. `None` when the
+/// provisioned toolchain is unavailable (the tests then skip).
 fn diff_refs() -> Option<&'static std::collections::HashMap<String, (String, String)>> {
     static CACHE: std::sync::OnceLock<Option<std::collections::HashMap<String, (String, String)>>> =
         std::sync::OnceLock::new();
     CACHE
         .get_or_init(|| {
             let jh = java_home()?;
-            let kotlinc = env("KRUSTY_KOTLINC")?;
             let cases = diff_cases();
             let dir = std::env::temp_dir().join(format!("krusty_diff_{}", std::process::id()));
             let _ = fs::remove_dir_all(&dir);
@@ -474,18 +473,19 @@ fn diff_refs() -> Option<&'static std::collections::HashMap<String, (String, Str
                     p
                 })
                 .collect();
-            // kotlinc — one invocation for every case.
-            let cc = Command::new(&kotlinc)
-                .args(&files)
-                .args(["-d", kref.to_str().unwrap()])
-                .env("JAVA_HOME", &jh)
-                .output()
-                .unwrap();
-            if !cc.status.success() {
-                eprintln!(
-                    "skip (kotlinc batch failed): {}",
-                    String::from_utf8_lossy(&cc.stderr)
-                );
+            // kotlinc — one server-backed invocation for every case.
+            let mut args: Vec<String> = files
+                .iter()
+                .map(|p| p.to_string_lossy().into_owned())
+                .collect();
+            args.extend(["-d".to_string(), kref.to_string_lossy().into_owned()]);
+            let Some((code, stderr)) = common::kotlinc_compile(&args) else {
+                eprintln!("skip (provisioned kotlinc server unavailable)");
+                let _ = fs::remove_dir_all(&dir);
+                return None;
+            };
+            if code != 0 {
+                eprintln!("skip (kotlinc batch failed): {stderr}");
                 let _ = fs::remove_dir_all(&dir);
                 return None;
             }
@@ -513,10 +513,10 @@ fn diff_refs() -> Option<&'static std::collections::HashMap<String, (String, Str
 }
 
 /// Assert the named differential case's krusty disassembly equals the fresh kotlinc one. Skips when the
-/// kotlinc env is unavailable.
+/// provisioned kotlinc toolchain is unavailable.
 fn assert_diff(name: &str) {
     let Some(refs) = diff_refs() else {
-        eprintln!("skip ({name}: set KRUSTY_KOTLINC + JAVA_HOME for the differential check)");
+        eprintln!("skip ({name}: provisioned kotlinc/JAVA_HOME unavailable)");
         return;
     };
     let (kr, ko) = refs
