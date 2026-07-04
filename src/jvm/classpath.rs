@@ -243,6 +243,16 @@ pub struct MetadataCallFacts {
     pub ret: ReturnInfo,
 }
 
+impl MetadataCallFacts {
+    fn fallback(call_sig: CallSig) -> Self {
+        MetadataCallFacts {
+            kept_params: None,
+            call_sig,
+            ret: ReturnInfo::default(),
+        }
+    }
+}
+
 /// The per-function `@Metadata` lookups for one class, all derived from its single decoded function list
 /// (facade parts merged). Computed once per class in [`Classpath::class_meta`]; the public
 /// `metadata_*` methods just index these maps.
@@ -487,15 +497,11 @@ impl Classpath {
     ) -> MetadataCallFacts {
         let meta = self.class_meta(internal);
         let Some((end, c)) = aligned_meta_callable(&meta, fn_name, desc_params) else {
-            return MetadataCallFacts {
-                kept_params: None,
-                call_sig: if extension {
-                    CallSig::default()
-                } else {
-                    CallSig::metadata_plain(desc_params.len())
-                },
-                ret: ReturnInfo::default(),
-            };
+            return MetadataCallFacts::fallback(if extension {
+                CallSig::default()
+            } else {
+                CallSig::metadata_plain(desc_params.len())
+            });
         };
         MetadataCallFacts {
             kept_params: Some(end),
@@ -545,21 +551,13 @@ impl Classpath {
         arity: usize,
     ) -> MetadataCallFacts {
         let Some(ci) = self.find(internal) else {
-            return MetadataCallFacts {
-                kept_params: None,
-                call_sig: CallSig::metadata_plain(arity),
-                ret: ReturnInfo::default(),
-            };
+            return MetadataCallFacts::fallback(CallSig::metadata_plain(arity));
         };
         let Some(f) = super::metadata::class_functions(&ci)
             .into_iter()
             .find(|f| f.jvm_name == jvm_name && f.value_param_types.len() == arity)
         else {
-            return MetadataCallFacts {
-                kept_params: None,
-                call_sig: CallSig::metadata_plain(arity),
-                ret: ReturnInfo::default(),
-            };
+            return MetadataCallFacts::fallback(CallSig::metadata_plain(arity));
         };
         MetadataCallFacts {
             kept_params: None,
