@@ -581,11 +581,7 @@ impl Ty {
     pub fn promote(a: Ty, b: Ty) -> Option<Ty> {
         if a.is_numeric() && b.is_numeric() {
             let r = if a.rank() >= b.rank() { a } else { b };
-            Some(if matches!(r, Ty::Byte | Ty::Short) {
-                Ty::Int
-            } else {
-                r
-            })
+            Some(r.int_arithmetic_repr())
         } else {
             None
         }

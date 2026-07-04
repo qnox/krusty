@@ -74,7 +74,7 @@ pub enum CtorDefaultValue {
 impl CtorDefaultValue {
     fn fills_param_ty(&self, ty: Ty) -> bool {
         match self {
-            CtorDefaultValue::Int(_) => matches!(ty, Ty::Int | Ty::Byte | Ty::Short | Ty::Char),
+            CtorDefaultValue::Int(_) => ty.int_arithmetic_repr() == Ty::Int,
             CtorDefaultValue::Long(_) => ty == Ty::Long,
             CtorDefaultValue::Double(_) => ty == Ty::Double,
             CtorDefaultValue::Float(_) => ty == Ty::Float,
