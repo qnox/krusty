@@ -2345,11 +2345,7 @@ impl crate::libraries::TargetRuntime for JvmLibraries {
     }
 
     fn unsigned_integer_box_type(&self, ty: Ty) -> Option<Ty> {
-        Some(Ty::obj(match ty {
-            Ty::UInt => "kotlin/UInt",
-            Ty::ULong => "kotlin/ULong",
-            _ => return None,
-        }))
+        ty.boxed_ref().filter(|_| ty.is_unsigned())
     }
 
     fn counted_loop_info(&self, internal: &str) -> Option<CountedLoopInfo> {
