@@ -42,8 +42,10 @@ jobs:
         uses: actions/cache@v6
         with:
           path: |
-            .kotlinc
-            .kotlin-box
+            target/cache/kotlinc
+            target/cache/box-corpus
+            target/cache/ser-corpus
+            target/cache/ksp-corpus
           key: kotlin-toolchain-${{ hashFiles('kotlin-versions') }}
       - name: compute conformance
         id: c

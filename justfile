@@ -157,7 +157,7 @@ mutants *ARGS:
     cargo mutants "$@"
 
 # Download + unpack the reference Kotlin compiler distribution into one self-contained dir
-# (.kotlinc/<ver>/), and print the path to its `bin/kotlinc`. Idempotent — a no-op once unpacked
+# (target/cache/kotlinc/<ver>/), and print the path to its `bin/kotlinc`. Idempotent — a no-op once unpacked
 # (so it's cheap to cache). This is the reference toolchain the differential harness validates
 # against; its `lib/kotlin-stdlib.jar` is also what the box e2e tests put on the runtime classpath.
 # Point KRUSTY_KOTLINC at the printed path:  export KRUSTY_KOTLINC="$(just kotlinc)"
