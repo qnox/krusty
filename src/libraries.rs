@@ -770,13 +770,6 @@ impl LibraryType {
     }
 }
 
-/// Whether a member's parameter list matches `args` as a prefix — the loose match the JVM resolver
-/// used (a call's argument descriptors prefixing the method's). One `Ty` → one descriptor token, so
-/// a `Ty`-slice prefix is equivalent to a descriptor prefix.
-fn params_prefix(member_params: &[Ty], args: &[Ty]) -> bool {
-    member_params.len() >= args.len() && member_params[..args.len()] == *args
-}
-
 /// Whether `arg` can be passed where `param` is expected, in erased Kotlin terms: an exact `Ty`
 /// match, or any argument into an erased generic (`Any`) parameter — a primitive boxes into it
 /// (`List<Int>.add(E)` → `add(Object)`, calling with `Int` boxes to `Integer`), a reference passes
@@ -804,7 +797,11 @@ pub(crate) fn best_overload<'a>(
                     && m.params.iter().zip(args).all(|(p, a)| arg_assignable(p, a))
             })
         })
-        .or_else(|| named.clone().find(|m| params_prefix(&m.params, args)))
+        .or_else(|| {
+            named
+                .clone()
+                .find(|m| m.params.len() >= args.len() && m.params[..args.len()] == *args)
+        })
 }
 
 impl LibraryType {
