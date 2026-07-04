@@ -32,9 +32,9 @@ default:
     @just --list
 
 # === PR gate: the one command CI runs ===
-# coverage-gate runs last as the unbypassable backstop: a local `--no-verify` push can skip the
-# pre-push hook, but CI re-measures here and fails the PR if coverage dropped below master.
-ci: lint test-all coverage-gate
+# Own tests run once under coverage; external/reference conformance runs plain. This avoids running
+# the product e2e suite once in `test-all` and then again in `coverage-gate`.
+ci: lint coverage-gate conformance-all-plain
 
 # Lint gate (enforced locally + in CI + by the pre-commit hook): formatting must be clean, and
 # clippy must introduce NO new findings beyond the frozen baseline (clippy-baseline.tsv). Existing
@@ -107,6 +107,13 @@ test-fast:
 # harness. The suite is internally rayon-parallel, so it uses all cores on its own.
 conformance-plain:
     ./run-tests.sh --test conformance kotlin_codegen_box_conformance
+
+# Run the whole external/reference conformance binary without coverage instrumentation. Keep the
+# memory-heavy Kotlin box corpus test isolated, then run every other conformance test in a fresh
+# process. This preserves the full conformance surface in CI without duplicating the own e2e suite.
+conformance-all-plain:
+    ./run-tests.sh --test conformance kotlin_codegen_box_conformance
+    ./run-tests.sh --test conformance -- --skip kotlin_codegen_box_conformance --test-threads=1
 
 # Measure test coverage — regions, functions, lines and BRANCHES — via LLVM source-based coverage
 # (nightly, `-Zcoverage-options=branch`). Runs an instrumented build + the own suite in parallel and
