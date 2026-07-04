@@ -2,20 +2,10 @@
 //! a `public static final Companion` field on the outer class built in its `<clinit>`, and
 //! `C.foo()` → `getstatic C.Companion; invokevirtual`. Round-tripped under `-Xverify:all`.
 
-use std::path::PathBuf;
-
 mod common;
 
 #[test]
 fn companion_methods_run() {
-    let Some(java_home) = common::java_home() else {
-        eprintln!("skipping companion_e2e: set JAVA_HOME");
-        return;
-    };
-    let Some(stdlib) = common::stdlib_jar() else {
-        eprintln!("skipping companion_e2e: no kotlin-stdlib jar found");
-        return;
-    };
     let src = "class C {\n\
     companion object {\n\
         fun answer(): Int = 42\n\
@@ -27,9 +17,5 @@ if (C.answer() != 42) return \"f1\"\n\
 if (C.greet(\"x\") != \"hi x\") return \"f2\"\n\
 return \"OK\"\n\
 }\n";
-    let jdk = PathBuf::from(format!("{java_home}/lib/modules"));
-    let Some(out) = common::compile_and_run_box(src, "C", &[stdlib], Some(&jdk)) else {
-        return;
-    };
-    assert_eq!(out, "OK");
+    common::assert_box_ok_with_stdlib(src, "C");
 }
