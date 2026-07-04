@@ -1581,7 +1581,7 @@ impl SymbolSource for JvmLibraries {
             for recv_desc in supertype_descriptors(&self.cp, receiver) {
                 for owner in self.cp.find_extension_owners(&recv_desc) {
                     // Gate: `name` genuinely resolves by lambda return type on this facade.
-                    if !self.cp.lambda_return_overloads(&owner).contains_key(name) {
+                    if !self.cp.lambda_return_overloads(&owner).contains(name) {
                         continue;
                     }
                     // The `@JvmName`-mangled method is `name` + the return type's simple name (`sumOf` +

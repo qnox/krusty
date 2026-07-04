@@ -317,11 +317,10 @@ fn metadata_top_level_call_sig(param_count: usize, c: &MetaCallable) -> CallSig 
     )
 }
 
-/// Per-class `@Metadata` cache: class internal name → (Kotlin function name → its `@JvmName`-mangled
-/// overloads `[(jvm_name, jvm_desc, kotlin_return_class)]`). Bridges a Kotlin name to the JVM method that
-/// `@OverloadResolutionByLambdaReturnType` selects (`sumOf` → `sumOfInt`/`sumOfLong`/…).
-/// Kotlin function name → its `@JvmName`-mangled overloads, for one class's `@Metadata`.
-type LambdaReturnOverloads = HashMap<String, Vec<super::metadata::JvmOverload>>;
+/// Per-class `@Metadata` cache: class internal name → Kotlin function names that participate in
+/// `@OverloadResolutionByLambdaReturnType` (`sumOf`, …). The resolver derives and verifies the concrete
+/// JVM method (`sumOfInt`/`sumOfLong`/…) from the lambda return type, so the cache only needs membership.
+type LambdaReturnOverloads = std::collections::HashSet<String>;
 type MetaOverloadCache = RefCell<HashMap<String, std::rc::Rc<LambdaReturnOverloads>>>;
 
 #[derive(Default)]
@@ -642,8 +641,7 @@ impl Classpath {
         out
     }
 
-    /// A facade class's `@Metadata` Kotlin-name → `@JvmName` overloads, cached (part-merged for a multifile
-    /// facade). See [`MetaOverloadCache`].
+    /// A facade class's lambda-return-overload Kotlin names, cached (part-merged for a multifile facade).
     pub fn lambda_return_overloads(&self, internal: &str) -> std::rc::Rc<LambdaReturnOverloads> {
         if let Some(m) = self.meta_overloads.borrow().get(internal) {
             return m.clone();
@@ -652,7 +650,7 @@ impl Classpath {
         // `Int`/`Long`/`Double` `sumOf` in one part, `UInt`/`ULong` in another). The facade EXTENDS its
         // parts, so union every class's own metadata up the superclass chain — exactly how the extension
         // index reaches the part methods (a part isn't listed in the facade's `d1`).
-        let mut map: LambdaReturnOverloads = HashMap::new();
+        let mut names = LambdaReturnOverloads::new();
         let mut cur = Some(internal.to_string());
         let mut seen = std::collections::HashSet::new();
         while let Some(cn) = cur {
@@ -661,19 +659,13 @@ impl Classpath {
             }
             let Some(ci) = self.find(&cn) else { break };
             for f in self.meta_functions(&cn).iter() {
-                if let (Some(jvm_desc), Some(ret_class)) = (&f.jvm_desc, &f.ret_class) {
-                    map.entry(f.kotlin_name.clone()).or_default().push(
-                        super::metadata::JvmOverload {
-                            jvm_name: f.jvm_name.clone(),
-                            jvm_desc: jvm_desc.clone(),
-                            ret_class: ret_class.clone(),
-                        },
-                    );
+                if f.jvm_desc.is_some() && f.ret_class.is_some() {
+                    names.insert(f.kotlin_name.clone());
                 }
             }
             cur = ci.super_class.clone();
         }
-        let rc = std::rc::Rc::new(map);
+        let rc = std::rc::Rc::new(names);
         self.meta_overloads
             .borrow_mut()
             .insert(internal.to_string(), rc.clone());
