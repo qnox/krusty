@@ -5,13 +5,10 @@
 //! Now `append_top` treats the String class as `String`. These run on a real JVM to guard the result;
 //! byte-parity itself is checked by the differential harness (`bytediff dataClasses/equals/intarray`).
 
-use std::path::PathBuf;
-
 mod common;
 
 fn run(src: &str) -> Option<String> {
-    let java_home = common::java_home()?;
-    let jdk = PathBuf::from(format!("{java_home}/lib/modules"));
+    let jdk = common::jdk_modules()?;
     let cp = common::classpath_jars_for("// WITH_STDLIB");
     let cs = common::compile_in_process(src, "S", &cp, Some(&jdk))?;
     let box_class = common::find_box_class(&cs)?;

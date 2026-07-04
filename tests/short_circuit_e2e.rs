@@ -2,16 +2,13 @@
 //! Regression guard for the eager-`iand`/`ior` miscompile (`x != 0 && 10/x > 0` must not divide when
 //! `x == 0`). Compiled by the krusty binary, run on a real JVM under `-Xverify:all`.
 
-use std::path::PathBuf;
-
 mod common;
 
 /// Compile `src` in-process and run `SCKt.box()` on the shared persistent JVM (stdlib + JDK jimage on
 /// the classpath). `None` ⇒ environment unavailable (skip) or krusty couldn't emit.
 fn run_box(_tag: &str, src: &str) -> Option<String> {
-    let java_home = common::java_home()?;
     let stdlib = common::stdlib_jar()?;
-    let jdk_modules = PathBuf::from(format!("{java_home}/lib/modules"));
+    let jdk_modules = common::jdk_modules()?;
     common::compile_and_run_box(src, "SC", &[stdlib], Some(&jdk_modules))
 }
 

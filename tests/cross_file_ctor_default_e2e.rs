@@ -7,8 +7,6 @@
 
 mod common;
 
-use std::path::PathBuf;
-
 use krusty::diag::DiagSink;
 use krusty::jvm::names::file_class_name;
 use krusty::resolve::{check_file, collect_signatures_with_cp};
@@ -16,9 +14,8 @@ use krusty::resolve::{check_file, collect_signatures_with_cp};
 /// Compile two sources as one module (mirrors the conformance harness's `compile_multifile`): parse
 /// each, collect signatures across BOTH, then check + lower + emit each file.
 fn compile_two(a: &str, b: &str) -> Option<Vec<(String, Vec<u8>)>> {
-    let jh = common::java_home()?;
     let sl = common::stdlib_jar()?;
-    let jdk = PathBuf::from(format!("{jh}/lib/modules"));
+    let jdk = common::jdk_modules()?;
 
     let mut diags = DiagSink::new();
     let features = krusty::features::LangFeatures::from_source(a);
