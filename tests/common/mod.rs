@@ -718,8 +718,7 @@ pub fn run_box_corpus_case(rel: &str) -> Option<String> {
     if src.contains("// FILE:") || src.contains("// MODULE:") {
         return None;
     }
-    let jh = java_home()?;
-    let jdk = PathBuf::from(format!("{jh}/lib/modules"));
+    let jdk = jdk_modules()?;
     let cp = classpath_jars_for(&src);
     let classes = compile_in_process(&src, "P", &cp, Some(&jdk))?;
     let box_class = find_box_class(&classes)?;
