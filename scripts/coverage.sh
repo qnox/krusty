@@ -25,6 +25,7 @@ cd "$(dirname "$0")/.."
 summary_out="${1:-target/coverage/summary.json}"
 raw_out="target/coverage/full.json"
 jobs="${KRUSTY_TEST_JOBS:-1}"
+coverage_target="${KRUSTY_COVERAGE_TARGET_DIR:-target/coverage-build}"
 
 # Self-provision the reference kotlinc + box corpus exactly like run-tests.sh, so the kept e2e
 # suites (which need the stdlib jar / JVM runtime) don't silently skip and undercount coverage.
@@ -42,13 +43,18 @@ if ! cargo +nightly llvm-cov --version >/dev/null 2>&1; then
   echo "coverage: nightly llvm-tools are also required: \`rustup component add llvm-tools-preview --toolchain nightly\`" >&2
   exit 2
 fi
+# Keep instrumented coverage builds isolated from normal `target/debug` artifacts. `llvm-cov report`
+# discovers coverage mappings from the instrumented binaries in the active target dir; reusing the
+# normal target can accidentally include stale mappings from previous local runs or overlapping hooks.
+rm -rf "$coverage_target"
+export CARGO_TARGET_DIR="$coverage_target"
 # Instrument the whole build (source-based coverage) for the rest of this script's cargo invocations.
 source <(cargo +nightly llvm-cov show-env --sh --branch 2>/dev/null)
 mkdir -p target/coverage
 # Prune stale counters so this run measures only the tests it runs. `cargo llvm-cov clean` refuses a
 # target/ it didn't create (missing CACHEDIR.TAG — e.g. a worktree whose target was set up by hand),
 # so remove the raw/merged coverage files directly instead; profraw names carry a %p pid slot.
-rm -f target/*.profraw target/coverage/*.profdata target/coverage/*.profraw
+rm -f "$coverage_target"/*.profraw target/coverage/*.profdata target/coverage/*.profraw
 
 # Compile exactly the coverage workload without running it, and read each test executable's path from
 # cargo's JSON build output. Keep library unit tests plus the product e2e integration target; do not
