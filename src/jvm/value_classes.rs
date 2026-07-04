@@ -383,7 +383,7 @@ pub fn lower_value_classes(ir: &mut IrFile) -> bool {
             .unbox_param_nullable
             .iter()
             .zip(&fr.target_param_tys)
-            .any(|(nullable, target)| *nullable && is_jvm_scalar_ty(ir_ty_to_jvm(target)))
+            .any(|(nullable, target)| *nullable && ir_ty_to_jvm(target).jvm_boxed_ref().is_some())
         {
             return false;
         }
@@ -2263,7 +2263,7 @@ fn is_ref(t: &Ty) -> bool {
         return true;
     }
     match t.obj_internal() {
-        Some(fq_name) => !is_jvm_scalar_class(fq_name),
+        Some(fq_name) => Ty::obj(fq_name).unboxed_primitive().is_none(),
         None => false,
     }
 }
@@ -2775,27 +2775,6 @@ fn is_property_getter_bridge_name(name: &str) -> bool {
         || name
             .strip_prefix("is")
             .is_some_and(|s| s.chars().next().is_some_and(char::is_uppercase))
-}
-
-fn is_jvm_scalar_class(fq: &str) -> bool {
-    matches!(
-        fq,
-        "kotlin/Int"
-            | "kotlin/Long"
-            | "kotlin/Short"
-            | "kotlin/Byte"
-            | "kotlin/Boolean"
-            | "kotlin/Char"
-            | "kotlin/Double"
-            | "kotlin/Float"
-    )
-}
-
-fn is_jvm_scalar_ty(t: Ty) -> bool {
-    matches!(
-        t,
-        Ty::Int | Ty::Long | Ty::Short | Ty::Byte | Ty::Boolean | Ty::Char | Ty::Double | Ty::Float
-    )
 }
 
 fn desc(t: &Ty) -> String {
