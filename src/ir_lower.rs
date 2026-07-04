@@ -5306,10 +5306,14 @@ impl<'a> Lower<'a> {
         // Capture only when actually used: capturing an UNUSED `this` is wrong where `this` isn't
         // available yet (a lambda in a base-ctor argument, pre-`super()`), and when NOT captured we clear
         // `cur_class` for the body so a missed member access bails (returns None) rather than miscompiles.
-        let captures_this = deep
-            && self.cur_class.is_some()
+        // Capture the enclosing `this` when a bare member access needs it — for a REAL closure it becomes
+        // capture field 0, for an INLINE-spliced lambda the splicer remaps it (like any captured local) to
+        // the enclosing method's slot 0, so an enclosing-member call (`es.find { same(it.v, 3) }`, `same`
+        // a method of the enclosing class) resolves in both. Previously the `deep`/InlineSplice gate cleared
+        // `cur_class` for a spliced lambda, so such a call bailed ("this construct is not yet supported").
+        let captures_this = self.cur_class.is_some()
             && recv_ty.is_none()
-            && self.lambda_uses_enclosing_this(body, &bind_names);
+            && self.lambda_uses_enclosing_this(body, &bind_names, deep);
         if captures_this {
             let tty = Ty::obj(self.cur_class.as_deref().unwrap());
             captures.insert(0, ("this".to_string(), 0, tty));
@@ -5484,11 +5488,17 @@ impl<'a> Lower<'a> {
     /// Drives whether a class-member closure must capture the enclosing `this`. Names BOUND by the lambda
     /// (its parameters / `it`) are not enclosing references. A miss is safe — the caller clears
     /// `cur_class` when this returns false, so any member access it overlooked simply fails to lower.
-    fn lambda_uses_enclosing_this(&self, body: AstExprId, bound: &[String]) -> bool {
+    /// Whether the lambda `body` references the enclosing instance (`this`/`super`, or a bare
+    /// instance-field/method access). `deep` mirrors the capture-scan depth: a REAL closure counts a use
+    /// anywhere (incl. inside a NESTED lambda, which captures it transitively); an INLINE-spliced lambda
+    /// counts only a DIRECT use — a use confined to a nested lambda is that lambda's own capture, and
+    /// counting it here would make the outer splice's `this`-capture asymmetric with its (shallow) named
+    /// captures.
+    fn lambda_uses_enclosing_this(&self, body: AstExprId, bound: &[String], deep: bool) -> bool {
         let Some(cur) = self.cur_class.clone() else {
             return false;
         };
-        fn scan(lo: &Lower, cur: &str, bound: &[String], e: AstExprId) -> bool {
+        fn scan(lo: &Lower, cur: &str, bound: &[String], e: AstExprId, deep: bool) -> bool {
             if let Expr::Name(n) = lo.afile.expr(e) {
                 // `this`/`super` (incl. labeled `this@Outer`) are bare names here, not a dedicated
                 // variant — an explicit enclosing-instance reference.
@@ -5504,12 +5514,17 @@ impl<'a> Lower<'a> {
                     return true;
                 }
             }
+            // A SHALLOW (inline-splice) scan does not descend into a NESTED lambda's body.
+            if !deep && matches!(lo.afile.expr(e), Expr::Lambda { .. }) {
+                return false;
+            }
             lo.afile
-                .any_child_expr(e, &mut |c| scan(lo, cur, bound, c), &mut |s| {
-                    lo.afile.any_child_stmt(s, &mut |c| scan(lo, cur, bound, c))
+                .any_child_expr(e, &mut |c| scan(lo, cur, bound, c, deep), &mut |s| {
+                    lo.afile
+                        .any_child_stmt(s, &mut |c| scan(lo, cur, bound, c, deep))
                 })
         }
-        scan(self, &cur, bound, body)
+        scan(self, &cur, bound, body, deep)
     }
 
     /// Lower a `suspend` lambda literal to a concrete `kotlin/coroutines/jvm/internal/SuspendLambda`

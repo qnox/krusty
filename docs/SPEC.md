@@ -1630,6 +1630,25 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   known gap — a JVM signature doesn't encode `List<Int?>` vs `List<Int>`.)
   (`build840_collection_property_element_e2e`)
 
+- **A function parameter may be named after a modifier soft keyword (build.840 jj1).** Kotlin's only real
+  parameter modifiers are `vararg`/`noinline`/`crossinline` (+ annotations); every other modifier keyword
+  (`open`, `sealed`, `abstract`, `private`, …) is a soft keyword usable as a plain identifier, so
+  `fun f(open: Int)` is valid. The parser's `skip_decl_prefix` treated ANY modifier-spelled ident as a
+  modifier and consumed it, then reported "expected parameter name". It now leaves a modifier ident that is
+  immediately followed by `:` for the name parse (a genuine modifier never precedes a colon) — which also
+  handles an annotated modifier-keyword name (`@Anno open: Int`). (`build840_jj1_param_soft_keyword_e2e`)
+
+- **An inline HOF lambda may call an ENCLOSING-class member (build.840 kk1).** `class H { fun f(es) =
+  es.find { same(it.v, 3) }; fun same(a, b) = … }` — the inline-spliced `find` lambda calls `same`, a method
+  of the enclosing class. krusty cleared `cur_class` for a spliced lambda's body (only a REAL closure
+  captured the enclosing `this`), so the bare member call `same(…)` failed to resolve and the file bailed
+  with "this construct is not yet supported by the IR backend". `lower_lambda_sam` now captures the
+  enclosing `this` for an inline-splice lambda too — the splicer remaps it (like any captured local) to the
+  enclosing method's slot 0, so the member call resolves and lowers. The `this`-use scan is SHALLOW for a
+  spliced lambda (a `this` used only inside a NESTED lambda is that lambda's own capture), matching the
+  shallow named-capture scan. `forEach { member() }` already worked (a `for`-loop desugar).
+  (`build840_kk1_inline_hof_enclosing_member_e2e`; box-OK 2379→2380)
+
 - **A static method DECLARED ON AN INTERFACE uses an `InterfaceMethodref` constant.** A Kotlin interface's
   `foo$default` synthetic (reached when a call OMITS an interface-declared default arg — `interface A { fun
   f(x: String = "OK") }`, `class C(val x: A) : A by x`, `C(B()).f()` → `A.f$default(...)`) is a `static`
