@@ -4811,22 +4811,18 @@ impl<'a> Lower<'a> {
                 .is_some_and(|t| t.value_underlying.is_some())
     }
 
-    /// Whether top-level function `fname` declares a bare type-parameter return (`fun <T> f(): T`).
-    fn callee_returns_typaram(&self, fname: &str) -> bool {
-        self.afile.decls.iter().any(|&d| {
-            matches!(self.afile.decl(d), Decl::Fun(f)
-                if f.name == fname
-                    && !f.type_params.is_empty()
-                    && f.ret.as_ref().is_some_and(|r| f.type_params.contains(&r.name)))
-        })
-    }
-
     /// A call to a type-parameter-returning function whose erased `Object` result needs a coercion
     /// krusty doesn't model — skip the file rather than miscompile. The result of `f<Unit>()` must
     /// become `Unit.INSTANCE` (not the raw object); inside an `inline` expansion an erased result
     /// feeding a boxed/`Int?` slot mis-frames the verifier. Both reach here as a tail-returned `T`.
     fn erased_generic_call_unmodeled(&self, e: AstExprId, fname: &str) -> bool {
-        if !self.callee_returns_typaram(fname) {
+        let returns_typaram = self.afile.decls.iter().any(|&d| {
+            matches!(self.afile.decl(d), Decl::Fun(f)
+                if f.name == fname
+                    && !f.type_params.is_empty()
+                    && f.ret.as_ref().is_some_and(|r| f.type_params.contains(&r.name)))
+        });
+        if !returns_typaram {
             return false;
         }
         let unit_targ = self
