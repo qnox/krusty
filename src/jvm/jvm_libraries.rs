@@ -262,6 +262,31 @@ impl JvmLibraries {
         })
     }
 
+    fn metadata_receivers_allow(&self, owner: &str, name: &str, receiver: Ty) -> bool {
+        let recvs = self.cp.metadata_receiver_types(owner, name);
+        if recvs.is_empty() {
+            return true;
+        }
+        let receiver_name = match receiver {
+            Ty::UInt => Some("kotlin/UInt"),
+            Ty::ULong => Some("kotlin/ULong"),
+            Ty::Obj(i, _) if self.value_class_underlying_desc(i).is_some() => Some(i),
+            Ty::Obj(i, _) if self.cp.is_kotlin_collection(i) => {
+                return !recvs.iter().any(|r| self.cp.is_kotlin_collection(r))
+                    || recvs
+                        .iter()
+                        .filter(|r| self.cp.is_kotlin_collection(r))
+                        .any(|r| self.cp.kotlin_subtype(i, r));
+            }
+            _ => None,
+        };
+        receiver_name.is_none_or(|actual| {
+            recvs
+                .iter()
+                .any(|r| r == actual || self.cp.kotlin_subtype(actual, r))
+        })
+    }
+
     fn member_return(&self, recv: Ty, name: &str, args: &[Ty]) -> Option<Ty> {
         let Ty::Obj(start, start_args) = recv else {
             return None;
@@ -1693,44 +1718,11 @@ impl SymbolSource for JvmLibraries {
                     {
                         continue;
                     }
-                    // A value-class receiver erases to a primitive descriptor (`UInt`→`"I"`), so a SIGNED
-                    // primitive extension (`Int.coerceAtMost`) matches at the erased rung. Reject a
-                    // candidate whose `@Metadata` receivers are concrete and EXCLUDE this value class (it is
-                    // not one of them, nor a subtype) — only a `UInt`-declared (or generic, no recorded
-                    // receiver) extension applies to a `UInt`. Mirrors the collection applicability check.
-                    let recv_vc = match &receiver {
-                        Ty::UInt => Some("kotlin/UInt".to_string()),
-                        Ty::ULong => Some("kotlin/ULong".to_string()),
-                        Ty::Obj(i, _) if self.value_class_underlying_desc(i).is_some() => {
-                            Some(i.to_string())
-                        }
-                        _ => None,
-                    };
-                    if let Some(vc) = &recv_vc {
-                        let recvs = self.cp.metadata_receiver_types(&c.owner, &c.name);
-                        if !recvs.is_empty()
-                            && !recvs
-                                .iter()
-                                .any(|r| r == vc || self.cp.kotlin_subtype(vc, r))
-                        {
-                            continue;
-                        }
-                    }
-                    if let Ty::Obj(recv_internal, _) = &receiver {
-                        if self.cp.is_kotlin_collection(recv_internal) {
-                            let recvs = self.cp.metadata_receiver_types(&c.owner, &c.name);
-                            let collection_recvs: Vec<&String> = recvs
-                                .iter()
-                                .filter(|r| self.cp.is_kotlin_collection(r))
-                                .collect();
-                            if !collection_recvs.is_empty()
-                                && !collection_recvs
-                                    .iter()
-                                    .any(|r| self.cp.kotlin_subtype(recv_internal, r))
-                            {
-                                continue;
-                            }
-                        }
+                    // Metadata keeps receiver identities that the JVM descriptor erases (value-class
+                    // underlying descriptors and read-only vs mutable collections). Reject descriptor
+                    // matches whose recorded source receivers exclude the actual receiver.
+                    if !self.metadata_receivers_allow(&c.owner, &c.name, receiver) {
+                        continue;
                     }
                     let (mut params, pret) = parse_method_desc_with_field_params(&c.descriptor);
                     let is_default = c.name.ends_with("$default");
