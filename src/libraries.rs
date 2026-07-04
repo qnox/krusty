@@ -465,17 +465,13 @@ impl CallSig {
         }
     }
 
-    pub fn metadata_member(
-        param_count: usize,
-        names: Option<Vec<String>>,
-        defaults: Vec<bool>,
-    ) -> Self {
+    pub fn metadata_member(param_count: usize, names: Vec<String>, defaults: Vec<bool>) -> Self {
         CallSig::metadata_base(param_count, names, defaults)
     }
 
     pub fn metadata_top_level(
         param_count: usize,
-        names: Option<Vec<String>>,
+        names: Vec<String>,
         defaults: Vec<bool>,
         lambda_receivers: Vec<Option<Ty>>,
         lambda_receiver_params: Vec<bool>,
@@ -488,7 +484,7 @@ impl CallSig {
         sig
     }
 
-    pub fn metadata_extension(physical_param_count: usize, names: Option<Vec<String>>) -> Self {
+    pub fn metadata_extension(physical_param_count: usize, names: Vec<String>) -> Self {
         physical_param_count
             .checked_sub(1)
             .map(|param_count| {
@@ -502,7 +498,7 @@ impl CallSig {
             .unwrap_or_default()
     }
 
-    fn metadata_base(param_count: usize, names: Option<Vec<String>>, defaults: Vec<bool>) -> Self {
+    fn metadata_base(param_count: usize, names: Vec<String>, defaults: Vec<bool>) -> Self {
         let defaults = metadata_defaults(defaults, param_count);
         CallSig {
             required: required_arity(param_count, &defaults),
@@ -513,10 +509,12 @@ impl CallSig {
     }
 }
 
-fn metadata_names(names: Option<Vec<String>>, param_count: usize) -> Vec<String> {
-    names
-        .filter(|names| names.len() == param_count && !names.iter().any(String::is_empty))
-        .unwrap_or_default()
+fn metadata_names(names: Vec<String>, param_count: usize) -> Vec<String> {
+    if names.len() == param_count && !names.iter().any(String::is_empty) {
+        names
+    } else {
+        Vec::new()
+    }
 }
 
 fn metadata_defaults(defaults: Vec<bool>, param_count: usize) -> Vec<bool> {

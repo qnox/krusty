@@ -494,7 +494,7 @@ impl Classpath {
                 } else {
                     CallSig::metadata_top_level(
                         desc_params.len(),
-                        None,
+                        Vec::new(),
                         Vec::new(),
                         Vec::new(),
                         Vec::new(),
@@ -507,11 +507,11 @@ impl Classpath {
         MetadataCallFacts {
             kept_params: Some(end),
             call_sig: if extension {
-                CallSig::metadata_extension(end, Some(c.value_param_names.clone()))
+                CallSig::metadata_extension(end, c.value_param_names.clone())
             } else {
                 CallSig::metadata_top_level(
                     end,
-                    Some(c.value_param_names.clone()),
+                    c.value_param_names.clone(),
                     c.value_param_has_default.clone(),
                     c.value_param_recv_funs
                         .iter()
@@ -554,7 +554,7 @@ impl Classpath {
         let Some(ci) = self.find(internal) else {
             return MetadataCallFacts {
                 kept_params: None,
-                call_sig: CallSig::metadata_member(arity, None, Vec::new()),
+                call_sig: CallSig::metadata_member(arity, Vec::new(), Vec::new()),
                 ret: ReturnInfo::default(),
             };
         };
@@ -564,7 +564,7 @@ impl Classpath {
         else {
             return MetadataCallFacts {
                 kept_params: None,
-                call_sig: CallSig::metadata_member(arity, None, Vec::new()),
+                call_sig: CallSig::metadata_member(arity, Vec::new(), Vec::new()),
                 ret: ReturnInfo::default(),
             };
         };
@@ -572,7 +572,7 @@ impl Classpath {
             kept_params: None,
             call_sig: CallSig::metadata_member(
                 arity,
-                Some(f.value_param_names),
+                f.value_param_names,
                 f.value_param_has_default,
             ),
             ret: metadata_return_info(f.ret_class.as_deref(), f.ret_nullable),
