@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 
 use crate::jvm::classreader::{parse_class, read_method_code, ClassInfo, MethodCode};
 use crate::jvm::names::type_descriptor;
-use crate::libraries::{CallSig, FunctionSet};
+use crate::libraries::{CallSig, FunctionSet, ReturnInfo};
 use crate::types::Ty;
 
 /// Map a Kotlin internal type name (`kotlin/Int`, `kotlin/Char`, …) from builtins metadata to a `Ty`.
@@ -237,17 +237,11 @@ struct MetaCallable {
     value_param_recv_funs: Vec<Option<String>>,
 }
 
-#[derive(Clone, Debug)]
-pub struct MetadataReturn {
-    pub class: Option<String>,
-    pub nullable: bool,
-}
-
 #[derive(Clone)]
 pub struct MetadataCallFacts {
     pub kept_params: Option<usize>,
     pub call_sig: CallSig,
-    pub ret: Option<MetadataReturn>,
+    pub ret: ReturnInfo,
 }
 
 /// The per-function `@Metadata` lookups for one class, all derived from its single decoded function list
@@ -283,11 +277,11 @@ fn aligned_meta_callable<'a>(
         .max_by_key(|(end, _)| *end)
 }
 
-fn metadata_return_of(c: &MetaCallable) -> MetadataReturn {
-    MetadataReturn {
-        class: c.ret_class.clone(),
-        nullable: c.ret_nullable,
-    }
+fn metadata_return_of(c: &MetaCallable) -> ReturnInfo {
+    ReturnInfo::new(
+        c.ret_nullable,
+        c.ret_class.as_deref().map(kotlin_name_to_ty),
+    )
 }
 
 fn metadata_param_names_of(c: &MetaCallable) -> Option<Vec<String>> {
@@ -539,7 +533,7 @@ impl Classpath {
                         Vec::new(),
                     )
                 },
-                ret: None,
+                ret: ReturnInfo::default(),
             };
         };
         MetadataCallFacts {
@@ -549,7 +543,7 @@ impl Classpath {
             } else {
                 metadata_top_level_call_sig(end, c)
             },
-            ret: Some(metadata_return_of(c)),
+            ret: metadata_return_of(c),
         }
     }
 
@@ -583,7 +577,7 @@ impl Classpath {
             return MetadataCallFacts {
                 kept_params: None,
                 call_sig: CallSig::metadata_member(arity, None, Vec::new()),
-                ret: None,
+                ret: ReturnInfo::default(),
             };
         };
         let Some(f) = super::metadata::class_functions(&ci)
@@ -593,7 +587,7 @@ impl Classpath {
             return MetadataCallFacts {
                 kept_params: None,
                 call_sig: CallSig::metadata_member(arity, None, Vec::new()),
-                ret: None,
+                ret: ReturnInfo::default(),
             };
         };
         let names = if !f.value_param_names.is_empty()
@@ -614,10 +608,10 @@ impl Classpath {
         MetadataCallFacts {
             kept_params: None,
             call_sig: CallSig::metadata_member(arity, names, defaults),
-            ret: Some(MetadataReturn {
-                class: f.ret_class,
-                nullable: f.ret_nullable,
-            }),
+            ret: ReturnInfo::new(
+                f.ret_nullable,
+                f.ret_class.as_deref().map(kotlin_name_to_ty),
+            ),
         }
     }
 
