@@ -5,32 +5,19 @@
 
 mod common;
 
-fn run(src: &str) -> Option<String> {
-    common::compile_and_run_with_stdlib(src, "P")
-}
-
 #[test]
 fn val_backing_field_custom_getter() {
-    if !common::stdlib_toolchain_ready() {
-        return;
-    }
     const SRC: &str = "// WITH_STDLIB\n\
 class My {\n\
     val my: String = \"O\"\n\
         get() = field + \"K\"\n\
 }\n\
 fun box(): String = My().my\n";
-    assert_eq!(
-        run(SRC).expect("val backing-field custom getter should compile + run"),
-        "OK"
-    );
+    common::expect_box_ok_with_stdlib(SRC, "P");
 }
 
 #[test]
 fn var_backing_field_custom_accessors() {
-    if !common::stdlib_toolchain_ready() {
-        return;
-    }
     const SRC: &str = "// WITH_STDLIB\n\
 class My {\n\
     var v: Int = 1\n\
@@ -44,17 +31,11 @@ fun box(): String {\n\
     if (m.v != 20) return \"fail set: ${m.v}\"\n\
     return \"OK\"\n\
 }\n";
-    assert_eq!(
-        run(SRC).expect("var backing-field custom accessors should compile + run"),
-        "OK"
-    );
+    common::expect_box_ok_with_stdlib(SRC, "P");
 }
 
 #[test]
 fn internal_read_and_write_go_through_custom_accessors() {
-    if !common::stdlib_toolchain_ready() {
-        return;
-    }
     // An IN-CLASS read/write of a custom-accessor property must call `getX`/`setX` — NOT read/write
     // the backing field directly (which would bypass the custom logic).
     const SRC: &str = "// WITH_STDLIB\n\
@@ -73,17 +54,11 @@ class My {\n\
     }\n\
 }\n\
 fun box(): String = My().selfTest()\n";
-    assert_eq!(
-        run(SRC).expect("internal custom-accessor access should compile + run"),
-        "OK"
-    );
+    common::expect_box_ok_with_stdlib(SRC, "P");
 }
 
 #[test]
 fn incdec_on_custom_accessor_var_goes_through_accessors() {
-    if !common::stdlib_toolchain_ready() {
-        return;
-    }
     // `v++` on a custom-accessor `var` is `v = v + 1` = `setV(getV() + 1)` — it must run both
     // accessors, NOT increment the raw field. v0=1: getV()=11, +1=12, setV(12) → field=24; getV()=34.
     const SRC: &str = "// WITH_STDLIB\n\
@@ -94,8 +69,5 @@ class My {\n\
     fun selfTest(): Int { v++; return v }\n\
 }\n\
 fun box(): String = if (My().selfTest() == 34) \"OK\" else \"fail: ${My().selfTest()}\"\n";
-    assert_eq!(
-        run(SRC).expect("incdec on custom-accessor var should compile + run"),
-        "OK"
-    );
+    common::expect_box_ok_with_stdlib(SRC, "P");
 }
