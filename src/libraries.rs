@@ -434,6 +434,37 @@ pub struct CallSig {
 }
 
 impl CallSig {
+    pub fn source(
+        param_names: Vec<String>,
+        param_defaults: Vec<bool>,
+        lambda_param_types: Vec<Vec<Ty>>,
+        lambda_recv: Vec<bool>,
+        required: usize,
+        vararg: bool,
+    ) -> Self {
+        let lambda_receivers = lambda_recv
+            .iter()
+            .enumerate()
+            .map(|(i, has_recv)| {
+                if *has_recv {
+                    lambda_param_types.get(i).and_then(|v| v.first()).copied()
+                } else {
+                    None
+                }
+            })
+            .collect();
+        CallSig {
+            param_names,
+            param_defaults,
+            lambda_param_types,
+            lambda_receivers,
+            lambda_receiver_params: lambda_recv,
+            required,
+            vararg,
+            ..Default::default()
+        }
+    }
+
     pub fn metadata_member(
         param_count: usize,
         names: Option<Vec<String>>,
