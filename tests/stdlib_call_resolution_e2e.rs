@@ -49,7 +49,9 @@ fn resolve_errors(src: &str) -> Option<Vec<String>> {
 fn assert_resolves(label: &str, src: &str) {
     match resolve_errors(src) {
         None => {
-            eprintln!("skip {label}: no stdlib jar / JDK modules (set KRUSTY_KOTLINC + JAVA_HOME)")
+            eprintln!(
+                "skip {label}: no stdlib jar / JDK modules (run `just kotlinc`; set JAVA_HOME)"
+            )
         }
         Some(errs) => assert!(
             errs.is_empty(),

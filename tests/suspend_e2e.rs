@@ -55,7 +55,7 @@ fn javap(jh: &str, class_file: &std::path::Path) -> String {
 
 /// Locate a real `kotlin-stdlib.jar` (the coroutine intrinsics — `Continuation`, `ContinuationImpl`,
 /// `IntrinsicsKt`, `ResultKt` — live there) for the compile + run classpath. Mirrors how the box
-/// harness finds it: a vendored `target/cache/kotlinc/<v>/.../lib/kotlin-stdlib.jar`, else `KRUSTY_KOTLINC`'s dist.
+/// harness finds it: a provisioned `target/cache/kotlinc/<v>/.../lib/kotlin-stdlib.jar`.
 fn stdlib_jar() -> Option<String> {
     // Walk up from CWD looking for `target/cache/kotlinc/*/kotlinc/lib/kotlin-stdlib.jar`.
     let mut dir = std::env::current_dir().ok()?;

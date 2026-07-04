@@ -12,7 +12,6 @@
 //!   - No javac: the runner loads bytes with a per-test ClassLoader + reflection
 //!
 //! Env vars:
-//!   KRUSTY_KOTLIN_BOX_DIR   optional override for compiler/testData/codegen/box
 //!   KRUSTY_REF_JAVA_HOME / JAVA_HOME
 //!   KRUSTY_BOX_LIMIT        cap on files scanned (default: all)
 //! The kotlin-stdlib jar is located from local caches (`common::stdlib_jar`) and supplied via
@@ -140,64 +139,9 @@ fn collect_kt(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-fn cached_box_dir(version: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("target")
-        .join("cache")
-        .join("box-corpus")
-        .join(version)
-        .join("compiler")
-        .join("testData")
-        .join("codegen")
-        .join("box")
-}
-
-fn supported_kotlin_versions() -> Vec<String> {
-    let manifest = Path::new(env!("CARGO_MANIFEST_DIR")).join("kotlin-versions");
-    fs::read_to_string(manifest)
-        .unwrap_or_default()
-        .lines()
-        .filter_map(|line| {
-            let line = line.trim();
-            if line.is_empty() || line.starts_with('#') {
-                None
-            } else {
-                line.split_whitespace().next().map(str::to_string)
-            }
-        })
-        .collect()
-}
-
 fn discover_box_dir() -> PathBuf {
-    if let Some(path) = env("KRUSTY_KOTLIN_BOX_DIR").map(PathBuf::from) {
+    if let Some(path) = krusty::toolchain::box_corpus_dir() {
         return path;
-    }
-
-    for version in supported_kotlin_versions().into_iter().rev() {
-        let path = cached_box_dir(&version);
-        if path.is_dir() {
-            return path;
-        }
-    }
-
-    let cache_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("target")
-        .join("cache")
-        .join("box-corpus");
-    if let Ok(entries) = fs::read_dir(&cache_root) {
-        let mut candidates: Vec<PathBuf> =
-            entries.filter_map(|e| e.ok().map(|e| e.path())).collect();
-        candidates.sort();
-        for root in candidates.into_iter().rev() {
-            let path = root
-                .join("compiler")
-                .join("testData")
-                .join("codegen")
-                .join("box");
-            if path.is_dir() {
-                return path;
-            }
-        }
     }
 
     let out = Command::new("just")
