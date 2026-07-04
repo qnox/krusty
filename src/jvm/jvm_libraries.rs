@@ -935,6 +935,22 @@ fn suspend_metadata_return(info: ReturnInfo, physical_ret: Ty) -> Ty {
     }
 }
 
+fn required_arity(params_len: usize, defaults: &[bool]) -> usize {
+    if defaults.is_empty() {
+        params_len
+    } else {
+        defaults.iter().filter(|d| !**d).count()
+    }
+}
+
+fn metadata_vec_for_params<T>(items: Vec<T>, params_len: usize) -> Vec<T> {
+    if items.len() == params_len {
+        items
+    } else {
+        Vec::new()
+    }
+}
+
 /// Parse a class generic signature into its formal type-parameter names and its supertypes (the
 /// superclass followed by interfaces) as signature nodes, e.g. `java/util/List`'s
 /// `<E:Ljava/lang/Object;>Ljava/lang/Object;Ljava/util/Collection<TE;>;` → (`[E]`, `[Object,
@@ -2188,11 +2204,7 @@ impl SymbolSource for JvmLibraries {
                                 .cp
                                 .metadata_member_param_defaults(&cn, meta_name, params.len())
                                 .unwrap_or_default();
-                            let required = if param_defaults.is_empty() {
-                                params.len()
-                            } else {
-                                param_defaults.iter().filter(|d| !**d).count()
-                            };
+                            let required = required_arity(params.len(), &param_defaults);
                             let call_sig = match self.cp.metadata_member_param_names(
                                 &cn,
                                 meta_name,
@@ -2308,38 +2320,23 @@ impl SymbolSource for JvmLibraries {
                     .cp
                     .metadata_param_defaults(&c.owner, meta_name, &params)
                     .unwrap_or_default();
-                let required = if param_defaults.is_empty() {
-                    params.len()
-                } else {
-                    param_defaults.iter().filter(|d| !**d).count()
-                };
-                let lambda_receivers = {
-                    let recvs = self.cp.metadata_param_recv_funs(&c.owner, meta_name);
-                    if recvs.len() == params.len() {
-                        recvs
-                            .into_iter()
-                            .map(|o| o.map(|internal| Ty::obj(&internal)))
-                            .collect()
-                    } else {
-                        Vec::new()
-                    }
-                };
-                let lambda_receiver_params = {
-                    let flags = self.cp.metadata_param_recv_fun_flags(&c.owner, meta_name);
-                    if flags.len() == params.len() {
-                        flags
-                    } else {
-                        Vec::new()
-                    }
-                };
-                let lambda_materialized = {
-                    let flags = self.cp.metadata_param_materialized(&c.owner, meta_name);
-                    if flags.len() == params.len() {
-                        flags
-                    } else {
-                        Vec::new()
-                    }
-                };
+                let required = required_arity(params.len(), &param_defaults);
+                let lambda_receivers = metadata_vec_for_params(
+                    self.cp
+                        .metadata_param_recv_funs(&c.owner, meta_name)
+                        .into_iter()
+                        .map(|o| o.map(|internal| Ty::obj(&internal)))
+                        .collect(),
+                    params.len(),
+                );
+                let lambda_receiver_params = metadata_vec_for_params(
+                    self.cp.metadata_param_recv_fun_flags(&c.owner, meta_name),
+                    params.len(),
+                );
+                let lambda_materialized = metadata_vec_for_params(
+                    self.cp.metadata_param_materialized(&c.owner, meta_name),
+                    params.len(),
+                );
                 let call_sig = match self.cp.metadata_param_names(&c.owner, meta_name, &params) {
                     Some(names) if names.len() == params.len() => crate::libraries::CallSig {
                         required,
