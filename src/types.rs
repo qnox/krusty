@@ -476,6 +476,11 @@ impl Ty {
         matches!(self, Ty::Byte | Ty::Short | Ty::Int)
     }
 
+    /// True for scalar slots whose update arithmetic runs as `Int` and narrows back on store.
+    pub fn narrows_int_update(self) -> bool {
+        matches!(self, Ty::Byte | Ty::Short | Ty::Char)
+    }
+
     /// True for the unsigned integer types (inline classes over a signed primitive).
     pub fn is_unsigned(self) -> bool {
         matches!(self, Ty::UInt | Ty::ULong)
