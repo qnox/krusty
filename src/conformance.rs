@@ -91,6 +91,83 @@ pub fn extra_libs(src: &str) -> ExtraLibs {
     }
 }
 
+/// One `// MODULE:` block from a Kotlin box test: its name, regular classpath dependency modules,
+/// and the source files that belong to the module.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModuleBlock {
+    pub name: String,
+    pub deps: Vec<String>,
+    pub files: Vec<(String, String)>,
+}
+
+/// Split a `// MODULE:`-partitioned box test into modules, each with its `// FILE:` blocks. Returns
+/// `None` for shapes krusty's module model does not cover, so the conformance harness can skip them
+/// instead of mis-grading them.
+pub fn split_modules(src: &str) -> Option<Vec<ModuleBlock>> {
+    let mut mods: Vec<ModuleBlock> = Vec::new();
+    let mut cur_file: Option<String> = None;
+    let mut cur = String::new();
+    let flush = |mods: &mut Vec<ModuleBlock>, cur_file: &mut Option<String>, cur: &mut String| {
+        if let Some(fname) = cur_file.take() {
+            if let Some(m) = mods.last_mut() {
+                m.files.push((fname, std::mem::take(cur)));
+            }
+        }
+    };
+    for line in src.lines() {
+        let t = line.trim_start();
+        if let Some(rest) = t.strip_prefix("// MODULE:") {
+            flush(&mut mods, &mut cur_file, &mut cur);
+            let header = rest.trim();
+            if header.matches('(').count() > 1 {
+                return None;
+            }
+            let name_end = header.find('(').unwrap_or(header.len());
+            let name = header[..name_end].trim().to_string();
+            let deps = header[name_end..]
+                .trim_start_matches('(')
+                .split(')')
+                .next()
+                .unwrap_or("")
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            mods.push(ModuleBlock {
+                name,
+                deps,
+                files: Vec::new(),
+            });
+        } else if let Some(rest) = t.strip_prefix("// FILE:") {
+            flush(&mut mods, &mut cur_file, &mut cur);
+            let fname = rest.trim();
+            if !fname.ends_with(".kt") {
+                return None;
+            }
+            let stem = fname
+                .strip_suffix(".kt")
+                .unwrap_or(fname)
+                .rsplit('/')
+                .next()
+                .unwrap_or(fname)
+                .to_string();
+            cur_file = Some(stem);
+        } else if cur_file.is_some() {
+            cur.push_str(line);
+            cur.push('\n');
+        } else if !mods.is_empty() && !t.is_empty() && !t.starts_with("//") {
+            cur_file = Some(mods.last().unwrap().name.clone());
+            cur.push_str(line);
+            cur.push('\n');
+        }
+    }
+    flush(&mut mods, &mut cur_file, &mut cur);
+    if mods.len() < 2 || mods.iter().any(|m| m.files.is_empty()) {
+        return None;
+    }
+    Some(mods)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -305,5 +382,128 @@ mod tests {
     fn backends_constant_lists_jvm_variants() {
         assert!(BACKENDS.contains(&"JVM"));
         assert!(BACKENDS.contains(&"JVM_IR"));
+    }
+
+    #[test]
+    fn split_modules_two_modules_with_explicit_files_parse_names_deps_and_bodies() {
+        let src = "\
+// MODULE: lib
+// FILE: lib.kt
+class A
+// MODULE: main(lib)
+// FILE: main.kt
+fun box(): String = \"OK\"
+";
+        let mods = split_modules(src).expect("two-module test should split");
+        assert_eq!(mods.len(), 2);
+        assert_eq!(mods[0].name, "lib");
+        assert!(mods[0].deps.is_empty());
+        assert_eq!(
+            mods[0].files,
+            vec![("lib".to_string(), "class A\n".to_string())]
+        );
+        assert_eq!(mods[1].name, "main");
+        assert_eq!(mods[1].deps, vec!["lib".to_string()]);
+        assert_eq!(
+            mods[1].files,
+            vec![(
+                "main".to_string(),
+                "fun box(): String = \"OK\"\n".to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn split_modules_multiple_regular_deps_split_on_comma() {
+        let src = "\
+// MODULE: a
+// FILE: a.kt
+class A
+// MODULE: b
+// FILE: b.kt
+class B
+// MODULE: main(a, b)
+// FILE: main.kt
+fun box(): String = \"OK\"
+";
+        let mods = split_modules(src).expect("should split");
+        assert_eq!(mods.len(), 3);
+        assert_eq!(mods[2].deps, vec!["a".to_string(), "b".to_string()]);
+    }
+
+    #[test]
+    fn split_modules_implicit_file_body_after_module_header() {
+        let src = "\
+// MODULE: lib
+class A
+// MODULE: main(lib)
+fun box(): String = \"OK\"
+";
+        let mods = split_modules(src).expect("implicit-file test should split");
+        assert_eq!(mods.len(), 2);
+        assert_eq!(mods[0].files[0].0, "lib");
+        assert_eq!(mods[1].files[0].0, "main");
+    }
+
+    #[test]
+    fn split_modules_nested_file_path_uses_leaf_stem() {
+        let src = "\
+// MODULE: lib
+// FILE: pkg/Foo.kt
+package pkg
+class Foo
+// MODULE: main(lib)
+// FILE: main.kt
+fun box(): String = \"OK\"
+";
+        let mods = split_modules(src).expect("should split");
+        assert_eq!(mods[0].files[0].0, "Foo");
+    }
+
+    #[test]
+    fn split_modules_friend_or_dependson_header_is_declined() {
+        let src = "\
+// MODULE: common
+// FILE: common.kt
+expect fun f(): String
+// MODULE: main()()(common)
+// FILE: main.kt
+actual fun f(): String = \"OK\"
+";
+        assert!(split_modules(src).is_none());
+    }
+
+    #[test]
+    fn split_modules_java_file_source_is_declined() {
+        let src = "\
+// MODULE: lib
+// FILE: J.java
+public class J {}
+// MODULE: main(lib)
+// FILE: main.kt
+fun box(): String = \"OK\"
+";
+        assert!(split_modules(src).is_none());
+    }
+
+    #[test]
+    fn split_modules_single_module_is_declined() {
+        let src = "\
+// MODULE: only
+// FILE: only.kt
+fun box(): String = \"OK\"
+";
+        assert!(split_modules(src).is_none());
+    }
+
+    #[test]
+    fn split_modules_module_without_any_source_is_declined() {
+        let src = "\
+// MODULE: lib
+// MODULE: main(lib)
+// FILE: main.kt
+fun box(): String = \"OK\"
+";
+        assert!(split_modules(src).is_none());
     }
 }

@@ -44,9 +44,12 @@ build_log="$logdir/build.log"
 cargo test --profile gate --no-run 2>&1 | tee "$build_log"
 
 bins=()
-while IFS= read -r line; do
-  bins+=("$line")
-done < <(sed -nE 's/.*[Ee]xecutable [^(]*\(([^)]+)\)/\1/p' "$build_log" | sort -u)
+while IFS=$'\t' read -r target path; do
+  case "$target" in
+    "unittests src/main.rs"|"unittests src/bin/"*) continue ;;
+  esac
+  bins+=("$path")
+done < <(sed -nE 's/.*[Ee]xecutable ([^(]+) \(([^)]+)\)/\1\t\2/p' "$build_log" | sort -u)
 
 # KRUSTY_TEST_EXCLUDE: comma-separated test-binary base names to skip (e.g. the slow external-corpus
 # suites for the fast pre-push run). Matched against each binary's name with the cargo hash stripped.
@@ -61,6 +64,11 @@ if [ -n "${KRUSTY_TEST_EXCLUDE:-}" ]; then
     [ "$skip" -eq 0 ] && kept+=("$b")
   done
   bins=("${kept[@]}")
+fi
+
+if [ "${#bins[@]}" -eq 0 ]; then
+  echo "run-tests.sh: no test binaries scheduled after build/filter" >&2
+  exit 1
 fi
 
 run_one() {
@@ -82,8 +90,14 @@ export -f run_one
 
 # The conformance binary contains external corpus/reference-toolchain suites. Run it alone before
 # the product test binary to avoid core contention and to keep fast/coverage exclusion binary-scoped.
+# The Kotlin codegen corpus test is memory-heavy, so run it in its own process, then run every other
+# conformance test in a fresh process. This still executes the full conformance binary's test set; it
+# just avoids carrying earlier external-suite state into the large corpus pass on small CI machines.
 gate="$(printf '%s\n' "${bins[@]}" | grep '/conformance-' || true)"
-[ -n "$gate" ] && run_one "$logdir" "$gate::--test-threads=1"
+if [ -n "$gate" ]; then
+  run_one "$logdir" "$gate::kotlin_codegen_box_conformance --test-threads=1"
+  run_one "$logdir" "$gate::--skip kotlin_codegen_box_conformance --test-threads=1"
+fi
 
 ncpu="$(nproc 2>/dev/null || sysctl -n hw.ncpu)"
 jobs="${KRUSTY_TEST_JOBS:-$ncpu}"
@@ -116,8 +130,10 @@ for b in "${rest[@]}"; do
   [ "$seen" -eq 0 ] && ordered+=("$b")
 done
 
-printf '%s\n' "${ordered[@]}" \
-  | xargs -P "$jobs" -I{} bash -c 'run_one "$0" "$1::--test-threads='"$threads"'"' "$logdir" {}
+if [ "${#ordered[@]}" -gt 0 ]; then
+  printf '%s\n' "${ordered[@]}" \
+    | xargs -P "$jobs" -I{} bash -c 'run_one "$0" "$1::--test-threads='"$threads"'"' "$logdir" {}
+fi
 
 if [ -f "$logdir/FAILED" ]; then
   echo "=== FAILED TEST BINARIES ==="
@@ -129,6 +145,10 @@ if [ -f "$logdir/FAILED" ]; then
 fi
 
 echo "=== SLOWEST TEST BINARIES ==="
+if [ ! -f "$logdir/TIMINGS" ]; then
+  echo "run-tests.sh: no test binaries ran; scheduled ${#bins[@]} binaries" >&2
+  exit 1
+fi
 # awk limits to 20 rows (rather than `| head -20`): head closing the pipe early makes `sort` take
 # SIGPIPE, which under `set -o pipefail` fails this cosmetic diagnostic — and thus the whole (green)
 # run — with 141. Letting awk consume all of sort's output keeps the pipeline exit status 0.
