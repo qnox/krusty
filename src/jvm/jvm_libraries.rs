@@ -256,9 +256,6 @@ impl JvmLibraries {
             return true;
         }
         let receiver_name = match receiver {
-            Ty::UInt => Some("kotlin/UInt"),
-            Ty::ULong => Some("kotlin/ULong"),
-            Ty::Obj(i, _) if self.value_class_underlying_desc(i).is_some() => Some(i),
             Ty::Obj(i, _) if self.cp.is_kotlin_collection(i) => {
                 return !recvs.iter().any(|r| self.cp.is_kotlin_collection(r))
                     || recvs
@@ -266,7 +263,9 @@ impl JvmLibraries {
                         .filter(|r| self.cp.is_kotlin_collection(r))
                         .any(|r| self.cp.kotlin_subtype(i, r));
             }
-            _ => None,
+            _ => receiver
+                .kotlin_class_internal()
+                .filter(|i| self.value_class_underlying_desc(i).is_some()),
         };
         receiver_name.is_none_or(|actual| {
             recvs
