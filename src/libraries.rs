@@ -503,7 +503,12 @@ impl CallSig {
     }
 
     fn metadata_base(param_count: usize, names: Vec<String>, defaults: Vec<bool>) -> Self {
-        let defaults = metadata_defaults(defaults, param_count);
+        let defaults = vec_for_arity(defaults, param_count);
+        let defaults = if defaults.iter().any(|d| *d) {
+            defaults
+        } else {
+            Vec::new()
+        };
         CallSig {
             required: required_arity(param_count, &defaults),
             param_names: metadata_names(names, param_count),
@@ -516,15 +521,6 @@ impl CallSig {
 fn metadata_names(names: Vec<String>, param_count: usize) -> Vec<String> {
     if names.len() == param_count && !names.iter().any(String::is_empty) {
         names
-    } else {
-        Vec::new()
-    }
-}
-
-fn metadata_defaults(defaults: Vec<bool>, param_count: usize) -> Vec<bool> {
-    let defaults = vec_for_arity(defaults, param_count);
-    if defaults.iter().any(|d| *d) {
-        defaults
     } else {
         Vec::new()
     }
