@@ -15,9 +15,7 @@ mod common;
 /// Single-compilation box run: everything lives in one source, cross-referencing declarations (which
 /// still drives the checker/`types` resolution heavily).
 fn run(src: &str, stem: &str) -> Option<String> {
-    let sl = common::stdlib_jar()?;
-    let jdk = common::jdk_modules()?;
-    common::compile_and_run_box(src, stem, &[sl], Some(&jdk))
+    common::compile_and_run_with_stdlib(src, stem)
 }
 
 /// Compile `lib_src` with krusty (emitting `@Metadata`), persist its classfiles to a fresh classpath
