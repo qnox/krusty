@@ -9505,24 +9505,13 @@ impl<'a> Lower<'a> {
     fn zero_placeholder(&mut self, t: Ty) -> u32 {
         // A NON-nullable primitive stored in its `Obj("kotlin/…")` value-class form is a JVM primitive
         // (e.g. a non-null `Int` parameter is `int`), so its zero is the primitive `0`, not a null ref.
-        let boxed_prim = match t {
-            Ty::Obj(n, _) => match n {
-                "kotlin/Long" => Some(IrConst::Long(0)),
-                "kotlin/Double" => Some(IrConst::Double(0.0)),
-                "kotlin/Float" => Some(IrConst::Float(0.0)),
-                "kotlin/Int" | "kotlin/Short" | "kotlin/Byte" | "kotlin/Char"
-                | "kotlin/Boolean" => Some(IrConst::Int(0)),
-                _ => None,
-            },
-            _ => None,
-        };
+        let t = t.unboxed_primitive().unwrap_or(t);
         let c = match t {
             Ty::Long => IrConst::Long(0),
             Ty::Double => IrConst::Double(0.0),
             Ty::Float => IrConst::Float(0.0),
             // Plain JVM-int-family primitives (and a value-class type with a scalar/int repr) → `0`.
             Ty::Int | Ty::Byte | Ty::Short | Ty::Char | Ty::Boolean => IrConst::Int(0),
-            _ if boxed_prim.is_some() => boxed_prim.unwrap(),
             t if self.has_scalar_value_repr(t) => IrConst::Int(0),
             _ => IrConst::Null,
         };
