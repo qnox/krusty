@@ -49,12 +49,20 @@ impl JvmLibraries {
         JvmLibraries { cp }
     }
 
+    fn const_value_to_lib(value: &crate::jvm::classreader::ConstVal) -> Option<LibConst> {
+        match value {
+            crate::jvm::classreader::ConstVal::Int(v) => Some(LibConst::Int(*v)),
+            crate::jvm::classreader::ConstVal::Long(v) => Some(LibConst::Long(*v)),
+            crate::jvm::classreader::ConstVal::Float(v) => Some(LibConst::Float(*v)),
+            crate::jvm::classreader::ConstVal::Double(v) => Some(LibConst::Double(*v)),
+            crate::jvm::classreader::ConstVal::Str(_) => None,
+        }
+    }
+
     fn primitive_companion_consts_for_type(
         &self,
         internal: &str,
     ) -> std::collections::HashMap<String, LibraryConst> {
-        use crate::jvm::classreader::ConstVal;
-
         let prim = match internal {
             "java/lang/Integer" | "kotlin/Int" => "Int",
             "java/lang/Long" | "kotlin/Long" => "Long",
@@ -73,13 +81,7 @@ impl JvmLibraries {
         ci.fields
             .iter()
             .filter_map(|f| {
-                let value = match f.const_value.as_ref()? {
-                    ConstVal::Int(v) => LibConst::Int(*v),
-                    ConstVal::Long(v) => LibConst::Long(*v),
-                    ConstVal::Float(v) => LibConst::Float(*v),
-                    ConstVal::Double(v) => LibConst::Double(*v),
-                    ConstVal::Str(_) => return None,
-                };
+                let value = Self::const_value_to_lib(f.const_value.as_ref()?)?;
                 Some((
                     f.name.clone(),
                     LibraryConst {
@@ -95,8 +97,6 @@ impl JvmLibraries {
         &self,
         internal: &str,
     ) -> std::collections::HashMap<String, LibraryConst> {
-        use crate::jvm::classreader::ConstVal;
-
         let companion_internal = format!("{internal}$Companion");
         let Some((ci, companion)) = self
             .cp
@@ -111,13 +111,7 @@ impl JvmLibraries {
             .filter_map(|f| {
                 let ret = prop_rets.get(&f.name)?;
                 let ty = kotlin_name_to_ty(ret);
-                let value = match f.const_value.as_ref()? {
-                    ConstVal::Int(v) => LibConst::Int(*v),
-                    ConstVal::Long(v) => LibConst::Long(*v),
-                    ConstVal::Float(v) => LibConst::Float(*v),
-                    ConstVal::Double(v) => LibConst::Double(*v),
-                    ConstVal::Str(_) => return None,
-                };
+                let value = Self::const_value_to_lib(f.const_value.as_ref()?)?;
                 Some((f.name.clone(), LibraryConst { ty, value }))
             })
             .collect()
