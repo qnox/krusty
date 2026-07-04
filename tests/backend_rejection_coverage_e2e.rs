@@ -12,42 +12,11 @@ use std::fs;
 use std::process::Command;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-fn env(k: &str) -> Option<String> {
-    std::env::var(k).ok().filter(|v| !v.is_empty())
-}
-
-fn java_home() -> Option<String> {
-    env("KRUSTY_REF_JAVA_HOME").or_else(|| env("JAVA_HOME"))
-}
-
-/// Locate a real `kotlin-stdlib.jar` for the compile classpath (unsigned intrinsics, coroutine
-/// intrinsics, etc. live there). Mirrors the box harness walk: `target/cache/kotlinc/*/kotlinc/lib`.
-fn stdlib_jar() -> Option<String> {
-    let mut dir = std::env::current_dir().ok()?;
-    loop {
-        if let Ok(versions) = fs::read_dir(dir.join("target/cache/kotlinc")) {
-            for v in versions.flatten() {
-                let jar = v.path().join("kotlinc/lib/kotlin-stdlib.jar");
-                if jar.exists() {
-                    return Some(jar.to_string_lossy().into_owned());
-                }
-            }
-        }
-        if !dir.pop() {
-            return None;
-        }
-    }
-}
+mod common;
 
 /// `<stdlib>:<jdk modules>` classpath, or `None` when the toolchain is unavailable (test skips clean).
-fn classpath() -> Option<String> {
-    let stdlib = stdlib_jar()?;
-    let jh = java_home()?;
-    let modules = format!("{jh}/lib/modules");
-    if !std::path::Path::new(&modules).exists() {
-        return None;
-    }
-    Some(format!("{stdlib}:{modules}"))
+fn classpath() -> Option<std::ffi::OsString> {
+    std::env::join_paths([common::stdlib_jar()?, common::jdk_modules()?]).ok()
 }
 
 static COUNTER: AtomicU32 = AtomicU32::new(0);
@@ -68,7 +37,9 @@ fn rejects(src: &str) -> bool {
     let kt = dir.join("S.kt");
     fs::write(&kt, src).unwrap();
     let out = Command::new(krusty)
-        .args(["-cp", &cp, "-d", dir.to_str().unwrap()])
+        .arg("-cp")
+        .arg(&cp)
+        .args(["-d", dir.to_str().unwrap()])
         .arg(&kt)
         .output()
         .unwrap();
