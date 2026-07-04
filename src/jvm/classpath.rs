@@ -215,7 +215,7 @@ pub struct TypeIndex {
 
 /// Per-class `@Metadata` cache: class internal name → every function decoded from its `Package` metadata
 /// (with the multifile-facade part classes merged in). This is the SINGLE decode of a class's `d1` for the
-/// function lookups below — `metadata_return`, `metadata_receiver_types`, `metadata_kept_params`, and
+/// function lookups below — `metadata_return`, `metadata_receiver_types`, `metadata_call_facts`, and
 /// parameter metadata all project over it instead of each re-decoding and re-merging.
 type MetaFnsCache = RefCell<HashMap<String, std::rc::Rc<ClassMeta>>>;
 
@@ -241,6 +241,13 @@ struct MetaCallable {
 pub struct MetadataReturn {
     pub class: Option<String>,
     pub nullable: bool,
+}
+
+#[derive(Clone)]
+pub struct MetadataCallFacts {
+    pub kept_params: Option<usize>,
+    pub call_sig: CallSig,
+    pub ret: Option<MetadataReturn>,
 }
 
 /// The per-function `@Metadata` lookups for one class, all derived from its single decoded function list
@@ -274,6 +281,40 @@ fn aligned_meta_callable<'a>(
             .then_some((end, c))
         })
         .max_by_key(|(end, _)| *end)
+}
+
+fn metadata_return_of(c: &MetaCallable) -> MetadataReturn {
+    MetadataReturn {
+        class: c.ret_class.clone(),
+        nullable: c.ret_nullable,
+    }
+}
+
+fn metadata_param_names_of(c: &MetaCallable) -> Option<Vec<String>> {
+    (!c.value_param_names.is_empty() && !c.value_param_names.iter().any(String::is_empty))
+        .then(|| c.value_param_names.clone())
+}
+
+fn metadata_defaults_of(c: &MetaCallable) -> Vec<bool> {
+    if c.value_param_has_default.iter().any(|d| *d) {
+        c.value_param_has_default.clone()
+    } else {
+        Vec::new()
+    }
+}
+
+fn metadata_top_level_call_sig(param_count: usize, c: &MetaCallable) -> CallSig {
+    CallSig::metadata_top_level(
+        param_count,
+        metadata_param_names_of(c),
+        metadata_defaults_of(c),
+        c.value_param_recv_funs
+            .iter()
+            .map(|o| o.as_deref().map(Ty::obj))
+            .collect(),
+        c.value_param_recv_fun_flags.clone(),
+        c.value_param_materialized.clone(),
+    )
 }
 
 /// Per-class `@Metadata` cache: class internal name → (Kotlin function name → its `@JvmName`-mangled
@@ -415,7 +456,7 @@ impl Classpath {
 
     /// The decoded `@Metadata` function lookups for `internal` (facade parts merged), decoded once and
     /// cached. The single `d1` decode that `metadata_return`/`metadata_receiver_types`/
-    /// `metadata_kept_params` all project over.
+    /// `metadata_call_facts` all project over.
     fn class_meta(&self, internal: &str) -> std::rc::Rc<ClassMeta> {
         if let Some(m) = self.meta_fns.borrow().get(internal) {
             return m.clone();
@@ -493,92 +534,45 @@ impl Classpath {
     /// param erases to `kotlin/Any` (accepts anything). `None` when the
     /// class has no `@Metadata` entry for `fn_name` (a Java method, a synthetic) — the caller then keeps
     /// the descriptor params unchanged.
-    /// The `@Metadata` SOURCE value-parameter count of the `internal.fn_name` OVERLOAD that the bytecode
-    /// candidate with parameter types `desc_params` denotes — i.e. how many of the descriptor's params
-    /// are real source params, the rest being synthetic trailing params the descriptor appends (a
-    /// `@Composable` Composer/int). `@Metadata` omits no source param but records no `method_signature`
-    /// for these runtime functions, so the overload is aligned STRUCTURALLY: its mapped source value
-    /// params must be a compatible prefix of the descriptor's params after `recv_off` leading params (a
-    /// `1` when the function is an extension — its receiver is the descriptor's first param, absent from
-    /// `@Metadata`'s `value_parameter`s). Returns the matched source arity, or `None` when nothing aligns
-    /// (a Java method, a synthetic, or a normal function whose arity already equals the descriptor's).
-    pub fn metadata_kept_params(
+    /// The descriptor-aligned source call facts for top-level/static `internal.fn_name`: kept source
+    /// arity, named/default call shape, receiver-lambda annotations, materialization flags, and return
+    /// metadata. Everything is projected from ONE `@Metadata` callable, so overloads cannot drift across
+    /// parallel lookups.
+    pub fn metadata_call_facts(
         &self,
         internal: &str,
         fn_name: &str,
         desc_params: &[Ty],
-    ) -> Option<usize> {
+        extension: bool,
+    ) -> MetadataCallFacts {
         let meta = self.class_meta(internal);
-        // For each same-named overload, the descriptor's REAL leading params are its extension receiver
-        // (one slot, if any) followed by its source value params; any params beyond that are synthetic
-        // trailing ones the descriptor appends (a `@Composable` Composer/int). Align the overload by
-        // requiring its source value params to prefix-match the descriptor after the receiver slot, and
-        // return how many leading params are real (`receiver? + source arity`). Prefer the LONGEST such
-        // alignment (the most-specific overload) when several fit; `None` if none align (truncate is then
-        // skipped — a normal function whose arity already equals the descriptor's).
-        aligned_meta_callable(&meta, fn_name, desc_params).map(|(end, _)| end)
-    }
-
-    /// The SOURCE value-parameter NAMES of the `internal.fn_name` overload whose source value params
-    /// prefix-match `desc_params` after its extension-receiver slot — i.e. the names parallel to the
-    /// LOGICAL params of the overload the descriptor denotes. Drives named-argument resolution of a
-    /// classpath call (`foo(b = …, a = …)`). Picks the LONGEST-aligning overload (most specific), matching
-    /// [`metadata_kept_params`]. `None` if no overload aligns or its names are unrecorded/empty.
-    pub fn metadata_param_names(
-        &self,
-        internal: &str,
-        fn_name: &str,
-        desc_params: &[Ty],
-    ) -> Option<Vec<String>> {
-        let meta = self.class_meta(internal);
-        aligned_meta_callable(&meta, fn_name, desc_params).and_then(|(_, c)| {
-            if !c.value_param_names.is_empty() && !c.value_param_names.iter().any(String::is_empty)
-            {
-                Some(c.value_param_names.clone())
+        let Some((end, c)) = aligned_meta_callable(&meta, fn_name, desc_params) else {
+            return MetadataCallFacts {
+                kept_params: None,
+                call_sig: if extension {
+                    CallSig::default()
+                } else {
+                    CallSig::metadata_top_level(
+                        desc_params.len(),
+                        None,
+                        Vec::new(),
+                        Vec::new(),
+                        Vec::new(),
+                        Vec::new(),
+                    )
+                },
+                ret: None,
+            };
+        };
+        MetadataCallFacts {
+            kept_params: Some(end),
+            call_sig: if extension {
+                CallSig::metadata_extension(end, metadata_param_names_of(c))
             } else {
-                None
-            }
-        })
-    }
-
-    /// The source-level call shape for the descriptor-aligned top-level `internal.fn_name` overload.
-    /// Names, defaults, receiver-lambda annotations, and materialization flags are projected from ONE
-    /// `@Metadata` callable, so overloads cannot drift across parallel metadata lookups.
-    pub fn metadata_call_sig(&self, internal: &str, fn_name: &str, desc_params: &[Ty]) -> CallSig {
-        let meta = self.class_meta(internal);
-        let Some((_, c)) = aligned_meta_callable(&meta, fn_name, desc_params) else {
-            return CallSig::metadata_top_level(
-                desc_params.len(),
-                None,
-                Vec::new(),
-                Vec::new(),
-                Vec::new(),
-                Vec::new(),
-            );
-        };
-        let names = if !c.value_param_names.is_empty()
-            && !c.value_param_names.iter().any(String::is_empty)
-        {
-            Some(c.value_param_names.clone())
-        } else {
-            None
-        };
-        let defaults = if c.value_param_has_default.iter().any(|d| *d) {
-            c.value_param_has_default.clone()
-        } else {
-            Vec::new()
-        };
-        CallSig::metadata_top_level(
-            desc_params.len(),
-            names,
-            defaults,
-            c.value_param_recv_funs
-                .iter()
-                .map(|o| o.as_deref().map(Ty::obj))
-                .collect(),
-            c.value_param_recv_fun_flags.clone(),
-            c.value_param_materialized.clone(),
-        )
+                metadata_top_level_call_sig(end, c)
+            },
+            ret: Some(metadata_return_of(c)),
+        }
     }
 
     /// The Kotlin return metadata of member `name` (its JVM or source name) of `arity` LOGICAL value

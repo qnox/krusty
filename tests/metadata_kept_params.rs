@@ -1,4 +1,4 @@
-//! `Classpath::metadata_kept_params` aligns a classpath function's bytecode candidate to its
+//! `Classpath::metadata_call_facts` aligns a classpath function's bytecode candidate to its
 //! `@Metadata` SOURCE signature, reporting how many leading descriptor params are REAL (an extension
 //! receiver + the source value params). Any params beyond that are synthetic trailing params the
 //! descriptor appends (a `@Composable` method's `(Composer, int)`), which the resolver truncates so a
@@ -14,6 +14,11 @@ use krusty::types::Ty;
 
 use super::common;
 
+fn kept(cp: &Classpath, name: &str, params: &[Ty]) -> Option<usize> {
+    cp.metadata_call_facts("kotlin/collections/CollectionsKt", name, params, false)
+        .kept_params
+}
+
 #[test]
 fn vararg_factory_keeps_its_array_param() {
     let Some(jar) = common::stdlib_jar() else {
@@ -25,15 +30,14 @@ fn vararg_factory_keeps_its_array_param() {
     // `vararg` is ONE source value param (the array), so the kept count must be 1 — NOT 0 (which would
     // drop the array and underflow the operand stack at the call).
     let params = vec![Ty::array(Ty::obj("java/lang/Object"))];
-    let kept =
-        cp.metadata_kept_params("kotlin/collections/CollectionsKt", "mutableListOf", &params);
+    let mutable_kept = kept(&cp, "mutableListOf", &params);
     assert_eq!(
-        kept,
+        mutable_kept,
         Some(1),
-        "the vararg overload's array param must be kept (no truncation), got {kept:?}"
+        "the vararg overload's array param must be kept (no truncation), got {mutable_kept:?}"
     );
     assert_eq!(
-        cp.metadata_kept_params("kotlin/collections/CollectionsKt", "listOf", &params),
+        kept(&cp, "listOf", &params),
         Some(1),
         "listOf's vararg array param must be kept too"
     );
@@ -48,8 +52,5 @@ fn empty_factory_keeps_zero_params() {
     let cp = Classpath::new(vec![jar]);
     // The no-arg `listOf(): List<T>` overload — descriptor `()…`, zero params — aligns at zero kept,
     // which equals its descriptor arity, so the resolver truncates nothing.
-    assert_eq!(
-        cp.metadata_kept_params("kotlin/collections/CollectionsKt", "listOf", &[]),
-        Some(0)
-    );
+    assert_eq!(kept(&cp, "listOf", &[]), Some(0));
 }

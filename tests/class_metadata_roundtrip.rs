@@ -2,7 +2,7 @@
 //! class's member functions (with their SOURCE `value_parameter` types), and `metadata::class_functions`
 //! decodes them back. This is the contract cross-module resolution relies on — a dependent module reads
 //! a lib class's member signatures (their source arity) from the lib's emitted `@Metadata`, exactly as
-//! `Classpath::metadata_kept_params` does for a classpath callee. `build_class` existed but was unwired
+//! `Classpath::metadata_call_facts` does for a classpath callee. `build_class` existed but was unwired
 //! and untested; this pins the round-trip before it is wired into emit.
 
 use krusty::jvm::classreader::ClassInfo;
