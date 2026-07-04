@@ -3,10 +3,11 @@
 //! `java/lang ↔ kotlin` name normalization live here — the front end (`resolve`, `ir_lower`) sees
 //! only Kotlin-level `Ty`s and opaque descriptor tokens through the trait.
 
-use super::classpath::{metadata_return_info, Classpath};
+use super::classpath::{kotlin_name_to_ty, metadata_return_info, Classpath};
 use super::jvm_class_map::{
     kotlin_builtin_to_internal, to_jvm_internal, to_kotlin_internal, BUILTIN_MAPPED_NAMES,
 };
+use super::metadata;
 use crate::call_resolver::{arg_fits, function_input_types, gsig_to_ty, unify_gsig};
 use crate::jvm::names::{method_descriptor, property_getter_name, type_descriptor};
 use crate::libraries::{
@@ -240,7 +241,7 @@ impl JvmLibraries {
         let ic = self
             .cp
             .find(internal)
-            .and_then(|ci| crate::jvm::metadata::class_inline(&ci))?;
+            .and_then(|ci| metadata::class_inline(&ci))?;
         Some(match ic.underlying_class.as_deref() {
             Some("kotlin/Boolean") => "Z".into(),
             Some("kotlin/Byte") => "B".into(),
@@ -419,20 +420,21 @@ impl JvmLibraries {
     }
 
     fn value_companion_fns_for_class(&self, internal: &str) -> Vec<crate::libraries::CompanionFn> {
-        let Some(ci) = self.cp.find(internal) else {
+        let Some(ci) = self
+            .cp
+            .find(internal)
+            .filter(|ci| metadata::class_inline(ci).is_some())
+        else {
             return Vec::new();
         };
-        if crate::jvm::metadata::class_inline(&ci).is_none() {
-            return Vec::new();
-        }
-        let Some(companion_field) = crate::jvm::metadata::class_companion_name(&ci) else {
+        let Some(companion_field) = metadata::class_companion_name(&ci) else {
             return Vec::new();
         };
         let companion_internal = format!("{internal}${companion_field}");
         let Some(comp_ci) = self.cp.find(&companion_internal) else {
             return Vec::new();
         };
-        crate::jvm::metadata::class_functions(&comp_ci)
+        metadata::class_functions(&comp_ci)
             .into_iter()
             .filter(|m| m.is_public)
             .filter_map(|m| {
@@ -465,10 +467,10 @@ impl JvmLibraries {
         &self,
         ci: &crate::jvm::classreader::ClassInfo,
     ) -> Vec<LibraryMember> {
-        if crate::jvm::metadata::class_inline(ci).is_none() {
+        if metadata::class_inline(ci).is_none() {
             return Vec::new();
         }
-        crate::jvm::metadata::class_functions(ci)
+        metadata::class_functions(ci)
             .into_iter()
             .filter(|m| m.is_public && !m.is_extension)
             .filter_map(|m| {
@@ -721,9 +723,7 @@ fn suspend_return_from_gsig(
                 // `Obj("java/lang/String")`. A boxed PRIMITIVE (`java/lang/Long`) stays an `Obj` here —
                 // the call site unboxes it to the source primitive only when the return is non-nullable
                 // (a `Long?` return must keep the boxed form).
-                Some(super::classpath::kotlin_name_to_ty(to_kotlin_internal(
-                    name,
-                )))
+                Some(kotlin_name_to_ty(to_kotlin_internal(name)))
             }
             // A generic class (`List<Item>`) keeps its arguments via the general converter, then any JVM
             // collection name the signature spelled in Java terms (`java/util/List`) is canonicalized to
@@ -926,7 +926,7 @@ fn nonpublic_ext_receiver_is_typevar(signature: Option<&str>) -> bool {
 }
 
 fn metadata_return_ty(class: Option<&str>) -> Option<Ty> {
-    class.map(super::classpath::kotlin_name_to_ty)
+    class.map(kotlin_name_to_ty)
 }
 
 fn nullable_scalar_return(info: ReturnInfo, ret: Ty) -> Ty {
@@ -1077,7 +1077,7 @@ impl SymbolSource for JvmLibraries {
     fn sealed_subclasses(&self, internal: &str) -> Vec<String> {
         self.cp
             .find(internal)
-            .map(|ci| crate::jvm::metadata::class_sealed_subclasses(&ci))
+            .map(|ci| metadata::class_sealed_subclasses(&ci))
             .unwrap_or_default()
     }
 
@@ -1126,7 +1126,7 @@ impl SymbolSource for JvmLibraries {
         // The property's LOGICAL (@Metadata) return type — a value class here (`id` → `lib/Vid`), whose
         // physical getter erases the return to the underlying. Only handle a value-class-typed property
         // (guarded by `value_underlying`), so an ordinary property keeps its normal getter path.
-        let logical = crate::jvm::metadata::class_property_return_classes(&ci)
+        let logical = metadata::class_property_return_classes(&ci)
             .get(property)?
             .clone();
         self.resolve_type(&logical)
@@ -1403,7 +1403,7 @@ impl SymbolSource for JvmLibraries {
         // `Vid` argument. Recover the SOURCE name + logical (value-class) parameter types from `@Metadata`
         // and expose the member under the source name — keeping the mangled JVM name as `physical_name`
         // and the erased descriptor for emit (the value-classes pass unboxes the `Vid` argument).
-        for mf in crate::jvm::metadata::class_functions(&ci) {
+        for mf in metadata::class_functions(&ci) {
             if !mf.is_public || mf.is_extension || mf.jvm_name == mf.kotlin_name {
                 continue;
             }
@@ -1425,11 +1425,7 @@ impl SymbolSource for JvmLibraries {
             let mut logical: Vec<Ty> = value_params
                 .iter()
                 .zip(&mf.value_param_types)
-                .map(|(p, vt)| {
-                    vt.as_deref()
-                        .map(super::classpath::kotlin_name_to_ty)
-                        .unwrap_or(*p)
-                })
+                .map(|(p, vt)| vt.as_deref().map(kotlin_name_to_ty).unwrap_or(*p))
                 .collect();
             // A `suspend` member's `params` carry the trailing `Continuation` (the resolver strips it when
             // matching a call, exactly as for a non-mangled suspend member); the logical value parameters
@@ -1512,17 +1508,9 @@ impl SymbolSource for JvmLibraries {
         };
         // A classpath `@JvmInline value class` (detected via `@Metadata`): its erased underlying type, so
         // the JVM backend can unbox it like a user value class. `UInt` → `Int`, `Result` → `Any`.
-        let value_underlying = crate::jvm::metadata::class_inline(&ci).map(|ic| {
+        let value_underlying = metadata::class_inline(&ci).map(|ic| {
             match ic.underlying_class.as_deref() {
-                Some("kotlin/Boolean") => Ty::Boolean,
-                Some("kotlin/Byte") => Ty::Byte,
-                Some("kotlin/Short") => Ty::Short,
-                Some("kotlin/Int") => Ty::Int,
-                Some("kotlin/Long") => Ty::Long,
-                Some("kotlin/Char") => Ty::Char,
-                Some("kotlin/Float") => Ty::Float,
-                Some("kotlin/Double") => Ty::Double,
-                Some(other) => Ty::obj(other),
+                Some(other) => kotlin_name_to_ty(other),
                 // The underlying type was carried in the @Metadata type TABLE (proto field 19), not
                 // inlined — `class_inline` can't resolve it there. Recover it from the synthesized
                 // `box-impl(U)` parameter descriptor, the authoritative JVM underlying type. (A type
@@ -1685,9 +1673,10 @@ impl SymbolSource for JvmLibraries {
                             .and_then(|m| m.receiver_class.as_ref())
                             .is_some_and(|rc| {
                                 receiver.obj_internal() == Some(rc.as_str())
-                                    && self.cp.find(rc).is_some_and(|ci| {
-                                        crate::jvm::metadata::class_inline(&ci).is_some()
-                                    })
+                                    && self
+                                        .cp
+                                        .find(rc)
+                                        .is_some_and(|ci| metadata::class_inline(&ci).is_some())
                             });
                         if value_recv_match {
                             public = true;
@@ -1948,7 +1937,7 @@ impl SymbolSource for JvmLibraries {
                                 .iter()
                                 .map(|vt| {
                                     vt.as_deref()
-                                        .map(super::classpath::kotlin_name_to_ty)
+                                        .map(kotlin_name_to_ty)
                                         .unwrap_or(Ty::obj("kotlin/Any"))
                                 })
                                 .collect();
@@ -2122,7 +2111,7 @@ impl SymbolSource for JvmLibraries {
                                 // `ret_nullable` below (which mirrors the non-suspend member path).
                                 base.obj_internal()
                                     .and_then(super::jvm_class_map::wrapper_to_kotlin_prim)
-                                    .map(super::classpath::kotlin_name_to_ty)
+                                    .map(kotlin_name_to_ty)
                                     .unwrap_or(base)
                             } else {
                                 let recovered =
