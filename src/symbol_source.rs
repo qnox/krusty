@@ -78,8 +78,8 @@ pub trait SymbolSource {
     /// Whether this source recognizes `ty` as one of Kotlin's unsigned integer library types. The checker
     /// uses this for the source-level unsigned arithmetic/equality rules without carrying a local list of
     /// `UInt`/`ULong` in resolver code.
-    fn is_unsigned_integer_type(&self, _ty: Ty) -> bool {
-        false
+    fn is_unsigned_integer_type(&self, ty: Ty) -> bool {
+        ty.is_unsigned()
     }
 
     /// Normalize a semantic type to the form a JVM `<init>`/method descriptor carries, so a call
@@ -229,10 +229,6 @@ impl SymbolSource for CompositeSource {
 
     fn value_underlying(&self, ty: Ty) -> Option<Ty> {
         self.children.iter().find_map(|c| c.value_underlying(ty))
-    }
-
-    fn is_unsigned_integer_type(&self, ty: Ty) -> bool {
-        self.children.iter().any(|c| c.is_unsigned_integer_type(ty))
     }
 
     fn jvm_descriptor_form(&self, ty: Ty) -> Ty {
