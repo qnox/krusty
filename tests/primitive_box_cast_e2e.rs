@@ -4,15 +4,8 @@
 
 mod common;
 
-fn run(src: &str) -> Option<String> {
-    common::compile_and_run_with_stdlib(src, "P")
-}
-
 #[test]
 fn primitive_to_reference_cast_boxes() {
-    if !common::stdlib_toolchain_ready() {
-        return;
-    }
     const SRC: &str = "// WITH_STDLIB\n\
 fun box(): String {\n\
     val a: Any = 42 as Any\n\
@@ -24,10 +17,7 @@ fun box(): String {\n\
     if (bn!!.toInt() != 10) return \"fail byte\"\n\
     return \"OK\"\n\
 }\n";
-    assert_eq!(
-        run(SRC).expect("primitive→reference cast should compile + run"),
-        "OK"
-    );
+    common::expect_box_ok_with_stdlib(SRC, "P");
 }
 
 #[test]
