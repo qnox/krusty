@@ -8,14 +8,6 @@ mod common;
 
 #[test]
 fn trailing_lambda_skips_defaulted_middle_param() {
-    let Some(java_home) = common::java_home() else {
-        eprintln!("skipping trailing_lambda_default_e2e: set JAVA_HOME");
-        return;
-    };
-    let Some(stdlib) = common::stdlib_jar() else {
-        eprintln!("skipping trailing_lambda_default_e2e: no kotlin-stdlib jar found");
-        return;
-    };
     // `host` has a defaulted MIDDLE parameter `modifier`; the call omits it and passes a trailing lambda
     // for the final `builder` parameter. `builder` runs and appends to a StringBuilder we observe.
     const SRC: &str = "\
@@ -33,9 +25,5 @@ fun box(): String {\n\
   if (b != \"pXB\") return \"f2: \" + b\n\
   return \"OK\"\n\
 }\n";
-    let jdk = std::path::PathBuf::from(format!("{java_home}/lib/modules"));
-    let Some(out) = common::compile_and_run_box(SRC, "D", &[stdlib], Some(&jdk)) else {
-        return;
-    };
-    assert_eq!(out, "OK");
+    common::assert_box_ok_with_stdlib(SRC, "D");
 }

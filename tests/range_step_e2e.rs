@@ -7,14 +7,6 @@ mod common;
 
 #[test]
 fn stepped_progressions_run() {
-    let Some(java_home) = common::java_home() else {
-        eprintln!("skipping range_step_e2e: set JAVA_HOME");
-        return;
-    };
-    let Some(stdlib) = common::stdlib_jar() else {
-        eprintln!("skipping range_step_e2e: no kotlin-stdlib jar found");
-        return;
-    };
     // Each case's expected sum is computed from the exact progression the stdlib produces.
     const SRC: &str = "fun box(): String {\n\
 var a = 0; for (i in 0..6 step 2) a += i\n\
@@ -50,9 +42,5 @@ val ulr = 1uL..<3uL\n\
 if (!ulr.contains(1uL) || ulr.contains(3uL)) return \"ulr\"\n\
 return \"OK\"\n\
 }\n";
-    let jdk = std::path::PathBuf::from(format!("{java_home}/lib/modules"));
-    let Some(out) = common::compile_and_run_box(SRC, "R", &[stdlib], Some(&jdk)) else {
-        return;
-    };
-    assert_eq!(out, "OK");
+    common::assert_box_ok_with_stdlib(SRC, "R");
 }
