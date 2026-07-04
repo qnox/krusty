@@ -2276,22 +2276,7 @@ impl SymbolSource for JvmLibraries {
                 let inline = self
                     .cp
                     .is_inline_callable(&c.owner, meta_name, &inline_desc, &params);
-                let param_defaults = self
-                    .cp
-                    .metadata_param_defaults(&c.owner, meta_name, &params)
-                    .unwrap_or_default();
-                let call_sig = CallSig::metadata_top_level(
-                    params.len(),
-                    self.cp.metadata_param_names(&c.owner, meta_name, &params),
-                    param_defaults,
-                    self.cp
-                        .metadata_param_recv_funs(&c.owner, meta_name)
-                        .into_iter()
-                        .map(|o| o.map(|internal| Ty::obj(&internal)))
-                        .collect(),
-                    self.cp.metadata_param_recv_fun_flags(&c.owner, meta_name),
-                    self.cp.metadata_param_materialized(&c.owner, meta_name),
-                );
+                let call_sig = self.cp.metadata_call_sig(&c.owner, meta_name, &params);
                 let ret_metadata =
                     classpath_return_info(self.cp.metadata_return(&c.owner, meta_name).as_ref());
                 let ret = if suspend {
