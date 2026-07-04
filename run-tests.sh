@@ -41,7 +41,7 @@ trap cleanup EXIT
 # startup/warmup costs. Running binaries concurrently keeps each binary's in-process shared JVM runner
 # while avoiding the sequential binary bottleneck.
 build_log="$logdir/build.log"
-cargo test --profile gate --no-run 2>&1 | tee "$build_log"
+cargo test --color never --profile gate --no-run 2>&1 | tee "$build_log"
 
 bins=()
 while IFS=$'\t' read -r target path; do
