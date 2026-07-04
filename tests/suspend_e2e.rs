@@ -6,6 +6,7 @@
 //! exactly this shape.
 
 use std::fs;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use super::common;
@@ -72,6 +73,32 @@ fn stdlib_jar() -> Option<String> {
             return None;
         }
     }
+}
+
+fn jdk_modules_path() -> Option<PathBuf> {
+    common::jdk_modules()
+}
+
+fn compile_krusty_src(
+    stem: &str,
+    src: &str,
+    cp_jars: &[PathBuf],
+    jdk_modules: Option<&Path>,
+    out_dir: &Path,
+) {
+    common::compile_to_dir(src, stem, cp_jars, jdk_modules, out_dir)
+        .unwrap_or_else(|| panic!("{stem}: krusty failed to compile"));
+}
+
+fn compile_krusty_with_stdlib(stem: &str, src: &str, stdlib: &str, out_dir: &Path) {
+    let cp = [PathBuf::from(stdlib)];
+    let jdk = jdk_modules_path();
+    compile_krusty_src(stem, src, &cp, jdk.as_deref(), out_dir);
+}
+
+fn compile_krusty_with_cp(stem: &str, src: &str, cp_jars: &[PathBuf], out_dir: &Path) {
+    let jdk = jdk_modules_path();
+    compile_krusty_src(stem, src, cp_jars, jdk.as_deref(), out_dir);
 }
 
 #[test]
@@ -164,24 +191,14 @@ fn suspend_lambda_control_flow_with_capture_runs() {
     let Some(stdlib) = stdlib_jar() else {
         return;
     };
-    let krusty = env!("CARGO_BIN_EXE_krusty");
     let dir = std::env::temp_dir().join(format!("krusty_susp_lamcf_{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
-    fs::write(
-        dir.join("S.kt"),
+    compile_krusty_with_stdlib(
+        "S",
         "suspend fun foo(): Int = 42\nfun make(c: Boolean): suspend () -> Int = {\n    if (c) foo() else 7\n}\n",
-    )
-    .unwrap();
-    let kc = Command::new(krusty)
-        .args(["-cp", &stdlib, "-d", dir.to_str().unwrap()])
-        .arg(dir.join("S.kt"))
-        .output()
-        .unwrap();
-    assert!(
-        kc.status.success(),
-        "krusty failed:\n{}",
-        String::from_utf8_lossy(&kc.stderr)
+        &stdlib,
+        &dir,
     );
     let driver = "import kotlin.coroutines.*;\n\
 import kotlin.jvm.functions.Function1;\n\
@@ -225,24 +242,14 @@ fn suspend_lambda_param_with_suspension_runs() {
     let Some(stdlib) = stdlib_jar() else {
         return;
     };
-    let krusty = env!("CARGO_BIN_EXE_krusty");
     let dir = std::env::temp_dir().join(format!("krusty_susp_lampsusp_{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
-    fs::write(
-        dir.join("S.kt"),
+    compile_krusty_with_stdlib(
+        "S",
         "suspend fun foo(): Int = 42\nfun make(): suspend (Int) -> Int = {\n    val a = foo()\n    it + a\n}\n",
-    )
-    .unwrap();
-    let kc = Command::new(krusty)
-        .args(["-cp", &stdlib, "-d", dir.to_str().unwrap()])
-        .arg(dir.join("S.kt"))
-        .output()
-        .unwrap();
-    assert!(
-        kc.status.success(),
-        "krusty failed:\n{}",
-        String::from_utf8_lossy(&kc.stderr)
+        &stdlib,
+        &dir,
     );
     let driver = "import kotlin.coroutines.*;\n\
 import kotlin.jvm.functions.Function2;\n\
@@ -283,24 +290,14 @@ fn suspend_lambda_captures_with_suspension_runs() {
     let Some(stdlib) = stdlib_jar() else {
         return;
     };
-    let krusty = env!("CARGO_BIN_EXE_krusty");
     let dir = std::env::temp_dir().join(format!("krusty_susp_lamcapsusp_{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
-    fs::write(
-        dir.join("S.kt"),
+    compile_krusty_with_stdlib(
+        "S",
         "suspend fun foo(): Int = 42\nfun make(n: Int): suspend () -> Int = {\n    val a = foo()\n    n + a\n}\n",
-    )
-    .unwrap();
-    let kc = Command::new(krusty)
-        .args(["-cp", &stdlib, "-d", dir.to_str().unwrap()])
-        .arg(dir.join("S.kt"))
-        .output()
-        .unwrap();
-    assert!(
-        kc.status.success(),
-        "krusty failed:\n{}",
-        String::from_utf8_lossy(&kc.stderr)
+        &stdlib,
+        &dir,
     );
     let driver = "import kotlin.coroutines.*;\n\
 import kotlin.jvm.functions.Function1;\n\
@@ -341,7 +338,6 @@ fn suspend_lambda_two_suspensions_async_resume() {
     let (Some(stdlib), Some(_kotlinc)) = (stdlib_jar(), kotlinc_bin()) else {
         return;
     };
-    let krusty = env!("CARGO_BIN_EXE_krusty");
     let dir = std::env::temp_dir().join(format!("krusty_susp_lam2as_{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
@@ -372,21 +368,11 @@ fun resumeSaved(v: Int) { saved!!.resumeWith(Result.success(v)) }\n",
         }
         None => return,
     }
-    fs::write(
-        dir.join("Use.kt"),
+    compile_krusty_with_cp(
+        "Use",
         "fun make(): suspend () -> Int = {\n    val a = suspendOnce()\n    val b = plain()\n    a + b\n}\n",
-    )
-    .unwrap();
-    let cp_compile = format!("{}:{}", libjar.to_str().unwrap(), stdlib);
-    let ku = Command::new(krusty)
-        .args(["-cp", &cp_compile, "-d", dir.to_str().unwrap()])
-        .arg(dir.join("Use.kt"))
-        .output()
-        .unwrap();
-    assert!(
-        ku.status.success(),
-        "krusty failed:\n{}",
-        String::from_utf8_lossy(&ku.stderr)
+        &[libjar.clone(), PathBuf::from(&stdlib)],
+        &dir,
     );
     let driver = "import kotlin.coroutines.*;\n\
 import kotlin.coroutines.intrinsics.IntrinsicsKt;\n\
@@ -435,24 +421,14 @@ fn suspend_lambda_two_suspensions_runs() {
     let Some(stdlib) = stdlib_jar() else {
         return;
     };
-    let krusty = env!("CARGO_BIN_EXE_krusty");
     let dir = std::env::temp_dir().join(format!("krusty_susp_lam2_{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
-    fs::write(
-        dir.join("S.kt"),
+    compile_krusty_with_stdlib(
+        "S",
         "suspend fun foo(): Int = 42\nsuspend fun bar(): Int = 100\nfun make(): suspend () -> Int = {\n    val a = foo()\n    val b = bar()\n    a + b\n}\n",
-    )
-    .unwrap();
-    let kc = Command::new(krusty)
-        .args(["-cp", &stdlib, "-d", dir.to_str().unwrap()])
-        .arg(dir.join("S.kt"))
-        .output()
-        .unwrap();
-    assert!(
-        kc.status.success(),
-        "krusty failed:\n{}",
-        String::from_utf8_lossy(&kc.stderr)
+        &stdlib,
+        &dir,
     );
     let driver = "import kotlin.coroutines.*;\n\
 import kotlin.jvm.functions.Function1;\n\
@@ -493,24 +469,14 @@ fn suspend_lambda_non_tail_body_runs() {
     let Some(stdlib) = stdlib_jar() else {
         return;
     };
-    let krusty = env!("CARGO_BIN_EXE_krusty");
     let dir = std::env::temp_dir().join(format!("krusty_susp_lamnontail_{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
-    fs::write(
-        dir.join("S.kt"),
+    compile_krusty_with_stdlib(
+        "S",
         "suspend fun foo(): Int = 42\nfun make(): suspend () -> Int = {\n    val a = foo()\n    a + 1\n}\n",
-    )
-    .unwrap();
-    let kc = Command::new(krusty)
-        .args(["-cp", &stdlib, "-d", dir.to_str().unwrap()])
-        .arg(dir.join("S.kt"))
-        .output()
-        .unwrap();
-    assert!(
-        kc.status.success(),
-        "krusty failed:\n{}",
-        String::from_utf8_lossy(&kc.stderr)
+        &stdlib,
+        &dir,
     );
     let driver = "import kotlin.coroutines.*;\n\
 import kotlin.jvm.functions.Function1;\n\
@@ -551,25 +517,15 @@ fn suspend_fun_suspension_in_and_condition() {
     let Some(stdlib) = stdlib_jar() else {
         return;
     };
-    let krusty = env!("CARGO_BIN_EXE_krusty");
     let dir = std::env::temp_dir().join(format!("krusty_susp_andcond_{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
-    fs::write(
-        dir.join("S.kt"),
+    compile_krusty_with_stdlib(
+        "S",
         "suspend fun check(): Boolean = true\n\
          suspend fun bar(c: Boolean): Int {\n    if (c && check()) return 1\n    return 2\n}\n",
-    )
-    .unwrap();
-    let kc = Command::new(krusty)
-        .args(["-cp", &stdlib, "-d", dir.to_str().unwrap()])
-        .arg(dir.join("S.kt"))
-        .output()
-        .unwrap();
-    assert!(
-        kc.status.success(),
-        "krusty failed:\n{}",
-        String::from_utf8_lossy(&kc.stderr)
+        &stdlib,
+        &dir,
     );
     let driver = "import kotlin.coroutines.*;\n\
 public class M {\n\
@@ -613,24 +569,14 @@ fn suspend_lambda_with_parameter_runs() {
     let Some(stdlib) = stdlib_jar() else {
         return;
     };
-    let krusty = env!("CARGO_BIN_EXE_krusty");
     let dir = std::env::temp_dir().join(format!("krusty_susp_lamparam_{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
-    fs::write(
-        dir.join("S.kt"),
+    compile_krusty_with_stdlib(
+        "S",
         "fun make(): suspend (Int) -> Int = { it + 1 }\n",
-    )
-    .unwrap();
-    let kc = Command::new(krusty)
-        .args(["-cp", &stdlib, "-d", dir.to_str().unwrap()])
-        .arg(dir.join("S.kt"))
-        .output()
-        .unwrap();
-    assert!(
-        kc.status.success(),
-        "krusty failed:\n{}",
-        String::from_utf8_lossy(&kc.stderr)
+        &stdlib,
+        &dir,
     );
     let driver = "import kotlin.coroutines.*;\n\
 import kotlin.jvm.functions.Function2;\n\
@@ -671,7 +617,6 @@ fn suspend_lambda_internal_suspension_async_resume() {
     let (Some(stdlib), Some(_kotlinc)) = (stdlib_jar(), kotlinc_bin()) else {
         return;
     };
-    let krusty = env!("CARGO_BIN_EXE_krusty");
     let dir = std::env::temp_dir().join(format!("krusty_susp_laminas_{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
@@ -701,21 +646,11 @@ fun resumeSaved(v: Int) { saved!!.resumeWith(Result.success(v)) }\n",
         }
         None => return,
     }
-    fs::write(
-        dir.join("Use.kt"),
+    compile_krusty_with_cp(
+        "Use",
         "fun make(): suspend () -> Int = { suspendOnce() }\n",
-    )
-    .unwrap();
-    let cp_compile = format!("{}:{}", libjar.to_str().unwrap(), stdlib);
-    let ku = Command::new(krusty)
-        .args(["-cp", &cp_compile, "-d", dir.to_str().unwrap()])
-        .arg(dir.join("Use.kt"))
-        .output()
-        .unwrap();
-    assert!(
-        ku.status.success(),
-        "krusty failed:\n{}",
-        String::from_utf8_lossy(&ku.stderr)
+        &[libjar.clone(), PathBuf::from(&stdlib)],
+        &dir,
     );
     let driver = "import kotlin.coroutines.*;\n\
 import kotlin.coroutines.intrinsics.IntrinsicsKt;\n\
@@ -765,24 +700,14 @@ fn suspend_lambda_with_internal_suspension_runs() {
     let Some(stdlib) = stdlib_jar() else {
         return;
     };
-    let krusty = env!("CARGO_BIN_EXE_krusty");
     let dir = std::env::temp_dir().join(format!("krusty_susp_laminsusp_{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
-    fs::write(
-        dir.join("S.kt"),
+    compile_krusty_with_stdlib(
+        "S",
         "suspend fun foo(): Int = 42\nfun make(): suspend () -> Int = { foo() }\n",
-    )
-    .unwrap();
-    let kc = Command::new(krusty)
-        .args(["-cp", &stdlib, "-d", dir.to_str().unwrap()])
-        .arg(dir.join("S.kt"))
-        .output()
-        .unwrap();
-    assert!(
-        kc.status.success(),
-        "krusty failed:\n{}",
-        String::from_utf8_lossy(&kc.stderr)
+        &stdlib,
+        &dir,
     );
     let driver = "import kotlin.coroutines.*;\n\
 import kotlin.jvm.functions.Function1;\n\
@@ -823,24 +748,14 @@ fn suspend_lambda_captures_enclosing_variable() {
     let Some(stdlib) = stdlib_jar() else {
         return;
     };
-    let krusty = env!("CARGO_BIN_EXE_krusty");
     let dir = std::env::temp_dir().join(format!("krusty_susp_lamcap_{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
-    fs::write(
-        dir.join("S.kt"),
+    compile_krusty_with_stdlib(
+        "S",
         "fun make(n: Int): suspend () -> Int = { n + 1 }\n",
-    )
-    .unwrap();
-    let kc = Command::new(krusty)
-        .args(["-cp", &stdlib, "-d", dir.to_str().unwrap()])
-        .arg(dir.join("S.kt"))
-        .output()
-        .unwrap();
-    assert!(
-        kc.status.success(),
-        "krusty failed:\n{}",
-        String::from_utf8_lossy(&kc.stderr)
+        &stdlib,
+        &dir,
     );
     let driver = "import kotlin.coroutines.*;\n\
 import kotlin.jvm.functions.Function1;\n\
@@ -882,20 +797,14 @@ fn leaf_suspend_lambda_creates_and_invokes() {
     let Some(stdlib) = stdlib_jar() else {
         return;
     };
-    let krusty = env!("CARGO_BIN_EXE_krusty");
     let dir = std::env::temp_dir().join(format!("krusty_susp_lam_{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
-    fs::write(dir.join("S.kt"), "fun make(): suspend () -> Int = { 42 }\n").unwrap();
-    let kc = Command::new(krusty)
-        .args(["-cp", &stdlib, "-d", dir.to_str().unwrap()])
-        .arg(dir.join("S.kt"))
-        .output()
-        .unwrap();
-    assert!(
-        kc.status.success(),
-        "krusty failed:\n{}",
-        String::from_utf8_lossy(&kc.stderr)
+    compile_krusty_with_stdlib(
+        "S",
+        "fun make(): suspend () -> Int = { 42 }\n",
+        &stdlib,
+        &dir,
     );
     let driver = "import kotlin.coroutines.*;\n\
 import kotlin.jvm.functions.Function1;\n\
@@ -954,25 +863,15 @@ fn suspend_fun_suspension_on_elvis_rhs() {
     let Some(stdlib) = stdlib_jar() else {
         return;
     };
-    let krusty = env!("CARGO_BIN_EXE_krusty");
     let dir = std::env::temp_dir().join(format!("krusty_susp_elvis_{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
-    fs::write(
-        dir.join("S.kt"),
+    compile_krusty_with_stdlib(
+        "S",
         "suspend fun fallback(): Int = 7\n\
          suspend fun bar(x: Int?): Int {\n    val a = x ?: fallback()\n    return a + 1\n}\n",
-    )
-    .unwrap();
-    let kc = Command::new(krusty)
-        .args(["-cp", &stdlib, "-d", dir.to_str().unwrap()])
-        .arg(dir.join("S.kt"))
-        .output()
-        .unwrap();
-    assert!(
-        kc.status.success(),
-        "krusty failed:\n{}",
-        String::from_utf8_lossy(&kc.stderr)
+        &stdlib,
+        &dir,
     );
     let driver = "import kotlin.coroutines.*;\n\
 public class M {\n\
@@ -1036,21 +935,10 @@ fn run_suspend(name: &str, src: &str, call: &str, expect: i32) {
         eprintln!("skipping: no kotlin-stdlib.jar found");
         return;
     };
-    let krusty = env!("CARGO_BIN_EXE_krusty");
     let dir = std::env::temp_dir().join(format!("krusty_susp_{name}_{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
-    fs::write(dir.join("S.kt"), src).unwrap();
-    let kc = Command::new(krusty)
-        .args(["-cp", &stdlib, "-d", dir.to_str().unwrap()])
-        .arg(dir.join("S.kt"))
-        .output()
-        .unwrap();
-    assert!(
-        kc.status.success(),
-        "{name}: krusty failed to compile:\n{}",
-        String::from_utf8_lossy(&kc.stderr)
-    );
+    compile_krusty_with_stdlib("S", src, &stdlib, &dir);
     let driver = format!(
         "import kotlin.coroutines.Continuation;\n\
 import kotlin.coroutines.CoroutineContext;\n\
@@ -1182,7 +1070,6 @@ fn suspend_fun_calls_classpath_suspend_fun() {
     let (Some(stdlib), Some(_kotlinc)) = (stdlib_jar(), kotlinc_bin()) else {
         return;
     };
-    let krusty = env!("CARGO_BIN_EXE_krusty");
     let dir = std::env::temp_dir().join(format!("krusty_susp_cp_{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
@@ -1204,21 +1091,11 @@ fn suspend_fun_calls_classpath_suspend_fun() {
         None => return,
     }
     // 2) krusty compiles the caller against the lib jar + stdlib.
-    fs::write(
-        dir.join("Use.kt"),
+    compile_krusty_with_cp(
+        "Use",
         "suspend fun caller(): Int {\n    val a = helper()\n    return a + 1\n}\n",
-    )
-    .unwrap();
-    let cp_compile = format!("{}:{}", libjar.to_str().unwrap(), stdlib);
-    let ku = Command::new(krusty)
-        .args(["-cp", &cp_compile, "-d", dir.to_str().unwrap()])
-        .arg(dir.join("Use.kt"))
-        .output()
-        .unwrap();
-    assert!(
-        ku.status.success(),
-        "krusty failed to compile against classpath suspend dep:\n{}",
-        String::from_utf8_lossy(&ku.stderr)
+        &[libjar.clone(), PathBuf::from(&stdlib)],
+        &dir,
     );
     // 3) drive UseKt.caller(k) → 43.
     let driver = "import kotlin.coroutines.*;\n\
@@ -1319,25 +1196,15 @@ fn state_machine_member_suspend_fun_runs() {
     let Some(stdlib) = stdlib_jar() else {
         return;
     };
-    let krusty = env!("CARGO_BIN_EXE_krusty");
     let dir = std::env::temp_dir().join(format!("krusty_susp_smmem_{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
-    fs::write(
-        dir.join("S.kt"),
+    compile_krusty_with_stdlib(
+        "S",
         "suspend fun foo(): Int = 42\n\
          class C(val base: Int) {\n    suspend fun m(): Int {\n        val a = foo()\n        return base + a\n    }\n}\n",
-    )
-    .unwrap();
-    let kc = Command::new(krusty)
-        .args(["-cp", &stdlib, "-d", dir.to_str().unwrap()])
-        .arg(dir.join("S.kt"))
-        .output()
-        .unwrap();
-    assert!(
-        kc.status.success(),
-        "krusty failed:\n{}",
-        String::from_utf8_lossy(&kc.stderr)
+        &stdlib,
+        &dir,
     );
     let driver = "import kotlin.coroutines.*;\n\
 public class M {\n\
@@ -1376,25 +1243,15 @@ fn state_machine_member_suspend_fun_with_param_runs() {
     let Some(stdlib) = stdlib_jar() else {
         return;
     };
-    let krusty = env!("CARGO_BIN_EXE_krusty");
     let dir = std::env::temp_dir().join(format!("krusty_susp_smmemp_{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
-    fs::write(
-        dir.join("S.kt"),
+    compile_krusty_with_stdlib(
+        "S",
         "suspend fun foo(): Int = 42\n\
          class C(val base: Int) {\n    suspend fun m(x: Int): Int {\n        val a = foo()\n        return base + a + x\n    }\n}\n",
-    )
-    .unwrap();
-    let kc = Command::new(krusty)
-        .args(["-cp", &stdlib, "-d", dir.to_str().unwrap()])
-        .arg(dir.join("S.kt"))
-        .output()
-        .unwrap();
-    assert!(
-        kc.status.success(),
-        "krusty failed:\n{}",
-        String::from_utf8_lossy(&kc.stderr)
+        &stdlib,
+        &dir,
     );
     let driver = "import kotlin.coroutines.*;\n\
 public class M {\n\
@@ -1433,7 +1290,6 @@ fn toplevel_suspend_fun_with_param_survives_async_resume() {
     let (Some(stdlib), Some(_kotlinc)) = (stdlib_jar(), kotlinc_bin()) else {
         return;
     };
-    let krusty = env!("CARGO_BIN_EXE_krusty");
     let dir = std::env::temp_dir().join(format!("krusty_susp_tlp_async_{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
@@ -1463,21 +1319,11 @@ fun resumeSaved(v: Int) { saved!!.resumeWith(Result.success(v)) }\n",
         }
         None => return,
     }
-    fs::write(
-        dir.join("Use.kt"),
+    compile_krusty_with_cp(
+        "Use",
         "suspend fun caller(x: Int): Int {\n    val a = suspendOnce()\n    return a + x\n}\n",
-    )
-    .unwrap();
-    let cp_compile = format!("{}:{}", libjar.to_str().unwrap(), stdlib);
-    let ku = Command::new(krusty)
-        .args(["-cp", &cp_compile, "-d", dir.to_str().unwrap()])
-        .arg(dir.join("Use.kt"))
-        .output()
-        .unwrap();
-    assert!(
-        ku.status.success(),
-        "krusty failed:\n{}",
-        String::from_utf8_lossy(&ku.stderr)
+        &[libjar.clone(), PathBuf::from(&stdlib)],
+        &dir,
     );
     let driver = "import kotlin.coroutines.*;\n\
 import kotlin.coroutines.intrinsics.IntrinsicsKt;\n\
@@ -1527,7 +1373,6 @@ fn member_suspend_fun_with_param_survives_async_resume() {
     let (Some(stdlib), Some(_kotlinc)) = (stdlib_jar(), kotlinc_bin()) else {
         return;
     };
-    let krusty = env!("CARGO_BIN_EXE_krusty");
     let dir = std::env::temp_dir().join(format!("krusty_susp_memp_async_{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
@@ -1557,21 +1402,11 @@ fun resumeSaved(v: Int) { saved!!.resumeWith(Result.success(v)) }\n",
         }
         None => return,
     }
-    fs::write(
-        dir.join("Use.kt"),
+    compile_krusty_with_cp(
+        "Use",
         "class C(val base: Int) {\n    suspend fun m(x: Int): Int {\n        val a = suspendOnce()\n        return base + a + x\n    }\n}\n",
-    )
-    .unwrap();
-    let cp_compile = format!("{}:{}", libjar.to_str().unwrap(), stdlib);
-    let ku = Command::new(krusty)
-        .args(["-cp", &cp_compile, "-d", dir.to_str().unwrap()])
-        .arg(dir.join("Use.kt"))
-        .output()
-        .unwrap();
-    assert!(
-        ku.status.success(),
-        "krusty failed:\n{}",
-        String::from_utf8_lossy(&ku.stderr)
+        &[libjar.clone(), PathBuf::from(&stdlib)],
+        &dir,
     );
     let driver = "import kotlin.coroutines.*;\n\
 import kotlin.coroutines.intrinsics.IntrinsicsKt;\n\
@@ -1619,24 +1454,14 @@ fn leaf_member_suspend_fun_runs() {
     let Some(stdlib) = stdlib_jar() else {
         return;
     };
-    let krusty = env!("CARGO_BIN_EXE_krusty");
     let dir = std::env::temp_dir().join(format!("krusty_susp_mem_{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
-    fs::write(
-        dir.join("S.kt"),
+    compile_krusty_with_stdlib(
+        "S",
         "class C(val base: Int) {\n    suspend fun m(): Int = base + 5\n}\n",
-    )
-    .unwrap();
-    let kc = Command::new(krusty)
-        .args(["-cp", &stdlib, "-d", dir.to_str().unwrap()])
-        .arg(dir.join("S.kt"))
-        .output()
-        .unwrap();
-    assert!(
-        kc.status.success(),
-        "krusty failed to compile member suspend:\n{}",
-        String::from_utf8_lossy(&kc.stderr)
+        &stdlib,
+        &dir,
     );
     let driver = "import kotlin.coroutines.*;\n\
 public class M {\n\
@@ -1800,7 +1625,6 @@ fn suspend_fun_actually_suspends_and_resumes_async() {
     let (Some(stdlib), Some(_kotlinc)) = (stdlib_jar(), kotlinc_bin()) else {
         return;
     };
-    let krusty = env!("CARGO_BIN_EXE_krusty");
     let dir = std::env::temp_dir().join(format!("krusty_susp_async_{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
@@ -1832,21 +1656,11 @@ fun resumeSaved(v: Int) { saved!!.resumeWith(Result.success(v)) }\n",
         None => return,
     }
     // krusty compiles a caller that suspends on the primitive.
-    fs::write(
-        dir.join("Use.kt"),
+    compile_krusty_with_cp(
+        "Use",
         "suspend fun caller(): Int {\n    val a = suspendOnce()\n    return a + 1\n}\n",
-    )
-    .unwrap();
-    let cp_compile = format!("{}:{}", libjar.to_str().unwrap(), stdlib);
-    let ku = Command::new(krusty)
-        .args(["-cp", &cp_compile, "-d", dir.to_str().unwrap()])
-        .arg(dir.join("Use.kt"))
-        .output()
-        .unwrap();
-    assert!(
-        ku.status.success(),
-        "krusty failed to compile async suspend caller:\n{}",
-        String::from_utf8_lossy(&ku.stderr)
+        &[libjar.clone(), PathBuf::from(&stdlib)],
+        &dir,
     );
     // Driver: caller suspends (returns COROUTINE_SUSPENDED); resume with 42; completion receives 43.
     let driver = "import kotlin.coroutines.*;\n\

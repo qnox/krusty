@@ -86,6 +86,28 @@ pub fn compile_in_process(
     }
 }
 
+/// Compile Kotlin `src` in-process and write the emitted `.class` files under `out_dir`, preserving
+/// package directories. This matches the classfile layout the CLI writes for tests that need to run a
+/// Java driver against krusty output, without paying a subprocess/compiler-cache cold start per case.
+#[allow(dead_code)]
+pub fn compile_to_dir(
+    src: &str,
+    stem: &str,
+    cp_jars: &[PathBuf],
+    jdk_modules: Option<&std::path::Path>,
+    out_dir: &Path,
+) -> Option<()> {
+    let classes = compile_in_process(src, stem, cp_jars, jdk_modules)?;
+    for (name, bytes) in classes {
+        let path = out_dir.join(format!("{name}.class"));
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).ok()?;
+        }
+        std::fs::write(path, bytes).ok()?;
+    }
+    Some(())
+}
+
 /// Lower Kotlin `src` to backend-agnostic IR (`lex → parse → check → collect → ir_lower`), stopping
 /// before any JVM-specific pass — the exact input the alternate (`js`) backend consumes. Returns
 /// `None` on a front-end error (caller skips). Shares the same thread-local `Classpath` cache as
