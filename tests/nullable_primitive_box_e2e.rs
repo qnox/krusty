@@ -7,16 +7,8 @@
 
 mod common;
 
-fn run(src: &str) -> Option<String> {
-    common::compile_and_run_with_stdlib(src, "P")
-}
-
-/// Skip (not fail) when the JVM + stdlib jar this e2e needs is absent.
 #[test]
 fn boxed_nullable_int_equality() {
-    if !common::stdlib_toolchain_ready() {
-        return;
-    }
     const SRC: &str = "// WITH_STDLIB\n\
 fun box(): String {\n\
     val a: Int? = 5\n\
@@ -27,31 +19,22 @@ fun box(): String {\n\
     if (c != null) return \"fail null\"\n\
     return \"OK\"\n\
 }\n";
-    assert_eq!(
-        run(SRC).expect("boxed Int? equality should compile + run"),
-        "OK"
-    );
+    common::expect_box_ok_with_stdlib(SRC, "P");
 }
 
 #[test]
 fn not_null_assert_on_nullable_int_arith() {
-    if !common::stdlib_toolchain_ready() {
-        return;
-    }
     const SRC: &str = "// WITH_STDLIB\n\
 fun box(): String {\n\
     val a: Int? = 7\n\
     val r = a!! + 1\n\
     return if (r == 8) \"OK\" else \"fail\"\n\
 }\n";
-    assert_eq!(run(SRC).expect("`Int?!! + 1` should compile + run"), "OK");
+    common::expect_box_ok_with_stdlib(SRC, "P");
 }
 
 #[test]
 fn elvis_on_nullable_int() {
-    if !common::stdlib_toolchain_ready() {
-        return;
-    }
     const SRC: &str = "// WITH_STDLIB\n\
 fun box(): String {\n\
     val a: Int? = null\n\
@@ -60,14 +43,11 @@ fun box(): String {\n\
     if ((b ?: 0) != 9) return \"fail nonnull\"\n\
     return \"OK\"\n\
 }\n";
-    assert_eq!(run(SRC).expect("`Int? ?: 0` should compile + run"), "OK");
+    common::expect_box_ok_with_stdlib(SRC, "P");
 }
 
 #[test]
 fn nullable_int_returned_from_function() {
-    if !common::stdlib_toolchain_ready() {
-        return;
-    }
     const SRC: &str = "// WITH_STDLIB\n\
 fun f(b: Boolean): Int? = if (b) 42 else null\n\
 fun box(): String {\n\
@@ -75,17 +55,11 @@ fun box(): String {\n\
     if (f(false) != null) return \"fail false\"\n\
     return \"OK\"\n\
 }\n";
-    assert_eq!(
-        run(SRC).expect("a `: Int?` return should compile + run"),
-        "OK"
-    );
+    common::expect_box_ok_with_stdlib(SRC, "P");
 }
 
 #[test]
 fn data_class_with_nullable_int_field() {
-    if !common::stdlib_toolchain_ready() {
-        return;
-    }
     const SRC: &str = "// WITH_STDLIB\n\
 data class P(val x: Int?, val y: String)\n\
 fun box(): String {\n\
@@ -97,17 +71,11 @@ fun box(): String {\n\
     p.hashCode()\n\
     return \"OK\"\n\
 }\n";
-    assert_eq!(
-        run(SRC).expect("data class with an Int? field should compile + run"),
-        "OK"
-    );
+    common::expect_box_ok_with_stdlib(SRC, "P");
 }
 
 #[test]
 fn boxed_nullable_long() {
-    if !common::stdlib_toolchain_ready() {
-        return;
-    }
     const SRC: &str = "// WITH_STDLIB\n\
 fun box(): String {\n\
     val a: Long? = 1L\n\
@@ -117,8 +85,5 @@ fun box(): String {\n\
     if (c != null) return \"fail c\"\n\
     return \"OK\"\n\
 }\n";
-    assert_eq!(
-        run(SRC).expect("a boxed `Long?` (the two-slot wrapper path) should compile + run"),
-        "OK"
-    );
+    common::expect_box_ok_with_stdlib(SRC, "P");
 }
