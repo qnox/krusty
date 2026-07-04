@@ -876,18 +876,6 @@ fn nonpublic_ext_receiver_is_typevar(signature: Option<&str>) -> bool {
         .is_some_and(|gsig| matches!(gsig.params.first(), Some(GSig::Var(_))))
 }
 
-fn suspend_metadata_return(info: ReturnInfo, physical_ret: Ty) -> Ty {
-    match info.class {
-        Some(ty) if ty.is_jvm_scalar() && info.nullable => {
-            super::jvm_class_map::wrapper_internal(ty)
-                .map(Ty::obj)
-                .unwrap_or(ty)
-        }
-        Some(ty) => ty,
-        None => physical_ret,
-    }
-}
-
 /// Parse a class generic signature into its formal type-parameter names and its supertypes (the
 /// superclass followed by interfaces) as signature nodes, e.g. `java/util/List`'s
 /// `<E:Ljava/lang/Object;>Ljava/lang/Object;Ljava/util/Collection<TE;>;` → (`[E]`, `[Object,
@@ -2167,7 +2155,15 @@ impl SymbolSource for JvmLibraries {
                 let call_sig = meta.call_sig;
                 let ret_metadata = meta.ret;
                 let ret = if suspend {
-                    suspend_metadata_return(ret_metadata, physical_ret)
+                    match ret_metadata.class {
+                        Some(ty) if ty.is_jvm_scalar() && ret_metadata.nullable => {
+                            super::jvm_class_map::wrapper_internal(ty)
+                                .map(Ty::obj)
+                                .unwrap_or(ty)
+                        }
+                        Some(ty) => ty,
+                        None => physical_ret,
+                    }
                 } else {
                     physical_ret
                 };
