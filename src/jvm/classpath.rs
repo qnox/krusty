@@ -575,21 +575,6 @@ impl Classpath {
         }
     }
 
-    /// The SOURCE value-parameter names of the classpath class `internal`'s constructor of `arity`
-    /// parameters, from its `@Metadata` — for mapping NAMED constructor arguments onto positions. Prefers
-    /// an exact-arity constructor (a class may have several); `None` if none records complete names.
-    pub fn metadata_constructor_param_names(
-        &self,
-        internal: &str,
-        arity: usize,
-    ) -> Option<Vec<String>> {
-        let ci = self.find(internal)?;
-        super::metadata::class_constructor_params(&ci)
-            .into_iter()
-            .map(|(names, _)| names)
-            .find(|names| names.len() == arity && !names.iter().any(String::is_empty))
-    }
-
     /// The primary ctor's SOURCE parameter names + per-parameter default flags, for a constructor with at
     /// least `min_arity` parameters (so a NAMED call may omit a defaulted one). Reads both facts from one
     /// constructor metadata record and picks the first named parameter list long enough.

@@ -126,18 +126,11 @@ pub trait SymbolSource {
         None
     }
 
-    /// SOURCE value-parameter names of the constructor of `internal` taking `arity` parameters, when this
-    /// source records them (from `@Metadata`) — for mapping NAMED constructor arguments onto positions.
-    /// Descriptors don't carry parameter names, so this is the only source for a classpath constructor.
-    fn constructor_param_names(&self, _internal: &str, _arity: usize) -> Option<Vec<String>> {
-        None
-    }
-
     /// The primary constructor's SOURCE parameter names PLUS a per-parameter "declares a default value"
     /// flag, for a constructor whose parameter count is at least `min_arity` — so a NAMED call may OMIT a
-    /// defaulted parameter (`Cfg(a = 1, c = "x")` for `Cfg(a, b = 9, c = "z")`). Unlike
-    /// [`Self::constructor_param_names`] (exact arity), this returns the FULL parameter list; the omitted
-    /// slots lower to kotlinc's `<init>$default` synthetic. `None` when no such constructor is recorded.
+    /// defaulted parameter (`Cfg(a = 1, c = "x")` for `Cfg(a, b = 9, c = "z")`). This returns the FULL
+    /// parameter list; the omitted slots lower to kotlinc's `<init>$default` synthetic. `None` when no such
+    /// constructor is recorded.
     fn constructor_named_params(
         &self,
         _internal: &str,
@@ -280,12 +273,6 @@ impl SymbolSource for CompositeSource {
         self.children
             .iter()
             .find_map(|c| c.physical_property_getter_name(property))
-    }
-
-    fn constructor_param_names(&self, internal: &str, arity: usize) -> Option<Vec<String>> {
-        self.children
-            .iter()
-            .find_map(|c| c.constructor_param_names(internal, arity))
     }
 
     fn constructor_named_params(
@@ -467,7 +454,6 @@ mod tests {
         assert!(s.class_literal_type().is_none());
         assert!(s.platform_default_import_packages().is_empty());
         assert!(s.physical_property_getter_name("x").is_none());
-        assert!(s.constructor_param_names("mod/Foo", 1).is_none());
         assert!(s.constructor_named_params("mod/Foo", 0).is_none());
         assert!(!s.value_class_ctor_has_default("mod/Foo"));
         assert!(!s.is_enum_entry("mod/Foo", "A"));
@@ -508,7 +494,6 @@ mod tests {
         assert!(c.class_literal_type().is_none());
         assert!(c.platform_default_import_packages().is_empty());
         assert!(c.physical_property_getter_name("x").is_none());
-        assert!(c.constructor_param_names("shared", 1).is_none());
         assert!(c.infer_constructor_type_args("shared", &[]).is_none());
         assert!(!c.value_class_ctor_has_default("shared"));
         assert!(!c.is_enum_entry("shared", "A"));
