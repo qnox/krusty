@@ -1278,10 +1278,6 @@ impl SymbolSource for JvmLibraries {
         }
     }
 
-    fn is_unsigned_integer_type(&self, ty: Ty) -> bool {
-        matches!(ty, Ty::UInt | Ty::ULong)
-    }
-
     fn jvm_descriptor_form(&self, ty: Ty) -> Ty {
         // A reference type erases to its JVM internal name (a Kotlin collection → its single
         // `java/util/*` interface) with type arguments dropped — exactly what a descriptor-read
