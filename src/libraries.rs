@@ -480,7 +480,7 @@ impl CallSig {
     }
 }
 
-fn required_arity(param_count: usize, defaults: &[bool]) -> usize {
+pub fn required_arity(param_count: usize, defaults: &[bool]) -> usize {
     if defaults.is_empty() {
         param_count
     } else {

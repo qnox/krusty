@@ -11,7 +11,7 @@ use std::collections::HashMap;
 
 use crate::ast::*;
 use crate::diag::{DiagSink, Span};
-use crate::libraries::{CompilerPlatform, EmptySymbolSource};
+use crate::libraries::{required_arity, CompilerPlatform, EmptySymbolSource};
 use crate::symbol_source::SymbolSource;
 use crate::types::Ty;
 
@@ -8865,7 +8865,7 @@ impl<'a> Checker<'a> {
                                 .libraries
                                 .constructor_named_params(&internal, args.len())
                             {
-                                let required = param_defaults.iter().filter(|d| !**d).count();
+                                let required = required_arity(param_names.len(), &param_defaults);
                                 match map_call_args(
                                     args,
                                     arg_names.as_deref(),
@@ -10417,7 +10417,7 @@ impl<'a> Checker<'a> {
                             if let Some(param_names) = self.primary_ctor_param_names(&fname) {
                                 let param_defaults: Vec<bool> =
                                     cls.ctor_defaults.iter().map(|d| d.is_some()).collect();
-                                let required = param_defaults.iter().filter(|d| !**d).count();
+                                let required = required_arity(param_names.len(), &param_defaults);
                                 match map_call_args(
                                     args,
                                     arg_names.as_deref(),
@@ -10542,7 +10542,7 @@ impl<'a> Checker<'a> {
                                 .libraries
                                 .constructor_named_params(&internal, args.len())
                             {
-                                let required = param_defaults.iter().filter(|d| !**d).count();
+                                let required = required_arity(param_names.len(), &param_defaults);
                                 match map_call_args(
                                     args,
                                     arg_names.as_deref(),

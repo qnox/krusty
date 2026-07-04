@@ -17,8 +17,8 @@ use crate::ir::{
 };
 use crate::jvm::names::{property_getter_name, property_setter_name};
 use crate::libraries::{
-    CompilerPlatform, CountedLoopInfo, InlineKind, PlatformAccessor, PlatformCtor, RuntimeCtor,
-    RuntimeOp,
+    required_arity, CompilerPlatform, CountedLoopInfo, InlineKind, PlatformAccessor, PlatformCtor,
+    RuntimeCtor, RuntimeOp,
 };
 use crate::resolve::{
     CtorDefaultValue, ExprLowering, InvokeKind, LambdaCapture, Signature, StmtLowering,
@@ -4719,7 +4719,7 @@ impl<'a> Lower<'a> {
             .syms
             .libraries
             .constructor_named_params(internal, args.len())?;
-        let required = param_defaults.iter().filter(|d| !**d).count();
+        let required = required_arity(param_names.len(), &param_defaults);
         let slots = crate::resolve::map_call_args(
             args,
             Some(&names),
