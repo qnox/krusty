@@ -10,8 +10,8 @@ use super::jvm_class_map::{
 use crate::call_resolver::{arg_fits, function_input_types, gsig_to_ty, unify_gsig};
 use crate::jvm::names::{method_descriptor, property_getter_name, type_descriptor};
 use crate::libraries::{
-    CallSig, CountedLoopInfo, FnFlags, FnKind, FunctionInfo, FunctionSet, GSig, GenericSig,
-    InlineKind, LibConst, LibraryCallable, LibraryConst, LibraryMember, LibrarySeed, LibraryType,
+    CountedLoopInfo, FnFlags, FnKind, FunctionInfo, FunctionSet, GSig, GenericSig, InlineKind,
+    LibConst, LibraryCallable, LibraryConst, LibraryMember, LibrarySeed, LibraryType,
     PlatformAccessor, PlatformCtor, PlatformField, PlatformRangeCtor, RangeConstruction,
     ReturnInfo, RuntimeCtor, RuntimeOp,
 };
@@ -1725,12 +1725,13 @@ impl SymbolSource for JvmLibraries {
                     if is_default && params.len() >= 2 {
                         params.truncate(params.len() - 2);
                     }
+                    let meta = self
+                        .cp
+                        .metadata_call_facts(&c.owner, meta_name, &params, true);
                     let inline =
                         self.cp
                             .is_inline_callable(&c.owner, &c.name, &c.descriptor, &params);
-                    let ret_metadata = classpath_return_info(
-                        self.cp.metadata_return(&c.owner, meta_name).as_ref(),
-                    );
+                    let ret_metadata = classpath_return_info(meta.ret.as_ref());
                     // Logical return, recovered RECEIVER-substituted (arg-independent): `<T> T.takeIf(…): T?`
                     // → `receiver`. A type var the receiver doesn't bind (`fold`'s `R`) stays as the erased
                     // physical type — arg-binding selection in `CallResolver` refines that.
@@ -1754,10 +1755,7 @@ impl SymbolSource for JvmLibraries {
                         },
                         _ => ret,
                     };
-                    let call_sig = CallSig::metadata_extension(
-                        params.len(),
-                        self.cp.metadata_param_names(&c.owner, meta_name, &params),
-                    );
+                    let call_sig = meta.call_sig;
                     let inline_kind = InlineKind::from_flags(inline, inline && !c.public);
                     let callable = LibraryCallable {
                         inline: inline_kind,
@@ -2238,7 +2236,10 @@ impl SymbolSource for JvmLibraries {
                 // leading params (their exact types — an extension receiver, a vararg array) and
                 // truncate the trailing synthetics. A normal function's metadata count equals the
                 // descriptor's param count, so this is a no-op for it (no regression).
-                if let Some(keep) = self.cp.metadata_kept_params(&c.owner, meta_name, &params) {
+                let meta = self
+                    .cp
+                    .metadata_call_facts(&c.owner, meta_name, &params, false);
+                if let Some(keep) = meta.kept_params {
                     if keep < params.len() {
                         params.truncate(keep);
                     }
@@ -2251,9 +2252,8 @@ impl SymbolSource for JvmLibraries {
                 let inline = self
                     .cp
                     .is_inline_callable(&c.owner, meta_name, &inline_desc, &params);
-                let call_sig = self.cp.metadata_call_sig(&c.owner, meta_name, &params);
-                let ret_metadata =
-                    classpath_return_info(self.cp.metadata_return(&c.owner, meta_name).as_ref());
+                let call_sig = meta.call_sig;
+                let ret_metadata = classpath_return_info(meta.ret.as_ref());
                 let ret = if suspend {
                     suspend_metadata_return(ret_metadata, physical_ret)
                 } else {
