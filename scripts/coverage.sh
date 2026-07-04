@@ -45,9 +45,11 @@ mkdir -p target/coverage
 # so remove the raw/merged coverage files directly instead; profraw names carry a %p pid slot.
 rm -f target/*.profraw target/coverage/*.profdata target/coverage/*.profraw
 
-# Compile the library + all integration test binaries (instrumented) without running them, and read
-# each test executable's path from cargo's JSON build output.
-mapfile -t bins < <(cargo +nightly test --no-run --message-format=json 2>/dev/null \
+# Compile exactly the coverage workload without running it, and read each test executable's path from
+# cargo's JSON build output. Keep library unit tests plus the product e2e integration target; do not
+# instrument/build zero-test bin harnesses or `conformance`, because conformance is excluded from the
+# metric and pre-push runs it separately without coverage instrumentation.
+mapfile -t bins < <(cargo +nightly test --no-run --lib --test e2e --message-format=json 2>/dev/null \
   | jq -r 'select(.profile.test == true and .executable != null) | .executable')
 
 # Keep the lib/bin unit-test executables and every integration binary except the excluded suites.

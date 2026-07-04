@@ -1018,19 +1018,27 @@ fn kotlin_codegen_box_conformance() {
                 let _ = report.flamegraph(f);
                 eprintln!("flamegraph written to {}", path.display());
             }
-            // Terminal-readable hotspots: aggregate samples by leaf frame, print the top 25.
+            // Terminal-readable hotspots: aggregate samples by the innermost krusty frame. The raw
+            // leaf is usually the sampling/backtrace/thread trampoline; the SVG keeps the full stack.
             let mut leaf: std::collections::HashMap<String, isize> =
                 std::collections::HashMap::new();
             let mut total: isize = 0;
             for (frames, count) in &report.data {
                 total += *count;
-                if let Some(top) = frames.frames.first().and_then(|f| f.first()) {
-                    *leaf.entry(top.name()).or_default() += *count;
+                let krusty_frame = frames
+                    .frames
+                    .iter()
+                    .rev()
+                    .flat_map(|f| f.iter().rev())
+                    .map(|f| f.name())
+                    .find(|name| name.starts_with("krusty::"));
+                if let Some(name) = krusty_frame {
+                    *leaf.entry(name).or_default() += *count;
                 }
             }
             let mut v: Vec<_> = leaf.into_iter().collect();
             v.sort_by(|a, b| b.1.cmp(&a.1));
-            eprintln!("--- profiler: top self-frames ({total} samples) ---");
+            eprintln!("--- profiler: top krusty frames ({total} samples) ---");
             for (name, c) in v.into_iter().take(25) {
                 eprintln!("  {:>5.1}%  {name}", 100.0 * c as f64 / total.max(1) as f64);
             }

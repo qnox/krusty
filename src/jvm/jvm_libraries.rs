@@ -63,16 +63,11 @@ impl JvmScalarTy for Ty {
 /// abstraction.
 pub struct JvmLibraries {
     cp: std::rc::Rc<Classpath>,
-    functions_cache:
-        std::cell::RefCell<std::collections::HashMap<(String, Option<Ty>), FunctionSet>>,
 }
 
 impl JvmLibraries {
     pub fn new(cp: std::rc::Rc<Classpath>) -> JvmLibraries {
-        JvmLibraries {
-            cp,
-            functions_cache: std::cell::RefCell::new(std::collections::HashMap::new()),
-        }
+        JvmLibraries { cp }
     }
 
     fn primitive_companion_consts_for_type(
@@ -1573,8 +1568,8 @@ impl SymbolSource for JvmLibraries {
     }
     fn functions(&self, name: &str, receiver: Option<Ty>) -> FunctionSet {
         let key = (name.to_string(), receiver);
-        if let Some(cached) = self.functions_cache.borrow().get(&key) {
-            return cached.clone();
+        if let Some(cached) = self.cp.cached_functions(&key) {
+            return cached;
         }
         let mut overloads = Vec::new();
         // Slice 1 of the `FunctionSet` consolidation: the `@OverloadResolutionByLambdaReturnType` family
@@ -2293,7 +2288,7 @@ impl SymbolSource for JvmLibraries {
             }
         }
         let set = FunctionSet { overloads };
-        self.functions_cache.borrow_mut().insert(key, set.clone());
+        self.cp.cache_functions(key, set.clone());
         set
     }
 }
