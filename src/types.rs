@@ -481,6 +481,19 @@ impl Ty {
         matches!(self, Ty::Byte | Ty::Short | Ty::Char)
     }
 
+    /// Whether a numeric `actual` can be assigned to this numeric target in source checking.
+    pub fn accepts_numeric(self, actual: Ty) -> bool {
+        match self {
+            Ty::Byte | Ty::Short => matches!(actual, Ty::Int | Ty::Byte | Ty::Short),
+            Ty::Long => matches!(actual, Ty::Int | Ty::Byte | Ty::Short | Ty::Char),
+            Ty::Float | Ty::Double => matches!(
+                actual,
+                Ty::Int | Ty::Long | Ty::Byte | Ty::Short | Ty::Char | Ty::Float
+            ),
+            _ => false,
+        }
+    }
+
     /// True for the unsigned integer types (inline classes over a signed primitive).
     pub fn is_unsigned(self) -> bool {
         matches!(self, Ty::UInt | Ty::ULong)
