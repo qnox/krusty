@@ -7,14 +7,11 @@
 
 mod common;
 
-use std::path::PathBuf;
-
 /// Lower `src`, emit JS, append `console.log(box())`, run on Node. Returns Node's stdout, or `None`
 /// to skip (toolchain/node missing or a front-end gap).
 fn run(src: &str) -> Option<String> {
     let stdlib = common::stdlib_jar()?;
-    let java_home = common::java_home()?;
-    let jdk = PathBuf::from(format!("{java_home}/lib/modules"));
+    let jdk = common::jdk_modules()?;
     let ir = common::lower_to_ir(src, &[stdlib], Some(&jdk))?;
     let js = format!("{}\nconsole.log(box());\n", krusty::js::emit_file(&ir));
     common::run_js(&js)

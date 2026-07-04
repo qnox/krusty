@@ -1,8 +1,6 @@
 //! Destructuring declarations `val (a, b) = e` (desugared to `componentN()` calls). Compiled by
 //! the krusty binary, run on a real JVM. A type without `componentN` operators is cleanly rejected.
 
-use std::path::PathBuf;
-
 use krusty::diag::DiagSink;
 use krusty::lexer::lex;
 use krusty::parser::parse;
@@ -40,11 +38,10 @@ fun box(): String {
 /// the shared persistent JVM. `None` means the environment is unavailable (skip) or krusty couldn't
 /// emit (unsupported IR) — never a test failure, matching the suite's other e2e tests.
 fn run_box(_tag: &str, src: &str) -> Option<String> {
-    let java_home = common::java_home()?;
     // The data class emits `Intrinsics` references, so kotlin-stdlib must be on the classpath. The
     // jimage (`<jdk>/lib/modules`) is the compile-time bootclasspath so collection supertypes resolve.
     let stdlib = common::stdlib_jar()?;
-    let jdk_modules = PathBuf::from(format!("{java_home}/lib/modules"));
+    let jdk_modules = common::jdk_modules()?;
     common::compile_and_run_box(src, "Destr", &[stdlib], Some(&jdk_modules))
 }
 
