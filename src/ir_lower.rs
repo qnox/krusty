@@ -5788,7 +5788,11 @@ impl<'a> Lower<'a> {
                     {
                         (*init, Some((*index, ty.clone())))
                     } else {
-                        return None;
+                        // A bare (non-`Variable`) leading statement — e.g. a suspend-call STATEMENT
+                        // whose result is discarded (`{ foo(); tail }`). Only the retired hand-roll
+                        // machine below cared about `tail`/`bound`; the general lambda-mode machine
+                        // flattens any block shape, so fall back rather than skip the file.
+                        (body_val, None)
                     }
                 }
                 _ => (body_val, None),
@@ -10142,6 +10146,39 @@ impl<'a> Lower<'a> {
             .is_some()
     }
 
+    /// The reified-type substitution to record for a spliceable classpath extension call: pair the
+    /// callee's generic type-parameter NAMES (from its `Signature`) with the call's explicit type
+    /// ARGUMENTS (`getFor<Prov>` → `[("T", Prov)]`). Empty unless the callee is inline (its body is
+    /// spliced) and the call supplies type arguments — so a `<reified T>` extension whose compiled body
+    /// carries `reifiedOperationMarker`/`T::class` specializes to the concrete type at the splice.
+    fn reified_call_subst_for(
+        &self,
+        ast_call: AstExprId,
+        c: &crate::libraries::LibraryCallable,
+    ) -> Vec<(String, Ty)> {
+        if !c.inline.can_inline() {
+            return Vec::new();
+        }
+        let formals = c
+            .signature
+            .as_deref()
+            .map(crate::jvm::jvm_libraries::signature_formals)
+            .unwrap_or_default();
+        // The type ARGUMENTS come pre-resolved from the checker (`resolved_call_type_args`) — the checker
+        // resolves imports/classpath types the lowerer's local `ty_ref` can't (a wildcard-imported class).
+        self.info
+            .resolved_call_type_args
+            .get(&ast_call)
+            .map(|targs| {
+                formals
+                    .iter()
+                    .zip(targs)
+                    .map(|(name, ty)| (name.clone(), *ty))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     fn lower_ext_call_on(
         &mut self,
         recv_ir: u32,
@@ -10180,6 +10217,10 @@ impl<'a> Lower<'a> {
                 None => a.push(self.expr(arg)?),
             }
         }
+        // For a `<reified T>` extension the backend must SPLICE (its compiled body carries a
+        // `reifiedOperationMarker`/`T::class` the JVM can't call directly), record the call's explicit
+        // type arguments against the callee's type-parameter NAMES so the splicer specializes the body.
+        let reified_subst = self.reified_call_subst_for(e, &c);
         let call = self.ir.add_expr(IrExpr::Call {
             callee: Callee::Static {
                 owner: c.owner,
@@ -10193,6 +10234,9 @@ impl<'a> Lower<'a> {
             dispatch_receiver: None,
             args: a,
         });
+        if !reified_subst.is_empty() {
+            self.ir.reified_call_subst.insert(call, reified_subst);
+        }
         Some(self.coerce_erased_call_result(e, call, &c.physical_ret, true))
     }
 
@@ -18261,6 +18305,7 @@ impl<'a> Lower<'a> {
                                 a.push(self.ir.add_expr(IrExpr::Const(IrConst::Null)));
                             }
                         }
+                        let reified_subst = self.reified_call_subst_for(e, &c);
                         let call = self.ir.add_expr(IrExpr::Call {
                             callee: Callee::Static {
                                 owner: c.owner,
@@ -18271,6 +18316,9 @@ impl<'a> Lower<'a> {
                             dispatch_receiver: None,
                             args: a,
                         });
+                        if !reified_subst.is_empty() {
+                            self.ir.reified_call_subst.insert(call, reified_subst);
+                        }
                         self.coerce_generic_read(call, e, c.physical_ret)
                     } else if let Some(c) = {
                         // A call selected by lambda RETURN type (`recv.sumOf { it * 2 }`): resolve the

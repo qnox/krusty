@@ -58,6 +58,12 @@ mod build722_dd1_suspend_member_default_e2e;
 mod build722_hh1_inline_hof_both_branches_e2e;
 #[path = "build722_reified_class_literal_e2e.rs"]
 mod build722_reified_class_literal_e2e;
+#[path = "build775_aa1_suspend_iface_param_elvis_e2e.rs"]
+mod build775_aa1_suspend_iface_param_elvis_e2e;
+#[path = "build775_ee1_reified_vc_ext_e2e.rs"]
+mod build775_ee1_reified_vc_ext_e2e;
+#[path = "build775_ii1_suspend_for_loop_e2e.rs"]
+mod build775_ii1_suspend_for_loop_e2e;
 #[path = "builtin_intrinsics_coverage_e2e.rs"]
 mod builtin_intrinsics_coverage_e2e;
 #[path = "bytecode_parity_e2e.rs"]

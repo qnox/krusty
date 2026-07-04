@@ -118,8 +118,11 @@ pub fn lower_suspend(ir: &mut IrFile, facade: &str) -> bool {
                 let unit_ret = orig_rets[fid as usize] == Ty::Unit;
                 ensure_tail_return(ir, b, unit_ret);
             }
-        } else if !build_state_machine(ir, facade, fid, body.unwrap()) {
-            return false;
+        } else {
+            let unit_ret = orig_rets[fid as usize] == Ty::Unit;
+            if !build_state_machine(ir, facade, fid, body.unwrap(), unit_ret) {
+                return false;
+            }
         }
     }
     // Suspend LAMBDAS with multiple suspensions / control flow: their `invokeSuspend` is a state machine
@@ -695,11 +698,20 @@ fn expr_calls_suspend(ir: &IrFile, e: ExprId, suspend_set: &HashSet<u32>) -> boo
 /// local live across any suspension point is spilled to a continuation field (restored at the loop top so
 /// its slot is frame-consistent on every dispatch path). Returns `false` (skip, never miscompile) for a
 /// shape the flattener doesn't handle yet (a suspension nested deeper than a branch value, in a loop, …).
-fn build_state_machine(ir: &mut IrFile, facade: &str, fid: u32, b: ExprId) -> bool {
+fn build_state_machine(ir: &mut IrFile, facade: &str, fid: u32, b: ExprId, unit_ret: bool) -> bool {
     // Normalize a block-valued initializer (`val a = (x ?: foo())`, `a?.b ?: foo()` — elvis / safe-call
     // lower to `Variable{ init: Block{ prelude…, value: When } }`) into `prelude…; Variable{ init: When }`,
     // so the conditional suspension surfaces as a `Variable{init: When}` the flattener handles.
     normalize_block_inits(ir, b);
+    // A value-less body that FALLS THROUGH (a `Unit` fn whose last statement is a suspension / loop, with
+    // no explicit `return`) needs a terminal `return Unit.INSTANCE` — otherwise its final resume state runs
+    // off the end of the `when(label)` dispatch, falls back to the `while(true)` top, and re-dispatches the
+    // same label forever (an infinite loop, a coroutine that never completes). Mirrors the leaf path. Only
+    // for a value-less block — a trailing-value body is left to the `value.is_some()` bail just below (this
+    // path doesn't model a trailing-value suspend body), so its behaviour is unchanged.
+    if matches!(&ir.exprs[b as usize], IrExpr::Block { value: None, .. }) {
+        ensure_tail_return(ir, b, unit_ret);
+    }
     let IrExpr::Block { stmts, value } = ir.exprs[b as usize].clone() else {
         crate::trace_compiler!(
             "suspend",
@@ -1626,6 +1638,29 @@ impl Flat<'_> {
                 self.states[cur] = out;
                 self.flatten(&stmts[i + 1..], merge, after);
                 return;
+            }
+            // A bare `Block` STATEMENT that suspends (e.g. a `for` loop desugars to
+            // `{ val it = xs.iterator(); while (it.hasNext()) { … } }`, spliced into the body as one
+            // block). Inline its statements into the flattening stream — IR locals are flat-indexed, so
+            // the block is pure grouping and can be flattened away. Only for a value-less block; a
+            // block with a suspending trailing VALUE is an expression position handled elsewhere.
+            if let IrExpr::Block {
+                stmts: inner,
+                value: None,
+            } = &self.ir.exprs[stmt as usize]
+            {
+                if expr_calls_suspend(self.ir, stmt, self.suspend) {
+                    crate::trace_compiler!(
+                        "suspend",
+                        "flatten: splicing suspending block stmt with {} inner stmts",
+                        inner.len()
+                    );
+                    let mut spliced: Vec<ExprId> = inner.clone();
+                    spliced.extend_from_slice(&stmts[i + 1..]);
+                    self.states[cur] = out;
+                    self.flatten(&spliced, cur, after);
+                    return;
+                }
             }
             // An `if`/`when` STATEMENT whose branch body suspends: route each branch through its own
             // entry state (which flattens the branch), all converging at `merge`.

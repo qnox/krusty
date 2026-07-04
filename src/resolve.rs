@@ -3380,6 +3380,12 @@ pub struct TypeInfo {
     /// the checker resolves through imports (`var res: Result<T>? = null`) keeps its (value-)class type
     /// instead of collapsing to the initializer's type. Absent for an inferred (no-annotation) local.
     pub local_decl_types: HashMap<StmtId, Ty>,
+    /// Call `ExprId` → its explicit type arguments RESOLVED to `Ty` (`getFor<Prov>` → `[Prov]`). The
+    /// checker resolves them (imports/classpath types resolve here, not in the lowerer's local
+    /// `ty_ref`); the lowerer pairs them with a `<reified T>` classpath extension's type-parameter names
+    /// to drive the bytecode splicer's reified specialization. Recorded only where an explicit `<…>` is
+    /// present on a call.
+    pub resolved_call_type_args: HashMap<ExprId, Vec<Ty>>,
 }
 
 /// How to inline a receiver-lambda scope-function call (see [`InlineCall::ReceiverLambda`]).
@@ -3551,6 +3557,7 @@ fn make_checker<'a>(file: &'a File, syms: &'a SymbolTable, diags: &'a mut DiagSi
         inferred_method_rets: HashMap::new(),
         stmt_lowers: HashMap::new(),
         local_decl_types: HashMap::new(),
+        resolved_call_type_args: HashMap::new(),
         fn_reassigned: std::collections::HashSet::new(),
         expr_depth: 0,
         allow_lambda_mutation: false,
@@ -4251,6 +4258,7 @@ pub fn check_file(file: &File, syms: &mut SymbolTable, diags: &mut DiagSink) -> 
         inferred_method_rets,
         stmt_lowers,
         local_decl_types,
+        resolved_call_type_args,
         ..
     } = c;
     for ((name, params), ret) in inferred_fun_rets {
@@ -4281,6 +4289,7 @@ pub fn check_file(file: &File, syms: &mut SymbolTable, diags: &mut DiagSink) -> 
         expr_lowers,
         stmt_lowers,
         local_decl_types,
+        resolved_call_type_args,
     }
 }
 
@@ -4324,6 +4333,7 @@ struct Checker<'a> {
     inferred_method_rets: HashMap<(String, String, Vec<Ty>), Ty>,
     stmt_lowers: HashMap<StmtId, StmtLowering>,
     local_decl_types: HashMap<StmtId, Ty>,
+    resolved_call_type_args: HashMap<ExprId, Vec<Ty>>,
     /// Names reassigned anywhere in the function body currently being checked (including inside its
     /// closures). A captured `var` is boxed only if it's in here — kotlinc treats a captured-but-never-
     /// reassigned `var` as effectively final (passed by value).
@@ -8119,7 +8129,16 @@ impl<'a> Checker<'a> {
         arg_tys: &[Ty],
         type_args: &[Ty],
     ) -> Option<Ty> {
+        crate::trace_compiler!(
+            "resolve",
+            "record_library_extension_call {name} recv={receiver:?} args={arg_tys:?} targs={type_args:?}"
+        );
         let c = self.library_extension_callable(name, receiver, arg_tys, type_args)?;
+        crate::trace_compiler!(
+            "resolve",
+            "record_library_extension_call {name} -> ret={:?}",
+            c.ret
+        );
         Some(c.ret)
     }
 
@@ -9205,6 +9224,12 @@ impl<'a> Checker<'a> {
                 // types as `String`/`Int`, not the erased `Any`) and remember the plan to infer the
                 // method's own `<R>` from the lambda body — the call's result type — after the args type.
                 let generic_member: Option<GenericMemberPlan> = self.plan_generic_member(rt, &name);
+                crate::trace_compiler!(
+                    "resolve",
+                    "MCALL name={name} rt={rt:?} nargs={} generic_member={}",
+                    args.len(),
+                    generic_member.is_some()
+                );
                 // A library extension taking a lambda (`list.map { it … }`): the lambda's parameter
                 // types are recovered from the extension's generic signature — bound by the receiver's
                 // element type and the non-lambda arguments — so the lambda body checks against `Int`
@@ -9443,6 +9468,11 @@ impl<'a> Checker<'a> {
                     &name,
                     &arg_tys,
                 ) {
+                    crate::trace_compiler!(
+                        "resolve",
+                        "RIM-9451 name={name} rt={rt:?} -> ret={:?}",
+                        m.ret
+                    );
                     return m.ret;
                 }
                 // Instance method call on a class value: `p.method(args)` (own or inherited).
@@ -9683,6 +9713,16 @@ impl<'a> Checker<'a> {
                     .cloned()
                     .map(|ts| ts.iter().map(|r| self.resolve_ty(r)).collect())
                     .unwrap_or_default();
+                crate::trace_compiler!(
+                    "resolve",
+                    "EXT-SECTION name={name} rt={rt:?} call_targs={call_targs:?}"
+                );
+                // Stash the RESOLVED explicit type arguments so the lowerer can specialize a `<reified T>`
+                // classpath extension's spliced body (imports/classpath types resolve here, not there).
+                if !call_targs.is_empty() {
+                    self.resolved_call_type_args
+                        .insert(call, call_targs.clone());
+                }
                 // NAMED arguments to a classpath EXTENSION (`"s".tag(count = …, name = …)`): the
                 // `@Metadata` names are the LOGICAL value parameters (the receiver is a separate
                 // `receiver_type`, not a label), so reorder the labelled arguments into parameter order

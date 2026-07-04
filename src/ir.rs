@@ -899,6 +899,13 @@ pub struct IrFile {
     /// [`Self::external_value_classes`] — lets the value-class pass recognize a sole-property read emitted
     /// as `invokevirtual X.getV()` and rewrite it to identity (the receiver IS the unboxed underlying).
     pub external_value_class_getters: std::collections::HashMap<String, String>,
+    /// Call `ExprId` → reified-type substitution for a `<reified T>` CLASSPATH inline extension whose
+    /// compiled body the backend must splice: `[(type-parameter name, concrete JVM internal name)]`
+    /// (`[("T", "lib/Prov")]`). The bytecode splicer feeds this to `substitute_reified` so a
+    /// `reifiedOperationMarker`/`T::class` in the spliced body specializes to the concrete type — the
+    /// classpath analogue of the IR inliner's `reified_subst` (which only has same-file bodies). The
+    /// concrete type is a backend-agnostic `Ty`; the JVM splicer maps it to an internal name.
+    pub reified_call_subst: std::collections::HashMap<u32, Vec<(String, Ty)>>,
 }
 
 /// Backend-agnostic generic-signature shape of a declaration (the data a JVM `Signature` / a future

@@ -1572,11 +1572,32 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `reified_subst` bound to the call's type argument, substitutes `T` to that concrete type and emits its
   class constant (`nameOf<Widget>()` → `Widget::class`). (`build722_reified_class_literal_e2e`)
 
-  PARTIAL — ee1 (reified extension delegating to a member with a `KClass<T>` parameter,
-  `getFor(id, T::class)`) still does NOT run: passing a class literal to a `kotlin.reflect.KClass<T>`
-  PARAMETER needs (a) overload resolution to accept `java/lang/Class` for a `KClass` parameter AND (b) the
-  lowerer to wrap it in `Reflection.getOrCreateKotlinClass` so the runtime value is a real `KClass` (krusty
-  models a class literal as `java/lang/Class`, correct for `==`/`getClass`/`.simpleName` but not as a
-  `KClass` argument) — plus (c) selecting the 1-parameter reified EXTENSION over the same-named 2-parameter
-  value-class-mangled classpath MEMBER by arity, and (d) binding the extension's reified return `T` at the
-  call site. Those remain a follow-up.
+- **A REIFIED classpath extension delegating to a `KClass<T>`-parameter member (build.775 ee1).** An
+  `inline fun <reified T : Any> Reg.getFor(id: Aid): T = getFor(id, T::class)` (a value-class parameter
+  mangles the JVM name; `Reg` is a `typealias`) called `r.getFor<Prov>(id).go()` now compiles AND runs.
+  Four pieces landed: **(a)** overload selection no longer prefers the same-named 2-required-parameter
+  classpath MEMBER over the 1-parameter reified EXTENSION — `best_member_overload`'s prefix (under-
+  application) match is gated on `required <= args.len()`, so a 1-arg call doesn't spuriously bind a
+  2-required member (which erased the generic return to `Any`, breaking `.go()`). **(b)** the extension's
+  reified return `T` binds to the explicit `<Prov>` via the existing `bind_extension_callable` path (now
+  reached). **(c)** the reified inline body is SPLICED from bytecode: the checker stores the resolved call
+  type arguments (`TypeInfo::resolved_call_type_args`), the lowerer records `[(T, Prov)]` on the IR call
+  (`IrFile::reified_call_subst`), and `jvm::inline::splice_unified` NOPs each `Intrinsics.
+  reifiedOperationMarker` and repoints the following type-bearing op at the concrete type. **(d)** the
+  KClass mode (`reifiedOperationMarker(…, "T"); ldc class <erased>; Reflection.getOrCreateKotlinClass`) is
+  handled: the erased `ldc class` operand is repointed to `Prov` while `getOrCreateKotlinClass` is KEPT, so
+  the runtime value is a real `KClass<Prov>` (repointing WITHOUT keeping `getOrCreateKotlinClass` would
+  miscompile). A malformed/unhandled reified marker cleanly SKIPS the whole splice (never miscompiles).
+  (`build775_ee1_reified_vc_ext_e2e`)
+
+- **A `suspend` call as a STATEMENT in a coroutine-builder lambda + implicit-`Unit` suspend fns
+  (build.775 aa1/ii1).** `runBlocking { f(r); if (…) … }` (a bare suspend-call statement followed by more
+  code) no longer skips the file — the single-suspension lambda lowering falls back to the general
+  lambda-mode state machine for any block shape instead of bailing on a non-`Variable` leading statement.
+  And a `suspend fun` whose body FALLS THROUGH with no explicit `return` (an implicit-`Unit` body ending in
+  a suspension or a `for`/`while` loop, e.g. `suspend fun f(r, xs) { for (x in xs) r.del(x) }`) now gets a
+  terminal `return Unit.INSTANCE` in its state machine — without it the final resume state ran off the end
+  of the `when(label)` dispatch, fell back to the `while(true)` top, and re-dispatched the same label
+  forever (an infinite loop / coroutine that never completes). A bare suspending `Block` STATEMENT (the
+  `for`-loop iterator desugar) is now spliced into the state-machine flattening stream.
+  (`build775_ii1_suspend_for_loop_e2e`, `build775_aa1_suspend_iface_param_elvis_e2e`)
