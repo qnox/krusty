@@ -5544,10 +5544,7 @@ impl<'a> Emitter<'a> {
                 }
             }
         }
-        let arithmetic_ty = match owner_prim {
-            Ty::Byte | Ty::Short | Ty::Char => Ty::Int,
-            t => t,
-        };
+        let arithmetic_ty = owner_prim.int_arithmetic_repr();
         emit_num_conv(arithmetic_ty, source_prim, code);
         emit_num_conv(source_prim, ret, code);
         true
