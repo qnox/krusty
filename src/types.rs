@@ -476,6 +476,23 @@ impl Ty {
         matches!(self, Ty::UInt | Ty::ULong)
     }
 
+    /// True for Kotlin scalar values that the JVM backend carries in primitive slots.
+    pub fn is_jvm_scalar(self) -> bool {
+        matches!(
+            self,
+            Ty::Int
+                | Ty::Byte
+                | Ty::Short
+                | Ty::Long
+                | Ty::Float
+                | Ty::Double
+                | Ty::Boolean
+                | Ty::Char
+                | Ty::UInt
+                | Ty::ULong
+        )
+    }
+
     /// A primitive whose generic upper bound (`fun <T: Int>`) krusty specializes a FUNCTION type
     /// parameter to (descriptor uses the primitive, like kotlinc). Restricted to the INTEGRAL JVM
     /// primitives: floating types (`Double`/`Float`) have boxed-vs-primitive `==` (−0.0/NaN) semantics
