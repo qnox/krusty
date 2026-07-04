@@ -55,6 +55,10 @@ thread_local! {
     /// it sets the flag and `emit_all` drops the whole file (returns `None`), so the file is skipped,
     /// never miscompiled. A compiler must never crash on its own IR.
     static EMIT_BAIL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// The `ExprId` of the value expression currently being emitted (set by `emit_value`). The Static
+    /// inline-splice path reads it to look up `IrFile::reified_call_subst` for a `<reified T>` classpath
+    /// extension — `emit_value_node` matches on `&IrExpr` and doesn't otherwise carry the node's id.
+    static CUR_EXPR: std::cell::Cell<u32> = const { std::cell::Cell::new(u32::MAX) };
 }
 
 pub fn inline_bail_reason() -> Option<String> {
@@ -3069,9 +3073,15 @@ impl<'a> Emitter<'a> {
             return false; // no lambda argument — not this path
         }
         // Probe at offset 0 to learn whether frames are needed (HOST branchy OR any lambda BODY branchy).
-        let Some(probe) =
-            crate::jvm::inline::splice_unified(body, descriptor, base, &lam_splices, 0, self.cw)
-        else {
+        let Some(probe) = crate::jvm::inline::splice_unified(
+            body,
+            descriptor,
+            base,
+            &lam_splices,
+            0,
+            self.cw,
+            &HashMap::new(),
+        ) else {
             return false;
         };
         // The splice records frames if it has a join, any lambda body has frames, OR the HOST body itself
@@ -3133,6 +3143,7 @@ impl<'a> Emitter<'a> {
             &lam_splices,
             splice_start,
             self.cw,
+            &HashMap::new(),
         ) else {
             return false;
         };
@@ -3472,6 +3483,28 @@ impl<'a> Emitter<'a> {
     /// inliner; the callee body comes from [`MethodBodies::body`]). Returns `true` if spliced; `false`
     /// means the caller must report an inline backend gap rather than silently treating this as an
     /// ordinary call-resolution fallback.
+    /// The reified type substitution (type-parameter name → JVM internal name) for the value expression
+    /// currently being emitted (`CUR_EXPR`), from [`IrFile::reified_call_subst`]. Empty for a call that
+    /// isn't a `<reified T>` classpath-extension splice — the common case. Fed to `splice_unified` so a
+    /// `reifiedOperationMarker`/`T::class` in the spliced body specializes to the concrete type.
+    fn reified_type_map(&self) -> HashMap<String, String> {
+        let e = CUR_EXPR.with(|c| c.get());
+        self.ir
+            .reified_call_subst
+            .get(&e)
+            .map(|subst| {
+                subst
+                    .iter()
+                    .filter_map(|(name, ty)| {
+                        let internal =
+                            crate::jvm::jvm_class_map::to_jvm_internal(ty.obj_internal()?);
+                        Some((name.clone(), internal.to_string()))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     fn try_inline_static(
         &mut self,
         owner: &str,
@@ -3486,7 +3519,7 @@ impl<'a> Emitter<'a> {
             descriptor,
             splice_desc: descriptor,
         };
-        self.try_inline_static_as(target, args, code, true)
+        self.try_inline_static_as(target, args, code, true, &HashMap::new())
     }
 
     /// Splice `owner.name` whose REAL (body-fetch) descriptor is `descriptor`, mapping the body's locals
@@ -3499,6 +3532,7 @@ impl<'a> Emitter<'a> {
         args: &[u32],
         code: &mut CodeBuilder,
         allow_owner_bridge: bool,
+        reified: &HashMap<String, String>,
     ) -> bool {
         let InlineStaticTarget {
             owner,
@@ -3563,7 +3597,7 @@ impl<'a> Emitter<'a> {
         // layout is position-independent); a branchy body is then RE-spliced at its real method offset so
         // any `tableswitch`/`lookupswitch` pads correctly.
         let Some(probe) =
-            crate::jvm::inline::splice_unified(&body, splice_desc, base, &[], 0, self.cw)
+            crate::jvm::inline::splice_unified(&body, splice_desc, base, &[], 0, self.cw, reified)
         else {
             crate::trace_compiler!(
                 "splice",
@@ -3604,6 +3638,7 @@ impl<'a> Emitter<'a> {
             &[],
             splice_start,
             self.cw,
+            reified,
         ) else {
             return false;
         };
@@ -3861,6 +3896,7 @@ impl<'a> Emitter<'a> {
 
     fn emit_value(&mut self, e: u32, code: &mut CodeBuilder) {
         let node = self.ir.expr(e).clone();
+        CUR_EXPR.with(|c| c.set(e));
         self.emit_value_node(&node, code);
         self.terminate_if_nothing_call(&node, code);
     }
@@ -4242,7 +4278,8 @@ impl<'a> Emitter<'a> {
                                 descriptor: &descriptor,
                                 splice_desc: &splice_desc,
                             };
-                            self.try_inline_static_as(target, &all, code, true)
+                            let reified = self.reified_type_map();
+                            self.try_inline_static_as(target, &all, code, true, &reified)
                         } else {
                             let has_lambda_arg = args.iter().any(|&a| {
                                 matches!(self.ir.expr(a), IrExpr::Lambda { .. })
@@ -4255,11 +4292,13 @@ impl<'a> Emitter<'a> {
                                 descriptor: &descriptor,
                                 splice_desc: &descriptor,
                             };
+                            let reified = self.reified_type_map();
                             self.try_inline_static_as(
                                 target,
                                 &args,
                                 code,
                                 inline.must_inline() || has_lambda_arg,
+                                &reified,
                             )
                         };
                         if spliced {
