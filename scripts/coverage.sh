@@ -7,9 +7,9 @@
 # RUNNER — this deliberately does NOT use `cargo llvm-cov test` (runs binaries serially) nor
 # `cargo llvm-cov nextest` (process-per-test; net-negative here — every test contends on the shared
 # JVM daemon, and tests that share per-binary state fail under separate processes). It mirrors
-# run-tests.sh: instrument via `llvm-cov show-env`, build once, run the test binaries in PARALLEL
-# (threads within each binary, many binaries at once, one shared JVM daemon), then aggregate the
-# profraw counters into a report. That is the fast model.
+# run-tests.sh: instrument via `llvm-cov show-env`, build once, run the selected test binaries, then
+# aggregate the profraw counters into a report. Increase KRUSTY_TEST_JOBS explicitly for local
+# experiments; CI defaults to the stable single-worker path.
 #
 # SCOPE — the metric reflects krusty's OWN test suite, not imported external suites. These are
 # EXCLUDED: their INPUT is an external corpus or the reference compiler, so counting them would
@@ -24,7 +24,7 @@ cd "$(dirname "$0")/.."
 
 summary_out="${1:-target/coverage/summary.json}"
 raw_out="target/coverage/full.json"
-jobs="${KRUSTY_TEST_JOBS:-$(nproc)}"
+jobs="${KRUSTY_TEST_JOBS:-1}"
 
 # Self-provision the reference kotlinc + box corpus exactly like run-tests.sh, so the kept e2e
 # suites (which need the stdlib jar / JVM runtime) don't silently skip and undercount coverage.
