@@ -13,9 +13,8 @@ mod common;
 /// Single-compilation box run against kotlin-stdlib + JDK modules. Returns `None` (→ skip) when the
 /// toolchain isn't provisioned.
 fn run(src: &str, stem: &str) -> Option<String> {
-    let jh = common::java_home()?;
     let sl = common::stdlib_jar()?;
-    let jdk = std::path::PathBuf::from(format!("{jh}/lib/modules"));
+    let jdk = common::jdk_modules()?;
     common::compile_and_run_box(src, stem, &[sl], Some(&jdk))
 }
 
