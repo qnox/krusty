@@ -4,15 +4,8 @@
 
 mod common;
 
-fn run(src: &str) -> Option<String> {
-    common::compile_and_run_with_stdlib(src, "P")
-}
-
 #[test]
 fn named_constructor_args_map_and_fill_defaults() {
-    if !common::stdlib_toolchain_ready() {
-        return;
-    }
     const SRC: &str = "// WITH_STDLIB\n\
 class C(val a: Int = 1, val b: Int = 2, val c: Int = 3)\n\
 fun box(): String {\n\
@@ -22,17 +15,11 @@ fun box(): String {\n\
     if (y.a != 1 || y.b != 2 || y.c != 7) return \"fail y\"\n\
     return \"OK\"\n\
 }\n";
-    assert_eq!(
-        run(SRC).expect("named ctor args should compile + run"),
-        "OK"
-    );
+    common::expect_box_ok_with_stdlib(SRC, "P");
 }
 
 #[test]
 fn named_ctor_call_targets_primary_not_a_colliding_secondary() {
-    if !common::stdlib_toolchain_ready() {
-        return;
-    }
     // A named call (`C(b = 9)`) references the PRIMARY ctor's parameter names — it must NOT be routed
     // to a same-arity secondary ctor that only coincides on argument types. (Regression: the lowering
     // picked the `constructor(x: Int)` secondary, yielding `a = 9` instead of the default `a = 1`.)
@@ -44,8 +31,5 @@ fun box(): String {\n\
     val c = C(b = 9)\n\
     return if (c.a == 1 && c.b == 9) \"OK\" else \"fail: a=${c.a} b=${c.b}\"\n\
 }\n";
-    assert_eq!(
-        run(SRC).expect("named ctor vs secondary should compile + run"),
-        "OK"
-    );
+    common::expect_box_ok_with_stdlib(SRC, "P");
 }

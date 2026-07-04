@@ -5,16 +5,8 @@
 
 mod common;
 
-fn run(src: &str) -> Option<String> {
-    common::compile_and_run_with_stdlib(src, "P")
-}
-
-/// Skip (not fail) when the JVM + stdlib jar this e2e needs is absent.
 #[test]
 fn nullable_reference_cast_passes_null_and_checkcasts() {
-    if !common::stdlib_toolchain_ready() {
-        return;
-    }
     const SRC: &str = "// WITH_STDLIB\n\
 class Foo(val v: Int)\n\
 fun box(): String {\n\
@@ -27,5 +19,5 @@ fun box(): String {\n\
     try { val bad: Any? = \"x\"; bad as Foo? } catch (e: ClassCastException) { r = \"OK\" }\n\
     return r\n\
 }\n";
-    assert_eq!(run(SRC).expect("`as Foo?` should compile + run"), "OK");
+    common::expect_box_ok_with_stdlib(SRC, "P");
 }
