@@ -1092,10 +1092,6 @@ impl SymbolSource for JvmLibraries {
         (getter != property).then_some(getter)
     }
 
-    fn constructor_param_names(&self, internal: &str, arity: usize) -> Option<Vec<String>> {
-        self.cp.metadata_constructor_param_names(internal, arity)
-    }
-
     fn constructor_named_params(
         &self,
         internal: &str,
