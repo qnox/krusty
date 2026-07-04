@@ -1600,7 +1600,22 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   of the `when(label)` dispatch, fell back to the `while(true)` top, and re-dispatched the same label
   forever (an infinite loop / coroutine that never completes). A bare suspending `Block` STATEMENT (the
   `for`-loop iterator desugar) is now spliced into the state-machine flattening stream.
-  (`build775_ii1_suspend_for_loop_e2e`, `build775_aa1_suspend_iface_param_elvis_e2e`)
+  (`build775_ii1_suspend_for_loop_e2e`)
+
+- **A coroutine builder infers its result type from the block (`runBlocking { … } : T`, build.775 aa1).**
+  `runBlocking<T>(block: suspend CoroutineScope.() -> T): T` — and any generic top-level fn with a
+  suspend-lambda parameter — used to type its result `Any`, so a value flowing OUT into a non-suspend
+  context (`val c = runBlocking { repo.byId(x) } ?: error(); c.scheduledAt`, the real hit
+  `member … on Any` ×7) lost the block's type. Two erasure layers hid `T`: (1) the `$default` synthetic the
+  omitted-context call resolves to carries no generic `Signature`, so binding failed and the erased
+  `Object` return leaked — `resolve_top_level_default_callable` now falls back to the BASE function's gsig
+  (matched by parameter shape). (2) The suspend SAM erases the result into `Function2<Recv,
+  Continuation<T>, Object>` while the lambda argument erases its own `Continuation` type argument to `Any`
+  and carries its real result in the `Ty::Fun` return — `unify_gsig` now binds `T` from the lambda's return
+  for a trailing-`Continuation<T>` param. The lowerer then `checkcast`/unboxes the erased `Object` return
+  to the substituted type (a non-inline classpath call with an `Object` physical return now coerces, like
+  the inline path). Passing tests only masked this: `fun box(): String = runBlocking { … }` supplied the
+  result type from `box`'s return. (`build775_aa1_suspend_iface_param_elvis_e2e`)
 
 - **A static method DECLARED ON AN INTERFACE uses an `InterfaceMethodref` constant.** A Kotlin interface's
   `foo$default` synthetic (reached when a call OMITS an interface-declared default arg — `interface A { fun

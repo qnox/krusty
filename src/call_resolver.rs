@@ -37,7 +37,23 @@ pub(crate) fn unify_gsig(
             // the parameter nodes bind the lambda's parameters and the return node binds its return, so
             // `map`'s `R` binds from the lambda body's type (`{ it * 2 }` → `Int`).
             if let Ty::Fun(fsig) = actual {
-                for (a, p) in params.iter().zip(fsig.params.iter()) {
+                // A SUSPEND SAM parameter (`suspend CoroutineScope.() -> T`) erases to
+                // `Function2<CoroutineScope, Continuation<T>, Object>` — the RESULT type parameter `T`
+                // lives inside the trailing `Continuation<T>`, and the JVM return node is `Object`. The
+                // lambda argument, however, ERASES its own `Continuation` type argument (to `Any`) and
+                // carries its real result in `fsig.ret`. Binding `T` from the erased `Continuation<Any>`
+                // would fix it to `Any` (`runBlocking { … } : Any`, losing the block's type); bind it from
+                // `fsig.ret` instead, and skip the `Continuation` param so it isn't double-unified.
+                let value_params: &[GSig] = match params.last() {
+                    Some(GSig::Class(n, cargs))
+                        if n == "kotlin/coroutines/Continuation" && !cargs.is_empty() =>
+                    {
+                        unify_gsig(&cargs[0], fsig.ret, binds);
+                        &params[..params.len() - 1]
+                    }
+                    _ => params,
+                };
+                for (a, p) in value_params.iter().zip(fsig.params.iter()) {
                     unify_gsig(a, *p, binds);
                 }
                 unify_gsig(ret, fsig.ret, binds);
@@ -714,8 +730,35 @@ impl<'a> CallResolver<'a> {
             let Some(mapping) = self.default_arg_mapping(o, params, args) else {
                 continue;
             };
-            let ret_ty = o
-                .generic_sig
+            // A `$default` synthetic usually carries NO generic `Signature` (it isn't API), so binding the
+            // return type parameter off it fails and the erased `Object` return leaks (`runBlocking { … }`
+            // → `Any`, losing the block's result type). Fall back to the BASE function's gsig — its leading
+            // real parameters (and their type-parameter positions) align with the `$default`'s, so unifying
+            // the provided args against it recovers `T` (`runBlocking<T>(block: () -> T): T` → `T = Ch`).
+            let base_gsig = o.generic_sig.clone().or_else(|| {
+                // The `$default` (krusty models it with the REAL params, no mask/marker) shares its base
+                // function's parameter shape, so a SAME-ARITY base overload's generic signature applies.
+                // Among same-arity candidates, prefer one whose return is a bare type PARAMETER (the
+                // generic `fun <T> …(): T` form we need to bind), so a same-name/same-arity non-generic
+                // sibling doesn't cross-bind.
+                let bases: Vec<FunctionInfo> = self
+                    .lib
+                    .functions(name, None)
+                    .overloads
+                    .into_iter()
+                    .filter(|b| {
+                        b.kind == FnKind::TopLevel
+                            && b.generic_sig.is_some()
+                            && b.callable.params.len() == params.len()
+                    })
+                    .collect();
+                bases
+                    .iter()
+                    .find(|b| matches!(b.generic_sig.as_ref().map(|g| &g.ret), Some(GSig::Var(_))))
+                    .or_else(|| bases.first())
+                    .and_then(|b| b.generic_sig.clone())
+            });
+            let ret_ty = base_gsig
                 .as_ref()
                 .map(|gsig| {
                     let mut binds = std::collections::HashMap::new();
@@ -730,6 +773,11 @@ impl<'a> CallResolver<'a> {
                     gsig_to_ty(&gsig.ret, &binds)
                 })
                 .unwrap_or(c.ret);
+            crate::trace_compiler!(
+                "resolve",
+                "top_level_default {name} base_gsig={} mapping={mapping:?} -> ret={ret_ty:?}",
+                base_gsig.is_some()
+            );
             let ret_ty = o.ret.apply(ret_ty);
             return Some(callable_with_return(c, ret_ty, true));
         }

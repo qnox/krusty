@@ -4575,6 +4575,14 @@ impl<'a> Lower<'a> {
         }
         Some(if c.inline.can_inline() {
             self.coerce_erased_call_result(e, call, &c.physical_ret, true)
+        } else if c.physical_ret.non_null().obj_internal() == Some("kotlin/Any")
+            && c.ret != c.physical_ret
+        {
+            // A NON-inline FQ call with an ERASED generic return (`kotlinx.coroutines.runBlocking { … }`,
+            // `$default` returning `Object`): `checkcast`/unbox the result to the substituted type the
+            // checker inferred (`T = String`/`Int`), mirroring the bare-name path — else the boxed result
+            // lands in a stricter slot / is `areturn`ed against a stricter method return (`VerifyError`).
+            self.coerce_erased_call_result(e, call, &c.physical_ret, true)
         } else {
             call
         })
@@ -16861,6 +16869,15 @@ impl<'a> Lower<'a> {
                         // reference, but do not eagerly unbox nullable generic returns (`T?`), because
                         // null must stay a legal value until a primitive/non-null use site demands it.
                         if call_inline {
+                            self.coerce_erased_call_result(e, call, &call_phys, true)
+                        } else if call_phys.non_null().obj_internal() == Some("kotlin/Any")
+                            && call_log != call_phys
+                        {
+                            // A NON-inline classpath top-level fn with an ERASED generic return
+                            // (`runBlocking<T> { … }`, whose `$default` returns `Object`): the checker
+                            // substituted the concrete result type (`T = Ch`/`Int`), so `checkcast`/unbox
+                            // the `Object` result to it — else it lands boxed in a stricter slot
+                            // (`VerifyError`). A concrete (non-erased) return keeps the raw call, unchanged.
                             self.coerce_erased_call_result(e, call, &call_phys, true)
                         } else {
                             call
