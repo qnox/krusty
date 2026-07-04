@@ -108,6 +108,68 @@ pub fn compile_to_dir(
     Some(())
 }
 
+/// Run the same checked-file → JVM-backend pipeline as the CLI, but report whether the already
+/// front-end-valid source is declined by a backend unsupported-feature path. Returns `None` when the
+/// front end rejects the source, because backend-rejection tests should not pass via a parser/type
+/// error.
+#[allow(dead_code)]
+pub fn backend_rejects_in_process(
+    src: &str,
+    stem: &str,
+    cp_jars: &[PathBuf],
+    jdk_modules: Option<&std::path::Path>,
+) -> Option<bool> {
+    use krusty::diag::DiagSink;
+    use krusty::jvm::names::file_class_name;
+    use krusty::resolve::{check_file, collect_signatures_with_cp};
+
+    let mut diags = DiagSink::new();
+    let features = krusty::features::LangFeatures::from_source(src);
+    let toks = krusty::lexer::lex(src, &mut diags);
+    let files = vec![krusty::parser::parse_with_features(
+        src, &toks, &mut diags, &features,
+    )];
+    if diags.has_errors() {
+        return None;
+    }
+    let mut cp_paths: Vec<PathBuf> = cp_jars.to_vec();
+    if let Some(p) = jdk_modules {
+        cp_paths.push(p.to_path_buf());
+    }
+    thread_local! {
+        static CP: std::cell::RefCell<std::collections::HashMap<Vec<PathBuf>, std::rc::Rc<Classpath>>> =
+            std::cell::RefCell::new(std::collections::HashMap::new());
+    }
+    let cp = CP.with(|c| {
+        c.borrow_mut()
+            .entry(cp_paths.clone())
+            .or_insert_with(|| std::rc::Rc::new(Classpath::new(cp_paths.clone())))
+            .clone()
+    });
+    let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(cp.clone()));
+    let mut syms = collect_signatures_with_cp(&files, platform, &mut diags);
+    if diags.has_errors() {
+        return None;
+    }
+    let file = &files[0];
+    let info = check_file(file, &mut syms, &mut diags);
+    if diags.has_errors() {
+        return None;
+    }
+    let facade = file_class_name(stem, file.package.as_deref());
+    let Some(mut ir) = krusty::ir_lower::lower_file(file, &info, &syms) else {
+        return Some(true);
+    };
+    krusty::plugins::run_enabled(&mut ir, file);
+    if !krusty::jvm::value_classes::lower_value_classes(&mut ir) {
+        return Some(true);
+    }
+    if !krusty::jvm::suspend::lower_suspend(&mut ir, &facade) {
+        return Some(true);
+    }
+    Some(krusty::jvm::ir_emit::emit_all(&ir, &facade, &*cp, None).is_none())
+}
+
 /// Lower Kotlin `src` to backend-agnostic IR (`lex → parse → check → collect → ir_lower`), stopping
 /// before any JVM-specific pass — the exact input the alternate (`js`) backend consumes. Returns
 /// `None` on a front-end error (caller skips). Shares the same thread-local `Classpath` cache as
@@ -188,9 +250,11 @@ pub fn front_end_diagnostics(
 #[allow(dead_code)]
 pub fn run_js(js: &str) -> Option<String> {
     let node = which_node()?;
-    let dir = std::env::temp_dir().join(format!("krusty_js_{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("krusty_node_{}", std::process::id()));
     let _ = std::fs::create_dir_all(&dir);
-    let path = dir.join(format!("m_{:x}.mjs", hash_str(js)));
+    static JS_COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = JS_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let path = dir.join(format!("m_{:x}_{n}.mjs", hash_str(js)));
     std::fs::write(&path, js).ok()?;
     // Bound wall time via `timeout` so a miscompiled loop can't hang the suite forever (exit 124).
     let out = Command::new("timeout")

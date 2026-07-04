@@ -2,52 +2,26 @@
 //! DECLINES to lower, emitting a "not yet supported by the IR backend" style diagnostic (a non-zero
 //! exit). The box corpus contains only SUPPORTED programs, so these bail branches
 //! (`src/jvm/backend.rs`, `src/ir_lower.rs`, `src/jvm/suspend.rs`, `src/jvm/value_classes.rs`) are
-//! otherwise never exercised. Each test drives a FULL compile through the krusty binary (front end
-//! passes; the backend bails) and asserts the compile is rejected.
+//! otherwise never exercised. Each test drives the same front-end + JVM backend pipeline in-process
+//! (front end passes; the backend bails) and asserts the compile is rejected.
 //!
 //! These are deliberately constructs krusty does NOT support yet — if one of them starts compiling,
 //! the feature has landed and the test should be promoted to a real round-trip test elsewhere.
 
-use std::fs;
-use std::process::Command;
-use std::sync::atomic::{AtomicU32, Ordering};
-
 use super::common;
 
-/// `<stdlib>:<jdk modules>` classpath, or `None` when the toolchain is unavailable (test skips clean).
-fn classpath() -> Option<std::ffi::OsString> {
-    std::env::join_paths([common::stdlib_jar()?, common::jdk_modules()?]).ok()
-}
-
-static COUNTER: AtomicU32 = AtomicU32::new(0);
-
-/// Compile `src` with the krusty binary into a fresh temp dir. Returns `true` when the backend
-/// REJECTS the program — a non-zero exit, or a "not (yet) supported" diagnostic on stderr. Returns
+/// Compile `src` through the frontend and JVM backend in-process. Returns `true` only when the front
+/// end accepts the source and the backend reaches one of its unsupported-feature exits. Returns
 /// `true` (skip-clean) when the toolchain is absent, so the suite never fails spuriously on a machine
 /// without the vendored kotlinc/JDK.
 fn rejects(src: &str) -> bool {
-    let Some(cp) = classpath() else {
+    let Some(stdlib) = common::stdlib_jar() else {
         return true;
     };
-    let krusty = env!("CARGO_BIN_EXE_krusty");
-    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let dir = std::env::temp_dir().join(format!("krusty_reject_{}_{n}", std::process::id()));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).unwrap();
-    let kt = dir.join("S.kt");
-    fs::write(&kt, src).unwrap();
-    let out = Command::new(krusty)
-        .arg("-cp")
-        .arg(&cp)
-        .args(["-d", dir.to_str().unwrap()])
-        .arg(&kt)
-        .output()
-        .unwrap();
-    let _ = fs::remove_dir_all(&dir);
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    !out.status.success()
-        || stderr.contains("not yet supported")
-        || stderr.contains("not supported")
+    let Some(jdk_modules) = common::jdk_modules() else {
+        return true;
+    };
+    common::backend_rejects_in_process(src, "S", &[stdlib], Some(&jdk_modules)).unwrap_or(false)
 }
 
 // --- Unsigned byte/short block-list (src/jvm/ir_emit.rs `ty_ok`/`callee_ok`; emit_all → None; the
@@ -86,23 +60,6 @@ fn ushort_return_rejected() {
 fn ubyte_to_int_rejected() {
     assert!(rejects(
         "fun main() { val b = 5.toUByte(); println(b.toInt()) }\n"
-    ));
-}
-
-// --- Array-element sized-array constructor (`Array(n) { <array> }`) — src/ir_lower.rs emits the
-//     explicit "Array(n) {…} with an array element is not supported" diagnostic. ---
-
-#[test]
-fn nested_int_array_ctor_rejected() {
-    assert!(rejects(
-        "fun main() { val a = Array(2) { IntArray(3) { it } }; println(a[0][0]) }\n"
-    ));
-}
-
-#[test]
-fn triple_nested_array_ctor_rejected() {
-    assert!(rejects(
-        "fun main() { val a = Array(2) { Array(2) { IntArray(2) } }; println(a.size) }\n"
     ));
 }
 

@@ -25,6 +25,7 @@ cd "$(dirname "$0")/.."
 summary_out="${1:-target/coverage/summary.json}"
 raw_out="target/coverage/full.json"
 jobs="${KRUSTY_TEST_JOBS:-1}"
+test_threads="${KRUSTY_TEST_THREADS:-3}"
 coverage_target="${KRUSTY_COVERAGE_TARGET_DIR:-target/coverage-build}"
 
 # Self-provision the reference kotlinc + box corpus exactly like run-tests.sh, so the kept e2e
@@ -70,16 +71,16 @@ for b in "${bins[@]}"; do
   is_excluded "$name" && continue
   run+=("$b")
 done
-echo "coverage: running ${#run[@]} test binaries in parallel (-P $jobs), conformance binary excluded" >&2
+echo "coverage: running ${#run[@]} test binaries in parallel (-P $jobs, --test-threads=$test_threads), conformance binary excluded" >&2
 
 # Run the binaries in parallel; each writes its own profraw (LLVM_PROFILE_FILE has a %p pid slot).
 # A non-zero exit from any binary (a failing test) fails the whole run — the tests are the workload.
-# `--test-threads=1` per binary is deliberate: -P already gives jobs-wide across-binary parallelism,
-# so one thread each keeps total concurrency at `jobs`; letting each binary default to nproc threads
-# would make it jobs×nproc-wide and thrash the cores (much slower under coverage instrumentation).
+# `--test-threads` is bounded explicitly instead of leaving libtest at nproc. The e2e target is one
+# large binary, so forcing it to 1 serializes almost the entire coverage workload; using a small
+# default preserves full coverage while avoiding the memory pressure seen with unbounded parallelism.
 status_dir="$(mktemp -d)"
 printf '%s\0' "${run[@]}" | xargs -0 -P "$jobs" -I{} \
-  sh -c '"$1" --quiet --test-threads=1 2>/dev/null || echo fail > "$2/$(basename "$1")"' _ {} "$status_dir"
+  sh -c '"$1" --quiet --test-threads="$3" 2>/dev/null || echo fail > "$2/$(basename "$1")"' _ {} "$status_dir" "$test_threads"
 if compgen -G "$status_dir/*" >/dev/null; then
   echo "coverage: FAIL — test binaries reported failures:" >&2
   ls "$status_dir" >&2

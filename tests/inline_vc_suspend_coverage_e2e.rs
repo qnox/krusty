@@ -24,7 +24,6 @@
 //! cleanly when the toolchain isn't provisioned.
 
 use std::fs;
-use std::process::Command;
 
 use super::common;
 
@@ -49,8 +48,8 @@ fn run_ok(src: &str, stem: &str) {
 // Suspend harness — compile a `suspend fun` and drive it via a Java Continuation.
 // ============================================================================
 
-/// Compile `src` (top-level suspend fns land on `SKt`) with the krusty binary, then run a Java driver
-/// that evaluates `SKt.<call_expr>` (where `k` is an in-scope trivial `Continuation`) and asserts the
+/// Compile `src` (top-level suspend fns land on `SKt`) in-process, then run a Java driver that
+/// evaluates `SKt.<call_expr>` (where `k` is an in-scope trivial `Continuation`) and asserts the
 /// synchronously-completing result's `String.valueOf` equals `expect`.
 fn run_suspend(name: &str, src: &str, call_expr: &str, expect: &str) {
     let jh = match common::java_home() {
@@ -62,25 +61,20 @@ fn run_suspend(name: &str, src: &str, call_expr: &str, expect: &str) {
         eprintln!("skipping {name}: no kotlin-stdlib jar");
         return;
     };
-    let krusty = env!("CARGO_BIN_EXE_krusty");
+    let jdk = common::jdk_modules();
     let dir = std::env::temp_dir().join(format!("krusty_ivsc_{name}_{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
-    fs::write(dir.join("S.kt"), src).unwrap();
-    let kc = Command::new(krusty)
-        .args([
-            "-cp",
-            &stdlib.to_string_lossy(),
-            "-d",
-            dir.to_str().unwrap(),
-        ])
-        .arg(dir.join("S.kt"))
-        .output()
-        .unwrap();
+    let kc = common::compile_to_dir(
+        src,
+        "S",
+        std::slice::from_ref(&stdlib),
+        jdk.as_deref(),
+        &dir,
+    );
     assert!(
-        kc.status.success(),
-        "{name}: krusty failed to compile:\n{}",
-        String::from_utf8_lossy(&kc.stderr)
+        kc.is_some(),
+        "{name}: krusty failed to compile a supported suspend snippet"
     );
     let driver = format!(
         "import kotlin.coroutines.*;\n\
@@ -109,32 +103,22 @@ public class M {{\n\
     assert_eq!(out.trim(), "OK", "{name}: wrong result; got {out}");
 }
 
-/// Compile a `suspend fun` `src` with the krusty binary and assert the BACKEND cleanly REJECTS it (a
-/// non-zero exit / "not yet supported" diagnostic) — exercising the `src/jvm/suspend.rs` bail branch
-/// for suspend-function shapes krusty does not yet lower. Skips clean when the toolchain is absent.
+/// Compile a `suspend fun` `src` through the backend pipeline and assert the BACKEND cleanly REJECTS
+/// it — exercising the `src/jvm/suspend.rs` bail branch for suspend-function shapes krusty does not
+/// yet lower. Skips clean when the toolchain is absent.
 fn rejects_suspend(name: &str, src: &str) {
     let Some(stdlib) = common::stdlib_jar() else {
         eprintln!("skipping {name}: no kotlin-stdlib jar");
         return;
     };
-    let krusty = env!("CARGO_BIN_EXE_krusty");
-    let dir = std::env::temp_dir().join(format!("krusty_ivsc_rej_{name}_{}", std::process::id()));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).unwrap();
-    fs::write(dir.join("S.kt"), src).unwrap();
-    let out = Command::new(krusty)
-        .args([
-            "-cp",
-            &stdlib.to_string_lossy(),
-            "-d",
-            dir.to_str().unwrap(),
-        ])
-        .arg(dir.join("S.kt"))
-        .output()
-        .unwrap();
-    let _ = fs::remove_dir_all(&dir);
+    let Some(jdk_modules) = common::jdk_modules() else {
+        eprintln!("skipping {name}: no JDK modules");
+        return;
+    };
+    let rejected = common::backend_rejects_in_process(src, "S", &[stdlib], Some(&jdk_modules))
+        .unwrap_or(false);
     assert!(
-        !out.status.success(),
+        rejected,
         "{name}: expected the backend to REJECT this suspend shape, but it compiled"
     );
 }
