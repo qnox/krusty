@@ -8,24 +8,10 @@
 
 mod common;
 
-use std::path::PathBuf;
-
 /// Compile `src` (stem `stem`) against kotlin-stdlib + JDK modules and run its `box()`, asserting
 /// "OK". Skips (returns) when the toolchain / stdlib / JDK isn't provisioned so the suite still runs.
 fn run_ok(src: &str, stem: &str) {
-    let Some(java_home) = common::java_home() else {
-        eprintln!("skipping feature_coverage_u_e2e::{stem}: set JAVA_HOME");
-        return;
-    };
-    let Some(stdlib) = common::stdlib_jar() else {
-        eprintln!("skipping feature_coverage_u_e2e::{stem}: no kotlin-stdlib jar found");
-        return;
-    };
-    let jdk = PathBuf::from(format!("{java_home}/lib/modules"));
-    let Some(out) = common::compile_and_run_box(src, stem, &[stdlib], Some(&jdk)) else {
-        return;
-    };
-    assert_eq!(out, "OK", "{stem} produced wrong box() result");
+    common::assert_box_ok_with_stdlib(src, stem);
 }
 
 // --- inline lambda body containing a loop with break/continue (branchy splice) --------------------

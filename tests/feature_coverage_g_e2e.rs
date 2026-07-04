@@ -4,24 +4,10 @@
 
 mod common;
 
-use std::path::PathBuf;
-
 /// Compile `src` (with entry `box`) under class `stem` and run it, asserting the return is `"OK"`.
 /// Skips (returns) when the toolchain env is unavailable — matching the other e2e tests.
 fn run(src: &str, stem: &str) {
-    let Some(java_home) = common::java_home() else {
-        eprintln!("skipping feature_coverage_g_e2e: set JAVA_HOME");
-        return;
-    };
-    let Some(stdlib) = common::stdlib_jar() else {
-        eprintln!("skipping feature_coverage_g_e2e: no kotlin-stdlib jar found");
-        return;
-    };
-    let jdk = PathBuf::from(format!("{java_home}/lib/modules"));
-    let Some(out) = common::compile_and_run_box(src, stem, &[stdlib], Some(&jdk)) else {
-        return;
-    };
-    assert_eq!(out, "OK");
+    common::assert_box_ok_with_stdlib(src, stem);
 }
 
 #[test]
