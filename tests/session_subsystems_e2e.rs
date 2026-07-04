@@ -9,17 +9,10 @@
 
 mod common;
 
-fn run(src: &str) -> Option<String> {
-    common::compile_and_run_with_stdlib(src, "P")
-}
-
 /// A generic class with a `var T` field storing two different concrete types — forces the
 /// erased-field + checkcast-on-read path (not just a value round-trip), pinning erasure-to-Object.
 #[test]
 fn generic_var_field_erasure() {
-    if !common::stdlib_toolchain_ready() {
-        return;
-    }
     const SRC: &str = "// WITH_STDLIB\n\
 class Cell<T>(var v: T)\n\
 fun <T> id(x: T): T = x\n\
@@ -33,18 +26,12 @@ fun box(): String {\n\
     if (id(\"a\") != \"a\") return \"fail id\"\n\
     return \"OK\"\n\
 }\n";
-    assert_eq!(
-        run(SRC).expect("generic var field should compile + run"),
-        "OK"
-    );
+    common::expect_box_ok_with_stdlib(SRC, "P");
 }
 
 /// `@JvmInline value class` arithmetic — the unboxed underlying representation.
 #[test]
 fn value_class_unboxed_arith() {
-    if !common::stdlib_toolchain_ready() {
-        return;
-    }
     const SRC: &str = "// WITH_STDLIB\n\
 @JvmInline value class Meters(val v: Int)\n\
 fun add(a: Meters, b: Meters): Meters = Meters(a.v + b.v)\n\
@@ -52,19 +39,13 @@ fun box(): String {\n\
     val r = add(Meters(2), Meters(3))\n\
     return if (r.v == 5) \"OK\" else \"fail\"\n\
 }\n";
-    assert_eq!(
-        run(SRC).expect("value class arith should compile + run"),
-        "OK"
-    );
+    common::expect_box_ok_with_stdlib(SRC, "P");
 }
 
 /// Multi-field data class mixing `val`/`var` with `copy` — pins per-field finality/visibility/order
 /// against a desync after merging `IrClass`'s five field-parallel `Vec`s into one `Vec<IrField>`.
 #[test]
 fn data_class_multifield_copy() {
-    if !common::stdlib_toolchain_ready() {
-        return;
-    }
     const SRC: &str = "// WITH_STDLIB\n\
 data class R(val a: Int, var b: Int, val c: String)\n\
 fun box(): String {\n\
@@ -79,19 +60,13 @@ fun box(): String {\n\
     if (s.b != 9) return \"fail shared\"\n\
     return \"OK\"\n\
 }\n";
-    assert_eq!(
-        run(SRC).expect("multi-field data class copy should compile + run"),
-        "OK"
-    );
+    common::expect_box_ok_with_stdlib(SRC, "P");
 }
 
 /// `lateinit var` — the backing field carries `IrField::is_lateinit`; a read after init returns the
 /// value (the per-access null-check passes). Pins the field-flag fold.
 #[test]
 fn lateinit_var_set_then_get() {
-    if !common::stdlib_toolchain_ready() {
-        return;
-    }
     const SRC: &str = "// WITH_STDLIB\n\
 class Holder {\n\
     lateinit var name: String\n\
@@ -101,15 +76,12 @@ fun box(): String {\n\
     h.name = \"hi\"\n\
     return if (h.name == \"hi\") \"OK\" else \"fail\"\n\
 }\n";
-    assert_eq!(run(SRC).expect("lateinit var should compile + run"), "OK");
+    common::expect_box_ok_with_stdlib(SRC, "P");
 }
 
 /// Enum — `IrClass` enum-entry fields + `values()`/`valueOf`/`ordinal`/`name`.
 #[test]
 fn enum_entries_and_values() {
-    if !common::stdlib_toolchain_ready() {
-        return;
-    }
     const SRC: &str = "// WITH_STDLIB\n\
 enum class Color { RED, GREEN, BLUE }\n\
 fun box(): String {\n\
@@ -119,5 +91,5 @@ fun box(): String {\n\
     if (Color.valueOf(\"GREEN\") != Color.GREEN) return \"fail valueOf\"\n\
     return \"OK\"\n\
 }\n";
-    assert_eq!(run(SRC).expect("enum should compile + run"), "OK");
+    common::expect_box_ok_with_stdlib(SRC, "P");
 }
