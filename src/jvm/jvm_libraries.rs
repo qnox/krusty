@@ -118,17 +118,15 @@ impl JvmLibraries {
     ) -> std::collections::HashMap<String, LibraryConst> {
         use crate::jvm::classreader::ConstVal;
 
-        let Some(ci) = self.cp.find(internal) else {
-            return std::collections::HashMap::new();
-        };
         let companion_internal = format!("{internal}$Companion");
-        let Some(companion) = self.cp.find(&companion_internal) else {
+        let Some((ci, companion)) = self
+            .cp
+            .find(internal)
+            .zip(self.cp.find(&companion_internal))
+        else {
             return std::collections::HashMap::new();
         };
         let prop_rets = super::metadata::class_property_return_classes(&companion);
-        if prop_rets.is_empty() {
-            return std::collections::HashMap::new();
-        }
         ci.fields
             .iter()
             .filter_map(|f| {
