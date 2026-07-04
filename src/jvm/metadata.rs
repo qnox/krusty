@@ -1201,12 +1201,12 @@ pub struct BuiltinMember {
 pub struct BuiltinClass {
     pub supertypes: Vec<String>,
     pub members: Vec<BuiltinMember>,
-    /// Return-nullability for EVERY declared function member keyed by `(name, value-arity)`, INCLUDING
+    /// Nullable returns for declared function members keyed by `(name, value-arity)`, INCLUDING
     /// members `members` drops because their return is a bare type parameter (`Map.get(K): V?`,
     /// `firstOrNull(): T?`). The resolved member for such a call is the erased classpath method (`java/util
     /// /Map.get` returns `Object`) which carries no Kotlin nullability — this is the only surviving record
     /// that the source return is `T?`. Consulted by the member walk to null-annotate that resolved return.
-    pub member_ret_nullable: Vec<(String, usize, bool)>,
+    pub nullable_member_returns: Vec<(String, usize)>,
 }
 
 /// Parse a `.kotlin_builtins` resource → every declared `Class` (qualified name → its supertypes +
@@ -1353,7 +1353,7 @@ pub fn parse_builtins(data: &[u8]) -> std::collections::HashMap<String, BuiltinC
         };
         let supertypes: Vec<String> = supids.iter().filter_map(|&sid| type_of_id(sid)).collect();
         let mut members = Vec::new();
-        let mut member_ret_nullable = Vec::new();
+        let mut nullable_member_returns = Vec::new();
         for fb in &funcs {
             let mut p = Pb { b: fb, i: 0 };
             let mut name_id = None;
@@ -1410,10 +1410,10 @@ pub fn parse_builtins(data: &[u8]) -> std::collections::HashMap<String, BuiltinC
                 let ret_nullable = types
                     .get(ri as usize)
                     .is_some_and(|tb| parse_type_nullable(tb));
-                // Record nullability for EVERY function (even the type-parameter-return ones the member
-                // list drops just below) so the erased classpath member can be null-annotated later.
-                if let Some(name) = strings.get(ni as usize) {
-                    member_ret_nullable.push((name.clone(), params.len(), ret_nullable));
+                // Record nullable returns even for type-parameter-return functions the member list drops
+                // just below, so the erased classpath member can be null-annotated later.
+                if let Some(name) = strings.get(ni as usize).filter(|_| ret_nullable) {
+                    nullable_member_returns.push((name.clone(), params.len()));
                 }
                 if let Some((name, ret)) = strings.get(ni as usize).cloned().zip(type_of_id(ri)) {
                     members.push(BuiltinMember {
@@ -1465,7 +1465,7 @@ pub fn parse_builtins(data: &[u8]) -> std::collections::HashMap<String, BuiltinC
             BuiltinClass {
                 supertypes,
                 members,
-                member_ret_nullable,
+                nullable_member_returns,
             },
         );
     }

@@ -801,14 +801,11 @@ impl Classpath {
     /// such member/builtin is recorded.
     pub fn builtin_member_ret_nullable(&self, internal: &str, name: &str, arity: usize) -> bool {
         let path = Self::builtins_path_for(internal);
-        self.builtins_file(&path)
-            .get(internal)
-            .map(|c| {
-                c.member_ret_nullable
-                    .iter()
-                    .any(|(n, a, nullable)| *nullable && n == name && *a == arity)
-            })
-            .unwrap_or(false)
+        self.builtins_file(&path).get(internal).is_some_and(|c| {
+            c.nullable_member_returns
+                .iter()
+                .any(|(n, a)| n == name && *a == arity)
+        })
     }
 
     /// Direct supertypes declared in `.kotlin_builtins` for a Kotlin builtin class.
