@@ -831,11 +831,11 @@ fn parse_type_alias(body: &[u8], records: &[Rec], d2: &[String]) -> Option<(Stri
     Some((name, internal))
 }
 
-/// The SOURCE value-parameter names of every constructor in a `Class`'s `@Metadata` (`Class.constructor`
-/// field 8 → `Constructor.value_parameter` field 2 → `ValueParameter.name` field 2), one `Vec` per
-/// constructor in declaration order (the primary constructor is first). Drives NAMED-ARGUMENT resolution
-/// for a classpath constructor call — descriptors don't carry parameter names.
-pub fn class_constructor_param_names(ci: &ClassInfo) -> Vec<Vec<String>> {
+/// The SOURCE value-parameter names and default flags of every constructor in a `Class`'s `@Metadata`
+/// (`Class.constructor` field 8 → `Constructor.value_parameter` field 2), one pair per constructor in
+/// declaration order (the primary constructor is first). Drives NAMED-ARGUMENT resolution for classpath
+/// constructor calls; descriptors don't carry names or source-level default declarations.
+pub fn class_constructor_params(ci: &ClassInfo) -> Vec<(Vec<String>, Vec<bool>)> {
     let mut out = Vec::new();
     if ci.kotlin_d1.is_empty() {
         return out;
@@ -856,72 +856,6 @@ pub fn class_constructor_param_names(ci: &ClassInfo) -> Vec<Vec<String>> {
                 };
                 let mut cp = Pb { b: cbody, i: 0 };
                 let mut names = Vec::new();
-                while !cp.at_end() {
-                    let Some(ct) = cp.varint() else { break };
-                    match (ct >> 3, ct & 7) {
-                        (2, 2) => {
-                            // Constructor.value_parameter (repeated ValueParameter)
-                            let Some(vlen) = cp.varint() else { break };
-                            let Some(vbody) = cp.bytes(vlen as usize) else {
-                                break;
-                            };
-                            let mut vp = Pb { b: vbody, i: 0 };
-                            let mut nid = 0u64;
-                            while !vp.at_end() {
-                                let Some(vt) = vp.varint() else { break };
-                                match (vt >> 3, vt & 7) {
-                                    (2, 0) => nid = vp.varint().unwrap_or(0), // ValueParameter.name
-                                    (_, w) => {
-                                        if vp.skip(w).is_none() {
-                                            break;
-                                        }
-                                    }
-                                }
-                            }
-                            names.push(
-                                resolve_string(&records, d2, nid as usize).unwrap_or_default(),
-                            );
-                        }
-                        (_, w) => {
-                            if cp.skip(w).is_none() {
-                                break;
-                            }
-                        }
-                    }
-                }
-                out.push(names);
-            }
-            (_, w) => {
-                if pb.skip(w).is_none() {
-                    break;
-                }
-            }
-        }
-    }
-    out
-}
-
-/// Which constructor parameters DECLARE A DEFAULT VALUE (`ValueParameter.flags` bit 1), one `Vec<bool>`
-/// per constructor, parallel to [`class_constructor_param_names`]. Lets a NAMED classpath ctor call omit
-/// a defaulted parameter (`Cfg(a = 1, c = "x")`) — the omitted slot lowers to the `<init>$default` synthetic.
-pub fn class_constructor_param_defaults(ci: &ClassInfo) -> Vec<Vec<bool>> {
-    let mut out = Vec::new();
-    if ci.kotlin_d1.is_empty() {
-        return out;
-    }
-    let bytes = decode_d1(&ci.kotlin_d1);
-    let (_st_body, msg_body) = split_d1(&bytes);
-    let mut pb = Pb { b: msg_body, i: 0 };
-    while !pb.at_end() {
-        let Some(tag) = pb.varint() else { break };
-        match (tag >> 3, tag & 7) {
-            (8, 2) => {
-                // Class.constructor (repeated Constructor)
-                let Some(len) = pb.varint() else { break };
-                let Some(cbody) = pb.bytes(len as usize) else {
-                    break;
-                };
-                let mut cp = Pb { b: cbody, i: 0 };
                 let mut defaults = Vec::new();
                 while !cp.at_end() {
                     let Some(ct) = cp.varint() else { break };
@@ -933,11 +867,13 @@ pub fn class_constructor_param_defaults(ci: &ClassInfo) -> Vec<Vec<bool>> {
                                 break;
                             };
                             let mut vp = Pb { b: vbody, i: 0 };
+                            let mut nid = 0u64;
                             let mut vflags = 0u64;
                             while !vp.at_end() {
                                 let Some(vt) = vp.varint() else { break };
                                 match (vt >> 3, vt & 7) {
                                     (1, 0) => vflags = vp.varint().unwrap_or(0), // ValueParameter.flags
+                                    (2, 0) => nid = vp.varint().unwrap_or(0), // ValueParameter.name
                                     (_, w) => {
                                         if vp.skip(w).is_none() {
                                             break;
@@ -945,6 +881,9 @@ pub fn class_constructor_param_defaults(ci: &ClassInfo) -> Vec<Vec<bool>> {
                                     }
                                 }
                             }
+                            names.push(
+                                resolve_string(&records, d2, nid as usize).unwrap_or_default(),
+                            );
                             defaults.push(vflags & DECLARES_DEFAULT_VALUE_BIT != 0);
                         }
                         (_, w) => {
@@ -954,7 +893,7 @@ pub fn class_constructor_param_defaults(ci: &ClassInfo) -> Vec<Vec<bool>> {
                         }
                     }
                 }
-                out.push(defaults);
+                out.push((names, defaults));
             }
             (_, w) => {
                 if pb.skip(w).is_none() {
