@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 
 use crate::jvm::classreader::{parse_class, read_method_code, ClassInfo, MethodCode};
 use crate::jvm::names::type_descriptor;
-use crate::libraries::CallSig;
+use crate::libraries::{CallSig, FunctionSet};
 use crate::types::Ty;
 
 /// Map a Kotlin internal type name (`kotlin/Int`, `kotlin/Char`, …) from builtins metadata to a `Ty`.
@@ -314,6 +314,10 @@ pub struct Classpath {
     meta_fns: MetaFnsCache,
     /// Cache of each class's `@Metadata` Kotlin-name → `@JvmName` overloads (see [`MetaOverloadCache`]).
     meta_overloads: MetaOverloadCache,
+    /// Cache of resolved library function sets keyed by semantic call query. A `JvmLibraries` wrapper is
+    /// rebuilt for every snippet, but the `Classpath` is reused on the worker thread, so keeping this here
+    /// avoids re-walking metadata/extension indexes for common stdlib calls across thousands of snippets.
+    functions: RefCell<HashMap<(String, Option<Ty>), FunctionSet>>,
     /// Parsed `.kotlin_builtins` fragments, keyed by resource path (e.g. `kotlin/kotlin.kotlin_builtins`,
     /// `kotlin/collections/collections.kotlin_builtins`), each mapping class internal name → its
     /// supertypes + members. Built once per file on first use — the single source for BOTH the collection
@@ -367,6 +371,7 @@ impl Classpath {
             suspend_names: RefCell::new(HashMap::new()),
             meta_fns: RefCell::new(HashMap::new()),
             meta_overloads: RefCell::new(HashMap::new()),
+            functions: RefCell::new(HashMap::new()),
             builtins: RefCell::new(HashMap::new()),
             builtin_members: RefCell::new(HashMap::new()),
             id,
@@ -377,6 +382,14 @@ impl Classpath {
     /// (see the `id` field). Unlike an `Rc<Classpath>` pointer, this never aliases a freed classpath.
     pub fn id(&self) -> u64 {
         self.id
+    }
+
+    pub fn cached_functions(&self, key: &(String, Option<Ty>)) -> Option<FunctionSet> {
+        self.functions.borrow().get(key).cloned()
+    }
+
+    pub fn cache_functions(&self, key: (String, Option<Ty>), set: FunctionSet) {
+        self.functions.borrow_mut().insert(key, set);
     }
 
     /// The Kotlin return metadata of function `fn_name` declared in class `internal`, decoded from the
