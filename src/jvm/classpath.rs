@@ -215,7 +215,7 @@ pub struct TypeIndex {
 
 /// Per-class `@Metadata` cache: class internal name → every function decoded from its `Package` metadata
 /// (with the multifile-facade part classes merged in). This is the SINGLE decode of a class's `d1` for the
-/// function lookups below — `metadata_return`, `metadata_receiver_types`, `metadata_call_facts`, and
+/// function lookups below — `meta_functions`, `metadata_receiver_types`, `metadata_call_facts`, and
 /// parameter metadata all project over it instead of each re-decoding and re-merging.
 type MetaFnsCache = RefCell<HashMap<String, std::rc::Rc<ClassMeta>>>;
 

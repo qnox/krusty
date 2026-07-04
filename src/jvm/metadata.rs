@@ -1526,57 +1526,6 @@ pub fn parse_builtins(data: &[u8]) -> std::collections::HashMap<String, BuiltinC
     out
 }
 
-/// All `inline` functions declared in a `Package` body: explicit JVM `(name, descriptor)` pairs (when
-/// a `method_signature` extension is present) and the set of inline function *names* (always, from
-/// `Function.name`) — the latter catches the common inline functions (`map`, `let`, …) whose JVM
-/// signature equals the computed default, so they omit the extension.
-fn package_inline(body: &[u8], d2: &[String]) -> (HashSet<(String, String)>, HashSet<String>) {
-    package_flagged(body, d2, |f| f.is_inline)
-}
-
-/// All functions in a `Package` body whose decoded `Function` satisfies `pred` (e.g. `is_inline` /
-/// `is_suspend`): explicit JVM `(name, descriptor)` pairs (when a `method_signature` extension is
-/// present) and the set of function *names* (always, from `Function.name`).
-fn package_flagged(
-    body: &[u8],
-    d2: &[String],
-    pred: impl Fn(&ParsedFunction) -> bool,
-) -> (HashSet<(String, String)>, HashSet<String>) {
-    let mut methods = HashSet::new();
-    let mut names = HashSet::new();
-    // Skip the leading delimited `StringTableTypes`; the `Package` (with the functions) follows it.
-    let (_, pkg) = split_d1(body);
-    let mut pb = Pb { b: pkg, i: 0 };
-    while !pb.at_end() {
-        let Some(tag) = pb.varint() else { break };
-        match (tag >> 3, tag & 7) {
-            (3, 2) => {
-                // repeated Function function = 3
-                let Some(len) = pb.varint() else { break };
-                let Some(fbody) = pb.bytes(len as usize) else {
-                    break;
-                };
-                if let Some(f) = parse_function(fbody).filter(&pred) {
-                    if let Some(n) = d2.get(f.name_id as usize) {
-                        names.insert(n.clone());
-                    }
-                    if let Some((ni, di)) = f.jvm_sig {
-                        if let (Some(n), Some(d)) = (d2.get(ni as usize), d2.get(di as usize)) {
-                            methods.insert((n.clone(), d.clone()));
-                        }
-                    }
-                }
-            }
-            (_, w) => {
-                if pb.skip(w).is_none() {
-                    break;
-                }
-            }
-        }
-    }
-    (methods, names)
-}
-
 /// The Kotlin names of every `suspend` function in a class's `@Metadata` (from the `IS_SUSPEND` flag
 /// bit). A call to a method of one of these names (in this class) is a suspension point. Both function
 /// carriers are read: a file facade's `Package.function` (field 3, top-level `suspend fun`s) AND a
@@ -1591,23 +1540,4 @@ pub fn suspend_method_names(ci: &ClassInfo) -> HashSet<String> {
         .filter(|f| f.is_suspend)
         .map(|f| f.kotlin_name)
         .collect()
-}
-
-/// The JVM `(name, descriptor)` of every `inline` function in a class with an explicit method
-/// signature in its `@Metadata`. (Common inline functions omit it — see [`inline_method_names`].)
-pub fn inline_methods(ci: &ClassInfo) -> HashSet<(String, String)> {
-    if ci.kotlin_d1.is_empty() {
-        return HashSet::new();
-    }
-    package_inline(&decode_d1(&ci.kotlin_d1), &ci.kotlin_d2).0
-}
-
-/// The Kotlin names of every `inline` function in a class's `@Metadata`. A call to a method of one of
-/// these names (in this class) is inline — descriptor-agnostic, so it catches the functions whose
-/// signature equals the default and thus carry no explicit `method_signature`.
-pub fn inline_method_names(ci: &ClassInfo) -> HashSet<String> {
-    if ci.kotlin_d1.is_empty() {
-        return HashSet::new();
-    }
-    package_inline(&decode_d1(&ci.kotlin_d1), &ci.kotlin_d2).1
 }

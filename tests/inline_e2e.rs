@@ -25,16 +25,20 @@ fn splices_real_empty_array_body() {
     );
     // The metadata reader decodes d1 and identifies inline functions with their JVM signatures.
     if let Some(part) = cp.find("kotlin/collections/CollectionsKt___CollectionsKt") {
-        let inl = krusty::jvm::metadata::inline_methods(&part);
+        let fns = krusty::jvm::metadata::package_functions(&part);
+        let inl: Vec<_> = fns
+            .iter()
+            .filter(|f| f.is_inline)
+            .filter_map(|f| Some((f.jvm_name.as_str(), f.jvm_desc.as_deref()?)))
+            .collect();
         assert!(
             inl.iter().all(|(n, d)| !n.is_empty() && d.starts_with('(')),
             "each explicit inline entry has a JVM name + descriptor"
         );
         // Name-based detection finds the common inline functions (which omit method_signature).
-        let names = krusty::jvm::metadata::inline_method_names(&part);
         for f in ["map", "filter", "forEach", "sumOf"] {
             assert!(
-                names.contains(f),
+                fns.iter().any(|mf| mf.is_inline && mf.kotlin_name == f),
                 "inline function {f} recognized from metadata"
             );
         }
