@@ -132,7 +132,7 @@ impl JvmLibraries {
             .iter()
             .filter_map(|f| {
                 let ret = prop_rets.get(&f.name)?;
-                let ty = metadata_return_ty(Some(ret))?;
+                let ty = kotlin_name_to_ty(ret);
                 let value = match f.const_value.as_ref()? {
                     ConstVal::Int(v) => LibConst::Int(*v),
                     ConstVal::Long(v) => LibConst::Long(*v),
@@ -482,7 +482,11 @@ impl JvmLibraries {
                 // Value-class implementation methods are static and take the erased receiver as their
                 // first JVM parameter. Source member resolution sees only the value parameters.
                 let logical_params = params.get(1..).unwrap_or(&[]).to_vec();
-                let ret = metadata_return_ty(m.ret_class.as_deref()).unwrap_or(physical_ret);
+                let ret = m
+                    .ret_class
+                    .as_deref()
+                    .map(kotlin_name_to_ty)
+                    .unwrap_or(physical_ret);
                 let mut member = LibraryMember::new(m.kotlin_name, logical_params, ret, descriptor);
                 member.owner = Some(ci.this_class.clone());
                 member.physical_name = Some(m.jvm_name);
@@ -649,7 +653,8 @@ fn parse_method_gsig(sig: &str) -> Option<GenericSig> {
 /// A type's simple (unqualified) source name, from its canonical internal name's last segment
 /// (`kotlin/Int` → `Int`, `kotlin/UInt` → `UInt`, `app/Foo` → `Foo`). Generic — no per-type list.
 fn ty_simple_name(t: Ty) -> Option<&'static str> {
-    source_internal_of_ty(t).map(|i| i.rsplit('/').next().unwrap_or(i))
+    t.kotlin_class_internal()
+        .map(|i| i.rsplit('/').next().unwrap_or(i))
 }
 
 /// The canonical element type of a `@JvmName`-mangled reduction extension's RECEIVER — its first
@@ -859,25 +864,6 @@ fn kotlin_simple_name_of_ty(t: Ty) -> Option<&'static str> {
     })
 }
 
-fn source_internal_of_ty(t: Ty) -> Option<&'static str> {
-    Some(match t {
-        Ty::Boolean => "kotlin/Boolean",
-        Ty::Byte => "kotlin/Byte",
-        Ty::Short => "kotlin/Short",
-        Ty::Int => "kotlin/Int",
-        Ty::Long => "kotlin/Long",
-        Ty::Char => "kotlin/Char",
-        Ty::Float => "kotlin/Float",
-        Ty::Double => "kotlin/Double",
-        Ty::UInt => "kotlin/UInt",
-        Ty::ULong => "kotlin/ULong",
-        Ty::String => "kotlin/String",
-        Ty::Obj(internal, _) => internal,
-        Ty::Nullable(inner) | Ty::TyParam(_, inner) => return source_internal_of_ty(*inner),
-        _ => return None,
-    })
-}
-
 /// Curated JVM ABI for the well-known mapped builtins, used only when the classpath cannot supply the
 /// mapped JVM class (a no-classpath compile, e.g. a self-contained snippet with no `-cp`). This keeps
 /// the Kotlin↔JVM mapping a *backend* fact: the member's JVM owner/descriptor live here, so the compiler
@@ -917,10 +903,6 @@ fn nonpublic_ext_receiver_is_typevar(signature: Option<&str>) -> bool {
     signature
         .and_then(parse_method_gsig)
         .is_some_and(|gsig| matches!(gsig.params.first(), Some(GSig::Var(_))))
-}
-
-fn metadata_return_ty(class: Option<&str>) -> Option<Ty> {
-    class.map(kotlin_name_to_ty)
 }
 
 fn nullable_scalar_return(info: ReturnInfo, ret: Ty) -> Ty {
@@ -1427,7 +1409,11 @@ impl SymbolSource for JvmLibraries {
             if mf.is_suspend {
                 logical.push(Ty::obj("kotlin/coroutines/Continuation"));
             }
-            let ret = metadata_return_ty(mf.ret_class.as_deref()).unwrap_or(physical_ret);
+            let ret = mf
+                .ret_class
+                .as_deref()
+                .map(kotlin_name_to_ty)
+                .unwrap_or(physical_ret);
             let mut member =
                 LibraryMember::new(mf.kotlin_name.clone(), logical, ret, desc.to_string());
             member.physical_name = Some(mf.jvm_name.clone());
@@ -1910,7 +1896,7 @@ impl SymbolSource for JvmLibraries {
             // Map `name` → the mangled `jvm_name` via `@Metadata` (extension receiver == this receiver) and
             // expose it with LOGICAL (value-class) parameter types so a value-class argument matches; the
             // value-classes pass unboxes it at the erased call. Bounded to a genuine value-class-param mangle.
-            if let Some(recv_internal) = source_internal_of_ty(receiver) {
+            if let Some(recv_internal) = receiver.kotlin_class_internal() {
                 for (rank, recv_desc) in supertype_descriptors(&self.cp, receiver)
                     .into_iter()
                     .enumerate()
@@ -2000,7 +1986,7 @@ impl SymbolSource for JvmLibraries {
             // member walk is BREADTH-FIRST (a subtype's override before a supertype's), and each member
             // carries its visit rung in `receiver_rank` so an arg-binding consumer (`resolve_instance`) can
             // pick the closest type's overload — the same most-derived-first precedence the BFS gives.
-            if let Some(internal) = source_internal_of_ty(receiver) {
+            if let Some(internal) = receiver.kotlin_class_internal() {
                 let mut seen = std::collections::HashSet::new();
                 let mut queue = std::collections::VecDeque::new();
                 queue.push_back(internal.to_string());
