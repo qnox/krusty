@@ -611,6 +611,14 @@ pub fn compile_and_run_box(
     run_box(&classes, &box_class, cp_jars)
 }
 
+/// Compile `src` with kotlin-stdlib plus the provisioned JDK modules, then run `box()`.
+#[allow(dead_code)]
+pub fn compile_and_run_with_stdlib(src: &str, stem: &str) -> Option<String> {
+    let stdlib = stdlib_jar()?;
+    let jdk = jdk_modules()?;
+    compile_and_run_box(src, stem, &[stdlib], Some(&jdk))
+}
+
 /// Compile Kotlin `lib_src` with the REAL kotlinc into a fresh classpath dir (tagged by `tag` +
 /// process id), returning the output dir for a `-classpath`. `None` (→ skip the test) when the kotlinc
 /// toolchain / stdlib isn't provisioned. The single shared "build a dependency jar" helper — classpath

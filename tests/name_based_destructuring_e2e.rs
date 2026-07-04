@@ -7,9 +7,7 @@
 mod common;
 
 fn run(src: &str) -> Option<String> {
-    let stdlib = common::stdlib_jar()?;
-    let jdk = common::jdk_modules()?;
-    common::compile_and_run_box(src, "Nb", &[stdlib], Some(&jdk))
+    common::compile_and_run_with_stdlib(src, "Nb")
 }
 
 const FOR_AND_VAL: &str = r#"

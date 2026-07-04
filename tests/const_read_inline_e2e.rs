@@ -7,9 +7,7 @@ mod common;
 use krusty::jvm::classreader::parse_class;
 
 fn run(src: &str) -> Option<String> {
-    let sl = common::stdlib_jar()?;
-    let jdk = common::jdk_modules()?;
-    common::compile_and_run_box(src, "Main", &[sl], Some(&jdk))
+    common::compile_and_run_with_stdlib(src, "Main")
 }
 
 #[test]
