@@ -6,19 +6,9 @@
 mod common;
 
 fn run_box(name: &str, src: &str) {
-    let Some(java_home) = common::java_home() else {
-        eprintln!("skipping secondary_ctor_noprimary_e2e: set JAVA_HOME");
-        return;
-    };
-    let Some(stdlib) = common::stdlib_jar() else {
-        eprintln!("skipping secondary_ctor_noprimary_e2e: no kotlin-stdlib jar found");
-        return;
-    };
-    let jdk = std::path::PathBuf::from(format!("{java_home}/lib/modules"));
-    let Some(out) = common::compile_and_run_box(src, "B", &[stdlib], Some(&jdk)) else {
-        return;
-    };
-    assert_eq!(out, "OK", "{name}");
+    if let Some(out) = common::compile_and_run_with_stdlib(src, "B") {
+        assert_eq!(out, "OK", "{name}");
+    }
 }
 
 #[test]
