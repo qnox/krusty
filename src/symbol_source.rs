@@ -75,13 +75,6 @@ pub trait SymbolSource {
         }
     }
 
-    /// Whether this source recognizes `ty` as one of Kotlin's unsigned integer library types. The checker
-    /// uses this for the source-level unsigned arithmetic/equality rules without carrying a local list of
-    /// `UInt`/`ULong` in resolver code.
-    fn is_unsigned_integer_type(&self, ty: Ty) -> bool {
-        ty.is_unsigned()
-    }
-
     /// Normalize a semantic type to the form a JVM `<init>`/method descriptor carries, so a call
     /// argument can be matched against a descriptor-read parameter. A Kotlin built-in erases to its
     /// single JVM identity (`kotlin/collections/Set<String>` → `java/util/Set`, read-only and mutable
@@ -443,8 +436,6 @@ mod tests {
     #[test]
     fn default_trait_methods_are_empty_or_none() {
         let s = module();
-        // FakeSource does not override this, so it is `false`.
-        assert!(!s.is_unsigned_integer_type(Ty::Int));
         assert_eq!(s.jvm_descriptor_form(Ty::Int), Ty::Int);
         assert!(s.property_reference_type(1, false).is_none());
         assert!(s.class_literal_type().is_none());
@@ -484,7 +475,6 @@ mod tests {
     fn composite_delegates_defaults_to_children() {
         let c = CompositeSource::new(vec![Box::new(module()), Box::new(library())]);
         // No child overrides these, so the composite reports the empty/None defaults.
-        assert!(!c.is_unsigned_integer_type(Ty::Int));
         assert_eq!(c.jvm_descriptor_form(Ty::Int), Ty::Int);
         assert!(c.property_reference_type(0, true).is_none());
         assert!(c.class_literal_type().is_none());
