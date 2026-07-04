@@ -2165,23 +2165,12 @@ impl SymbolSource for JvmLibraries {
                                 );
                                 recovered.unwrap_or(m.ret)
                             };
-                            // Source parameter NAMES + per-parameter DEFAULT flags (from the class's
-                            // `@Metadata`) for named/omitted-argument resolution. A member's `params` are the
-                            // logical params (no receiver), so both align 1:1. A data-class `copy` defaults
-                            // every parameter, so `required` drops below the arity and a subset may be passed.
-                            // `@Metadata` keys on the JVM name, so a value-class-param-MANGLED member (`copy`
-                            // → `copy-<hash>`) is looked up by its `physical_name`.
+                            // Member call shape from the class's `@Metadata`. A value-class-param-mangled
+                            // member (`copy` → `copy-<hash>`) is keyed by its physical JVM name.
                             let meta_name = m.physical_name.as_deref().unwrap_or(&m.name);
-                            let param_defaults = self
-                                .cp
-                                .metadata_member_param_defaults(&cn, meta_name, params.len())
-                                .unwrap_or_default();
-                            let call_sig = CallSig::metadata_member(
-                                params.len(),
+                            let call_sig =
                                 self.cp
-                                    .metadata_member_param_names(&cn, meta_name, params.len()),
-                                param_defaults,
-                            );
+                                    .metadata_member_call_sig(&cn, meta_name, params.len());
                             // A generic-return builtin member (`Map.get(K): V?`) resolves to the erased
                             // classpath method (`java/util/Map.get` → `Object`), which carries no Kotlin
                             // nullability. Recover the source `V?` from the builtin `@Metadata`. Applied
