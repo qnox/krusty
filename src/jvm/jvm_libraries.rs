@@ -876,14 +876,6 @@ fn nonpublic_ext_receiver_is_typevar(signature: Option<&str>) -> bool {
         .is_some_and(|gsig| matches!(gsig.params.first(), Some(GSig::Var(_))))
 }
 
-fn nullable_scalar_return(info: ReturnInfo, ret: Ty) -> Ty {
-    if info.nullable && ret.is_jvm_scalar() {
-        Ty::nullable(ret)
-    } else {
-        ret
-    }
-}
-
 fn suspend_metadata_return(info: ReturnInfo, physical_ret: Ty) -> Ty {
     match info.class {
         Some(ty) if ty.is_jvm_scalar() && info.nullable => {
@@ -1673,7 +1665,11 @@ impl SymbolSource for JvmLibraries {
                             gsig_to_ty(&gsig.ret, &binds)
                         })
                         .unwrap_or(pret);
-                    let ret = nullable_scalar_return(ret_metadata, ret);
+                    let ret = if ret_metadata.nullable && ret.is_jvm_scalar() {
+                        Ty::nullable(ret)
+                    } else {
+                        ret
+                    };
                     let ret = match ret_metadata.class {
                         Some(meta) if self.value_underlying(meta).is_some() => match meta {
                             Ty::Obj(class, _) => Ty::obj_args(class, ret.type_args()),
