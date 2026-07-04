@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 
 use crate::jvm::classreader::{parse_class, read_method_code, ClassInfo, MethodCode};
 use crate::jvm::names::type_descriptor;
+use crate::libraries::CallSig;
 use crate::types::Ty;
 
 /// Map a Kotlin internal type name (`kotlin/Int`, `kotlin/Char`, …) from builtins metadata to a `Ty`.
@@ -255,6 +256,26 @@ struct ClassMeta {
     /// instead of re-decoding + re-merging the `d1` themselves.
     fns: std::rc::Rc<[super::metadata::MetaFn]>,
 }
+
+fn aligned_meta_callable<'a>(
+    meta: &'a ClassMeta,
+    fn_name: &str,
+    desc_params: &[Ty],
+) -> Option<(usize, &'a MetaCallable)> {
+    meta.by_jvm_name
+        .get(fn_name)?
+        .iter()
+        .filter_map(|&i| {
+            let c = &meta.callables[i];
+            let off = c.is_extension as usize;
+            let end = off + c.value_param_types.len();
+            (end <= desc_params.len()
+                && compat_prefix(&c.value_param_types, &desc_params[off..end]))
+            .then_some((end, c))
+        })
+        .max_by_key(|(end, _)| *end)
+}
+
 /// Per-class `@Metadata` cache: class internal name → (Kotlin function name → its `@JvmName`-mangled
 /// overloads `[(jvm_name, jvm_desc, kotlin_return_class)]`). Bridges a Kotlin name to the JVM method that
 /// `@OverloadResolutionByLambdaReturnType` selects (`sumOf` → `sumOfInt`/`sumOfLong`/…).
@@ -482,18 +503,7 @@ impl Classpath {
         // return how many leading params are real (`receiver? + source arity`). Prefer the LONGEST such
         // alignment (the most-specific overload) when several fit; `None` if none align (truncate is then
         // skipped — a normal function whose arity already equals the descriptor's).
-        meta.by_jvm_name
-            .get(fn_name)?
-            .iter()
-            .filter_map(|&i| {
-                let c = &meta.callables[i];
-                let off = c.is_extension as usize;
-                let end = off + c.value_param_types.len();
-                (end <= desc_params.len()
-                    && compat_prefix(&c.value_param_types, &desc_params[off..end]))
-                .then_some(end)
-            })
-            .max()
+        aligned_meta_callable(&meta, fn_name, desc_params).map(|(end, _)| end)
     }
 
     /// The SOURCE value-parameter NAMES of the `internal.fn_name` overload whose source value params
@@ -508,104 +518,54 @@ impl Classpath {
         desc_params: &[Ty],
     ) -> Option<Vec<String>> {
         let meta = self.class_meta(internal);
-        meta.by_jvm_name
-            .get(fn_name)?
-            .iter()
-            .filter_map(|&i| {
-                let c = &meta.callables[i];
-                if c.value_param_names.is_empty()
-                    || c.value_param_names.iter().any(String::is_empty)
-                {
-                    return None;
-                }
-                let off = c.is_extension as usize;
-                let end = off + c.value_param_types.len();
-                (end <= desc_params.len()
-                    && compat_prefix(&c.value_param_types, &desc_params[off..end]))
-                .then_some((end, c.value_param_names.clone()))
-            })
-            .max_by_key(|(end, _)| *end)
-            .map(|(_, names)| names)
+        aligned_meta_callable(&meta, fn_name, desc_params).and_then(|(_, c)| {
+            if !c.value_param_names.is_empty() && !c.value_param_names.iter().any(String::is_empty)
+            {
+                Some(c.value_param_names.clone())
+            } else {
+                None
+            }
+        })
     }
 
-    /// Per-LOGICAL-param `DECLARES_DEFAULT_VALUE` flags of the `internal.fn_name` overload whose source
-    /// value params prefix-match `desc_params` (same alignment as [`metadata_param_names`]). A classpath
-    /// call may OMIT a trailing run of `true` params (filled by the `<name>$default` synthetic); the
-    /// required arity is the count of `false`. `None` when no overload aligns or none of its params declare
-    /// a default (nothing to omit — the existing all-required path applies).
-    /// Per SOURCE value parameter of the top-level `fn_name` on facade `internal`: `Some(receiver_internal)`
-    /// when it is a RECEIVER function-type param (`Recv.() -> R`, decoded from the param Type's
-    /// `@ExtensionFunctionType` annotation). Drives classpath receiver-lambda binding: a lambda passed to
-    /// such a param binds `this` to the receiver. `None` if the facade/function isn't found; an empty/all-
-    /// `None` vec means no receiver-lambda params.
-    pub fn metadata_param_recv_funs(&self, internal: &str, fn_name: &str) -> Vec<Option<String>> {
+    /// The source-level call shape for the descriptor-aligned top-level `internal.fn_name` overload.
+    /// Names, defaults, receiver-lambda annotations, and materialization flags are projected from ONE
+    /// `@Metadata` callable, so overloads cannot drift across parallel metadata lookups.
+    pub fn metadata_call_sig(&self, internal: &str, fn_name: &str, desc_params: &[Ty]) -> CallSig {
         let meta = self.class_meta(internal);
-        meta.by_kotlin_name
-            .get(fn_name)
-            .and_then(|idxs| {
-                idxs.iter()
-                    .map(|&i| &meta.callables[i])
-                    .find(|c| c.value_param_recv_funs.iter().any(Option::is_some))
-                    .or_else(|| idxs.first().map(|&i| &meta.callables[i]))
-            })
-            .map(|c| c.value_param_recv_funs.clone())
-            .unwrap_or_default()
-    }
-
-    pub fn metadata_param_recv_fun_flags(&self, internal: &str, fn_name: &str) -> Vec<bool> {
-        let meta = self.class_meta(internal);
-        meta.by_kotlin_name
-            .get(fn_name)
-            .and_then(|idxs| {
-                idxs.iter()
-                    .map(|&i| &meta.callables[i])
-                    .find(|c| c.value_param_recv_fun_flags.iter().any(|b| *b))
-                    .or_else(|| idxs.first().map(|&i| &meta.callables[i]))
-            })
-            .map(|c| c.value_param_recv_fun_flags.clone())
-            .unwrap_or_default()
-    }
-
-    /// Per SOURCE value parameter of `fn_name`: whether it is `crossinline`/`noinline` (its lambda
-    /// argument is MATERIALIZED, so a mutable local it captures must be `Ref`-boxed). Empty when the
-    /// function is absent or carries no such parameter.
-    pub fn metadata_param_materialized(&self, internal: &str, fn_name: &str) -> Vec<bool> {
-        let meta = self.class_meta(internal);
-        meta.by_kotlin_name
-            .get(fn_name)
-            .and_then(|idxs| {
-                idxs.iter()
-                    .map(|&i| &meta.callables[i])
-                    .find(|c| c.value_param_materialized.iter().any(|b| *b))
-                    .or_else(|| idxs.first().map(|&i| &meta.callables[i]))
-            })
-            .map(|c| c.value_param_materialized.clone())
-            .unwrap_or_default()
-    }
-
-    pub fn metadata_param_defaults(
-        &self,
-        internal: &str,
-        fn_name: &str,
-        desc_params: &[Ty],
-    ) -> Option<Vec<bool>> {
-        let meta = self.class_meta(internal);
-        meta.by_jvm_name
-            .get(fn_name)?
-            .iter()
-            .filter_map(|&i| {
-                let c = &meta.callables[i];
-                if !c.value_param_has_default.iter().any(|d| *d) {
-                    return None;
-                }
-                let off = c.is_extension as usize;
-                let end = off + c.value_param_types.len();
-                (end <= desc_params.len()
-                    && compat_prefix(&c.value_param_types, &desc_params[off..end]))
-                .then_some((end, c.value_param_has_default.clone()))
-            })
-            .max_by_key(|(end, _)| *end)
-            .map(|(_, defs)| defs)
+        let Some((_, c)) = aligned_meta_callable(&meta, fn_name, desc_params) else {
+            return CallSig::metadata_top_level(
+                desc_params.len(),
+                None,
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            );
+        };
+        let names = if !c.value_param_names.is_empty()
+            && !c.value_param_names.iter().any(String::is_empty)
+        {
+            Some(c.value_param_names.clone())
+        } else {
+            None
+        };
+        let defaults = if c.value_param_has_default.iter().any(|d| *d) {
+            c.value_param_has_default.clone()
+        } else {
+            Vec::new()
+        };
+        CallSig::metadata_top_level(
+            desc_params.len(),
+            names,
+            defaults,
+            c.value_param_recv_funs
+                .iter()
+                .map(|o| o.as_deref().map(Ty::obj))
+                .collect(),
+            c.value_param_recv_fun_flags.clone(),
+            c.value_param_materialized.clone(),
+        )
     }
 
     /// Source parameter NAMES of the class instance MEMBER `internal.jvm_name` of source arity `arity`,
@@ -702,10 +662,9 @@ impl Classpath {
             .map(|f| f.value_param_names)
     }
 
-    /// Which parameters of a class MEMBER (`jvm_name`, `arity` value params) DECLARE A DEFAULT VALUE, from
-    /// the CLASS's `@Metadata` functions (field 9) — `metadata_param_defaults` only reads PACKAGE (top-
-    /// level) functions, so a data-class `copy`'s defaults are invisible to it. Returns `None` when the
-    /// member has no defaulted parameter (no `$default` synthetic to route through).
+    /// Which parameters of a class MEMBER (`jvm_name`, `arity` value params) DECLARE A DEFAULT VALUE,
+    /// from the CLASS's `@Metadata` functions (field 9). Package-facade call-shape metadata is separate;
+    /// this member path is what makes data-class `copy` defaults visible.
     pub fn metadata_member_param_defaults(
         &self,
         internal: &str,
