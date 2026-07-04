@@ -4,7 +4,7 @@
 //! cases that the `Ty::Nullable` rework miscompiled (a 57-case `VerifyError` the hand-written e2e
 //! missed entirely) — all nullable-primitive boxing / boxed-comparison shapes — now `box()=OK`.
 //!
-//! Needs the provisioned box corpus (`KRUSTY_KOTLIN_BOX_DIR`) + JVM toolchain; skips otherwise.
+//! Needs the provisioned box corpus + JVM toolchain; skips otherwise.
 
 mod common;
 

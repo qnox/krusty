@@ -802,7 +802,7 @@ public class KotlincServer {
 "#;
 
 /// The reference compiler's all-in-one jar (`<dist>/lib/kotlin-compiler.jar`), which carries
-/// `K2JVMCompiler`. `None` when no `KRUSTY_KOTLINC` dist is available.
+/// `K2JVMCompiler`. `None` when the provisioned dist is unavailable.
 #[allow(dead_code)]
 pub fn kotlin_compiler_jar() -> Option<PathBuf> {
     let p = kotlinc_lib_dir()?.join("kotlin-compiler.jar");

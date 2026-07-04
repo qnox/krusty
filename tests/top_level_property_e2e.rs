@@ -5,6 +5,8 @@
 use std::fs;
 use std::process::Command;
 
+mod common;
+
 fn env(k: &str) -> Option<String> {
     std::env::var(k).ok().filter(|v| !v.is_empty())
 }
@@ -68,41 +70,46 @@ fn top_level_properties_run_and_round_trip() {
     );
 
     // (2) A Kotlin consumer (real kotlinc) imports + uses the properties via metadata.
-    if let Some(kotlinc) = env("KRUSTY_KOTLINC") {
+    {
         fs::write(root.join("C.kt"), "import demo.greeting\nimport demo.counter\nfun main() {\n  counter = counter + 1\n  println(greeting + \":\" + counter)\n}\n").unwrap();
-        let mut cmd = Command::new(&kotlinc);
-        cmd.arg(root.join("C.kt")).args([
-            "-cp",
-            lib.to_str().unwrap(),
-            "-d",
-            root.join("cout").to_str().unwrap(),
-        ]);
-        cmd.env("JAVA_HOME", &java_home);
-        let cc = cmd.output().expect("kotlinc");
+        let cout = root.join("cout");
+        let args = vec![
+            root.join("C.kt").to_string_lossy().into_owned(),
+            "-cp".to_string(),
+            lib.to_string_lossy().into_owned(),
+            "-d".to_string(),
+            cout.to_string_lossy().into_owned(),
+        ];
+        let Some((code, _stderr)) = common::kotlinc_compile(&args) else {
+            let _ = fs::remove_dir_all(&root);
+            return;
+        };
         // A *Kotlin* consumer importing the top-level properties needs krusty to emit the Kotlin
         // `@Metadata` annotation (kotlinc reads property declarations from it, not from the JVM ABI).
         // krusty doesn't emit `@Metadata` yet — so this cross-Kotlin-interop step is skipped, not
         // asserted, until metadata emission lands. (The Java-ABI consumption above is the phase-398
         // guarantee and IS asserted.)
-        if !cc.status.success() {
+        if code != 0 {
             eprintln!("skip (kotlinc consumer needs @Metadata, not emitted yet)");
             let _ = fs::remove_dir_all(&root);
             return;
         }
-        if let Some(stdlib) = env("KRUSTY_KOTLIN_STDLIB") {
-            let cp = format!(
-                "{}:{}:{}",
-                root.join("cout").to_str().unwrap(),
-                lib.to_str().unwrap(),
-                stdlib
-            );
-            let r = Command::new(&java)
-                .args(["-cp", &cp, "CKt"])
-                .output()
-                .unwrap();
-            if r.status.success() {
-                assert_eq!(String::from_utf8_lossy(&r.stdout).trim(), "hi:11");
-            }
+        let Some(stdlib) = common::stdlib_jar() else {
+            let _ = fs::remove_dir_all(&root);
+            return;
+        };
+        let cp = format!(
+            "{}:{}:{}",
+            cout.to_string_lossy(),
+            lib.to_string_lossy(),
+            stdlib.to_string_lossy()
+        );
+        let r = Command::new(&java)
+            .args(["-cp", &cp, "CKt"])
+            .output()
+            .unwrap();
+        if r.status.success() {
+            assert_eq!(String::from_utf8_lossy(&r.stdout).trim(), "hi:11");
         }
     }
     let _ = fs::remove_dir_all(&root);

@@ -62,8 +62,7 @@ fn vendored_kotlin_box_cases_return_ok() {
         .map(|p| p.to_string_lossy().into_owned())
         .expect(
             "kotlin-stdlib jar not found — box cases need it on the runtime classpath. \
-             Provision the reference compiler with `just kotlinc` and export \
-             KRUSTY_KOTLINC=\"$(just kotlinc)\". Refusing to skip.",
+             Provision the reference compiler with `just kotlinc`. Refusing to skip.",
         );
     let krusty = env!("CARGO_BIN_EXE_krusty");
     let data = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/box_data");
