@@ -501,8 +501,15 @@ impl<'a> CallResolver<'a> {
             .ret
             .class
             .filter(|meta| self.lib.value_underlying(*meta).is_some());
-        let ret_ty = o.ret.apply_with_class(ret_class, ret_ty);
-        callable_with_return(c, ret_ty, false)
+        let ret_ty2 = o.ret.apply_with_class(ret_class, ret_ty);
+        crate::trace_compiler!(
+            "resolve",
+            "bind_extension_callable {}.{} gsig={} type_args={type_args:?} ret_ty={ret_ty:?} -> {ret_ty2:?}",
+            c.owner,
+            c.name,
+            o.generic_sig.is_some()
+        );
+        callable_with_return(c, ret_ty2, false)
     }
 
     fn resolve_extension_default_callable(
@@ -1635,6 +1642,14 @@ fn best_member_overload<'a>(
         .or_else(|| {
             candidates.clone().find(|o| {
                 o.callable.params.len() >= args.len()
+                    // A prefix match (fewer args than params) is only a valid UNDER-application when the
+                    // omitted trailing parameters are optional — i.e. the call still supplies every REQUIRED
+                    // parameter. Otherwise a 1-arg call would spuriously bind a 2-required-param member
+                    // (`getFor(id, t)`), shadowing the genuine 1-param extension overload and erasing its
+                    // generic return to `Any`. `required == 0` (no metadata) keeps the legacy behaviour.
+                    && (o.callable.params.len() == args.len()
+                        || o.call_sig.required == 0
+                        || o.call_sig.required <= args.len())
                     && o.callable.params[..args.len()]
                         .iter()
                         .zip(args)

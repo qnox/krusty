@@ -540,6 +540,48 @@ fn is_type_op(insn: &Insn) -> bool {
     )
 }
 
+/// True for an `ldc`/`ldc_w` that pushes a `Class` constant — the type-bearing op for the KClass /
+/// `T::class(.java)` reified modes (`reifiedOperationMarker(4|5, "T")` then `ldc class <erased>`,
+/// followed for `KClass` by `Reflection.getOrCreateKotlinClass`). The erased `ldc class` operand is what
+/// specializes to the concrete reified type.
+fn is_ldc_class(insn: &Insn, src_cp: &[C]) -> bool {
+    let (op, operands) = match insn {
+        Insn::Plain { op, operands } => (*op, operands),
+        _ => return false,
+    };
+    let idx = match op {
+        0x12 => operands.first().map(|&b| b as u16), // ldc (1-byte)
+        0x13 => operands
+            .first()
+            .zip(operands.get(1))
+            .map(|(a, b)| (*a as u16) << 8 | *b as u16), // ldc_w (2-byte)
+        _ => return false,
+    };
+    idx.and_then(|i| src_cp.get(i as usize))
+        .is_some_and(|c| matches!(c, C::Class(_)))
+}
+
+/// The type-bearing op (`anewarray`/`checkcast`/… OR an `ldc class`) a `reifiedOperationMarker` precedes.
+fn is_reified_type_bearing(insn: &Insn, src_cp: &[C]) -> bool {
+    is_type_op(insn) || is_ldc_class(insn, src_cp)
+}
+
+/// Overwrite the constant-pool operand of a reified type-bearing instruction with the concrete `Class`
+/// pool `idx`. Handles the 2-byte type-ops / `ldc_w` (via [`set_pool_operand`]) and the 1-byte `ldc`
+/// (`idx` must fit a byte, else the widening would shift offsets and break already-resolved branch
+/// targets — return `false` so the caller SKIPS the splice rather than miscompiling).
+fn set_reified_operand(insn: &mut Insn, idx: u16) -> bool {
+    if let Insn::Plain { op: 0x12, operands } = insn {
+        if idx > 0xff || operands.is_empty() {
+            return false;
+        }
+        operands[0] = idx as u8;
+        return true;
+    }
+    set_pool_operand(insn, idx);
+    true
+}
+
 /// Substitute Kotlin's `reifiedOperationMarker` pattern in an inline body: the call (preceded by its
 /// `iconst <mode>` and `ldc "<typeParam>"` argument pushes) is replaced with `nop`s, and the
 /// following type op (`anewarray`/`checkcast`/`instanceof`) is repointed at the concrete reified type
@@ -589,6 +631,56 @@ pub fn substitute_reified(
         }
     }
     patches
+}
+
+/// NOP each `reifiedOperationMarker` triplet (`iconst <mode>; ldc "<T>"; invokestatic marker`) in place
+/// — the marker itself is a compile-time directive that THROWS at runtime, so it must never reach the
+/// spliced bytecode. Returns, per marker, the index of the following type-bearing instruction
+/// (`anewarray`/`checkcast`/…/`ldc class`) and the reified type-parameter name — so the caller repoints
+/// that instruction at the concrete type AFTER relocation (`set_reified_operand`). Unlike
+/// [`substitute_reified`], this also covers the `ldc class` (KClass / `T::class`) modes and defers the
+/// operand rewrite (the CLASS pool ref must be minted post-relocation to survive `relocate_insns`).
+/// `None` (⇒ the caller SKIPS the whole splice, never miscompiles) if any marker is malformed — the
+/// preceding `ldc "<T>"` name is unreadable, or no type-bearing op follows — since NOP-ing an
+/// unspecializable marker would leave the erased placeholder in the emitted body.
+fn reify_markers(insns: &mut [Insn], src_cp: &[C]) -> Option<Vec<(usize, String)>> {
+    // Locate every marker + its (name, following type-bearing index) FIRST, bailing on any malformed
+    // one, so a partial NOP is never left behind when we decide to skip.
+    let mut plan: Vec<(usize, usize, String)> = Vec::new();
+    for i in 0..insns.len() {
+        let is_marker = matches!(&insns[i], Insn::Plain { op: 0xb8, operands } if operands.len() == 2
+            && methodref_target(src_cp, (operands[0] as u16) << 8 | operands[1] as u16)
+                == Some(("kotlin/jvm/internal/Intrinsics", "reifiedOperationMarker")));
+        if !is_marker {
+            continue;
+        }
+        if i < 2 {
+            return None; // a marker with no room for its `iconst <mode>; ldc "<T>"` argument pushes
+        }
+        let name = match &insns[i - 1] {
+            Insn::Plain { op: 0x12, operands } if operands.len() == 1 => match src_cp
+                .get(operands[0] as usize)
+            {
+                Some(C::String(u)) => utf8(src_cp, *u).map(|s| s.trim_end_matches('?').to_string()),
+                _ => None,
+            },
+            _ => None,
+        }?;
+        let j = (i + 1..insns.len()).find(|&j| is_reified_type_bearing(&insns[j], src_cp))?;
+        plan.push((i, j, name));
+    }
+    let nop = Insn::Plain {
+        op: 0x00,
+        operands: vec![],
+    };
+    let mut targets = Vec::with_capacity(plan.len());
+    for (i, j, name) in plan {
+        insns[i] = nop.clone();
+        insns[i - 1] = nop.clone();
+        insns[i - 2] = nop.clone();
+        targets.push((j, name));
+    }
+    Some(targets)
 }
 
 /// Overwrite the 2-byte constant-pool operand of a pool-referencing instruction with `idx` (used to
@@ -1621,17 +1713,32 @@ pub fn splice_unified(
     lambdas: &[LambdaSplice],
     start_offset: usize,
     cw: &mut ClassWriter,
+    reified: &HashMap<String, String>,
 ) -> Option<BranchySplice> {
-    // A `reifiedOperationMarker` body needs its reified type substituted (`substitute_reified`), which
-    // requires the call's reified type arguments — a separate concern from frame/operand-stack splicing
-    // and orthogonal to this path (the IR inliner skips reified fns; reified intrinsics like `emptyArray`
-    // go through the synthetics registry). Unreached by the lambda/host splicer (0 corpus occurrences).
-    if is_reified_inline(body) {
+    // A `reifiedOperationMarker` body specializes its reified type parameter at the call site. Without
+    // the call's reified type arguments (`reified` empty) it can't be specialized — the marker THROWS at
+    // runtime — so skip (the caller falls back / drops the file, never miscompiles). With them, the
+    // markers are NOP'd and each following type-bearing op repointed at the concrete type below.
+    crate::trace_compiler!(
+        "splice",
+        "splice_unified reified_inline={} reified_map_len={}",
+        is_reified_inline(body),
+        reified.len()
+    );
+    if is_reified_inline(body) && reified.is_empty() {
         return None;
     }
     let ret = ret_vtype(descriptor, cw)?;
     let offsets_of_param = param_offsets(descriptor)?;
     let mut insns = disassemble(&body.code)?;
+    // NOP the reified markers now (before relocation) and remember which instructions to repoint; the
+    // concrete `Class` pool ref is minted + applied AFTER relocation (so `relocate_insns` doesn't remap
+    // it back to the erased placeholder).
+    let reified_targets: Vec<(usize, String)> = if reified.is_empty() {
+        Vec::new()
+    } else {
+        reify_markers(&mut insns, &body.source_cp)?
+    };
     // `assert` is a codegen INTRINSIC, not a normal inline: kotlinc guards it on a synthetic per-class
     // `$assertionsDisabled` field (or elides it per `-Xassertions`/`ASSERTIONS_MODE`), and when disabled
     // does NOT even evaluate the argument. Splicing its library body (which reads `kotlin/_Assertions.
@@ -1786,6 +1893,16 @@ pub fn splice_unified(
         }
     }
     relocate_insns(&mut insns, &body.source_cp, cw)?;
+    // Repoint each reified type-bearing op at its concrete type (post-relocation, so the fresh CLASS pool
+    // ref survives). An unmapped type-parameter name (`reified` lacks it) or a 1-byte `ldc` overflow ⇒
+    // skip the whole splice rather than emit the erased placeholder.
+    for (j, name) in &reified_targets {
+        let concrete = reified.get(name)?;
+        let idx = cw.class_ref(concrete);
+        if !set_reified_operand(&mut insns[*j], idx) {
+            return None;
+        }
+    }
     shift_locals(&mut insns, base)?;
     // Return handling: DROP a trailing return (fall through with the result on the stack), and redirect
     // any earlier return to the join (`goto` past the body). A pure BRANCHLESS body — no branches, a
@@ -2165,7 +2282,8 @@ mod tests {
             handlers: vec![],
         };
         let mut cw = ClassWriter::new("T", "java/lang/Object");
-        let bs = splice_unified(&body, "(I)I", 3, &[], 0, &mut cw).expect("branchless splice");
+        let bs = splice_unified(&body, "(I)I", 3, &[], 0, &mut cw, &HashMap::new())
+            .expect("branchless splice");
         // Prologue stores the one arg into slot 3, then the body runs with no trailing return.
         // istore_3 ; iload_3 ; iconst_3 ; imul   (compact slot-3 forms; the `ireturn` is dropped)
         assert_eq!(bs.bytes, vec![0x3e, 0x1d, 0x06, 0x68]);
@@ -2454,7 +2572,8 @@ mod tests {
             handlers: vec![],
         };
         let mut cw = ClassWriter::new("T", "java/lang/Object");
-        let out = splice_unified(&body, "(I)I", 1, &[], 0, &mut cw).expect("splice");
+        let out =
+            splice_unified(&body, "(I)I", 1, &[], 0, &mut cw, &HashMap::new()).expect("splice");
         assert!(out.join_required);
         assert!(!out.frames.is_empty());
     }

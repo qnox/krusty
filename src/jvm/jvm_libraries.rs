@@ -586,6 +586,12 @@ fn gsig_unbox_wrapper(g: GSig) -> GSig {
 
 /// Parse a leading `<Name:Bound...>` formal-type-parameter block, returning the formal names and the
 /// remaining signature. No block means empty names and unchanged input.
+/// The generic type-parameter NAMES of a method `Signature` (`<T:…;U:…>(…)…` → `["T", "U"]`), for
+/// mapping a call's explicit type arguments onto reified type parameters at an inline splice.
+pub(crate) fn signature_formals(sig: &str) -> Vec<String> {
+    parse_formals(sig).0
+}
+
 fn parse_formals(s: &str) -> (Vec<String>, &str) {
     let Some(rest) = s.strip_prefix('<') else {
         return (Vec::new(), s);
