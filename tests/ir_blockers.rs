@@ -1,6 +1,6 @@
 //! Diagnostic: for JVM-applicable single-file `box()` tests that parse+check cleanly but do NOT
-//! lower to IR, tally the actual unsupported AST node variants (walking the expr/stmt arenas) — an
-//! accurate roadmap of what to add to `ir_lower` next. Gated on KRUSTY_KOTLIN_BOX_DIR.
+//! lower to IR, tally unsupported AST node variants — a roadmap for `ir_lower` using the provisioned
+//! box corpus locator shared with conformance.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -119,7 +119,6 @@ fn decl_blockers(file: &File) -> Vec<&'static str> {
                 }
             }
             Decl::Property(_) => out.push("top-level property"),
-            _ => out.push("other top-level decl"),
         }
     }
     out
@@ -136,11 +135,11 @@ fn ir_blockers() {
 }
 
 fn run() {
-    let Ok(box_dir) = std::env::var("KRUSTY_KOTLIN_BOX_DIR") else {
+    let Some(box_dir) = krusty::toolchain::box_corpus_dir() else {
         return;
     };
     let mut files = Vec::new();
-    collect_kt(Path::new(&box_dir), &mut files);
+    collect_kt(&box_dir, &mut files);
 
     let (mut total, mut lowered, mut nearmiss) = (0u32, 0u32, 0u32);
     // count of files that contain each unsupported variant (once per file), and files with classes/decls.
