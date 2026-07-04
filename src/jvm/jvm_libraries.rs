@@ -1817,15 +1817,8 @@ impl SymbolSource for JvmLibraries {
             // For a value-class receiver only (bounding the blast radius), map `name` → the mangled method
             // via `meta_functions` (the facade-merged `@Metadata` decode), then load the real candidate by
             // that JVM name.
-            // The receiver's value-class internal name — a dedicated `Ty::UInt`/`ULong` or an `Obj`.
-            let recv_value_internal: Option<String> = match &receiver {
-                Ty::UInt => Some("kotlin/UInt".to_string()),
-                Ty::ULong => Some("kotlin/ULong".to_string()),
-                Ty::Obj(i, _) => Some(i.to_string()),
-                _ => None,
-            };
-            if let Some(recv_internal) = recv_value_internal {
-                if let Some(recv_desc) = self.value_class_underlying_desc(&recv_internal) {
+            if let Some(recv_internal) = receiver.kotlin_class_internal() {
+                if let Some(recv_desc) = self.value_class_underlying_desc(recv_internal) {
                     {
                         for owner in self.cp.find_extension_owners(&recv_desc) {
                             // `meta_functions` shares the facade-merged decode — for a multifile FACADE
@@ -1838,7 +1831,7 @@ impl SymbolSource for JvmLibraries {
                                 if mf.kotlin_name != name
                                     || mf.jvm_name == name
                                     || !mf.is_public
-                                    || mf.receiver_class.as_deref() != Some(recv_internal.as_str())
+                                    || mf.receiver_class.as_deref() != Some(recv_internal)
                                 {
                                     continue;
                                 }
