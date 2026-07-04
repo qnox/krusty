@@ -1384,7 +1384,13 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 if p.receiver.is_some() {
                     return None;
                 }
-                let ty = lo.delegated_prop_type(p)?;
+                let ty = if let Some(tref) = p.ty.as_ref() {
+                    ty_of(file, tref)
+                } else {
+                    let delegate_ty = info.ty(p.delegate?);
+                    let internal = delegate_ty.obj_internal()?;
+                    syms.method_of(internal, "getValue")?.ret
+                };
                 let fid = lo.ir.add_fun(IrFunction {
                     name: property_getter_name(&p.name),
                     params: vec![],
@@ -4213,18 +4219,6 @@ impl<'a> Lower<'a> {
             return Some(t);
         }
         self.info.ty(call).array_elem()
-    }
-
-    /// The type of a delegated property — the explicit annotation if present, else inferred from the
-    /// delegate's `getValue` return type. `None` if the delegate type isn't a resolvable class with a
-    /// `getValue` member (e.g. an extension-operator delegate — not modeled yet).
-    fn delegated_prop_type(&self, p: &ast::PropDecl) -> Option<Ty> {
-        if let Some(tref) = p.ty.as_ref() {
-            return Some(ty_of(self.afile, tref));
-        }
-        let delegate_ty = self.info.ty(p.delegate?);
-        let internal = delegate_ty.obj_internal()?;
-        Some(self.syms.method_of(internal, "getValue")?.ret)
     }
 
     /// Build a fresh `PropertyReference0Impl(<facade>::class, name, "name()<ret>", 0)` for a local
