@@ -5,17 +5,8 @@
 
 mod common;
 
-fn run(src: &str) -> Option<String> {
-    common::compile_and_run_with_stdlib(src, "P")
-}
-
-/// The JVM + stdlib jar this e2e needs. When absent (a machine without `JAVA_HOME`/stdlib), the test
-/// SKIPS rather than fails — only a present toolchain that still returns the wrong answer is a bug.
 #[test]
 fn unbounded_type_param_cast_is_erased_noop() {
-    if !common::stdlib_toolchain_ready() {
-        return;
-    }
     // `<T>` is `<T : Any?>` — `null as T` is a no-op (no null check, no checkcast).
     const SRC: &str = "// WITH_STDLIB\n\
 fun <T> idCast(x: Any?): T = x as T\n\
@@ -24,17 +15,11 @@ fun box(): String {\n\
     if (idCast<String>(\"hi\") != \"hi\") return \"fail str\"\n\
     return \"OK\"\n\
 }\n";
-    assert_eq!(
-        run(SRC).expect("unbounded `as T` should compile + run"),
-        "OK"
-    );
+    common::expect_box_ok_with_stdlib(SRC, "P");
 }
 
 #[test]
 fn nonnull_bounded_type_param_cast_throws_on_null() {
-    if !common::stdlib_toolchain_ready() {
-        return;
-    }
     // `<T : Any>` — `null as T` null-checks and throws (a `NullPointerException`).
     const SRC: &str = "// WITH_STDLIB\n\
 fun <T : Any> castNonNull(x: Any?): T = x as T\n\
@@ -44,17 +29,11 @@ fun box(): String {\n\
     try { castNonNull<Int>(null) } catch (e: NullPointerException) { r = \"OK\" }\n\
     return r\n\
 }\n";
-    assert_eq!(
-        run(SRC).expect("non-null bounded `as T` should compile + run"),
-        "OK"
-    );
+    common::expect_box_ok_with_stdlib(SRC, "P");
 }
 
 #[test]
 fn class_bounded_type_param_cast_checkcasts() {
-    if !common::stdlib_toolchain_ready() {
-        return;
-    }
     // `<T : CharSequence>` — null-check then `checkcast CharSequence`; a wrong type throws CCE.
     const SRC: &str = "// WITH_STDLIB\n\
 fun <T : CharSequence> asSeq(x: Any?): T = x as T\n\
@@ -64,17 +43,11 @@ fun box(): String {\n\
     try { asSeq<String>(42) } catch (e: ClassCastException) { r = \"OK\" }\n\
     return r\n\
 }\n";
-    assert_eq!(
-        run(SRC).expect("class-bounded `as T` should compile + run"),
-        "OK"
-    );
+    common::expect_box_ok_with_stdlib(SRC, "P");
 }
 
 #[test]
 fn safe_cast_to_type_param_is_erased() {
-    if !common::stdlib_toolchain_ready() {
-        return;
-    }
     // `x as? T` (safe cast to a type parameter). `T` is erased, so the runtime cannot actually test it
     // (the bound is `Object` for an unbounded `T`); a non-null value keeps its identity, `null` stays
     // `null`. Modeled like kotlinc's `unchecked_cast1`: the cast is used INSIDE the generic function so
@@ -89,5 +62,5 @@ fun box(): String {\n\
     val s = sb.toString()\n\
     return if (s == \"hi42null\") \"OK\" else s\n\
 }\n";
-    assert_eq!(run(SRC).expect("`as? T` should compile + run"), "OK");
+    common::expect_box_ok_with_stdlib(SRC, "P");
 }
