@@ -5,16 +5,7 @@
 mod common;
 
 fn run(src: &str, stem: &str) -> Option<String> {
-    let Some(java_home) = common::java_home() else {
-        eprintln!("skipping feature_coverage_i_e2e: set JAVA_HOME");
-        return None;
-    };
-    let Some(stdlib) = common::stdlib_jar() else {
-        eprintln!("skipping feature_coverage_i_e2e: no kotlin-stdlib jar found");
-        return None;
-    };
-    let jdk = std::path::PathBuf::from(format!("{java_home}/lib/modules"));
-    common::compile_and_run_box(src, stem, &[stdlib], Some(&jdk))
+    common::compile_and_run_with_stdlib(src, stem)
 }
 
 #[test]
