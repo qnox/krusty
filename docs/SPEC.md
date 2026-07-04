@@ -1601,3 +1601,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   forever (an infinite loop / coroutine that never completes). A bare suspending `Block` STATEMENT (the
   `for`-loop iterator desugar) is now spliced into the state-machine flattening stream.
   (`build775_ii1_suspend_for_loop_e2e`, `build775_aa1_suspend_iface_param_elvis_e2e`)
+
+- **A static method DECLARED ON AN INTERFACE uses an `InterfaceMethodref` constant.** A Kotlin interface's
+  `foo$default` synthetic (reached when a call OMITS an interface-declared default arg — `interface A { fun
+  f(x: String = "OK") }`, `class C(val x: A) : A by x`, `C(B()).f()` → `A.f$default(...)`) is a `static`
+  method ON THE INTERFACE; even an `invokestatic` to it must reference it via an `InterfaceMethodref`, else
+  the JVM throws `IncompatibleClassChangeError`. The `Callee::Static` emit now picks `interface_methodref`
+  when the owner is an interface (queried through the new `MethodBodies::owner_is_interface`, backed by the
+  classpath's class flags); a class owner (a stdlib facade — the common case) stays `Methodref`. Surfaced by
+  the ee1 overload-selection fix routing an omitted-default interface call to the correct `A.f$default`
+  target. (box corpus `codegen/box/compileKotlinAgainstKotlin/delegatedDefault.kt`; box-OK 2378→2379)
