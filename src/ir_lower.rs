@@ -3830,10 +3830,6 @@ impl<'a> Lower<'a> {
         self.scalar_value_repr(ty).is_some()
     }
 
-    fn is_unsigned_integer_type(&self, ty: Ty) -> bool {
-        ty.is_unsigned()
-    }
-
     fn unsigned_integer_box_type(&self, ty: Ty) -> Option<Ty> {
         self.syms.libraries.unsigned_integer_box_type(ty)
     }
@@ -3886,7 +3882,7 @@ impl<'a> Lower<'a> {
     }
 
     fn compare_ordered(&mut self, ty: Ty, op: IrBinOp, lhs: u32, rhs: u32) -> Option<u32> {
-        if self.is_unsigned_integer_type(ty) {
+        if ty.is_unsigned() {
             let call = self.runtime_call(RuntimeOp::UnsignedCompare, ty, vec![lhs, rhs])?;
             let zero = self.ir.add_expr(IrExpr::Const(IrConst::Int(0)));
             Some(self.ir.add_expr(IrExpr::PrimitiveBinOp {
@@ -7964,7 +7960,7 @@ impl<'a> Lower<'a> {
             return None;
         }
         // Unsigned `div`/`rem` need platform unsigned helpers (signed `+`/`-`/`*` share opcodes).
-        if self.is_unsigned_integer_type(lt) && matches!(op, BinOp::Div | BinOp::Rem) {
+        if lt.is_unsigned() && matches!(op, BinOp::Div | BinOp::Rem) {
             let l = self.expr(recv)?;
             let r = self.expr(arg)?;
             let runtime_op = if op == BinOp::Div {
@@ -9208,7 +9204,7 @@ impl<'a> Lower<'a> {
             dispatch_receiver: Some(it_g2),
             args: vec![],
         });
-        let x_init = if self.is_unsigned_integer_type(elem) {
+        let x_init = if elem.is_unsigned() {
             // The element is a boxed `kotlin/UInt`/`ULong` — checkcast + `unbox-impl`, not the
             // `Integer` unbox a plain JVM-scalar coercion would emit.
             self.unbox_unsigned(next_call, elem)?
@@ -9440,7 +9436,7 @@ impl<'a> Lower<'a> {
         let target_ref = ir_type_is_reference(target);
         // An unsigned value flowing into a reference context (`Any`, a generic, a collection element)
         // boxes via the inline-class `box-impl` factory to a `kotlin/UInt`/`ULong` object.
-        if self.is_unsigned_integer_type(at) && target_ref {
+        if at.is_unsigned() && target_ref {
             return self.box_unsigned(e, at);
         }
         // A reference (`Any`, a smart-cast `is UInt`) flowing into an unsigned target unboxes the
@@ -9766,7 +9762,7 @@ impl<'a> Lower<'a> {
         }
         // An unsigned value out of an erased reference: checkcast to the inline-class object, then
         // `unbox-impl` — the wrapper is `kotlin/UInt`, not `Integer`.
-        if self.is_unsigned_integer_type(logical) && physical.is_reference() {
+        if logical.is_unsigned() && physical.is_reference() {
             return self
                 .unbox_unsigned(read, logical)
                 .expect("unsigned integer target must provide box/unbox shape");
@@ -14298,7 +14294,7 @@ impl<'a> Lower<'a> {
                     // A reference (`Any`) smart-cast to `UInt`/`ULong` (`if (x is UInt) … x …`) would
                     // unbox the `kotlin.UInt` value type, but krusty erases unsigned to `int` and would
                     // emit an `Integer` unbox (ClassCastException) — skip rather than miscompile.
-                    if self.is_unsigned_integer_type(narrowed) && slot_ty.is_reference() {
+                    if narrowed.is_unsigned() && slot_ty.is_reference() {
                         return None;
                     }
                     if narrowed != slot_ty && narrowed != Ty::Error {
@@ -14356,7 +14352,7 @@ impl<'a> Lower<'a> {
                     if narrowed != sty
                         && self.has_scalar_value_repr(narrowed)
                         && sty.is_reference()
-                        && !self.is_unsigned_integer_type(narrowed)
+                        && !narrowed.is_unsigned()
                     {
                         self.ir.add_expr(IrExpr::TypeOp {
                             op: IrTypeOp::ImplicitCoercion,
@@ -14897,7 +14893,7 @@ impl<'a> Lower<'a> {
                 // `/`/`%` need target unsigned intrinsics. Comparisons use the platform unsigned
                 // comparator and compare its result with zero.
                 let lty = self.info.ty(lhs);
-                if self.is_unsigned_integer_type(lty)
+                if lty.is_unsigned()
                     && matches!(
                         op,
                         BinOp::Div | BinOp::Rem | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge
@@ -15070,7 +15066,7 @@ impl<'a> Lower<'a> {
                     let lower_concat_operand = |this: &mut Self, oe: AstExprId| -> Option<u32> {
                         let v = this.expr(oe)?;
                         let t = this.info.ty(oe);
-                        Some(if this.is_unsigned_integer_type(t) {
+                        Some(if t.is_unsigned() {
                             this.unsigned_to_string(v, t)?
                         } else {
                             v
@@ -15317,9 +15313,8 @@ impl<'a> Lower<'a> {
                     // smart-cast of them reaches the IEEE-correct numeric `==` conform. Unsigned stays
                     // excluded (its conform / value-box unbox isn't modeled).
                     let base = self.ty_ref(&base_ref).or_else(|| {
-                        Ty::from_name(&base_ref.name).filter(|t| {
-                            self.has_scalar_value_repr(*t) && !self.is_unsigned_integer_type(*t)
-                        })
+                        Ty::from_name(&base_ref.name)
+                            .filter(|t| self.has_scalar_value_repr(*t) && !t.is_unsigned())
                     });
                     if let Some(target) = base {
                         let inst_operand = ty_to_ir(target);
@@ -15385,7 +15380,7 @@ impl<'a> Lower<'a> {
                 })?;
                 // An unsigned target tests against its inline-class object (`kotlin/UInt`), not the
                 // representation's wrapper (`Integer`).
-                let type_operand = if self.is_unsigned_integer_type(target) {
+                let type_operand = if target.is_unsigned() {
                     ty_to_ir(self.unsigned_integer_box_type(target)?)
                 } else {
                     ty_to_ir(target)
@@ -15731,7 +15726,7 @@ impl<'a> Lower<'a> {
                 let operand_ty = self.info.ty(operand);
                 let target_is_tparam = self.cur_tparams.iter().any(|(n, _, _)| *n == ty.name);
                 if self.has_scalar_value_repr(operand_ty)
-                    && !self.is_unsigned_integer_type(operand_ty)
+                    && !operand_ty.is_unsigned()
                     && !target_is_tparam
                 {
                     let target = self.info.ty(e);
@@ -15766,9 +15761,9 @@ impl<'a> Lower<'a> {
                 // emitted by the `ImplicitCoercion` reference→primitive path. `ty_ref` only yields
                 // reference types, so handle the primitive case before it.
                 if !ty.nullable {
-                    if let Some(prim) = Ty::from_name(&ty.name).filter(|t| {
-                        self.has_scalar_value_repr(*t) && !self.is_unsigned_integer_type(*t)
-                    }) {
+                    if let Some(prim) = Ty::from_name(&ty.name)
+                        .filter(|t| self.has_scalar_value_repr(*t) && !t.is_unsigned())
+                    {
                         return Some(self.ir.add_expr(IrExpr::TypeOp {
                             op: IrTypeOp::ImplicitCoercion,
                             arg,
@@ -15893,7 +15888,7 @@ impl<'a> Lower<'a> {
                 // An unsigned subject compares its arms with unsigned `==` (bit-equal, same as signed),
                 // but a `ULong` subject whose magnitude exceeds `Long.MAX` needs care, and the unsigned
                 // const-val arms aren't materialized yet — bail rather than risk a mismatch.
-                if subject.map_or(false, |s| self.is_unsigned_integer_type(self.info.ty(s))) {
+                if subject.map_or(false, |s| self.info.ty(s).is_unsigned()) {
                     return None;
                 }
                 // A no-`else` `when` used as a *value* is only accepted by the checker when it is
@@ -16020,7 +16015,7 @@ impl<'a> Lower<'a> {
                             let v = self.expr(e)?;
                             // An unsigned interpolated value prints in unsigned decimal.
                             let ety = self.info.ty(e);
-                            let v = if self.is_unsigned_integer_type(ety) {
+                            let v = if ety.is_unsigned() {
                                 self.unsigned_to_string(v, ety)?
                             } else {
                                 v
@@ -17607,16 +17602,13 @@ impl<'a> Lower<'a> {
                     {
                         let rty = self.info.ty(receiver);
                         if args.is_empty()
-                            && (self.is_unsigned_integer_type(rty)
-                                || matches!(name.as_str(), "toUInt" | "toULong"))
+                            && (rty.is_unsigned() || matches!(name.as_str(), "toUInt" | "toULong"))
                         {
-                            if self.is_unsigned_integer_type(rty) && name == "toString" {
+                            if rty.is_unsigned() && name == "toString" {
                                 let r = self.expr(receiver)?;
                                 return self.unsigned_to_string(r, rty);
                             }
-                            if self.is_unsigned_integer_type(rty)
-                                && matches!(name.as_str(), "inc" | "dec")
-                            {
+                            if rty.is_unsigned() && matches!(name.as_str(), "inc" | "dec") {
                                 let one = self.scalar_one_const(rty)?;
                                 let r = self.expr(receiver)?;
                                 let o = self.ir.add_expr(IrExpr::Const(one));
