@@ -154,6 +154,8 @@ mod closure_in_class_e2e;
 mod codegen_host_e2e;
 #[path = "collection_members_e2e.rs"]
 mod collection_members_e2e;
+#[path = "collection_special_member_stub_e2e.rs"]
+mod collection_special_member_stub_e2e;
 #[path = "companion_const_e2e.rs"]
 mod companion_const_e2e;
 #[path = "companion_e2e.rs"]
