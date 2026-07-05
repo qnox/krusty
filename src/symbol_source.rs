@@ -14,11 +14,9 @@
 use crate::libraries::{FunctionSet, LibrarySeed, LibraryType};
 use crate::types::Ty;
 
-/// The shared-base form of a [`LibrarySeed`]: class names, type aliases, and canonical-name aliases,
-/// each behind an `Rc` so many files compiled against one provider share the large maps rather than
-/// cloning them.
+/// The shared-base form of a [`LibrarySeed`]: class names and type aliases, each behind an `Rc` so many
+/// files compiled against one provider share the large maps rather than cloning them.
 pub type SharedSeed = (
-    std::rc::Rc<std::collections::HashMap<String, String>>,
     std::rc::Rc<std::collections::HashMap<String, String>>,
     std::rc::Rc<std::collections::HashMap<String, String>>,
 );
@@ -41,7 +39,6 @@ pub trait SymbolSource {
         (
             std::rc::Rc::new(s.class_names),
             std::rc::Rc::new(s.type_aliases),
-            std::rc::Rc::new(s.canonical_names),
         )
     }
 
@@ -90,7 +87,6 @@ impl SymbolSource for CompositeSource {
             let s = child.seed();
             seed.class_names.extend(s.class_names);
             seed.type_aliases.extend(s.type_aliases);
-            seed.canonical_names.extend(s.canonical_names);
         }
         seed
     }
@@ -255,7 +251,7 @@ mod tests {
     #[test]
     fn default_seed_shared_wraps_seed_in_rc() {
         let s = module();
-        let (class_names, _aliases, _canon) = s.seed_shared();
+        let (class_names, _aliases) = s.seed_shared();
         assert_eq!(class_names.get("Foo"), Some(&"mod/Foo".to_string()));
     }
 
