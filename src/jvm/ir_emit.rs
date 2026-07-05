@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 
-use crate::ir::{Callee, IrBinOp, IrConst, IrExpr, IrFile, IrTypeOp};
+use crate::ir::{Callee, IrBinOp, IrClass, IrConst, IrCtorArg, IrExpr, IrField, IrFile, IrTypeOp};
 use crate::jvm::classfile::{ClassWriter, CodeBuilder, Label, VerifType};
 use crate::jvm::classreader::{MethodCode, C};
 use crate::jvm::inline::MethodBodies;
@@ -549,15 +549,10 @@ fn emit_class(
     // Constructor: super(); store each ctor *parameter* into its field; then run `init_body`
     // (body-property initializers + `init {}` blocks). Fields past `ctor_param_count` are body
     // properties — not parameters — so the descriptor covers only the leading parameter fields.
-    let field_tys: Vec<Ty> = c.fields.iter().map(|f| ir_ty_to_jvm(&f.ty)).collect();
     // The constructor takes ALL primary-ctor params (`ctor_args`), in declaration order — `val`/`var`
     // params back a field, plain params are arguments only. (Synthesized classes have empty `ctor_args`
     // and fall back to the leading `ctor_param_count` fields.)
-    let param_tys: Vec<Ty> = if c.ctor_args.is_empty() {
-        field_tys[..c.ctor_param_count as usize].to_vec()
-    } else {
-        c.ctor_args.iter().map(|a| ir_ty_to_jvm(&a.ty)).collect()
-    };
+    let param_tys = class_ctor_jvm_tys(c);
     // For a generic class, the `<init>` carries a `Signature` whose type-parameter params read `T<tp>;`
     // (`class Box<T>(var a: T)` → `(TT;)V`) — kotlinc does the same. No `<…>` prefix: the constructor
     // uses the class's type parameters, declares none. `None` (no attr) when no param is type-parameter-typed.
@@ -601,16 +596,7 @@ fn emit_class(
                 ir.classes
                     .iter()
                     .find(|sc| sc.fq_name == c.superclass)
-                    .map(|sc| {
-                        if sc.ctor_args.is_empty() {
-                            sc.fields[..sc.ctor_param_count as usize]
-                                .iter()
-                                .map(|f| ir_ty_to_jvm(&f.ty))
-                                .collect()
-                        } else {
-                            sc.ctor_args.iter().map(|a| ir_ty_to_jvm(&a.ty)).collect()
-                        }
-                    })
+                    .map(class_ctor_jvm_tys)
                     .unwrap_or_default()
             };
         let max_slot;
@@ -741,7 +727,7 @@ fn emit_class(
     // `super(…)` to the base `<init>`) then runs its body. A `super(…)`-reaching ctor's `body` already
     // has the class init steps prepended (the lowering does that). `this` is slot 0, parameters follow.
     for sc in &c.secondary_ctors {
-        let sc_param_tys: Vec<Ty> = sc.params.iter().map(ir_ty_to_jvm).collect();
+        let sc_param_tys = jvm_tys(&sc.params);
         let sc_words: u16 = sc_param_tys.iter().map(|t| slot_words(*t)).sum();
         let mut sctor = CodeBuilder::new(1 + sc_words);
         let sec_max;
@@ -777,7 +763,7 @@ fn emit_class(
                     if c.has_primary_ctor {
                         param_tys.clone()
                     } else {
-                        target_params.iter().map(ir_ty_to_jvm).collect()
+                        jvm_tys(target_params)
                     },
                 ),
                 // `super(…)` targets the base `<init>`, whose signature is read LIVE from the base
@@ -792,16 +778,7 @@ fn emit_class(
                         ir.classes
                             .iter()
                             .find(|sc| sc.fq_name == c.superclass)
-                            .map(|sc| {
-                                if sc.ctor_args.is_empty() {
-                                    sc.fields[..sc.ctor_param_count as usize]
-                                        .iter()
-                                        .map(|f| ir_ty_to_jvm(&f.ty))
-                                        .collect()
-                                } else {
-                                    sc.ctor_args.iter().map(|a| ir_ty_to_jvm(&a.ty)).collect()
-                                }
-                            })
+                            .map(class_ctor_jvm_tys)
                             .unwrap_or_default()
                     };
                     (owner, tys)
@@ -891,7 +868,7 @@ fn emit_class(
             // `this` slot; an ordinary member is an instance method.
             emit_method(ir, fid, &c.fq_name, facade, &mut cw, !f.is_static, bodies);
         } else {
-            let param_tys: Vec<Ty> = f.params.iter().map(ir_ty_to_jvm).collect();
+            let param_tys = jvm_tys(&f.params);
             let ret = ir_ty_to_jvm(&f.ret);
             cw.add_abstract_method(
                 0x0001 | 0x0400,
@@ -936,9 +913,9 @@ fn emit_enum_entry_subclass(
 
     // Constructor: `(String, int, <user>)V` → `super(name, ordinal, <user>)`, then the property
     // initializers (`this.<prop> = <init>`, from `init_body`).
-    let user_jvm: Vec<Ty> = user_tys.iter().map(ir_ty_to_jvm).collect();
-    let ctor_params: Vec<Ty> = std::iter::once(Ty::String)
-        .chain(std::iter::once(Ty::Int))
+    let user_jvm = jvm_tys(user_tys);
+    let ctor_params: Vec<Ty> = [Ty::String, Ty::Int]
+        .into_iter()
         .chain(user_jvm.iter().copied())
         .collect();
     let ctor_words: u16 = ctor_params.iter().map(|t| slot_words(*t)).sum();
@@ -1553,8 +1530,8 @@ fn ref_class(elem: &Ty) -> (&'static str, &'static str) {
 /// the return value back (box / numeric convert). Bridges are straight-line — no frames.
 fn emit_bridges(c: &crate::ir::IrClass, cw: &mut ClassWriter) {
     for b in &c.bridges {
-        let ep: Vec<Ty> = b.erased_params.iter().map(ir_ty_to_jvm).collect();
-        let cp: Vec<Ty> = b.concrete_params.iter().map(ir_ty_to_jvm).collect();
+        let ep = jvm_tys(&b.erased_params);
+        let cp = jvm_tys(&b.concrete_params);
         let er = ir_ty_to_jvm(&b.erased_ret);
         let cr = ir_ty_to_jvm(&b.concrete_ret);
         // A bridge whose (name, descriptor) already names a REAL method on this class would be a
@@ -2123,7 +2100,7 @@ fn emit_interface_class(
             // A default method — concrete instance method on the interface.
             emit_method(ir, fid, &c.fq_name, facade, &mut cw, !f.is_static, bodies);
         } else {
-            let param_tys: Vec<Ty> = f.params.iter().map(ir_ty_to_jvm).collect();
+            let param_tys = jvm_tys(&f.params);
             let ret = ir_ty_to_jvm(&f.ret);
             cw.add_abstract_method(
                 0x0001 | 0x0400,
@@ -2191,7 +2168,7 @@ fn emit_enum_class(
         cw.add_interface(itf);
     }
 
-    let field_tys: Vec<Ty> = c.fields.iter().map(|f| ir_ty_to_jvm(&f.ty)).collect();
+    let field_tys = field_jvm_tys(&c.fields);
     // (bridges emitted after the methods below — `emit_bridges` references emitted method refs)
     let n_params = c.ctor_param_count as usize;
     let user_tys: Vec<Ty> = field_tys[..n_params].to_vec();
@@ -2217,8 +2194,8 @@ fn emit_enum_class(
     );
 
     // Private constructor: `(Ljava/lang/String;I<user>)V` → `super(name, ordinal)` + store user fields.
-    let ctor_params: Vec<Ty> = std::iter::once(Ty::String)
-        .chain(std::iter::once(Ty::Int))
+    let ctor_params: Vec<Ty> = [Ty::String, Ty::Int]
+        .into_iter()
         .chain(user_tys.iter().copied())
         .collect();
     let ctor_desc = method_descriptor(&ctor_params, Ty::Unit);
@@ -2398,7 +2375,7 @@ fn emit_enum_class(
         } else {
             // An abstract enum member (`abstract fun t(): String`) — declared `ACC_ABSTRACT`, the
             // entry subclasses override it.
-            let param_tys: Vec<Ty> = f.params.iter().map(ir_ty_to_jvm).collect();
+            let param_tys = jvm_tys(&f.params);
             cw.add_abstract_method(
                 0x0001 | 0x0400,
                 &f.name,
@@ -2458,7 +2435,7 @@ fn emit_method(
     }
     let f = &ir.functions[fid as usize];
     let body = f.body.unwrap();
-    let param_tys: Vec<Ty> = f.params.iter().map(ir_ty_to_jvm).collect();
+    let param_tys = jvm_tys(&f.params);
     let ret = ir_ty_to_jvm(&f.ret);
     let mut e = Emitter {
         ir,
@@ -2684,7 +2661,7 @@ fn emit_default_stub(
 ) {
     let f = &ir.functions[fid as usize];
     let method_name = f.name.clone();
-    let real_params: Vec<Ty> = f.params.iter().map(ir_ty_to_jvm).collect();
+    let real_params = jvm_tys(&f.params);
     let ret = ir_ty_to_jvm(&f.ret);
     let n = real_params.len();
     let owner_ty = Ty::obj(owner);
@@ -2780,7 +2757,7 @@ fn emit_facade_default_stub(
 ) {
     let f = &ir.functions[fid as usize];
     let method_name = f.name.clone();
-    let real_params: Vec<Ty> = f.params.iter().map(ir_ty_to_jvm).collect();
+    let real_params = jvm_tys(&f.params);
     let ret = ir_ty_to_jvm(&f.ret);
     let n = real_params.len();
 
@@ -2968,8 +2945,8 @@ impl<'a> Emitter<'a> {
                 if n_cap != captures.len() {
                     return false;
                 }
-                let cap_tys: Vec<Ty> = impl_f.params[..n_cap].iter().map(ir_ty_to_jvm).collect();
-                let lam_tys: Vec<Ty> = impl_f.params[n_cap..].iter().map(ir_ty_to_jvm).collect();
+                let cap_tys = jvm_tys(&impl_f.params[..n_cap]);
+                let lam_tys = jvm_tys(&impl_f.params[n_cap..]);
                 let impl_ret = ir_ty_to_jvm(&impl_f.ret);
                 // Each capture binds to the caller's actual slot (a mutable capture writes through).
                 let mut cap_slots: Vec<(u16, Ty)> = Vec::with_capacity(captures.len());
@@ -3270,8 +3247,8 @@ impl<'a> Emitter<'a> {
         if fr.param_tys.len() != fr.arity as usize {
             return None;
         }
-        let param_tys: Vec<Ty> = fr.param_tys.iter().map(ir_ty_to_jvm).collect();
-        let target_param_tys: Vec<Ty> = fr.target_param_tys.iter().map(ir_ty_to_jvm).collect();
+        let param_tys = jvm_tys(&fr.param_tys);
+        let target_param_tys = jvm_tys(&fr.target_param_tys);
         let mut param_slots = vec![(0u16, Ty::Error); fr.arity as usize];
         scratch.set_stack(fr.arity as u16);
         for j in (0..fr.arity as usize).rev() {
@@ -4038,14 +4015,8 @@ impl<'a> Emitter<'a> {
                 // The constructor takes only the parameter fields (primary), or a secondary
                 // constructor's explicit parameter types; body properties are set inside it.
                 let field_tys: Vec<Ty> = match ctor_params {
-                    Some(ps) => ps.iter().map(ir_ty_to_jvm).collect(),
-                    None if !c.ctor_args.is_empty() => {
-                        c.ctor_args.iter().map(|a| ir_ty_to_jvm(&a.ty)).collect()
-                    }
-                    None => c.fields[..c.ctor_param_count as usize]
-                        .iter()
-                        .map(|f| ir_ty_to_jvm(&f.ty))
-                        .collect(),
+                    Some(ps) => jvm_tys(ps),
+                    None => class_ctor_jvm_tys(c),
                 };
                 let args = args.clone();
                 let aw: i32 = field_tys.iter().map(|t| slot_words(*t) as i32).sum();
@@ -4085,7 +4056,7 @@ impl<'a> Emitter<'a> {
                 let c = &self.ir.classes[*class as usize];
                 let fid = c.methods[*index as usize];
                 let f = &self.ir.functions[fid as usize];
-                let param_tys: Vec<Ty> = f.params.iter().map(ir_ty_to_jvm).collect();
+                let param_tys = jvm_tys(&f.params);
                 let ret = ir_ty_to_jvm(&f.ret);
                 let name = f.name.clone();
                 let owner = c.fq_name.clone();
@@ -4162,7 +4133,7 @@ impl<'a> Emitter<'a> {
             } => match callee {
                 Callee::Local(fid) => {
                     let f = &self.ir.functions[*fid as usize];
-                    let param_tys: Vec<Ty> = f.params.iter().map(ir_ty_to_jvm).collect();
+                    let param_tys = jvm_tys(&f.params);
                     let ret = ir_ty_to_jvm(&f.ret);
                     let name = f.name.clone();
                     let args = args.clone();
@@ -4178,7 +4149,7 @@ impl<'a> Emitter<'a> {
                     // The `foo$default(realparams, int mask, Object marker)` synthetic on the self facade
                     // (emitted by `emit_facade_default_stub`). Args already include the mask + marker.
                     let f = &self.ir.functions[*fid as usize];
-                    let mut param_tys: Vec<Ty> = f.params.iter().map(ir_ty_to_jvm).collect();
+                    let mut param_tys = jvm_tys(&f.params);
                     param_tys.push(Ty::Int);
                     param_tys.push(Ty::obj("java/lang/Object"));
                     let ret = ir_ty_to_jvm(&f.ret);
@@ -4200,7 +4171,7 @@ impl<'a> Emitter<'a> {
                     ret,
                 } => {
                     // A top-level function from another file → `invokestatic <facade>.<name>(desc)`.
-                    let param_tys: Vec<Ty> = params.iter().map(ir_ty_to_jvm).collect();
+                    let param_tys = jvm_tys(params);
                     let ret = ir_ty_to_jvm(ret);
                     let (facade, name) = (facade.clone(), name.clone());
                     let args = args.clone();
@@ -4387,7 +4358,7 @@ impl<'a> Emitter<'a> {
                     let owner = owner.clone();
                     let name = name.clone();
                     let interface = *interface;
-                    let param_tys: Vec<Ty> = params.iter().map(ir_ty_to_jvm).collect();
+                    let param_tys = jvm_tys(params);
                     let ret = ir_ty_to_jvm(ret);
                     let descriptor = method_descriptor(&param_tys, ret);
                     let recv = dispatch_receiver.expect("cross-file virtual call needs a receiver");
@@ -4650,7 +4621,7 @@ impl<'a> Emitter<'a> {
             } => {
                 let f = &self.ir.functions[*impl_fn as usize];
                 let impl_name = f.name.clone();
-                let impl_params: Vec<Ty> = f.params.iter().map(ir_ty_to_jvm).collect();
+                let impl_params = jvm_tys(&f.params);
                 let impl_ret = ir_ty_to_jvm(&f.ret);
                 // The impl method's parameters are the captured variables (bound at the call site)
                 // followed by the lambda's own parameters. Only the latter form the SAM/instantiated
@@ -4682,7 +4653,7 @@ impl<'a> Emitter<'a> {
                                     .find(|f| f.name == *method)
                             })
                             .map(|f| {
-                                let ps: Vec<Ty> = f.params.iter().map(ir_ty_to_jvm).collect();
+                                let ps = jvm_tys(&f.params);
                                 method_descriptor(&ps, ir_ty_to_jvm(&f.ret))
                             })
                             .unwrap_or_else(|| inst_desc.clone());
@@ -4860,7 +4831,7 @@ impl<'a> Emitter<'a> {
                 args,
             } => {
                 let owner = internal.clone();
-                let param_tys: Vec<Ty> = params.iter().map(ir_ty_to_jvm).collect();
+                let param_tys = jvm_tys(params);
                 let desc = method_descriptor(&param_tys, Ty::Unit);
                 let aw: i32 = param_tys.iter().map(|t| slot_words(*t) as i32).sum();
                 let args = args.clone();
@@ -6883,6 +6854,26 @@ pub fn ir_ty_to_jvm(t: &Ty) -> Ty {
         // concrete JVM type.
         Ty::TyParam(_, bound) => ir_ty_to_jvm(bound),
         _ => Ty::Error,
+    }
+}
+
+fn jvm_tys(tys: &[Ty]) -> Vec<Ty> {
+    tys.iter().map(ir_ty_to_jvm).collect()
+}
+
+fn field_jvm_tys(fields: &[IrField]) -> Vec<Ty> {
+    fields.iter().map(|f| ir_ty_to_jvm(&f.ty)).collect()
+}
+
+fn ctor_arg_jvm_tys(args: &[IrCtorArg]) -> Vec<Ty> {
+    args.iter().map(|a| ir_ty_to_jvm(&a.ty)).collect()
+}
+
+fn class_ctor_jvm_tys(c: &IrClass) -> Vec<Ty> {
+    if c.ctor_args.is_empty() {
+        field_jvm_tys(&c.fields[..c.ctor_param_count as usize])
+    } else {
+        ctor_arg_jvm_tys(&c.ctor_args)
     }
 }
 
