@@ -17,7 +17,7 @@
 //! the next increment; this pass currently lowers the unboxed core (construction, access, erasure).
 
 use crate::ir::{Callee, ExprId, IrExpr, IrFile};
-use crate::jvm::ir_emit::ir_ty_to_jvm;
+use crate::jvm::ir_emit::{ir_ty_to_jvm, jvm_tys};
 use crate::jvm::names::{method_descriptor, property_getter_name, type_descriptor};
 use crate::libraries::InlineKind;
 use crate::types::Ty;
@@ -586,20 +586,11 @@ pub fn lower_value_classes(ir: &mut IrFile) -> bool {
             .iter()
             .map(|&fid| {
                 let f = &ir.functions[fid as usize];
-                (
-                    f.name.clone(),
-                    method_descriptor(
-                        &f.params.iter().map(ir_ty_to_jvm).collect::<Vec<_>>(),
-                        ir_ty_to_jvm(&f.ret),
-                    ),
-                )
+                (f.name.clone(), ir_method_desc(&f.params, &f.ret))
             })
             .collect();
         c.bridges.retain(|b| {
-            let desc = method_descriptor(
-                &b.erased_params.iter().map(ir_ty_to_jvm).collect::<Vec<_>>(),
-                ir_ty_to_jvm(&b.erased_ret),
-            );
+            let desc = ir_method_desc(&b.erased_params, &b.erased_ret);
             method_keys.insert((b.name.clone(), desc))
         });
     }
@@ -2779,6 +2770,10 @@ fn is_property_getter_bridge_name(name: &str) -> bool {
 
 fn desc(t: &Ty) -> String {
     type_descriptor(ir_ty_to_jvm(t))
+}
+
+fn ir_method_desc(params: &[Ty], ret: &Ty) -> String {
+    method_descriptor(&jvm_tys(params), ir_ty_to_jvm(ret))
 }
 
 /// Collect every `ExprId` reachable from `root` (a function body), so rewrites stay within bodies that
