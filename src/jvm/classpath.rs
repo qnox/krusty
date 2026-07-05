@@ -164,7 +164,8 @@ fn global_ext_cache() -> &'static std::sync::Mutex<HashMap<Vec<PathBuf>, std::sy
 /// own `Classpath`; without sharing, every common class (`kotlin/collections/List`, …) was parsed once
 /// per thread. Sharing this — like the type/ext/jimage indexes — parses each class once per process.
 /// `RwLock` because reads (cache hits) dominate; a parse on a miss takes the write lock briefly.
-type ClassCache = std::sync::Arc<std::sync::RwLock<HashMap<String, Option<ClassInfo>>>>;
+type ClassCache =
+    std::sync::Arc<std::sync::RwLock<HashMap<String, Option<std::sync::Arc<ClassInfo>>>>>;
 fn global_class_cache(key: &[PathBuf]) -> ClassCache {
     static CACHE: std::sync::OnceLock<std::sync::Mutex<HashMap<Vec<PathBuf>, ClassCache>>> =
         std::sync::OnceLock::new();
@@ -218,7 +219,7 @@ pub struct TypeIndex {
 /// (with the multifile-facade part classes merged in). This is the SINGLE decode of a class's `d1` for the
 /// function lookups below — `meta_functions`, `metadata_receiver_types`, `metadata_call_facts`, and
 /// parameter metadata all project over it instead of each re-decoding and re-merging.
-type MetaFnsCache = RefCell<HashMap<String, std::rc::Rc<ClassMeta>>>;
+type MetaFnsCache = RefCell<crate::lru::LruCache<String, std::rc::Rc<ClassMeta>>>;
 
 /// One top-level callable decoded from `@Metadata`, with the fields classpath lookup needs kept
 /// together so return type, receiver, nullability, parameter names/defaults, and receiver-lambda
@@ -355,7 +356,7 @@ pub(super) fn metadata_return_info(class: Option<&str>, nullable: bool) -> Retur
 /// `@OverloadResolutionByLambdaReturnType` (`sumOf`, …). The resolver derives and verifies the concrete
 /// JVM method (`sumOfInt`/`sumOfLong`/…) from the lambda return type, so the cache only needs membership.
 type LambdaReturnOverloads = std::collections::HashSet<String>;
-type MetaOverloadCache = RefCell<HashMap<String, std::rc::Rc<LambdaReturnOverloads>>>;
+type MetaOverloadCache = RefCell<crate::lru::LruCache<String, std::rc::Rc<LambdaReturnOverloads>>>;
 
 #[derive(Default)]
 pub struct Classpath {
@@ -363,7 +364,7 @@ pub struct Classpath {
     // Two-level parsed-class cache: `local` is a per-thread L1 (cheap `RefCell`, no lock — serves the
     // hot repeated lookups), backed by `shared` — a process-global L2 (`RwLock`) so a class is PARSED
     // once across all rayon worker threads, not once per thread. L1 miss → L2 → parse.
-    local_cache: RefCell<HashMap<String, Option<ClassInfo>>>,
+    local_cache: RefCell<crate::lru::LruCache<String, Option<std::sync::Arc<ClassInfo>>>>,
     cache: ClassCache,
     /// Open `ZipArchive` per jar path, so reading an entry is a central-directory hash lookup + inflate
     /// — NOT a re-parse of the whole central directory (which `zip::ZipArchive::new` does, thousands of
@@ -379,10 +380,11 @@ pub struct Classpath {
     jimage: RefCell<Option<(PathBuf, std::sync::Arc<JimageIndex>)>>,
     /// Cache of lazily-read method bodies (`(internal, name, descriptor) → MethodCode`), so the inline
     /// expander reads each inline function's body once even when it's called many times.
-    bodies: RefCell<HashMap<(String, String, String), Option<MethodCode>>>,
+    bodies: RefCell<crate::lru::LruCache<(String, String, String), Option<MethodCode>>>,
     /// Cache of the `suspend` function names declared by a class (from its `@Metadata` `IS_SUSPEND`
     /// flag), so suspension-point recognition at a call site doesn't re-decode the metadata per call.
-    suspend_names: RefCell<HashMap<String, std::rc::Rc<std::collections::HashSet<String>>>>,
+    suspend_names:
+        RefCell<crate::lru::LruCache<String, std::rc::Rc<std::collections::HashSet<String>>>>,
     /// Cache of each class's decoded `@Metadata` functions (facade parts merged) — the single decode the
     /// return-type / receiver / nullability / kept-param lookups all project over (see [`MetaFnsCache`]).
     meta_fns: MetaFnsCache,
@@ -391,7 +393,7 @@ pub struct Classpath {
     /// Cache of resolved library function sets keyed by semantic call query. A `JvmLibraries` wrapper is
     /// rebuilt for every snippet, but the `Classpath` is reused on the worker thread, so keeping this here
     /// avoids re-walking metadata/extension indexes for common stdlib calls across thousands of snippets.
-    functions: RefCell<HashMap<(String, Option<Ty>), FunctionSet>>,
+    functions: RefCell<crate::lru::LruCache<(String, Option<Ty>), FunctionSet>>,
     /// Parsed `.kotlin_builtins` fragments, keyed by resource path (e.g. `kotlin/kotlin.kotlin_builtins`,
     /// `kotlin/collections/collections.kotlin_builtins`), each mapping class internal name → its
     /// supertypes + members. Built once per file on first use — the single source for BOTH the collection
@@ -400,7 +402,8 @@ pub struct Classpath {
     /// Resolved builtin member vectors, keyed by Kotlin internal class name. The raw builtins fragment is
     /// already cached, but mapping it to `LibraryMember`s also resolves JVM owners/interface flags and
     /// allocates descriptors. `resolve_type` asks for these repeatedly during member/subtype lookup.
-    builtin_members: RefCell<HashMap<String, std::rc::Rc<Vec<crate::libraries::LibraryMember>>>>,
+    builtin_members:
+        RefCell<crate::lru::LruCache<String, std::rc::Rc<Vec<crate::libraries::LibraryMember>>>>,
     /// Process-unique identity for this `Classpath`, assigned at construction. Caches keyed by a
     /// `Classpath` (e.g. the per-classpath library seed) MUST key on this — NOT on the `Rc<Classpath>`
     /// pointer address, which a freed-then-reallocated `Classpath` can reuse, yielding a false cache hit
@@ -433,21 +436,29 @@ impl Classpath {
             })
             .collect();
         let cache_key: Vec<PathBuf> = entries.iter().map(|e| e.path().to_path_buf()).collect();
+        // Per-cache LRU caps (entry counts). Sized so the warm working set of common stdlib/JDK classes
+        // and their call queries stays resident across compiles, while one-off classes evict — bounding
+        // per-thread memory instead of growing toward the full JDK. Override all at once with
+        // `KRUSTY_CACHE_CAP`. `CLASS_CAP`/`FN_CAP` are the two large ones (parsed classes, function sets).
+        const CLASS_CAP: usize = 4096;
+        const FN_CAP: usize = 8192;
+        const META_CAP: usize = 4096;
+        const BODY_CAP: usize = 2048;
         Classpath {
             entries,
-            local_cache: RefCell::new(HashMap::new()),
+            local_cache: RefCell::new(crate::lru::LruCache::new(CLASS_CAP)),
             cache: global_class_cache(&cache_key),
             archives: RefCell::new(HashMap::new()),
             ext: RefCell::new(None),
             types: RefCell::new(None),
             jimage: RefCell::new(None),
-            bodies: RefCell::new(HashMap::new()),
-            suspend_names: RefCell::new(HashMap::new()),
-            meta_fns: RefCell::new(HashMap::new()),
-            meta_overloads: RefCell::new(HashMap::new()),
-            functions: RefCell::new(HashMap::new()),
+            bodies: RefCell::new(crate::lru::LruCache::new(BODY_CAP)),
+            suspend_names: RefCell::new(crate::lru::LruCache::new(META_CAP)),
+            meta_fns: RefCell::new(crate::lru::LruCache::new(META_CAP)),
+            meta_overloads: RefCell::new(crate::lru::LruCache::new(META_CAP)),
+            functions: RefCell::new(crate::lru::LruCache::new(FN_CAP)),
             builtins: RefCell::new(HashMap::new()),
-            builtin_members: RefCell::new(HashMap::new()),
+            builtin_members: RefCell::new(crate::lru::LruCache::new(META_CAP)),
             id,
         }
     }
@@ -459,7 +470,7 @@ impl Classpath {
     }
 
     pub fn cached_functions(&self, key: &(String, Option<Ty>)) -> Option<FunctionSet> {
-        self.functions.borrow().get(key).cloned()
+        self.functions.borrow_mut().get(key).cloned()
     }
 
     pub fn cache_functions(&self, key: (String, Option<Ty>), set: FunctionSet) {
@@ -470,13 +481,13 @@ impl Classpath {
     /// cached. The single `d1` decode that `meta_functions`/`metadata_receiver_types`/
     /// `metadata_call_facts` all project over.
     fn class_meta(&self, internal: &str) -> std::rc::Rc<ClassMeta> {
-        if let Some(m) = self.meta_fns.borrow().get(internal) {
+        if let Some(m) = self.meta_fns.borrow_mut().get(internal) {
             return m.clone();
         }
         let ci = self.find(internal);
         let mut fns = ci
             .as_ref()
-            .map(super::metadata::package_functions)
+            .map(|c| super::metadata::package_functions(c))
             .unwrap_or_default();
         // A multifile FACADE has no function metadata of its own — its `d1` lists the PART class names,
         // which hold the functions; merge them in (the parts' `d1` is decoded once here, not per lookup).
@@ -667,7 +678,7 @@ impl Classpath {
 
     /// A facade class's lambda-return-overload Kotlin names, cached (part-merged for a multifile facade).
     pub fn lambda_return_overloads(&self, internal: &str) -> std::rc::Rc<LambdaReturnOverloads> {
-        if let Some(m) = self.meta_overloads.borrow().get(internal) {
+        if let Some(m) = self.meta_overloads.borrow_mut().get(internal) {
             return m.clone();
         }
         // Overloads of one Kotlin name are split across the multifile facade's PART classes (the
@@ -759,7 +770,7 @@ impl Classpath {
     /// `LibraryMember` facts. The source name stays in `name`; JVM realization details stay in the JVM
     /// backend/provider and descriptor data.
     pub fn builtin_members(&self, internal: &str) -> Vec<crate::libraries::LibraryMember> {
-        if let Some(members) = self.builtin_members.borrow().get(internal) {
+        if let Some(members) = self.builtin_members.borrow_mut().get(internal) {
             return members.as_ref().clone();
         }
         let path = Self::builtins_path_for(internal);
@@ -1052,12 +1063,14 @@ impl Classpath {
         Some(buf)
     }
 
-    pub fn find(&self, internal: &str) -> Option<ClassInfo> {
+    pub fn find(&self, internal: &str) -> Option<std::sync::Arc<ClassInfo>> {
         // The front end names built-in types in Kotlin terms (`kotlin/Any`); a classpath artifact is
-        // a real JVM class, so map to the JVM name (`java/lang/Object`) before looking it up.
+        // a real JVM class, so map to the JVM name (`java/lang/Object`) before looking it up. The parsed
+        // class is shared behind an `Arc`: L1↔L2 and every caller clone is a refcount bump, never a deep
+        // copy of the (large) `ClassInfo`.
         let internal = super::jvm_class_map::to_jvm_internal(internal);
         // L1: per-thread, no lock.
-        if let Some(hit) = self.local_cache.borrow().get(internal) {
+        if let Some(hit) = self.local_cache.borrow_mut().get(internal) {
             return hit.clone();
         }
         // L2: process-global, shared across threads — a class parsed by ANY thread is reused here.
@@ -1079,7 +1092,7 @@ impl Classpath {
             };
             if let Some(b) = bytes {
                 if let Ok(ci) = parse_class(&b) {
-                    found = Some(ci);
+                    found = Some(std::sync::Arc::new(ci));
                     break;
                 }
             }
@@ -1120,7 +1133,7 @@ impl Classpath {
             name.to_string(),
             descriptor.to_string(),
         );
-        if let Some(hit) = self.bodies.borrow().get(&key) {
+        if let Some(hit) = self.bodies.borrow_mut().get(&key) {
             return hit.clone();
         }
         let mut code = self
@@ -1182,13 +1195,13 @@ impl Classpath {
     /// `IS_SUSPEND` flag (decoded once per class and cached). A call to it is a coroutine suspension
     /// point. Includes the multifile-facade part-class superclass walk.
     pub fn is_suspend_method(&self, internal: &str, name: &str) -> bool {
-        if let Some(set) = self.suspend_names.borrow().get(internal) {
+        if let Some(set) = self.suspend_names.borrow_mut().get(internal) {
             return set.contains(name);
         }
         let ci = self.find(internal);
         let mut names = ci
             .as_ref()
-            .map(super::metadata::suspend_method_names)
+            .map(|c| super::metadata::suspend_method_names(c))
             .unwrap_or_default();
         let mut cur = ci.as_ref().and_then(|ci| ci.super_class.clone());
         while let Some(s) = cur {
