@@ -18106,17 +18106,25 @@ impl<'a> Lower<'a> {
                         // A `@JvmStatic` member of a classpath `object` (`Base58Uuid.of(x)`) → a static
                         // method on the object class (`invokestatic`), found in the type's static list.
                         rt.obj_internal().and_then(|internal| {
-                            crate::call_resolver::resolve_companion(
-                                &*self.syms.libraries,
-                                internal,
-                                &name,
-                                &self.arg_tys(&args),
-                            )
-                            // A `@JvmStatic suspend fun` is not CPS-lowered on this path — the checker
-                            // leaves it unresolved, so this never fires; guard anyway to never emit a
-                            // static call missing its `Continuation`.
-                            .filter(|m| !m.suspend)
-                            .map(|m| (internal.to_string(), m))
+                            self.info
+                                .resolved_companions
+                                .get(&e)
+                                .cloned()
+                                // Reuse the static member the checker resolved for this call (keyed by
+                                // the call ExprId); resolve only when not recorded.
+                                .or_else(|| {
+                                    crate::call_resolver::resolve_companion(
+                                        &*self.syms.libraries,
+                                        internal,
+                                        &name,
+                                        &self.arg_tys(&args),
+                                    )
+                                    // A `@JvmStatic suspend fun` is not CPS-lowered on this path — the
+                                    // checker leaves it unresolved, so this never fires; guard anyway to
+                                    // never emit a static call missing its `Continuation`.
+                                    .filter(|m| !m.suspend)
+                                })
+                                .map(|m| (internal.to_string(), m))
                         })
                     } {
                         let (internal, m) = m;
