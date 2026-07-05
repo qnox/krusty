@@ -1630,6 +1630,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   known gap — a JVM signature doesn't encode `List<Int?>` vs `List<Int>`.)
   (`build840_collection_property_element_e2e`)
 
+- **A safe call to a lambda-taking extension types the lambda from the non-null receiver (build.840 mm1).**
+  `c?.takeIf { it.at > 0 }` (a `?.` call to `takeIf`/`takeUnless`/any lambda extension) typed the lambda
+  argument naively — no expected parameter type — so `it` defaulted to `Any` and `it.at` failed with
+  "unresolved member 'at' on kotlin/Any". The `Expr::SafeCall` checker arm now types a lambda argument
+  against the extension's block parameter, bound by the NON-NULL receiver (`rt.non_null()`), exactly as the
+  non-safe path does (`?.let`/`?.run`/`?.also` already routed through the scope-function path). Non-lambda
+  arguments are typed once and reused (no double evaluation). (`build840_mm1_safe_call_lambda_ext_e2e`)
+
 - **A function parameter may be named after a modifier soft keyword (build.840 jj1).** Kotlin's only real
   parameter modifiers are `vararg`/`noinline`/`crossinline` (+ annotations); every other modifier keyword
   (`open`, `sealed`, `abstract`, `private`, …) is a soft keyword usable as a plain identifier, so

@@ -6484,7 +6484,44 @@ impl<'a> Checker<'a> {
                     match &args {
                         None => self.check_member(rt, &name, self.span(e), Some(e)),
                         Some(a) => {
-                            let arg_tys = self.arg_tys(a);
+                            // A safe call to a lambda-taking extension (`c?.takeIf { it.at > 0 }`): type the
+                            // lambda argument against the extension's block parameter (bound by the NON-NULL
+                            // receiver), exactly as the non-safe path does — otherwise `it` defaults to `Any`
+                            // and a member access on it fails ("member … on Any"). `?.let`/`?.run`/… already
+                            // route through `safe_scope_call_result`; this covers `takeIf`/`takeUnless`/any
+                            // other lambda extension reached by `?.`.
+                            let nn = rt.non_null();
+                            let partial: Vec<Option<Ty>> = a
+                                .iter()
+                                .map(|&x| {
+                                    (!matches!(self.file.expr(x), Expr::Lambda { .. }))
+                                        .then(|| self.expr(x))
+                                })
+                                .collect();
+                            let ext_pts = self
+                                .resolver()
+                                .extension_lambda_param_types(nn, &name, &partial);
+                            let arg_tys: Vec<Ty> = a
+                                .iter()
+                                .enumerate()
+                                .map(|(i, &x)| {
+                                    match ext_pts.as_ref().and_then(|p| p.get(i)) {
+                                        Some(pt)
+                                            if !pt.is_empty()
+                                                && matches!(
+                                                    self.file.expr(x),
+                                                    Expr::Lambda { .. }
+                                                ) =>
+                                        {
+                                            self.check_lambda_with_types(x, pt)
+                                        }
+                                        // A non-lambda argument was already typed into `partial` — reuse
+                                        // it rather than re-evaluating (a double `self.expr` would
+                                        // duplicate diagnostics / `expr_types` work).
+                                        _ => partial[i].unwrap_or_else(|| self.expr(x)),
+                                    }
+                                })
+                                .collect();
                             let inline_arg_supported = !a
                                 .iter()
                                 .any(|x| matches!(self.file.expr(*x), Expr::CallableRef { .. }));
