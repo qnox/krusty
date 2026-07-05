@@ -1095,11 +1095,7 @@ fn emit_toplevel_prop_ref_class(
     pr: &crate::ir::PropRef,
     facade: &str,
 ) -> Vec<u8> {
-    let owner: &str = if pr.owner_internal.is_empty() {
-        facade
-    } else {
-        &pr.owner_internal
-    };
+    let owner = facade_sentinel(&pr.owner_internal, facade);
     let fq = c.fq_name.clone();
     let self_desc = format!("L{fq};");
     let mut cw = ClassWriter::new(&fq, &c.superclass);
@@ -1195,16 +1191,8 @@ fn emit_func_ref_class(c: &crate::ir::IrClass, facade: &str) -> Vec<u8> {
     let fr = c.func_ref.as_ref().unwrap();
     // An empty `owner_class`/`call_owner` is the facade sentinel (a top-level function lives on the
     // file facade, whose name isn't known until emit) — resolve it here.
-    let owner_class: &str = if fr.owner_class.is_empty() {
-        facade
-    } else {
-        &fr.owner_class
-    };
-    let call_owner: &str = if fr.call_owner.is_empty() {
-        facade
-    } else {
-        &fr.call_owner
-    };
+    let owner_class = facade_sentinel(&fr.owner_class, facade);
+    let call_owner = facade_sentinel(&fr.call_owner, facade);
     let fq = c.fq_name.clone();
     let self_desc = format!("L{fq};");
     let mut cw = ClassWriter::new(&fq, &c.superclass);
@@ -3213,11 +3201,7 @@ impl<'a> Emitter<'a> {
         scratch: &mut CodeBuilder,
     ) -> Option<(Vec<crate::jvm::inline::Insn>, ResolvedFrames)> {
         let fr = self.ir.classes[class as usize].func_ref.clone()?;
-        let call_owner = if fr.call_owner.is_empty() {
-            self.facade.clone()
-        } else {
-            fr.call_owner.clone()
-        };
+        let call_owner = facade_sentinel_owned(&fr.call_owner, &self.facade);
         let first_call_arg = match fr.dispatch {
             crate::ir::FrDispatch::VirtualUnbound => 1usize,
             _ => 0usize,
@@ -3354,11 +3338,7 @@ impl<'a> Emitter<'a> {
         scratch: &mut CodeBuilder,
     ) -> Option<(Vec<crate::jvm::inline::Insn>, ResolvedFrames)> {
         let pr = self.ir.classes[class as usize].prop_ref.clone()?;
-        let owner = if pr.owner_internal.is_empty() {
-            self.facade.clone()
-        } else {
-            pr.owner_internal.clone()
-        };
+        let owner = facade_sentinel_owned(&pr.owner_internal, &self.facade);
         let prop_jvm = ir_ty_to_jvm(&pr.prop_ty);
         let getter_desc = format!("(){}", type_descriptor(prop_jvm));
         let arity = if pr.bound || pr.static_dispatch { 0 } else { 1 };
@@ -3886,11 +3866,7 @@ impl<'a> Emitter<'a> {
             IrExpr::ClassConst { internal } => {
                 // Empty `internal` is a sentinel for "the enclosing facade/owner class" (the lowering
                 // doesn't know the facade name — only the emitter does, via `self.facade`).
-                let name = if internal.is_empty() {
-                    self.facade.clone()
-                } else {
-                    internal.clone()
-                };
+                let name = facade_sentinel_owned(internal, &self.facade);
                 code.ldc_class(&name, self.cw);
             }
             IrExpr::GetValue(i) => {
@@ -6822,6 +6798,18 @@ fn ir_type_desc(t: &Ty) -> String {
 
 fn ir_method_desc(params: &[Ty], ret: &Ty) -> String {
     method_descriptor(&jvm_tys(params), ir_ty_to_jvm(ret))
+}
+
+fn facade_sentinel<'a>(internal: &'a str, facade: &'a str) -> &'a str {
+    if internal.is_empty() {
+        facade
+    } else {
+        internal
+    }
+}
+
+fn facade_sentinel_owned(internal: &str, facade: &str) -> String {
+    facade_sentinel(internal, facade).to_string()
 }
 
 fn field_jvm_tys(fields: &[IrField]) -> Vec<Ty> {
