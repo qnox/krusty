@@ -159,6 +159,34 @@ fn global_ext_cache() -> &'static std::sync::Mutex<HashMap<Vec<PathBuf>, std::sy
     CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
 }
 
+/// The rebuilt candidates for ONE method name, grouped for O(1) receiver lookup so `find_extensions`
+/// doesn't re-scan + re-parse the whole list on every call site (the cost the eager `by_recv` map avoided).
+#[derive(Default)]
+struct ExtByName {
+    /// first-parameter descriptor (the extension receiver) → candidates.
+    by_recv: HashMap<String, Vec<ExtCandidate>>,
+    /// every candidate of this name (top-level + extensions), for the receiver-less `find_top_level`.
+    all: Vec<ExtCandidate>,
+}
+
+/// Process-global memoization of the lazy ext index's REBUILT candidates (method name → grouped
+/// candidates), keyed by classpath and SHARED across worker threads. The rebuild (super-walk of a name's
+/// facades) then runs once per name for the whole process, not once per thread; grouping by receiver keeps
+/// the per-call-site `find_extensions` O(1). `RwLock` because hits (reads) dominate; a miss takes the write
+/// lock briefly. Bounded by the DISTINCT QUERIED names (the working set), not the whole classpath.
+type ExtCandCache = std::sync::Arc<std::sync::RwLock<HashMap<String, std::sync::Arc<ExtByName>>>>;
+fn global_ext_candidates(key: &[PathBuf]) -> ExtCandCache {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<HashMap<Vec<PathBuf>, ExtCandCache>>> =
+        std::sync::OnceLock::new();
+    CACHE
+        .get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap()
+        .entry(key.to_vec())
+        .or_insert_with(|| std::sync::Arc::new(std::sync::RwLock::new(HashMap::new())))
+        .clone()
+}
+
 /// Process-global cache of parsed `ClassInfo` (internal name → parsed class, `None` if absent), keyed
 /// by the classpath. The conformance harness compiles on several rayon worker threads, EACH with its
 /// own `Classpath`; without sharing, every common class (`kotlin/collections/List`, …) was parsed once
@@ -195,13 +223,21 @@ pub struct ExtCandidate {
 
 /// Lazy index of static methods grouped by `(first_param_descriptor, method_name)`. Built on
 /// first use from all entries in the classpath.
+/// A LAZY index of the classpath's static (top-level + extension) functions. Only the small "where" map
+/// is retained — `name → the facade/part ROOT classes that declare a static of that name`; the full
+/// candidate records (descriptors, signatures) are REBUILT on query from each root's `ClassInfo` (which
+/// the L1/L2 caches already hold), via [`Classpath::rebuild_ext_candidates`]. This keeps ~a few MB of
+/// name/owner strings resident instead of materializing every stdlib static twice (the old eager index
+/// was the single largest retained allocation — ~195 MB — per heap profiling).
 #[derive(Default)]
 struct ExtIndex {
-    /// `by_recv[recv_desc][method_name]` = list of candidates.
-    by_recv: HashMap<String, HashMap<String, Vec<ExtCandidate>>>,
-    /// `by_name[method_name]` = every public static method of that name (top-level functions and
-    /// extensions alike), regardless of arity — for resolving receiver-less top-level calls (`listOf`).
-    by_name: HashMap<String, Vec<ExtCandidate>>,
+    /// method name → facade/part ROOT class names whose super-walk declares a static of that name.
+    by_name: HashMap<String, Vec<String>>,
+    /// receiver descriptor → the owner facades that declare an extension on it (for `find_extension_owners`).
+    by_recv_owners: HashMap<String, Vec<String>>,
+    /// Names `@Metadata` marks as GENUINE top-level (a receiver-less function, never an extension) — these
+    /// are never keyed by their first parameter, so `find_extensions` must not return them for any receiver.
+    toplevel_only: std::collections::HashSet<String>,
 }
 
 /// Full type index from the classpath: class names and Kotlin type aliases.
@@ -404,6 +440,13 @@ pub struct Classpath {
     /// allocates descriptors. `resolve_type` asks for these repeatedly during member/subtype lookup.
     builtin_members:
         RefCell<crate::lru::LruCache<String, std::rc::Rc<Vec<crate::libraries::LibraryMember>>>>,
+    /// Rebuilt ext/top-level candidates per method name (the lazy [`ExtIndex`]'s `by_name` gives WHERE;
+    /// this memoizes the actual rebuilt records so a hot stdlib name isn't re-walked on every query). Two
+    /// levels, like the parsed-class cache: `ext_l1` is a per-thread `RefCell` — a CHEAP borrow on the hot
+    /// resolver path (`find_extensions` is called per call site) — holding `Arc`s shared from `ext_candidates`,
+    /// the process-global L2 where the one-time rebuild lives. Both hold only QUERIED names (the working set).
+    ext_l1: RefCell<crate::lru::LruCache<String, std::sync::Arc<ExtByName>>>,
+    ext_candidates: ExtCandCache,
     /// Process-unique identity for this `Classpath`, assigned at construction. Caches keyed by a
     /// `Classpath` (e.g. the per-classpath library seed) MUST key on this — NOT on the `Rc<Classpath>`
     /// pointer address, which a freed-then-reallocated `Classpath` can reuse, yielding a false cache hit
@@ -472,6 +515,8 @@ impl Classpath {
             functions: RefCell::new(crate::lru::LruCache::new(FN_CAP)),
             builtins: RefCell::new(HashMap::new()),
             builtin_members: RefCell::new(crate::lru::LruCache::new(META_CAP)),
+            ext_l1: RefCell::new(crate::lru::LruCache::new(FN_CAP)),
+            ext_candidates: global_ext_candidates(&cache_key),
             id,
         }
     }
@@ -497,7 +542,7 @@ impl Classpath {
             .ext
             .borrow()
             .as_ref()
-            .map_or(0, |i| i.by_recv.len() + i.by_name.len());
+            .map_or(0, |i| i.by_name.len() + i.by_recv_owners.len());
         format!(
             "classpath#{} L1_class={} L2_class={} fns={} meta_fns={} meta_ovl={} suspend={} bodies={} \
              builtin={} | jimage={} type={} ext={}",
@@ -758,19 +803,54 @@ impl Classpath {
     /// `receiver_desc` — the facades to consult for a Kotlin-name resolution (`sumOf`).
     pub fn find_extension_owners(&self, receiver_desc: &str) -> Vec<String> {
         self.ensure_ext_index();
-        let mut owners: Vec<String> = Vec::new();
-        if let Some(idx) = self.ext.borrow().as_ref() {
-            if let Some(by_name) = idx.by_recv.get(receiver_desc) {
-                for cands in by_name.values() {
-                    for c in cands {
-                        if !owners.contains(&c.owner) {
-                            owners.push(c.owner.clone());
-                        }
-                    }
-                }
+        self.ext
+            .borrow()
+            .as_ref()
+            .and_then(|idx| idx.by_recv_owners.get(receiver_desc).cloned())
+            .unwrap_or_default()
+    }
+
+    /// Rebuild the [`ExtCandidate`]s a facade/part `root` contributes for `name` — the lazy counterpart of
+    /// the old eager index. Walks `root`'s super-class chain (each `ClassInfo` served from the L1/L2 cache),
+    /// collecting matching statics; `public` mirrors the eager filter (a non-public root's public statics
+    /// are the `@InlineOnly` splice-only candidates the inliner may select but resolution never emits).
+    fn rebuild_ext_candidates(&self, root: &str, name: &str) -> Vec<ExtCandidate> {
+        let mut out = Vec::new();
+        let Some(root_ci) = self.find(root) else {
+            return out;
+        };
+        let root_public = root_ci.is_public();
+        let mut cur = Some(root.to_string());
+        let mut visited = std::collections::HashSet::new();
+        while let Some(cn) = cur {
+            if !visited.insert(cn.clone()) {
+                break;
             }
+            let Some(ci) = self.find(&cn) else { break };
+            for m in &ci.methods {
+                // Static methods of this name only — never `<init>`/`<clinit>` (the eager scan excluded
+                // `<`-prefixed names; a real call name never starts with `<`, so this only hardens the path).
+                if m.name != name || !m.is_static() || m.name.starts_with('<') {
+                    continue;
+                }
+                if !root_public && m.is_public() {
+                    continue;
+                }
+                let Some((_, ret_desc)) = descriptor_parts(&m.descriptor) else {
+                    continue;
+                };
+                out.push(ExtCandidate {
+                    owner: root.to_string(),
+                    name: m.name.clone(),
+                    descriptor: m.descriptor.clone(),
+                    ret_desc,
+                    signature: m.signature.clone(),
+                    public: root_public && m.is_public(),
+                });
+            }
+            cur = ci.super_class.clone();
         }
-        owners
+        out
     }
 
     /// A parsed `.kotlin_builtins` fragment by resource path (class internal name → supertypes+members),
@@ -1276,11 +1356,19 @@ impl Classpath {
     /// Returns all static methods in any classpath class whose first parameter matches.
     pub fn find_extensions(&self, receiver_desc: &str, method_name: &str) -> Vec<ExtCandidate> {
         self.ensure_ext_index();
-        self.ext
+        // A genuine top-level name is never reachable via a receiver.
+        if self
+            .ext
             .borrow()
             .as_ref()
-            .and_then(|idx| idx.by_recv.get(receiver_desc))
-            .and_then(|by_name| by_name.get(method_name))
+            .is_some_and(|idx| idx.toplevel_only.contains(method_name))
+        {
+            return Vec::new();
+        }
+        // O(1): the rebuilt candidates are pre-grouped by receiver (first-parameter) descriptor.
+        self.ext_by_name(method_name)
+            .by_recv
+            .get(receiver_desc)
             .cloned()
             .unwrap_or_default()
     }
@@ -1289,13 +1377,58 @@ impl Classpath {
     /// extensions), for resolving a receiver-less call. Includes non-public (`@InlineOnly`) candidates,
     /// each tagged via `ExtCandidate.public`; the caller filters — normal resolution is public-only.
     pub fn find_top_level(&self, method_name: &str) -> Vec<ExtCandidate> {
+        self.ext_by_name(method_name).all.clone()
+    }
+
+    /// The memoized rebuild for `method_name`, shared across threads and grouped by receiver — a hot name
+    /// (`map`, `let`) is walked once for the whole process, and both `find_top_level` and `find_extensions`
+    /// are then O(1) reads. This is what makes the lazy index perform: the WHERE map is tiny + retained;
+    /// candidate records are rebuilt on first use and kept only for queried names.
+    fn ext_by_name(&self, method_name: &str) -> std::sync::Arc<ExtByName> {
+        // L1: per-thread, no lock — the hot resolver path.
+        if let Some(hit) = self.ext_l1.borrow_mut().get(method_name).cloned() {
+            return hit;
+        }
+        // L2: process-global, shared across threads (the rebuild happens once here).
+        if let Some(hit) = self
+            .ext_candidates
+            .read()
+            .unwrap()
+            .get(method_name)
+            .cloned()
+        {
+            self.ext_l1
+                .borrow_mut()
+                .insert(method_name.to_string(), hit.clone());
+            return hit;
+        }
         self.ensure_ext_index();
-        self.ext
+        // Clone the small owner list, releasing the `ext` borrow before `rebuild` (which borrows the class
+        // caches). Candidates are rebuilt from each owner's cached `ClassInfo`, then grouped by receiver.
+        let roots = self
+            .ext
             .borrow()
             .as_ref()
-            .and_then(|idx| idx.by_name.get(method_name))
-            .cloned()
-            .unwrap_or_default()
+            .and_then(|idx| idx.by_name.get(method_name).cloned())
+            .unwrap_or_default();
+        let mut grouped = ExtByName::default();
+        for root in &roots {
+            for cand in self.rebuild_ext_candidates(root, method_name) {
+                if let Some(recv) = descriptor_parts(&cand.descriptor).and_then(|(fp, _)| fp) {
+                    grouped.by_recv.entry(recv).or_default().push(cand.clone());
+                }
+                grouped.all.push(cand);
+            }
+        }
+        let rc = std::sync::Arc::new(grouped);
+        self.ext_candidates
+            .write()
+            .unwrap()
+            .insert(method_name.to_string(), rc.clone());
+        self.ext_l1
+            .borrow_mut()
+            .insert(method_name.to_string(), rc.clone());
+        rc
     }
 
     fn ensure_ext_index(&self) {
@@ -1343,46 +1476,49 @@ impl Classpath {
             .values()
             .flat_map(|c| c.ext_names.iter().map(|s| s.as_str()))
             .collect();
-        let mut idx = ExtIndex::default();
-        for (name, lite) in &all {
-            let mut cur = Some(name.clone());
+        // Names that are top-level EVERYWHERE and never an extension — precomputed once (the same for
+        // every occurrence, since the `@Metadata` classification is per name).
+        let toplevel_only: std::collections::HashSet<String> = global_toplevel
+            .iter()
+            .filter(|n| !global_ext.contains(*n))
+            .map(|s| s.to_string())
+            .collect();
+        let mut idx = ExtIndex {
+            toplevel_only,
+            ..ExtIndex::default()
+        };
+        // Record only WHERE each static lives (root class + receiver → owner) — the candidate records are
+        // rebuilt on query from the root's `ClassInfo`, so the retained index is names + owners, not the
+        // materialized statics.
+        let push_dedup = |m: &mut HashMap<String, Vec<String>>, k: String, owner: &str| {
+            let v = m.entry(k).or_default();
+            if v.last().map(String::as_str) != Some(owner) && !v.iter().any(|o| o == owner) {
+                v.push(owner.to_string());
+            }
+        };
+        for (root, lite) in &all {
+            let mut cur = Some(root.clone());
             let mut visited = std::collections::HashSet::new();
             while let Some(cn) = cur {
                 if !visited.insert(cn.clone()) {
                     break;
                 }
                 let Some(c) = all.get(&cn) else { break };
-                for (mname, mdesc, msig, public) in &c.statics {
+                for (mname, mdesc, _msig, public) in &c.statics {
                     if !lite.is_public && *public {
                         continue;
                     }
-                    let Some((first_param, ret_desc)) = descriptor_parts(mdesc) else {
+                    let Some((first_param, _ret_desc)) = descriptor_parts(mdesc) else {
                         continue;
                     };
-                    let cand = ExtCandidate {
-                        owner: name.clone(),
-                        name: mname.clone(),
-                        descriptor: mdesc.clone(),
-                        ret_desc,
-                        signature: msig.clone(),
-                        public: lite.is_public && *public,
-                    };
-                    // A receiver-less top-level function (no first param, OR `@Metadata` marks the name as a
-                    // genuine top-level fn that is NEVER an extension) is by_name-only — never keyed by its
-                    // first parameter (which is a value parameter, not a receiver).
+                    push_dedup(&mut idx.by_name, mname.clone(), root);
+                    // Receiver keying: a genuine top-level (no first param, or a name that is top-level and
+                    // never an extension) is NOT reachable via a receiver — skip `by_recv_owners` for it.
                     if let Some(first_param) = first_param {
-                        let only_toplevel = global_toplevel.contains(mname.as_str())
-                            && !global_ext.contains(mname.as_str());
-                        if !only_toplevel {
-                            idx.by_recv
-                                .entry(first_param)
-                                .or_default()
-                                .entry(mname.clone())
-                                .or_default()
-                                .push(cand.clone());
+                        if !idx.toplevel_only.contains(mname) {
+                            push_dedup(&mut idx.by_recv_owners, first_param, root);
                         }
                     }
-                    idx.by_name.entry(mname.clone()).or_default().push(cand);
                 }
                 cur = c.super_class.clone();
             }
