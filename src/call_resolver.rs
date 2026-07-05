@@ -133,13 +133,10 @@ fn ranked_extension_overloads(fs: &FunctionSet, allow_must_inline: bool) -> Vec<
     out
 }
 
-/// Map each provided argument to a parameter index for a top-level call carrying a lambda. Identity when
-/// the counts match; else, for a call that omits leading defaulted parameters before a TRAILING lambda
-/// (`runBlocking { … }`), leading args → leading params and the trailing lambda → the LAST parameter.
-fn default_omit_lambda_param_indices(
-    param_count: usize,
-    arg_tys: &[Option<Ty>],
-) -> Option<Vec<usize>> {
+/// Map each provided argument to a logical parameter index. Identity when the counts match; else, for a
+/// call that omits leading defaulted parameters before a TRAILING lambda (`runBlocking { … }`), leading
+/// args → leading params and the trailing lambda → the LAST parameter.
+fn trailing_default_arg_indices(param_count: usize, arg_tys: &[Option<Ty>]) -> Option<Vec<usize>> {
     let n = arg_tys.len();
     if param_count == n {
         Some((0..n).collect())
@@ -888,7 +885,7 @@ impl<'a> CallResolver<'a> {
                 if has_exact && gsig.params.len() != arg_tys.len() {
                     return None;
                 }
-                let map = default_omit_lambda_param_indices(gsig.params.len(), arg_tys)?;
+                let map = trailing_default_arg_indices(gsig.params.len(), arg_tys)?;
                 let mut binds = std::collections::HashMap::new();
                 for (ai, at) in arg_tys.iter().enumerate() {
                     if let (Some(t), Some(ps)) = (at, gsig.params.get(map[ai])) {
@@ -935,7 +932,7 @@ impl<'a> CallResolver<'a> {
                 if has_exact && recvs.len() != arg_tys.len() {
                     return None;
                 }
-                let map = default_omit_lambda_param_indices(recvs.len(), arg_tys)?;
+                let map = trailing_default_arg_indices(recvs.len(), arg_tys)?;
                 let out: Vec<Option<Ty>> = map
                     .iter()
                     .map(|&pi| recvs.get(pi).cloned().flatten())
@@ -982,18 +979,13 @@ impl<'a> CallResolver<'a> {
                 if gsig.params.is_empty() {
                     continue;
                 }
-                let n_real = gsig.params.len() - 1;
-                let k = arg_tys.len();
-                let trailing_lambda = k >= 1 && arg_tys[k - 1].is_none();
-                let mapped: Vec<&GSig> = if n_real == k {
-                    gsig.params[1..].iter().collect()
-                } else if trailing_lambda && n_real > k && k >= 1 {
-                    let mut v: Vec<&GSig> = gsig.params[1..k].iter().collect();
-                    v.push(&gsig.params[n_real]);
-                    v
-                } else {
+                let Some(param_indices) =
+                    trailing_default_arg_indices(gsig.params.len() - 1, arg_tys)
+                else {
                     continue;
                 };
+                let mapped: Vec<&GSig> =
+                    param_indices.iter().map(|&i| &gsig.params[i + 1]).collect();
                 let mut binds = std::collections::HashMap::new();
                 unify_gsig(&gsig.params[0], receiver, &mut binds);
                 for (ps, at) in mapped.iter().zip(arg_tys) {
@@ -1028,18 +1020,15 @@ impl<'a> CallResolver<'a> {
                 if gsig.params.is_empty() {
                     continue;
                 }
-                let n_real = gsig.params.len() - 1;
-                let k = arg_tys.len();
-                let trailing_lambda = k >= 1 && arg_tys[k - 1].is_none();
-                let mapped: Vec<(usize, &GSig)> = if n_real == k {
-                    gsig.params[1..].iter().enumerate().collect()
-                } else if trailing_lambda && n_real > k && k >= 1 {
-                    let mut v: Vec<(usize, &GSig)> = gsig.params[1..k].iter().enumerate().collect();
-                    v.push((n_real - 1, &gsig.params[n_real]));
-                    v
-                } else {
+                let Some(param_indices) =
+                    trailing_default_arg_indices(gsig.params.len() - 1, arg_tys)
+                else {
                     continue;
                 };
+                let mapped: Vec<(usize, &GSig)> = param_indices
+                    .iter()
+                    .map(|&i| (i, &gsig.params[i + 1]))
+                    .collect();
                 let mut binds = std::collections::HashMap::new();
                 unify_gsig(&gsig.params[0], receiver, &mut binds);
                 for ((_, ps), at) in mapped.iter().zip(arg_tys) {
