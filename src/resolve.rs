@@ -8532,7 +8532,13 @@ impl<'a> Checker<'a> {
         if let Some(m) =
             crate::call_resolver::resolve_property_member(&*self.syms.libraries, rt, name)
         {
-            return m.ret;
+            // Record the resolved getter so the lowerer reuses it (keyed by the member-access
+            // ExprId; `lower_member_read_on` reads the same map — see [`TypeInfo::resolved_members`]).
+            let ret = m.ret;
+            if let Some(me) = mexpr {
+                self.resolved_members.insert(me, m);
+            }
+            return ret;
         }
         // Classpath EXTENSION property: `recv.name` whose getter is a top-level `get<Name>(recv)` static
         // (e.g. `descriptor.elementDescriptors` → `SerialDescriptorKt.getElementDescriptors(descriptor)`).
