@@ -65,60 +65,6 @@ pub trait SymbolSource {
         Vec::new()
     }
 
-    /// The value-class underlying type for a semantic type, when this source knows it. The default
-    /// handles ordinary reference-named value classes through `resolve_type`; platform providers can
-    /// add builtins whose source type is not represented as `Ty::Obj`.
-    fn value_underlying(&self, ty: Ty) -> Option<Ty> {
-        match ty {
-            Ty::Obj(internal, _) => self.resolve_type(internal).and_then(|t| t.value_underlying),
-            _ => None,
-        }
-    }
-
-    /// Normalize a semantic type to the form a JVM `<init>`/method descriptor carries, so a call
-    /// argument can be matched against a descriptor-read parameter. A Kotlin built-in erases to its
-    /// single JVM identity (`kotlin/collections/Set<String>` → `java/util/Set`, read-only and mutable
-    /// alike) and type arguments are dropped, mirroring erasure. Sources that do not need platform
-    /// normalization return the type unchanged. Reference (`Ty::Obj`) types are normalized and arrays
-    /// recurse into their element (so a nested collection normalizes too); primitives, `String` and
-    /// function types already compare exactly across the two sides.
-    fn jvm_descriptor_form(&self, ty: Ty) -> Ty {
-        ty
-    }
-
-    /// If values of this type can be invoked like a Kotlin function, return their arity. Plain
-    /// `Ty::Fun` is handled here; platform providers can add callable runtime types such as property
-    /// references without the checker knowing their class names.
-    fn function_like_arity(&self, ty: Ty) -> Option<usize> {
-        ty.fun_arity().map(usize::from)
-    }
-
-    /// The platform/library type used for a property reference with the given arity and mutability.
-    /// Resolver needs this type so direct property-reference APIs (`get`, `name`) keep working, but the
-    /// actual class name is provider-owned.
-    fn property_reference_type(&self, _arity: usize, _mutable: bool) -> Option<Ty> {
-        None
-    }
-
-    /// The type produced by a class literal (`X::class`) on this target/platform.
-    fn class_literal_type(&self) -> Option<Ty> {
-        None
-    }
-
-    /// Additional default wildcard-import packages contributed by this platform, in dotted Kotlin
-    /// package syntax. Common Kotlin defaults live in the resolver; this hook is only for documented
-    /// target additions such as JVM's `java.lang` and `kotlin.jvm`.
-    fn platform_default_import_packages(&self) -> &'static [&'static str] {
-        &[]
-    }
-
-    /// Platform spelling for a physical zero-arg getter when Kotlin property metadata is unavailable.
-    /// Common resolution asks for a semantic property name first; this hook is a fallback owned by the
-    /// source because JVM uses JavaBean-style `getX`/`isX` while other targets need not.
-    fn physical_property_getter_name(&self, _property: &str) -> Option<String> {
-        None
-    }
-
     /// The primary constructor's SOURCE parameter names PLUS a per-parameter "declares a default value"
     /// flag, for a constructor whose parameter count is at least `min_arity` — so a NAMED call may OMIT a
     /// defaulted parameter (`Cfg(a = 1, c = "x")` for `Cfg(a, b = 9, c = "z")`). This returns the FULL
@@ -218,50 +164,6 @@ impl SymbolSource for CompositeSource {
 
     fn resolve_type(&self, internal: &str) -> Option<LibraryType> {
         self.children.iter().find_map(|c| c.resolve_type(internal))
-    }
-
-    fn value_underlying(&self, ty: Ty) -> Option<Ty> {
-        self.children.iter().find_map(|c| c.value_underlying(ty))
-    }
-
-    fn jvm_descriptor_form(&self, ty: Ty) -> Ty {
-        self.children
-            .iter()
-            .find_map(|c| {
-                let t = c.jvm_descriptor_form(ty);
-                (t != ty).then_some(t)
-            })
-            .unwrap_or(ty)
-    }
-
-    fn function_like_arity(&self, ty: Ty) -> Option<usize> {
-        self.children.iter().find_map(|c| c.function_like_arity(ty))
-    }
-
-    fn property_reference_type(&self, arity: usize, mutable: bool) -> Option<Ty> {
-        self.children
-            .iter()
-            .find_map(|c| c.property_reference_type(arity, mutable))
-    }
-
-    fn class_literal_type(&self) -> Option<Ty> {
-        self.children.iter().find_map(|c| c.class_literal_type())
-    }
-
-    fn platform_default_import_packages(&self) -> &'static [&'static str] {
-        self.children
-            .iter()
-            .find_map(|c| {
-                let imports = c.platform_default_import_packages();
-                (!imports.is_empty()).then_some(imports)
-            })
-            .unwrap_or(&[])
-    }
-
-    fn physical_property_getter_name(&self, property: &str) -> Option<String> {
-        self.children
-            .iter()
-            .find_map(|c| c.physical_property_getter_name(property))
     }
 
     fn constructor_named_params(
@@ -436,32 +338,11 @@ mod tests {
     #[test]
     fn default_trait_methods_are_empty_or_none() {
         let s = module();
-        assert_eq!(s.jvm_descriptor_form(Ty::Int), Ty::Int);
-        assert!(s.property_reference_type(1, false).is_none());
-        assert!(s.class_literal_type().is_none());
-        assert!(s.platform_default_import_packages().is_empty());
-        assert!(s.physical_property_getter_name("x").is_none());
         assert!(s.constructor_named_params("mod/Foo", 0).is_none());
         assert!(!s.value_class_ctor_has_default("mod/Foo"));
         assert!(!s.is_enum_entry("mod/Foo", "A"));
         assert!(s.value_class_property_member("mod/Foo", "id").is_none());
         assert!(s.infer_constructor_type_args("mod/Foo", &[]).is_none());
-    }
-
-    #[test]
-    fn default_value_underlying_uses_resolve_type() {
-        // FakeSource's resolved type has `value_underlying: None`, so this is None even for a known type.
-        let s = module();
-        assert!(s.value_underlying(Ty::obj("shared")).is_none());
-        // A non-Obj type short-circuits to None.
-        assert!(s.value_underlying(Ty::Int).is_none());
-    }
-
-    #[test]
-    fn default_function_like_arity_uses_fun_arity() {
-        let s = module();
-        // A non-function type has no callable arity.
-        assert!(s.function_like_arity(Ty::Int).is_none());
     }
 
     #[test]
@@ -475,17 +356,10 @@ mod tests {
     fn composite_delegates_defaults_to_children() {
         let c = CompositeSource::new(vec![Box::new(module()), Box::new(library())]);
         // No child overrides these, so the composite reports the empty/None defaults.
-        assert_eq!(c.jvm_descriptor_form(Ty::Int), Ty::Int);
-        assert!(c.property_reference_type(0, true).is_none());
-        assert!(c.class_literal_type().is_none());
-        assert!(c.platform_default_import_packages().is_empty());
-        assert!(c.physical_property_getter_name("x").is_none());
         assert!(c.infer_constructor_type_args("shared", &[]).is_none());
         assert!(!c.value_class_ctor_has_default("shared"));
         assert!(!c.is_enum_entry("shared", "A"));
         assert!(c.value_class_property_member("shared", "id").is_none());
-        assert!(c.value_underlying(Ty::obj("shared")).is_none());
-        assert!(c.function_like_arity(Ty::Int).is_none());
     }
 
     #[test]

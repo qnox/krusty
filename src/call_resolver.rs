@@ -12,9 +12,9 @@
 //! lives here.
 
 use crate::libraries::{
-    FnKind, FunctionInfo, FunctionSet, GSig, GenericSig, InlineKind, LibraryCallable, LibraryMember,
+    CompilerPlatform, FnKind, FunctionInfo, FunctionSet, GSig, GenericSig, InlineKind,
+    LibraryCallable, LibraryMember,
 };
-use crate::symbol_source::SymbolSource;
 use crate::types::Ty;
 
 type GSigBinds = std::collections::HashMap<String, Ty>;
@@ -199,11 +199,11 @@ fn callable_with_return(c: &LibraryCallable, ret: Ty, default_call: bool) -> Lib
 /// The arg-dependent binding layer over a [`SymbolSource`]: it selects overloads and binds generics for
 /// a specific call site. Holds the oracle by reference — cheap to construct per query.
 pub struct CallResolver<'a> {
-    lib: &'a dyn SymbolSource,
+    lib: &'a dyn CompilerPlatform,
 }
 
 impl<'a> CallResolver<'a> {
-    pub fn new(lib: &'a dyn SymbolSource) -> Self {
+    pub fn new(lib: &'a dyn CompilerPlatform) -> Self {
         CallResolver { lib }
     }
 
@@ -1061,12 +1061,12 @@ impl<'a> CallResolver<'a> {
 // The inherited-member walk over a library type's hierarchy — arg-dependent binding, so it lives in
 // this layer (not the oracle). `resolve` and `ir_lower` share one implementation, backend-agnostic.
 
-fn descriptor_form_args(lib: &dyn SymbolSource, args: &[Ty]) -> Option<Vec<Ty>> {
+fn descriptor_form_args(lib: &dyn CompilerPlatform, args: &[Ty]) -> Option<Vec<Ty>> {
     let out: Vec<Ty> = args.iter().map(|a| lib.jvm_descriptor_form(*a)).collect();
     (out.as_slice() != args).then_some(out)
 }
 
-fn params_match_descriptor_form(lib: &dyn SymbolSource, params: &[Ty], args: &[Ty]) -> bool {
+fn params_match_descriptor_form(lib: &dyn CompilerPlatform, params: &[Ty], args: &[Ty]) -> bool {
     params.len() == args.len()
         && params
             .iter()
@@ -1079,7 +1079,7 @@ fn params_match_descriptor_form(lib: &dyn SymbolSource, params: &[Ty], args: &[T
 /// interface (`java/util/List` argument → `java/util/Collection` parameter). Non-reference sides only
 /// match on identity. The supertype closure is walked through the symbol source; no collection
 /// relationships are hardcoded here.
-fn descriptor_arg_subtype_of_param(lib: &dyn SymbolSource, arg: Ty, param: Ty) -> bool {
+fn descriptor_arg_subtype_of_param(lib: &dyn CompilerPlatform, arg: Ty, param: Ty) -> bool {
     let pj = lib.jvm_descriptor_form(param);
     let aj = lib.jvm_descriptor_form(arg);
     if aj == pj {
@@ -1094,7 +1094,7 @@ fn descriptor_arg_subtype_of_param(lib: &dyn SymbolSource, arg: Ty, param: Ty) -
 
 /// Resolve a constructor on a library type by argument types (with the type's own widening).
 pub fn resolve_constructor(
-    lib: &dyn SymbolSource,
+    lib: &dyn CompilerPlatform,
     internal: &str,
     args: &[Ty],
 ) -> Option<LibraryMember> {
@@ -1234,7 +1234,7 @@ pub struct SyntheticCtorCall {
 /// (absent from the public `constructors`) and ALSO a separate value-class marker overload
 /// `<init>(<params…>, marker)` (no mask); only the `arity + 2` shape is the default synthetic.
 pub fn synthetic_default_ctor(
-    lib: &dyn SymbolSource,
+    lib: &dyn CompilerPlatform,
     internal: &str,
     arity: usize,
 ) -> Option<(String, Vec<Ty>)> {
@@ -1251,7 +1251,7 @@ pub fn synthetic_default_ctor(
 /// ret)`, the parameter types being the source method's (WITHOUT the leading receiver and trailing
 /// mask/marker). Lets a call omit a defaulted argument. `None` when the class has no such synthetic.
 pub fn synthetic_default_member(
-    lib: &dyn SymbolSource,
+    lib: &dyn CompilerPlatform,
     owner: &str,
     name: &str,
     arity: usize,
@@ -1297,7 +1297,7 @@ pub fn synthetic_default_member(
 /// synthetic `DefaultConstructorMarker` overload (a value-class param, or omitted defaults). See
 /// [`SyntheticCtorCall`]. `None` when no marker overload fits.
 pub fn resolve_synthetic_constructor(
-    lib: &dyn SymbolSource,
+    lib: &dyn CompilerPlatform,
     internal: &str,
     args: &[Ty],
 ) -> Option<SyntheticCtorCall> {
@@ -1367,7 +1367,7 @@ pub fn resolve_synthetic_constructor(
 
 /// Resolve a companion member `Type.name(args)` (the receiver type must be public).
 pub fn resolve_companion(
-    lib: &dyn SymbolSource,
+    lib: &dyn CompilerPlatform,
     internal: &str,
     name: &str,
     args: &[Ty],
@@ -1384,7 +1384,7 @@ pub fn resolve_companion(
 /// `functions` query, whose Member overloads carry the breadth-first `receiver_rank`; the closest rung's
 /// best overload wins (most-derived first), exactly the inherited-member walk this used to do by hand.
 pub fn resolve_instance(
-    lib: &dyn SymbolSource,
+    lib: &dyn CompilerPlatform,
     internal: &str,
     name: &str,
     args: &[Ty],
@@ -1408,7 +1408,7 @@ pub struct ResolvedMember {
 /// returns may bind from the receiver (`List<Int>.get(Int): Int`) or, for erased-`Any` returns, from
 /// the call arguments (`decodeFromString(serializer, text): T`).
 pub fn resolve_instance_member(
-    lib: &dyn SymbolSource,
+    lib: &dyn CompilerPlatform,
     recv: Ty,
     name: &str,
     args: &[Ty],
@@ -1445,7 +1445,7 @@ pub fn resolve_instance_member(
 /// Resolve a zero-arg property read on `recv`. The semantic Kotlin property name is tried first; if
 /// the source has only a physical getter method, the source supplies that fallback spelling.
 pub fn resolve_property_member(
-    lib: &dyn SymbolSource,
+    lib: &dyn CompilerPlatform,
     recv: Ty,
     property: &str,
 ) -> Option<ResolvedMember> {
@@ -1472,7 +1472,7 @@ pub fn resolve_property_member(
 }
 
 fn select_instance_info(
-    lib: &dyn SymbolSource,
+    lib: &dyn CompilerPlatform,
     recv: Ty,
     name: &str,
     args: &[Ty],
@@ -1599,7 +1599,7 @@ fn fun_arg_matches(param: &Ty, arg: &Ty) -> bool {
 
 /// Whether `arg` is assignable to `param` allowing a reference SUBTYPE (`arg`'s classpath supertype
 /// closure contains `param`). Falls back to exact / `Any` for the trivial cases.
-fn arg_subtype_assignable(lib: &dyn SymbolSource, param: &Ty, arg: &Ty) -> bool {
+fn arg_subtype_assignable(lib: &dyn CompilerPlatform, param: &Ty, arg: &Ty) -> bool {
     if param == arg || *param == Ty::obj("kotlin/Any") {
         return true;
     }
@@ -1622,7 +1622,7 @@ fn arg_subtype_assignable(lib: &dyn SymbolSource, param: &Ty, arg: &Ty) -> bool 
 /// `sub` is `super_` or transitively extends/implements it (via the classpath supertype walk). `depth`
 /// bounds the recursion: real class hierarchies are shallow, and the bound also guarantees termination
 /// on a malformed (cyclic) classpath rather than overflowing the stack.
-fn is_classpath_subtype(lib: &dyn SymbolSource, sub: &str, super_: &str, depth: u32) -> bool {
+fn is_classpath_subtype(lib: &dyn CompilerPlatform, sub: &str, super_: &str, depth: u32) -> bool {
     let sub_desc = lib.jvm_descriptor_form(Ty::obj(sub));
     let super_desc = lib.jvm_descriptor_form(Ty::obj(super_));
     if sub == super_ || sub_desc == super_desc {
@@ -1644,6 +1644,7 @@ fn is_classpath_subtype(lib: &dyn SymbolSource, sub: &str, super_: &str, depth: 
 mod tests {
     use super::*;
     use crate::libraries::{CallSig, FunctionSet, LibraryCallable, Origin, TypeKind};
+    use crate::symbol_source::SymbolSource;
 
     struct FakeSource {
         name: &'static str,
@@ -1676,6 +1677,13 @@ mod tests {
                 value_companion_fns: Vec::new(),
                 value_underlying: (internal == "kotlin/UInt").then_some(Ty::Int),
             })
+        }
+    }
+
+    impl crate::libraries::TargetRuntime for FakeSource {
+        fn value_underlying(&self, ty: Ty) -> Option<Ty> {
+            self.resolve_type(ty.obj_internal()?)
+                .and_then(|t| t.value_underlying)
         }
     }
 

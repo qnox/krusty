@@ -15,7 +15,7 @@ use crate::libraries::{
     CountedLoopInfo, FnFlags, FnKind, FunctionInfo, FunctionSet, GSig, GenericSig, InlineKind,
     LibConst, LibraryCallable, LibraryConst, LibraryMember, LibrarySeed, LibraryType,
     PlatformAccessor, PlatformCtor, PlatformField, PlatformRangeCtor, RangeConstruction,
-    ReturnInfo, RuntimeCtor, RuntimeOp,
+    ReturnInfo, RuntimeCtor, RuntimeOp, TargetRuntime,
 };
 use crate::symbol_source::SymbolSource;
 use crate::types::Ty;
@@ -962,20 +962,11 @@ fn class_implements(cp: &Classpath, internal: &str, target: &str) -> bool {
 }
 
 impl SymbolSource for JvmLibraries {
-    fn platform_default_import_packages(&self) -> &'static [&'static str] {
-        PLATFORM_DEFAULT_IMPORT_PACKAGES
-    }
-
     fn sealed_subclasses(&self, internal: &str) -> Vec<String> {
         self.cp
             .find(internal)
             .map(|ci| metadata::class_sealed_subclasses(&ci))
             .unwrap_or_default()
-    }
-
-    fn physical_property_getter_name(&self, property: &str) -> Option<String> {
-        let getter = property_getter_name(property);
-        (getter != property).then_some(getter)
     }
 
     fn constructor_named_params(
@@ -1189,53 +1180,6 @@ impl SymbolSource for JvmLibraries {
         );
         CACHE.with(|c| c.borrow_mut().insert(key, pair.clone()));
         pair
-    }
-
-    fn value_underlying(&self, ty: Ty) -> Option<Ty> {
-        match ty {
-            Ty::UInt => Some(Ty::Int),
-            Ty::ULong => Some(Ty::Long),
-            _ => <Self as SymbolSource>::resolve_type(self, ty.obj_internal()?)
-                .and_then(|t| t.value_underlying),
-        }
-    }
-
-    fn jvm_descriptor_form(&self, ty: Ty) -> Ty {
-        // A reference type erases to its JVM internal name (a Kotlin collection → its single
-        // `java/util/*` interface) with type arguments dropped — exactly what a descriptor-read
-        // constructor/method parameter carries. Arrays recurse into their element (`Array<Set<String>>`
-        // → `[Ljava/util/Set;` on the descriptor side), so a nested collection element normalizes too.
-        // Other kinds (primitives, `String`, function types) already compare exactly across the sides.
-        match ty {
-            Ty::Obj(internal, _) => Ty::obj(super::jvm_class_map::to_jvm_internal(internal)),
-            Ty::Array(e) => Ty::array(self.jvm_descriptor_form(*e)),
-            _ => ty,
-        }
-    }
-
-    fn function_like_arity(&self, ty: Ty) -> Option<usize> {
-        ty.fun_arity()
-            .map(usize::from)
-            .or_else(|| match ty.obj_internal()? {
-                "kotlin/reflect/KProperty1" | "kotlin/reflect/KMutableProperty1" => Some(1),
-                "kotlin/reflect/KProperty0" | "kotlin/reflect/KMutableProperty0" => Some(0),
-                _ => None,
-            })
-    }
-
-    fn property_reference_type(&self, arity: usize, mutable: bool) -> Option<Ty> {
-        let internal = match (arity, mutable) {
-            (0, false) => "kotlin/reflect/KProperty0",
-            (0, true) => "kotlin/reflect/KMutableProperty0",
-            (1, false) => "kotlin/reflect/KProperty1",
-            (1, true) => "kotlin/reflect/KMutableProperty1",
-            _ => return None,
-        };
-        Some(Ty::obj(internal))
-    }
-
-    fn class_literal_type(&self) -> Option<Ty> {
-        Some(Ty::obj("java/lang/Class"))
     }
 
     fn resolve_type(&self, internal: &str) -> Option<LibraryType> {
@@ -2166,6 +2110,62 @@ impl SymbolSource for JvmLibraries {
 impl crate::libraries::TargetRuntime for JvmLibraries {
     fn function_type(&self, arity: usize) -> Option<Ty> {
         Some(Ty::obj(&format!("kotlin/jvm/functions/Function{arity}")))
+    }
+
+    fn value_underlying(&self, ty: Ty) -> Option<Ty> {
+        match ty {
+            Ty::UInt => Some(Ty::Int),
+            Ty::ULong => Some(Ty::Long),
+            _ => <Self as SymbolSource>::resolve_type(self, ty.obj_internal()?)
+                .and_then(|t| t.value_underlying),
+        }
+    }
+
+    fn jvm_descriptor_form(&self, ty: Ty) -> Ty {
+        // A reference type erases to its JVM internal name (a Kotlin collection → its single
+        // `java/util/*` interface) with type arguments dropped — exactly what a descriptor-read
+        // constructor/method parameter carries. Arrays recurse into their element (`Array<Set<String>>`
+        // → `[Ljava/util/Set;` on the descriptor side), so a nested collection element normalizes too.
+        // Other kinds (primitives, `String`, function types) already compare exactly across the sides.
+        match ty {
+            Ty::Obj(internal, _) => Ty::obj(super::jvm_class_map::to_jvm_internal(internal)),
+            Ty::Array(e) => Ty::array(self.jvm_descriptor_form(*e)),
+            _ => ty,
+        }
+    }
+
+    fn function_like_arity(&self, ty: Ty) -> Option<usize> {
+        ty.fun_arity()
+            .map(usize::from)
+            .or_else(|| match ty.obj_internal()? {
+                "kotlin/reflect/KProperty1" | "kotlin/reflect/KMutableProperty1" => Some(1),
+                "kotlin/reflect/KProperty0" | "kotlin/reflect/KMutableProperty0" => Some(0),
+                _ => None,
+            })
+    }
+
+    fn property_reference_type(&self, arity: usize, mutable: bool) -> Option<Ty> {
+        let internal = match (arity, mutable) {
+            (0, false) => "kotlin/reflect/KProperty0",
+            (0, true) => "kotlin/reflect/KMutableProperty0",
+            (1, false) => "kotlin/reflect/KProperty1",
+            (1, true) => "kotlin/reflect/KMutableProperty1",
+            _ => return None,
+        };
+        Some(Ty::obj(internal))
+    }
+
+    fn class_literal_type(&self) -> Option<Ty> {
+        Some(Ty::obj("java/lang/Class"))
+    }
+
+    fn platform_default_import_packages(&self) -> &'static [&'static str] {
+        PLATFORM_DEFAULT_IMPORT_PACKAGES
+    }
+
+    fn physical_property_getter_name(&self, property: &str) -> Option<String> {
+        let getter = property_getter_name(property);
+        (getter != property).then_some(getter)
     }
 
     fn property_reference_impl(&self, arity: usize, mutable: bool) -> Option<PlatformCtor> {
