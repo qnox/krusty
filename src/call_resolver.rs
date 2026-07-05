@@ -1686,25 +1686,19 @@ fn best_member_overload<'a>(
 /// erased `kotlin/jvm/functions/FunctionN` object; neither pairs with the argument under plain equality or
 /// `Any` widening, so arity alone drives the match.
 fn fun_arg_matches(param: &Ty, arg: &Ty) -> bool {
-    let arg_arity = match arg.fun_arity() {
-        Some(n) => n,
-        None => return false,
+    let Some(arg_arity) = arg.fun_arity() else {
+        return false;
     };
     let param = match param {
         Ty::Nullable(inner) => **inner,
         _ => *param,
     };
-    if let Some(pn) = param.fun_arity() {
-        return pn == arg_arity;
-    }
-    match param.obj_internal() {
-        Some(p) => {
-            p.strip_prefix("kotlin/jvm/functions/Function")
-                .and_then(|d| d.parse::<u8>().ok())
-                == Some(arg_arity)
-        }
-        None => false,
-    }
+    param.fun_arity().is_some_and(|pn| pn == arg_arity)
+        || param
+            .obj_internal()
+            .and_then(|p| p.strip_prefix("kotlin/jvm/functions/Function"))
+            .and_then(|d| d.parse::<u8>().ok())
+            == Some(arg_arity)
 }
 
 /// Whether `arg` is assignable to `param` allowing a reference SUBTYPE (`arg`'s classpath supertype
