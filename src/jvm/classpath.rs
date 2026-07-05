@@ -411,6 +411,19 @@ pub struct Classpath {
     id: u64,
 }
 
+/// Current process resident-set size in KiB from Linux `/proc/self/status` (`VmRSS`, already in KiB),
+/// for memory profiling. `0` if unavailable (non-Linux, or the file can't be read).
+pub fn process_rss_kb() -> u64 {
+    std::fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|s| {
+            s.lines()
+                .find(|l| l.starts_with("VmRSS:"))
+                .and_then(|l| l.split_whitespace().nth(1)?.parse::<u64>().ok())
+        })
+        .unwrap_or(0)
+}
+
 impl Classpath {
     pub fn new(paths: Vec<PathBuf>) -> Classpath {
         use std::sync::atomic::{AtomicU64, Ordering};
@@ -467,6 +480,40 @@ impl Classpath {
     /// (see the `id` field). Unlike an `Rc<Classpath>` pointer, this never aliases a freed classpath.
     pub fn id(&self) -> u64 {
         self.id
+    }
+
+    /// A one-line snapshot of every cache's entry count — for memory profiling (`KRUSTY_MEM_REPORT`). The
+    /// per-`Classpath` caches (`L1_class`/`fns`/`meta*`/`bodies`/`builtin`) are LRU-bounded, so they
+    /// plateau at their caps; the shared `L2_class` map and the `jimage`/`type`/`ext` INDEXES are the
+    /// library-sized structures (the jimage names every JDK class) — the ones to watch if RSS is high.
+    pub fn cache_report(&self) -> String {
+        let jimage = self.jimage.borrow().as_ref().map_or(0, |(_, i)| i.len());
+        let types = self
+            .types
+            .borrow()
+            .as_ref()
+            .map_or(0, |i| i.class_names.len() + i.type_aliases.len());
+        let ext = self
+            .ext
+            .borrow()
+            .as_ref()
+            .map_or(0, |i| i.by_recv.len() + i.by_name.len());
+        format!(
+            "classpath#{} L1_class={} L2_class={} fns={} meta_fns={} meta_ovl={} suspend={} bodies={} \
+             builtin={} | jimage={} type={} ext={}",
+            self.id,
+            self.local_cache.borrow().len(),
+            self.cache.read().unwrap().len(),
+            self.functions.borrow().len(),
+            self.meta_fns.borrow().len(),
+            self.meta_overloads.borrow().len(),
+            self.suspend_names.borrow().len(),
+            self.bodies.borrow().len(),
+            self.builtin_members.borrow().len(),
+            jimage,
+            types,
+            ext,
+        )
     }
 
     pub fn cached_functions(&self, key: &(String, Option<Ty>)) -> Option<FunctionSet> {
