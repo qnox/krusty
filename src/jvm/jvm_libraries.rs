@@ -1739,66 +1739,58 @@ impl SymbolSource for JvmLibraries {
             // For a value-class receiver only (bounding the blast radius), map `name` → the mangled method
             // via `meta_functions` (the facade-merged `@Metadata` decode), then load the real candidate by
             // that JVM name.
-            if let Some(recv_internal) = receiver.kotlin_class_internal() {
-                if let Some(recv_desc) = self.value_class_underlying_desc(recv_internal) {
-                    {
-                        for owner in self.cp.find_extension_owners(&recv_desc) {
-                            // `meta_functions` shares the facade-merged decode — for a multifile FACADE
-                            // the functions live in the PART classes named in its `@Metadata` `d1`
-                            // (`URangesKt` → `URangesKt___URangesKt`), already merged there.
-                            let metafns = self.cp.meta_functions(&owner);
-                            for mf in metafns.iter() {
-                                // Only a metadata-mangled (jvm_name != kotlin name) public extension whose
-                                // `@Metadata` receiver IS this value class.
-                                if mf.kotlin_name != name
-                                    || mf.jvm_name == name
-                                    || !mf.is_public
-                                    || mf.receiver_class.as_deref() != Some(recv_internal)
-                                {
-                                    continue;
-                                }
-                                for c in self.cp.find_extensions(&recv_desc, &mf.jvm_name) {
-                                    let (params, pret) = parse_method_desc(&c.descriptor);
-                                    let ret_metadata = metadata_return_info(
-                                        mf.ret_class.as_deref(),
-                                        mf.ret_nullable,
-                                    );
-                                    let ret = ret_metadata.class.unwrap_or(pret);
-                                    let inline_kind = InlineKind::from_flags(
-                                        mf.is_inline,
-                                        mf.is_inline && !c.public,
-                                    );
-                                    overloads.push(FunctionInfo {
-                                        ret: ret_metadata,
-                                        // The value class is the most-specific receiver rung.
-                                        overload_rank: descriptor_narrowing(&c.descriptor) as u32,
-                                        generic_sig: c
-                                            .signature
-                                            .as_deref()
-                                            .and_then(parse_method_gsig),
-                                        flags: FnFlags {
-                                            inline: inline_kind,
-                                            suspend: mf.is_suspend,
-                                        },
-                                        ..FunctionInfo::plain(
-                                            FnKind::Extension,
-                                            Some(receiver),
-                                            LibraryCallable {
-                                                inline: inline_kind,
-                                                signature: c.signature.clone(),
-                                                ..LibraryCallable::library(
-                                                    c.owner.clone(),
-                                                    c.name.clone(),
-                                                    params,
-                                                    ret,
-                                                    pret,
-                                                    c.descriptor.clone(),
-                                                )
-                                            },
+            if let Some((recv_internal, recv_desc)) = receiver
+                .kotlin_class_internal()
+                .and_then(|i| self.value_class_underlying_desc(i).map(|d| (i, d)))
+            {
+                for owner in self.cp.find_extension_owners(&recv_desc) {
+                    // `meta_functions` shares the facade-merged decode — for a multifile FACADE
+                    // the functions live in the PART classes named in its `@Metadata` `d1`
+                    // (`URangesKt` → `URangesKt___URangesKt`), already merged there.
+                    let metafns = self.cp.meta_functions(&owner);
+                    for mf in metafns.iter() {
+                        // Only a metadata-mangled (jvm_name != kotlin name) public extension whose
+                        // `@Metadata` receiver IS this value class.
+                        if mf.kotlin_name != name
+                            || mf.jvm_name == name
+                            || !mf.is_public
+                            || mf.receiver_class.as_deref() != Some(recv_internal)
+                        {
+                            continue;
+                        }
+                        for c in self.cp.find_extensions(&recv_desc, &mf.jvm_name) {
+                            let (params, pret) = parse_method_desc(&c.descriptor);
+                            let ret_metadata =
+                                metadata_return_info(mf.ret_class.as_deref(), mf.ret_nullable);
+                            let ret = ret_metadata.class.unwrap_or(pret);
+                            let inline_kind =
+                                InlineKind::from_flags(mf.is_inline, mf.is_inline && !c.public);
+                            overloads.push(FunctionInfo {
+                                ret: ret_metadata,
+                                // The value class is the most-specific receiver rung.
+                                overload_rank: descriptor_narrowing(&c.descriptor) as u32,
+                                generic_sig: c.signature.as_deref().and_then(parse_method_gsig),
+                                flags: FnFlags {
+                                    inline: inline_kind,
+                                    suspend: mf.is_suspend,
+                                },
+                                ..FunctionInfo::plain(
+                                    FnKind::Extension,
+                                    Some(receiver),
+                                    LibraryCallable {
+                                        inline: inline_kind,
+                                        signature: c.signature.clone(),
+                                        ..LibraryCallable::library(
+                                            c.owner.clone(),
+                                            c.name.clone(),
+                                            params,
+                                            ret,
+                                            pret,
+                                            c.descriptor.clone(),
                                         )
-                                    });
-                                }
-                            }
+                                    },
+                                )
+                            });
                         }
                     }
                 }
