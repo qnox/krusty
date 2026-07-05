@@ -24,18 +24,6 @@ use crate::types::Ty;
 /// in the seed filter, so neither list is duplicated).
 const PLATFORM_DEFAULT_IMPORT_PACKAGES: &[&str] = &["java.lang", "kotlin.jvm"];
 
-/// The slash-form packages whose classes are reachable by a bare, unqualified, unimported name — the
-/// full Kotlin default-import set (language + this platform). Used to filter the classpath seed so a
-/// bare name cannot silently bind to an arbitrary classpath class (`Widget` → `jdk/internal/.../Widget`,
-/// `plain` → `sun/.../plain` — a silent miscompile).
-fn default_import_packages_internal() -> std::collections::HashSet<String> {
-    crate::resolve::KOTLIN_DEFAULT_IMPORT_PACKAGES
-        .iter()
-        .chain(PLATFORM_DEFAULT_IMPORT_PACKAGES)
-        .map(|p| p.replace('.', "/"))
-        .collect()
-}
-
 /// A platform backed by a JVM classpath (dirs + jars + the JDK jimage). The classpath is shared
 /// (`Rc`) with the JVM backend/emitter so the bytecode inliner reads inline-function bodies through
 /// the same lazily-populated caches — all within the `jvm` module, never through the `SymbolSource`
@@ -1140,7 +1128,12 @@ impl SymbolSource for JvmLibraries {
         // silent miscompile. Same-package user types and explicit/wildcard imports are added per file
         // by the signature collector; default-import typealiases (`ArrayList`→`java/util/ArrayList`,
         // declared in `kotlin.collections`) are seeded just below from the type-alias index.
-        let default_pkgs = default_import_packages_internal();
+        let default_pkgs: std::collections::HashSet<String> =
+            crate::resolve::KOTLIN_DEFAULT_IMPORT_PACKAGES
+                .iter()
+                .chain(PLATFORM_DEFAULT_IMPORT_PACKAGES)
+                .map(|p| p.replace('.', "/"))
+                .collect();
         let mut class_names: std::collections::HashMap<String, String> = idx
             .class_names
             .iter()
