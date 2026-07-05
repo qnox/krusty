@@ -17,12 +17,10 @@ use crate::libraries::{
 use crate::symbol_source::SymbolSource;
 use crate::types::Ty;
 
+type GSigBinds = std::collections::HashMap<String, Ty>;
+
 /// Bind type variables by unifying a parameter signature node with an actual argument `Ty`.
-pub(crate) fn unify_gsig(
-    sig: &GSig,
-    actual: Ty,
-    binds: &mut std::collections::HashMap<String, Ty>,
-) {
+pub(crate) fn unify_gsig(sig: &GSig, actual: Ty, binds: &mut GSigBinds) {
     match sig {
         GSig::Var(n) => {
             binds.entry(n.clone()).or_insert(actual);
@@ -73,7 +71,7 @@ pub(crate) fn unify_gsig(
 
 /// Realize a signature node to a `Ty` under the current bindings — an unbound variable erases to
 /// `Any`, a class becomes `Ty::obj_args` carrying its (substituted) type arguments.
-pub(crate) fn gsig_to_ty(sig: &GSig, binds: &std::collections::HashMap<String, Ty>) -> Ty {
+pub(crate) fn gsig_to_ty(sig: &GSig, binds: &GSigBinds) -> Ty {
     match sig {
         GSig::Var(n) => binds
             .get(n)
@@ -96,15 +94,20 @@ pub(crate) fn gsig_to_ty(sig: &GSig, binds: &std::collections::HashMap<String, T
     }
 }
 
+fn seeded_gsig_binds(gsig: &GenericSig, type_args: &[Ty]) -> GSigBinds {
+    gsig.formals
+        .iter()
+        .cloned()
+        .zip(type_args.iter().copied())
+        .collect()
+}
+
 fn bind_gsig_return<'a>(
     gsig: &GenericSig,
     type_args: &[Ty],
     actuals: impl IntoIterator<Item = (&'a GSig, Ty)>,
 ) -> Ty {
-    let mut binds = std::collections::HashMap::new();
-    for (f, t) in gsig.formals.iter().zip(type_args) {
-        binds.insert(f.clone(), *t);
-    }
+    let mut binds = seeded_gsig_binds(gsig, type_args);
     for (ps, a) in actuals {
         unify_gsig(ps, a, &mut binds);
     }
@@ -122,10 +125,7 @@ fn bind_ext_ret(gsig: &GenericSig, receiver: Ty, args: &[Ty], targs: &[Ty]) -> T
 }
 
 /// If `sig` is a function type, the substituted types of its lambda parameters. Empty for anything else.
-pub(crate) fn function_input_types(
-    sig: &GSig,
-    binds: &std::collections::HashMap<String, Ty>,
-) -> Vec<Ty> {
+pub(crate) fn function_input_types(sig: &GSig, binds: &GSigBinds) -> Vec<Ty> {
     match sig {
         GSig::Function { params, .. } => params.iter().map(|a| gsig_to_ty(a, binds)).collect(),
         _ => Vec::new(),
@@ -312,10 +312,7 @@ impl<'a> CallResolver<'a> {
             .generic_sig
             .as_ref()
             .map(|gsig| {
-                let mut binds = std::collections::HashMap::new();
-                for (f, t) in gsig.formals.iter().zip(type_args) {
-                    binds.insert(f.clone(), *t);
-                }
+                let mut binds = seeded_gsig_binds(gsig, type_args);
                 let vararg = params.len() != args.len();
                 if vararg && !gsig.params.is_empty() {
                     let fixed = gsig.params.len() - 1;
@@ -465,10 +462,7 @@ impl<'a> CallResolver<'a> {
         o.generic_sig
             .as_ref()
             .map(|gsig| {
-                let mut binds = std::collections::HashMap::new();
-                for (f, t) in gsig.formals.iter().zip(type_args) {
-                    binds.insert(f.clone(), *t);
-                }
+                let mut binds = seeded_gsig_binds(gsig, type_args);
                 if let Some(recv_sig) = gsig.params.first() {
                     unify_gsig(recv_sig, receiver, &mut binds);
                 }
