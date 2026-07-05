@@ -447,6 +447,49 @@ impl JvmLibraries {
             })
             .collect()
     }
+
+    /// Every value-class-TYPED property of `ci`, keyed by SOURCE property name. Such a property's getter is
+    /// `@JvmName`-mangled (`getId-<hash>`) and its physical return erases to the value class's underlying,
+    /// so ordinary getter resolution misses it. Each member carries the mangled getter name + physical
+    /// descriptor but the LOGICAL value-class return type from `@Metadata`, so `h.id` types as the value
+    /// class. An ordinary (non-value-class) property is skipped — it keeps its normal getter path.
+    fn value_class_property_members_for_class(
+        &self,
+        ci: &crate::jvm::classreader::ClassInfo,
+    ) -> Vec<(String, LibraryMember)> {
+        let internal = &ci.this_class;
+        metadata::class_property_return_classes(ci)
+            .into_iter()
+            .filter_map(|(property, logical)| {
+                // Only a value-class-typed property (mangled getter); an ordinary property keeps its
+                // normal getter path. Test value-class-ness via the `@JvmInline` `@Metadata` flag DIRECTLY
+                // (not `value_underlying`, which would call `resolve_type` and recurse mid-build).
+                let lci = self.cp.find(&logical)?;
+                metadata::class_inline(&lci)?;
+                let mut chars = property.chars();
+                let cap = chars.next()?.to_uppercase().collect::<String>();
+                let getter = format!("get{cap}{}", chars.as_str());
+                let dashed = format!("{getter}-");
+                let m = ci
+                    .methods
+                    .iter()
+                    .find(|mm| mm.name == getter || mm.name.starts_with(&dashed))?;
+                crate::trace_compiler!(
+                    "value_classes",
+                    "value-class property {internal}.{property} -> getter {} : {logical}",
+                    m.name
+                );
+                let mut member = LibraryMember::new(
+                    m.name.clone(),
+                    vec![],
+                    Ty::obj(&logical),
+                    m.descriptor.clone(),
+                );
+                member.owner = Some(internal.clone());
+                Some((property, member))
+            })
+            .collect()
+    }
 }
 
 /// Parse one JVM generic-signature type off the front of `s`, returning `(node, rest)`.
@@ -846,6 +889,12 @@ fn mapped_builtin_fallback(internal: &str) -> Option<LibraryType> {
         companion_object: None,
         value_companion_fns: Vec::new(),
         value_underlying: None,
+        type_params: Vec::new(),
+        sealed_subclasses: Vec::new(),
+        enum_entries: Vec::new(),
+        value_ctor_has_default: false,
+        ctor_named_params: Vec::new(),
+        value_class_properties: Vec::new(),
     })
 }
 
@@ -962,124 +1011,6 @@ fn class_implements(cp: &Classpath, internal: &str, target: &str) -> bool {
 }
 
 impl SymbolSource for JvmLibraries {
-    fn sealed_subclasses(&self, internal: &str) -> Vec<String> {
-        self.cp
-            .find(internal)
-            .map(|ci| metadata::class_sealed_subclasses(&ci))
-            .unwrap_or_default()
-    }
-
-    fn constructor_named_params(
-        &self,
-        internal: &str,
-        min_arity: usize,
-    ) -> Option<(Vec<String>, Vec<bool>)> {
-        self.cp
-            .metadata_constructor_named_params(internal, min_arity)
-    }
-
-    fn value_class_ctor_has_default(&self, internal: &str) -> bool {
-        // A defaulted primary constructor of a value class surfaces as the synthetic
-        // `constructor-impl$default` static method (kotlinc emits it iff some param has a default).
-        self.cp.find(internal).is_some_and(|ci| {
-            ci.methods
-                .iter()
-                .any(|m| m.name == "constructor-impl$default")
-        })
-    }
-
-    fn is_enum_entry(&self, internal: &str, name: &str) -> bool {
-        // An enum constant is a `static` field of the enum's OWN type (`descriptor == L<internal>;`),
-        // distinguishing it from `$VALUES` (an array `[L<internal>;`) and a companion INSTANCE.
-        const ACC_STATIC: u16 = 0x0008;
-        let want = format!("L{internal};");
-        self.cp.find(internal).is_some_and(|ci| {
-            ci.fields
-                .iter()
-                .any(|f| f.name == name && f.access & ACC_STATIC != 0 && f.descriptor == want)
-        })
-    }
-
-    fn value_class_property_member(
-        &self,
-        internal: &str,
-        property: &str,
-    ) -> Option<crate::libraries::LibraryMember> {
-        let ci = self.cp.find(internal)?;
-        // The property's LOGICAL (@Metadata) return type — a value class here (`id` → `lib/Vid`), whose
-        // physical getter erases the return to the underlying. Only handle a value-class-typed property
-        // (guarded by `value_underlying`), so an ordinary property keeps its normal getter path.
-        let logical = metadata::class_property_return_classes(&ci)
-            .get(property)?
-            .clone();
-        self.resolve_type(&logical)
-            .and_then(|t| t.value_underlying)?;
-        // Getter name = `get` + capitalized property, possibly `@JvmName`-mangled with a `-<hash>` suffix
-        // (kotlinc mangles any accessor whose signature mentions a value class).
-        let mut chars = property.chars();
-        let cap = chars.next()?.to_uppercase().collect::<String>();
-        let getter = format!("get{cap}{}", chars.as_str());
-        let dashed = format!("{getter}-");
-        let m = ci
-            .methods
-            .iter()
-            .find(|mm| mm.name == getter || mm.name.starts_with(&dashed))?;
-        crate::trace_compiler!(
-            "value_classes",
-            "value-class property {internal}.{property} -> getter {} : {logical}",
-            m.name
-        );
-        let mut member = crate::libraries::LibraryMember::new(
-            m.name.clone(),
-            vec![],
-            Ty::obj(&logical),
-            m.descriptor.clone(),
-        );
-        member.owner = Some(internal.to_string());
-        Some(member)
-    }
-
-    fn infer_constructor_type_args(&self, internal: &str, arg_tys: &[Ty]) -> Option<Vec<Ty>> {
-        let ci = self.cp.find(internal)?;
-        // The class's formal type parameters, in declaration order (`Pair` → `[A, B]`).
-        let (formals, _) = ci.signature.as_deref().and_then(parse_class_gsig)?;
-        if formals.is_empty() {
-            return None;
-        }
-        // The primary constructor of matching arity, and its generic parameter signatures (which name the
-        // class formals, e.g. `(TA;TB;)V`). Unify each with the actual argument type to bind the formals.
-        let mut binds = std::collections::HashMap::new();
-        for m in &ci.methods {
-            if m.name != "<init>" {
-                continue;
-            }
-            let Some(gsig) = m.signature.as_deref().and_then(parse_method_gsig) else {
-                continue;
-            };
-            if gsig.params.len() != arg_tys.len() {
-                continue;
-            }
-            for (p, a) in gsig.params.iter().zip(arg_tys) {
-                crate::call_resolver::unify_gsig(p, *a, &mut binds);
-            }
-            break;
-        }
-        if binds.is_empty() {
-            return None;
-        }
-        Some(
-            formals
-                .iter()
-                .map(|f| {
-                    binds
-                        .get(f)
-                        .copied()
-                        .unwrap_or_else(|| Ty::obj("kotlin/Any"))
-                })
-                .collect(),
-        )
-    }
-
     fn seed(&self) -> LibrarySeed {
         let (class_names, type_aliases, canonical_names) = self.seed_shared();
         LibrarySeed {
@@ -1226,6 +1157,9 @@ impl SymbolSource for JvmLibraries {
                 member.ret_nullable = true;
             }
             if m.name == "<init>" {
+                // Parse the ctor's generic signature so the resolver can infer a construction's type
+                // arguments (`Pair(1, 2)` → `<Int, Int>`) without spelling backend signature strings.
+                member.generic_sig = m.signature.as_deref().and_then(parse_method_gsig);
                 constructors.push(member);
             } else if m.is_static() {
                 // A Kotlin companion member compiles to a JVM static on the class.
@@ -1364,6 +1298,27 @@ impl SymbolSource for JvmLibraries {
             }
         });
         let value_class_metadata_members = self.value_class_metadata_members_for_class(&ci);
+        // The class's own formal type parameters (`Pair` → `[A, B]`), for constructor type-argument
+        // inference; empty for a non-generic type.
+        let type_params = ci
+            .signature
+            .as_deref()
+            .and_then(parse_class_gsig)
+            .map(|(formals, _)| formals)
+            .unwrap_or_default();
+        // An enum entry is a `static` field of the enum's OWN type (`descriptor == L<internal>;`).
+        const ACC_STATIC: u16 = 0x0008;
+        let enum_entries: Vec<String> = ci
+            .fields
+            .iter()
+            .filter(|f| f.access & ACC_STATIC != 0 && f.descriptor == self_desc)
+            .map(|f| f.name.clone())
+            .collect();
+        // A defaulted value-class primary constructor surfaces as the `constructor-impl$default` synthetic.
+        let value_ctor_has_default = ci
+            .methods
+            .iter()
+            .any(|m| m.name == "constructor-impl$default");
         Some(LibraryType {
             is_public: ci.is_public(),
             kind,
@@ -1380,6 +1335,12 @@ impl SymbolSource for JvmLibraries {
             companion_object,
             value_companion_fns: self.value_companion_fns_for_class(&ci.this_class),
             value_underlying,
+            type_params,
+            sealed_subclasses: metadata::class_sealed_subclasses(&ci),
+            enum_entries,
+            value_ctor_has_default,
+            ctor_named_params: metadata::class_constructor_params(&ci),
+            value_class_properties: self.value_class_property_members_for_class(&ci),
         })
     }
     fn functions(&self, name: &str, receiver: Option<Ty>) -> FunctionSet {

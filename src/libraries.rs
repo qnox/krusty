@@ -64,6 +64,10 @@ pub struct LibraryMember {
     pub physical_ret: Ty,
     pub descriptor: String,
     pub signature: Option<String>,
+    /// The member's PARSED generic signature, if the provider has one — carries type-variable binding
+    /// facts (a constructor's `(TA;TB;)V`) without making consumers parse backend signature strings.
+    /// Used to infer a construction's type arguments against the enclosing type's [`LibraryType::type_params`].
+    pub generic_sig: Option<GenericSig>,
     pub is_interface: bool,
     pub inline: InlineKind,
     /// The member is a `suspend fun` — a call site inside a suspend body must thread a `Continuation`
@@ -340,6 +344,7 @@ impl LibraryMember {
             physical_ret: ret,
             descriptor,
             signature: None,
+            generic_sig: None,
             is_interface: false,
             inline: InlineKind::None,
             suspend: false,
@@ -795,6 +800,31 @@ pub struct LibraryType {
     /// (`UInt` → `Int`, `Result` → `Any`); `None` for an ordinary class. The JVM backend erases the value
     /// class to this everywhere (like a user value class), reproducing kotlinc's unboxed representation.
     pub value_underlying: Option<Ty>,
+    /// The type's own formal type parameters, in declaration order (`Pair` → `["A", "B"]`); empty for a
+    /// non-generic type. With the constructors' [`LibraryMember::generic_sig`], lets a caller infer a
+    /// construction's type arguments by unifying the ctor's generic parameter signatures against the
+    /// actual argument types.
+    pub type_params: Vec<String>,
+    /// The direct subclasses (JVM internal names) of a `sealed` type, from its `@Metadata`; empty for a
+    /// non-sealed type. Lets an exhaustive `when` over a classpath sealed subject be proven exhaustive.
+    pub sealed_subclasses: Vec<String>,
+    /// The enum entry names this type declares (`Kind` → `["PENDING", "DONE"]`); empty for a non-enum.
+    /// Lets `EnumName.ENTRY` resolve for a classpath enum as it does for a source enum.
+    pub enum_entries: Vec<String>,
+    /// Whether a `@JvmInline value class`'s primary constructor is defaulted — kotlinc emits a
+    /// `constructor-impl$default` synthetic exactly then, which realizes an all-defaulted `Id()`.
+    pub value_ctor_has_default: bool,
+    /// Each constructor's SOURCE parameter names PLUS a per-parameter "declares a default value" flag,
+    /// from `@Metadata`. A NAMED call may OMIT a defaulted parameter (`Cfg(a = 1, c = "x")`); the caller
+    /// picks the constructor whose parameter list is long enough and lowers omitted slots to
+    /// kotlinc's `<init>$default` synthetic. Empty when no constructor metadata is recorded.
+    pub ctor_named_params: Vec<(Vec<String>, Vec<bool>)>,
+    /// Properties whose JVM getter is value-class-`@JvmName`-mangled (`Holder(val id: Vid)` →
+    /// `getId-<hash>`) and whose physical return erases to the value class's underlying, so ordinary
+    /// getter resolution misses them. Keyed by SOURCE property name; the member carries the MANGLED getter
+    /// name + physical descriptor but the LOGICAL value-class return type from `@Metadata`, so `h.id` types
+    /// as the value class.
+    pub value_class_properties: Vec<(String, LibraryMember)>,
 }
 
 /// What a library type *is*. Mutually exclusive at the source level; at the JVM level an `Annotation`
@@ -818,6 +848,32 @@ impl LibraryType {
     }
     pub fn is_object(&self) -> bool {
         self.kind == TypeKind::Object
+    }
+
+    /// Whether an enum entry named `name` is declared on this type — lets `EnumName.ENTRY` resolve.
+    pub fn is_enum_entry(&self, name: &str) -> bool {
+        self.enum_entries.iter().any(|e| e == name)
+    }
+
+    /// The SOURCE parameter names + per-parameter default flags of a constructor with at least
+    /// `min_arity` parameters, so a NAMED call may OMIT a defaulted one (`Cfg(a = 1, c = "x")`). Picks the
+    /// first recorded constructor whose (name, default) lists are non-empty, aligned, and long enough.
+    pub fn constructor_named_params(&self, min_arity: usize) -> Option<(Vec<String>, Vec<bool>)> {
+        self.ctor_named_params
+            .iter()
+            .find(|(n, d)| {
+                n.len() >= min_arity && n.len() == d.len() && !n.iter().any(String::is_empty)
+            })
+            .cloned()
+    }
+
+    /// The value-class-typed property `property`'s member (mangled getter + logical value-class return),
+    /// or `None` for an ordinary property.
+    pub fn value_class_property(&self, property: &str) -> Option<&LibraryMember> {
+        self.value_class_properties
+            .iter()
+            .find(|(p, _)| p == property)
+            .map(|(_, m)| m)
     }
 }
 
@@ -1019,5 +1075,73 @@ mod tests {
     #[test]
     fn inline_kind_default_is_none() {
         assert_eq!(InlineKind::default(), InlineKind::None);
+    }
+
+    fn ty_with<F: FnOnce(&mut super::LibraryType)>(f: F) -> super::LibraryType {
+        let mut t = super::LibraryType {
+            is_public: true,
+            kind: super::TypeKind::Class,
+            supertypes: vec![],
+            constructors: vec![],
+            members: vec![],
+            companion: vec![],
+            companion_consts: std::collections::HashMap::new(),
+            sam_method: None,
+            companion_object: None,
+            value_companion_fns: vec![],
+            value_underlying: None,
+            type_params: vec![],
+            sealed_subclasses: vec![],
+            enum_entries: vec![],
+            value_ctor_has_default: false,
+            ctor_named_params: vec![],
+            value_class_properties: vec![],
+        };
+        f(&mut t);
+        t
+    }
+
+    #[test]
+    fn library_type_is_enum_entry_reads_the_entries() {
+        let t = ty_with(|t| t.enum_entries = vec!["PENDING".into(), "DONE".into()]);
+        assert!(t.is_enum_entry("PENDING"));
+        assert!(t.is_enum_entry("DONE"));
+        assert!(!t.is_enum_entry("MISSING"));
+        assert!(!ty_with(|_| {}).is_enum_entry("PENDING"));
+    }
+
+    #[test]
+    fn library_type_constructor_named_params_picks_long_enough_and_valid() {
+        let t = ty_with(|t| {
+            t.ctor_named_params = vec![(vec!["host".into(), "port".into()], vec![false, true])];
+        });
+        // A call omitting the defaulted trailing `port` (arity 1) still matches the 2-param ctor.
+        assert_eq!(
+            t.constructor_named_params(1),
+            Some((vec!["host".into(), "port".into()], vec![false, true]))
+        );
+        // A call with more args than any recorded ctor has no match.
+        assert!(t.constructor_named_params(3).is_none());
+        // An entry with an empty (unnamed) parameter is rejected — named-arg mapping needs every name.
+        let bad = ty_with(|t| {
+            t.ctor_named_params = vec![(vec!["".into()], vec![false])];
+        });
+        assert!(bad.constructor_named_params(0).is_none());
+    }
+
+    #[test]
+    fn library_type_value_class_property_lookup_by_source_name() {
+        let member = super::LibraryMember::new(
+            "getId-abc123".into(),
+            vec![],
+            crate::types::Ty::obj("lib/Vid"),
+            "()Ljava/lang/String;".into(),
+        );
+        let t = ty_with(|t| t.value_class_properties = vec![("id".into(), member)]);
+        assert_eq!(
+            t.value_class_property("id").map(|m| m.name.as_str()),
+            Some("getId-abc123")
+        );
+        assert!(t.value_class_property("missing").is_none());
     }
 }

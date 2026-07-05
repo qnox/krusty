@@ -4930,7 +4930,12 @@ impl<'a> Checker<'a> {
         let subs = match self.syms.class_by_internal(internal) {
             Some(cs) if cs.is_sealed => self.syms.subclasses_of(internal),
             Some(_) => return false,
-            None => self.syms.libraries.sealed_subclasses(internal),
+            None => self
+                .syms
+                .libraries
+                .resolve_type(internal)
+                .map(|t| t.sealed_subclasses)
+                .unwrap_or_default(),
         };
         if subs.is_empty() {
             return false;
@@ -6951,7 +6956,12 @@ impl<'a> Checker<'a> {
                             .imported_type_internal(&en)
                             .or_else(|| self.syms.class_names.get(&en).cloned())
                         {
-                            if self.syms.libraries.is_enum_entry(&internal, &name) {
+                            if self
+                                .syms
+                                .libraries
+                                .resolve_type(&internal)
+                                .is_some_and(|t| t.is_enum_entry(&name))
+                            {
                                 crate::trace_compiler!(
                                     "resolve",
                                     "classpath enum entry {en}.{name} -> {internal}"
@@ -8383,7 +8393,8 @@ impl<'a> Checker<'a> {
             if let Some(inferred) = self
                 .syms
                 .libraries
-                .infer_constructor_type_args(internal, &arg_tys)
+                .resolve_type(internal)
+                .and_then(|t| crate::call_resolver::infer_constructor_type_args(&t, &arg_tys))
             {
                 if inferred.iter().any(|t| *t != Ty::obj("kotlin/Any")) {
                     return Ty::obj_args(internal, &inferred);
@@ -8585,9 +8596,8 @@ impl<'a> Checker<'a> {
                         // omitted-default named call is still recognized.
                         || self
                             .classpath_class_internal(n)
-                            .and_then(|i| {
-                                self.syms.libraries.constructor_named_params(&i, args.len())
-                            })
+                            .and_then(|i| self.syms.libraries.resolve_type(&i))
+                            .and_then(|t| t.constructor_named_params(args.len()))
                             .is_some()
                 }
                 Expr::Member { receiver, name }
@@ -8599,7 +8609,8 @@ impl<'a> Checker<'a> {
                     // names a TYPE, so DON'T type it as a value (that would emit "unresolved reference");
                     // named args map via the nested class's `@Metadata` constructor parameter names.
                     self.qualified_nested_ctor_internal(*receiver, name)
-                        .and_then(|i| self.syms.libraries.constructor_named_params(&i, args.len()))
+                        .and_then(|i| self.syms.libraries.resolve_type(&i))
+                        .and_then(|t| t.constructor_named_params(args.len()))
                         .is_some()
                 }
                 Expr::Member { receiver, name } => {
@@ -8876,7 +8887,8 @@ impl<'a> Checker<'a> {
                             if let Some((param_names, param_defaults)) = self
                                 .syms
                                 .libraries
-                                .constructor_named_params(&internal, args.len())
+                                .resolve_type(&internal)
+                                .and_then(|t| t.constructor_named_params(args.len()))
                             {
                                 let required = required_arity(param_names.len(), &param_defaults);
                                 match map_call_args(
@@ -10554,7 +10566,8 @@ impl<'a> Checker<'a> {
                             if let Some((param_names, param_defaults)) = self
                                 .syms
                                 .libraries
-                                .constructor_named_params(&internal, args.len())
+                                .resolve_type(&internal)
+                                .and_then(|t| t.constructor_named_params(args.len()))
                             {
                                 let required = required_arity(param_names.len(), &param_defaults);
                                 match map_call_args(
