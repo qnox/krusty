@@ -735,7 +735,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 // sibling default method) must be `invokespecial`, not `invokevirtual`/`invokeinterface` —
                 // else it dispatches to a same-named override (`interface A { private fun foo(); fun bar() =
                 // foo() }` called on a `B : A` with its own private `foo` would wrongly run `B.foo`).
-                if m.is_private {
+                if m.visibility.is_private() {
                     lo.ir.private_methods.insert(fid);
                 }
                 // Mark a method with default parameters now (pass 1) so a call lowered before this
@@ -19793,7 +19793,7 @@ fn ir_array_element(t: &Ty) -> Option<Ty> {
 /// are skipped. Conservative: when the parameter lists don't line up (e.g. an extension receiver
 /// shifts them) no guards are emitted.
 fn param_checks_for(f: &ast::FunDecl, param_tys: &[Ty]) -> Vec<Option<String>> {
-    if f.is_private || f.receiver.is_some() || f.params.len() != param_tys.len() {
+    if f.visibility.is_private() || f.receiver.is_some() || f.params.len() != param_tys.len() {
         return vec![None; param_tys.len()];
     }
     f.params

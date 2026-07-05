@@ -2,6 +2,7 @@
 //! parallel `Vec`s, so a file's whole AST is one bulk-freeable allocation block).
 
 use crate::diag::Span;
+use crate::types::Visibility;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub struct ExprId(pub u32);
@@ -455,9 +456,10 @@ pub struct FunDecl {
     pub is_final: bool,
     /// `abstract` modifier — a member with no body, only valid in an abstract class or interface.
     pub is_abstract: bool,
-    /// `private` visibility. Public/internal/protected functions get `Intrinsics.checkNotNullParameter`
-    /// guards on their non-null reference parameters (kotlinc does); private ones do not.
-    pub is_private: bool,
+    /// Declaration visibility (`public`/`internal`/`protected`/`private`; `public` by default).
+    /// Public/internal/protected functions get `Intrinsics.checkNotNullParameter` guards on their
+    /// non-null reference parameters (kotlinc does); private ones do not (read via `visibility.is_private()`).
+    pub visibility: Visibility,
     /// `suspend` modifier — a coroutine. Lowered continuation-passing-style: an extra
     /// `kotlin.coroutines.Continuation` parameter is appended and the return type erases to
     /// `java.lang.Object` (a leaf function with no suspension point needs no state machine).
@@ -513,6 +515,8 @@ pub struct AstEnumEntry {
 #[derive(Clone, Debug)]
 pub struct ClassDecl {
     pub name: String,
+    /// Declaration visibility (`public` by default).
+    pub visibility: Visibility,
     /// Simple names of annotations applied to the class (`@Serializable` → `["Serializable"]`).
     /// Used by the compiler-extension surface (`crate::plugins`) to find annotated declarations.
     pub annotations: Vec<String>,
@@ -701,6 +705,9 @@ pub enum ClassInit {
 #[derive(Clone, Debug)]
 pub struct PropDecl {
     pub name: String,
+    /// Declaration visibility (`public` by default). A `private set` narrows only the SETTER — that
+    /// lives on [`PropAccessor::is_private`]; this is the property's (getter's) visibility.
+    pub visibility: Visibility,
     /// Extension-property receiver type (`val String.foo: T` → `Some("String")`). The getter/setter
     /// are emitted as static `getFoo(Recv)`/`setFoo(Recv, T)` methods, like an extension function.
     pub receiver: Option<TypeRef>,
