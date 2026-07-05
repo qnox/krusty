@@ -36,6 +36,22 @@ pub fn property_getter_name(prop: &str) -> String {
     }
 }
 
+/// The `java.util` method name a mapped `kotlin.collections` interface declares for a Kotlin *property*
+/// member (`Map.keys` → `keySet()`, `Collection.size` → `size()`), from `JavaToKotlinClassMap`'s
+/// SpecialBuiltinMembers. `None` for a property with no special stub (its interface method is the plain
+/// `get<Name>` getter). A class implementing such an interface must emit this method as a bridge that
+/// forwards to the Kotlin getter, or the `java.util` abstract stays unimplemented. The READ direction of
+/// this same mapping lives in `Classpath::member` (the classpath member-name resolution).
+pub fn collection_property_stub_name(prop: &str) -> Option<&'static str> {
+    match prop {
+        "size" => Some("size"),
+        "values" => Some("values"),
+        "keys" => Some("keySet"),
+        "entries" => Some("entrySet"),
+        _ => None,
+    }
+}
+
 /// The JVM setter name for a Kotlin property: `x` -> `setX`; `isOpen` -> `setOpen`.
 pub fn property_setter_name(prop: &str) -> String {
     let b = prop.as_bytes();

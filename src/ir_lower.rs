@@ -1838,6 +1838,48 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                         }
                     }
                 }
+                // Collection special-member stubs: a class implementing a mapped `kotlin.collections`
+                // interface must provide the `java.util` method the interface declares for a Kotlin PROPERTY
+                // (`Map.size` → `size()`, `keys` → `keySet()`). kotlinc emits it as a synthetic bridge
+                // forwarding to the Kotlin getter (`getSize`/`getKeys`); without it the `java.util` abstract
+                // stays unimplemented and a call through the interface throws `AbstractMethodError`. The
+                // interface members are on the classpath (empty `props`), so scan the class's OWN overrides.
+                if !c.is_interface()
+                    && lo.syms.supertype_internals(&internal).iter().any(|s| {
+                        crate::jvm::jvm_class_map::to_jvm_internal(s).starts_with("java/util/")
+                    })
+                {
+                    let cid = lo.classes[&internal].id;
+                    for p in &c.body_props {
+                        let Some(stub) = crate::jvm::names::collection_property_stub_name(&p.name)
+                        else {
+                            continue;
+                        };
+                        let Some((own_ty, _)) = lo.syms.prop_of(&internal, &p.name) else {
+                            continue;
+                        };
+                        let already = lo.ir.classes[cid as usize]
+                            .bridges
+                            .iter()
+                            .any(|b| b.name == stub && b.erased_params.is_empty());
+                        if already {
+                            continue;
+                        }
+                        // The `java.util` stub and the Kotlin getter share the (erased) return, so the
+                        // bridge is a plain forward: `stub()` → `get<Name>()`.
+                        let ret = ty_to_ir(own_ty);
+                        lo.ir.classes[cid as usize].bridges.push(crate::ir::Bridge {
+                            name: stub.to_string(),
+                            erased_params: vec![],
+                            erased_ret: ret,
+                            concrete_params: vec![],
+                            concrete_ret: ret,
+                            target_name: Some(property_getter_name(&p.name)),
+                            box_ret: None,
+                            unbox_params: Vec::new(),
+                        });
+                    }
+                }
                 // Interface bridges: for each implemented-interface method, if the class's actual
                 // implementation (declared or inherited) has a different erased signature than the
                 // interface's, add a bridge with the interface's descriptor delegating to the impl.
