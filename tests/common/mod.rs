@@ -542,10 +542,20 @@ impl Drop for BoxRunner {
 impl BoxRunner {
     fn new(java: &str, cp: &str) -> Option<Self> {
         let mut cmd = Command::new(java);
-        cmd.args(["-cp", cp, "BoxRunner"])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null());
+        // Cap the runner heap and favour fast startup / low footprint over peak throughput: a box() test
+        // is tiny, so a 512 MB heap + serial GC + C1-only JIT keeps each persistent runner small (they
+        // used to grow to ~1 GB, and several run at once), easing memory pressure on the gate.
+        cmd.args([
+            "-Xmx512m",
+            "-XX:+UseSerialGC",
+            "-XX:TieredStopAtLevel=1",
+            "-cp",
+            cp,
+            "BoxRunner",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
         die_with_parent(&mut cmd);
         let mut child = cmd.spawn().ok()?;
         let stdin = child.stdin.take()?;
@@ -1080,6 +1090,9 @@ impl KotlincServer {
         cmd.args([
             "-XX:TieredStopAtLevel=1",
             "-XX:+UseSerialGC",
+            // Reference kotlinc needs more headroom than the box/java runners, but still cap it — the
+            // differential harness compiles small snippets, so 1 GB is ample and bounds the daemon.
+            "-Xmx1g",
             "-cp",
             cp,
             "KotlincServer",
@@ -1263,6 +1276,9 @@ impl JavaRunner {
         let mut cmd = Command::new(java);
         cmd.args([
             "-Xverify:all",
+            "-Xmx512m",
+            "-XX:+UseSerialGC",
+            "-XX:TieredStopAtLevel=1",
             "-cp",
             &runner_dir.to_string_lossy(),
             "JavaRunner",
