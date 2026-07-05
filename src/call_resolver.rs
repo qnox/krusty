@@ -122,10 +122,6 @@ pub(crate) fn arg_fits(p: &Ty, a: &Ty) -> bool {
     matches!((p, a), (Ty::Obj(pi, _), Ty::Obj(ai, _)) if pi == ai)
 }
 
-fn is_function_param(t: &Ty) -> bool {
-    matches!(t, Ty::Fun(_))
-}
-
 /// Map each provided argument to a parameter index for a top-level call carrying a lambda. Identity when
 /// the counts match; else, for a call that omits leading defaulted parameters before a TRAILING lambda
 /// (`runBlocking { … }`), leading args → leading params and the trailing lambda → the LAST parameter.
@@ -150,10 +146,6 @@ fn is_default_ctor_marker(ty: Ty) -> bool {
         ty,
         Ty::Obj("kotlin/jvm/internal/DefaultConstructorMarker", _)
     )
-}
-
-fn is_continuation(ty: Ty) -> bool {
-    matches!(ty, Ty::Obj("kotlin/coroutines/Continuation", _))
 }
 
 fn has_default_tail(params: &[Ty], mask_idx: usize, marker: impl FnOnce(Ty) -> bool) -> bool {
@@ -563,7 +555,7 @@ impl<'a> CallResolver<'a> {
                 let fits = if trailing_lambda {
                     let prefix_len = args.len() - 1;
                     prefix_len < real_count
-                        && is_function_param(&params[real_count])
+                        && matches!(params[real_count], Ty::Fun(_))
                         && params[1..1 + prefix_len]
                             .iter()
                             .zip(&args[..prefix_len])
@@ -1408,7 +1400,7 @@ pub fn synthetic_default_member(
             && m.params
                 .get(arity + 1)
                 .copied()
-                .is_some_and(is_continuation)
+                .is_some_and(|p| matches!(p, Ty::Obj("kotlin/coroutines/Continuation", _)))
             && has_default_tail(&m.params, arity + 2, Ty::is_reference)
     })?;
     Some((
