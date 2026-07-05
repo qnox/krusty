@@ -3014,11 +3014,7 @@ impl<'a> Emitter<'a> {
             );
             return false; // frames carry no stack prefix → need an empty baseline
         }
-        let ret_words = if descriptor.ends_with(")V") {
-            0
-        } else {
-            slot_words(ty_from_descriptor_ret(descriptor)) as i32
-        };
+        let ret_words = descriptor_ret_words(descriptor);
         // Emit each NON-lambda argument (the operands the host prologue stores into its parameter slots).
         let mut arg_words = 0i32;
         for (i, &a) in args.iter().enumerate() {
@@ -3470,14 +3466,7 @@ impl<'a> Emitter<'a> {
             // current inline-splice gap — can't materialize an unknown `Function` value here.
             return false;
         }
-        // A genuinely `void` (`)V`) method leaves NOTHING on the stack; `ty_from_descriptor_ret` maps
-        // `V` to `Unit` (a 1-word value), so guard it to 0 words — else the splice leaves the operand
-        // stack one slot too high (a later statement then splices on a non-empty baseline and bails).
-        let ret_words = if descriptor.ends_with(")V") {
-            0
-        } else {
-            slot_words(ty_from_descriptor_ret(descriptor)) as i32
-        };
+        let ret_words = descriptor_ret_words(descriptor);
         let top_local = base + body.max_locals;
         // ONE splicer for every no-lambda body (`splice_unified` subsumes the old branchless + branchy
         // paths). Probe at offset 0 to learn `join_required` (a branchless body has no switch, so its
@@ -6512,6 +6501,16 @@ fn boxed_descriptor(t: Ty) -> String {
 fn ty_from_descriptor_ret(desc: &str) -> Ty {
     let ret = desc.rsplit(')').next().unwrap_or("V");
     ty_from_field_descriptor(ret)
+}
+
+fn descriptor_ret_words(desc: &str) -> i32 {
+    // A genuinely `void` (`)V`) method leaves nothing on the stack; `ty_from_descriptor_ret` maps `V` to
+    // `Unit` (a 1-word value) for type flow elsewhere.
+    if desc.ends_with(")V") {
+        0
+    } else {
+        slot_words(ty_from_descriptor_ret(desc)) as i32
+    }
 }
 
 /// Parse a single JVM field/type descriptor into a `Ty`.
