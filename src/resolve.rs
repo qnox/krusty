@@ -7914,6 +7914,7 @@ impl<'a> Checker<'a> {
     /// Returns `Some(ret)` when it resolves, `None` to let the caller keep searching. Checks arguments.
     fn this_member_call_ret(
         &mut self,
+        call: ExprId,
         rt: Ty,
         name: &str,
         arg_tys: &[Ty],
@@ -7923,14 +7924,14 @@ impl<'a> Checker<'a> {
             return Some(Ty::String);
         }
         if rt == Ty::String {
-            if let Some(ret) = crate::call_resolver::resolve_instance_member(
+            if let Some(m) = crate::call_resolver::resolve_instance_member(
                 &*self.syms.libraries,
                 rt,
                 name,
                 arg_tys,
-            )
-            .map(|m| m.ret)
-            {
+            ) {
+                let ret = m.ret;
+                self.resolved_members.insert(call, m);
                 return Some(ret);
             }
         }
@@ -7975,7 +7976,9 @@ impl<'a> Checker<'a> {
                 name,
                 arg_tys,
             ) {
-                return Some(m.ret);
+                let ret = m.ret;
+                self.resolved_members.insert(call, m);
+                return Some(ret);
             }
         }
         // A MODULE extension on the receiver (`fun Recv.name(args)` declared in this compilation) — keyed
@@ -10778,7 +10781,9 @@ impl<'a> Checker<'a> {
                     // Unqualified call to a member of the implicit receiver of a builtin/library type — a
                     // receiver-lambda body (`"ab".run { uppercase() }`, `sb.apply { append(x) }`).
                     if let Some(rt) = self.this_ty {
-                        if let Some(ret) = self.this_member_call_ret(rt, &fname, &arg_tys, args) {
+                        if let Some(ret) =
+                            self.this_member_call_ret(call, rt, &fname, &arg_tys, args)
+                        {
                             return ret;
                         }
                     }

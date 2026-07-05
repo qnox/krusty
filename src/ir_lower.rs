@@ -10354,12 +10354,23 @@ impl<'a> Lower<'a> {
                 }
             }
         }
-        if let Some(member) = crate::call_resolver::resolve_instance_member(
-            &*self.syms.libraries,
-            this_ty,
-            name,
-            &arg_tys,
-        ) {
+        if let Some(member) = self
+            .info
+            .resolved_members
+            .get(&e)
+            .cloned()
+            // Reuse the member the checker resolved for this call (keyed by the call `ExprId`); fall
+            // back to resolving when it was recorded through a different path (see
+            // [`TypeInfo::resolved_members`]).
+            .or_else(|| {
+                crate::call_resolver::resolve_instance_member(
+                    &*self.syms.libraries,
+                    this_ty,
+                    name,
+                    &arg_tys,
+                )
+            })
+        {
             let member = member.member;
             let mut a = Vec::new();
             for (i, &arg) in args.iter().enumerate() {
