@@ -3438,6 +3438,10 @@ pub struct TypeInfo {
     /// reuses the callable instead of re-running `resolve_top_level_callable`. Absent for a call the
     /// checker resolved through a different path (a local/module/FQ call); the lowerer falls back.
     pub resolved_top_level: HashMap<ExprId, crate::libraries::LibraryCallable>,
+    /// `@JvmStatic`/companion `object` member calls (`Base58Uuid.of(x)`) the checker resolved, keyed
+    /// by the `Expr::Call` `ExprId`. Kept separate from [`Self::resolved_members`] because these emit
+    /// as a STATIC call, not a virtual instance call — a member-call lowering must never read one.
+    pub resolved_companions: HashMap<ExprId, crate::libraries::LibraryMember>,
 }
 
 /// How to inline a receiver-lambda scope-function call (see [`InlineCall::ReceiverLambda`]).
@@ -3612,6 +3616,7 @@ fn make_checker<'a>(file: &'a File, syms: &'a SymbolTable, diags: &'a mut DiagSi
         resolved_call_type_args: HashMap::new(),
         resolved_members: HashMap::new(),
         resolved_top_level: HashMap::new(),
+        resolved_companions: HashMap::new(),
         fn_reassigned: std::collections::HashSet::new(),
         expr_depth: 0,
         allow_lambda_mutation: false,
@@ -4316,6 +4321,7 @@ pub fn check_file(file: &File, syms: &mut SymbolTable, diags: &mut DiagSink) -> 
         resolved_call_type_args,
         resolved_members,
         resolved_top_level,
+        resolved_companions,
         ..
     } = c;
     for ((name, params), ret) in inferred_fun_rets {
@@ -4349,6 +4355,7 @@ pub fn check_file(file: &File, syms: &mut SymbolTable, diags: &mut DiagSink) -> 
         resolved_call_type_args,
         resolved_members,
         resolved_top_level,
+        resolved_companions,
     }
 }
 
@@ -4399,6 +4406,9 @@ struct Checker<'a> {
     /// Receiver-less top-level library calls resolved during checking, keyed by the `Expr::Call`
     /// `ExprId` (moved into [`TypeInfo::resolved_top_level`] for the lowerer to reuse).
     resolved_top_level: HashMap<ExprId, crate::libraries::LibraryCallable>,
+    /// Companion/`@JvmStatic` object member calls resolved during checking, keyed by the `Expr::Call`
+    /// `ExprId` (moved into [`TypeInfo::resolved_companions`] for the lowerer to reuse).
+    resolved_companions: HashMap<ExprId, crate::libraries::LibraryMember>,
     /// Names reassigned anywhere in the function body currently being checked (including inside its
     /// closures). A captured `var` is boxed only if it's in here — kotlinc treats a captured-but-never-
     /// reassigned `var` as effectively final (passed by value).
@@ -10113,7 +10123,11 @@ impl<'a> Checker<'a> {
                         for (i, (p, a)) in m.params.iter().zip(&arg_tys).enumerate() {
                             self.expect_assignable(*p, *a, self.span(args[i]), "argument");
                         }
-                        return m.ret;
+                        // Record the resolved static member so the lowerer emits it without
+                        // re-resolving (see [`TypeInfo::resolved_companions`]).
+                        let ret = m.ret;
+                        self.resolved_companions.insert(call, m);
+                        return ret;
                     }
                 }
                 self.diags.error(
