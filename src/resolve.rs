@@ -271,9 +271,6 @@ pub struct SymbolTable {
     /// classes, classpath `TypeAliasesKt` aliases, and the ported `JavaToKotlinClassMap`
     /// built-ins. The single source of truth for "does this type name resolve, and to what".
     pub class_names: ClassNames,
-    /// Internal-name canonical aliases for subtype identity checks. This is seeded by the library
-    /// source, so the checker does not call back into a backend map while comparing types.
-    pub canonical_names: std::rc::Rc<HashMap<String, String>>,
     /// Top-level function name → the facade class it lives on (`helper` → `pkg/AKt`), for the WHOLE
     /// multi-file compilation. Populated only by the multi-file driver (which knows each file's
     /// stem/facade); empty for single-file/in-process callers. Lets `lower_file` emit a call to a
@@ -300,7 +297,6 @@ impl Default for SymbolTable {
             ext_funs: HashMap::new(),
             ext_props: HashMap::new(),
             class_names: ClassNames::default(),
-            canonical_names: std::rc::Rc::new(HashMap::new()),
             fn_facades: HashMap::new(),
             prop_facades: HashMap::new(),
         }
@@ -862,7 +858,7 @@ pub fn collect_signatures_with_cp(
     // The library set's type universe: importable names + type aliases (and intrinsic built-in maps).
     // The (large) class-name base is shared by `Rc` — NOT cloned per compilation; only the small
     // per-file overlay (user classes + aliases) is owned here.
-    let (base_class_names, base_aliases, canonical_names) = libraries.seed_shared();
+    let (base_class_names, base_aliases) = libraries.seed_shared();
 
     // Pass 1: every class simple-name -> internal name (no bodies, just the type universe).
     // Pre-seed from the library type index so imports/stdlib types are visible.
@@ -2000,7 +1996,6 @@ pub fn collect_signatures_with_cp(
 
     table.libraries = libraries;
     table.class_names = class_names;
-    table.canonical_names = canonical_names;
     table
 }
 
@@ -5603,22 +5598,16 @@ impl<'a> Checker<'a> {
         if sub == sup {
             return true;
         }
-        // The Kotlin collection interfaces all map to one platform interface; compare on the canonical
-        // names so `MutableList`/`List` (and a `kotlin/collections/List` vs a platform `java/util/List`)
-        // are mutually assignable — the read-only/mutable distinction is enforced only at the `+=`
-        // operator, not in general assignability. Also lets a `kotlin/collections/MutableList` reach
-        // `java/util/Collection` via the hierarchy walk below. The aliases are seeded with the type
-        // universe, so the checker does not call into the backend's name map here.
-        let sub = self
-            .syms
-            .canonical_names
-            .get(sub)
-            .map_or(sub, String::as_str);
-        let sup = self
-            .syms
-            .canonical_names
-            .get(sup)
-            .map_or(sup, String::as_str);
+        // The Kotlin collection interfaces all map to one platform interface; compare on the erased
+        // (descriptor-form) names so `MutableList`/`List` (and a `kotlin/collections/List` vs a platform
+        // `java/util/List`) are mutually assignable — the read-only/mutable distinction is enforced only
+        // at the `+=` operator, not in general assignability. Also lets a `kotlin/collections/MutableList`
+        // reach `java/util/Collection` via the hierarchy walk below. `jvm_descriptor_form` is the platform
+        // erasure the emitter uses, so resolution and codegen stay consistent.
+        let sub_norm = self.syms.libraries.jvm_descriptor_form(Ty::obj(sub));
+        let sup_norm = self.syms.libraries.jvm_descriptor_form(Ty::obj(sup));
+        let sub = sub_norm.obj_internal().unwrap_or(sub);
+        let sup = sup_norm.obj_internal().unwrap_or(sup);
         if sub == sup {
             return true;
         }

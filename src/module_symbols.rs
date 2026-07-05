@@ -160,7 +160,6 @@ impl SymbolSource for ModuleSymbols<'_> {
         LibrarySeed {
             class_names,
             type_aliases: std::collections::HashMap::new(),
-            canonical_names: HashMap::new(),
         }
     }
 

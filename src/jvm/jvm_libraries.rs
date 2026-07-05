@@ -1012,11 +1012,10 @@ fn class_implements(cp: &Classpath, internal: &str, target: &str) -> bool {
 
 impl SymbolSource for JvmLibraries {
     fn seed(&self) -> LibrarySeed {
-        let (class_names, type_aliases, canonical_names) = self.seed_shared();
+        let (class_names, type_aliases) = self.seed_shared();
         LibrarySeed {
             class_names: (*class_names).clone(),
             type_aliases: (*type_aliases).clone(),
-            canonical_names: (*canonical_names).clone(),
         }
     }
 
@@ -1059,16 +1058,11 @@ impl SymbolSource for JvmLibraries {
             })
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
-        let mut canonical_names = std::collections::HashMap::new();
         // Seed the Kotlin built-in → JVM class mapping (ported `JavaToKotlinClassMap`): intrinsic
         // mapped types (`Comparable`, `Throwable`, `List`, …), not `.class` files. Classpath types
         // above take precedence (`or_insert`).
         for name in BUILTIN_MAPPED_NAMES {
             if let Some(internal) = kotlin_builtin_to_internal(name) {
-                let canonical = to_jvm_internal(internal);
-                if canonical != internal {
-                    canonical_names.insert(internal.to_string(), canonical.to_string());
-                }
                 if internal.starts_with("kotlin/collections/") {
                     // FORCE the Kotlin collection type (read-only vs mutable) over any classpath
                     // `java/util/List` — the front end must keep the distinction; emit erases it.
@@ -1078,22 +1072,6 @@ impl SymbolSource for JvmLibraries {
                         .entry(name.to_string())
                         .or_insert_with(|| internal.to_string());
                 }
-            }
-        }
-        for internal in [
-            "kotlin/Boolean",
-            "kotlin/Byte",
-            "kotlin/Short",
-            "kotlin/Int",
-            "kotlin/Long",
-            "kotlin/Char",
-            "kotlin/Float",
-            "kotlin/Double",
-            "kotlin/Throwable",
-        ] {
-            let canonical = to_jvm_internal(internal);
-            if canonical != internal {
-                canonical_names.insert(internal.to_string(), canonical.to_string());
             }
         }
         // `Pair`/`Triple` are auto-imported `kotlin.*` classes constructed directly (`Pair(a, b)`), but
@@ -1107,7 +1085,6 @@ impl SymbolSource for JvmLibraries {
         let pair = (
             std::rc::Rc::new(class_names),
             std::rc::Rc::new(idx.type_aliases.clone()),
-            std::rc::Rc::new(canonical_names),
         );
         CACHE.with(|c| c.borrow_mut().insert(key, pair.clone()));
         pair

@@ -40,9 +40,6 @@ pub struct GenericSig {
 pub struct LibrarySeed {
     pub class_names: HashMap<String, String>,
     pub type_aliases: HashMap<String, String>,
-    /// Non-identity canonical internal-name aliases used for subtype identity checks
-    /// (`kotlin/collections/List` -> `java/util/List`). Missing means identity.
-    pub canonical_names: HashMap<String, String>,
 }
 
 /// One member (constructor, member function/property accessor, or companion member) of a library
