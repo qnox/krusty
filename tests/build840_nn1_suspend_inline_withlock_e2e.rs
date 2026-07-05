@@ -15,16 +15,13 @@ fn run(src: &str) -> Option<String> {
     common::compile_and_run_box(src, "Main", &[sl, coro, jdk.clone()], Some(&jdk))
 }
 
-// RESOLUTION + suspend-context detection now work: `withLock` resolves as a defaulted inline extension
-// (the merged member/extension selector omits the `owner` default and binds `T` from the lambda), and the
-// enclosing `runBlocking { … }` lambda is recognized as a coroutine state machine (a suspend EXTENSION call
-// is no longer invisible to the lowerer's suspension detection). The remaining gap is EMIT: `withLock` is a
-// `suspend inline` function, so kotlinc materializes it by INLINING its body — whose inner `lock`/`unlock`
-// suspensions must be threaded into the enclosing state machine. krusty builds state machines from
-// IR-level `suspend_calls`, but a MUST-INLINE splice hides those suspensions from the IR, so the SM builder
-// bails ("no suspend call in any stmt"). Closing this needs suspend-inline-body splicing with continuation
-// threading — a coroutine-codegen feature tracked separately. Kept as the red TDD target for that work.
-#[ignore = "suspend inline-extension splice with continuation threading (withLock body) — pending coroutine codegen"]
+// `withLock` is a `suspend inline` EXTENSION on `Mutex` with a defaulted leading `owner: Any? = null`. The
+// merged member/extension selector omits the default and binds `T` from the lambda; because withLock also
+// emits a real `withLock$default` synthetic (only genuine `@InlineOnly` callees force a splice), it resolves
+// to that synthetic — a normal suspend `$default` call — rather than inlining. The CPS `Continuation` is
+// emit-only (dropped from the logical params at the metadata boundary, re-inserted before the mask/marker by
+// the coroutine pass), and the suspend EXTENSION call marks the enclosing `runBlocking { … }` lambda a
+// coroutine state machine. So the block compiles and runs: lock → action → unlock, returning `T`.
 #[test]
 fn with_lock_omits_default_owner_and_binds_lambda_return() {
     const SRC: &str = "import kotlinx.coroutines.sync.Mutex\n\

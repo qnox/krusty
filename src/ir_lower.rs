@@ -18458,6 +18458,14 @@ impl<'a> Lower<'a> {
                                 a.push(self.ir.add_expr(IrExpr::Const(IrConst::Null)));
                             }
                         }
+                        // A suspend EXTENSION resolved to its `name$default` synthetic (`m.withLock { … }`
+                        // omitting the defaulted `owner`): its physical descriptor spells the `Continuation`
+                        // before the mask/marker, so record the call for the coroutine pass to INSERT the
+                        // continuation value there (`append_continuation`, `$default` arm). `c.ret` is the
+                        // logical return the pass unboxes the erased `Object` suspension result by.
+                        let logical_ret = c.ret;
+                        let suspend_default =
+                            c.default_call && self.resolver().extension_is_suspend(&name, rt);
                         let reified_subst = self.reified_call_subst_for(e, &c);
                         let call = self.ir.add_expr(IrExpr::Call {
                             callee: Callee::Static {
@@ -18471,6 +18479,9 @@ impl<'a> Lower<'a> {
                         });
                         if !reified_subst.is_empty() {
                             self.ir.reified_call_subst.insert(call, reified_subst);
+                        }
+                        if suspend_default {
+                            self.ir.suspend_calls.insert(call, ty_to_ir(logical_ret));
                         }
                         self.coerce_generic_read(call, e, c.physical_ret)
                     } else if let Some(c) = {
