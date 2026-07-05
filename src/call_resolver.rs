@@ -384,36 +384,24 @@ impl<'a> CallResolver<'a> {
         allow_must_inline: bool,
     ) -> Option<LibraryCallable> {
         let fs = self.lib.functions(name, Some(receiver));
-        let mut ranks: Vec<u32> = fs
-            .overloads
-            .iter()
-            .filter(|o| {
-                o.kind == FnKind::Extension
-                    && o.receiver_rank != u32::MAX
-                    && (o.public || (allow_must_inline && o.flags.inline.must_inline()))
-            })
-            .map(|o| o.receiver_rank)
-            .collect();
-        ranks.sort_unstable();
+        let ranked = ranked_extension_overloads(&fs, allow_must_inline);
+        let mut ranks: Vec<u32> = ranked.iter().map(|o| o.receiver_rank).collect();
         ranks.dedup();
 
         for rank in ranks {
-            let mut matches: Vec<(&FunctionInfo, Vec<Ty>)> = fs
-                .overloads
+            let mut matches: Vec<(&FunctionInfo, Vec<Ty>)> = ranked
                 .iter()
+                .copied()
+                .filter(|o| o.receiver_rank == rank)
                 .filter_map(|o| {
                     let logical = self.bound_logical_params(o, receiver, type_args);
                     (logical.len() == args.len() + 1).then_some((o, logical))
                 })
                 .filter(|o| {
-                    o.0.kind == FnKind::Extension
-                        && o.0.receiver_rank != u32::MAX
-                        && (o.0.public || (allow_must_inline && o.0.flags.inline.must_inline()))
-                        && o.0.receiver_rank == rank
-                        && o.1[1..]
-                            .iter()
-                            .zip(args)
-                            .all(|(p, a)| self.arg_fits_or_subtype(p, a))
+                    o.1[1..]
+                        .iter()
+                        .zip(args)
+                        .all(|(p, a)| self.arg_fits_or_subtype(p, a))
                 })
                 .collect();
             if matches.is_empty() {
@@ -529,66 +517,51 @@ impl<'a> CallResolver<'a> {
         let fs = self
             .lib
             .functions(&format!("{name}$default"), Some(receiver));
-        let mut ranks: Vec<u32> = fs
-            .overloads
-            .iter()
-            .filter(|o| o.kind == FnKind::Extension && o.public)
-            .map(|o| o.receiver_rank)
-            .collect();
-        ranks.sort_unstable();
-        ranks.dedup();
-
         let trailing_lambda = args.last().is_some_and(|a| matches!(a, Ty::Fun(_)));
-        for rank in ranks {
-            for o in fs
-                .overloads
-                .iter()
-                .filter(|o| o.kind == FnKind::Extension && o.public && o.receiver_rank == rank)
-            {
-                let c = &o.callable;
-                let params = &c.params;
-                if params.is_empty() {
-                    continue;
-                }
-                let real_count = params.len() - 1;
-                let fits = if trailing_lambda {
-                    let prefix_len = args.len() - 1;
-                    prefix_len < real_count
-                        && matches!(params[real_count], Ty::Fun(_))
-                        && params[1..1 + prefix_len]
-                            .iter()
-                            .zip(&args[..prefix_len])
-                            .all(|(p, a)| self.arg_fits_or_subtype(p, a))
-                } else {
-                    args.len() <= real_count
-                        && params[1..1 + args.len()]
-                            .iter()
-                            .zip(args)
-                            .all(|(p, a)| self.arg_fits_or_subtype(p, a))
-                };
-                if !fits {
-                    continue;
-                }
-                let ret_ty = o
-                    .generic_sig
-                    .as_ref()
-                    .map(|gsig| {
-                        let mut binds = std::collections::HashMap::new();
-                        for (f, t) in gsig.formals.iter().zip(type_args) {
-                            binds.insert(f.clone(), *t);
-                        }
-                        let actuals: Vec<Ty> = std::iter::once(receiver)
-                            .chain(args.iter().copied())
-                            .collect();
-                        for (ps, a) in gsig.params.iter().zip(&actuals) {
-                            unify_gsig(ps, *a, &mut binds);
-                        }
-                        gsig_to_ty(&gsig.ret, &binds)
-                    })
-                    .unwrap_or(c.ret);
-                let ret_ty = o.ret.apply(ret_ty);
-                return Some(callable_with_return(c, ret_ty, true));
+        for o in ranked_extension_overloads(&fs, false) {
+            let c = &o.callable;
+            let params = &c.params;
+            if params.is_empty() {
+                continue;
             }
+            let real_count = params.len() - 1;
+            let fits = if trailing_lambda {
+                let prefix_len = args.len() - 1;
+                prefix_len < real_count
+                    && matches!(params[real_count], Ty::Fun(_))
+                    && params[1..1 + prefix_len]
+                        .iter()
+                        .zip(&args[..prefix_len])
+                        .all(|(p, a)| self.arg_fits_or_subtype(p, a))
+            } else {
+                args.len() <= real_count
+                    && params[1..1 + args.len()]
+                        .iter()
+                        .zip(args)
+                        .all(|(p, a)| self.arg_fits_or_subtype(p, a))
+            };
+            if !fits {
+                continue;
+            }
+            let ret_ty = o
+                .generic_sig
+                .as_ref()
+                .map(|gsig| {
+                    let mut binds = std::collections::HashMap::new();
+                    for (f, t) in gsig.formals.iter().zip(type_args) {
+                        binds.insert(f.clone(), *t);
+                    }
+                    let actuals: Vec<Ty> = std::iter::once(receiver)
+                        .chain(args.iter().copied())
+                        .collect();
+                    for (ps, a) in gsig.params.iter().zip(&actuals) {
+                        unify_gsig(ps, *a, &mut binds);
+                    }
+                    gsig_to_ty(&gsig.ret, &binds)
+                })
+                .unwrap_or(c.ret);
+            let ret_ty = o.ret.apply(ret_ty);
+            return Some(callable_with_return(c, ret_ty, true));
         }
         None
     }
