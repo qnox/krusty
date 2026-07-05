@@ -3828,6 +3828,10 @@ impl<'a> Lower<'a> {
         crate::call_resolver::CallResolver::new(&*self.syms.libraries)
     }
 
+    fn arg_tys(&self, args: &[AstExprId]) -> Vec<Ty> {
+        args.iter().map(|&a| self.info.ty(a)).collect()
+    }
+
     fn scalar_value_repr(&self, ty: Ty) -> Option<Ty> {
         self.syms.libraries.scalar_value_repr(ty)
     }
@@ -3930,12 +3934,11 @@ impl<'a> Lower<'a> {
         args: &[AstExprId],
         call_expr: AstExprId,
     ) -> Option<u32> {
-        let arg_tys: Vec<Ty> = args.iter().map(|&a| self.info.ty(a)).collect();
         let m = crate::call_resolver::resolve_instance(
             &*self.syms.libraries,
             &internal,
             name,
-            &arg_tys,
+            &self.arg_tys(args),
         )?;
         let owner = m.owner.clone().unwrap_or_else(|| internal.clone());
         let is_iface = self.library_type_is_interface(&owner);
@@ -4525,7 +4528,7 @@ impl<'a> Lower<'a> {
             return None;
         }
         let pkg = crate::resolve::qualified_path(self.afile, receiver)?;
-        let arg_tys: Vec<Ty> = args.iter().map(|&a| self.info.ty(a)).collect();
+        let arg_tys = self.arg_tys(args);
         // A trailing lambda was typed against its (receiver/suspend SAM) block parameter by the checker,
         // so its stored type already carries the right arity for overload resolution here.
         let has_trailing_lambda =
@@ -4636,7 +4639,7 @@ impl<'a> Lower<'a> {
             }
             return None; // sibling-file user class but arity/defaults/secondary not modeled cross-file
         }
-        let arg_tys: Vec<Ty> = args.iter().map(|a| self.info.ty(*a)).collect();
+        let arg_tys = self.arg_tys(args);
         // A classpath `@JvmInline value class` is constructed via its static `constructor-impl(U): U`,
         // which returns the UNBOXED underlying value — kotlinc's unboxed representation (the real `<init>`
         // is private, so a plain `new`/`invokespecial` would be an IllegalAccessError). The value-classes
@@ -5622,12 +5625,11 @@ impl<'a> Lower<'a> {
                         {
                             return true;
                         }
-                        let arg_tys: Vec<Ty> = args.iter().map(|&a| self.info.ty(a)).collect();
                         return crate::call_resolver::resolve_instance_member(
                             &*self.syms.libraries,
                             recv_ty,
                             name,
-                            &arg_tys,
+                            &self.arg_tys(args),
                         )
                         .is_some_and(|m| m.suspend);
                     }
@@ -10191,7 +10193,7 @@ impl<'a> Lower<'a> {
         args: &[AstExprId],
         e: AstExprId,
     ) -> Option<u32> {
-        let arg_tys: Vec<Ty> = args.iter().map(|&a| self.info.ty(a)).collect();
+        let arg_tys = self.arg_tys(args);
         let c = self
             .resolve_ext_lit_widened(name, rt, args, &arg_tys)
             .filter(|c| !c.default_call) // a defaulted extension needs the AST receiver expr — bail
@@ -10312,7 +10314,7 @@ impl<'a> Lower<'a> {
             }
         }
         // A builtin/library member method (`StringBuilder.append`, `String.isEmpty`) — `this.m(args)`.
-        let arg_tys: Vec<Ty> = args.iter().map(|&a| self.info.ty(a)).collect();
+        let arg_tys = self.arg_tys(args);
         let lib_owner = match this_ty {
             Ty::String => Some("kotlin/String".to_string()),
             Ty::Obj(i, _) => Some(i.to_string()),
@@ -13686,8 +13688,7 @@ impl<'a> Lower<'a> {
                                 })
                             } else {
                                 // A classpath instance method (`s?.substring(1)`).
-                                let arg_tys: Vec<Ty> =
-                                    args.iter().map(|&a| self.info.ty(a)).collect();
+                                let arg_tys = self.arg_tys(&args);
                                 if let Some(m) = crate::call_resolver::resolve_instance(
                                     &*self.syms.libraries,
                                     &internal,
@@ -16347,7 +16348,7 @@ impl<'a> Lower<'a> {
                         // `SymbolSource` (ModuleSymbols), then resolve its method id. Only a function
                         // defined in THIS file (present in `fun_ids`) is handled here; a cross-file
                         // function (in `funs` but not `fun_ids`) falls through to the facade branch below.
-                        let arg_tys: Vec<Ty> = args.iter().map(|&a| self.info.ty(a)).collect();
+                        let arg_tys = self.arg_tys(&args);
                         crate::module_symbols::ModuleSymbols::new(self.syms)
                             .resolve_top_level(&fname, &arg_tys)
                             .and_then(|fi| {
@@ -16456,7 +16457,7 @@ impl<'a> Lower<'a> {
                         // A top-level function defined in ANOTHER file of this multi-file compilation →
                         // a cross-facade `invokestatic`. Only the simple exact-arity case (no vararg /
                         // omitted defaults) is modeled here; anything else bails (skips the file).
-                        let arg_tys: Vec<Ty> = args.iter().map(|&a| self.info.ty(a)).collect();
+                        let arg_tys = self.arg_tys(&args);
                         let fi = crate::module_symbols::ModuleSymbols::new(self.syms)
                             .resolve_top_level(&fname, &arg_tys)?;
                         let plen = fi.callable.params.len();
@@ -16528,7 +16529,7 @@ impl<'a> Lower<'a> {
                         {
                             None
                         } else {
-                            let arg_tys: Vec<Ty> = args.iter().map(|&a| self.info.ty(a)).collect();
+                            let arg_tys = self.arg_tys(&args);
                             // Forward the call's explicit type arguments (`listOf<Long>(…)`), as the checker
                             // does — they bind the generic vararg's element type for literal adaptation below.
                             let call_targs: Vec<Ty> = self
@@ -16645,9 +16646,9 @@ impl<'a> Lower<'a> {
                             // primitive; mismatched primitives (`assertEquals(0, longVal)`) would compare
                             // `areEqual(Integer, Long)` = false (kotlinc unifies `T` and coerces the
                             // literal, which krusty doesn't model) — skip rather than miscompile.
-                            let prim_args: Vec<Ty> = args
-                                .iter()
-                                .map(|&a| self.info.ty(a))
+                            let prim_args: Vec<Ty> = self
+                                .arg_tys(&args)
+                                .into_iter()
                                 .filter(|t| self.has_scalar_value_repr(*t))
                                 .collect();
                             let generic_provided =
@@ -17097,7 +17098,7 @@ impl<'a> Lower<'a> {
                             .get(&cur)
                             .and_then(|ci| ci.super_internal.clone())?;
                         let this = self.ir.add_expr(IrExpr::GetValue(0));
-                        let arg_tys: Vec<Ty> = args.iter().map(|&a| self.info.ty(a)).collect();
+                        let arg_tys = self.arg_tys(&args);
                         // The concrete `super.f()` target: the SUPERCLASS's method — unless that method is
                         // ABSTRACT (a diamond `class C : AbstractBase(), Iface` where `Base.f` is abstract and
                         // `Iface.f` is a default). Then dispatch to the concrete superinterface DEFAULT via
@@ -17910,7 +17911,7 @@ impl<'a> Lower<'a> {
                         // A classpath *instance* method `recv.name(args)` → `invokevirtual`/
                         // `invokeinterface recvType.name:descriptor` (descriptor from the classpath; no
                         // hardcoded names). Enables stdlib member calls (iterators, collections, …).
-                        let arg_tys: Vec<Ty> = args.iter().map(|&a| self.info.ty(a)).collect();
+                        let arg_tys = self.arg_tys(&args);
                         self.class_of(rt)
                             .map(|ci| ci.internal.clone())
                             .or_else(|| {
@@ -18028,12 +18029,11 @@ impl<'a> Lower<'a> {
                         // more specific (`List<Int>.get` → `Int`) gets the unbox/checkcast kotlinc emits.
                         self.coerce_generic_read(call, e, mret)
                     } else if let Some(resolved) = {
-                        let arg_tys: Vec<Ty> = args.iter().map(|&a| self.info.ty(a)).collect();
                         crate::call_resolver::resolve_instance_member(
                             &*self.syms.libraries,
                             rt,
                             &name,
-                            &arg_tys,
+                            &self.arg_tys(&args),
                         )
                     } {
                         let recv = self.expr(receiver)?;
@@ -18064,13 +18064,12 @@ impl<'a> Lower<'a> {
                     } else if let Some(m) = {
                         // A `@JvmStatic` member of a classpath `object` (`Base58Uuid.of(x)`) → a static
                         // method on the object class (`invokestatic`), found in the type's static list.
-                        let arg_tys: Vec<Ty> = args.iter().map(|&a| self.info.ty(a)).collect();
                         rt.obj_internal().and_then(|internal| {
                             crate::call_resolver::resolve_companion(
                                 &*self.syms.libraries,
                                 internal,
                                 &name,
-                                &arg_tys,
+                                &self.arg_tys(&args),
                             )
                             // A `@JvmStatic suspend fun` is not CPS-lowered on this path — the checker
                             // leaves it unresolved, so this never fires; guard anyway to never emit a
@@ -18103,8 +18102,7 @@ impl<'a> Lower<'a> {
                         // A library-resolved extension `recv.name(args)` → `invokestatic
                         // facade.name(recv, args)`. Owner + descriptor come from resolver data, so no
                         // stdlib name is hardcoded here.
-                        let arg_tys: Vec<Ty> = args.iter().map(|&a| self.info.ty(a)).collect();
-                        self.resolve_ext_lit_widened(&name, rt, &args, &arg_tys)
+                        self.resolve_ext_lit_widened(&name, rt, &args, &self.arg_tys(&args))
                     } {
                         // Coerce the receiver + arguments to the extension's parameter types so a
                         // primitive flowing into a generic `Object` parameter (`fun <T> T.to(…)`) boxes.
@@ -18178,7 +18176,7 @@ impl<'a> Lower<'a> {
                         // `@JvmName`-mangled `@InlineOnly` method (`sumOfInt`) matching the lambda's return,
                         // then splice it (its body is a fold loop). The lambda return comes from the typed
                         // lambda arg.
-                        let arg_tys: Vec<Ty> = args.iter().map(|&a| self.info.ty(a)).collect();
+                        let arg_tys = self.arg_tys(&args);
                         arg_tys
                             .iter()
                             .find_map(|t| {
@@ -18251,9 +18249,8 @@ impl<'a> Lower<'a> {
                         // DRY-RUNS the
                         // actual splice — so a body the emitter couldn't splice (and would fall back to an
                         // `invokestatic` on the private method) is never routed; the call simply skips.
-                        let arg_tys: Vec<Ty> = args.iter().map(|&a| self.info.ty(a)).collect();
                         self.resolver()
-                            .resolve_extension_inline_callable(&name, rt, &arg_tys)
+                            .resolve_extension_inline_callable(&name, rt, &self.arg_tys(&args))
                             .filter(|c| {
                                 // The `@Metadata` `inline` flag is keyed by the Kotlin name; a
                                 // `@JvmName`-mangled method (`sumOf` → `sumOfInt`) loses it, reading back
