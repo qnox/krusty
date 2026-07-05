@@ -203,6 +203,39 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
         }
     }
 
+    // The `sequence {}` / `iterator {}` coroutine BUILDERS drive a suspend LAMBDA through `yield`/
+    // `yieldAll` suspension points — a state machine the pass doesn't model. Skip the whole file rather
+    // than emit a `Sequence`/`Iterator` whose `iterator()`/`next()` has no body (an `AbstractMethodError`
+    // at the for-loop / terminal operation). Detected by the builder's `yield`/`yieldAll` calls anywhere.
+    let uses_yield_builder = file.decls.iter().any(|&d| {
+        let body = match file.decl(d) {
+            Decl::Fun(f) => match &f.body {
+                FunBody::Expr(e) | FunBody::Block(e) => Some(*e),
+                FunBody::None => None,
+            },
+            Decl::Property(p) => p.init,
+            _ => None,
+        };
+        let class_bodies: Vec<AstExprId> = match file.decl(d) {
+            Decl::Class(c) => c
+                .methods
+                .iter()
+                .filter_map(|m| match &m.body {
+                    FunBody::Expr(e) | FunBody::Block(e) => Some(*e),
+                    FunBody::None => None,
+                })
+                .chain(c.body_props.iter().filter_map(|p| p.init))
+                .collect(),
+            _ => Vec::new(),
+        };
+        body.into_iter().chain(class_bodies).any(|e| {
+            expr_tree_calls_name(file, e, "yield") || expr_tree_calls_name(file, e, "yieldAll")
+        })
+    });
+    if uses_yield_builder {
+        return None;
+    }
+
     // --- suspend (coroutines) lowerability gate ---------------------------------------------------
     // The coroutine transform itself lives in `jvm::suspend` (CPS signature + state machine); this only
     // decides whether the file is lowerable at all. ir_lower lowers a suspend fn body PLAINLY (a call
@@ -269,6 +302,18 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     );
                 }
             }
+        }
+        // A member `suspend fn` on a class that IMPLEMENTS a supertype (an interface/class → the JVM emits
+        // BRIDGE methods) isn't modeled: the CPS-signature method and the generic bridge disagree on shape.
+        // Skip rather than miscompile (`SuspendingMutableMap : Map` with a `suspend fun clear()`). A suspend
+        // member on a plain class (no supertype, no bridges — the coroutine-intrinsics operator `invoke`)
+        // stays supported.
+        let suspend_member_needs_bridge = file.decls.iter().any(|&d| {
+            matches!(file.decl(d), Decl::Class(c)
+                if !c.supertypes.is_empty() && c.methods.iter().any(|m| m.is_suspend))
+        });
+        if suspend_member_needs_bridge {
+            return None;
         }
         // A NON-suspend body may not call any suspend fn (top-level or member): call-site continuation
         // threading is only modeled inside a suspend body (and calling a suspend fn from a non-suspend
@@ -712,7 +757,14 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 let sig = syms.classes.get(&c.name)?.methods.get(&m.name)?;
                 let ret = sig.ret;
                 let params = tys_to_ir(&sig.params);
-                let param_checks = param_checks_for(m, &sig.params);
+                let class_nonnull_tps: std::collections::HashSet<String> = c
+                    .type_param_bounds
+                    .iter()
+                    .filter(|(_, tr)| !tr.nullable)
+                    .map(|(n, _)| n.clone())
+                    .collect();
+                let param_checks =
+                    param_checks_for(m, &sig.params, &c.type_params, &class_nonnull_tps);
                 // The checker `Ty` carries no nullability, so recover the declared `?` from the method's
                 // AST return type (`fun f(): T?`) — same as a top-level function. A nullable value-class
                 // return (`Ucn?`) must stay the boxed `X`, not erase to the unboxed underlying.
@@ -1235,7 +1287,9 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     let sig = csig.static_methods.get(&m.name)?;
                     let ret = sig.ret;
                     let params = tys_to_ir(&sig.params);
-                    let param_checks = param_checks_for(m, &sig.params);
+                    // Companion methods have no enclosing type parameters in a param position.
+                    let param_checks =
+                        param_checks_for(m, &sig.params, &[], &std::collections::HashSet::new());
                     let fid = lo.ir.add_fun(IrFunction {
                         name: m.name.clone(),
                         params,
@@ -1344,7 +1398,9 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 } else {
                     ret
                 };
-                let param_checks = param_checks_for(f, &sig.params);
+                // A top-level function has no enclosing class type parameters.
+                let param_checks =
+                    param_checks_for(f, &sig.params, &[], &std::collections::HashSet::new());
                 let id = lo.ir.add_fun(IrFunction {
                     name: f.name.clone(),
                     params,
@@ -3618,7 +3674,20 @@ fn is_lateinit_prop(p: &ast::PropDecl) -> bool {
 /// `val xx get() = x`) or the initializer.
 fn body_prop_ty(file: &ast::File, info: &TypeInfo, p: &ast::PropDecl) -> Ty {
     if let Some(r) = p.ty.as_ref() {
-        ty_of(file, r)
+        let base = ty_of(file, r);
+        // `ty_of` resolves only file-local types + built-ins; a CLASSPATH type (`ArrayList<Int>`) erases to
+        // `kotlin/Any`. When the declared annotation is NOT `Any` yet erased to it, recover the concrete
+        // type the checker resolved the initializer/getter against (which IS this annotation, classpath-
+        // resolved) — so a top-level `val prop: ArrayList<Int>` backing field is `ArrayList`, not `Object`.
+        if base == Ty::obj("kotlin/Any") && r.name != "Any" && r.name != "kotlin/Any" {
+            if let Some(FunBody::Expr(g) | FunBody::Block(g)) = p.getter {
+                return info.ty(g);
+            }
+            if let Some(i) = p.init {
+                return info.ty(i);
+            }
+        }
+        base
     } else if let Some(FunBody::Expr(g) | FunBody::Block(g)) = p.getter {
         info.ty(g)
     } else if let Some(i) = p.init {
@@ -19920,7 +19989,25 @@ fn ir_array_element(t: &Ty) -> Option<Ty> {
 /// Primitives, nullable params (`String?`), and generic type parameters (`T`, which may be nullable)
 /// are skipped. Conservative: when the parameter lists don't line up (e.g. an extension receiver
 /// shifts them) no guards are emitted.
-fn param_checks_for(f: &ast::FunDecl, param_tys: &[Ty]) -> Vec<Option<String>> {
+/// Whether the expression tree rooted at `e` contains a CALL to the unqualified `name` — recursing FULLY
+/// through nested lambdas AND statement bodies (so a `sequence { for (…) { yield(i) } }` is found).
+fn expr_tree_calls_name(file: &ast::File, e: AstExprId, name: &str) -> bool {
+    if let Expr::Call { callee, .. } = file.expr(e) {
+        if matches!(file.expr(*callee), Expr::Name(n) if n == name) {
+            return true;
+        }
+    }
+    file.any_child_expr(e, &mut |c| expr_tree_calls_name(file, c, name), &mut |s| {
+        file.any_child_stmt(s, &mut |c| expr_tree_calls_name(file, c, name))
+    })
+}
+
+fn param_checks_for(
+    f: &ast::FunDecl,
+    param_tys: &[Ty],
+    class_type_params: &[String],
+    class_nonnull_type_params: &std::collections::HashSet<String>,
+) -> Vec<Option<String>> {
     if f.visibility.is_private() || f.receiver.is_some() || f.params.len() != param_tys.len() {
         return vec![None; param_tys.len()];
     }
@@ -19928,10 +20015,17 @@ fn param_checks_for(f: &ast::FunDecl, param_tys: &[Ty]) -> Vec<Option<String>> {
         .iter()
         .zip(param_tys)
         .map(|(p, ty)| {
-            let is_type_param = f.type_params.contains(&p.ty.name);
+            // A parameter typed as a TYPE PARAMETER (the function's own or the enclosing class's) is
+            // null-checked only when that parameter has a NON-NULL bound; an unbounded `T` (= `Any?`,
+            // nullable) is not — e.g. `Map<K, V>.get(key: K)` on a `K = Any?` instantiation accepts null.
+            // A function type parameter uses the same rule via the function's non-null set.
+            let nullable_type_param = (f.type_params.contains(&p.ty.name)
+                && !f.non_null_type_params.contains(&p.ty.name))
+                || (class_type_params.contains(&p.ty.name)
+                    && !class_nonnull_type_params.contains(&p.ty.name));
             // A value-class parameter is erased to its underlying type; the null-check applies to that
             // (a primitive underlying gets none — the param is a primitive local, not a reference).
-            if !p.ty.nullable && !is_type_param && ty.is_reference() {
+            if !p.ty.nullable && !nullable_type_param && ty.is_reference() {
                 Some(p.name.clone())
             } else {
                 None

@@ -74,6 +74,9 @@ pub fn kotlin_builtin_to_jvm(internal: &str) -> Option<&'static str> {
             "java/util/ListIterator"
         }
         "kotlin/collections/Map" | "kotlin/collections/MutableMap" => "java/util/Map",
+        "kotlin/collections/Map.Entry" | "kotlin/collections/MutableMap.MutableEntry" => {
+            "java/util/Map$Entry"
+        }
         _ => return None,
     })
 }
@@ -238,6 +241,17 @@ pub fn to_jvm_internal(internal: &str) -> &str {
     // `TYPE_MAP` (`Any`/`String` only), so a raw `java/util/List` never maps ambiguously back.
     if let Some(j) = kotlin_builtin_to_jvm(internal) {
         return j;
+    }
+    // Emit-only erasure of the TOP-LEVEL Kotlin mapped built-ins to their JVM class (`kotlin/CharSequence`
+    // → `java/lang/CharSequence`, `kotlin/Comparable`/`kotlin/Number`/`kotlin/Enum`, …), mirroring
+    // `JavaToKotlinClassMap`'s `addTopLevel`. Only a leaf `kotlin/<Name>` (no subpackage) qualifies, so a
+    // real stdlib class (`kotlin/Pair`, `kotlin/collections/*`) is untouched.
+    if let Some(simple) = internal.strip_prefix("kotlin/") {
+        if !simple.contains('/') {
+            if let Some(j) = kotlin_builtin_to_jvm(simple) {
+                return j;
+            }
+        }
     }
     TYPE_MAP
         .iter()

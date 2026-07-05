@@ -5974,9 +5974,17 @@ impl<'a> Checker<'a> {
                 return;
             }
         }
+        // The dedicated `Ty::String` variant and its object form `Obj("kotlin/String")` denote the SAME
+        // type (they share an erased key); a value of one flows into the other. A metadata-derived return
+        // spells it as the object form, the source `: String` annotation as `Ty::String`.
+        if (expected == Ty::String && actual == Ty::obj("kotlin/String"))
+            || (actual == Ty::String && expected == Ty::obj("kotlin/String"))
+        {
+            return;
+        }
         // String is a reference type with classpath supertypes; ask the same hierarchy walker instead of
         // keeping a local list of platform interfaces.
-        if actual == Ty::String {
+        if actual == Ty::String || actual == Ty::obj("kotlin/String") {
             if let Ty::Obj(e, _) = expected {
                 if self.obj_is_subtype("kotlin/String", e) {
                     return;
@@ -6093,6 +6101,30 @@ impl<'a> Checker<'a> {
 
     fn arg_tys(&mut self, args: &[ExprId]) -> Vec<Ty> {
         args.iter().map(|&a| self.expr(a)).collect()
+    }
+
+    /// Like [`Self::arg_tys`], but type each LAMBDA argument against the extension `name`'s block
+    /// parameter (bound by `receiver`), so `it` gets the real element/receiver type instead of the erased
+    /// `Any` — the same binding the plain member-call path applies. A non-lambda argument types normally
+    /// (once). Used where an extension call's arguments are typed OUTSIDE that path (e.g. the safe-call
+    /// `?.` arm, which passes `receiver.non_null()`).
+    fn ext_arg_tys(&mut self, receiver: Ty, name: &str, args: &[ExprId]) -> Vec<Ty> {
+        let partial: Vec<Option<Ty>> = args
+            .iter()
+            .map(|&x| (!matches!(self.file.expr(x), Expr::Lambda { .. })).then(|| self.expr(x)))
+            .collect();
+        let pts = self
+            .resolver()
+            .extension_lambda_param_types(receiver, name, &partial);
+        args.iter()
+            .enumerate()
+            .map(|(i, &x)| match pts.as_ref().and_then(|p| p.get(i)) {
+                Some(pt) if !pt.is_empty() && matches!(self.file.expr(x), Expr::Lambda { .. }) => {
+                    self.check_lambda_with_types(x, pt)
+                }
+                _ => partial[i].unwrap_or_else(|| self.expr(x)),
+            })
+            .collect()
     }
 
     fn expr_inner(&mut self, e: ExprId) -> Ty {
@@ -6593,44 +6625,13 @@ impl<'a> Checker<'a> {
                     match &args {
                         None => self.check_member(rt, &name, self.span(e), Some(e)),
                         Some(a) => {
-                            // A safe call to a lambda-taking extension (`c?.takeIf { it.at > 0 }`): type the
+                            // A safe call to a lambda-taking extension (`c?.takeIf { it.at > 0 }`) types its
                             // lambda argument against the extension's block parameter (bound by the NON-NULL
-                            // receiver), exactly as the non-safe path does — otherwise `it` defaults to `Any`
-                            // and a member access on it fails ("member … on Any"). `?.let`/`?.run`/… already
-                            // route through `safe_scope_call_result`; this covers `takeIf`/`takeUnless`/any
-                            // other lambda extension reached by `?.`.
-                            let nn = rt.non_null();
-                            let partial: Vec<Option<Ty>> = a
-                                .iter()
-                                .map(|&x| {
-                                    (!matches!(self.file.expr(x), Expr::Lambda { .. }))
-                                        .then(|| self.expr(x))
-                                })
-                                .collect();
-                            let ext_pts = self
-                                .resolver()
-                                .extension_lambda_param_types(nn, &name, &partial);
-                            let arg_tys: Vec<Ty> = a
-                                .iter()
-                                .enumerate()
-                                .map(|(i, &x)| {
-                                    match ext_pts.as_ref().and_then(|p| p.get(i)) {
-                                        Some(pt)
-                                            if !pt.is_empty()
-                                                && matches!(
-                                                    self.file.expr(x),
-                                                    Expr::Lambda { .. }
-                                                ) =>
-                                        {
-                                            self.check_lambda_with_types(x, pt)
-                                        }
-                                        // A non-lambda argument was already typed into `partial` — reuse
-                                        // it rather than re-evaluating (a double `self.expr` would
-                                        // duplicate diagnostics / `expr_types` work).
-                                        _ => partial[i].unwrap_or_else(|| self.expr(x)),
-                                    }
-                                })
-                                .collect();
+                            // receiver) — otherwise `it` defaults to `Any` and a member access on it fails
+                            // ("member … on Any"). `?.let`/`?.run`/… already route through
+                            // `safe_scope_call_result`; this covers `takeIf`/`takeUnless`/any other lambda
+                            // extension reached by `?.`.
+                            let arg_tys = self.ext_arg_tys(rt.non_null(), &name, a);
                             let inline_arg_supported = !a
                                 .iter()
                                 .any(|x| matches!(self.file.expr(*x), Expr::CallableRef { .. }));

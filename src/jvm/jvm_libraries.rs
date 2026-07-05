@@ -295,6 +295,54 @@ impl JvmLibraries {
         None
     }
 
+    /// The generic signature for `owner.jvm_name`, metadata-primary. When `@Metadata` DESCRIBES this
+    /// function (a Kotlin callable), its metadata gsig is authoritative — the JVM-agnostic, Kotlin-faithful
+    /// signature (nullability, variance, Kotlin type identities, and no synthetic `suspend` Continuation /
+    /// `@Composable` params, which are emit-only). There is NO fallback to the JVM `Signature` attribute
+    /// here: a metadata function that fails to decode is a decoder BUG to fix, not something to paper over
+    /// with the erased-ish JVM sig. The `Signature` attribute is consulted ONLY when `@Metadata` has no
+    /// record for the name — a Java class, a synthetic/bridge method, or a facade part metadata omits.
+    fn callable_generic_sig(
+        &self,
+        owner: &str,
+        jvm_name: &str,
+        jvm_desc: &str,
+        jvm_sig: Option<&str>,
+        is_extension: bool,
+    ) -> Option<GenericSig> {
+        // Prefer the metadata generic signature, disambiguating overloads by aligning the metadata value
+        // parameters to this callable's JVM descriptor (kotlinc omits `method_signature` when it equals the
+        // computed default, so `MetaFn.jvm_desc` is usually absent — a name-only match would hand one
+        // overload the WRONG signature). Only when `@Metadata` has no FUNCTION for the name (a Java method,
+        // a synthetic, or a PROPERTY getter — recorded as a property, not a function) do we read the JVM
+        // `Signature`, which uses the legacy receiver-in-`params[0]` shape.
+        let (desc_params, desc_ret) = parse_method_desc_with_field_params(jvm_desc);
+        if self.cp.has_meta_function(owner, jvm_name) {
+            // Metadata DESCRIBES this class's function — it is the authoritative signature and there is NO
+            // fallback to the JVM `Signature`. A failure to align/decode here is a bug to fix in the reader.
+            return self
+                .cp
+                .aligned_generic_sig(owner, jvm_name, &desc_params, &desc_ret);
+        }
+        // No `@Metadata` FUNCTION for the name — the JVM `Signature` is the only source. Its extension
+        // receiver is the leading value parameter; move it to the `receiver` ATTRIBUTE so the signature has
+        // the same shape as a metadata one (consumers bind the receiver separately, not as a value param).
+        let gsig = jvm_sig.and_then(parse_method_gsig)?;
+        Some(
+            if is_extension && gsig.receiver.is_none() && !gsig.params.is_empty() {
+                let mut params = gsig.params;
+                let receiver = Some(params.remove(0));
+                GenericSig {
+                    receiver,
+                    params,
+                    ..gsig
+                }
+            } else {
+                gsig
+            },
+        )
+    }
+
     /// The type-parameter bindings a receiver induces at `target_internal` (`Repo<Cfg>` at `lib/Repo` →
     /// `{T: Cfg}`), by walking the generic hierarchy from the receiver and propagating each class's type
     /// arguments through every `extends`/`implements` edge — the same walk `member_return` performs, but
@@ -643,8 +691,11 @@ fn parse_method_gsig(sig: &str) -> Option<GenericSig> {
         params_s = rest;
     }
     let (ret, _) = parse_gsig(&inner[close + 1..])?;
+    // The JVM `Signature` attribute is the fallback for NON-metadata callables (Java methods): an instance
+    // method has no receiver parameter and a static none either, so the receiver is not modeled here.
     Some(GenericSig {
         formals,
+        receiver: None,
         params,
         ret,
     })
@@ -1551,7 +1602,16 @@ impl SymbolSource for JvmLibraries {
                                 // arg-binding extension selector — mark it so it can't preempt a real rung.
                                 receiver_rank: u32::MAX,
                                 overload_rank: descriptor_narrowing(&c.descriptor) as u32,
-                                generic_sig,
+                                // `c.name` is the emit-mangled JVM name (`sumOfInt`); metadata is keyed by
+                                // the LOGICAL name (`sumOf`), so look the signature up by that. The metadata
+                                // form carries the receiver as an ATTRIBUTE (never `params[0]`).
+                                generic_sig: self.callable_generic_sig(
+                                    &c.owner,
+                                    name,
+                                    &c.descriptor,
+                                    c.signature.as_deref(),
+                                    true,
+                                ),
                                 flags: FnFlags {
                                     inline,
                                     suspend: self.cp.is_suspend_method(&c.owner, &c.name),
@@ -1586,6 +1646,20 @@ impl SymbolSource for JvmLibraries {
             {
                 for c in self.cp.find_extensions(&recv_desc, name) {
                     let generic_sig = c.signature.as_deref().and_then(parse_method_gsig);
+                    // The static-method index also surfaces a TOP-LEVEL function whose first parameter
+                    // happens to match this receiver's type (`repeat(times: Int, …)` reached under an `Int`
+                    // receiver). Its `@Metadata` says it is NOT an extension, so it must not bind here as
+                    // `Int.repeat` (which would mis-shape the call and break emit). Reject by metadata truth;
+                    // a candidate with no metadata (a Java method) is trusted as before.
+                    if self
+                        .cp
+                        .meta_functions(&c.owner)
+                        .iter()
+                        .find(|m| m.jvm_name == c.name && m.kotlin_name == name)
+                        .is_some_and(|m| !m.is_extension)
+                    {
+                        continue;
+                    }
                     // Metadata-primary visibility for a value-class extension. An `inline` extension on a
                     // value class (`Result.getOrThrow`) is PRIVATE in bytecode but PUBLIC per @Metadata —
                     // kotlinc resolves it, then inlines (no legal `invokestatic`). ONLY consider a
@@ -1640,7 +1714,7 @@ impl SymbolSource for JvmLibraries {
                     }
                     let meta = self
                         .cp
-                        .metadata_call_facts(&c.owner, meta_name, &params, true);
+                        .metadata_call_facts(&c.owner, meta_name, &params, &pret, true);
                     let inline =
                         self.cp
                             .is_inline_callable(&c.owner, &c.name, &c.descriptor, &params);
@@ -1690,7 +1764,14 @@ impl SymbolSource for JvmLibraries {
                         visibility: Visibility::from_public(public),
                         receiver_rank: rank as u32,
                         overload_rank: descriptor_narrowing(&c.descriptor) as u32,
-                        generic_sig,
+                        // Metadata-primary signature — the receiver is an ATTRIBUTE, not `params[0]`.
+                        generic_sig: self.callable_generic_sig(
+                            &c.owner,
+                            &c.name,
+                            &c.descriptor,
+                            c.signature.as_deref(),
+                            true,
+                        ),
                         call_sig,
                         flags: FnFlags {
                             inline: inline_kind,
@@ -1746,7 +1827,17 @@ impl SymbolSource for JvmLibraries {
                         );
                         overloads.push(FunctionInfo {
                             overload_rank: descriptor_narrowing(&c.descriptor) as u32,
-                            generic_sig,
+                            // `c.name` is the emit-mangled JVM name (`sumOfInt`); metadata is keyed by the
+                            // LOGICAL name (`sum`). The per-element overloads differ only by RETURN, which
+                            // the signature match disambiguates (full-descriptor alignment). The metadata
+                            // form carries the receiver as an ATTRIBUTE, never `params[0]`.
+                            generic_sig: self.callable_generic_sig(
+                                &c.owner,
+                                name,
+                                &c.descriptor,
+                                c.signature.as_deref(),
+                                true,
+                            ),
                             ..FunctionInfo::plain(
                                 FnKind::Extension,
                                 Some(receiver),
@@ -1803,7 +1894,13 @@ impl SymbolSource for JvmLibraries {
                                 ret: ret_metadata,
                                 // The value class is the most-specific receiver rung.
                                 overload_rank: descriptor_narrowing(&c.descriptor) as u32,
-                                generic_sig: c.signature.as_deref().and_then(parse_method_gsig),
+                                generic_sig: self.callable_generic_sig(
+                                    &c.owner,
+                                    &c.name,
+                                    &c.descriptor,
+                                    c.signature.as_deref(),
+                                    true,
+                                ),
                                 flags: FnFlags {
                                     inline: inline_kind,
                                     suspend: mf.is_suspend,
@@ -1892,7 +1989,16 @@ impl SymbolSource for JvmLibraries {
                                     ret: ret_metadata,
                                     receiver_rank: rank as u32,
                                     overload_rank: descriptor_narrowing(&c.descriptor) as u32,
-                                    generic_sig: c.signature.as_deref().and_then(parse_method_gsig),
+                                    // `c.name` is the value-class-param-mangled JVM name (`getFor-<hash>`);
+                                    // metadata is keyed by the LOGICAL name (`getFor`), so look it up by that
+                                    // to recover the reified return `T` (bound from the explicit type arg).
+                                    generic_sig: self.callable_generic_sig(
+                                        &c.owner,
+                                        name,
+                                        &c.descriptor,
+                                        c.signature.as_deref(),
+                                        true,
+                                    ),
                                     flags: FnFlags {
                                         // An inline extension MUST be inlined — `must_inline` makes the
                                         // lowerer splice it or SKIP (never `invokestatic`; falling back to a
@@ -2139,9 +2245,9 @@ impl SymbolSource for JvmLibraries {
                 // leading params (their exact types — an extension receiver, a vararg array) and
                 // truncate the trailing synthetics. A normal function's metadata count equals the
                 // descriptor's param count, so this is a no-op for it (no regression).
-                let meta = self
-                    .cp
-                    .metadata_call_facts(&c.owner, meta_name, &params, false);
+                let meta =
+                    self.cp
+                        .metadata_call_facts(&c.owner, meta_name, &params, &physical_ret, false);
                 if let Some(keep) = meta.kept_params {
                     if keep < params.len() {
                         params.truncate(keep);
@@ -2184,17 +2290,34 @@ impl SymbolSource for JvmLibraries {
                         descriptor,
                     )
                 };
+                // The static-method index (`find_top_level`) also surfaces an EXTENSION's compiled form
+                // (`T.run` → `run(receiver, block)`); classify by the metadata signature's receiver so it is
+                // an `Extension`, not a receiver-less `TopLevel`. Extension resolution reaches it through the
+                // by-receiver query; keeping the kind honest is what lets the top-level queries ignore it
+                // without per-call-site receiver checks.
+                let generic_sig = self.callable_generic_sig(
+                    &c.owner,
+                    &c.name,
+                    &c.descriptor,
+                    c.signature.as_deref(),
+                    false,
+                );
+                let kind = if generic_sig.as_ref().is_some_and(|g| g.receiver.is_some()) {
+                    FnKind::Extension
+                } else {
+                    FnKind::TopLevel
+                };
                 overloads.push(FunctionInfo {
                     ret: ret_metadata,
                     visibility: Visibility::from_public(c.public),
                     overload_rank: descriptor_narrowing(&c.descriptor) as u32,
-                    generic_sig: c.signature.as_deref().and_then(parse_method_gsig),
+                    generic_sig,
                     call_sig,
                     flags: FnFlags {
                         inline: inline_kind,
                         suspend,
                     },
-                    ..FunctionInfo::plain(FnKind::TopLevel, None, callable)
+                    ..FunctionInfo::plain(kind, None, callable)
                 });
             }
         }

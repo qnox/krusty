@@ -8,7 +8,152 @@
 //! String ids index the `d2` table.
 
 use super::classreader::ClassInfo;
+use crate::libraries::{GSig, GenericSig};
+use std::collections::HashMap;
 use std::collections::HashSet;
+
+/// Decode a Kotlin `@Metadata` `Type` message into a [`GSig`] — the metadata-primary, JVM-agnostic
+/// generic-signature node. Kotlin generics come straight from `@Metadata` (the same source kotlinc
+/// resolves against), NOT the JVM `Signature` attribute. `tparams` maps a `Type.type_parameter` id to its
+/// name (built from the enclosing function's + class's `type_parameter` tables).
+///
+/// Proto (`ProtoBuf.Type`): `nullable`=3, `argument`=2 (repeated `Argument{projection=1, type=2}`),
+/// `class_name`=6, `type_parameter`=8 (id), `type_parameter_name`=9 (string id). A `kotlin/FunctionN`
+/// class becomes a [`GSig::Function`] (its args are `[P1..Pn, R]`); a Kotlin primitive class collapses to
+/// [`GSig::Prim`] so it matches the rest of the pipeline. A `*`/unresolved argument erases to `Any`.
+fn parse_type_gsig(
+    body: &[u8],
+    records: &[Rec],
+    d2: &[String],
+    tparams: &HashMap<u64, String>,
+) -> Option<GSig> {
+    let mut pb = Pb { b: body, i: 0 };
+    let mut class_id = None;
+    let mut tp_id = None;
+    let mut tpn_id = None;
+    let mut args: Vec<GSig> = Vec::new();
+    while !pb.at_end() {
+        let tag = pb.varint()?;
+        match (tag >> 3, tag & 7) {
+            (6, 0) => class_id = Some(pb.varint()?),
+            (8, 0) => tp_id = Some(pb.varint()?),
+            (9, 0) => tpn_id = Some(pb.varint()?),
+            (2, 2) => {
+                // Type.argument — `Argument.type` = field 2 (an inline `Type`); a `*` projection has none.
+                let n = pb.varint()? as usize;
+                let abody = pb.bytes(n)?;
+                let mut ap = Pb { b: abody, i: 0 };
+                let mut arg = None;
+                while !ap.at_end() {
+                    let at = ap.varint()?;
+                    match (at >> 3, at & 7) {
+                        (2, 2) => {
+                            let tn = ap.varint()? as usize;
+                            let tb = ap.bytes(tn)?;
+                            arg = parse_type_gsig(tb, records, d2, tparams);
+                        }
+                        (_, w) => ap.skip(w)?,
+                    }
+                }
+                args.push(arg.unwrap_or_else(|| GSig::Class("kotlin/Any".to_string(), vec![])));
+            }
+            (_, w) => pb.skip(w)?,
+        }
+    }
+    if let Some(id) = class_id {
+        let internal = resolve_class_name(records, d2, id as usize)?;
+        return Some(gsig_from_kotlin_class(&internal, args));
+    }
+    if let Some(id) = tp_id {
+        return tparams.get(&id).map(|n| GSig::Var(n.clone()));
+    }
+    if let Some(id) = tpn_id {
+        return resolve_string(records, d2, id as usize).map(GSig::Var);
+    }
+    None
+}
+
+/// A `@Metadata` class name + decoded type args → a [`GSig`]: a `kotlin/FunctionN` becomes a
+/// [`GSig::Function`] (args are `[P1..Pn, R]`), a Kotlin primitive collapses to [`GSig::Prim`] (so it
+/// matches a JVM-descriptor primitive downstream), everything else stays a [`GSig::Class`].
+fn gsig_from_kotlin_class(internal: &str, mut args: Vec<GSig>) -> GSig {
+    if let Some(arity) = internal.strip_prefix("kotlin/Function") {
+        if arity.parse::<u8>().is_ok() {
+            let ret = Box::new(
+                args.pop()
+                    .unwrap_or(GSig::Class("kotlin/Any".to_string(), vec![])),
+            );
+            return GSig::Function { params: args, ret };
+        }
+    }
+    // Arrays are `GSig::Arr` (as the JVM `Signature` parser also produces), NOT `Class("kotlin/Array")` —
+    // the vararg/spread machinery matches on `Arr`. `Array<T>` carries its element as a type argument; a
+    // primitive-array class (`IntArray`) carries the (unboxed) element implicitly (its name minus `Array`).
+    if internal == "kotlin/Array" {
+        return GSig::Arr(Box::new(
+            args.pop()
+                .unwrap_or(GSig::Class("kotlin/Any".to_string(), vec![])),
+        ));
+    }
+    if let Some(elem) = internal.strip_suffix("Array").and_then(kotlin_primitive) {
+        return GSig::Arr(Box::new(GSig::Prim(elem)));
+    }
+    // A canonical scalar/reference type (`Int`, `String`, `Unit`, `Nothing`) has ONE dedicated `Ty`
+    // variant; decode it to that here (a `GSig::Prim` leaf) so a gsig-derived return is identical to the
+    // one a source annotation produces — `Obj("kotlin/Unit")` would not drive the expression-body
+    // `areturn`'s `Unit.INSTANCE` materialization the way `Ty::Unit` does.
+    match kotlin_canonical_ty(internal) {
+        Some(t) => GSig::Prim(t),
+        None => GSig::Class(internal.to_string(), args),
+    }
+}
+
+/// The JVM primitive a Kotlin primitive class name denotes (`kotlin/Int` → `Int`), or `None`. Only the
+/// eight primitives — used to recover a primitive-array's (unboxed) element type.
+fn kotlin_primitive(internal: &str) -> Option<crate::types::Ty> {
+    use crate::types::Ty;
+    Some(match internal {
+        "kotlin/Int" => Ty::Int,
+        "kotlin/Long" => Ty::Long,
+        "kotlin/Short" => Ty::Short,
+        "kotlin/Byte" => Ty::Byte,
+        "kotlin/Double" => Ty::Double,
+        "kotlin/Float" => Ty::Float,
+        "kotlin/Boolean" => Ty::Boolean,
+        "kotlin/Char" => Ty::Char,
+        _ => return None,
+    })
+}
+
+/// The canonical `Ty` a Kotlin built-in class name denotes — the primitives PLUS the reference types that
+/// carry a dedicated variant (`String`/`Unit`/`Nothing`). `None` for a class with no canonical variant.
+fn kotlin_canonical_ty(internal: &str) -> Option<crate::types::Ty> {
+    use crate::types::Ty;
+    kotlin_primitive(internal).or_else(|| {
+        Some(match internal {
+            "kotlin/String" => Ty::String,
+            "kotlin/Unit" => Ty::Unit,
+            "kotlin/Nothing" => Ty::Nothing,
+            _ => return None,
+        })
+    })
+}
+
+/// Parse a `TypeParameter` message → `(id, name string-id)`. Proto: `id`=1, `name`=2 (string-table id).
+fn parse_type_param(body: &[u8]) -> Option<(u64, u64)> {
+    let mut pb = Pb { b: body, i: 0 };
+    let mut id = None;
+    let mut name = None;
+    while !pb.at_end() {
+        let tag = pb.varint()?;
+        match (tag >> 3, tag & 7) {
+            (1, 0) => id = Some(pb.varint()?),
+            (2, 0) => name = Some(pb.varint()?),
+            (_, w) => pb.skip(w)?,
+        }
+    }
+    Some((id?, name?))
+}
 
 /// Decode the `@Metadata` `d1` string array to raw protobuf bytes. Modern metadata (since Kotlin 1.4)
 /// stores each byte as one already-UTF8-decoded char.
@@ -427,6 +572,13 @@ struct ParsedValueParam {
     has_default: bool,
     materialized: bool,
     recv_fun: (Option<u64>, Option<u64>),
+    /// The raw `ValueParameter.type` (field 3) `Type` message body — decoded to a [`GSig`] with the
+    /// enclosing type-parameter table (needs `records`/`d2`, so it happens in `decode_functions`).
+    type_body: Vec<u8>,
+    /// The raw `ValueParameter.varargElementType` (field 5) `Type` body when the parameter is a `vararg`.
+    /// Present ⇒ the parameter is a vararg whose LOGICAL gsig is `Array<elem>`; kotlinc stores the element
+    /// type here (the JVM descriptor's array-ness lives only in `type`/the descriptor).
+    vararg_elem_body: Option<Vec<u8>>,
 }
 
 /// A decoded `Function` message: whether it's `inline`, whether it's `suspend`, its name string id, its
@@ -451,6 +603,13 @@ struct ParsedFunction {
     /// SOURCE value parameters in declaration order. The COUNT is the source arity (excludes synthetic
     /// descriptor params); fields are resolved to names downstream.
     value_params: Vec<ParsedValueParam>,
+    /// The function's own `type_parameter` table (field 4): `(id, name string-id)` — for resolving a
+    /// `Type.type_parameter` reference in a parameter/return type to its name.
+    type_params: Vec<(u64, u64)>,
+    /// Raw `Function.return_type` (field 3) `Type` body, for the metadata generic signature.
+    return_body: Option<Vec<u8>>,
+    /// Raw `Function.receiver_type` (field 5) `Type` body (extensions only), for the metadata gsig.
+    receiver_body: Option<Vec<u8>>,
 }
 
 /// Parse one `Function` message. The return type is `Function.return_type = 3` and the extension
@@ -465,17 +624,29 @@ fn parse_function(body: &[u8]) -> Option<ParsedFunction> {
     let mut has_receiver = false;
     let mut ret_nullable = false;
     let mut value_params: Vec<ParsedValueParam> = Vec::new();
+    let mut type_params: Vec<(u64, u64)> = Vec::new();
+    let mut return_body: Option<Vec<u8>> = None;
+    let mut receiver_body: Option<Vec<u8>> = None;
     while !pb.at_end() {
         let tag = pb.varint()?;
         match (tag >> 3, tag & 7) {
             (9, 0) => flags = pb.varint()?,   // flags
             (2, 0) => name_id = pb.varint()?, // name (name id in table)
+            (4, 2) => {
+                // type_parameter (repeated `TypeParameter`) — the function's own generic parameters.
+                let n = pb.varint()? as usize;
+                let tpbody = pb.bytes(n)?;
+                if let Some(tp) = parse_type_param(tpbody) {
+                    type_params.push(tp);
+                }
+            }
             (3, 2) => {
                 // return_type (inline Type message)
                 let n = pb.varint()? as usize;
                 let tbody = pb.bytes(n)?;
                 ret_class = parse_type_class_name(tbody);
                 ret_nullable = parse_type_nullable(tbody);
+                return_body = Some(tbody.to_vec());
             }
             (5, 2) => {
                 // receiver_type (inline Type message) — PRESENCE marks an extension, even when the
@@ -484,6 +655,7 @@ fn parse_function(body: &[u8]) -> Option<ParsedFunction> {
                 let n = pb.varint()? as usize;
                 let tbody = pb.bytes(n)?;
                 recv_class = parse_type_class_name(tbody);
+                receiver_body = Some(tbody.to_vec());
             }
             (6, 2) => {
                 // value_parameter (repeated `ValueParameter`) — the SOURCE value parameters. Their count
@@ -497,6 +669,8 @@ fn parse_function(body: &[u8]) -> Option<ParsedFunction> {
                 let mut nid = 0u64;
                 let mut vflags = 0u64;
                 let mut recv_ids = (None, None);
+                let mut type_body = Vec::new();
+                let mut vararg_elem_body = None;
                 while !vp.at_end() {
                     let vt = vp.varint()?;
                     match (vt >> 3, vt & 7) {
@@ -509,6 +683,12 @@ fn parse_function(body: &[u8]) -> Option<ParsedFunction> {
                             // A RECEIVER function-type param (`Recv.() -> R`) carries the
                             // `@ExtensionFunctionType` type annotation + the receiver as its first arg.
                             recv_ids = parse_type_recv_fun(tb);
+                            type_body = tb.to_vec();
+                        }
+                        (5, 2) => {
+                            // varargElementType — PRESENCE marks a `vararg`; body is the element `Type`.
+                            let tn = vp.varint()? as usize;
+                            vararg_elem_body = Some(vp.bytes(tn)?.to_vec());
                         }
                         (_, w) => vp.skip(w)?,
                     }
@@ -520,6 +700,8 @@ fn parse_function(body: &[u8]) -> Option<ParsedFunction> {
                     has_default: vflags & DECLARES_DEFAULT_VALUE_BIT != 0,
                     materialized: vflags & (IS_CROSSINLINE_BIT | IS_NOINLINE_BIT) != 0,
                     recv_fun: recv_ids,
+                    type_body,
+                    vararg_elem_body,
                 });
             }
             (100, 2) => {
@@ -542,6 +724,9 @@ fn parse_function(body: &[u8]) -> Option<ParsedFunction> {
         has_receiver,
         ret_nullable,
         value_params,
+        type_params,
+        return_body,
+        receiver_body,
     })
 }
 
@@ -561,6 +746,72 @@ fn parse_type_nullable(body: &[u8]) -> bool {
         }
     }
     false
+}
+
+/// Build the metadata-primary [`GenericSig`] for a function: `formals` = the function's + enclosing
+/// class's type-parameter names; `receiver` = the EXTENSION's `receiver_type`, or — for a member — the
+/// declaring class parameterized by its own type parameters (`Box<T>`), or `None` for a top-level
+/// function; `params` = the source VALUE parameters (no receiver, no synthetic `suspend` Continuation);
+/// `ret` = the return type. Receiver is an ATTRIBUTE, uniform for member and extension: at the
+/// checker/resolver level `class A { fun foo(): B }` and `A.foo(): B` are the same function on a receiver
+/// `A`; that an extension emits the receiver as a leading JVM arg is only an emit detail. `None` only when
+/// a receiver that WAS present fails to decode. `class_receiver` is `Some((declaring_class, class_tparams))`
+/// for a member, `None` for an extension/top-level function.
+fn build_generic_sig(
+    pf: &ParsedFunction,
+    records: &[Rec],
+    d2: &[String],
+    class_receiver: Option<(&str, &[(u64, String)])>,
+) -> Option<GenericSig> {
+    // id → name for every type parameter in scope (the enclosing class's, then the function's).
+    let class_tparams = class_receiver.map(|(_, tps)| tps).unwrap_or(&[]);
+    let mut tparams: HashMap<u64, String> = class_tparams.iter().cloned().collect();
+    let mut formals: Vec<String> = class_tparams.iter().map(|(_, n)| n.clone()).collect();
+    for (id, name_id) in &pf.type_params {
+        if let Some(name) = resolve_string(records, d2, *name_id as usize) {
+            tparams.insert(*id, name.clone());
+            formals.push(name);
+        }
+    }
+    let receiver = if let Some(rb) = &pf.receiver_body {
+        // An EXTENSION: its `receiver_type` is the receiver gsig node (`T`, `Ch`, `List<T>`, …).
+        Some(parse_type_gsig(rb, records, d2, &tparams)?)
+    } else {
+        // A MEMBER: the declaring class parameterized by its own type parameters, so unifying it with the
+        // actual receiver binds `T` exactly like an extension. `None` for a top-level function.
+        class_receiver.map(|(internal, ctps)| {
+            GSig::Class(
+                internal.to_string(),
+                ctps.iter().map(|(_, n)| GSig::Var(n.clone())).collect(),
+            )
+        })
+    };
+    let params: Vec<GSig> = pf
+        .value_params
+        .iter()
+        .map(|vp| {
+            // A `vararg elem: T` param's LOGICAL type is `Array<T>` (the JVM descriptor's array-ness); its
+            // element type is `varargElementType`, so wrap it in `Arr` to match the JVM `Signature` shape.
+            let decoded = if let Some(elem) = &vp.vararg_elem_body {
+                parse_type_gsig(elem, records, d2, &tparams).map(|e| GSig::Arr(Box::new(e)))
+            } else {
+                parse_type_gsig(&vp.type_body, records, d2, &tparams)
+            };
+            // An unresolvable param erases to a fresh unbound var (→ `Any` downstream).
+            decoded.unwrap_or(GSig::Var("\u{0}".to_string()))
+        })
+        .collect();
+    let ret = pf
+        .return_body
+        .as_ref()
+        .and_then(|rb| parse_type_gsig(rb, records, d2, &tparams))
+        .unwrap_or(GSig::Class("kotlin/Any".to_string(), vec![]));
+    Some(GenericSig {
+        formals,
+        receiver,
+        params,
+        ret,
+    })
 }
 
 #[derive(Clone, Debug)]
@@ -604,6 +855,10 @@ pub struct MetaFn {
     /// SOURCE value parameters in declaration order. The LENGTH is the source arity: it excludes
     /// synthetic JVM descriptor params such as suspend `Continuation` or Compose `Composer`/masks.
     pub value_params: Vec<MetaValueParam>,
+    /// The metadata-primary generic signature (type parameters + parameter/return gsig nodes), decoded
+    /// straight from `@Metadata` rather than the JVM `Signature` attribute — a JVM-agnostic, Kotlin-faithful
+    /// source (nullability, variance, Kotlin type identities). `None` when the return type won't decode.
+    pub generic_sig: Option<GenericSig>,
 }
 
 /// One `Property` decoded from a class's `@Metadata`: its source name, logical (Kotlin) return-type
@@ -718,6 +973,11 @@ fn decode_functions(ci: &ClassInfo, fn_field: u64) -> Vec<MetaFn> {
                             }
                         })
                         .collect();
+                    // The metadata-primary generic signature. For now the structure MATCHES the JVM
+                    // `Signature`-derived gsig (extension: receiver at `params[0]`; member/top-level: value
+                    // params only) so it is a drop-in replacement; the uniform member-receiver synthesis is
+                    // a later step (`class_receiver = None` here keeps a member's params value-only).
+                    let generic_sig = build_generic_sig(&pf, &records, d2, None);
                     out.push(MetaFn {
                         kotlin_name,
                         jvm_name,
@@ -730,6 +990,7 @@ fn decode_functions(ci: &ClassInfo, fn_field: u64) -> Vec<MetaFn> {
                         ret_class,
                         ret_nullable: pf.ret_nullable,
                         value_params,
+                        generic_sig,
                     });
                 }
             }
