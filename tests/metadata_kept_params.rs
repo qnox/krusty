@@ -15,8 +15,15 @@ use krusty::types::Ty;
 use super::common;
 
 fn kept(cp: &Classpath, name: &str, params: &[Ty]) -> Option<usize> {
-    cp.metadata_call_facts("kotlin/collections/CollectionsKt", name, params, false)
-        .kept_params
+    // The return only tiebreaks return-distinguished overloads; `kept_params` here is decided by params.
+    cp.metadata_call_facts(
+        "kotlin/collections/CollectionsKt",
+        name,
+        params,
+        &Ty::obj("java/lang/Object"),
+        false,
+    )
+    .kept_params
 }
 
 #[test]
