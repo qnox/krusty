@@ -234,6 +234,13 @@ fn emit_expr(ir: &IrFile, e: u32, inst: bool) -> String {
     emit_expr_node(ir, ir.expr(e), inst)
 }
 
+fn emit_args(ir: &IrFile, args: &[u32], inst: bool) -> String {
+    args.iter()
+        .map(|&x| emit_expr(ir, x, inst))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 fn emit_expr_node(ir: &IrFile, node: &IrExpr, inst: bool) -> String {
     match node {
         IrExpr::Const(c) => match c {
@@ -260,8 +267,7 @@ fn emit_expr_node(ir: &IrFile, node: &IrExpr, inst: bool) -> String {
         }
         IrExpr::New { class, args, .. } => {
             let name = class_simple(&ir.classes[*class as usize].fq_name);
-            let a: Vec<String> = args.iter().map(|&x| emit_expr(ir, x, inst)).collect();
-            format!("new {}({})", name, a.join(", "))
+            format!("new {}({})", name, emit_args(ir, args, inst))
         }
         IrExpr::MethodCall {
             class,
@@ -301,37 +307,31 @@ fn emit_expr_node(ir: &IrFile, node: &IrExpr, inst: bool) -> String {
         } => match callee {
             Callee::Local(fid) => {
                 let name = &ir.functions[*fid as usize].name;
-                let a: Vec<String> = args.iter().map(|&x| emit_expr(ir, x, inst)).collect();
-                format!("{}({})", name, a.join(", "))
+                format!("{}({})", name, emit_args(ir, args, inst))
             }
             Callee::LocalDefault(fid) => {
                 let name = format!("{}$default", ir.functions[*fid as usize].name);
-                let a: Vec<String> = args.iter().map(|&x| emit_expr(ir, x, inst)).collect();
-                format!("{}({})", name, a.join(", "))
+                format!("{}({})", name, emit_args(ir, args, inst))
             }
             // A resolved JVM static call has no JS equivalent — emit the receiver-first form by name.
             Callee::Static { name, .. } => {
-                let a: Vec<String> = args.iter().map(|&x| emit_expr(ir, x, inst)).collect();
-                format!("{}({})", name, a.join(", "))
+                format!("{}({})", name, emit_args(ir, args, inst))
             }
             // A cross-file top-level function — by name (JS has a flat function namespace).
             Callee::CrossFile { name, .. } => {
-                let a: Vec<String> = args.iter().map(|&x| emit_expr(ir, x, inst)).collect();
-                format!("{}({})", name, a.join(", "))
+                format!("{}({})", name, emit_args(ir, args, inst))
             }
             // A resolved JVM instance call → `receiver.name(args)`.
             Callee::Virtual { name, .. } | Callee::CrossFileVirtual { name, .. } => {
                 let recv = dispatch_receiver
                     .map(|r| emit_expr(ir, r, inst))
                     .unwrap_or_default();
-                let a: Vec<String> = args.iter().map(|&x| emit_expr(ir, x, inst)).collect();
-                format!("{}.{}({})", recv, name, a.join(", "))
+                format!("{}.{}({})", recv, name, emit_args(ir, args, inst))
             }
             // `super.name(args)` → JS `<base>.prototype.name.call(this, …)` is the closest, but the JS
             // backend doesn't track the base name; emit the plain super form.
             Callee::Special { name, .. } => {
-                let a: Vec<String> = args.iter().map(|&x| emit_expr(ir, x, inst)).collect();
-                format!("super.{}({})", name, a.join(", "))
+                format!("super.{}({})", name, emit_args(ir, args, inst))
             }
             Callee::External(fq) => match fq.as_str() {
                 "kotlin/String.plus" => {

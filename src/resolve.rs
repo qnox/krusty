@@ -5982,6 +5982,10 @@ impl<'a> Checker<'a> {
         t
     }
 
+    fn arg_tys(&mut self, args: &[ExprId]) -> Vec<Ty> {
+        args.iter().map(|&a| self.expr(a)).collect()
+    }
+
     fn expr_inner(&mut self, e: ExprId) -> Ty {
         let t = match self.file.expr(e).clone() {
             Expr::IntLit(_) => Ty::Int,
@@ -6458,10 +6462,7 @@ impl<'a> Checker<'a> {
                         })
                     {
                         let logical: Vec<Ty> = fi.callable.params[1..].to_vec();
-                        let arg_tys: Vec<Ty> = match &args {
-                            Some(a) => a.iter().map(|x| self.expr(*x)).collect(),
-                            None => vec![],
-                        };
+                        let arg_tys = args.as_deref().map_or_else(Vec::new, |a| self.arg_tys(a));
                         if logical.len() != arg_tys.len() {
                             self.diags.error(
                                 self.span(e),
@@ -6483,7 +6484,7 @@ impl<'a> Checker<'a> {
                     match &args {
                         None => self.check_member(rt, &name, self.span(e), Some(e)),
                         Some(a) => {
-                            let arg_tys: Vec<Ty> = a.iter().map(|x| self.expr(*x)).collect();
+                            let arg_tys = self.arg_tys(a);
                             let inline_arg_supported = !a
                                 .iter()
                                 .any(|x| matches!(self.file.expr(*x), Expr::CallableRef { .. }));
@@ -6549,10 +6550,7 @@ impl<'a> Checker<'a> {
                 // this module): the member/classpath/library lookups above don't see module extensions, so
                 // resolve it here on the non-null receiver. The lowerer emits the static extension call.
                 let result = if result == Ty::Error {
-                    let arg_tys: Vec<Ty> = match &args {
-                        Some(a) => a.iter().map(|x| self.expr(*x)).collect(),
-                        None => vec![],
-                    };
+                    let arg_tys = args.as_deref().map_or_else(Vec::new, |a| self.arg_tys(a));
                     crate::module_symbols::ModuleSymbols::new(self.syms)
                         .functions(&name, Some(rt.non_null()))
                         .overloads
@@ -8649,7 +8647,7 @@ impl<'a> Checker<'a> {
                 if let Some(root) = self.dotted_root(receiver) {
                     if self.lookup(&root).is_none() {
                         if let Some(pkg) = qualified_path(self.file, receiver) {
-                            let arg_tys: Vec<Ty> = args.iter().map(|a| self.expr(*a)).collect();
+                            let arg_tys = self.arg_tys(args);
                             let targs: Vec<Ty> = self
                                 .file
                                 .call_type_args
@@ -8748,7 +8746,7 @@ impl<'a> Checker<'a> {
                     if self.lookup(&root).is_none() {
                         let qname = format!("{root}.{name}");
                         if let Some(cls) = self.syms.classes.get(&qname).cloned() {
-                            let arg_tys: Vec<Ty> = args.iter().map(|a| self.expr(*a)).collect();
+                            let arg_tys = self.arg_tys(args);
                             let params = if cls.ctor_params.len() == arg_tys.len() {
                                 Some(cls.ctor_params.clone())
                             } else {
@@ -8805,7 +8803,7 @@ impl<'a> Checker<'a> {
                     if self.lookup(&outer).is_none() {
                         let qualified = format!("{outer}.{name}");
                         if let Some(cls) = self.syms.classes.get(&qualified).cloned() {
-                            let arg_tys: Vec<Ty> = args.iter().map(|a| self.expr(*a)).collect();
+                            let arg_tys = self.arg_tys(args);
                             if cls.ctor_params.len() != arg_tys.len() {
                                 self.diags.error(
                                     span,
@@ -8891,7 +8889,7 @@ impl<'a> Checker<'a> {
                                 }
                             }
                         }
-                        let arg_tys: Vec<Ty> = args.iter().map(|a| self.expr(*a)).collect();
+                        let arg_tys = self.arg_tys(args);
                         // POSITIONAL — a plain constructor, a value-class-param/omitted-default
                         // synthetic (`library_ctor_resolves` covers both). Type-check the provided
                         // arguments against the plain constructor's params when it matches.
@@ -8968,7 +8966,7 @@ impl<'a> Checker<'a> {
                 }
                 // `super.method(args)` — dispatch to the base class's method (non-virtual).
                 if matches!(self.file.expr(receiver), Expr::Name(r) if r == "super") {
-                    let arg_tys: Vec<Ty> = args.iter().map(|a| self.expr(*a)).collect();
+                    let arg_tys = self.arg_tys(args);
                     if let Some(Ty::Obj(internal, _)) = self.this_ty {
                         let sup = self
                             .syms
@@ -9012,7 +9010,7 @@ impl<'a> Checker<'a> {
                             .and_then(|c| c.static_methods.get(&name))
                             .cloned()
                         {
-                            let arg_tys: Vec<Ty> = args.iter().map(|a| self.expr(*a)).collect();
+                            let arg_tys = self.arg_tys(args);
                             if sig.params.len() != arg_tys.len() {
                                 self.diags.error(
                                     span,
@@ -9031,7 +9029,7 @@ impl<'a> Checker<'a> {
                         }
                         // `Object.member(args)` — a singleton member call.
                         if self.syms.objects.contains(&cls) {
-                            let arg_tys: Vec<Ty> = args.iter().map(|a| self.expr(*a)).collect();
+                            let arg_tys = self.arg_tys(args);
                             return match self
                                 .syms
                                 .classes
@@ -9070,7 +9068,7 @@ impl<'a> Checker<'a> {
                             };
                         }
                         if let Some(internal) = self.imports.get(&cls).cloned() {
-                            let arg_tys: Vec<Ty> = args.iter().map(|a| self.expr(*a)).collect();
+                            let arg_tys = self.arg_tys(args);
                             return match crate::call_resolver::resolve_companion(
                                 &*self.syms.libraries,
                                 &internal,
@@ -10001,7 +9999,7 @@ impl<'a> Checker<'a> {
                 // member `operator fun invoke` — both go through the one invoke convention.
                 if let Some(local) = self.lookup(&fname) {
                     let receiver_ty = local.ty;
-                    let arg_tys: Vec<Ty> = args.iter().map(|a| self.expr(*a)).collect();
+                    let arg_tys = self.arg_tys(args);
                     if let Some(ret) =
                         self.record_invoke(call, callee, receiver_ty, args, &arg_tys, span)
                     {
@@ -10014,7 +10012,7 @@ impl<'a> Checker<'a> {
                 // calls `FunctionN.invoke`.
                 if self.lookup(&fname).is_none() {
                     if let Some(&(rt @ Ty::Fun(_), _, _)) = self.syms.props.get(&fname) {
-                        let arg_tys: Vec<Ty> = args.iter().map(|a| self.expr(*a)).collect();
+                        let arg_tys = self.arg_tys(args);
                         if let Some(ret) =
                             self.record_invoke(call, callee, rt, args, &arg_tys, span)
                         {
@@ -10024,7 +10022,7 @@ impl<'a> Checker<'a> {
                 }
                 // Local function call — resolved before top-level funs and constructors.
                 if let Some((stmt_id, sig)) = self.lookup_local_fun(&fname) {
-                    let arg_tys: Vec<Ty> = args.iter().map(|a| self.expr(*a)).collect();
+                    let arg_tys = self.arg_tys(args);
                     if arg_tys.len() != sig.params.len() {
                         self.diags.error(
                             span,
@@ -10978,7 +10976,7 @@ impl<'a> Checker<'a> {
                 // An arbitrary callee expression (e.g. `make()(x)`): invoke it if it is a function
                 // value or carries a member `operator fun invoke`.
                 let callee_ty = self.expr(callee);
-                let arg_tys: Vec<Ty> = args.iter().map(|a| self.expr(*a)).collect();
+                let arg_tys = self.arg_tys(args);
                 if let Some(ret) = self.record_invoke(call, callee, callee_ty, args, &arg_tys, span)
                 {
                     return ret;
