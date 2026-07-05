@@ -7,6 +7,7 @@
 //! string table, which contains type-alias targets used by `classpath.rs` for type resolution.
 
 pub const ACC_PUBLIC: u16 = 0x0001;
+pub const ACC_PROTECTED: u16 = 0x0004;
 pub const ACC_STATIC: u16 = 0x0008;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -23,6 +24,11 @@ pub struct MethodSig {
 impl MethodSig {
     pub fn is_public(&self) -> bool {
         self.access & ACC_PUBLIC != 0
+    }
+    /// A `protected` member (JVM `ACC_PROTECTED`) — reachable only from a subclass. Surfaced during the
+    /// supertype member walk so a Kotlin subclass can call an inherited protected classpath member.
+    pub fn is_protected(&self) -> bool {
+        self.access & ACC_PROTECTED != 0
     }
     pub fn is_static(&self) -> bool {
         self.access & ACC_STATIC != 0
@@ -81,6 +87,17 @@ impl ClassInfo {
     /// `ACC_INTERFACE` — call sites dispatch through it with `invokeinterface`, not `invokevirtual`.
     pub fn is_interface(&self) -> bool {
         self.access & 0x0200 != 0
+    }
+
+    /// `ACC_FINAL` — a subclass would fail verification (`cannot inherit from final class`).
+    pub fn is_final(&self) -> bool {
+        self.access & 0x0010 != 0
+    }
+
+    /// `ACC_ABSTRACT` — extending it requires implementing its abstract methods (and any bridges),
+    /// which krusty does not synthesize, so such a base is not a safe superclass to emit.
+    pub fn is_abstract(&self) -> bool {
+        self.access & 0x0400 != 0
     }
 
     pub fn method(&self, name: &str, descriptor: &str) -> Option<&MethodSig> {

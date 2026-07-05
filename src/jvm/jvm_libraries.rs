@@ -1053,6 +1053,16 @@ fn class_implements(cp: &Classpath, internal: &str, target: &str) -> bool {
 }
 
 impl SymbolSource for JvmLibraries {
+    fn class_is_extensible(&self, internal: &str) -> bool {
+        // Only a real, concrete (non-final, non-abstract) non-interface `.class` is a safe superclass to
+        // emit a `super(…)` to. A mapped/builtin type (no own `.class`) or a final/abstract/interface
+        // base is rejected — extending it would either fail JVM verification or need bridge/abstract
+        // synthesis the backend does not do.
+        self.cp
+            .find(internal)
+            .is_some_and(|ci| !ci.is_final() && !ci.is_abstract() && !ci.is_interface())
+    }
+
     fn resolve_type(&self, internal: &str) -> Option<LibraryType> {
         if let Some(hit) = self.type_cache.borrow().get(internal) {
             return hit.as_ref().map(|rc| (**rc).clone());
@@ -1107,13 +1117,21 @@ impl SymbolSource for JvmLibraries {
             // resolves the member on the concrete class, not on `Map` itself.
             let is_map = class_implements(&self.cp, internal, "java/util/Map");
             for m in &ci.methods {
-                // Only public members are callable from generated code.
-                if !m.is_public() {
+                // Public members are callable from anywhere; a `protected` member is surfaced too so a
+                // subclass can reach it through the supertype walk (a compiling program only reaches it
+                // from a legal subclass, which kotlinc already checked). Private/package members stay
+                // dropped: no legal call site.
+                if !m.is_public() && !m.is_protected() {
                     continue;
                 }
                 let (params, ret) = parse_method_desc(&m.descriptor);
                 let mut member =
                     LibraryMember::new(m.name.clone(), params, ret, m.descriptor.clone());
+                member.visibility = if m.is_public() {
+                    Visibility::Public
+                } else {
+                    Visibility::Protected
+                };
                 member.signature = m.signature.clone();
                 member.suspend = self.cp.is_suspend_method(internal, &m.name);
                 if is_map && member.name == "put" {
@@ -1930,6 +1948,7 @@ impl SymbolSource for JvmLibraries {
                                         || (suspend_ret_nullable && !ret.is_reference()),
                                     None,
                                 ),
+                                visibility: m.visibility,
                                 receiver_rank: rung,
                                 overload_rank: descriptor_narrowing(&m.descriptor) as u32,
                                 generic_sig,

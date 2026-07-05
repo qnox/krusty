@@ -7933,6 +7933,51 @@ impl<'a> Checker<'a> {
     /// the body of a receiver lambda (`StringBuilder().apply { append("x") }` → `this.append("x")`).
     /// Mirrors the qualified `recv.name(args)` member-call typing for builtin/library/user receivers.
     /// Returns `Some(ret)` when it resolves, `None` to let the caller keep searching. Checks arguments.
+    /// A user class that EXTENDS a classpath type inherits that supertype's members (`class Sub :
+    /// lib.Base()` calling an inherited method, e.g. a `protected` one). `resolve_instance_member` on the
+    /// user class itself misses them — the library has no `resolve_type` for a user class — so walk the
+    /// declared supertype chain and resolve the member on each CLASSPATH supertype. Records the resolved
+    /// member so the lowerer emits it directly. MUST run only after the module-member lookup fails, so a
+    /// user override keeps precedence over the inherited classpath member.
+    fn classpath_super_member_ret(
+        &mut self,
+        call: ExprId,
+        sub_internal: &str,
+        name: &str,
+        arg_tys: &[Ty],
+    ) -> Option<Ty> {
+        // Not a user class — its own members already went through the library.
+        self.syms.class_by_internal(sub_internal)?;
+        for sup in self.syms.supertype_internals(sub_internal) {
+            if self.syms.class_by_internal(&sup).is_some() {
+                continue; // a user supertype — already covered by the module-member walk
+            }
+            // Only inherit through a base CLASS chain, never an interface supertype: a concrete member
+            // reached via an interface (e.g. `Object.clone` seen through a `Cloneable` supertype) would
+            // emit an `invokevirtual` whose owner is an interface (`IncompatibleClassChangeError`).
+            // Interface default methods are resolved by the ordinary member paths, not here.
+            if self
+                .syms
+                .libraries
+                .resolve_type(&sup)
+                .is_none_or(|t| t.is_interface())
+            {
+                continue;
+            }
+            if let Some(m) = crate::call_resolver::resolve_instance_member(
+                &*self.syms.libraries,
+                Ty::obj(&sup),
+                name,
+                arg_tys,
+            ) {
+                let ret = m.ret;
+                self.resolved_members.insert(call, m);
+                return Some(ret);
+            }
+        }
+        None
+    }
+
     fn this_member_call_ret(
         &mut self,
         call: ExprId,
@@ -8000,6 +8045,11 @@ impl<'a> Checker<'a> {
                 let ret = m.ret;
                 self.resolved_members.insert(call, m);
                 return Some(ret);
+            }
+            if let Some(internal) = rt.obj_internal() {
+                if let Some(ret) = self.classpath_super_member_ret(call, internal, name, arg_tys) {
+                    return Some(ret);
+                }
             }
         }
         // A MODULE extension on the receiver (`fun Recv.name(args)` declared in this compilation) — keyed
@@ -9723,6 +9773,16 @@ impl<'a> Checker<'a> {
                         &arg_tys,
                     ) {
                         return m.ret;
+                    }
+                    // A user class that EXTENDS a classpath type inherits that supertype's members
+                    // (`sub.inheritedMethod()`). Runs after the module-member lookup, so a user override
+                    // wins.
+                    if let Some(internal) = rt.obj_internal() {
+                        if let Some(ret) =
+                            self.classpath_super_member_ret(call, internal, &name, &arg_tys)
+                        {
+                            return ret;
+                        }
                     }
                 }
                 // Builtin bitwise/shift operator methods on `Int`/`Long` (`a shl b`, `a and b`,

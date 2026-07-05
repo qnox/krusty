@@ -63,6 +63,10 @@ pub struct LibraryMember {
     /// into the emitted invoke (its CPS descriptor rebuilt by the coroutine pass) and treat the
     /// Object-erased result as `ret`.
     pub suspend: bool,
+    /// The member's Kotlin visibility, from its bytecode access flags/`@Metadata`. A `Protected` member
+    /// is surfaced (not dropped) so a subclass can reach an inherited classpath member; the emit is
+    /// identical to a public one. `Public` by default.
+    pub visibility: Visibility,
 }
 
 /// Platform-provided accessor used by counted range/progression loop lowering. The name and descriptor
@@ -337,6 +341,7 @@ impl LibraryMember {
             is_interface: false,
             inline: InlineKind::None,
             suspend: false,
+            visibility: Visibility::Public,
         }
     }
 }

@@ -766,6 +766,8 @@ impl Classpath {
                         is_interface: is_iface,
                         inline: crate::libraries::InlineKind::None,
                         suspend: false,
+                        // Builtin (`.kotlin_builtins`) members are all public API.
+                        visibility: crate::libraries::Visibility::Public,
                     }
                 })
             })
