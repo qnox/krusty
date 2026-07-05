@@ -4,6 +4,7 @@
 //! only Kotlin-level `Ty`s and opaque descriptor tokens through the trait.
 
 use super::classpath::{kotlin_name_to_ty, metadata_return_info, Classpath};
+use super::classreader::{ConstVal, FieldSig};
 use super::jvm_class_map::{
     kotlin_builtin_to_internal, to_jvm_internal, to_kotlin_internal, BUILTIN_MAPPED_NAMES,
 };
@@ -37,14 +38,27 @@ impl JvmLibraries {
         JvmLibraries { cp }
     }
 
-    fn const_value_to_lib(value: &crate::jvm::classreader::ConstVal) -> Option<LibConst> {
-        match value {
-            crate::jvm::classreader::ConstVal::Int(v) => Some(LibConst::Int(*v)),
-            crate::jvm::classreader::ConstVal::Long(v) => Some(LibConst::Long(*v)),
-            crate::jvm::classreader::ConstVal::Float(v) => Some(LibConst::Float(*v)),
-            crate::jvm::classreader::ConstVal::Double(v) => Some(LibConst::Double(*v)),
-            crate::jvm::classreader::ConstVal::Str(_) => None,
-        }
+    fn const_fields<F>(
+        fields: &[FieldSig],
+        mut ty: F,
+    ) -> std::collections::HashMap<String, LibraryConst>
+    where
+        F: FnMut(&FieldSig) -> Option<Ty>,
+    {
+        fields
+            .iter()
+            .filter_map(|f| {
+                let ty = ty(f)?;
+                let value = match f.const_value.as_ref()? {
+                    ConstVal::Int(v) => LibConst::Int(*v),
+                    ConstVal::Long(v) => LibConst::Long(*v),
+                    ConstVal::Float(v) => LibConst::Float(*v),
+                    ConstVal::Double(v) => LibConst::Double(*v),
+                    ConstVal::Str(_) => return None,
+                };
+                Some((f.name.clone(), LibraryConst { ty, value }))
+            })
+            .collect()
     }
 
     fn primitive_companion_consts_for_type(
@@ -66,19 +80,7 @@ impl JvmLibraries {
         let Some(ci) = self.cp.find(&internal) else {
             return std::collections::HashMap::new();
         };
-        ci.fields
-            .iter()
-            .filter_map(|f| {
-                let value = Self::const_value_to_lib(f.const_value.as_ref()?)?;
-                Some((
-                    f.name.clone(),
-                    LibraryConst {
-                        ty: field_desc_to_ty(&f.descriptor),
-                        value,
-                    },
-                ))
-            })
-            .collect()
+        Self::const_fields(&ci.fields, |f| Some(field_desc_to_ty(&f.descriptor)))
     }
 
     fn metadata_static_companion_consts_for_type(
@@ -94,15 +96,9 @@ impl JvmLibraries {
             return std::collections::HashMap::new();
         };
         let prop_rets = super::metadata::class_property_return_classes(&companion);
-        ci.fields
-            .iter()
-            .filter_map(|f| {
-                let ret = prop_rets.get(&f.name)?;
-                let ty = kotlin_name_to_ty(ret);
-                let value = Self::const_value_to_lib(f.const_value.as_ref()?)?;
-                Some((f.name.clone(), LibraryConst { ty, value }))
-            })
-            .collect()
+        Self::const_fields(&ci.fields, |f| {
+            prop_rets.get(&f.name).map(|ret| kotlin_name_to_ty(ret))
+        })
     }
 
     fn companion_consts_for_type(
