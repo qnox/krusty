@@ -9901,16 +9901,23 @@ impl<'a> Lower<'a> {
             Ty::Obj(i, _) => i.to_string(),
             _ => return None,
         };
-        let resolved =
-            crate::call_resolver::resolve_property_member(&*self.syms.libraries, rt, name).map(
-                |r| {
-                    let m = r.member;
-                    let physical_ret = m.physical_ret;
-                    let owner = m.owner.clone().unwrap_or_else(|| internal.clone());
-                    let is_iface = self.library_type_is_interface(&owner);
-                    (m, is_iface, physical_ret)
-                },
-            );
+        let resolved = self
+            .info
+            .resolved_members
+            .get(&e)
+            .cloned()
+            // Reuse the getter the checker resolved for this property read (keyed by the access
+            // ExprId); resolve only when it was recorded through a different path.
+            .or_else(|| {
+                crate::call_resolver::resolve_property_member(&*self.syms.libraries, rt, name)
+            })
+            .map(|r| {
+                let m = r.member;
+                let physical_ret = m.physical_ret;
+                let owner = m.owner.clone().unwrap_or_else(|| internal.clone());
+                let is_iface = self.library_type_is_interface(&owner);
+                (m, is_iface, physical_ret)
+            });
         if let Some((m, is_iface, physical_ret)) = resolved {
             let owner = m.owner.clone().unwrap_or_else(|| internal.clone());
             let read = self.ir.add_expr(IrExpr::Call {
