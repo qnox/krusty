@@ -596,6 +596,7 @@ impl Classpath {
                 CallSig::metadata_extension(
                     end,
                     c.value_params.iter().map(|p| p.name.clone()).collect(),
+                    c.value_params.iter().map(|p| p.has_default).collect(),
                 )
             } else {
                 CallSig::metadata_top_level(

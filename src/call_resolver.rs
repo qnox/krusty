@@ -166,6 +166,40 @@ fn bind_ext_ret(gsig: &GenericSig, receiver: Ty, args: &[Ty], targs: &[Ty]) -> T
     gsig_to_ty(&gsig.ret, &binds)
 }
 
+/// Bind an extension's generic return when OMITTED defaults leave the call args misaligned with the
+/// signature's value params. With a trailing lambda the provided args are a prefix and the last arg fills
+/// the LAST value-param (the omitted middle is skipped); otherwise the args are a leading prefix. Falls
+/// back to the plain positional binder when the overload has no generic signature.
+fn bind_defaulted_ext_ret(
+    o: &FunctionInfo,
+    receiver: Ty,
+    args: &[Ty],
+    targs: &[Ty],
+    trailing_lambda: bool,
+) -> Ty {
+    let Some(gsig) = o.generic_sig.as_ref() else {
+        return o.callable.ret;
+    };
+    let mut binds = seeded_gsig_binds(gsig, targs);
+    if let Some(recv_sig) = &gsig.receiver {
+        unify_gsig(recv_sig, receiver, &mut binds);
+    }
+    if trailing_lambda {
+        let prefix = args.len().saturating_sub(1);
+        for (ps, a) in gsig.params.iter().take(prefix).zip(args) {
+            unify_gsig(ps, *a, &mut binds);
+        }
+        if let (Some(ls), Some(la)) = (gsig.params.last(), args.last()) {
+            unify_gsig(ls, *la, &mut binds);
+        }
+    } else {
+        for (ps, a) in gsig.params.iter().zip(args) {
+            unify_gsig(ps, *a, &mut binds);
+        }
+    }
+    gsig_to_ty(&gsig.ret, &binds)
+}
+
 /// If `sig` is a function type, the substituted types of its lambda parameters. Empty for anything else.
 pub(crate) fn function_input_types(sig: &GSig, binds: &GSigBinds) -> Vec<Ty> {
     match sig {
@@ -277,6 +311,17 @@ impl<'a> CallResolver<'a> {
             .overloads
             .iter()
             .any(|o| o.flags.suspend)
+    }
+
+    /// True when `receiver.name(...)` binds a `suspend` EXTENSION (e.g. `Mutex.withLock`). The member
+    /// query in the lowerer only sees instance members; a suspend extension is invisible to it, so the
+    /// coroutine pass would miss the suspension point without this. Mirrors [`Self::toplevel_is_suspend`].
+    pub fn extension_is_suspend(&self, name: &str, receiver: Ty) -> bool {
+        self.lib
+            .functions(name, Some(receiver))
+            .overloads
+            .iter()
+            .any(|o| o.kind == FnKind::Extension && o.flags.suspend)
     }
 
     /// Resolve a receiver-less top-level library callable for a concrete call site. This is the
@@ -416,20 +461,77 @@ impl<'a> CallResolver<'a> {
         args: &[Ty],
         type_args: &[Ty],
     ) -> Option<LibraryCallable> {
-        self.resolve_extension_callable_exact(name, receiver, args, type_args, false)
-            .or_else(|| self.resolve_extension_default_callable(name, receiver, args, type_args))
+        let o = select_overload(
+            self.lib,
+            receiver,
+            name,
+            args,
+            type_args,
+            FnKind::Extension,
+            false,
+        )?;
+        self.build_extension_callable(name, receiver, args, type_args, &o)
     }
 
-    /// Resolve an extension callable for the bytecode inliner. This uses the same overload selection as
-    /// ordinary extension calls, but also admits non-public `@InlineOnly` candidates because callers must
-    /// splice the result and never emit it as a JVM call.
+    /// Resolve an extension callable for the bytecode inliner. Same overload selection as ordinary extension
+    /// calls, but also admits non-public `@InlineOnly` candidates (the caller splices, never emits a call).
     pub fn resolve_extension_inline_callable(
         &self,
         name: &str,
         receiver: Ty,
         args: &[Ty],
     ) -> Option<LibraryCallable> {
-        self.resolve_extension_callable_exact(name, receiver, args, &[], true)
+        let o = select_overload(self.lib, receiver, name, args, &[], FnKind::Extension, true)?;
+        self.build_extension_callable(name, receiver, args, &[], &o)
+    }
+
+    /// Shape a selected extension overload into a [`LibraryCallable`] for the call site. An EXACT call binds
+    /// the generic return directly. A call that OMITS trailing defaults picks the emit form by a Kotlin ABI
+    /// fact — an `inline` function has no `$default` synthetic (kotlinc materializes defaults by inlining),
+    /// so it becomes a MUST-INLINE splice; a non-`inline` one binds the `name$default` synthetic (the
+    /// backend appends placeholders + a bit-mask).
+    fn build_extension_callable(
+        &self,
+        name: &str,
+        receiver: Ty,
+        args: &[Ty],
+        type_args: &[Ty],
+        o: &FunctionInfo,
+    ) -> Option<LibraryCallable> {
+        let vparams = logical_value_params(self.lib, o, receiver, type_args);
+        if vparams.len() == args.len() {
+            return Some(self.bind_extension_callable(o, receiver, args, type_args));
+        }
+        // Defaulted call — omitted trailing/middle params. Bind the return with default-aware alignment.
+        let trailing_lambda = args.last().is_some_and(|a| matches!(a, Ty::Fun(_)));
+        let ret_ty = o.ret.apply(bind_defaulted_ext_ret(
+            o,
+            receiver,
+            args,
+            type_args,
+            trailing_lambda,
+        ));
+        if o.flags.inline.can_inline() {
+            let mut callable = callable_with_return(&o.callable, ret_ty, true);
+            callable.inline = crate::libraries::InlineKind::MustInline;
+            crate::trace_compiler!(
+                "resolve",
+                "extension defaulted (inline) {name} recv={receiver:?} args={args:?} -> {}.{}{} ret={ret_ty:?}",
+                callable.owner,
+                callable.name,
+                callable.descriptor
+            );
+            return Some(callable);
+        }
+        let c = self.default_synthetic_callable(name, receiver, args)?;
+        crate::trace_compiler!(
+            "resolve",
+            "extension defaulted ($default) {name} recv={receiver:?} args={args:?} -> {}.{}{} ret={ret_ty:?}",
+            c.owner,
+            c.name,
+            c.descriptor
+        );
+        Some(callable_with_return(&c, ret_ty, true))
     }
 
     /// Resolve a classpath/library extension property getter for `receiver.property`.
@@ -453,103 +555,6 @@ impl<'a> CallResolver<'a> {
             .or_else(|| self.lib.physical_property_getter_name(property))?;
         self.resolve_extension_callable(&getter, receiver, &[], &[])
             .filter(|c| c.ret.is_read_value_result())
-    }
-
-    fn resolve_extension_callable_exact(
-        &self,
-        name: &str,
-        receiver: Ty,
-        args: &[Ty],
-        type_args: &[Ty],
-        allow_must_inline: bool,
-    ) -> Option<LibraryCallable> {
-        let fs = self.lib.functions(name, Some(receiver));
-        let ranked = ranked_extension_overloads(&fs, allow_must_inline);
-        let mut ranks: Vec<u32> = ranked.iter().map(|o| o.receiver_rank).collect();
-        ranks.dedup();
-
-        for rank in ranks {
-            let mut matches: Vec<(&FunctionInfo, Vec<Ty>)> = ranked
-                .iter()
-                .copied()
-                .filter(|o| o.receiver_rank == rank)
-                .filter_map(|o| {
-                    let logical = self.bound_logical_params(o, receiver, type_args);
-                    (logical.len() == args.len() + 1).then_some((o, logical))
-                })
-                .filter(|o| {
-                    o.1[1..]
-                        .iter()
-                        .zip(args)
-                        .all(|(p, a)| self.arg_fits_or_subtype(p, a))
-                })
-                .collect();
-            if matches.is_empty() {
-                continue;
-            }
-            matches.sort_by_key(|o| o.0.overload_rank);
-            let specific_over = |a: &[Ty], b: &[Ty]| -> bool {
-                a.iter()
-                    .zip(b)
-                    .all(|(pa, pb)| self.arg_fits_or_subtype(pb, pa))
-            };
-            let best = (0..matches.len())
-                .find(|&i| {
-                    (0..matches.len())
-                        .all(|j| j == i || specific_over(&matches[i].1[1..], &matches[j].1[1..]))
-                })
-                .unwrap_or(0);
-            let o = matches[best].0;
-            crate::trace_compiler!(
-                "resolve",
-                "extension {name} recv={receiver:?} args={args:?} inline={} -> {}.{}{} ret={:?}",
-                allow_must_inline,
-                o.callable.owner,
-                o.callable.name,
-                o.callable.descriptor,
-                o.callable.ret
-            );
-            return Some(self.bind_extension_callable(o, receiver, args, type_args));
-        }
-        crate::trace_compiler!(
-            "resolve",
-            "extension {name} recv={receiver:?} args={args:?} inline={} -> <none>",
-            allow_must_inline
-        );
-        None
-    }
-
-    fn bound_logical_params(&self, o: &FunctionInfo, receiver: Ty, type_args: &[Ty]) -> Vec<Ty> {
-        o.generic_sig
-            .as_ref()
-            .map(|gsig| {
-                let mut binds = seeded_gsig_binds(gsig, type_args);
-                if let Some(recv_sig) = &gsig.receiver {
-                    unify_gsig(recv_sig, receiver, &mut binds);
-                }
-                // Emit-shaped list `[receiver, value-params…]` to match an extension's `callable.params`
-                // (receiver as the leading JVM arg); the caller compares `out[1..]` against the call args.
-                let recv_ty = gsig
-                    .receiver
-                    .as_ref()
-                    .map(|r| gsig_to_ty(r, &binds))
-                    .unwrap_or(receiver);
-                let mut out = vec![recv_ty];
-                out.extend(gsig_tys(&gsig.params, &binds));
-                // A VALUE-CLASS parameter is spelled as its ERASED underlying in the JVM `Signature`
-                // (`Id` → `kotlin/String`), but the callable's LOGICAL parameter carries the value-class
-                // type — prefer it so a value-class ARGUMENT (`getFor(id: Id)`) matches rather than being
-                // compared against the erased underlying.
-                for (i, p) in out.iter_mut().enumerate() {
-                    if let Some(cp) = o.callable.params.get(i) {
-                        if self.lib.value_underlying(*cp).is_some() {
-                            *p = *cp;
-                        }
-                    }
-                }
-                out
-            })
-            .unwrap_or_else(|| o.callable.params.clone())
     }
 
     fn bind_extension_callable(
@@ -580,20 +585,20 @@ impl<'a> CallResolver<'a> {
         callable_with_return(c, ret_ty2, false)
     }
 
-    fn resolve_extension_default_callable(
+    /// Find the `name$default` synthetic callable applicable to a defaulted extension call — the emit-shaped
+    /// callable (receiver at `params[0]`, all real params present) the backend fills with placeholders.
+    fn default_synthetic_callable(
         &self,
         name: &str,
         receiver: Ty,
         args: &[Ty],
-        type_args: &[Ty],
     ) -> Option<LibraryCallable> {
         let fs = self
             .lib
             .functions(&format!("{name}$default"), Some(receiver));
         let trailing_lambda = args.last().is_some_and(|a| matches!(a, Ty::Fun(_)));
         for o in ranked_extension_overloads(&fs, false) {
-            let c = &o.callable;
-            let params = &c.params;
+            let params = &o.callable.params;
             if params.is_empty() {
                 continue;
             }
@@ -613,16 +618,9 @@ impl<'a> CallResolver<'a> {
                         .zip(args)
                         .all(|(p, a)| self.arg_fits_or_subtype(p, a))
             };
-            if !fits {
-                continue;
+            if fits {
+                return Some(o.callable.clone());
             }
-            let ret_ty = o
-                .generic_sig
-                .as_ref()
-                .map(|gsig| bind_ext_ret(gsig, receiver, args, type_args))
-                .unwrap_or(c.ret);
-            let ret_ty = o.ret.apply(ret_ty);
-            return Some(callable_with_return(c, ret_ty, true));
         }
         None
     }
@@ -1606,9 +1604,46 @@ fn select_instance_info(
     name: &str,
     args: &[Ty],
 ) -> Option<FunctionInfo> {
-    let internal = recv.kotlin_class_internal()?;
-    if !lib.resolve_type(internal)?.is_public {
-        return None;
+    select_overload(lib, recv, name, args, &[], FnKind::Member, false)
+}
+
+/// The single call-overload selector for a receiver call `recv.name(args)`. It is parameterized by
+/// [`FnKind`] — MEMBER and EXTENSION resolution differ only in the *calling convention* the backend emits
+/// (invokevirtual with `this` vs invokestatic with the receiver as the leading arg), NOT in how the best
+/// overload is chosen. The receiver is always an ATTRIBUTE, never `params[0]`: candidates are matched
+/// against their LOGICAL value parameters (a member's `callable.params` are value-only; an extension's
+/// prepend the receiver in the JVM emit shape, so [`logical_value_params`] strips it). Overloads are tried
+/// closest-receiver-rank first, and within a rank by the ordered applicability passes below.
+fn select_overload(
+    lib: &dyn CompilerPlatform,
+    recv: Ty,
+    name: &str,
+    args: &[Ty],
+    type_args: &[Ty],
+    kind: FnKind,
+    allow_must_inline: bool,
+) -> Option<FunctionInfo> {
+    // A MEMBER call needs a public class receiver; an EXTENSION resolves on any receiver (primitives,
+    // type variables, nullable types) that may have no `resolve_type` entry, so gate only members.
+    if kind == FnKind::Member {
+        let internal = recv.kotlin_class_internal()?;
+        if !lib.resolve_type(internal)?.is_public {
+            return None;
+        }
+    }
+    let fs = lib.functions(name, Some(recv));
+    // Candidates as `(overload, logical value params)`, grouped by receiver rank. An extension admits only
+    // public overloads unless the caller is the bytecode inliner (which splices non-public `@InlineOnly`).
+    let mut by_rank: std::collections::BTreeMap<u32, Vec<(&FunctionInfo, Vec<Ty>)>> =
+        std::collections::BTreeMap::new();
+    for o in fs.overloads.iter().filter(|o| {
+        o.kind == kind
+            && (kind != FnKind::Extension
+                || (o.receiver_rank != u32::MAX
+                    && (o.public || (allow_must_inline && o.flags.inline.must_inline()))))
+    }) {
+        let lp = logical_value_params(lib, o, recv, type_args);
+        by_rank.entry(o.receiver_rank).or_default().push((o, lp));
     }
     // A generic method erases its type-parameter arguments to `Any` (`List<E>.add(E)` → `add(Object)`),
     // so a reference argument matches against an `Any` parameter — try the exact args, then widened.
@@ -1622,88 +1657,171 @@ fn select_instance_info(
             }
         })
         .collect();
-    let fs = lib.functions(name, Some(recv));
-    let mut by_rank: std::collections::BTreeMap<u32, Vec<&FunctionInfo>> =
-        std::collections::BTreeMap::new();
-    for o in fs.overloads.iter().filter(|o| o.kind == FnKind::Member) {
-        by_rank.entry(o.receiver_rank).or_default().push(o);
-    }
-    for members in by_rank.values() {
-        if let Some(o) = best_member_overload(members.iter().copied(), args)
-            .or_else(|| best_member_overload(members.iter().copied(), &widened))
+    for cands in by_rank.values() {
+        if let Some(o) =
+            best_by_args(lib, cands, args).or_else(|| best_by_args(lib, cands, &widened))
         {
             return Some(o.clone());
         }
     }
-    // Third pass — SUBTYPE-aware: an argument whose supertype closure includes the parameter type
-    // (e.g. a `KSerializer` passed where `SerializationStrategy` is expected — `KSerializer<T> :
-    // SerializationStrategy<T>`). The exact/widened passes above miss this because ordinary member
-    // assignability only accepts an exact type or an erased `Any`.
-    for members in by_rank.values() {
-        if let Some(o) = members.iter().copied().find(|o| {
-            o.callable.params.len() == args.len()
-                && o.callable
-                    .params
-                    .iter()
-                    .zip(args)
-                    .all(|(p, a)| arg_subtype_assignable(lib, p, a))
+    // SUBTYPE / value-class-underlying pass: an argument whose supertype closure includes the parameter
+    // type (a `KSerializer` where `SerializationStrategy` is expected), or a value-class argument matching
+    // its erased underlying. The exact/widened passes miss these (only exact or erased `Any`).
+    for cands in by_rank.values() {
+        if let Some((o, _)) = cands.iter().find(|(_, lp)| {
+            lp.len() == args.len() && lp.iter().zip(args).all(|(p, a)| arg_assignable(lib, p, a))
         }) {
-            return Some(o.clone());
+            return Some((*o).clone());
         }
     }
     // Descriptor-form pass, shared with constructor resolution: bridge Kotlin collection identity and
     // erase type arguments after exact, widened, and source-level subtype matching have failed.
     if let Some(jvm_args) = descriptor_form_args(lib, args) {
-        for members in by_rank.values() {
-            if let Some(o) = members
+        for cands in by_rank.values() {
+            if let Some((o, _)) = cands
                 .iter()
-                .copied()
-                .find(|o| params_match_descriptor_form(lib, &o.callable.params, &jvm_args))
+                .find(|(_, lp)| params_match_descriptor_form(lib, lp, &jvm_args))
             {
                 crate::trace_compiler!(
                     "resolve",
-                    "select_instance_info {} matched via jvm-descriptor-form args {args:?} -> {jvm_args:?}",
+                    "select_overload {} matched via jvm-descriptor-form args {args:?} -> {jvm_args:?}",
                     o.callable.name
                 );
-                return Some(o.clone());
+                return Some((*o).clone());
             }
         }
     }
     None
 }
 
-fn best_member_overload<'a>(
-    candidates: impl Iterator<Item = &'a FunctionInfo> + Clone,
+/// LOGICAL value parameters of an overload — what a call site's arguments are matched against, with the
+/// receiver excluded (it is an attribute). Member/top-level `callable.params` are already value-only; an
+/// extension's `callable.params` prepend the receiver in the JVM emit shape, so bind the generic signature
+/// to `recv` and drop the leading receiver, preferring each parameter's value-class LOGICAL type over its
+/// erased underlying (`Id` over `kotlin/String`).
+fn logical_value_params(
+    lib: &dyn CompilerPlatform,
+    o: &FunctionInfo,
+    recv: Ty,
+    type_args: &[Ty],
+) -> Vec<Ty> {
+    if o.kind != FnKind::Extension {
+        return o.callable.params.clone();
+    }
+    match o.generic_sig.as_ref() {
+        Some(gsig) => {
+            let mut binds = seeded_gsig_binds(gsig, type_args);
+            if let Some(recv_sig) = &gsig.receiver {
+                unify_gsig(recv_sig, recv, &mut binds);
+            }
+            let mut out = gsig_tys(&gsig.params, &binds);
+            for (i, p) in out.iter_mut().enumerate() {
+                // `callable.params[0]` is the receiver in the emit shape, so value params start at `+1`.
+                if let Some(cp) = o.callable.params.get(i + 1) {
+                    if lib.value_underlying(*cp).is_some() {
+                        *p = *cp;
+                    }
+                }
+            }
+            out
+        }
+        None => o
+            .callable
+            .params
+            .get(1..)
+            .map(<[Ty]>::to_vec)
+            .unwrap_or_default(),
+    }
+}
+
+/// Whether `arg` is assignable to `param` allowing a reference SUBTYPE or a value-class argument matching
+/// its erased underlying — the union of the source-level subtype rule and value-class unboxing.
+fn arg_assignable(lib: &dyn CompilerPlatform, param: &Ty, arg: &Ty) -> bool {
+    arg_subtype_assignable(lib, param, arg)
+        || lib.value_underlying(*arg).is_some_and(|u| *param == u)
+}
+
+/// `arg`'s class transitively extends/implements `param`'s class, mapping a function-TYPE parameter
+/// (`Ty::Fun`) to its `kotlin/FunctionN` class — so a `KProperty1` (which implements `Function1`) fits a
+/// `(T) -> R` parameter. Uses `kotlin_class_internal` on BOTH sides (which resolves `Ty::Fun`), unlike
+/// [`arg_subtype_assignable`]'s `obj_internal` (which is `None` for a function type).
+fn ref_subtype_fits(lib: &dyn CompilerPlatform, param: &Ty, arg: &Ty) -> bool {
+    match (param.kotlin_class_internal(), arg.kotlin_class_internal()) {
+        (Some(target), Some(start)) => is_classpath_subtype(lib, start, target, 0),
+        _ => false,
+    }
+}
+
+/// Pick the best overload whose logical value parameters accept `args`, in Kotlin applicability order:
+/// exact, then `Any`-widened / function-arity, then a prefix under-application (omitted trailing params
+/// must be optional), then a trailing-lambda call that omits leading DEFAULTED params (`m.withLock { … }`).
+fn best_by_args<'a>(
+    lib: &dyn CompilerPlatform,
+    cands: &[(&'a FunctionInfo, Vec<Ty>)],
     args: &[Ty],
 ) -> Option<&'a FunctionInfo> {
-    candidates
-        .clone()
-        .find(|o| o.callable.params == *args)
+    // The DEFAULT-omitting passes accept a reference SUBTYPE / value-class-underlying argument (a
+    // `joinToString(separator: CharSequence = …)` call with a `String`), matching the assignability the
+    // exact-arity subtype pass in `select_overload` applies — the exact/`Any`-widened passes above stay
+    // stricter so an exact call still prefers its precise overload.
+    let fits = |p: &Ty, a: &Ty| {
+        *p == *a
+            || fun_arg_matches(p, a)
+            || arg_assignable(lib, p, a)
+            || ref_subtype_fits(lib, p, a)
+            // A function-shaped argument that IS-A `FunctionN` by supertype (a `KProperty1` fits a
+            // `(T) -> R` param) — matched by arity, since it is neither a `Ty::Fun` nor equal to the param.
+            || p.fun_arity()
+                .zip(lib.function_like_arity(*a))
+                .is_some_and(|(pn, an)| usize::from(pn) == an)
+    };
+    cands
+        .iter()
+        .find(|(_, lp)| *lp == args)
         .or_else(|| {
-            candidates.clone().find(|o| {
-                o.callable.params.len() == args.len()
-                    && o.callable.params.iter().zip(args).all(|(p, a)| {
+            cands.iter().find(|(_, lp)| {
+                lp.len() == args.len()
+                    && lp.iter().zip(args).all(|(p, a)| {
                         p == a || *p == Ty::obj("kotlin/Any") || fun_arg_matches(p, a)
                     })
             })
         })
         .or_else(|| {
-            candidates.clone().find(|o| {
-                o.callable.params.len() >= args.len()
+            cands.iter().find(|(o, lp)| {
+                lp.len() >= args.len()
                     // A prefix match (fewer args than params) is only a valid UNDER-application when the
                     // omitted trailing parameters are optional — i.e. the call still supplies every REQUIRED
                     // parameter. Otherwise a 1-arg call would spuriously bind a 2-required-param member
                     // (`getFor(id, t)`), shadowing the genuine 1-param extension overload and erasing its
                     // generic return to `Any`. `required == 0` (no metadata) keeps the legacy behaviour.
-                    && (o.callable.params.len() == args.len()
+                    && (lp.len() == args.len()
                         || o.call_sig.required == 0
                         || o.call_sig.required <= args.len())
-                    && o.callable.params[..args.len()]
-                        .iter()
-                        .zip(args)
-                        .all(|(p, a)| p == a || fun_arg_matches(p, a))
+                    && lp[..args.len()].iter().zip(args).all(|(p, a)| fits(p, a))
             })
         })
+        .or_else(|| {
+            // Trailing-lambda call omitting leading defaulted params: the last arg (a lambda) fills the LAST
+            // value param, the leading args a prefix, and every omitted MIDDLE param must be defaulted.
+            if !matches!(args.last(), Some(Ty::Fun(_))) {
+                return None;
+            }
+            cands.iter().find(|(o, lp)| {
+                let Some(last) = lp.len().checked_sub(1) else {
+                    return false;
+                };
+                let prefix = args.len() - 1;
+                prefix <= last
+                    && fun_arg_matches(&lp[last], args.last().unwrap())
+                    && (prefix..last)
+                        .all(|i| o.call_sig.param_defaults.get(i).copied().unwrap_or(false))
+                    && lp[..prefix]
+                        .iter()
+                        .zip(&args[..prefix])
+                        .all(|(p, a)| fits(p, a))
+            })
+        })
+        .map(|(o, _)| *o)
 }
 
 /// A lambda argument (`Ty::Fun`) matches a function-typed parameter of the same arity. The parameter may
