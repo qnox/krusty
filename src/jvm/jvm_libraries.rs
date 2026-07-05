@@ -9,7 +9,7 @@ use super::jvm_class_map::{
     kotlin_builtin_to_internal, to_jvm_internal, to_kotlin_internal, BUILTIN_MAPPED_NAMES,
 };
 use super::metadata;
-use crate::call_resolver::{arg_fits, function_input_types, gsig_to_ty, unify_gsig};
+use crate::call_resolver::{arg_fits, function_input_types, gsig_to_ty, gsig_tys, unify_gsig};
 use crate::jvm::names::{method_descriptor, property_getter_name, type_descriptor};
 use crate::libraries::{
     CountedLoopInfo, FnFlags, FnKind, FunctionInfo, FunctionSet, GSig, GenericSig, InlineKind,
@@ -275,8 +275,7 @@ impl JvmLibraries {
             if let Some(supers) = supers {
                 for sup in supers {
                     if let GSig::Class(sup_internal, sup_args) = sup {
-                        let sup_targs: Vec<Ty> =
-                            sup_args.iter().map(|a| gsig_to_ty(a, &binds)).collect();
+                        let sup_targs = gsig_tys(&sup_args, &binds);
                         q.push_back((to_jvm_internal(&sup_internal).to_string(), sup_targs));
                     }
                 }
@@ -327,8 +326,7 @@ impl JvmLibraries {
             if let Some(supers) = supers {
                 for sup in supers {
                     if let GSig::Class(sup_internal, sup_args) = sup {
-                        let sup_targs: Vec<Ty> =
-                            sup_args.iter().map(|a| gsig_to_ty(a, &binds)).collect();
+                        let sup_targs = gsig_tys(&sup_args, &binds);
                         q.push_back((to_jvm_internal(&sup_internal).to_string(), sup_targs));
                     }
                 }
