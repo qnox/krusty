@@ -18,6 +18,7 @@ pub mod js;
 pub mod jvm;
 pub mod lexer;
 pub mod libraries;
+pub mod lru;
 pub mod metadata;
 pub mod module_symbols;
 pub mod parser;
