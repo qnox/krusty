@@ -1131,7 +1131,11 @@ impl Classpath {
         f.seek(SeekFrom::Start(offset)).ok()?;
         let mut buf = vec![0u8; size];
         f.read_exact(&mut buf).ok()?;
-        if compressed && buf.len() >= 29 {
+        // A compressed resource carries a `CompressedResourceHeader` (magic `0xCAFEFAFA`, little-endian
+        // `[FA FA FE CA]`); inflate its zlib payload past the 29-byte header. The magic confirms the "zip"
+        // decompressor (the build stores `compressed` from the table; this is the content-side check it
+        // used to do eagerly) — a resource without it is returned as-is rather than mis-inflated.
+        if compressed && buf.len() >= 29 && buf[0..4] == [0xFA, 0xFA, 0xFE, 0xCA] {
             let unc = u64::from_le_bytes(buf[12..20].try_into().ok()?) as usize;
             // The jimage is a trusted local JDK file, but cap the pre-allocation hint anyway — a real
             // `.class` is far under this, and `read_to_end` grows past it if ever needed.
@@ -1842,25 +1846,31 @@ fn scan_types_jar(
 /// the on-disk size + whether it is "zip"-compressed). Mirrors `scan_types_jimage`'s navigation but
 /// keeps content offsets.
 fn build_jimage_index(path: &Path) -> Option<JimageIndex> {
-    let b = std::fs::read(path).ok()?;
-    if b.len() < 28 {
+    use std::io::Read;
+    // Read ONLY the header + location/string tables (a few MB), NOT the ~146 MB content blob that follows
+    // — the index just stores each resource's content OFFSET; the bytes are seek-read on demand
+    // (`jimage_bytes`). Reading the whole image was a ~146 MB peak-RSS spike per worker thread.
+    let mut f = File::open(path).ok()?;
+    let mut head = [0u8; 28];
+    f.read_exact(&mut head).ok()?;
+    let h =
+        |o: usize| u32::from_le_bytes([head[o], head[o + 1], head[o + 2], head[o + 3]]) as usize;
+    if h(0) != 0xCAFE_DADA {
         return None;
     }
-    let u32le = |o: usize| u32::from_le_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]]);
-    if u32le(0) != 0xCAFE_DADA {
-        return None;
-    }
-    let table_length = u32le(16) as usize;
-    let locations_size = u32le(20) as usize;
-    let strings_size = u32le(24) as usize;
+    let table_length = h(16);
+    let locations_size = h(20);
+    let strings_size = h(24);
     let header = 28;
     let offsets = header + table_length * 4;
     let locations = offsets + table_length * 4;
     let strings = locations + locations_size;
     let content = strings + strings_size;
-    if content > b.len() {
-        return None;
-    }
+    let mut b = vec![0u8; content];
+    use std::io::Seek;
+    f.rewind().ok()?;
+    f.read_exact(&mut b).ok()?;
+    let u32le = |o: usize| u32::from_le_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]]);
     let read_str = |off: usize| -> &str {
         if off == 0 {
             return "";
@@ -1916,15 +1926,13 @@ fn build_jimage_index(path: &Path) -> Option<JimageIndex> {
         let (off, comp, unc) = (a[5], a[6], a[7]);
         let abs = content + off;
         // Store the ON-DISK byte count: the compressed size for a compressed resource (a JetBrains
-        // Runtime / `jlink --compress` image), else the uncompressed size. Mark `is_zip` ONLY when the
-        // resource's `CompressedResourceHeader` (magic `0xCAFEFAFA`) names the "zip" decompressor —
-        // resolved against the strings table here — so `jimage_bytes` never inflates another scheme.
-        let is_zip = comp != 0
-            && abs + 24 <= b.len()
-            && b[abs..abs + 4] == [0xFA, 0xFA, 0xFE, 0xCA]
-            && read_str(u32le(abs + 20) as usize) == "zip";
+        // Runtime / `jlink --compress` image), else the uncompressed size. `compressed` (comp != 0) comes
+        // from the location table alone — the `CompressedResourceHeader` magic check that CONFIRMS the
+        // "zip" scheme is deferred to `jimage_bytes` (which reads the content anyway), so the index build
+        // needs only the tables, not the content.
         let stored = if comp != 0 { comp } else { unc };
-        idx.entry(internal).or_insert((abs as u64, stored, is_zip));
+        idx.entry(internal)
+            .or_insert((abs as u64, stored, comp != 0));
     }
     Some(idx)
 }
