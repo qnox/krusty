@@ -460,15 +460,46 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
             field_type_params.extend(iface_delegate_fields.iter().map(|_| None));
             field_type_params.extend(expr_delegate_fields.iter().map(|_| None));
             let class_ty = Ty::obj(&internal);
-            // Resolve a base class (`: A(args)`): only a non-interface class declared in this file is
-            // supported; extending a classpath/Java type isn't modeled yet → bail.
+            // Resolve a base class (`: A(args)`): a non-interface class declared in this file, OR a
+            // CLASSPATH (Java/library) class — the subclass's `super(…)` becomes `invokespecial` on the
+            // base's `<init>`. A base type that resolves to neither (or to an interface) → bail.
             let super_internal: Option<String> = match &c.base_class {
                 Some(base) => {
                     let is_file_class = file.decls.iter().any(|&d| matches!(file.decl(d), Decl::Class(bc) if bc.name == *base && !bc.is_interface()));
-                    if !is_file_class {
-                        return None;
+                    if is_file_class {
+                        Some(class_internal(file, base))
+                    } else {
+                        // A classpath base class: map the source name to its internal (via imports). Only a
+                        // CONCRETE (non-final, non-abstract) non-interface class is a safe superclass to
+                        // emit — a final base fails verification, an abstract base needs abstract-method /
+                        // bridge synthesis the backend doesn't do, an interface isn't a superclass. Anything
+                        // else → bail (the construct stays unsupported, as before).
+                        let resolved = lo
+                            .syms
+                            .class_names
+                            .get(base)
+                            .cloned()
+                            .unwrap_or_else(|| base.clone());
+                        if !lo.syms.libraries.class_is_extensible(&resolved) {
+                            return None;
+                        }
+                        // Only a NO-ARG `super()` to a classpath base is emitted (the ctor lowering has no
+                        // lowered `ClassSig` for a library base to shape a parameterized `super(args)`).
+                        // When no explicit base args are written, the base MUST have a no-arg constructor,
+                        // else the emitted `invokespecial <base>.<init>()V` would target a method that
+                        // doesn't exist — bail rather than miscompile. (An arg-taking `: Base(x)` already
+                        // bails at the `super_field_tys` arity check, since a classpath base contributes no
+                        // field types.)
+                        let has_no_arg_ctor =
+                            lo.syms.libraries.resolve_type(&resolved).is_some_and(|t| {
+                                t.constructors.is_empty()
+                                    || t.constructors.iter().any(|ctor| ctor.params.is_empty())
+                            });
+                        if c.base_args.is_empty() && !has_no_arg_ctor {
+                            return None;
+                        }
+                        Some(resolved)
                     }
-                    Some(class_internal(file, base))
                 }
                 None => None,
             };
@@ -16523,6 +16554,25 @@ impl<'a> Lower<'a> {
                         if self.cur_class.is_none()
                             && self.lookup(&fname).is_none()
                             && !self.module_declares(&fname)
+                        {
+                            self.lookup("this").and_then(|(this_v, this_ty)| {
+                                self.lower_this_member_call(this_v, this_ty, &fname, &args, e)
+                            })
+                        } else {
+                            None
+                        }
+                    } {
+                        r
+                    } else if let Some(r) = {
+                        // An unqualified call inside a class that the checker resolved to an INHERITED
+                        // member of a CLASSPATH superclass (`class Sub : lib.Base()` calling `secret()`).
+                        // `resolve_method` walks user classes only, so this lowers as neither a sibling nor
+                        // a top-level call; route it through the enclosing `this` (slot 0) and the member
+                        // the checker recorded (`lower_this_member_call` reuses `resolved_members`).
+                        if self.cur_class.is_some()
+                            && self.lookup(&fname).is_none()
+                            && !self.module_declares(&fname)
+                            && self.info.resolved_members.contains_key(&e)
                         {
                             self.lookup("this").and_then(|(this_v, this_ty)| {
                                 self.lower_this_member_call(this_v, this_ty, &fname, &args, e)

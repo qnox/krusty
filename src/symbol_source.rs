@@ -31,6 +31,15 @@ pub trait SymbolSource {
     fn resolve_type(&self, _internal: &str) -> Option<LibraryType> {
         None
     }
+
+    /// Whether `internal` names a plain class this source can be used as a SUPERCLASS of an emitted
+    /// user class: a concrete (non-`final`, non-`abstract`) non-interface class that actually exists.
+    /// A `final` base can't be inherited, an `abstract` base needs abstract-method/bridge synthesis the
+    /// backend doesn't do, and an interface isn't a superclass — all must be rejected before emitting a
+    /// `super(…)` to it. `false` by default (a source with no such class).
+    fn class_is_extensible(&self, _internal: &str) -> bool {
+        false
+    }
 }
 
 /// An ordered federation of sources — itself a [`SymbolSource`], so it nests. Earlier children win:
@@ -68,6 +77,12 @@ impl SymbolSource for CompositeSource {
 
     fn resolve_type(&self, internal: &str) -> Option<LibraryType> {
         self.children.iter().find_map(|c| c.resolve_type(internal))
+    }
+
+    fn class_is_extensible(&self, internal: &str) -> bool {
+        self.children
+            .iter()
+            .any(|c| c.class_is_extensible(internal))
     }
 }
 
