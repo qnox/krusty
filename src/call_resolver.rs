@@ -1189,14 +1189,6 @@ fn descriptor_arg_subtype_of_param(lib: &dyn SymbolSource, arg: Ty, param: Ty) -
     false
 }
 
-fn params_match_descriptor_subtype(lib: &dyn SymbolSource, params: &[Ty], args: &[Ty]) -> bool {
-    params.len() == args.len()
-        && params
-            .iter()
-            .zip(args)
-            .all(|(p, a)| descriptor_arg_subtype_of_param(lib, *a, *p))
-}
-
 /// Resolve a constructor on a library type by argument types (with the type's own widening).
 pub fn resolve_constructor(
     lib: &dyn SymbolSource,
@@ -1252,11 +1244,13 @@ pub fn resolve_constructor(
             return Some(m.clone());
         }
     }
-    if let Some(m) = t
-        .constructors
-        .iter()
-        .find(|m| params_match_descriptor_subtype(lib, &m.params, args))
-    {
+    if let Some(m) = t.constructors.iter().find(|m| {
+        m.params.len() == args.len()
+            && m.params
+                .iter()
+                .zip(args)
+                .all(|(p, a)| descriptor_arg_subtype_of_param(lib, *a, *p))
+    }) {
         let mode = jvm_args
             .as_ref()
             .map_or("nominal-subtype", |_| "jvm-subtype");
