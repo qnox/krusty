@@ -612,8 +612,7 @@ fn ty_simple_name(t: Ty) -> Option<&'static str> {
 /// (`java/lang/Integer`/`kotlin/Int` → `Ty::Int`). Used to pick the element-appropriate overload of
 /// `sum`/`average`/… among the per-element methods that share a Kotlin source name. `None` if the
 /// signature's receiver isn't a single-type-argument container.
-fn gsig_receiver_element(sig: Option<&str>) -> Option<Ty> {
-    let gsig = sig.and_then(parse_method_gsig)?;
+fn gsig_receiver_element(gsig: &GenericSig) -> Option<Ty> {
     match gsig.params.first()? {
         GSig::Class(_, args) => {
             // Unbox a boxed-primitive wrapper (`java/lang/Integer`/`kotlin/Int` → `Int`) so the element
@@ -1686,11 +1685,11 @@ impl SymbolSource for JvmLibraries {
                     .or_else(|| receiver.array_elem());
                 for recv_desc in supertype_descriptors(&self.cp, receiver) {
                     for c in self.cp.find_extensions(&recv_desc, &jname) {
-                        // Defensive: the candidate's generic-signature receiver element must equal the
-                        // actual receiver's element — bind only the element-appropriate reduction.
-                        if want_elem.is_some()
-                            && gsig_receiver_element(c.signature.as_deref()) != want_elem
-                        {
+                        let generic_sig = c.signature.as_deref().and_then(parse_method_gsig);
+                        // Bind only the element-appropriate reduction.
+                        if want_elem.is_some_and(|elem| {
+                            generic_sig.as_ref().and_then(gsig_receiver_element) != Some(elem)
+                        }) {
                             continue;
                         }
                         // A no-argument reduction only: the extension descriptor carries just the RECEIVER
@@ -1707,7 +1706,7 @@ impl SymbolSource for JvmLibraries {
                         );
                         overloads.push(FunctionInfo {
                             overload_rank: descriptor_narrowing(&c.descriptor) as u32,
-                            generic_sig: c.signature.as_deref().and_then(parse_method_gsig),
+                            generic_sig,
                             ..FunctionInfo::plain(
                                 FnKind::Extension,
                                 Some(receiver),
