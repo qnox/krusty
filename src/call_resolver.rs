@@ -156,17 +156,10 @@ fn has_default_tail(params: &[Ty], mask_idx: usize, marker: impl FnOnce(Ty) -> b
 
 fn callable_with_return(c: &LibraryCallable, ret: Ty, default_call: bool) -> LibraryCallable {
     LibraryCallable {
-        owner: c.owner.clone(),
-        name: c.name.clone(),
-        params: c.params.clone(),
         ret,
-        physical_ret: c.physical_ret,
-        descriptor: c.descriptor.clone(),
-        inline: c.inline,
         default_call,
         vararg_elem: None,
-        signature: c.signature.clone(),
-        origin: c.origin.clone(),
+        ..c.clone()
     }
 }
 
@@ -323,17 +316,12 @@ impl<'a> CallResolver<'a> {
             c.inline
         );
         Some(LibraryCallable {
-            owner: c.owner.clone(),
-            name: c.name.clone(),
             params: params.clone(),
             ret: ret_ty,
             physical_ret: *ret,
-            descriptor: c.descriptor.clone(),
-            inline: c.inline,
             default_call: false,
             vararg_elem,
-            signature: c.signature.clone(),
-            origin: c.origin.clone(),
+            ..c.clone()
         })
     }
 
