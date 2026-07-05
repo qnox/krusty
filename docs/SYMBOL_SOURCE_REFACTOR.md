@@ -153,6 +153,39 @@ back where it belongs — in the resolver, over the file's imports.
     uncached, so populating these in `resolve_type` is neutral-to-faster. Dead
     `classpath::metadata_constructor_named_params` removed.
   - `SymbolSource`: 10 → 4 (`seed`, `seed_shared`, `functions`, `resolve_type`).
-- **Stage 4 — TODO.** Kill `seed`/`seed_shared` + `LibrarySeed`/`SharedSeed`; `ClassNames`
-  falls back to resolver FQ-probing over `resolve_type`; per-lookup ambiguity pruning. Highest
-  risk (hottest path).
+- **Stage 4a — DONE.** `canonical_names` removed from the seed. `obj_is_subtype` normalizes
+  collection identity via `jvm_descriptor_form` (the platform erasure it already uses for
+  codegen) instead of a baked internal→JVM map. `LibrarySeed`/`SharedSeed`/`SymbolTable` lose
+  the `canonical_names` field; `SharedSeed` is now `(class_names, type_aliases)`. Behavior
+  preserved (`canonical_names` was built by calling `to_jvm_internal`, exactly what
+  `jvm_descriptor_form` does for a reference type). Gate green.
+
+Landed endpoint: **`SymbolSource` = `{seed, seed_shared, functions, resolve_type}`** (4).
+
+## Stage 4b/4c — kill the seed (scoped follow-up, NOT a fold)
+
+Reducing to `{functions, resolve_type, type_aliases}` needs a resolver phase-ordering rewrite,
+not a mechanical fold. Findings:
+
+- The seed's `class_names` is already **default-import-package-scoped** (not a whole-classpath
+  index) — the author narrowed it (`jvm_libraries::seed_shared`) and built the import machinery
+  (`import_wildcards` + exhaustive `collect_file_type_names`, whose comment states it exists "so
+  a default-import-only seed still resolves imported values") to replace it. The disambiguation
+  block (`resolve.rs`, "Explicit imports disambiguate…") already reproduces the seed's
+  `class_names` by probing default/wildcard packages via `resolve_type`, including the
+  collection-forcing (`List` → `kotlin/collections/List` wins by package order).
+- **Blocker: phase interdependency.** In `build_symbol_table` the order is seed → user classes →
+  alias expansion (reads `class_names.get(target)`) → import block (populates `class_names`).
+  Alias expansion runs *before* the block and depends on `class_names` already holding classpath
+  names; the block in turn reads `class_names` for dotted resolution. Killing the seed requires
+  reordering (block before alias expansion), threading alias targets into
+  `collect_file_type_names`, and emptying the `ClassNames` base — then iterating against the box
+  gate for the narrow user-`typealias`-to-classpath-type miscompile cases.
+- `type_aliases` does **not** fold into per-name `resolve_type`: classpath aliases live in
+  per-package `*TypeAliasesKt` facades and need a scan, so they become a dedicated
+  `type_aliases()` method (Rc-cached), replacing `seed`/`seed_shared`.
+- Perf: killing the pre-built map shifts work to per-file `resolve_type` probing (~N names ×
+  ~10 default packages). `cp.find` caches negatives (cheap misses), but `resolve_type` rebuilds
+  `LibraryType` per call — memoize `resolve_type` (Rc-cached per internal) before/with this step.
+
+Endpoint after 4b/4c: **`SymbolSource` = `{functions, resolve_type, type_aliases}`** (3).
