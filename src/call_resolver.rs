@@ -12,7 +12,7 @@
 //! lives here.
 
 use crate::libraries::{
-    FnKind, FunctionInfo, FunctionSet, GSig, InlineKind, LibraryCallable, LibraryMember,
+    FnKind, FunctionInfo, FunctionSet, GSig, GenericSig, InlineKind, LibraryCallable, LibraryMember,
 };
 use crate::symbol_source::SymbolSource;
 use crate::types::Ty;
@@ -94,6 +94,31 @@ pub(crate) fn gsig_to_ty(sig: &GSig, binds: &std::collections::HashMap<String, T
             }
         }
     }
+}
+
+fn bind_gsig_return<'a>(
+    gsig: &GenericSig,
+    type_args: &[Ty],
+    actuals: impl IntoIterator<Item = (&'a GSig, Ty)>,
+) -> Ty {
+    let mut binds = std::collections::HashMap::new();
+    for (f, t) in gsig.formals.iter().zip(type_args) {
+        binds.insert(f.clone(), *t);
+    }
+    for (ps, a) in actuals {
+        unify_gsig(ps, a, &mut binds);
+    }
+    gsig_to_ty(&gsig.ret, &binds)
+}
+
+fn bind_ext_ret(gsig: &GenericSig, receiver: Ty, args: &[Ty], targs: &[Ty]) -> Ty {
+    bind_gsig_return(
+        gsig,
+        targs,
+        gsig.params
+            .iter()
+            .zip(std::iter::once(receiver).chain(args.iter().copied())),
+    )
 }
 
 /// If `sig` is a function type, the substituted types of its lambda parameters. Empty for anything else.
@@ -475,19 +500,7 @@ impl<'a> CallResolver<'a> {
         let ret_ty = o
             .generic_sig
             .as_ref()
-            .map(|gsig| {
-                let mut binds = std::collections::HashMap::new();
-                for (f, t) in gsig.formals.iter().zip(type_args) {
-                    binds.insert(f.clone(), *t);
-                }
-                let actuals: Vec<Ty> = std::iter::once(receiver)
-                    .chain(args.iter().copied())
-                    .collect();
-                for (ps, a) in gsig.params.iter().zip(&actuals) {
-                    unify_gsig(ps, *a, &mut binds);
-                }
-                gsig_to_ty(&gsig.ret, &binds)
-            })
+            .map(|gsig| bind_ext_ret(gsig, receiver, args, type_args))
             .unwrap_or(c.ret);
         let ret_class = o
             .ret
@@ -543,19 +556,7 @@ impl<'a> CallResolver<'a> {
             let ret_ty = o
                 .generic_sig
                 .as_ref()
-                .map(|gsig| {
-                    let mut binds = std::collections::HashMap::new();
-                    for (f, t) in gsig.formals.iter().zip(type_args) {
-                        binds.insert(f.clone(), *t);
-                    }
-                    let actuals: Vec<Ty> = std::iter::once(receiver)
-                        .chain(args.iter().copied())
-                        .collect();
-                    for (ps, a) in gsig.params.iter().zip(&actuals) {
-                        unify_gsig(ps, *a, &mut binds);
-                    }
-                    gsig_to_ty(&gsig.ret, &binds)
-                })
+                .map(|gsig| bind_ext_ret(gsig, receiver, args, type_args))
                 .unwrap_or(c.ret);
             let ret_ty = o.ret.apply(ret_ty);
             return Some(callable_with_return(c, ret_ty, true));
@@ -719,16 +720,13 @@ impl<'a> CallResolver<'a> {
             let ret_ty = base_gsig
                 .as_ref()
                 .map(|gsig| {
-                    let mut binds = std::collections::HashMap::new();
-                    for (f, t) in gsig.formals.iter().zip(type_args) {
-                        binds.insert(f.clone(), *t);
-                    }
-                    for (param_i, arg_i) in &mapping {
-                        if let Some(ps) = gsig.params.get(*param_i) {
-                            unify_gsig(ps, args[*arg_i], &mut binds);
-                        }
-                    }
-                    gsig_to_ty(&gsig.ret, &binds)
+                    bind_gsig_return(
+                        gsig,
+                        type_args,
+                        mapping.iter().filter_map(|(param_i, arg_i)| {
+                            gsig.params.get(*param_i).map(|ps| (ps, args[*arg_i]))
+                        }),
+                    )
                 })
                 .unwrap_or(c.ret);
             crate::trace_compiler!(
@@ -766,14 +764,11 @@ impl<'a> CallResolver<'a> {
                 .generic_sig
                 .as_ref()
                 .map(|gsig| {
-                    let mut binds = std::collections::HashMap::new();
-                    for (f, t) in gsig.formals.iter().zip(type_args) {
-                        binds.insert(f.clone(), *t);
-                    }
-                    for (ps, a) in gsig.params.iter().zip(args) {
-                        unify_gsig(ps, *a, &mut binds);
-                    }
-                    gsig_to_ty(&gsig.ret, &binds)
+                    bind_gsig_return(
+                        gsig,
+                        type_args,
+                        gsig.params.iter().zip(args.iter().copied()),
+                    )
                 })
                 .unwrap_or(c.ret);
             let logical_ret = o.ret.apply(recovered);
