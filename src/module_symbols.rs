@@ -271,6 +271,12 @@ impl SymbolSource for ModuleSymbols<'_> {
             companion_object: None,
             value_companion_fns: Vec::new(),
             value_underlying: None,
+            type_params: Vec::new(),
+            sealed_subclasses: Vec::new(),
+            enum_entries: Vec::new(),
+            value_ctor_has_default: false,
+            ctor_named_params: Vec::new(),
+            value_class_properties: Vec::new(),
         })
     }
 }

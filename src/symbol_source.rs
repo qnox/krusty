@@ -11,7 +11,7 @@
 //! INSIDE one source (an extension's receiver-MRO rank is only comparable within one type hierarchy);
 //! the composite federates at the resolve boundary, never by flattening one global overload set.
 
-use crate::libraries::{FunctionSet, LibraryMember, LibrarySeed, LibraryType};
+use crate::libraries::{FunctionSet, LibrarySeed, LibraryType};
 use crate::types::Ty;
 
 /// The shared-base form of a [`LibrarySeed`]: class names, type aliases, and canonical-name aliases,
@@ -52,66 +52,11 @@ pub trait SymbolSource {
         FunctionSet::default()
     }
 
-    /// The shape of the type named `internal` (constructors, members, companion, supertypes), or `None`
-    /// if this source has no such type.
+    /// The shape of the type named `internal` — constructors, members, companion, supertypes, and the
+    /// type-shape facts a resolver needs about it (formal type parameters, sealed subclasses, enum
+    /// entries, value-class underlying, constructor named-parameter lists, value-class-typed properties).
+    /// `None` if this source has no such type.
     fn resolve_type(&self, _internal: &str) -> Option<LibraryType> {
-        None
-    }
-
-    /// The direct subclasses (JVM internal names) of a classpath `sealed` class, from its `@Metadata`.
-    /// Empty for a non-sealed / unknown / non-classpath type. Lets the checker prove that an exhaustive
-    /// `when` over a classpath sealed subject (no explicit `else`) is used as an expression.
-    fn sealed_subclasses(&self, _internal: &str) -> Vec<String> {
-        Vec::new()
-    }
-
-    /// The primary constructor's SOURCE parameter names PLUS a per-parameter "declares a default value"
-    /// flag, for a constructor whose parameter count is at least `min_arity` — so a NAMED call may OMIT a
-    /// defaulted parameter (`Cfg(a = 1, c = "x")` for `Cfg(a, b = 9, c = "z")`). This returns the FULL
-    /// parameter list; the omitted slots lower to kotlinc's `<init>$default` synthetic. `None` when no such
-    /// constructor is recorded.
-    fn constructor_named_params(
-        &self,
-        _internal: &str,
-        _min_arity: usize,
-    ) -> Option<(Vec<String>, Vec<bool>)> {
-        None
-    }
-
-    /// Whether the classpath `@JvmInline value class` named `internal` exposes a DEFAULTED primary
-    /// constructor — kotlinc emits a `constructor-impl$default` synthetic exactly then. A zero-arg
-    /// construction `Id()` (all params defaulted) is realized through that synthetic; `false` when the
-    /// value class's sole underlying param is mandatory, so `Id()` stays unresolved rather than miscompiled.
-    fn value_class_ctor_has_default(&self, _internal: &str) -> bool {
-        false
-    }
-
-    /// Whether the classpath type `internal` declares an enum entry named `name` — a `static final`
-    /// field of the enum's own type (`Kind.PENDING` → `getstatic lib/Kind.PENDING:Llib/Kind;`). Lets
-    /// `EnumName.ENTRY` resolve for a classpath enum, as it already does for a source enum.
-    fn is_enum_entry(&self, _internal: &str, _name: &str) -> bool {
-        false
-    }
-
-    /// A property of classpath type `internal` whose declared type is a `@JvmInline value class`
-    /// (`Holder(val id: Vid)`): its getter is `@JvmName`-mangled (`getId-<hash>`) and its physical
-    /// return erases to the value class's underlying, so ordinary getter resolution misses it. Returns a
-    /// member carrying the MANGLED getter name + physical descriptor but the LOGICAL value-class return
-    /// type (recovered from `@Metadata`), so `h.id` types as the value class and `h.id.v` resolves.
-    fn value_class_property_member(
-        &self,
-        _internal: &str,
-        _property: &str,
-    ) -> Option<LibraryMember> {
-        None
-    }
-
-    /// The type arguments of `internal` INFERRED from a constructor call's argument types — `Pair(1, 2)` →
-    /// `[Int, Int]`, so `Pair(1, 2)` types as `Pair<Int, Int>` (its `first`/`second`/`component*` then type
-    /// concretely). Each formal type parameter is bound by unifying the constructor's generic parameter
-    /// signatures with `arg_tys`; an unbound formal defaults to `Any`. `None` if `internal` is non-generic
-    /// or this source can't infer.
-    fn infer_constructor_type_args(&self, _internal: &str, _arg_tys: &[Ty]) -> Option<Vec<Ty>> {
         None
     }
 }
@@ -164,40 +109,6 @@ impl SymbolSource for CompositeSource {
 
     fn resolve_type(&self, internal: &str) -> Option<LibraryType> {
         self.children.iter().find_map(|c| c.resolve_type(internal))
-    }
-
-    fn constructor_named_params(
-        &self,
-        internal: &str,
-        min_arity: usize,
-    ) -> Option<(Vec<String>, Vec<bool>)> {
-        self.children
-            .iter()
-            .find_map(|c| c.constructor_named_params(internal, min_arity))
-    }
-
-    fn infer_constructor_type_args(&self, internal: &str, arg_tys: &[Ty]) -> Option<Vec<Ty>> {
-        self.children
-            .iter()
-            .find_map(|c| c.infer_constructor_type_args(internal, arg_tys))
-    }
-
-    fn value_class_ctor_has_default(&self, internal: &str) -> bool {
-        self.children
-            .iter()
-            .any(|c| c.value_class_ctor_has_default(internal))
-    }
-
-    fn is_enum_entry(&self, internal: &str, name: &str) -> bool {
-        self.children
-            .iter()
-            .any(|c| c.is_enum_entry(internal, name))
-    }
-
-    fn value_class_property_member(&self, internal: &str, property: &str) -> Option<LibraryMember> {
-        self.children
-            .iter()
-            .find_map(|c| c.value_class_property_member(internal, property))
     }
 }
 
@@ -254,6 +165,12 @@ mod tests {
                     companion_object: None,
                     value_companion_fns: Vec::new(),
                     value_underlying: None,
+                    type_params: Vec::new(),
+                    sealed_subclasses: Vec::new(),
+                    enum_entries: Vec::new(),
+                    value_ctor_has_default: false,
+                    ctor_named_params: Vec::new(),
+                    value_class_properties: Vec::new(),
                 })
             } else {
                 None
@@ -336,59 +253,10 @@ mod tests {
     }
 
     #[test]
-    fn default_trait_methods_are_empty_or_none() {
-        let s = module();
-        assert!(s.constructor_named_params("mod/Foo", 0).is_none());
-        assert!(!s.value_class_ctor_has_default("mod/Foo"));
-        assert!(!s.is_enum_entry("mod/Foo", "A"));
-        assert!(s.value_class_property_member("mod/Foo", "id").is_none());
-        assert!(s.infer_constructor_type_args("mod/Foo", &[]).is_none());
-    }
-
-    #[test]
     fn default_seed_shared_wraps_seed_in_rc() {
         let s = module();
         let (class_names, _aliases, _canon) = s.seed_shared();
         assert_eq!(class_names.get("Foo"), Some(&"mod/Foo".to_string()));
-    }
-
-    #[test]
-    fn composite_delegates_defaults_to_children() {
-        let c = CompositeSource::new(vec![Box::new(module()), Box::new(library())]);
-        // No child overrides these, so the composite reports the empty/None defaults.
-        assert!(c.infer_constructor_type_args("shared", &[]).is_none());
-        assert!(!c.value_class_ctor_has_default("shared"));
-        assert!(!c.is_enum_entry("shared", "A"));
-        assert!(c.value_class_property_member("shared", "id").is_none());
-    }
-
-    #[test]
-    fn composite_delegates_constructor_named_params_to_children() {
-        struct CtorSource;
-        impl SymbolSource for CtorSource {
-            fn constructor_named_params(
-                &self,
-                internal: &str,
-                min_arity: usize,
-            ) -> Option<(Vec<String>, Vec<bool>)> {
-                (internal == "lib/Cfg" && min_arity <= 2).then(|| {
-                    (
-                        vec!["host".to_string(), "port".to_string()],
-                        vec![false, true],
-                    )
-                })
-            }
-        }
-
-        let c = CompositeSource::new(vec![Box::new(module()), Box::new(CtorSource)]);
-        assert_eq!(
-            c.constructor_named_params("lib/Cfg", 1),
-            Some((
-                vec!["host".to_string(), "port".to_string()],
-                vec![false, true]
-            ))
-        );
-        assert!(c.constructor_named_params("lib/Cfg", 3).is_none());
     }
 
     #[test]

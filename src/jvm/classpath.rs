@@ -531,22 +531,6 @@ impl Classpath {
         }
     }
 
-    /// The primary ctor's SOURCE parameter names + per-parameter default flags, for a constructor with at
-    /// least `min_arity` parameters (so a NAMED call may omit a defaulted one). Reads both facts from one
-    /// constructor metadata record and picks the first named parameter list long enough.
-    pub fn metadata_constructor_named_params(
-        &self,
-        internal: &str,
-        min_arity: usize,
-    ) -> Option<(Vec<String>, Vec<bool>)> {
-        let ci = self.find(internal)?;
-        super::metadata::class_constructor_params(&ci)
-            .into_iter()
-            .find(|(n, d)| {
-                n.len() >= min_arity && n.len() == d.len() && !n.iter().any(String::is_empty)
-            })
-    }
-
     /// The source-level call and return facts of class MEMBER `internal.jvm_name/arity`, from the class's
     /// own `@Metadata` function record. Names, default flags, return classifier, and nullability come
     /// from the SAME member record, so a data-class `copy`, value-class-mangled member, or `suspend`
@@ -778,6 +762,7 @@ impl Classpath {
                         physical_ret,
                         descriptor,
                         signature: None,
+                        generic_sig: None,
                         is_interface: is_iface,
                         inline: crate::libraries::InlineKind::None,
                         suspend: false,

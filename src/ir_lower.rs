@@ -4668,7 +4668,11 @@ impl<'a> Lower<'a> {
             // is `null` (reference underlying only — a scalar's dummy slot can't take `null`).
             if args.is_empty()
                 && under.is_reference()
-                && self.syms.libraries.value_class_ctor_has_default(internal)
+                && self
+                    .syms
+                    .libraries
+                    .resolve_type(internal)
+                    .is_some_and(|t| t.value_ctor_has_default)
             {
                 let marker = Ty::obj("kotlin/jvm/internal/DefaultConstructorMarker");
                 let desc = self
@@ -4750,7 +4754,8 @@ impl<'a> Lower<'a> {
         let (param_names, param_defaults) = self
             .syms
             .libraries
-            .constructor_named_params(internal, args.len())?;
+            .resolve_type(internal)
+            .and_then(|t| t.constructor_named_params(args.len()))?;
         let required = required_arity(param_names.len(), &param_defaults);
         let slots = crate::resolve::map_call_args(
             args,
@@ -14753,7 +14758,12 @@ impl<'a> Lower<'a> {
                             })
                         })
                     {
-                        if self.syms.libraries.is_enum_entry(&enum_internal, &name) {
+                        if self
+                            .syms
+                            .libraries
+                            .resolve_type(&enum_internal)
+                            .is_some_and(|t| t.is_enum_entry(&name))
+                        {
                             return Some(self.ir.add_expr(IrExpr::ExternalStaticField {
                                 descriptor: format!("L{enum_internal};"),
                                 owner: enum_internal,

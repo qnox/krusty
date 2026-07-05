@@ -19,6 +19,47 @@ use crate::types::Ty;
 
 type GSigBinds = std::collections::HashMap<String, Ty>;
 
+/// The type arguments of a constructed generic type INFERRED from a construction's argument types
+/// (`Pair(1, 2)` → `[Int, Int]`, so `Pair(1, 2)` types as `Pair<Int, Int>`). Each of the type's formal
+/// parameters (`ty.type_params`) is bound by unifying the matching-arity constructor's parsed generic
+/// parameter signatures against `arg_tys`; an unbound formal defaults to `Any`. `None` when the type is
+/// non-generic or no constructor carries a generic signature to unify.
+pub fn infer_constructor_type_args(
+    ty: &crate::libraries::LibraryType,
+    arg_tys: &[Ty],
+) -> Option<Vec<Ty>> {
+    if ty.type_params.is_empty() {
+        return None;
+    }
+    let mut binds = GSigBinds::new();
+    for ctor in &ty.constructors {
+        let Some(gsig) = &ctor.generic_sig else {
+            continue;
+        };
+        if gsig.params.len() != arg_tys.len() {
+            continue;
+        }
+        for (p, a) in gsig.params.iter().zip(arg_tys) {
+            unify_gsig(p, *a, &mut binds);
+        }
+        break;
+    }
+    if binds.is_empty() {
+        return None;
+    }
+    Some(
+        ty.type_params
+            .iter()
+            .map(|f| {
+                binds
+                    .get(f)
+                    .copied()
+                    .unwrap_or_else(|| Ty::obj("kotlin/Any"))
+            })
+            .collect(),
+    )
+}
+
 /// Bind type variables by unifying a parameter signature node with an actual argument `Ty`.
 pub(crate) fn unify_gsig(sig: &GSig, actual: Ty, binds: &mut GSigBinds) {
     match sig {
@@ -1181,7 +1222,9 @@ pub fn resolve_constructor(
         // typed zero). A mandatory-param value class stays unresolved (no synthetic → no phantom call).
         let all_default = args.is_empty()
             && underlying.is_reference()
-            && lib.value_class_ctor_has_default(internal);
+            && lib
+                .resolve_type(internal)
+                .is_some_and(|t| t.value_ctor_has_default);
         crate::trace_compiler!(
             "value_classes",
             "resolve_constructor {internal} value-class underlying={underlying:?} args={args:?} fits={fits} all_default={all_default}"
@@ -1461,7 +1504,10 @@ pub fn resolve_property_member(
             // `@JvmName`-mangled (`getId-<hash>`) and the physical return erases to the underlying, so
             // the plain lookups above miss it. Recover the mangled getter + logical value-class type.
             let internal = recv.kotlin_class_internal()?;
-            let member = lib.value_class_property_member(internal, property)?;
+            let member = lib
+                .resolve_type(internal)?
+                .value_class_property(property)
+                .cloned()?;
             let ret = member.ret;
             Some(ResolvedMember {
                 member,
@@ -1676,6 +1722,12 @@ mod tests {
                 companion_object: None,
                 value_companion_fns: Vec::new(),
                 value_underlying: (internal == "kotlin/UInt").then_some(Ty::Int),
+                type_params: Vec::new(),
+                sealed_subclasses: Vec::new(),
+                enum_entries: Vec::new(),
+                value_ctor_has_default: false,
+                ctor_named_params: Vec::new(),
+                value_class_properties: Vec::new(),
             })
         }
     }
