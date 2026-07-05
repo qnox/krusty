@@ -10,6 +10,9 @@ autotests = false
 zip = { version = "8", default-features = false, features = ["deflate"] }
 # Inflate zlib-compressed JDK jimage resources (JetBrains Runtime / `jlink --compress` images).
 flate2 = "1"
+# Heap profiler, OFF by default (optional dep, enabled only by the `dhat-heap` feature) so normal
+# builds pay zero cost. See the `dhat-heap` feature.
+dhat = { version = "0.3", optional = true }
 
 [features]
 # Opt-in compiler tracing (`trace_compiler!`). OFF by default so release/gate/conformance builds pay
@@ -18,6 +21,11 @@ flate2 = "1"
 # No logging crate is used on purpose (the project is dependency-lean; a compile-time-elided macro beats
 # any crate's runtime level check on the "no penalty when disabled" axis). See `src/trace.rs`.
 trace = []
+
+# Opt-in heap profiling. `cargo test --features dhat-heap --test conformance kotlin_codegen_box_conformance`
+# swaps in dhat's global allocator and profiles the compile phase, writing `dhat-heap.json` (view at
+# https://nnethercote.github.io/dh_view/dh_view.html). OFF by default — zero cost, the dep isn't compiled.
+dhat-heap = ["dep:dhat"]
 
 [dev-dependencies]
 rayon = "1"

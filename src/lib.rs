@@ -5,6 +5,11 @@
 //! set is bounded by a single file rather than the whole-module IR graph that makes kotlinc's
 //! memory scale with module size. See `docs/SPEC.md`.
 
+// Re-exported under the `dhat-heap` feature so the integration-test crate can name dhat's global
+// allocator (`krusty::dhat::Alloc`) without a separate dev-dependency. Not compiled otherwise.
+#[cfg(feature = "dhat-heap")]
+pub use dhat;
+
 pub mod ast;
 pub mod backend;
 pub mod call_resolver;

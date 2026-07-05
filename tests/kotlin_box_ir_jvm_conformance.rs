@@ -813,6 +813,12 @@ fn kotlin_codegen_box_conformance() {
 
     let no_run = env("KRUSTY_NO_RUN").is_some();
 
+    // Heap profiler (`--features dhat-heap`): its `Drop` at end of scope writes `dhat-heap.json` with
+    // bytes-alive-at-peak by allocation call stack. Pair with `KRUSTY_NO_RUN=1` to profile the compiler
+    // alone, and `KRUSTY_BOX_LIMIT` to keep the (instrumented, slower) run short.
+    #[cfg(feature = "dhat-heap")]
+    let _dhat = krusty::dhat::Profiler::new_heap();
+
     // Parallel phase: compile each test in-process, run in the per-thread JVM.
     let results: Vec<(PathBuf, TestResult)> = pool.install(|| {
         files
