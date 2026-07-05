@@ -1210,7 +1210,7 @@ impl Classpath {
                     if !lite.is_public && *public {
                         continue;
                     }
-                    let Some(ret_desc) = descriptor_ret(mdesc) else {
+                    let Some((first_param, ret_desc)) = descriptor_parts(mdesc) else {
                         continue;
                     };
                     let cand = ExtCandidate {
@@ -1224,7 +1224,7 @@ impl Classpath {
                     // A receiver-less top-level function (no first param, OR `@Metadata` marks the name as a
                     // genuine top-level fn that is NEVER an extension) is by_name-only — never keyed by its
                     // first parameter (which is a value parameter, not a receiver).
-                    if let Some(first_param) = first_descriptor_param(mdesc) {
+                    if let Some(first_param) = first_param {
                         let only_toplevel = global_toplevel.contains(mname.as_str())
                             && !global_ext.contains(mname.as_str());
                         if !only_toplevel {
@@ -1367,21 +1367,14 @@ fn collect_jar(jar: &Path, all: &mut HashMap<String, ClassLite>) {
     }
 }
 
-/// Extract the first parameter type from a JVM method descriptor like `(Ljava/lang/String;IZ)V`.
-/// Returns `None` if there are no parameters.
-fn first_descriptor_param(desc: &str) -> Option<String> {
-    let inner = desc.strip_prefix('(')?;
-    let mut s = inner;
-    if s.starts_with(')') {
-        return None; // no params
-    }
-    Some(read_one_type(&mut s).to_string())
-}
-
-/// Extract the return type descriptor from a JVM method descriptor.
-fn descriptor_ret(desc: &str) -> Option<String> {
-    let close = desc.find(')')?;
-    Some(desc[close + 1..].to_string())
+fn descriptor_parts(desc: &str) -> Option<(Option<String>, String)> {
+    let params = desc.strip_prefix('(')?;
+    let ret = params.find(')')?;
+    let first = (!params.starts_with(')')).then(|| {
+        let mut cursor = params;
+        read_one_type(&mut cursor).to_string()
+    });
+    Some((first, params[ret + 1..].to_string()))
 }
 
 /// Read one complete JVM type descriptor from the start of `s`, advancing past it.
