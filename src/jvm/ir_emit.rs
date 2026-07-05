@@ -348,7 +348,7 @@ fn emit_statics(ir: &IrFile, facade: &str, cw: &mut ClassWriter, bodies: &dyn Me
         } else {
             0x001A // PRIVATE | STATIC | FINAL
         };
-        let desc = type_descriptor(ir_ty_to_jvm(&s.ty));
+        let desc = ir_type_desc(&s.ty);
         // A `const val` initialized by a compile-time literal carries a `ConstantValue` attribute (the
         // JVM initializes the field; its `<clinit>` store is omitted below) — byte-identical to kotlinc.
         if s.is_const {
@@ -525,12 +525,7 @@ fn emit_class(
             .get(&c.fq_name)
             .and_then(|fs| fs.iter().find(|(fname, _)| fname == name))
             .map(|(_, tp)| format!("T{tp};"));
-        cw.add_field_sig(
-            acc,
-            name,
-            &type_descriptor(ir_ty_to_jvm(ty)),
-            field_sig.as_deref(),
-        );
+        cw.add_field_sig(acc, name, &ir_type_desc(ty), field_sig.as_deref());
     }
     // A `companion object`'s `const val`s live on THIS (outer) class as `public static final` +
     // `ConstantValue` fields (kotlinc's layout); they have no `<clinit>` store (the JVM initializes them).
@@ -539,7 +534,7 @@ fn emit_class(
         .iter()
         .filter(|s| s.owner.as_deref() == Some(c.fq_name.as_str()))
     {
-        let desc = type_descriptor(ir_ty_to_jvm(&s.ty));
+        let desc = ir_type_desc(&s.ty);
         if let Some(cv) = const_value_idx(ir, s.init, &mut cw) {
             cw.add_field_const(0x0019, &s.name, &desc, cv); // PUBLIC | STATIC | FINAL
         } else {
@@ -908,7 +903,7 @@ fn emit_enum_entry_subclass(
     // Entry-body PROPERTIES are private backing fields (read via synthesized getters, like kotlinc).
     for field in c.fields.iter() {
         let acc = 0x0002 | if field.is_final { 0x0010 } else { 0 };
-        cw.add_field(acc, &field.name, &type_descriptor(ir_ty_to_jvm(&field.ty)));
+        cw.add_field(acc, &field.name, &ir_type_desc(&field.ty));
     }
 
     // Constructor: `(String, int, <user>)V` → `super(name, ordinal, <user>)`, then the property
@@ -1239,7 +1234,7 @@ fn emit_func_ref_class(c: &crate::ir::IrClass, facade: &str) -> Vec<u8> {
     // backend lowerings such as value-class erasure. Both exclude the unbound receiver parameter.
     let mut signature_desc = String::from("(");
     for pt in fr.param_tys.iter().skip(first_arg) {
-        signature_desc.push_str(&type_descriptor(ir_ty_to_jvm(pt)));
+        signature_desc.push_str(&ir_type_desc(pt));
     }
     signature_desc.push(')');
     let signature_ret = if returns_void {
@@ -1252,7 +1247,7 @@ fn emit_func_ref_class(c: &crate::ir::IrClass, facade: &str) -> Vec<u8> {
 
     let mut call_desc = String::from("(");
     for pt in fr.target_param_tys.iter().skip(first_arg) {
-        call_desc.push_str(&type_descriptor(ir_ty_to_jvm(pt)));
+        call_desc.push_str(&ir_type_desc(pt));
     }
     call_desc.push(')');
     let target_ret_jvm = ir_ty_to_jvm(&fr.target_ret_ty);
@@ -2549,13 +2544,13 @@ fn jvm_method_signature(g: &crate::ir::IrGenericSig, f: &crate::ir::IrFunction) 
     for (i, pt) in g.param_tparams.iter().enumerate() {
         match pt {
             Some(name) => s.push_str(&format!("T{name};")),
-            None => s.push_str(&type_descriptor(ir_ty_to_jvm(&f.params[i]))),
+            None => s.push_str(&ir_type_desc(&f.params[i])),
         }
     }
     s.push(')');
     match &g.ret_tparam {
         Some(name) => s.push_str(&format!("T{name};")),
-        None => s.push_str(&type_descriptor(ir_ty_to_jvm(&f.ret))),
+        None => s.push_str(&ir_type_desc(&f.ret)),
     }
     Some(s)
 }
@@ -6859,6 +6854,10 @@ pub fn ir_ty_to_jvm(t: &Ty) -> Ty {
 
 pub(crate) fn jvm_tys(tys: &[Ty]) -> Vec<Ty> {
     tys.iter().map(ir_ty_to_jvm).collect()
+}
+
+fn ir_type_desc(t: &Ty) -> String {
+    type_descriptor(ir_ty_to_jvm(t))
 }
 
 fn field_jvm_tys(fields: &[IrField]) -> Vec<Ty> {
