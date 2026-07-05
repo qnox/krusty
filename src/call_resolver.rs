@@ -1500,8 +1500,8 @@ fn select_instance_info(
         by_rank.entry(o.receiver_rank).or_default().push(o);
     }
     for members in by_rank.values() {
-        if let Some(o) = best_member_overload(members.iter().copied(), name, args)
-            .or_else(|| best_member_overload(members.iter().copied(), name, &widened))
+        if let Some(o) = best_member_overload(members.iter().copied(), args)
+            .or_else(|| best_member_overload(members.iter().copied(), &widened))
         {
             return Some(o.clone());
         }
@@ -1545,7 +1545,6 @@ fn select_instance_info(
 
 fn best_member_overload<'a>(
     candidates: impl Iterator<Item = &'a FunctionInfo> + Clone,
-    _name: &str,
     args: &[Ty],
 ) -> Option<&'a FunctionInfo> {
     candidates
