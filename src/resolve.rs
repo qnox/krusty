@@ -3433,6 +3433,11 @@ pub struct TypeInfo {
     /// overloads. Absent for calls the checker did not resolve through the library member path
     /// (module members, synthesized operator calls) — the lowerer falls back to resolving those.
     pub resolved_members: HashMap<ExprId, crate::call_resolver::ResolvedMember>,
+    /// Receiver-less top-level library calls the checker already resolved, keyed by the `Expr::Call`
+    /// `ExprId`. Same purpose as [`Self::resolved_members`] for the top-level call path: the lowerer
+    /// reuses the callable instead of re-running `resolve_top_level_callable`. Absent for a call the
+    /// checker resolved through a different path (a local/module/FQ call); the lowerer falls back.
+    pub resolved_top_level: HashMap<ExprId, crate::libraries::LibraryCallable>,
 }
 
 /// How to inline a receiver-lambda scope-function call (see [`InlineCall::ReceiverLambda`]).
@@ -3606,6 +3611,7 @@ fn make_checker<'a>(file: &'a File, syms: &'a SymbolTable, diags: &'a mut DiagSi
         local_decl_types: HashMap::new(),
         resolved_call_type_args: HashMap::new(),
         resolved_members: HashMap::new(),
+        resolved_top_level: HashMap::new(),
         fn_reassigned: std::collections::HashSet::new(),
         expr_depth: 0,
         allow_lambda_mutation: false,
@@ -4309,6 +4315,7 @@ pub fn check_file(file: &File, syms: &mut SymbolTable, diags: &mut DiagSink) -> 
         local_decl_types,
         resolved_call_type_args,
         resolved_members,
+        resolved_top_level,
         ..
     } = c;
     for ((name, params), ret) in inferred_fun_rets {
@@ -4341,6 +4348,7 @@ pub fn check_file(file: &File, syms: &mut SymbolTable, diags: &mut DiagSink) -> 
         local_decl_types,
         resolved_call_type_args,
         resolved_members,
+        resolved_top_level,
     }
 }
 
@@ -4388,6 +4396,9 @@ struct Checker<'a> {
     /// Classpath instance-member calls resolved during checking, keyed by the `Expr::Call` `ExprId`
     /// (moved into [`TypeInfo::resolved_members`] so the lowerer reads them instead of re-resolving).
     resolved_members: HashMap<ExprId, crate::call_resolver::ResolvedMember>,
+    /// Receiver-less top-level library calls resolved during checking, keyed by the `Expr::Call`
+    /// `ExprId` (moved into [`TypeInfo::resolved_top_level`] for the lowerer to reuse).
+    resolved_top_level: HashMap<ExprId, crate::libraries::LibraryCallable>,
     /// Names reassigned anywhere in the function body currently being checked (including inside its
     /// closures). A captured `var` is boxed only if it's in here — kotlinc treats a captured-but-never-
     /// reassigned `var` as effectively final (passed by value).
@@ -10970,6 +10981,9 @@ impl<'a> Checker<'a> {
                         self.resolver()
                             .resolve_top_level_callable(&fname, &arg_tys, &call_targs)
                     {
+                        // Record the resolved callable so the lowerer emits it without re-resolving
+                        // (see [`TypeInfo::resolved_top_level`]).
+                        self.resolved_top_level.insert(call, c.clone());
                         let last_is_array =
                             c.params.last().is_some_and(|p| p.array_elem().is_some());
                         let vararg = last_is_array
