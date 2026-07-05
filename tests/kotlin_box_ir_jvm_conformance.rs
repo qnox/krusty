@@ -926,6 +926,18 @@ fn kotlin_codegen_box_conformance() {
             .collect()
     });
 
+    // Peak-memory snapshot (KRUSTY_MEM_REPORT=1): process RSS after all compiles, the point where the
+    // classpath caches are warmest. Confirms whether the per-thread LRU caps bound RSS. For a per-cache /
+    // per-allocation-site breakdown, run this binary under `dhat`/`heaptrack` or call `Classpath::
+    // cache_report()` from a focused profiling test.
+    if env("KRUSTY_MEM_REPORT").is_some() {
+        eprintln!(
+            "mem: peak process RSS = {} MiB ({} threads)",
+            krusty::jvm::classpath::process_rss_kb() / 1024,
+            n_threads,
+        );
+    }
+
     // Emit the flamegraph (if profiling was on) before computing summaries.
     if let Some(g) = flame_guard {
         if let Ok(report) = g.report().build() {
