@@ -161,6 +161,57 @@ pub trait TargetRuntime {
         None
     }
 
+    /// The value-class underlying type for a semantic type, when this target knows it. The default has
+    /// no value classes; a platform provider recovers the erased underlying from its type metadata plus
+    /// any builtins whose source type is not represented as `Ty::Obj` (`UInt` → `Int`).
+    fn value_underlying(&self, _ty: Ty) -> Option<Ty> {
+        None
+    }
+
+    /// Normalize a semantic type to the form a JVM `<init>`/method descriptor carries, so a call
+    /// argument can be matched against a descriptor-read parameter. A Kotlin built-in erases to its
+    /// single JVM identity (`kotlin/collections/Set<String>` → `java/util/Set`, read-only and mutable
+    /// alike) and type arguments are dropped, mirroring erasure. Targets that do not need platform
+    /// normalization return the type unchanged. Reference (`Ty::Obj`) types are normalized and arrays
+    /// recurse into their element (so a nested collection normalizes too); primitives, `String` and
+    /// function types already compare exactly across the two sides.
+    fn jvm_descriptor_form(&self, ty: Ty) -> Ty {
+        ty
+    }
+
+    /// If values of this type can be invoked like a Kotlin function, return their arity. Plain
+    /// `Ty::Fun` is handled by the default; platform providers can add callable runtime types such as
+    /// property references without the checker knowing their class names.
+    fn function_like_arity(&self, ty: Ty) -> Option<usize> {
+        ty.fun_arity().map(usize::from)
+    }
+
+    /// The platform/library type used for a property reference with the given arity and mutability.
+    /// Resolver needs this type so direct property-reference APIs (`get`, `name`) keep working, but the
+    /// actual class name is provider-owned.
+    fn property_reference_type(&self, _arity: usize, _mutable: bool) -> Option<Ty> {
+        None
+    }
+
+    /// The type produced by a class literal (`X::class`) on this target/platform.
+    fn class_literal_type(&self) -> Option<Ty> {
+        None
+    }
+
+    /// Additional default wildcard-import packages contributed by this platform, in dotted Kotlin
+    /// package syntax. Common Kotlin defaults live in the resolver; this hook is only for documented
+    /// target additions such as JVM's `java.lang` and `kotlin.jvm`.
+    fn platform_default_import_packages(&self) -> &'static [&'static str] {
+        &[]
+    }
+
+    /// Platform spelling for a physical zero-arg getter when Kotlin property metadata is unavailable.
+    /// Common resolution asks for a semantic property name first; this hook is a fallback owned by the
+    /// target because JVM uses JavaBean-style `getX`/`isX` while other targets need not.
+    fn physical_property_getter_name(&self, _property: &str) -> Option<String> {
+        None
+    }
+
     /// Runtime implementation class constructed for a property reference on this platform.
     fn property_reference_impl(&self, _arity: usize, _mutable: bool) -> Option<PlatformCtor> {
         None

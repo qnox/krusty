@@ -739,7 +739,7 @@ fn wildcard_candidate(pkg: &str, name: &str) -> String {
 /// inference can type an unqualified object-member call (`val logger = logger {}`). Recovers a nested
 /// owner (`a/b/Outer/Obj` → `a/b/Outer$Obj`) via `resolve_type`, since only [`SymbolSource`] is available
 /// here (not the richer `CompilerPlatform` `resolve_nested_internal` needs).
-fn object_member_import_sig(file: &File, name: &str, src: &dyn SymbolSource) -> Option<String> {
+fn object_member_import_sig(file: &File, name: &str, src: &dyn CompilerPlatform) -> Option<String> {
     let suffix = format!(".{name}");
     let fq = file
         .imports
@@ -2701,7 +2701,7 @@ fn infer_getter_ty(file: &File, e: ExprId, locals: &HashMap<&str, Ty>) -> Ty {
 }
 
 fn companion_const(
-    src: &dyn SymbolSource,
+    src: &dyn CompilerPlatform,
     class_names: &ClassNames,
     type_name: &str,
     const_name: &str,
@@ -2766,7 +2766,7 @@ fn infer_lit_ty(
     e: ExprId,
     class_names: &ClassNames,
     fun_rets: &HashMap<String, Ty>,
-    src: &dyn SymbolSource,
+    src: &dyn CompilerPlatform,
 ) -> Ty {
     infer_lit_ty_p(file, e, class_names, fun_rets, &[], src)
 }
@@ -2789,14 +2789,14 @@ fn infer_lit_ty_p(
     class_names: &ClassNames,
     fun_rets: &HashMap<String, Ty>,
     props: &[(String, Ty, bool)],
-    src: &dyn SymbolSource,
+    src: &dyn CompilerPlatform,
 ) -> Ty {
     // Resolve the (single) return type of `name` applied to `receiver` (a method/extension when
     // `receiver` is `Some`, a top-level function when `None`) through the FEDERATED symbol source — the
     // same classpath/stdlib resolution the full checker uses. Returns a type only when every applicable
     // overload AGREES on the return type (no arg-based overload selection here); otherwise `None`, so the
     // caller falls back to `Error` (skip) rather than guess. NO stdlib symbol names are hardcoded.
-    fn resolved_ret(src: &dyn SymbolSource, name: &str, receiver: Option<Ty>) -> Option<Ty> {
+    fn resolved_ret(src: &dyn CompilerPlatform, name: &str, receiver: Option<Ty>) -> Option<Ty> {
         let fs = src.functions(name, receiver);
         let mut ret: Option<Ty> = None;
         for o in &fs.overloads {
