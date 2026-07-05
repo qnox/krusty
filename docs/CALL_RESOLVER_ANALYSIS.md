@@ -266,6 +266,27 @@ Each phase is independently shippable and TDD-gated (`./run-tests.sh`). Order ma
 handoff complete before 4 removes the lowerer's fallback, so the harness stays green throughout
 (the lowerer can assert-or-fallback during migration, then drop the fallback in step 4).
 
+### Hard rule (learned the expensive way)
+
+Reusing the checker's recorded resolution in the lowerer is **safe only when the checker and the
+lowerer call the SAME resolve function with the same args**. Then a recorded hit is byte-identical
+to re-resolving, and a `stored.or_else(resolve)` fallback cannot change behaviour.
+
+It is **UNSAFE** when the two passes resolve through DIFFERENT functions. The lowerer's main member
+path has two branches: branch 1 `resolve_instance` (erased ret + `coerce_generic_read`) and branch 2
+`resolve_instance_member` (arg-bound ret). The checker records via `resolve_instance_member`.
+Feeding that record into branch 1 via `stored.or_else(resolve_instance)` makes branch 1 fire even
+where `resolve_instance` returns `None` (e.g. `Map.get` on `kotlin/collections/Map`), routing the
+call through branch 1's erased-ret emit → `VerifyError: Object not assignable to integer`. Two box
+tests (`map_basic_access`, `map_and_set_operations`) caught it; the slice was reverted.
+
+Consequence: the `resolve_instance` (branch-1) sites cannot be converted by a swap. They need the
+deeper unification — collapse branch 1 and branch 2 into ONE emit path that consumes the stored
+`ResolvedMember` with its bound ret — before their re-resolution can be removed.
+
+Safe-to-convert now (same fn both sides): top-level (`resolve_top_level_callable`), and the
+`resolve_instance_member` source sites (done: main branch 2, this-member).
+
 ### Migration safety
 Keep a temporary invariant check: during steps 3–4, have the lowerer resolve AND compare against the
 stored `ResolvedCall`; any mismatch is a pre-existing checker/lowerer divergence surfaced — fix it,

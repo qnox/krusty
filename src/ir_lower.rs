@@ -16566,11 +16566,17 @@ impl<'a> Lower<'a> {
                                         .collect()
                                 })
                                 .unwrap_or_default();
-                            self.resolver().resolve_top_level_callable(
-                                &fname,
-                                &arg_tys,
-                                &call_targs,
-                            )
+                            // Reuse the callable the checker resolved for this call (keyed by the call
+                            // ExprId); resolve only when it recorded through a different path (a
+                            // local/module/FQ call). Both sides call `resolve_top_level_callable`, so a
+                            // recorded hit is identical to re-resolving.
+                            self.info.resolved_top_level.get(&e).cloned().or_else(|| {
+                                self.resolver().resolve_top_level_callable(
+                                    &fname,
+                                    &arg_tys,
+                                    &call_targs,
+                                )
+                            })
                         }
                     } {
                         // For a spliced top-level `inline fun` (`run { 2 + 3 }`), the body returns the
