@@ -6857,7 +6857,7 @@ pub fn ir_ty_to_jvm(t: &Ty) -> Ty {
     }
 }
 
-fn jvm_tys(tys: &[Ty]) -> Vec<Ty> {
+pub(crate) fn jvm_tys(tys: &[Ty]) -> Vec<Ty> {
     tys.iter().map(ir_ty_to_jvm).collect()
 }
 
