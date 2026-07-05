@@ -119,6 +119,20 @@ pub(crate) fn arg_fits(p: &Ty, a: &Ty) -> bool {
         || matches!((p, a), (Ty::Obj(pi, _), Ty::Obj(ai, _)) if pi == ai)
 }
 
+fn ranked_extension_overloads(fs: &FunctionSet, allow_must_inline: bool) -> Vec<&FunctionInfo> {
+    let mut out: Vec<&FunctionInfo> = fs
+        .overloads
+        .iter()
+        .filter(|o| {
+            o.kind == FnKind::Extension
+                && o.receiver_rank != u32::MAX
+                && (o.public || (allow_must_inline && o.flags.inline.must_inline()))
+        })
+        .collect();
+    out.sort_by_key(|o| o.receiver_rank);
+    out
+}
+
 /// Map each provided argument to a parameter index for a top-level call carrying a lambda. Identity when
 /// the counts match; else, for a call that omits leading defaulted parameters before a TRAILING lambda
 /// (`runBlocking { … }`), leading args → leading params and the trailing lambda → the LAST parameter.
@@ -988,57 +1002,38 @@ impl<'a> CallResolver<'a> {
     ) -> Option<Vec<Vec<Ty>>> {
         let fs = self.lib.functions(name, Some(receiver));
         for allow_must_inline in [false, true] {
-            let mut ranks: Vec<u32> = fs
-                .overloads
-                .iter()
-                .filter(|o| {
-                    o.kind == FnKind::Extension
-                        && o.receiver_rank != u32::MAX
-                        && (o.public || (allow_must_inline && o.flags.inline.must_inline()))
-                })
-                .map(|o| o.receiver_rank)
-                .collect();
-            ranks.sort_unstable();
-            ranks.dedup();
-
-            for rank in ranks {
-                for o in fs.overloads.iter().filter(|o| {
-                    o.kind == FnKind::Extension
-                        && o.receiver_rank == rank
-                        && (o.public || (allow_must_inline && o.flags.inline.must_inline()))
-                }) {
-                    let Some(gsig) = o.generic_sig.as_ref() else {
-                        continue;
-                    };
-                    if gsig.params.is_empty() {
-                        continue;
+            for o in ranked_extension_overloads(&fs, allow_must_inline) {
+                let Some(gsig) = o.generic_sig.as_ref() else {
+                    continue;
+                };
+                if gsig.params.is_empty() {
+                    continue;
+                }
+                let n_real = gsig.params.len() - 1;
+                let k = arg_tys.len();
+                let trailing_lambda = k >= 1 && arg_tys[k - 1].is_none();
+                let mapped: Vec<&GSig> = if n_real == k {
+                    gsig.params[1..].iter().collect()
+                } else if trailing_lambda && n_real > k && k >= 1 {
+                    let mut v: Vec<&GSig> = gsig.params[1..k].iter().collect();
+                    v.push(&gsig.params[n_real]);
+                    v
+                } else {
+                    continue;
+                };
+                let mut binds = std::collections::HashMap::new();
+                unify_gsig(&gsig.params[0], receiver, &mut binds);
+                for (ps, at) in mapped.iter().zip(arg_tys) {
+                    if let Some(t) = at {
+                        unify_gsig(ps, *t, &mut binds);
                     }
-                    let n_real = gsig.params.len() - 1;
-                    let k = arg_tys.len();
-                    let trailing_lambda = k >= 1 && arg_tys[k - 1].is_none();
-                    let mapped: Vec<&GSig> = if n_real == k {
-                        gsig.params[1..].iter().collect()
-                    } else if trailing_lambda && n_real > k && k >= 1 {
-                        let mut v: Vec<&GSig> = gsig.params[1..k].iter().collect();
-                        v.push(&gsig.params[n_real]);
-                        v
-                    } else {
-                        continue;
-                    };
-                    let mut binds = std::collections::HashMap::new();
-                    unify_gsig(&gsig.params[0], receiver, &mut binds);
-                    for (ps, at) in mapped.iter().zip(arg_tys) {
-                        if let Some(t) = at {
-                            unify_gsig(ps, *t, &mut binds);
-                        }
-                    }
-                    let out: Vec<Vec<Ty>> = mapped
-                        .iter()
-                        .map(|ps| function_input_types(ps, &binds))
-                        .collect();
-                    if out.iter().any(|v| !v.is_empty()) {
-                        return Some(out);
-                    }
+                }
+                let out: Vec<Vec<Ty>> = mapped
+                    .iter()
+                    .map(|ps| function_input_types(ps, &binds))
+                    .collect();
+                if out.iter().any(|v| !v.is_empty()) {
+                    return Some(out);
                 }
             }
         }
@@ -1053,77 +1048,57 @@ impl<'a> CallResolver<'a> {
     ) -> Option<Vec<Option<Ty>>> {
         let fs = self.lib.functions(name, Some(receiver));
         for allow_must_inline in [false, true] {
-            let mut ranks: Vec<u32> = fs
-                .overloads
-                .iter()
-                .filter(|o| {
-                    o.kind == FnKind::Extension
-                        && o.receiver_rank != u32::MAX
-                        && (o.public || (allow_must_inline && o.flags.inline.must_inline()))
-                })
-                .map(|o| o.receiver_rank)
-                .collect();
-            ranks.sort_unstable();
-            ranks.dedup();
-
-            for rank in ranks {
-                for o in fs.overloads.iter().filter(|o| {
-                    o.kind == FnKind::Extension
-                        && o.receiver_rank == rank
-                        && (o.public || (allow_must_inline && o.flags.inline.must_inline()))
-                }) {
-                    let Some(gsig) = o.generic_sig.as_ref() else {
-                        continue;
-                    };
-                    if gsig.params.is_empty() {
-                        continue;
+            for o in ranked_extension_overloads(&fs, allow_must_inline) {
+                let Some(gsig) = o.generic_sig.as_ref() else {
+                    continue;
+                };
+                if gsig.params.is_empty() {
+                    continue;
+                }
+                let n_real = gsig.params.len() - 1;
+                let k = arg_tys.len();
+                let trailing_lambda = k >= 1 && arg_tys[k - 1].is_none();
+                let mapped: Vec<(usize, &GSig)> = if n_real == k {
+                    gsig.params[1..].iter().enumerate().collect()
+                } else if trailing_lambda && n_real > k && k >= 1 {
+                    let mut v: Vec<(usize, &GSig)> = gsig.params[1..k].iter().enumerate().collect();
+                    v.push((n_real - 1, &gsig.params[n_real]));
+                    v
+                } else {
+                    continue;
+                };
+                let mut binds = std::collections::HashMap::new();
+                unify_gsig(&gsig.params[0], receiver, &mut binds);
+                for ((_, ps), at) in mapped.iter().zip(arg_tys) {
+                    if let Some(t) = at {
+                        unify_gsig(ps, *t, &mut binds);
                     }
-                    let n_real = gsig.params.len() - 1;
-                    let k = arg_tys.len();
-                    let trailing_lambda = k >= 1 && arg_tys[k - 1].is_none();
-                    let mapped: Vec<(usize, &GSig)> = if n_real == k {
-                        gsig.params[1..].iter().enumerate().collect()
-                    } else if trailing_lambda && n_real > k && k >= 1 {
-                        let mut v: Vec<(usize, &GSig)> =
-                            gsig.params[1..k].iter().enumerate().collect();
-                        v.push((n_real - 1, &gsig.params[n_real]));
-                        v
-                    } else {
-                        continue;
-                    };
-                    let mut binds = std::collections::HashMap::new();
-                    unify_gsig(&gsig.params[0], receiver, &mut binds);
-                    for ((_, ps), at) in mapped.iter().zip(arg_tys) {
-                        if let Some(t) = at {
-                            unify_gsig(ps, *t, &mut binds);
+                }
+                let out: Vec<Option<Ty>> = mapped
+                    .iter()
+                    .map(|(logical_idx, ps)| {
+                        if let Some(recv) = o
+                            .call_sig
+                            .lambda_receivers
+                            .get(*logical_idx)
+                            .copied()
+                            .flatten()
+                        {
+                            return Some(recv);
                         }
-                    }
-                    let out: Vec<Option<Ty>> = mapped
-                        .iter()
-                        .map(|(logical_idx, ps)| {
-                            if let Some(recv) = o
-                                .call_sig
-                                .lambda_receivers
-                                .get(*logical_idx)
-                                .copied()
-                                .flatten()
-                            {
-                                return Some(recv);
-                            }
-                            if o.call_sig
-                                .lambda_receiver_params
-                                .get(*logical_idx)
-                                .copied()
-                                .unwrap_or(false)
-                            {
-                                return function_input_types(ps, &binds).first().copied();
-                            }
-                            None
-                        })
-                        .collect();
-                    if out.iter().any(Option::is_some) {
-                        return Some(out);
-                    }
+                        if o.call_sig
+                            .lambda_receiver_params
+                            .get(*logical_idx)
+                            .copied()
+                            .unwrap_or(false)
+                        {
+                            return function_input_types(ps, &binds).first().copied();
+                        }
+                        None
+                    })
+                    .collect();
+                if out.iter().any(Option::is_some) {
+                    return Some(out);
                 }
             }
         }
