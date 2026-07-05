@@ -1473,6 +1473,7 @@ impl SymbolSource for JvmLibraries {
                     ] {
                         let jname = format!("{name}{simple}");
                         for c in self.cp.find_extensions(&recv_desc, &jname) {
+                            let generic_sig = c.signature.as_deref().and_then(parse_method_gsig);
                             let (params, pret) = parse_method_desc(&c.descriptor);
                             // A single-selector overload whose receiver is THIS supertype and whose JVM
                             // return is the wanted primitive.
@@ -1488,8 +1489,7 @@ impl SymbolSource for JvmLibraries {
                             // `([I, Function1)I`) by the SELECTOR parameter type from the generic signature
                             // == the receiver's element type — so an `Int` lambda never binds a `UInt` body.
                             if let Some(elem) = want_elem {
-                                let Some(gsig) = c.signature.as_deref().and_then(parse_method_gsig)
-                                else {
+                                let Some(gsig) = generic_sig.as_ref() else {
                                     continue;
                                 };
                                 let mut binds = std::collections::HashMap::new();
@@ -1512,7 +1512,7 @@ impl SymbolSource for JvmLibraries {
                                 // arg-binding extension selector — mark it so it can't preempt a real rung.
                                 receiver_rank: u32::MAX,
                                 overload_rank: descriptor_narrowing(&c.descriptor) as u32,
-                                generic_sig: c.signature.as_deref().and_then(parse_method_gsig),
+                                generic_sig,
                                 flags: FnFlags {
                                     inline,
                                     suspend: self.cp.is_suspend_method(&c.owner, &c.name),
@@ -1546,6 +1546,7 @@ impl SymbolSource for JvmLibraries {
                 .enumerate()
             {
                 for c in self.cp.find_extensions(&recv_desc, name) {
+                    let generic_sig = c.signature.as_deref().and_then(parse_method_gsig);
                     // Metadata-primary visibility for a value-class extension. An `inline` extension on a
                     // value class (`Result.getOrThrow`) is PRIVATE in bytecode but PUBLIC per @Metadata —
                     // kotlinc resolves it, then inlines (no legal `invokestatic`). ONLY consider a
@@ -1580,10 +1581,8 @@ impl SymbolSource for JvmLibraries {
                     // `List.map`; value-class-specific mangled lookup below handles the real receiver.
                     if !public
                         && recv_desc == "Ljava/lang/Object;"
-                        && !c
-                            .signature
-                            .as_deref()
-                            .and_then(parse_method_gsig)
+                        && !generic_sig
+                            .as_ref()
                             .is_some_and(|gsig| matches!(gsig.params.first(), Some(GSig::Var(_))))
                     {
                         continue;
@@ -1610,10 +1609,8 @@ impl SymbolSource for JvmLibraries {
                     // Logical return, recovered RECEIVER-substituted (arg-independent): `<T> T.takeIf(…): T?`
                     // → `receiver`. A type var the receiver doesn't bind (`fold`'s `R`) stays as the erased
                     // physical type — arg-binding selection in `CallResolver` refines that.
-                    let ret = c
-                        .signature
-                        .as_deref()
-                        .and_then(parse_method_gsig)
+                    let ret = generic_sig
+                        .as_ref()
                         .map(|gsig| {
                             let mut binds = std::collections::HashMap::new();
                             if let Some(recv_sig) = gsig.params.first() {
@@ -1654,7 +1651,7 @@ impl SymbolSource for JvmLibraries {
                         public,
                         receiver_rank: rank as u32,
                         overload_rank: descriptor_narrowing(&c.descriptor) as u32,
-                        generic_sig: c.signature.as_deref().and_then(parse_method_gsig),
+                        generic_sig,
                         call_sig,
                         flags: FnFlags {
                             inline: inline_kind,
