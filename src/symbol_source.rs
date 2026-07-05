@@ -1,9 +1,9 @@
 //! `SymbolSource` — the federatable seam shared by every provider of declarations.
 //!
-//! A *source* answers the three arg-independent questions resolution needs about a body of code: the
-//! type universe it contributes (`seed`), the overloads of a name (`functions`), and the shape of a
-//! type (`resolve_type`). Both the current module (its AST decls) and a compiled library (a classpath)
-//! are sources; [`crate::libraries::SymbolSource`] is a `SymbolSource` plus the JVM-emit extras.
+//! A *source* answers the two arg-independent questions resolution needs about a body of code: the
+//! overloads of a name (`functions`) and the shape of a type (`resolve_type`, which also redirects a
+//! `typealias` to its target). Both the current module (its AST decls) and a compiled library (a
+//! classpath) are sources.
 //!
 //! Sources COMPOSE: a [`CompositeSource`] holds an ordered list of children and is itself a
 //! `SymbolSource`, so `[current module, sibling modules, stdlib, extra jars]` federate uniformly with
@@ -11,37 +11,12 @@
 //! INSIDE one source (an extension's receiver-MRO rank is only comparable within one type hierarchy);
 //! the composite federates at the resolve boundary, never by flattening one global overload set.
 
-use crate::libraries::{FunctionSet, LibrarySeed, LibraryType};
+use crate::libraries::{FunctionSet, LibraryType};
 use crate::types::Ty;
-
-/// The shared-base form of a [`LibrarySeed`]: class names and type aliases, each behind an `Rc` so many
-/// files compiled against one provider share the large maps rather than cloning them.
-pub type SharedSeed = (
-    std::rc::Rc<std::collections::HashMap<String, String>>,
-    std::rc::Rc<std::collections::HashMap<String, String>>,
-);
 
 /// A provider of declarations — a module's AST or a compiled library. The arg-independent metadata
 /// surface that federates across sources; arg-dependent selection/binding lives above (the resolver).
 pub trait SymbolSource {
-    /// The type universe this source contributes, resolved to internal names (simple name → internal,
-    /// plus type aliases). Empty by default.
-    fn seed(&self) -> LibrarySeed {
-        LibrarySeed::default()
-    }
-
-    /// The same type universe as [`seed`], but with the (large) base maps shared by `Rc` so a caller
-    /// that compiles many files against one provider does NOT clone the whole stdlib+JDK class-name
-    /// map per file. Returns `(class_names, type_aliases)`. The default just wraps `seed`; a heavy
-    /// classpath-backed source (the JVM one) overrides this to cache and return a shared `Rc`.
-    fn seed_shared(&self) -> SharedSeed {
-        let s = self.seed();
-        (
-            std::rc::Rc::new(s.class_names),
-            std::rc::Rc::new(s.type_aliases),
-        )
-    }
-
     /// ALL overloads of function `name` applicable to a call — members + extensions (`receiver = Some`)
     /// or top-level functions (`receiver = None`) — in ONE query, each tagged with its `FnKind` and
     /// carrying full metadata (inline/`@InlineOnly`, return nullability, receiver rung). Empty by default.
@@ -59,8 +34,8 @@ pub trait SymbolSource {
 }
 
 /// An ordered federation of sources — itself a [`SymbolSource`], so it nests. Earlier children win:
-/// `functions` concatenates in order (each overload keeps its own origin), `resolve_type`/`seed` take
-/// the first/earliest contributor on a name clash.
+/// `functions` concatenates in order (each overload keeps its own origin), `resolve_type` takes the
+/// first/earliest contributor on a name clash.
 #[derive(Default)]
 pub struct CompositeSource {
     children: Vec<Box<dyn SymbolSource>>,
@@ -79,18 +54,6 @@ impl CompositeSource {
 }
 
 impl SymbolSource for CompositeSource {
-    fn seed(&self) -> LibrarySeed {
-        // Merge with EARLIEST-wins: fill from the lowest-precedence child first, then let each more
-        // specific child overwrite, so a name a high-precedence source defines shadows the rest.
-        let mut seed = LibrarySeed::default();
-        for child in self.children.iter().rev() {
-            let s = child.seed();
-            seed.class_names.extend(s.class_names);
-            seed.type_aliases.extend(s.type_aliases);
-        }
-        seed
-    }
-
     fn functions(&self, name: &str, receiver: Option<Ty>) -> FunctionSet {
         // Concatenate in precedence order — each `FunctionInfo` already carries its source's origin, and
         // selection is done per-source (ranks are not comparable across sources), so order is enough.
@@ -111,15 +74,14 @@ impl SymbolSource for CompositeSource {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::libraries::{FnKind, FunctionInfo, LibraryCallable, LibrarySeed, LibraryType};
+    use crate::libraries::{FnKind, FunctionInfo, LibraryCallable, LibraryType};
     use crate::types::Ty;
 
-    /// A minimal source: a few class names and one top-level overload of a chosen name.
+    /// A minimal source: one top-level overload of a chosen name, one type shape.
     struct FakeSource {
-        class: Option<(String, String)>, // simple -> internal
-        fn_name: Option<String>,         // a top-level fn this source provides
-        owner: String,                   // owner stamped on its callable (proxy for "origin")
-        typed: Option<String>,           // an internal name this source has a shape for
+        fn_name: Option<String>, // a top-level fn this source provides
+        owner: String,           // owner stamped on its callable (proxy for "origin")
+        typed: Option<String>,   // an internal name this source has a shape for
     }
 
     fn callable(owner: &str, name: &str) -> LibraryCallable {
@@ -127,13 +89,6 @@ mod tests {
     }
 
     impl SymbolSource for FakeSource {
-        fn seed(&self) -> LibrarySeed {
-            let mut s = LibrarySeed::default();
-            if let Some((k, v)) = &self.class {
-                s.class_names.insert(k.clone(), v.clone());
-            }
-            s
-        }
         fn functions(&self, name: &str, receiver: Option<Ty>) -> FunctionSet {
             if receiver.is_none() && self.fn_name.as_deref() == Some(name) {
                 FunctionSet {
@@ -161,6 +116,7 @@ mod tests {
                     companion_object: None,
                     value_companion_fns: Vec::new(),
                     value_underlying: None,
+                    alias_target: None,
                     type_params: Vec::new(),
                     sealed_subclasses: Vec::new(),
                     enum_entries: Vec::new(),
@@ -176,7 +132,6 @@ mod tests {
 
     fn module() -> FakeSource {
         FakeSource {
-            class: Some(("Foo".into(), "mod/Foo".into())),
             fn_name: Some("greet".into()),
             owner: "module".into(),
             typed: Some("shared".into()),
@@ -185,8 +140,7 @@ mod tests {
 
     fn library() -> FakeSource {
         FakeSource {
-            class: Some(("Foo".into(), "lib/Foo".into())), // clashes with module on `Foo`
-            fn_name: Some("greet".into()),                 // clashes with module on `greet`
+            fn_name: Some("greet".into()), // clashes with module on `greet`
             owner: "library".into(),
             typed: Some("shared".into()), // clashes with module on `shared`
         }
@@ -220,7 +174,6 @@ mod tests {
     fn resolve_type_falls_through_to_later_source() {
         // Only the library has `lib/only`.
         let lib = FakeSource {
-            class: None,
             fn_name: None,
             owner: "library".into(),
             typed: Some("lib/only".into()),
@@ -228,14 +181,6 @@ mod tests {
         let c = CompositeSource::new(vec![Box::new(module()), Box::new(lib)]);
         assert!(c.resolve_type("lib/only").is_some());
         assert!(c.resolve_type("nope").is_none());
-    }
-
-    #[test]
-    fn seed_merges_with_earliest_winning_on_clash() {
-        let c = CompositeSource::new(vec![Box::new(module()), Box::new(library())]);
-        let seed = c.seed();
-        // `Foo` is defined by both; the module (earliest/highest precedence) wins.
-        assert_eq!(seed.class_names.get("Foo"), Some(&"mod/Foo".to_string()));
     }
 
     #[test]
@@ -249,13 +194,6 @@ mod tests {
     }
 
     #[test]
-    fn default_seed_shared_wraps_seed_in_rc() {
-        let s = module();
-        let (class_names, _aliases) = s.seed_shared();
-        assert_eq!(class_names.get("Foo"), Some(&"mod/Foo".to_string()));
-    }
-
-    #[test]
     fn push_appends_at_lowest_precedence() {
         let mut c = CompositeSource::new(vec![Box::new(module())]);
         c.push(Box::new(library()));
@@ -266,9 +204,8 @@ mod tests {
     }
 
     #[test]
-    fn empty_composite_has_empty_seed_and_no_functions() {
+    fn empty_composite_has_no_functions_and_no_types() {
         let c = CompositeSource::default();
-        assert!(c.seed().class_names.is_empty());
         assert!(c.functions("anything", None).overloads.is_empty());
         assert!(c.resolve_type("anything").is_none());
     }

@@ -802,6 +802,23 @@ impl Classpath {
             .unwrap_or_default()
     }
 
+    /// The target internal name of the classpath `typealias` named `internal` (full name, e.g.
+    /// `kotlin/collections/ArrayList` → `java/util/ArrayList`), or `None` if `internal` is not an alias.
+    pub fn type_alias_target(&self, internal: &str) -> Option<String> {
+        self.scan_types().type_aliases.get(internal).cloned()
+    }
+
+    /// Whether `internal` is a Kotlin BUILTIN declared in a `.kotlin_builtins` fragment (`kotlin/Number`,
+    /// `kotlin/collections/List`, …), and if so whether it is an interface. `None` = not a builtin. Lets
+    /// `resolve_type` report a builtin whose JVM class is absent (a no-JDK compile) from the builtins data,
+    /// with the right class-vs-interface kind for member-invoke codegen.
+    pub fn builtin_is_interface(&self, internal: &str) -> Option<bool> {
+        let path = Self::builtins_path_for(internal);
+        self.builtins_file(&path)
+            .get(internal)
+            .map(|c| c.is_interface)
+    }
+
     /// Whether `internal` names a type in the Kotlin collection hierarchy (`collections.kotlin_builtins`)
     /// — i.e. one whose read-only/mutable identity is known here. A platform `java/util/List` or a user
     /// class is NOT (the front end never produces the former for a Kotlin collection; both keep their

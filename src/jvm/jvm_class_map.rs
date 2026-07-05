@@ -41,33 +41,39 @@ pub const BUILTIN_MAPPED_NAMES: &[&str] = &[
     "Nothing",
 ];
 
-/// Map a Kotlin built-in type's **simple name** to its JVM internal name, mirroring
-/// `JavaToKotlinClassMap`'s `kotlinToJava` direction. `None` if the name is not a mapped built-in.
-///
-/// Mutable collection variants (`MutableList`, …) map to the same JVM interface as their read-only
-/// counterpart, exactly as in the reference `addMapping`.
-pub fn kotlin_builtin_to_jvm(simple: &str) -> Option<&'static str> {
-    Some(match simple {
-        // addTopLevel(...) — top-level mapped types (java class via `X::class.java`).
-        "Any" => "java/lang/Object",
-        "String" => "java/lang/String",
-        "CharSequence" => "java/lang/CharSequence",
-        "Throwable" => "java/lang/Throwable",
-        "Cloneable" => "java/lang/Cloneable",
-        "Number" => "java/lang/Number",
-        "Comparable" => "java/lang/Comparable",
-        "Enum" => "java/lang/Enum",
-        "Annotation" => "java/lang/annotation/Annotation",
-        // mutabilityMappings — read-only Kotlin collection → JVM interface.
-        "Iterable" | "MutableIterable" => "java/lang/Iterable",
-        "Iterator" | "MutableIterator" => "java/util/Iterator",
-        "Collection" | "MutableCollection" => "java/util/Collection",
-        "List" | "MutableList" => "java/util/List",
-        "Set" | "MutableSet" => "java/util/Set",
-        "ListIterator" | "MutableListIterator" => "java/util/ListIterator",
-        "Map" | "MutableMap" => "java/util/Map",
-        // addKotlinToJava(FqNames.nothing, Void)
-        "Nothing" => "java/lang/Void",
+/// `JavaToKotlinClassMap`'s `kotlinToJava` direction, keyed by the FULL Kotlin INTERNAL name (as kotlinc
+/// keys it by `FqName`) — NEVER a simple name, so `kotlin/collections/List` → `java/util/List` and a bare
+/// `kotlin/List` (not a real type) simply isn't a key. Mutable variants map to the same JVM interface as
+/// their read-only counterpart (`addMapping`). `None` if `internal` is not a mapped built-in.
+pub fn kotlin_builtin_to_jvm(internal: &str) -> Option<&'static str> {
+    Some(match internal {
+        // Top-level `kotlin` package builtins.
+        "kotlin/Any" => "java/lang/Object",
+        "kotlin/String" => "java/lang/String",
+        "kotlin/CharSequence" => "java/lang/CharSequence",
+        "kotlin/Throwable" => "java/lang/Throwable",
+        "kotlin/Cloneable" => "java/lang/Cloneable",
+        "kotlin/Number" => "java/lang/Number",
+        "kotlin/Comparable" => "java/lang/Comparable",
+        "kotlin/Enum" => "java/lang/Enum",
+        "kotlin/Annotation" => "java/lang/annotation/Annotation",
+        "kotlin/Nothing" => "java/lang/Void",
+        // `kotlin.collections` — read-only AND mutable erase to the one JVM interface.
+        "kotlin/collections/Iterable" | "kotlin/collections/MutableIterable" => {
+            "java/lang/Iterable"
+        }
+        "kotlin/collections/Iterator" | "kotlin/collections/MutableIterator" => {
+            "java/util/Iterator"
+        }
+        "kotlin/collections/Collection" | "kotlin/collections/MutableCollection" => {
+            "java/util/Collection"
+        }
+        "kotlin/collections/List" | "kotlin/collections/MutableList" => "java/util/List",
+        "kotlin/collections/Set" | "kotlin/collections/MutableSet" => "java/util/Set",
+        "kotlin/collections/ListIterator" | "kotlin/collections/MutableListIterator" => {
+            "java/util/ListIterator"
+        }
+        "kotlin/collections/Map" | "kotlin/collections/MutableMap" => "java/util/Map",
         _ => return None,
     })
 }
@@ -114,8 +120,9 @@ pub fn kotlin_builtin_to_internal(simple: &str) -> Option<&'static str> {
         "MutableIterator" => "kotlin/collections/MutableIterator",
         "ListIterator" => "kotlin/collections/ListIterator",
         "MutableListIterator" => "kotlin/collections/MutableListIterator",
-        // Non-collection built-ins keep their JVM identity (no read-only/mutable distinction).
-        other => return kotlin_builtin_to_jvm(other),
+        // Non-collection built-ins keep their JVM identity (no read-only/mutable distinction). The map is
+        // FQN-keyed, so form the top-level Kotlin internal (`kotlin/<simple>`) before the lookup.
+        other => return kotlin_builtin_to_jvm(&format!("kotlin/{other}")),
     })
 }
 
@@ -216,13 +223,6 @@ pub fn wrapper_to_kotlin_prim(internal: &str) -> Option<&'static str> {
 /// Any other name — a user class, a JDK class already named in JVM form, a Kotlin stdlib class with
 /// no JVM-builtin counterpart — passes through unchanged. Applied at the Ty→bytecode boundary.
 pub fn to_jvm_internal(internal: &str) -> &str {
-    // Emit-only mappings: core-introduced Kotlin names with a JVM counterpart that the classpath
-    // never surfaces (so they stay out of the bidirectional `TYPE_MAP` and don't affect
-    // `to_kotlin_internal`). `kotlin/Throwable` is synthesized by the front end for the `throw`
-    // checkcast; the classpath always reads `java/lang/Throwable` directly.
-    if internal == "kotlin/Throwable" {
-        return "java/lang/Throwable";
-    }
     // Emit-only: a BOXED primitive used as a reference (the element of `Array<Int>` = `[Ljava/lang/
     // Integer;`). The front end carries it as the Kotlin primitive name (`kotlin/Int`); only here does
     // it erase to the JVM wrapper. ONE-WAY (boxed primitives are never read back from the classpath
@@ -230,15 +230,14 @@ pub fn to_jvm_internal(internal: &str) -> &str {
     if let Some(wrapper) = kotlin_prim_to_wrapper(internal) {
         return wrapper;
     }
-    // Emit-only erasure of the Kotlin collection types (read-only AND mutable) to their single JVM
-    // interface — `kotlin/collections/MutableList` → `java/util/List`, `…/List` → `java/util/List`, etc.
-    // The front end keeps the two distinct (read-only vs mutable); they collapse only here at the bytecode
-    // boundary. ONE-WAY (not in the bidirectional `TYPE_MAP`), so `to_kotlin_internal` never has to pick
-    // ambiguously between `List`/`MutableList` when it reads a raw `java/util/List` descriptor.
-    if let Some(simple) = internal.strip_prefix("kotlin/collections/") {
-        if let Some(j) = kotlin_builtin_to_jvm(simple) {
-            return j;
-        }
+    // `JavaToKotlinClassMap` (`kotlinToJava`), keyed by full Kotlin internal name — the codegen erasure
+    // kotlinc's `KotlinTypeMapper` performs: `kotlin/Number` → `java/lang/Number`,
+    // `kotlin/collections/MutableList` → `java/util/List`, `kotlin/Throwable` → `java/lang/Throwable`, …
+    // The FRONT END keeps the Kotlin identity (own hierarchy/members, read-only vs mutable); only here, at
+    // the JVM boundary, does it erase. ONE-WAY — the inverse `to_kotlin_internal` uses the bidirectional
+    // `TYPE_MAP` (`Any`/`String` only), so a raw `java/util/List` never maps ambiguously back.
+    if let Some(j) = kotlin_builtin_to_jvm(internal) {
+        return j;
     }
     TYPE_MAP
         .iter()

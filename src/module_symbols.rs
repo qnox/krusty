@@ -8,7 +8,7 @@
 
 use crate::libraries::{
     CallSig, FnFlags, FnKind, FunctionInfo, FunctionSet, InlineKind, LibraryCallable,
-    LibraryMember, LibrarySeed, LibraryType, Origin,
+    LibraryMember, LibraryType, Origin,
 };
 use crate::resolve::{ClassSig, Signature, SymbolTable};
 use crate::symbol_source::SymbolSource;
@@ -141,28 +141,6 @@ fn fn_info(
 }
 
 impl SymbolSource for ModuleSymbols<'_> {
-    fn seed(&self) -> LibrarySeed {
-        // The module's declared type names → their internal names. `class_names` already holds the
-        // resolved internal for every user class/object/enum (mixed with library names); pick out the
-        // ones this module actually declares.
-        let mut class_names = std::collections::HashMap::new();
-        let declared = self
-            .syms
-            .classes
-            .keys()
-            .chain(self.syms.objects.iter())
-            .chain(self.syms.enums.keys());
-        for name in declared {
-            if let Some(internal) = self.syms.class_names.get(name) {
-                class_names.insert(name.clone(), internal.clone());
-            }
-        }
-        LibrarySeed {
-            class_names,
-            type_aliases: std::collections::HashMap::new(),
-        }
-    }
-
     fn functions(&self, name: &str, receiver: Option<Ty>) -> FunctionSet {
         let mut overloads = Vec::new();
         match receiver {
@@ -270,6 +248,7 @@ impl SymbolSource for ModuleSymbols<'_> {
             companion_object: None,
             value_companion_fns: Vec::new(),
             value_underlying: None,
+            alias_target: None,
             type_params: Vec::new(),
             sealed_subclasses: Vec::new(),
             enum_entries: Vec::new(),
@@ -446,18 +425,5 @@ mod tests {
         assert_eq!(t.members[0].ret, Ty::Int);
         assert_eq!(t.supertypes, vec!["demo/Shape".to_string()]);
         assert!(m.resolve_type("demo/Nope").is_none());
-    }
-
-    #[test]
-    fn seed_lists_declared_types() {
-        let mut st = SymbolTable::default();
-        st.classes.insert("Point".into(), class("demo/Point"));
-        st.class_names.insert("Point".into(), "demo/Point".into());
-        st.class_names
-            .insert("String".into(), "java/lang/String".into()); // library, not declared
-        let m = ModuleSymbols::new(&st);
-        let seed = m.seed();
-        assert_eq!(seed.class_names.get("Point"), Some(&"demo/Point".into()));
-        assert!(!seed.class_names.contains_key("String"));
     }
 }
