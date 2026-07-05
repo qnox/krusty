@@ -18035,14 +18035,24 @@ impl<'a> Lower<'a> {
                         // A generic member whose erased return is `Object` but whose substituted type is
                         // more specific (`List<Int>.get` → `Int`) gets the unbox/checkcast kotlinc emits.
                         self.coerce_generic_read(call, e, mret)
-                    } else if let Some(resolved) = {
-                        crate::call_resolver::resolve_instance_member(
-                            &*self.syms.libraries,
-                            rt,
-                            &name,
-                            &self.arg_tys(&args),
-                        )
-                    } {
+                    } else if let Some(resolved) = self
+                        .info
+                        .resolved_members
+                        .get(&e)
+                        .cloned()
+                        // The checker records the member it resolved for this source call keyed by the
+                        // call `ExprId` (see [`TypeInfo::resolved_members`]); reuse it so the call is
+                        // resolved once. Fall back to resolving for a call the checker did not record
+                        // through this path (its resolution came from an earlier branch above).
+                        .or_else(|| {
+                            crate::call_resolver::resolve_instance_member(
+                                &*self.syms.libraries,
+                                rt,
+                                &name,
+                                &self.arg_tys(&args),
+                            )
+                        })
+                    {
                         let recv = self.expr(receiver)?;
                         let ret = resolved.ret;
                         let member = resolved.member;

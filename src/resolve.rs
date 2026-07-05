@@ -3427,6 +3427,12 @@ pub struct TypeInfo {
     /// to drive the bytecode splicer's reified specialization. Recorded only where an explicit `<…>` is
     /// present on a call.
     pub resolved_call_type_args: HashMap<ExprId, Vec<Ty>>,
+    /// Classpath instance-member calls the checker already resolved, keyed by the `Expr::Call`
+    /// `ExprId`. The lowerer reads the resolved member here instead of re-running `call_resolver`,
+    /// so a source call is resolved exactly once and the two passes cannot select different
+    /// overloads. Absent for calls the checker did not resolve through the library member path
+    /// (module members, synthesized operator calls) — the lowerer falls back to resolving those.
+    pub resolved_members: HashMap<ExprId, crate::call_resolver::ResolvedMember>,
 }
 
 /// How to inline a receiver-lambda scope-function call (see [`InlineCall::ReceiverLambda`]).
@@ -3599,6 +3605,7 @@ fn make_checker<'a>(file: &'a File, syms: &'a SymbolTable, diags: &'a mut DiagSi
         stmt_lowers: HashMap::new(),
         local_decl_types: HashMap::new(),
         resolved_call_type_args: HashMap::new(),
+        resolved_members: HashMap::new(),
         fn_reassigned: std::collections::HashSet::new(),
         expr_depth: 0,
         allow_lambda_mutation: false,
@@ -4301,6 +4308,7 @@ pub fn check_file(file: &File, syms: &mut SymbolTable, diags: &mut DiagSink) -> 
         stmt_lowers,
         local_decl_types,
         resolved_call_type_args,
+        resolved_members,
         ..
     } = c;
     for ((name, params), ret) in inferred_fun_rets {
@@ -4332,6 +4340,7 @@ pub fn check_file(file: &File, syms: &mut SymbolTable, diags: &mut DiagSink) -> 
         stmt_lowers,
         local_decl_types,
         resolved_call_type_args,
+        resolved_members,
     }
 }
 
@@ -4376,6 +4385,9 @@ struct Checker<'a> {
     stmt_lowers: HashMap<StmtId, StmtLowering>,
     local_decl_types: HashMap<StmtId, Ty>,
     resolved_call_type_args: HashMap<ExprId, Vec<Ty>>,
+    /// Classpath instance-member calls resolved during checking, keyed by the `Expr::Call` `ExprId`
+    /// (moved into [`TypeInfo::resolved_members`] so the lowerer reads them instead of re-resolving).
+    resolved_members: HashMap<ExprId, crate::call_resolver::ResolvedMember>,
     /// Names reassigned anywhere in the function body currently being checked (including inside its
     /// closures). A captured `var` is boxed only if it's in here — kotlinc treats a captured-but-never-
     /// reassigned `var` as effectively final (passed by value).
@@ -9488,14 +9500,14 @@ impl<'a> Checker<'a> {
                     return Ty::String; // intrinsic on any type
                 }
                 if rt == Ty::String {
-                    if let Some(ret) = crate::call_resolver::resolve_instance_member(
+                    if let Some(m) = crate::call_resolver::resolve_instance_member(
                         &*self.syms.libraries,
                         rt,
                         &name,
                         &arg_tys,
-                    )
-                    .map(|m| m.ret)
-                    {
+                    ) {
+                        let ret = m.ret;
+                        self.resolved_members.insert(call, m);
                         return ret;
                     }
                     match (name.as_str(), arg_tys.as_slice()) {
@@ -9523,7 +9535,11 @@ impl<'a> Checker<'a> {
                         "RIM-9451 name={name} rt={rt:?} -> ret={:?}",
                         m.ret
                     );
-                    return m.ret;
+                    // Record the resolved member so the lowerer emits it directly rather than
+                    // re-resolving the same call (see [`TypeInfo::resolved_members`]).
+                    let ret = m.ret;
+                    self.resolved_members.insert(call, m);
+                    return ret;
                 }
                 // Instance method call on a class value: `p.method(args)` (own or inherited).
                 if let Ty::Obj(_, _) = rt {
