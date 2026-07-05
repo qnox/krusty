@@ -863,13 +863,7 @@ fn emit_class(
             // `this` slot; an ordinary member is an instance method.
             emit_method(ir, fid, &c.fq_name, facade, &mut cw, !f.is_static, bodies);
         } else {
-            let param_tys = jvm_tys(&f.params);
-            let ret = ir_ty_to_jvm(&f.ret);
-            cw.add_abstract_method(
-                0x0001 | 0x0400,
-                &f.name,
-                &method_descriptor(&param_tys, ret),
-            );
+            cw.add_abstract_method(0x0001 | 0x0400, &f.name, &ir_method_desc(&f.params, &f.ret));
         }
         // A method with default-valued parameters gets a `<name>$default(self, params…, mask, marker)`
         // synthetic stub (the JVM realization of default arguments).
@@ -2095,13 +2089,7 @@ fn emit_interface_class(
             // A default method — concrete instance method on the interface.
             emit_method(ir, fid, &c.fq_name, facade, &mut cw, !f.is_static, bodies);
         } else {
-            let param_tys = jvm_tys(&f.params);
-            let ret = ir_ty_to_jvm(&f.ret);
-            cw.add_abstract_method(
-                0x0001 | 0x0400,
-                &f.name,
-                &method_descriptor(&param_tys, ret),
-            );
+            cw.add_abstract_method(0x0001 | 0x0400, &f.name, &ir_method_desc(&f.params, &f.ret));
             // PUBLIC | ABSTRACT
         }
         // An interface method with default parameters gets a STATIC `<name>$default(iface, params…, mask,
@@ -2370,12 +2358,7 @@ fn emit_enum_class(
         } else {
             // An abstract enum member (`abstract fun t(): String`) — declared `ACC_ABSTRACT`, the
             // entry subclasses override it.
-            let param_tys = jvm_tys(&f.params);
-            cw.add_abstract_method(
-                0x0001 | 0x0400,
-                &f.name,
-                &method_descriptor(&param_tys, ir_ty_to_jvm(&f.ret)),
-            );
+            cw.add_abstract_method(0x0001 | 0x0400, &f.name, &ir_method_desc(&f.params, &f.ret));
         }
     }
     // $values(): build the backing array — `new E[n]` filled with each entry constant (kotlinc factors
@@ -4647,10 +4630,7 @@ impl<'a> Emitter<'a> {
                                     .map(|&m| &self.ir.functions[m as usize])
                                     .find(|f| f.name == *method)
                             })
-                            .map(|f| {
-                                let ps = jvm_tys(&f.params);
-                                method_descriptor(&ps, ir_ty_to_jvm(&f.ret))
-                            })
+                            .map(|f| ir_method_desc(&f.params, &f.ret))
                             .unwrap_or_else(|| inst_desc.clone());
                         (iface.clone(), method.clone(), sam_desc, inst_desc)
                     }
@@ -6858,6 +6838,10 @@ pub(crate) fn jvm_tys(tys: &[Ty]) -> Vec<Ty> {
 
 fn ir_type_desc(t: &Ty) -> String {
     type_descriptor(ir_ty_to_jvm(t))
+}
+
+fn ir_method_desc(params: &[Ty], ret: &Ty) -> String {
+    method_descriptor(&jvm_tys(params), ir_ty_to_jvm(ret))
 }
 
 fn field_jvm_tys(fields: &[IrField]) -> Vec<Ty> {
