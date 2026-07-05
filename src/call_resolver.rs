@@ -192,7 +192,7 @@ fn ranked_extension_overloads(fs: &FunctionSet, allow_must_inline: bool) -> Vec<
         .filter(|o| {
             o.kind == FnKind::Extension
                 && o.receiver_rank != u32::MAX
-                && (o.public || (allow_must_inline && o.flags.inline.must_inline()))
+                && (o.public() || (allow_must_inline && o.flags.inline.must_inline()))
         })
         .collect();
     out.sort_by_key(|o| o.receiver_rank);
@@ -289,7 +289,7 @@ impl<'a> CallResolver<'a> {
         let parsed: Vec<(&FunctionInfo, Vec<Ty>, Ty)> = fs
             .overloads
             .iter()
-            .filter(|o| o.kind == FnKind::TopLevel && o.public)
+            .filter(|o| o.kind == FnKind::TopLevel && o.public())
             .map(|o| (o, o.callable.params.clone(), o.callable.ret))
             .collect();
 
@@ -717,7 +717,7 @@ impl<'a> CallResolver<'a> {
         let fsd = self.lib.functions(&format!("{name}$default"), None);
         for o in fsd.overloads.iter().filter(|o| o.kind == FnKind::TopLevel) {
             let c = &o.callable;
-            if !o.public && !o.flags.inline.must_inline() {
+            if !o.public() && !o.flags.inline.must_inline() {
                 continue;
             }
             let params = &c.params;

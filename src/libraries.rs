@@ -438,6 +438,53 @@ pub struct LibraryCallable {
 
 /// How a resolved function relates to the call's receiver — drives Kotlin overload precedence (a member
 /// wins over an extension, both over a top-level function).
+///
+/// Kotlin declaration visibility, decoded from `@Metadata`/source and preserved through resolution.
+/// `PRIVATE_TO_THIS` folds into `Private`; `LOCAL` is not represented (locals are never surfaced by a
+/// source). Accessibility from a given call site (`protected`/`internal`/`private`) is decided by the
+/// selector against the site's context — this only records what the declaration IS.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Visibility {
+    #[default]
+    Public,
+    Internal,
+    Protected,
+    Private,
+}
+
+impl Visibility {
+    /// The kotlin-metadata `Flags.VISIBILITY` enum value → `Visibility`. Order:
+    /// INTERNAL=0, PRIVATE=1, PROTECTED=2, PUBLIC=3, PRIVATE_TO_THIS=4, LOCAL=5. Unknown/`LOCAL`
+    /// conservatively map to `Private` (never wrongly widens access).
+    pub fn from_metadata(v: u64) -> Visibility {
+        match v {
+            0 => Visibility::Internal,
+            2 => Visibility::Protected,
+            3 => Visibility::Public,
+            _ => Visibility::Private,
+        }
+    }
+
+    /// Coarse map from a legacy `is_public` bool, for synthetic/top-level callables that never carry a
+    /// finer visibility (a top-level or extension can be `public`/`internal`/`private` but NEVER
+    /// `protected`, so no protected information is lost here). `internal` top-levels still read back as
+    /// `Private` until the finer decode reaches those arms — a deliberate interim under-approximation.
+    pub fn from_public(is_public: bool) -> Visibility {
+        if is_public {
+            Visibility::Public
+        } else {
+            Visibility::Private
+        }
+    }
+
+    /// Whether this is the `public` visibility — the exact predicate the pre-context resolver used
+    /// (`is_public`). Kept so the current public-only filter is expressible verbatim while the
+    /// context-aware `accessible(...)` gate is introduced separately.
+    pub fn is_public(self) -> bool {
+        self == Visibility::Public
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum FnKind {
     /// A member of the receiver's type (or an inherited one).
@@ -635,9 +682,10 @@ pub struct FunctionInfo {
     /// The opaque platform callable (owner/name/descriptor on JVM) + its resolved `params`/`ret`. Reuses
     /// [`LibraryCallable`]; the front end reads `params`/`ret` and passes the whole thing to the emitter.
     pub callable: LibraryCallable,
-    /// Whether the callee is PUBLIC. A non-public callable has no legal call site (`@InlineOnly`); an
-    /// arg-binding selector includes it only when it will SPLICE (never emits an `invokestatic`).
-    pub public: bool,
+    /// The callee's Kotlin visibility. The pre-context resolver treated non-`Public` as "no legal call
+    /// site" (an `@InlineOnly` is included only when it will SPLICE); the context-aware `accessible(...)`
+    /// gate refines that for `protected`/`internal`. Read `public()` for the legacy public-only predicate.
+    pub visibility: Visibility,
     /// For an [`FnKind::Extension`] overload, the receiver-MRO RUNG it was found at (0 = the receiver's
     /// own type, increasing up the supertype chain). An arg-binding selector groups candidates by this
     /// rank and processes rungs most-specific-first, so a `List` extension wins over an `Iterable` one —
@@ -664,12 +712,18 @@ impl FunctionInfo {
             ret: ReturnInfo::default(),
             flags: FnFlags::default(),
             callable,
-            public: true,
+            visibility: Visibility::Public,
             receiver_rank: 0,
             overload_rank: 0,
             generic_sig: None,
             call_sig: CallSig::default(),
         }
+    }
+
+    /// The legacy public-only accessibility predicate (`visibility == Public`) — what the resolver's
+    /// pre-context filters used. The context-aware `accessible(...)` gate supersedes this per call site.
+    pub fn public(&self) -> bool {
+        self.visibility.is_public()
     }
 
     /// Materialize this selected overload as an instance-member emit handle with a caller-chosen logical
@@ -1042,7 +1096,31 @@ impl TargetRuntime for EmptySymbolSource {}
 
 #[cfg(test)]
 mod tests {
-    use super::InlineKind;
+    use super::{InlineKind, Visibility};
+
+    #[test]
+    fn visibility_from_metadata_maps_the_kotlin_enum() {
+        // kotlin-metadata Flags.VISIBILITY order: INTERNAL=0, PRIVATE=1, PROTECTED=2, PUBLIC=3,
+        // PRIVATE_TO_THIS=4, LOCAL=5. Everything past PUBLIC folds conservatively to Private.
+        assert_eq!(Visibility::from_metadata(0), Visibility::Internal);
+        assert_eq!(Visibility::from_metadata(1), Visibility::Private);
+        assert_eq!(Visibility::from_metadata(2), Visibility::Protected);
+        assert_eq!(Visibility::from_metadata(3), Visibility::Public);
+        assert_eq!(Visibility::from_metadata(4), Visibility::Private); // PRIVATE_TO_THIS
+        assert_eq!(Visibility::from_metadata(5), Visibility::Private); // LOCAL → never widens
+    }
+
+    #[test]
+    fn visibility_is_public_matches_the_old_bool() {
+        // The pre-context filters used `is_public`; only Public satisfies it.
+        assert!(Visibility::Public.is_public());
+        assert!(!Visibility::Internal.is_public());
+        assert!(!Visibility::Protected.is_public());
+        assert!(!Visibility::Private.is_public());
+        // `from_public` round-trips the coarse bool (protected can't occur on its callers).
+        assert!(Visibility::from_public(true).is_public());
+        assert!(!Visibility::from_public(false).is_public());
+    }
 
     #[test]
     fn inline_kind_from_flags_collapses_the_pair() {

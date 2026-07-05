@@ -13,7 +13,7 @@ use crate::libraries::{
     CountedLoopInfo, FnFlags, FnKind, FunctionInfo, FunctionSet, GSig, GenericSig, InlineKind,
     LibConst, LibraryCallable, LibraryConst, LibraryMember, LibraryType, PlatformAccessor,
     PlatformCtor, PlatformField, PlatformRangeCtor, RangeConstruction, ReturnInfo, RuntimeCtor,
-    RuntimeOp, TargetRuntime,
+    RuntimeOp, TargetRuntime, Visibility,
 };
 use crate::symbol_source::SymbolSource;
 use crate::types::Ty;
@@ -1380,7 +1380,7 @@ impl SymbolSource for JvmLibraries {
                             }
                             let inline = InlineKind::from_flags(true, !c.public);
                             overloads.push(FunctionInfo {
-                                public: c.public,
+                                visibility: Visibility::from_public(c.public),
                                 // The lambda-return family is resolved by return type, never through the
                                 // arg-binding extension selector — mark it so it can't preempt a real rung.
                                 receiver_rank: u32::MAX,
@@ -1521,7 +1521,7 @@ impl SymbolSource for JvmLibraries {
                     };
                     overloads.push(FunctionInfo {
                         ret: ret_metadata,
-                        public,
+                        visibility: Visibility::from_public(public),
                         receiver_rank: rank as u32,
                         overload_rank: descriptor_narrowing(&c.descriptor) as u32,
                         generic_sig,
@@ -2019,7 +2019,7 @@ impl SymbolSource for JvmLibraries {
                 };
                 overloads.push(FunctionInfo {
                     ret: ret_metadata,
-                    public: c.public,
+                    visibility: Visibility::from_public(c.public),
                     overload_rank: descriptor_narrowing(&c.descriptor) as u32,
                     generic_sig: c.signature.as_deref().and_then(parse_method_gsig),
                     call_sig,
