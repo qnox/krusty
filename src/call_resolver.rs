@@ -79,19 +79,19 @@ pub(crate) fn gsig_to_ty(sig: &GSig, binds: &GSigBinds) -> Ty {
             .unwrap_or_else(|| Ty::obj("kotlin/Any")),
         GSig::Prim(t) => *t,
         GSig::Arr(inner) => Ty::array(gsig_to_ty(inner, binds)),
-        GSig::Function { params, ret } => {
-            let ps: Vec<Ty> = params.iter().map(|a| gsig_to_ty(a, binds)).collect();
-            Ty::fun(ps, gsig_to_ty(ret, binds))
-        }
+        GSig::Function { params, ret } => Ty::fun(gsig_tys(params, binds), gsig_to_ty(ret, binds)),
         GSig::Class(internal, args) => {
             if args.is_empty() {
                 Ty::obj(internal)
             } else {
-                let targs: Vec<Ty> = args.iter().map(|a| gsig_to_ty(a, binds)).collect();
-                Ty::obj_args(internal, &targs)
+                Ty::obj_args(internal, &gsig_tys(args, binds))
             }
         }
     }
+}
+
+pub(crate) fn gsig_tys(sigs: &[GSig], binds: &GSigBinds) -> Vec<Ty> {
+    sigs.iter().map(|s| gsig_to_ty(s, binds)).collect()
 }
 
 fn seeded_gsig_binds(gsig: &GenericSig, type_args: &[Ty]) -> GSigBinds {
@@ -127,7 +127,7 @@ fn bind_ext_ret(gsig: &GenericSig, receiver: Ty, args: &[Ty], targs: &[Ty]) -> T
 /// If `sig` is a function type, the substituted types of its lambda parameters. Empty for anything else.
 pub(crate) fn function_input_types(sig: &GSig, binds: &GSigBinds) -> Vec<Ty> {
     match sig {
-        GSig::Function { params, .. } => params.iter().map(|a| gsig_to_ty(a, binds)).collect(),
+        GSig::Function { params, .. } => gsig_tys(params, binds),
         _ => Vec::new(),
     }
 }
@@ -466,7 +466,7 @@ impl<'a> CallResolver<'a> {
                 if let Some(recv_sig) = gsig.params.first() {
                     unify_gsig(recv_sig, receiver, &mut binds);
                 }
-                let mut out: Vec<Ty> = gsig.params.iter().map(|p| gsig_to_ty(p, &binds)).collect();
+                let mut out = gsig_tys(&gsig.params, &binds);
                 // A VALUE-CLASS parameter is spelled as its ERASED underlying in the JVM `Signature`
                 // (`Id` → `kotlin/String`), but the callable's LOGICAL parameter carries the value-class
                 // type — prefer it so a value-class ARGUMENT (`getFor(id: Id)`) matches rather than being
