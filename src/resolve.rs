@@ -8549,6 +8549,38 @@ impl<'a> Checker<'a> {
         Ty::obj(internal)
     }
 
+    /// Whether a member of `owner` with visibility `vis` is accessible from the CURRENT site (the class
+    /// being checked, `self.this_ty`), by Kotlin's rules. `public` and `internal` are always accessible
+    /// (a resolved user member is in-module; cross-module `internal` is a separate, later concern).
+    /// `private` reaches the declaring class and classes lexically nested inside it (an inner/nested
+    /// class or the companion, whose JVM internal name is `<owner>$…`); `protected` reaches those plus
+    /// any subclass of `owner`. At a top-level site (no enclosing class) a non-public member is
+    /// inaccessible.
+    fn member_accessible(&self, vis: Visibility, owner: &str) -> bool {
+        match vis {
+            Visibility::Public | Visibility::Internal => true,
+            Visibility::Private | Visibility::Protected => {
+                let Some(enc) = self
+                    .this_ty
+                    .and_then(|t| t.obj_internal().map(str::to_string))
+                else {
+                    return false;
+                };
+                let nested_prefix = format!("{owner}$");
+                if enc == owner || enc.starts_with(&nested_prefix) {
+                    return true;
+                }
+                // `protected` additionally reaches from a subclass of the owner.
+                vis == Visibility::Protected
+                    && self
+                        .syms
+                        .supertype_internals(&enc)
+                        .iter()
+                        .any(|s| s == owner)
+            }
+        }
+    }
+
     fn check_member(&mut self, rt: Ty, name: &str, span: Span, mexpr: Option<ExprId>) -> Ty {
         if rt == Ty::Error {
             return Ty::Error;
@@ -8566,31 +8598,26 @@ impl<'a> Checker<'a> {
         // Property read on a class value: `p.prop` (own or inherited).
         if let Ty::Obj(internal, args) = rt {
             if let Some((ty, _)) = self.lookup_prop(internal, name) {
-                // A `private` member property is readable ONLY from within its declaring class; a read
-                // from anywhere else is illegal (kotlinc rejects it). krusty models inaccessible-as-absent
-                // elsewhere, but here the member DOES resolve, so surface the same diagnostic kotlinc
-                // gives rather than silently compiling an illegal access.
-                let is_private = self
+                // A non-public member property may be inaccessible from this site (kotlinc rejects it).
+                // The member DOES resolve here, so surface kotlinc's diagnostic rather than silently
+                // compiling an illegal read. (Under-enforcement is safe — a legal program is never
+                // rejected; over-enforcement would be a false positive, so the rule stays conservative.)
+                if let Some(vis) = self
                     .syms
                     .class_by_internal(internal)
                     .and_then(|cs| cs.prop_visibility.get(name))
-                    .is_some_and(|v| v.is_private());
-                if is_private {
-                    // A `private` member is visible in its declaring class AND in classes lexically
-                    // NESTED inside it (an `inner`/nested class or the `companion object`, whose JVM
-                    // internal name is `<owner>$…`). Accessible iff the enclosing class is the owner or
-                    // nested within it; otherwise reject.
-                    let enclosing = self
-                        .this_ty
-                        .and_then(|t| t.obj_internal().map(str::to_string));
-                    let nested_prefix = format!("{internal}$");
-                    let accessible = enclosing
-                        .as_deref()
-                        .is_some_and(|e| e == internal || e.starts_with(&nested_prefix));
-                    if !accessible {
+                    .copied()
+                {
+                    if !self.member_accessible(vis, internal) {
+                        let kind = match vis {
+                            Visibility::Private => "private",
+                            Visibility::Protected => "protected",
+                            Visibility::Internal => "internal",
+                            Visibility::Public => "public",
+                        };
                         self.diags.error(
                             span,
-                            format!("cannot access '{name}': it is private in '{internal}'"),
+                            format!("cannot access '{name}': it is {kind} in '{internal}'"),
                         );
                     }
                 }
@@ -12142,6 +12169,17 @@ mod tests {
         // A class NESTED inside the owner (here an `inner class`) may read the enclosing private property
         // through an instance of the owner — kotlinc allows it, so the access check must not reject it.
         ok("class C {\n  private val secret = 42\n  inner class N {\n    fun r(o: C): Int = o.secret\n  }\n}");
+    }
+
+    #[test]
+    fn protected_member_property_access_is_checked() {
+        // A `protected` member is unreadable from unrelated code (here a top-level function)…
+        err_contains(
+            "open class Base { protected val secret = 1 }\nfun box(): String = Base().secret.toString()",
+            "it is protected in 'Base'",
+        );
+        // …but readable from a SUBCLASS (through a base-typed receiver inside the subclass).
+        ok("open class Base { protected val secret = 1 }\nclass Sub : Base() {\n  fun r(b: Base): Int = b.secret\n}");
     }
 
     #[test]
