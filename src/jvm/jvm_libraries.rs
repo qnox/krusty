@@ -983,14 +983,6 @@ fn class_implements(cp: &Classpath, internal: &str, target: &str) -> bool {
     false
 }
 
-fn member_matches_query(member_name: &str, query: &str) -> bool {
-    member_name == query
-        || matches!(
-            (member_name, query),
-            ("keySet", "keys") | ("entrySet", "entries")
-        )
-}
-
 impl SymbolSource for JvmLibraries {
     fn platform_default_import_packages(&self) -> &'static [&'static str] {
         PLATFORM_DEFAULT_IMPORT_PACKAGES
@@ -1937,7 +1929,12 @@ impl SymbolSource for JvmLibraries {
                         continue;
                     };
                     for m in &t.members {
-                        if member_matches_query(&m.name, name) {
+                        if m.name == name
+                            || matches!(
+                                (m.name.as_str(), name),
+                                ("keySet", "keys") | ("entrySet", "entries")
+                            )
+                        {
                             crate::trace_compiler!(
                                 "resolve",
                                 "member walk {cn}.{} (rung {rung}) desc={} sig={:?}",
