@@ -5697,13 +5697,19 @@ impl<'a> Lower<'a> {
                         {
                             return true;
                         }
-                        return crate::call_resolver::resolve_instance_member(
+                        if crate::call_resolver::resolve_instance_member(
                             &*self.syms.libraries,
                             recv_ty,
                             name,
                             &self.arg_tys(args),
                         )
-                        .is_some_and(|m| m.suspend);
+                        .is_some_and(|m| m.suspend)
+                        {
+                            return true;
+                        }
+                        // A suspend EXTENSION (`Mutex.withLock`) is invisible to the member query above —
+                        // recognize it so the enclosing lambda becomes a coroutine state machine.
+                        return self.resolver().extension_is_suspend(name, recv_ty);
                     }
                 }
                 false
