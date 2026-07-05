@@ -511,6 +511,21 @@ impl<'a> CallResolver<'a> {
             type_args,
             trailing_lambda,
         ));
+        // Prefer a real `name$default` synthetic when it exists — even for an `inline` function. Many
+        // `inline` stdlib/coroutine functions (`Mutex.withLock`) also emit a `$default` callable (the
+        // `$$forInline` variant is what kotlinc splices); calling `$default` threads the `Continuation`
+        // through the ordinary suspend machinery instead of splicing a suspend body. Splice (MUST-INLINE)
+        // only when there is NO `$default` synthetic — a genuine `@InlineOnly` callee with no call target.
+        if let Some(c) = self.default_synthetic_callable(name, receiver, args) {
+            crate::trace_compiler!(
+                "resolve",
+                "extension defaulted ($default) {name} recv={receiver:?} args={args:?} -> {}.{}{} ret={ret_ty:?}",
+                c.owner,
+                c.name,
+                c.descriptor
+            );
+            return Some(callable_with_return(&c, ret_ty, true));
+        }
         if o.flags.inline.can_inline() {
             let mut callable = callable_with_return(&o.callable, ret_ty, true);
             callable.inline = crate::libraries::InlineKind::MustInline;
@@ -523,15 +538,7 @@ impl<'a> CallResolver<'a> {
             );
             return Some(callable);
         }
-        let c = self.default_synthetic_callable(name, receiver, args)?;
-        crate::trace_compiler!(
-            "resolve",
-            "extension defaulted ($default) {name} recv={receiver:?} args={args:?} -> {}.{}{} ret={ret_ty:?}",
-            c.owner,
-            c.name,
-            c.descriptor
-        );
-        Some(callable_with_return(&c, ret_ty, true))
+        None
     }
 
     /// Resolve a classpath/library extension property getter for `receiver.property`.
