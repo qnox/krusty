@@ -588,6 +588,69 @@ impl Ty {
     }
 }
 
+/// Kotlin declaration visibility — the modifier on a `fun`/`val`/`class` (from source) or the
+/// `@Metadata`/bytecode flags of a library declaration. `PRIVATE_TO_THIS` folds into `Private`;
+/// `LOCAL` is not represented (locals are never surfaced as declarations). This records what a
+/// declaration IS; whether a given call site may access it (`protected`/`internal`/`private`) is a
+/// separate context-dependent decision made during resolution.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Visibility {
+    #[default]
+    Public,
+    Internal,
+    Protected,
+    Private,
+}
+
+impl Visibility {
+    /// The kotlin-metadata `Flags.VISIBILITY` enum value → `Visibility`. Order:
+    /// INTERNAL=0, PRIVATE=1, PROTECTED=2, PUBLIC=3, PRIVATE_TO_THIS=4, LOCAL=5. Unknown/`LOCAL`
+    /// conservatively map to `Private` (never wrongly widens access).
+    pub fn from_metadata(v: u64) -> Visibility {
+        match v {
+            0 => Visibility::Internal,
+            2 => Visibility::Protected,
+            3 => Visibility::Public,
+            _ => Visibility::Private,
+        }
+    }
+
+    /// The source visibility modifier keyword → `Visibility`; no/unknown modifier is `public`
+    /// (Kotlin's default). `PRIVATE_TO_THIS` is not a source keyword.
+    pub fn from_modifier(m: &str) -> Visibility {
+        match m {
+            "private" => Visibility::Private,
+            "protected" => Visibility::Protected,
+            "internal" => Visibility::Internal,
+            _ => Visibility::Public,
+        }
+    }
+
+    /// Coarse map from a legacy `is_public` bool, for synthetic/top-level callables that never carry a
+    /// finer visibility (a top-level or extension can be `public`/`internal`/`private` but NEVER
+    /// `protected`, so no protected information is lost here). `internal` top-levels still read back as
+    /// `Private` until the finer decode reaches those arms — a deliberate interim under-approximation.
+    pub fn from_public(is_public: bool) -> Visibility {
+        if is_public {
+            Visibility::Public
+        } else {
+            Visibility::Private
+        }
+    }
+
+    /// Whether this is the `public` visibility — the exact predicate the pre-context resolver used
+    /// (`is_public`). Kept so the current public-only filter is expressible verbatim while the
+    /// context-aware `accessible(...)` gate is introduced separately.
+    pub fn is_public(self) -> bool {
+        self == Visibility::Public
+    }
+
+    /// Whether this is `private` — the source `is_private` bool the parser/AST previously carried.
+    pub fn is_private(self) -> bool {
+        self == Visibility::Private
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

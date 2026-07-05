@@ -13,6 +13,7 @@
 //! realization of those (invokestatic on a facade, `@JvmStatic`, descriptors) lives in the impl.
 
 use crate::types::Ty;
+pub use crate::types::Visibility;
 use std::collections::HashMap;
 
 /// A parsed generic-signature node, platform neutral. A backend parses its own signature format into
@@ -443,53 +444,6 @@ pub struct LibraryCallable {
 
 /// How a resolved function relates to the call's receiver — drives Kotlin overload precedence (a member
 /// wins over an extension, both over a top-level function).
-///
-/// Kotlin declaration visibility, decoded from `@Metadata`/source and preserved through resolution.
-/// `PRIVATE_TO_THIS` folds into `Private`; `LOCAL` is not represented (locals are never surfaced by a
-/// source). Accessibility from a given call site (`protected`/`internal`/`private`) is decided by the
-/// selector against the site's context — this only records what the declaration IS.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-pub enum Visibility {
-    #[default]
-    Public,
-    Internal,
-    Protected,
-    Private,
-}
-
-impl Visibility {
-    /// The kotlin-metadata `Flags.VISIBILITY` enum value → `Visibility`. Order:
-    /// INTERNAL=0, PRIVATE=1, PROTECTED=2, PUBLIC=3, PRIVATE_TO_THIS=4, LOCAL=5. Unknown/`LOCAL`
-    /// conservatively map to `Private` (never wrongly widens access).
-    pub fn from_metadata(v: u64) -> Visibility {
-        match v {
-            0 => Visibility::Internal,
-            2 => Visibility::Protected,
-            3 => Visibility::Public,
-            _ => Visibility::Private,
-        }
-    }
-
-    /// Coarse map from a legacy `is_public` bool, for synthetic/top-level callables that never carry a
-    /// finer visibility (a top-level or extension can be `public`/`internal`/`private` but NEVER
-    /// `protected`, so no protected information is lost here). `internal` top-levels still read back as
-    /// `Private` until the finer decode reaches those arms — a deliberate interim under-approximation.
-    pub fn from_public(is_public: bool) -> Visibility {
-        if is_public {
-            Visibility::Public
-        } else {
-            Visibility::Private
-        }
-    }
-
-    /// Whether this is the `public` visibility — the exact predicate the pre-context resolver used
-    /// (`is_public`). Kept so the current public-only filter is expressible verbatim while the
-    /// context-aware `accessible(...)` gate is introduced separately.
-    pub fn is_public(self) -> bool {
-        self == Visibility::Public
-    }
-}
-
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum FnKind {
     /// A member of the receiver's type (or an inherited one).

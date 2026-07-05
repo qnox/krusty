@@ -6,6 +6,7 @@ use crate::ast::*;
 use crate::diag::{DiagSink, Span};
 use crate::features::LangFeatures;
 use crate::token::{Token, TokenKind};
+use crate::types::Visibility;
 
 /// Parse with the default (no experimental flags) language feature set.
 pub fn parse(src: &str, tokens: &[Token], diags: &mut DiagSink) -> File {
@@ -715,7 +716,7 @@ impl<'a> Parser<'a> {
                         mods.iter().any(|m| m == "tailrec"),
                         mods.iter().any(|m| m == "abstract"),
                     );
-                    d.is_private = mods.iter().any(|m| m == "private");
+                    d.visibility = visibility_of(&mods);
                     let id = self.file.add_decl(Decl::Fun(d));
                     self.file.decls.push(id);
                 }
@@ -724,17 +725,19 @@ impl<'a> Parser<'a> {
                     let mut d = self.parse_class();
                     d.modality = modality_of(is_open, is_abstract, is_sealed);
                     d.is_value = is_value;
+                    d.visibility = visibility_of(&mods);
                     let id = self.file.add_decl(Decl::Class(d));
                     self.file.decls.push(id);
                 }
                 // top-level property: `val`/`var name (: Type)? = init`
                 TokenKind::KwVal | TokenKind::KwVar => {
-                    let d = self.parse_top_property_c(
+                    let mut d = self.parse_top_property_c(
                         mods.iter().any(|m| m == "lateinit"),
                         false,
                         mods.iter().any(|m| m == "const"),
                         false,
                     );
+                    d.visibility = visibility_of(&mods);
                     let id = self.file.add_decl(Decl::Property(d));
                     self.file.decls.push(id);
                 }
@@ -1268,6 +1271,7 @@ impl<'a> Parser<'a> {
         let end = self.t[self.i.saturating_sub(1)].span;
         PropDecl {
             name,
+            visibility: Visibility::Public,
             receiver,
             ty,
             is_var,
@@ -1376,15 +1380,19 @@ impl<'a> Parser<'a> {
                         mods.iter().any(|m| m == "tailrec"),
                         mods.iter().any(|m| m == "abstract"),
                     );
-                    d.is_private = mods.iter().any(|m| m == "private");
+                    d.visibility = visibility_of(&mods);
                     methods.push(d);
                 }
-                TokenKind::KwVal | TokenKind::KwVar => props.push(self.parse_top_property_c(
-                    lateinit,
-                    false,
-                    mods.iter().any(|m| m == "const"),
-                    false,
-                )),
+                TokenKind::KwVal | TokenKind::KwVar => {
+                    let mut p = self.parse_top_property_c(
+                        lateinit,
+                        false,
+                        mods.iter().any(|m| m == "const"),
+                        false,
+                    );
+                    p.visibility = visibility_of(&mods);
+                    props.push(p);
+                }
                 _ => {
                     self.diags.error(
                         self.tok().span,
@@ -1591,6 +1599,7 @@ impl<'a> Parser<'a> {
         let end = self.t[self.i.saturating_sub(1)].span;
         ClassDecl {
             name,
+            visibility: Visibility::Public,
             annotations,
             annotation_args,
             type_params: Vec::new(),
@@ -1732,7 +1741,7 @@ impl<'a> Parser<'a> {
                 is_inline: false,
                 is_final: false,
                 is_abstract: false,
-                is_private: false,
+                visibility: Visibility::Public,
                 is_suspend: false,
                 is_tailrec: false,
                 annotations,
@@ -1841,7 +1850,7 @@ impl<'a> Parser<'a> {
             is_inline,
             is_final,
             is_abstract,
-            is_private: false,
+            visibility: Visibility::Public,
             is_suspend,
             is_tailrec,
             annotations,
@@ -2063,12 +2072,13 @@ impl<'a> Parser<'a> {
                     TokenKind::KwVal | TokenKind::KwVar => {
                         // Non-abstract body props may omit the initializer (init blocks supply the
                         // value); an `abstract` property has no field and is marked accordingly.
-                        let p = self.parse_top_property_c(
+                        let mut p = self.parse_top_property_c(
                             lateinit,
                             !is_abstract,
                             mods.iter().any(|m| m == "const"),
                             is_abstract,
                         );
+                        p.visibility = visibility_of(&mods);
                         init_order.push(ClassInit::PropInit(body_props.len()));
                         body_props.push(p);
                     }
@@ -2213,6 +2223,7 @@ impl<'a> Parser<'a> {
         self.pop_lexical_type_params(lexical_type_param_lens);
         ClassDecl {
             name,
+            visibility: Visibility::Public,
             annotations,
             annotation_args,
             type_params,
@@ -2415,12 +2426,13 @@ impl<'a> Parser<'a> {
                         // The interface member's modifiers were consumed into `imods` before `parse_fun`,
                         // so it never saw `private` — a private interface method is non-virtual (called via
                         // `invokespecial`), so preserve the flag here.
-                        f.is_private = imods.iter().any(|m| m == "private");
+                        f.visibility = visibility_of(&imods);
                         methods.push(f);
                     }
                     // Abstract interface property: `val`/`var x: T` (no initializer/getter).
                     TokenKind::KwVal | TokenKind::KwVar => {
-                        let p = self.parse_top_property(false, true);
+                        let mut p = self.parse_top_property(false, true);
+                        p.visibility = visibility_of(&imods);
                         if p.init.is_some() {
                             self.diags.error(p.span, "krusty: interface properties with an initializer/getter are not supported");
                         }
@@ -2455,6 +2467,7 @@ impl<'a> Parser<'a> {
         let end = self.t[self.i.saturating_sub(1)].span;
         ClassDecl {
             name,
+            visibility: Visibility::Public,
             annotations,
             annotation_args,
             type_params,
@@ -2517,12 +2530,13 @@ impl<'a> Parser<'a> {
                         mods.iter().any(|m| m == "abstract"),
                     )),
                     TokenKind::KwVal | TokenKind::KwVar => {
-                        let p = self.parse_top_property_c(
+                        let mut p = self.parse_top_property_c(
                             lateinit,
                             true,
                             mods.iter().any(|m| m == "const"),
                             false,
                         );
+                        p.visibility = visibility_of(&mods);
                         init_order.push(ClassInit::PropInit(body_props.len()));
                         body_props.push(p);
                     }
@@ -2581,6 +2595,7 @@ impl<'a> Parser<'a> {
         let name = format!("Anon$anon${}", span.lo);
         let synth = ClassDecl {
             name: name.clone(),
+            visibility: Visibility::Public,
             annotations: Vec::new(),
             annotation_args: Vec::new(),
             type_params: self.current_lexical_type_params(),
@@ -2660,12 +2675,13 @@ impl<'a> Parser<'a> {
                         mods.iter().any(|m| m == "abstract"),
                     )),
                     TokenKind::KwVal | TokenKind::KwVar => {
-                        let p = self.parse_top_property_c(
+                        let mut p = self.parse_top_property_c(
                             lateinit,
                             true,
                             mods.iter().any(|m| m == "const"),
                             false,
                         ); // init blocks may supply the value
+                        p.visibility = visibility_of(&mods);
                         init_order.push(ClassInit::PropInit(body_props.len()));
                         body_props.push(p);
                     }
@@ -2712,6 +2728,7 @@ impl<'a> Parser<'a> {
         let end = self.t[self.i.saturating_sub(1)].span;
         ClassDecl {
             name,
+            visibility: Visibility::Public,
             annotations,
             annotation_args,
             type_params: Vec::new(),
@@ -5378,6 +5395,15 @@ impl<'a> Parser<'a> {
 // ---- precedence ----
 const BP_PREFIX: u8 = 13;
 
+/// The visibility a declaration's modifier list denotes — the first visibility keyword present, or
+/// `public` (Kotlin's default) when none is written.
+fn visibility_of(mods: &[String]) -> crate::types::Visibility {
+    mods.iter()
+        .find(|m| matches!(m.as_str(), "private" | "protected" | "internal" | "public"))
+        .map(|m| crate::types::Visibility::from_modifier(m))
+        .unwrap_or_default()
+}
+
 /// Soft modifiers that don't change a declaration's *kind* (so krusty can ignore them). Excludes
 /// `data`/`enum`/`annotation`/`value`/`object`/`companion`/`inner`/`expect`/`actual`,
 /// which would alter parsing/semantics and must remain unsupported. `sealed` is included: it maps
@@ -5671,6 +5697,64 @@ mod tests {
             .filter(|x| x.severity == crate::diag::Severity::Error)
             .count();
         assert_eq!(errors, 1, "cascade: {}", d.render("t", src));
+    }
+
+    #[test]
+    fn visibility_modifiers_captured() {
+        // The visibility modifier on a top-level declaration is captured onto its AST node (default
+        // `public` when none is written) — the foundation the resolver's access checks read.
+        let mut d = DiagSink::new();
+        let src = "internal fun f() {}\nprivate fun g() {}\nfun p() {}\ninternal class C {}\nprivate val x = 1\n";
+        let toks = lex(src, &mut d);
+        let file = parse(src, &toks, &mut d);
+        assert!(!d.has_errors(), "unexpected: {}", d.render("t", src));
+        let vis = |name: &str| -> Visibility {
+            file.decls
+                .iter()
+                .find_map(|&id| match file.decl(id) {
+                    Decl::Fun(f) if f.name == name => Some(f.visibility),
+                    Decl::Class(c) if c.name == name => Some(c.visibility),
+                    Decl::Property(pr) if pr.name == name => Some(pr.visibility),
+                    _ => None,
+                })
+                .expect("declaration present")
+        };
+        assert_eq!(vis("f"), Visibility::Internal);
+        assert_eq!(vis("g"), Visibility::Private);
+        assert_eq!(vis("p"), Visibility::Public);
+        assert_eq!(vis("C"), Visibility::Internal);
+        assert_eq!(vis("x"), Visibility::Private);
+    }
+
+    #[test]
+    fn member_property_visibility_modifiers_captured() {
+        // A class body's member PROPERTIES carry their own visibility. (Regular-class member FUNCTION
+        // visibility is deliberately not fed to the AST yet: marking such a method `private` would emit
+        // it non-virtually without the synthetic accessor krusty doesn't generate; see the parser
+        // dispatch. Interface member functions and top-level functions do carry it.)
+        let mut d = DiagSink::new();
+        let src = "class C {\n  internal val mv = 1\n  private var pv = 2\n  val pub = 3\n}\n";
+        let toks = lex(src, &mut d);
+        let file = parse(src, &toks, &mut d);
+        assert!(!d.has_errors(), "unexpected: {}", d.render("t", src));
+        let class = file
+            .decls
+            .iter()
+            .find_map(|&id| match file.decl(id) {
+                Decl::Class(c) if c.name == "C" => Some(c),
+                _ => None,
+            })
+            .expect("class C");
+        let prop = |name: &str| {
+            class
+                .body_props
+                .iter()
+                .find(|p| p.name == name)
+                .expect("property")
+        };
+        assert_eq!(prop("mv").visibility, Visibility::Internal);
+        assert_eq!(prop("pv").visibility, Visibility::Private);
+        assert_eq!(prop("pub").visibility, Visibility::Public);
     }
 
     #[test]
