@@ -680,7 +680,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
             for (mi, m) in c.methods.iter().enumerate() {
                 let sig = syms.classes.get(&c.name)?.methods.get(&m.name)?;
                 let ret = sig.ret;
-                let params: Vec<Ty> = sig.params.iter().map(|t| ty_to_ir(*t)).collect();
+                let params = tys_to_ir(&sig.params);
                 let param_checks = param_checks_for(m, &sig.params);
                 // The checker `Ty` carries no nullability, so recover the declared `?` from the method's
                 // AST return type (`fun f(): T?`) — same as a top-level function. A nullable value-class
@@ -1203,7 +1203,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 for (mi, m) in c.companion_methods.iter().enumerate() {
                     let sig = csig.static_methods.get(&m.name)?;
                     let ret = sig.ret;
-                    let params: Vec<Ty> = sig.params.iter().map(|t| ty_to_ir(*t)).collect();
+                    let params = tys_to_ir(&sig.params);
                     let param_checks = param_checks_for(m, &sig.params);
                     let fid = lo.ir.add_fun(IrFunction {
                         name: m.name.clone(),
@@ -1802,8 +1802,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                                 if let Some((_, _, impl_fid, _)) =
                                     lo.resolve_method(&internal, &m.name)
                                 {
-                                    let ip: Vec<Ty> =
-                                        m.params.iter().map(|t| ty_to_ir(*t)).collect();
+                                    let ip = tys_to_ir(&m.params);
                                     let ir_ = ty_to_ir(m.ret);
                                     let cp = lo.ir.functions[impl_fid as usize].params.clone();
                                     let cr = lo.ir.functions[impl_fid as usize].ret.clone();
@@ -2568,8 +2567,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                                     // Pick the sibling secondary ctor this `this(…)` targets: prefer the
                                     // one whose parameter types accept the arguments, else the unique
                                     // same-arity ctor. (Ambiguity type-matching can't resolve bails.)
-                                    let arg_irs: Vec<Ty> =
-                                        args.iter().map(|a| ty_to_ir(lo.info.ty(*a))).collect();
+                                    let arg_irs = tys_to_ir(&lo.arg_tys(args));
                                     let typed = sec_param_tys.iter().find(|p| {
                                         p.len() == arg_irs.len()
                                             && arg_irs
@@ -2870,7 +2868,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                                     .find(|(n, _)| n == &bm.name)
                                     .map(|(_, s)| s)?,
                             };
-                            let params: Vec<Ty> = sig.params.iter().map(|t| ty_to_ir(*t)).collect();
+                            let params = tys_to_ir(&sig.params);
                             let fid = lo.ir.add_fun(IrFunction {
                                 name: bm.name.clone(),
                                 params,
@@ -4626,7 +4624,7 @@ impl<'a> Lower<'a> {
                 return None;
             }
             if !cs.is_interface && cs.ctor_params.len() == args.len() {
-                let params: Vec<Ty> = cs.ctor_params.iter().map(|t| ty_to_ir(*t)).collect();
+                let params = tys_to_ir(&cs.ctor_params);
                 let mut a = Vec::new();
                 for (arg, pty) in args.iter().zip(&params) {
                     a.push(self.lower_arg(*arg, pty)?);
@@ -6506,7 +6504,7 @@ impl<'a> Lower<'a> {
             }
         }
         for (mname, params, ret) in methods {
-            let params_ir: Vec<Ty> = params.iter().map(|t| ty_to_ir(*t)).collect();
+            let params_ir = tys_to_ir(&params);
             let descriptor = self.syms.libraries.method_descriptor(&params, ret)?;
             let field = self.this_field(class_id, delegate_idx);
             let args: Vec<u32> = (0..params.len())
@@ -8330,7 +8328,7 @@ impl<'a> Lower<'a> {
                 .ext_fun_ids
                 .contains_key(&(recv_ty.erased_recv(), name.to_string()))
         {
-            let param_tys: Vec<Ty> = params.iter().map(|t| ty_to_ir(*t)).collect();
+            let param_tys = tys_to_ir(params);
             return self.make_func_ref(
                 e.0,
                 false,
@@ -8362,7 +8360,7 @@ impl<'a> Lower<'a> {
         } else {
             crate::ir::FrDispatch::VirtualUnbound
         };
-        let param_tys: Vec<Ty> = params.iter().map(|t| ty_to_ir(*t)).collect();
+        let param_tys = tys_to_ir(params);
         self.make_func_ref(
             e.0,
             bound,
@@ -8399,7 +8397,7 @@ impl<'a> Lower<'a> {
             .get(&internal)
             .is_some_and(|ci| self.ir.classes[ci.id as usize].is_interface);
         let this_e = self.ir.add_expr(IrExpr::GetValue(0));
-        let param_tys: Vec<Ty> = sig.params.iter().map(|t| ty_to_ir(*t)).collect();
+        let param_tys = tys_to_ir(&sig.params);
         self.make_func_ref(
             e.0,
             true,
@@ -8446,7 +8444,7 @@ impl<'a> Lower<'a> {
             // equal), unlike an `invokedynamic` lambda. The target signature leads with the receiver type.
             if rty.obj_internal().is_some_and(|i| !self.is_value_class(i)) {
                 let cap = self.expr(recv)?;
-                let param_tys: Vec<Ty> = params.iter().map(|t| ty_to_ir(*t)).collect();
+                let param_tys = tys_to_ir(params);
                 let mut target = vec![ty_to_ir(rty)];
                 target.extend(param_tys.iter().copied());
                 return self.make_func_ref(
@@ -14160,7 +14158,7 @@ impl<'a> Lower<'a> {
                 // `emit_func_ref_class` expect the IR/boxed form (`Obj("kotlin/Int")`) that `ir_ty_to_jvm`
                 // round-trips to a primitive descriptor — convert via `ty_to_ir` (a bare `Ty::Int` would
                 // emit as `Object` and the `invoke` would call a non-existent erased target method).
-                let param_tys: Vec<Ty> = c.params.iter().map(|t| ty_to_ir(*t)).collect();
+                let param_tys = tys_to_ir(&c.params);
                 return self.make_func_ref(
                     e.0,
                     false,
@@ -16473,7 +16471,7 @@ impl<'a> Lower<'a> {
                             callee: Callee::CrossFile {
                                 facade,
                                 name: fname.clone(),
-                                params: fi.callable.params.iter().map(|t| ty_to_ir(*t)).collect(),
+                                params: tys_to_ir(&fi.callable.params),
                                 ret: ty_to_ir(fi.callable.ret),
                             },
                             dispatch_receiver: None,
@@ -16912,8 +16910,7 @@ impl<'a> Lower<'a> {
                         // A secondary constructor whose parameter types MATCH the arguments is preferred
                         // over a lenient primary match (`Sc("x")` is the `String` secondary, not the
                         // `Int` primary coerced). Compare the argument IR types to each secondary's.
-                        let arg_irs: Vec<Ty> =
-                            args.iter().map(|a| ty_to_ir(self.info.ty(*a))).collect();
+                        let arg_irs = tys_to_ir(&self.arg_tys(&args));
                         let secs = self.ir.classes[class as usize].secondary_ctors.clone();
                         // Whether the PRIMARY constructor can accept the args (each assignable to a field
                         // type). When it can't (`IC("abc")`: a `String` isn't assignable to `List<T>`),
@@ -17880,7 +17877,7 @@ impl<'a> Lower<'a> {
                             callee: Callee::CrossFileVirtual {
                                 owner,
                                 name: name.clone(),
-                                params: sig_params.iter().map(|t| ty_to_ir(*t)).collect(),
+                                params: tys_to_ir(&sig_params),
                                 ret: ty_to_ir(sig_ret),
                                 interface,
                             },
@@ -19603,15 +19600,12 @@ pub(crate) fn ty_to_ir(t: Ty) -> Ty {
         // (see `ir_array_element` below for the inverse — extracting an array IrType's element.)
         // A reference `Array<T>` keeps its element as a type argument (the JVM backend boxes a
         // primitive `T` when it lays out the array; the front end keeps the logical element).
-        Ty::Obj("kotlin/Array", args) => {
-            let targs: Vec<Ty> = args.iter().map(|t| ty_to_ir(*t)).collect();
-            return Ty::obj_args("kotlin/Array", &targs);
-        }
+        Ty::Obj("kotlin/Array", args) => return Ty::obj_args("kotlin/Array", &tys_to_ir(args)),
         Ty::Obj(n, _) => return Ty::obj(n),
         // A Kotlin function type `(A,…) -> R` is kept structural so each backend picks its own
         // representation (the JVM maps it to `kotlin/jvm/functions/FunctionN`, JS to a closure, …).
         Ty::Fun(s) => {
-            let params: Vec<Ty> = s.params.iter().map(|t| ty_to_ir(*t)).collect();
+            let params = tys_to_ir(&s.params);
             let ret = ty_to_ir(s.ret);
             return if s.suspend {
                 Ty::fun_suspend(params, ret)
@@ -19658,6 +19652,10 @@ pub(crate) fn ty_to_ir(t: Ty) -> Ty {
         _ => return Ty::Error,
     };
     Ty::obj(fq)
+}
+
+fn tys_to_ir(tys: &[Ty]) -> Vec<Ty> {
+    tys.iter().map(|t| ty_to_ir(*t)).collect()
 }
 
 /// The element `IrType` of an array `IrType` target — a reference `Array<E>` (its type argument) or a
