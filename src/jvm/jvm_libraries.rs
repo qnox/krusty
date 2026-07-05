@@ -792,7 +792,10 @@ pub fn desc_to_ty(d: &str) -> Ty {
         s if s.starts_with('[') => Ty::array(desc_to_ty(&s[1..])),
         s if s.starts_with('L') && s.ends_with(';') => {
             let internal = to_kotlin_internal(&s[1..s.len() - 1]);
-            if let Some(n) = function_iface_arity(internal) {
+            if let Some(n) = internal
+                .strip_prefix("kotlin/jvm/functions/Function")
+                .and_then(|n| n.parse::<usize>().ok())
+            {
                 Ty::fun(vec![Ty::obj("kotlin/Any"); n], Ty::obj("kotlin/Any"))
             } else {
                 Ty::obj(internal)
@@ -809,12 +812,6 @@ fn field_desc_to_ty(d: &str) -> Ty {
         s if s.starts_with('[') => Ty::array(field_desc_to_ty(&s[1..])),
         _ => desc_to_ty(d),
     }
-}
-
-fn function_iface_arity(internal: &str) -> Option<usize> {
-    internal
-        .strip_prefix("kotlin/jvm/functions/Function")
-        .and_then(|n| n.parse::<usize>().ok())
 }
 
 /// Split one JVM field descriptor off the front of `s`, returning `(descriptor, rest)`.
