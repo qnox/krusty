@@ -303,6 +303,7 @@ mod tests {
             generic_props: HashMap::new(),
             value_field: None,
             generic_methods: HashMap::new(),
+            prop_visibility: std::collections::HashMap::new(),
         }
     }
 

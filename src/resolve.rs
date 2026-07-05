@@ -13,7 +13,7 @@ use crate::ast::*;
 use crate::diag::{DiagSink, Span};
 use crate::libraries::{required_arity, CompilerPlatform, EmptySymbolSource};
 use crate::symbol_source::SymbolSource;
-use crate::types::Ty;
+use crate::types::{Ty, Visibility};
 
 #[derive(Clone, Debug)]
 pub struct Signature {
@@ -179,6 +179,11 @@ pub struct ClassSig {
     /// method's own type parameters from the lambda body. Keyed by method name; only methods whose
     /// substitution actually depends on a type parameter are recorded (ordinary methods are absent).
     pub generic_methods: HashMap<String, GenericMethod>,
+    /// Visibility of each MEMBER property that is not `public`, keyed by name (a `public`/absent entry
+    /// is the default). Read by the resolver's access check to reject a `private` member read from
+    /// outside the declaring class. Only body properties are recorded; primary-constructor properties
+    /// default to `public`.
+    pub prop_visibility: HashMap<String, Visibility>,
 }
 
 /// The un-erased declared shape of a generic higher-order method, retained so a call site can
@@ -1870,6 +1875,14 @@ pub fn collect_signatures_with_cp(
                     // registration below), captured before `static_methods`/`internal` are moved into the
                     // main class's `ClassSig`.
                     let companion_methods_sigs = static_methods.clone();
+                    // Non-public member-property visibility, for the resolver's access check. Only body
+                    // properties carry a source modifier; ctor properties default to public.
+                    let prop_visibility: HashMap<String, Visibility> = c
+                        .body_props
+                        .iter()
+                        .filter(|bp| bp.visibility != Visibility::Public)
+                        .map(|bp| (bp.name.clone(), bp.visibility))
+                        .collect();
                     let comp_internal = format!("{internal}$Companion");
                     table.classes.insert(
                         c.name.clone(),
@@ -1893,6 +1906,7 @@ pub fn collect_signatures_with_cp(
                             secondary_ctors,
                             tparam_names,
                             generic_props,
+                            prop_visibility,
                             value_field,
                             generic_methods,
                         },
@@ -1929,6 +1943,7 @@ pub fn collect_signatures_with_cp(
                                 generic_props: HashMap::new(),
                                 value_field: None,
                                 generic_methods: HashMap::new(),
+                                prop_visibility: HashMap::new(),
                             },
                         );
                     }
@@ -8551,6 +8566,34 @@ impl<'a> Checker<'a> {
         // Property read on a class value: `p.prop` (own or inherited).
         if let Ty::Obj(internal, args) = rt {
             if let Some((ty, _)) = self.lookup_prop(internal, name) {
+                // A `private` member property is readable ONLY from within its declaring class; a read
+                // from anywhere else is illegal (kotlinc rejects it). krusty models inaccessible-as-absent
+                // elsewhere, but here the member DOES resolve, so surface the same diagnostic kotlinc
+                // gives rather than silently compiling an illegal access.
+                let is_private = self
+                    .syms
+                    .class_by_internal(internal)
+                    .and_then(|cs| cs.prop_visibility.get(name))
+                    .is_some_and(|v| v.is_private());
+                if is_private {
+                    // A `private` member is visible in its declaring class AND in classes lexically
+                    // NESTED inside it (an `inner`/nested class or the `companion object`, whose JVM
+                    // internal name is `<owner>$…`). Accessible iff the enclosing class is the owner or
+                    // nested within it; otherwise reject.
+                    let enclosing = self
+                        .this_ty
+                        .and_then(|t| t.obj_internal().map(str::to_string));
+                    let nested_prefix = format!("{internal}$");
+                    let accessible = enclosing
+                        .as_deref()
+                        .is_some_and(|e| e == internal || e.starts_with(&nested_prefix));
+                    if !accessible {
+                        self.diags.error(
+                            span,
+                            format!("cannot access '{name}': it is private in '{internal}'"),
+                        );
+                    }
+                }
                 // Generic substitution: if `name` is declared as one of the receiver class's type
                 // parameters and the receiver carries that argument (`Box<Int>().x`), report the
                 // argument type instead of the erased `Object`. The member-read lowering inserts the
@@ -12084,6 +12127,22 @@ mod tests {
     // hardcoded in the checker — they resolve generically from the classpath (a real stdlib / kotlin.test
     // jar) and are validated by the box-conformance + `feature_box_e2e` suites, not here (these unit
     // tests use `EmptySymbolSource`, so a classpath-resolved call can't be typed).
+
+    #[test]
+    fn private_member_property_access_is_checked() {
+        // A `private` member property is readable only from within its declaring class — kotlinc rejects
+        // a read from anywhere else, and so must krusty (rather than silently compiling it).
+        err_contains(
+            "class C { private val secret = 42 }\nfun box(): String = C().secret.toString()",
+            "it is private in 'C'",
+        );
+        // Legal accesses from WITHIN the class (implicit `this`, explicit `this`, and another instance of
+        // the same class) are accepted.
+        ok("class C {\n  private val secret = 42\n  fun a(): Int = secret\n  fun b(): Int = this.secret\n  fun c(o: C): Int = o.secret\n}");
+        // A class NESTED inside the owner (here an `inner class`) may read the enclosing private property
+        // through an instance of the owner — kotlinc allows it, so the access check must not reject it.
+        ok("class C {\n  private val secret = 42\n  inner class N {\n    fun r(o: C): Int = o.secret\n  }\n}");
+    }
 
     #[test]
     fn object_self_reference_resolves() {
