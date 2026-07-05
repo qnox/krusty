@@ -1160,30 +1160,10 @@ fn descriptor_arg_subtype_of_param(lib: &dyn SymbolSource, arg: Ty, param: Ty) -
         return true;
     }
     // Only a reference argument can widen to a reference parameter through the type hierarchy.
-    let (Ty::Obj(arg_internal, _), Ty::Obj(param_jvm, _)) = (arg, pj) else {
+    let (Ty::Obj(arg_internal, _), Some(param_internal)) = (arg, pj.obj_internal()) else {
         return false;
     };
-    let mut stack = vec![arg_internal.to_string()];
-    let mut seen = std::collections::HashSet::new();
-    while let Some(cur) = stack.pop() {
-        if !seen.insert(cur.clone()) {
-            continue;
-        }
-        // Compare each visited supertype in its JVM-descriptor identity (a Kotlin collection supertype
-        // such as `kotlin/collections/Collection` erases to `java/util/Collection`).
-        let cur_jvm = lib
-            .jvm_descriptor_form(Ty::obj(&cur))
-            .obj_internal()
-            .map(str::to_string)
-            .unwrap_or_else(|| cur.clone());
-        if cur_jvm == param_jvm {
-            return true;
-        }
-        if let Some(t) = lib.resolve_type(&cur) {
-            stack.extend(t.supertypes);
-        }
-    }
-    false
+    is_classpath_subtype(lib, arg_internal, param_internal, 0)
 }
 
 /// Resolve a constructor on a library type by argument types (with the type's own widening).
@@ -1718,7 +1698,9 @@ fn arg_subtype_assignable(lib: &dyn SymbolSource, param: &Ty, arg: &Ty) -> bool 
 /// bounds the recursion: real class hierarchies are shallow, and the bound also guarantees termination
 /// on a malformed (cyclic) classpath rather than overflowing the stack.
 fn is_classpath_subtype(lib: &dyn SymbolSource, sub: &str, super_: &str, depth: u32) -> bool {
-    if sub == super_ {
+    let sub_desc = lib.jvm_descriptor_form(Ty::obj(sub));
+    let super_desc = lib.jvm_descriptor_form(Ty::obj(super_));
+    if sub == super_ || sub_desc == super_desc {
         return true;
     }
     if depth > 64 {
