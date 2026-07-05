@@ -101,25 +101,22 @@ pub(crate) fn function_input_types(
     sig: &GSig,
     binds: &std::collections::HashMap<String, Ty>,
 ) -> Vec<Ty> {
-    if let GSig::Function { params, .. } = sig {
-        return params.iter().map(|a| gsig_to_ty(a, binds)).collect();
+    match sig {
+        GSig::Function { params, .. } => params.iter().map(|a| gsig_to_ty(a, binds)).collect(),
+        _ => Vec::new(),
     }
-    Vec::new()
 }
 
 /// Whether argument `a` can be passed where parameter `p` is expected, in erased Kotlin terms: an
 /// exact match, any argument into an erased `Any` parameter, or the *same erased class* (a parameter
 /// `Pair` accepts an argument `Pair<Int, String>` — generic parameters erase to the raw type).
 pub(crate) fn arg_fits(p: &Ty, a: &Ty) -> bool {
-    if p == a || *p == Ty::obj("kotlin/Any") {
-        return true;
-    }
     // A lambda value fits a function-typed parameter when arities agree; its body result is handled by
     // the selected call's generic binding, not by erased descriptor matching.
-    if let (Some(pn), Some(an)) = (p.fun_arity(), a.fun_arity()) {
-        return pn == an;
-    }
-    matches!((p, a), (Ty::Obj(pi, _), Ty::Obj(ai, _)) if pi == ai)
+    p == a
+        || *p == Ty::obj("kotlin/Any")
+        || matches!((p.fun_arity(), a.fun_arity()), (Some(pn), Some(an)) if pn == an)
+        || matches!((p, a), (Ty::Obj(pi, _), Ty::Obj(ai, _)) if pi == ai)
 }
 
 /// Map each provided argument to a parameter index for a top-level call carrying a lambda. Identity when
@@ -131,14 +128,14 @@ fn default_omit_lambda_param_indices(
 ) -> Option<Vec<usize>> {
     let n = arg_tys.len();
     if param_count == n {
-        return Some((0..n).collect());
-    }
-    if param_count > n && n >= 1 && arg_tys[n - 1].is_none() {
+        Some((0..n).collect())
+    } else if param_count > n && n >= 1 && arg_tys[n - 1].is_none() {
         let mut map: Vec<usize> = (0..n - 1).collect();
         map.push(param_count - 1);
-        return Some(map);
+        Some(map)
+    } else {
+        None
     }
-    None
 }
 
 fn is_default_ctor_marker(ty: Ty) -> bool {
