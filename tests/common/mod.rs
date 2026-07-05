@@ -11,6 +11,54 @@ use std::time::{Duration, Instant};
 
 use krusty::jvm::classpath::Classpath;
 
+/// Make a spawned child receive `SIGKILL` when THIS test process dies. libtest's worker threads live for
+/// the whole binary, so a persistent JVM runner spawned from one is killed at process teardown — a clean
+/// exit OR the gate SIGKILL-ing the binary — instead of orphaning and holding ~1 GB until the OS reaps it.
+/// Apply to the `Command` before `spawn()`. Linux `PR_SET_PDEATHSIG`; a no-op on other platforms.
+#[allow(dead_code)]
+fn die_with_parent(cmd: &mut Command) {
+    #[cfg(target_os = "linux")]
+    // SAFETY: `pre_exec` runs in the forked child before `exec`; `prctl` is async-signal-safe and touches
+    // no shared state, so it is valid in that restricted context.
+    unsafe {
+        use std::os::unix::process::CommandExt;
+        cmd.pre_exec(|| {
+            libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL as libc::c_ulong);
+            Ok(())
+        });
+    }
+}
+
+/// Best-effort removal of `krusty_lib_*` / `krusty_node_*` temp dirs left by DEAD test processes — a
+/// crashed or gate-killed prior run can't clean up after itself, so its compiled-class scratch dirs would
+/// accumulate. Runs once per binary. A dir owned by a LIVE pid is left alone (a concurrent test binary may
+/// still be using it). `_` in a tag name means the pid is the trailing `_`-segment.
+#[allow(dead_code)]
+fn sweep_stale_temp_dirs() {
+    static ONCE: OnceLock<()> = OnceLock::new();
+    ONCE.get_or_init(|| {
+        let Ok(rd) = std::fs::read_dir(std::env::temp_dir()) else {
+            return;
+        };
+        for e in rd.flatten() {
+            let name = e.file_name();
+            let Some(pid) = name
+                .to_str()
+                .filter(|n| n.starts_with("krusty_lib_") || n.starts_with("krusty_node_"))
+                .and_then(|n| n.rsplit('_').next())
+                .and_then(|p| p.parse::<i32>().ok())
+            else {
+                continue;
+            };
+            // `kill(pid, 0)` succeeds iff the process is alive; a failure (ESRCH) ⇒ dead ⇒ safe to remove.
+            let alive = unsafe { libc::kill(pid, 0) } == 0;
+            if !alive {
+                let _ = std::fs::remove_dir_all(e.path());
+            }
+        }
+    });
+}
+
 /// Compile Kotlin `src` to `(internal_name, class_bytes)` pairs entirely in-process — the same pipeline
 /// (`lex → parse → check → ir_lower → ir_emit`) the conformance harness uses, sharing the process-global
 /// classpath caches (type/ext/jimage indexes) across every call. This is dramatically faster than
@@ -493,13 +541,13 @@ impl Drop for BoxRunner {
 
 impl BoxRunner {
     fn new(java: &str, cp: &str) -> Option<Self> {
-        let mut child = Command::new(java)
-            .args(["-cp", cp, "BoxRunner"])
+        let mut cmd = Command::new(java);
+        cmd.args(["-cp", cp, "BoxRunner"])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .ok()?;
+            .stderr(Stdio::null());
+        die_with_parent(&mut cmd);
+        let mut child = cmd.spawn().ok()?;
         let stdin = child.stdin.take()?;
         let mut stdout = child.stdout.take()?;
         let waiters: Arc<Mutex<HashMap<u64, mpsc::Sender<Vec<u8>>>>> =
@@ -735,7 +783,10 @@ pub fn run_box(
         cp.push(':');
         cp.push_str(&j.to_string_lossy());
     }
-    let pool = POOL.get_or_init(|| Mutex::new(RunnerPool::new()));
+    let pool = POOL.get_or_init(|| {
+        sweep_stale_temp_dirs();
+        Mutex::new(RunnerPool::new())
+    });
 
     // Fetch (or spin up) the runner for this classpath under the pool lock, then release the lock so
     // the actual round-trip runs concurrently with other threads' calls. The pool is capped because a
@@ -1023,21 +1074,21 @@ struct KotlincServer {
 
 impl KotlincServer {
     fn new(java: &str, cp: &str) -> Option<Self> {
-        let mut child = Command::new(java)
-            // Test compiles aren't perf-critical; favour fast startup over peak codegen throughput
-            // (cap JIT at C1, serial GC) so the one-time JVM+compiler warmup is small.
-            .args([
-                "-XX:TieredStopAtLevel=1",
-                "-XX:+UseSerialGC",
-                "-cp",
-                cp,
-                "KotlincServer",
-            ])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .ok()?;
+        let mut cmd = Command::new(java);
+        // Test compiles aren't perf-critical; favour fast startup over peak codegen throughput
+        // (cap JIT at C1, serial GC) so the one-time JVM+compiler warmup is small.
+        cmd.args([
+            "-XX:TieredStopAtLevel=1",
+            "-XX:+UseSerialGC",
+            "-cp",
+            cp,
+            "KotlincServer",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+        die_with_parent(&mut cmd);
+        let mut child = cmd.spawn().ok()?;
         let stdin = child.stdin.take()?;
         let stdout = child.stdout.take()?;
         Some(KotlincServer {
@@ -1209,18 +1260,18 @@ struct JavaRunner {
 
 impl JavaRunner {
     fn new(java: &str, runner_dir: &Path) -> Option<Self> {
-        let mut child = Command::new(java)
-            .args([
-                "-Xverify:all",
-                "-cp",
-                &runner_dir.to_string_lossy(),
-                "JavaRunner",
-            ])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .ok()?;
+        let mut cmd = Command::new(java);
+        cmd.args([
+            "-Xverify:all",
+            "-cp",
+            &runner_dir.to_string_lossy(),
+            "JavaRunner",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+        die_with_parent(&mut cmd);
+        let mut child = cmd.spawn().ok()?;
         let stdin = child.stdin.take()?;
         let stdout = child.stdout.take()?;
         Some(JavaRunner {
