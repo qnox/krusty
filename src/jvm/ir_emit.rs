@@ -3213,6 +3213,11 @@ impl<'a> Emitter<'a> {
         scratch: &mut CodeBuilder,
     ) -> Option<(Vec<crate::jvm::inline::Insn>, ResolvedFrames)> {
         let fr = self.ir.classes[class as usize].func_ref.clone()?;
+        let call_owner = if fr.call_owner.is_empty() {
+            self.facade.clone()
+        } else {
+            fr.call_owner.clone()
+        };
         let first_call_arg = match fr.dispatch {
             crate::ir::FrDispatch::VirtualUnbound => 1usize,
             _ => 0usize,
@@ -3248,12 +3253,7 @@ impl<'a> Emitter<'a> {
             crate::ir::FrDispatch::VirtualBound => {
                 let [capture] = captures else { return None };
                 self.emit_value(*capture, scratch);
-                let call_owner = if fr.call_owner.is_empty() {
-                    self.facade.as_str()
-                } else {
-                    fr.call_owner.as_str()
-                };
-                let owner_ref = self.cw.class_ref(call_owner);
+                let owner_ref = self.cw.class_ref(&call_owner);
                 scratch.checkcast(owner_ref);
             }
             crate::ir::FrDispatch::VirtualUnbound => {
@@ -3292,12 +3292,7 @@ impl<'a> Emitter<'a> {
             load(*jt, *slot, scratch);
             if let Some(vc) = fr.unbox_params.get(k).and_then(|v| v.as_ref()) {
                 let locals = self.verif_locals_with(&param_slots);
-                let call_owner = if fr.call_owner.is_empty() {
-                    self.facade.as_str()
-                } else {
-                    fr.call_owner.as_str()
-                };
-                let stack_prefix = func_ref_call_stack_prefix(self.cw, &fr.dispatch, call_owner);
+                let stack_prefix = func_ref_call_stack_prefix(self.cw, &fr.dispatch, &call_owner);
                 emit_value_class_unbox_adapter(
                     self.cw,
                     scratch,
@@ -3326,32 +3321,17 @@ impl<'a> Emitter<'a> {
         };
         match fr.dispatch {
             crate::ir::FrDispatch::Static | crate::ir::FrDispatch::StaticBound => {
-                let call_owner = if fr.call_owner.is_empty() {
-                    self.facade.as_str()
-                } else {
-                    fr.call_owner.as_str()
-                };
-                let m = self.cw.methodref(call_owner, &fr.call_name, &call_desc);
+                let m = self.cw.methodref(&call_owner, &fr.call_name, &call_desc);
                 scratch.invokestatic(m, call_arg_words, ret_words);
             }
             _ if fr.call_interface => {
-                let call_owner = if fr.call_owner.is_empty() {
-                    self.facade.as_str()
-                } else {
-                    fr.call_owner.as_str()
-                };
                 let m = self
                     .cw
-                    .interface_methodref(call_owner, &fr.call_name, &call_desc);
+                    .interface_methodref(&call_owner, &fr.call_name, &call_desc);
                 scratch.invokeinterface(m, call_arg_words, ret_words);
             }
             _ => {
-                let call_owner = if fr.call_owner.is_empty() {
-                    self.facade.as_str()
-                } else {
-                    fr.call_owner.as_str()
-                };
-                let m = self.cw.methodref(call_owner, &fr.call_name, &call_desc);
+                let m = self.cw.methodref(&call_owner, &fr.call_name, &call_desc);
                 scratch.invokevirtual(m, call_arg_words, ret_words);
             }
         }
