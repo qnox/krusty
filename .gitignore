@@ -6,3 +6,4 @@ docs/badges/
 *.profraw
 # cargo-mutants run output
 mutants.out/
+dhat-heap.json
