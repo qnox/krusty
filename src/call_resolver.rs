@@ -581,7 +581,10 @@ impl<'a> CallResolver<'a> {
 
     fn arg_fits_or_subtype(&self, param: &Ty, arg: &Ty) -> bool {
         self.arg_fits(param, arg)
-            || self.value_class_arg_fits(param, arg)
+            || self
+                .lib
+                .value_underlying(*arg)
+                .is_some_and(|underlying| *param == underlying)
             || self.reference_subtype(arg, param)
     }
 
@@ -591,12 +594,6 @@ impl<'a> CallResolver<'a> {
                 .fun_arity()
                 .zip(self.lib.function_like_arity(*arg))
                 .is_some_and(|(p, a)| usize::from(p) == a)
-    }
-
-    fn value_class_arg_fits(&self, param: &Ty, arg: &Ty) -> bool {
-        self.lib
-            .value_underlying(*arg)
-            .is_some_and(|underlying| *param == underlying)
     }
 
     fn reference_subtype(&self, arg: &Ty, param: &Ty) -> bool {
