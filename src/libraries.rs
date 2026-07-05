@@ -34,14 +34,6 @@ pub struct GenericSig {
     pub ret: GSig,
 }
 
-/// The type universe a symbol source contributes, resolved to internal names: every importable
-/// simple name → its internal name, plus type aliases (`alias` → target simple/internal name).
-#[derive(Default)]
-pub struct LibrarySeed {
-    pub class_names: HashMap<String, String>,
-    pub type_aliases: HashMap<String, String>,
-}
-
 /// One member (constructor, member function/property accessor, or companion member) of a library
 /// type, in Kotlin terms. `descriptor` is an opaque backend token (a JVM method descriptor) the
 /// matching emitter consumes verbatim — the front end matches on `params`/`ret`, never parsing it.
@@ -763,6 +755,7 @@ pub struct FunctionSet {
 /// The shape of a library type: enough for the front end to resolve member accesses against it
 /// (publicness, kind, supertypes, constructors, instance members, and companion members) without
 /// knowing the target ABI.
+#[derive(Clone)]
 pub struct LibraryType {
     pub is_public: bool,
     /// The declaration kind (class / interface / annotation / object). One field instead of parallel
@@ -797,6 +790,10 @@ pub struct LibraryType {
     /// (`UInt` → `Int`, `Result` → `Any`); `None` for an ordinary class. The JVM backend erases the value
     /// class to this everywhere (like a user value class), reproducing kotlinc's unboxed representation.
     pub value_underlying: Option<Ty>,
+    /// When this name is a `typealias`, the target internal it expands to (`kotlin/collections/ArrayList`
+    /// → `java/util/ArrayList`); `None` for a real type. Name resolution records the target, so an alias
+    /// resolves to the underlying type with no separate alias query.
+    pub alias_target: Option<String>,
     /// The type's own formal type parameters, in declaration order (`Pair` → `["A", "B"]`); empty for a
     /// non-generic type. With the constructors' [`LibraryMember::generic_sig`], lets a caller infer a
     /// construction's type arguments by unifying the ctor's generic parameter signatures against the
@@ -1087,6 +1084,7 @@ mod tests {
             companion_object: None,
             value_companion_fns: vec![],
             value_underlying: None,
+            alias_target: None,
             type_params: vec![],
             sealed_subclasses: vec![],
             enum_entries: vec![],

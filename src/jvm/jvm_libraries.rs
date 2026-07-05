@@ -5,17 +5,15 @@
 
 use super::classpath::{kotlin_name_to_ty, metadata_return_info, Classpath};
 use super::classreader::{ConstVal, FieldSig};
-use super::jvm_class_map::{
-    kotlin_builtin_to_internal, to_jvm_internal, to_kotlin_internal, BUILTIN_MAPPED_NAMES,
-};
+use super::jvm_class_map::{to_jvm_internal, to_kotlin_internal};
 use super::metadata;
 use crate::call_resolver::{arg_fits, function_input_types, gsig_to_ty, gsig_tys, unify_gsig};
 use crate::jvm::names::{method_descriptor, property_getter_name, type_descriptor};
 use crate::libraries::{
     CountedLoopInfo, FnFlags, FnKind, FunctionInfo, FunctionSet, GSig, GenericSig, InlineKind,
-    LibConst, LibraryCallable, LibraryConst, LibraryMember, LibrarySeed, LibraryType,
-    PlatformAccessor, PlatformCtor, PlatformField, PlatformRangeCtor, RangeConstruction,
-    ReturnInfo, RuntimeCtor, RuntimeOp, TargetRuntime,
+    LibConst, LibraryCallable, LibraryConst, LibraryMember, LibraryType, PlatformAccessor,
+    PlatformCtor, PlatformField, PlatformRangeCtor, RangeConstruction, ReturnInfo, RuntimeCtor,
+    RuntimeOp, TargetRuntime,
 };
 use crate::symbol_source::SymbolSource;
 use crate::types::Ty;
@@ -31,11 +29,20 @@ const PLATFORM_DEFAULT_IMPORT_PACKAGES: &[&str] = &["java.lang", "kotlin.jvm"];
 /// abstraction.
 pub struct JvmLibraries {
     cp: std::rc::Rc<Classpath>,
+    /// Memoized `resolve_type` results (an `Rc` per internal, `None` cached too). Since name resolution
+    /// now probes `resolve_type` per referenced name × default package instead of reading a pre-built
+    /// simple-name index, the same type is asked for many times; building its `LibraryType` (descriptor
+    /// parses + `@Metadata` decodes) once and cloning from the cache keeps that lazy probing cheap.
+    type_cache:
+        std::cell::RefCell<std::collections::HashMap<String, Option<std::rc::Rc<LibraryType>>>>,
 }
 
 impl JvmLibraries {
     pub fn new(cp: std::rc::Rc<Classpath>) -> JvmLibraries {
-        JvmLibraries { cp }
+        JvmLibraries {
+            cp,
+            type_cache: std::cell::RefCell::new(std::collections::HashMap::new()),
+        }
     }
 
     fn const_fields<F>(
@@ -889,6 +896,7 @@ fn mapped_builtin_fallback(internal: &str) -> Option<LibraryType> {
         companion_object: None,
         value_companion_fns: Vec::new(),
         value_underlying: None,
+        alias_target: None,
         type_params: Vec::new(),
         sealed_subclasses: Vec::new(),
         enum_entries: Vec::new(),
@@ -896,6 +904,40 @@ fn mapped_builtin_fallback(internal: &str) -> Option<LibraryType> {
         ctor_named_params: Vec::new(),
         value_class_properties: Vec::new(),
     })
+}
+
+/// The [`LibraryType`] of a classless Kotlin BUILTIN (`kotlin/Number`, `kotlin/collections/List`, …) whose
+/// JVM class is absent from the classpath (a no-JDK compile) — supertypes and members from the
+/// `.kotlin_builtins` data, kind from the metadata `is_interface` flag.
+fn builtin_library_type(
+    is_interface: bool,
+    supertypes: Vec<String>,
+    members: Vec<LibraryMember>,
+) -> LibraryType {
+    LibraryType {
+        is_public: true,
+        kind: if is_interface {
+            crate::libraries::TypeKind::Interface
+        } else {
+            crate::libraries::TypeKind::Class
+        },
+        supertypes,
+        constructors: Vec::new(),
+        members,
+        companion: Vec::new(),
+        companion_consts: Default::default(),
+        sam_method: None,
+        companion_object: None,
+        value_companion_fns: Vec::new(),
+        value_underlying: None,
+        alias_target: None,
+        type_params: Vec::new(),
+        sealed_subclasses: Vec::new(),
+        enum_entries: Vec::new(),
+        value_ctor_has_default: false,
+        ctor_named_params: Vec::new(),
+        value_class_properties: Vec::new(),
+    }
 }
 
 /// Parse a class generic signature into its formal type-parameter names and its supertypes (the
@@ -1011,314 +1053,264 @@ fn class_implements(cp: &Classpath, internal: &str, target: &str) -> bool {
 }
 
 impl SymbolSource for JvmLibraries {
-    fn seed(&self) -> LibrarySeed {
-        let (class_names, type_aliases) = self.seed_shared();
-        LibrarySeed {
-            class_names: (*class_names).clone(),
-            type_aliases: (*type_aliases).clone(),
-        }
-    }
-
-    fn seed_shared(&self) -> crate::symbol_source::SharedSeed {
-        // The merged class-name map (classpath index + the ported built-in mapping) is identical for
-        // every file compiled against this classpath, so build it ONCE per (thread, classpath) and hand
-        // back a shared `Rc`. Cloning this ~40k-entry map per file was the dominant `sigs` cost.
-        thread_local! {
-            static CACHE: std::cell::RefCell<std::collections::HashMap<u64, crate::symbol_source::SharedSeed>> =
-                std::cell::RefCell::new(std::collections::HashMap::new());
-        }
-        // Key on the classpath's STABLE process-unique id — NOT the `Rc` pointer address, which a
-        // freed-then-reallocated `Classpath` can reuse, serving a stale seed for a different classpath
-        // (manifested as a cross-module class going unresolved after a prior compile in the same process).
-        let key = self.cp.id();
-        if let Some(hit) = CACHE.with(|c| c.borrow().get(&key).cloned()) {
-            return hit;
-        }
-        let idx = self.cp.scan_types();
-        // A bare (unqualified, unimported) type name resolves ONLY to a class in a DEFAULT-IMPORT
-        // package — kotlinc semantics. NOT to an arbitrary classpath class: a global simple-name seed
-        // of the whole classpath silently binds a bare name to whatever shares it (`Widget`→
-        // `jdk/internal/.../Widget`, `plain`→`sun/.../plain`, shadowing a user `fun plain()`) — a
-        // silent miscompile. Same-package user types and explicit/wildcard imports are added per file
-        // by the signature collector; default-import typealiases (`ArrayList`→`java/util/ArrayList`,
-        // declared in `kotlin.collections`) are seeded just below from the type-alias index.
-        let default_pkgs: std::collections::HashSet<String> =
-            crate::resolve::KOTLIN_DEFAULT_IMPORT_PACKAGES
-                .iter()
-                .chain(PLATFORM_DEFAULT_IMPORT_PACKAGES)
-                .map(|p| p.replace('.', "/"))
-                .collect();
-        let mut class_names: std::collections::HashMap<String, String> = idx
-            .class_names
-            .iter()
-            .filter(|(_, internal)| {
-                internal
-                    .rfind('/')
-                    .is_some_and(|i| default_pkgs.contains(&internal[..i]))
-            })
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
-        // Seed the Kotlin built-in → JVM class mapping (ported `JavaToKotlinClassMap`): intrinsic
-        // mapped types (`Comparable`, `Throwable`, `List`, …), not `.class` files. Classpath types
-        // above take precedence (`or_insert`).
-        for name in BUILTIN_MAPPED_NAMES {
-            if let Some(internal) = kotlin_builtin_to_internal(name) {
-                if internal.starts_with("kotlin/collections/") {
-                    // FORCE the Kotlin collection type (read-only vs mutable) over any classpath
-                    // `java/util/List` — the front end must keep the distinction; emit erases it.
-                    class_names.insert(name.to_string(), internal.to_string());
-                } else {
-                    class_names
-                        .entry(name.to_string())
-                        .or_insert_with(|| internal.to_string());
-                }
-            }
-        }
-        // `Pair`/`Triple` are auto-imported `kotlin.*` classes constructed directly (`Pair(a, b)`), but
-        // the classpath scan indexes them by FQ name only (they're otherwise reached via `to`), so seed
-        // the simple-name → internal mapping (classpath entries above still take precedence).
-        for (name, internal) in [("Pair", "kotlin/Pair"), ("Triple", "kotlin/Triple")] {
-            class_names
-                .entry(name.to_string())
-                .or_insert_with(|| internal.to_string());
-        }
-        let pair = (
-            std::rc::Rc::new(class_names),
-            std::rc::Rc::new(idx.type_aliases.clone()),
-        );
-        CACHE.with(|c| c.borrow_mut().insert(key, pair.clone()));
-        pair
-    }
-
     fn resolve_type(&self, internal: &str) -> Option<LibraryType> {
-        // A Kotlin MAPPED type (`kotlin.collections.List`, `kotlin.CharSequence`, …) has no own JVM
-        // `.class` — its *actual* platform declaration IS a JVM type (`java/util/List`), exactly the
-        // `expect`/`actual` + `JavaToKotlinClassMap` device kotlinc uses. When the classpath has no class
-        // for the Kotlin name, resolve members against that mapped (actual) type — the SAME generic
-        // mapping (`to_jvm_internal`) the emitter uses for the call owner, so resolution and codegen stay
-        // byte-consistent. Members/return types erase to the JVM forms (`get(int)Object`, etc.).
-        let ci = match self.cp.find(internal) {
-            Some(ci) => ci,
-            None => {
-                let mapped = super::jvm_class_map::to_jvm_internal(internal);
-                if mapped == internal {
-                    return None;
+        if let Some(hit) = self.type_cache.borrow().get(internal) {
+            return hit.as_ref().map(|rc| (**rc).clone());
+        }
+        let built = (|| -> Option<LibraryType> {
+            // A classpath `typealias` (`kotlin/collections/ArrayList` → `java/util/ArrayList`) has no class of
+            // its own; resolve the underlying type and tag it with `alias_target` so name resolution records
+            // the real internal.
+            if let Some(target) = self.cp.type_alias_target(internal) {
+                let mut t = self.resolve_type(&target)?;
+                t.alias_target = Some(target);
+                return Some(t);
+            }
+            // A Kotlin MAPPED type (`kotlin.collections.List`, `kotlin.CharSequence`, …) has no own JVM
+            // `.class` — its *actual* platform declaration IS a JVM type (`java/util/List`), exactly the
+            // `expect`/`actual` + `JavaToKotlinClassMap` device kotlinc uses. When the classpath has no class
+            // for the Kotlin name, resolve members against that mapped (actual) type — the SAME generic
+            // mapping (`to_jvm_internal`) the emitter uses for the call owner, so resolution and codegen stay
+            // byte-consistent. Members/return types erase to the JVM forms (`get(int)Object`, etc.).
+            let ci = match self.cp.find(internal) {
+                Some(ci) => ci,
+                None => {
+                    let mapped = super::jvm_class_map::to_jvm_internal(internal);
+                    if mapped == internal {
+                        return None;
+                    }
+                    match self.cp.find(mapped) {
+                        Some(ci) => ci,
+                        // The mapped JVM class is absent (a no-JDK compile). If `internal` is a Kotlin builtin,
+                        // report it from the `.kotlin_builtins` data (present in the stdlib) — its Kotlin
+                        // identity, members, supertypes, and class-vs-interface kind — so `List`/`Number`/… still
+                        // resolve without the JDK on the classpath.
+                        None => {
+                            if let Some(is_iface) = self.cp.builtin_is_interface(internal) {
+                                return Some(builtin_library_type(
+                                    is_iface,
+                                    self.cp.builtin_supertypes(internal),
+                                    self.builtin_members_for_type(internal),
+                                ));
+                            }
+                            // Otherwise the backend's curated minimal ABI for the well-known mapped builtins.
+                            return mapped_builtin_fallback(internal);
+                        }
+                    }
                 }
-                match self.cp.find(mapped) {
-                    Some(ci) => ci,
-                    // The classpath has neither the Kotlin name nor the mapped JVM class — a no-classpath
-                    // compile (no JDK/stdlib to read). Fall back to the backend's curated minimal ABI for
-                    // the well-known mapped builtins so member resolution stays generic and the compiler
-                    // core never has to spell a `java/lang/*` name itself.
-                    None => return mapped_builtin_fallback(internal),
+            };
+            let mut constructors = Vec::new();
+            let mut members = Vec::new();
+            let mut companion = Vec::new();
+            // `Map.put` returns the PREVIOUS value (`V?`, null for a fresh key) — Kotlin enhances this Java
+            // method's nullability. It applies to ANY `Map` subtype (`HashMap`, `TreeMap`, …), since a call
+            // resolves the member on the concrete class, not on `Map` itself.
+            let is_map = class_implements(&self.cp, internal, "java/util/Map");
+            for m in &ci.methods {
+                // Only public members are callable from generated code.
+                if !m.is_public() {
+                    continue;
+                }
+                let (params, ret) = parse_method_desc(&m.descriptor);
+                let mut member =
+                    LibraryMember::new(m.name.clone(), params, ret, m.descriptor.clone());
+                member.signature = m.signature.clone();
+                member.suspend = self.cp.is_suspend_method(internal, &m.name);
+                if is_map && member.name == "put" {
+                    member.ret_nullable = true;
+                }
+                if m.name == "<init>" {
+                    // Parse the ctor's generic signature so the resolver can infer a construction's type
+                    // arguments (`Pair(1, 2)` → `<Int, Int>`) without spelling backend signature strings.
+                    member.generic_sig = m.signature.as_deref().and_then(parse_method_gsig);
+                    constructors.push(member);
+                } else if m.is_static() {
+                    // A Kotlin companion member compiles to a JVM static on the class.
+                    companion.push(member);
+                } else {
+                    members.push(member);
                 }
             }
-        };
-        let mut constructors = Vec::new();
-        let mut members = Vec::new();
-        let mut companion = Vec::new();
-        // `Map.put` returns the PREVIOUS value (`V?`, null for a fresh key) — Kotlin enhances this Java
-        // method's nullability. It applies to ANY `Map` subtype (`HashMap`, `TreeMap`, …), since a call
-        // resolves the member on the concrete class, not on `Map` itself.
-        let is_map = class_implements(&self.cp, internal, "java/util/Map");
-        for m in &ci.methods {
-            // Only public members are callable from generated code.
-            if !m.is_public() {
-                continue;
-            }
-            let (params, ret) = parse_method_desc(&m.descriptor);
-            let mut member = LibraryMember::new(m.name.clone(), params, ret, m.descriptor.clone());
-            member.signature = m.signature.clone();
-            member.suspend = self.cp.is_suspend_method(internal, &m.name);
-            if is_map && member.name == "put" {
-                member.ret_nullable = true;
-            }
-            if m.name == "<init>" {
-                // Parse the ctor's generic signature so the resolver can infer a construction's type
-                // arguments (`Pair(1, 2)` → `<Int, Int>`) without spelling backend signature strings.
-                member.generic_sig = m.signature.as_deref().and_then(parse_method_gsig);
-                constructors.push(member);
-            } else if m.is_static() {
-                // A Kotlin companion member compiles to a JVM static on the class.
-                companion.push(member);
-            } else {
+            // A member whose JVM name is MANGLED by a value-class PARAMETER (`fun get(id: Vid): Cat` →
+            // `get-<hash>(String)`): the descriptor-read loop above stored it under the mangled name, so a
+            // source-name call `p.get(v)` misses it, and its erased `String` parameter wouldn't accept the
+            // `Vid` argument. Recover the SOURCE name + logical (value-class) parameter types from `@Metadata`
+            // and expose the member under the source name — keeping the mangled JVM name as `physical_name`
+            // and the erased descriptor for emit (the value-classes pass unboxes the `Vid` argument).
+            for mf in metadata::class_functions(&ci) {
+                if !mf.is_public || mf.is_extension || mf.jvm_name == mf.kotlin_name {
+                    continue;
+                }
+                let Some(desc) = mf.jvm_desc.as_deref() else {
+                    continue;
+                };
+                let (params, physical_ret) = parse_method_desc(desc);
+                // A `suspend` member appends a `Continuation` JVM parameter the SOURCE signature
+                // (`value_params`) excludes — drop it (the CPS pass re-threads it) and match the leading
+                // value parameters. Any OTHER count mismatch (`@Composable`, …) isn't a plain mangled member.
+                let value_params = if mf.is_suspend && !params.is_empty() {
+                    &params[..params.len() - 1]
+                } else {
+                    &params[..]
+                };
+                if value_params.len() != mf.value_params.len() {
+                    continue;
+                }
+                let mut logical: Vec<Ty> = value_params
+                    .iter()
+                    .zip(&mf.value_params)
+                    .map(|(p, vp)| vp.ty.as_deref().map(kotlin_name_to_ty).unwrap_or(*p))
+                    .collect();
+                // A `suspend` member's `params` carry the trailing `Continuation` (the resolver strips it when
+                // matching a call, exactly as for a non-mangled suspend member); the logical value parameters
+                // are the leading ones.
+                if mf.is_suspend {
+                    logical.push(Ty::obj("kotlin/coroutines/Continuation"));
+                }
+                let ret = metadata_return_info(mf.ret_class.as_deref(), mf.ret_nullable)
+                    .apply(physical_ret);
+                let mut member =
+                    LibraryMember::new(mf.kotlin_name.clone(), logical, ret, desc.to_string());
+                member.physical_name = Some(mf.jvm_name.clone());
+                member.physical_ret = physical_ret;
+                member.ret_nullable = mf.ret_nullable;
+                member.suspend = mf.is_suspend;
+                crate::trace_compiler!(
+                    "resolve",
+                    "mangled member {}.{} jvm={} logical_params={:?}",
+                    internal,
+                    mf.kotlin_name,
+                    mf.jvm_name,
+                    member.params
+                );
                 members.push(member);
             }
-        }
-        // A member whose JVM name is MANGLED by a value-class PARAMETER (`fun get(id: Vid): Cat` →
-        // `get-<hash>(String)`): the descriptor-read loop above stored it under the mangled name, so a
-        // source-name call `p.get(v)` misses it, and its erased `String` parameter wouldn't accept the
-        // `Vid` argument. Recover the SOURCE name + logical (value-class) parameter types from `@Metadata`
-        // and expose the member under the source name — keeping the mangled JVM name as `physical_name`
-        // and the erased descriptor for emit (the value-classes pass unboxes the `Vid` argument).
-        for mf in metadata::class_functions(&ci) {
-            if !mf.is_public || mf.is_extension || mf.jvm_name == mf.kotlin_name {
-                continue;
+            // Every JDK `Throwable` has a no-arg and a single-message constructor; synthesize those two
+            // shapes when the classpath reader can't surface the jimage constructor descriptors.
+            if constructors.is_empty() && super::jvm_class_map::is_throwable_internal(internal) {
+                constructors.push(LibraryMember::new(
+                    "<init>".into(),
+                    vec![],
+                    Ty::Unit,
+                    "()V".into(),
+                ));
+                constructors.push(LibraryMember::new(
+                    "<init>".into(),
+                    vec![Ty::String],
+                    Ty::Unit,
+                    format!("({})V", type_descriptor(Ty::String)),
+                ));
             }
-            let Some(desc) = mf.jvm_desc.as_deref() else {
-                continue;
-            };
-            let (params, physical_ret) = parse_method_desc(desc);
-            // A `suspend` member appends a `Continuation` JVM parameter the SOURCE signature
-            // (`value_params`) excludes — drop it (the CPS pass re-threads it) and match the leading
-            // value parameters. Any OTHER count mismatch (`@Composable`, …) isn't a plain mangled member.
-            let value_params = if mf.is_suspend && !params.is_empty() {
-                &params[..params.len() - 1]
+            let mut supertypes = ci.interfaces.clone();
+            if let Some(s) = &ci.super_class {
+                supertypes.push(s.clone());
+            }
+            for s in self.cp.builtin_supertypes(internal) {
+                if !supertypes.iter().any(|existing| existing == &s) {
+                    supertypes.push(s);
+                }
+            }
+            // A companion object compiles to a `public static final C$Name` field on `C` (default name
+            // `Companion`; e.g. `Json.Default: Json$Default`). Detect it by the descriptor pattern
+            // `L<this>$<fieldname>;` so a bare `C` reference can resolve to the companion instance.
+            let companion_object = ci.fields.iter().find_map(|f| {
+                // A Kotlin companion-object instance field is always `public static final`, typed as the
+                // nested companion class (`L<this>$<fieldname>;`). Requiring all three flags + the nested-
+                // type-name pattern makes a false positive on a hand-authored non-Kotlin static field
+                // (a nested-class-typed `public static final` field) vanishingly unlikely.
+                let public_static_final =
+                    f.access & (0x0001 | 0x0008 | 0x0010) == (0x0001 | 0x0008 | 0x0010);
+                if !public_static_final {
+                    return None;
+                }
+                let nested = format!("{internal}${}", f.name);
+                (f.descriptor == format!("L{nested};")).then(|| (f.name.clone(), nested))
+            });
+            // A Kotlin `object` has a `public static final INSTANCE` field of its own type.
+            let self_desc = format!("L{internal};");
+            let is_object = ci.fields.iter().any(|f| {
+                f.name == "INSTANCE" && f.descriptor == self_desc && f.access & 0x0008 != 0
+                // ACC_STATIC
+            });
+            let kind = if ci.access & 0x2000 != 0 {
+                crate::libraries::TypeKind::Annotation
+            } else if ci.is_interface() {
+                crate::libraries::TypeKind::Interface
+            } else if is_object {
+                crate::libraries::TypeKind::Object
             } else {
-                &params[..]
+                crate::libraries::TypeKind::Class
             };
-            if value_params.len() != mf.value_params.len() {
-                continue;
-            }
-            let mut logical: Vec<Ty> = value_params
+            // A classpath `@JvmInline value class` (detected via `@Metadata`): its erased underlying type, so
+            // the JVM backend can unbox it like a user value class. `UInt` → `Int`, `Result` → `Any`.
+            let value_underlying = metadata::class_inline(&ci).map(|ic| {
+                match ic.underlying_class.as_deref() {
+                    Some(other) => kotlin_name_to_ty(other),
+                    // The underlying type was carried in the @Metadata type TABLE (proto field 19), not
+                    // inlined — `class_inline` can't resolve it there. Recover it from the synthesized
+                    // `box-impl(U)` parameter descriptor, the authoritative JVM underlying type. (A type
+                    // PARAMETER underlying — `Result<T>` — has no concrete box-impl param and stays `Any`.)
+                    None => ci
+                        .methods
+                        .iter()
+                        .find(|m| m.name == "box-impl")
+                        .and_then(|m| m.descriptor.strip_prefix('('))
+                        .and_then(split_one)
+                        .map(|(d, _)| field_desc_to_ty(d))
+                        .unwrap_or_else(|| Ty::obj("kotlin/Any")),
+                }
+            });
+            let value_class_metadata_members = self.value_class_metadata_members_for_class(&ci);
+            // The class's own formal type parameters (`Pair` → `[A, B]`), for constructor type-argument
+            // inference; empty for a non-generic type.
+            let type_params = ci
+                .signature
+                .as_deref()
+                .and_then(parse_class_gsig)
+                .map(|(formals, _)| formals)
+                .unwrap_or_default();
+            // An enum entry is a `static` field of the enum's OWN type (`descriptor == L<internal>;`).
+            const ACC_STATIC: u16 = 0x0008;
+            let enum_entries: Vec<String> = ci
+                .fields
                 .iter()
-                .zip(&mf.value_params)
-                .map(|(p, vp)| vp.ty.as_deref().map(kotlin_name_to_ty).unwrap_or(*p))
+                .filter(|f| f.access & ACC_STATIC != 0 && f.descriptor == self_desc)
+                .map(|f| f.name.clone())
                 .collect();
-            // A `suspend` member's `params` carry the trailing `Continuation` (the resolver strips it when
-            // matching a call, exactly as for a non-mangled suspend member); the logical value parameters
-            // are the leading ones.
-            if mf.is_suspend {
-                logical.push(Ty::obj("kotlin/coroutines/Continuation"));
-            }
-            let ret =
-                metadata_return_info(mf.ret_class.as_deref(), mf.ret_nullable).apply(physical_ret);
-            let mut member =
-                LibraryMember::new(mf.kotlin_name.clone(), logical, ret, desc.to_string());
-            member.physical_name = Some(mf.jvm_name.clone());
-            member.physical_ret = physical_ret;
-            member.ret_nullable = mf.ret_nullable;
-            member.suspend = mf.is_suspend;
-            crate::trace_compiler!(
-                "resolve",
-                "mangled member {}.{} jvm={} logical_params={:?}",
-                internal,
-                mf.kotlin_name,
-                mf.jvm_name,
-                member.params
-            );
-            members.push(member);
-        }
-        // Every JDK `Throwable` has a no-arg and a single-message constructor; synthesize those two
-        // shapes when the classpath reader can't surface the jimage constructor descriptors.
-        if constructors.is_empty() && super::jvm_class_map::is_throwable_internal(internal) {
-            constructors.push(LibraryMember::new(
-                "<init>".into(),
-                vec![],
-                Ty::Unit,
-                "()V".into(),
-            ));
-            constructors.push(LibraryMember::new(
-                "<init>".into(),
-                vec![Ty::String],
-                Ty::Unit,
-                format!("({})V", type_descriptor(Ty::String)),
-            ));
-        }
-        let mut supertypes = ci.interfaces.clone();
-        if let Some(s) = &ci.super_class {
-            supertypes.push(s.clone());
-        }
-        for s in self.cp.builtin_supertypes(internal) {
-            if !supertypes.iter().any(|existing| existing == &s) {
-                supertypes.push(s);
-            }
-        }
-        // A companion object compiles to a `public static final C$Name` field on `C` (default name
-        // `Companion`; e.g. `Json.Default: Json$Default`). Detect it by the descriptor pattern
-        // `L<this>$<fieldname>;` so a bare `C` reference can resolve to the companion instance.
-        let companion_object = ci.fields.iter().find_map(|f| {
-            // A Kotlin companion-object instance field is always `public static final`, typed as the
-            // nested companion class (`L<this>$<fieldname>;`). Requiring all three flags + the nested-
-            // type-name pattern makes a false positive on a hand-authored non-Kotlin static field
-            // (a nested-class-typed `public static final` field) vanishingly unlikely.
-            let public_static_final =
-                f.access & (0x0001 | 0x0008 | 0x0010) == (0x0001 | 0x0008 | 0x0010);
-            if !public_static_final {
-                return None;
-            }
-            let nested = format!("{internal}${}", f.name);
-            (f.descriptor == format!("L{nested};")).then(|| (f.name.clone(), nested))
-        });
-        // A Kotlin `object` has a `public static final INSTANCE` field of its own type.
-        let self_desc = format!("L{internal};");
-        let is_object = ci.fields.iter().any(|f| {
-            f.name == "INSTANCE" && f.descriptor == self_desc && f.access & 0x0008 != 0
-            // ACC_STATIC
-        });
-        let kind = if ci.access & 0x2000 != 0 {
-            crate::libraries::TypeKind::Annotation
-        } else if ci.is_interface() {
-            crate::libraries::TypeKind::Interface
-        } else if is_object {
-            crate::libraries::TypeKind::Object
-        } else {
-            crate::libraries::TypeKind::Class
-        };
-        // A classpath `@JvmInline value class` (detected via `@Metadata`): its erased underlying type, so
-        // the JVM backend can unbox it like a user value class. `UInt` → `Int`, `Result` → `Any`.
-        let value_underlying = metadata::class_inline(&ci).map(|ic| {
-            match ic.underlying_class.as_deref() {
-                Some(other) => kotlin_name_to_ty(other),
-                // The underlying type was carried in the @Metadata type TABLE (proto field 19), not
-                // inlined — `class_inline` can't resolve it there. Recover it from the synthesized
-                // `box-impl(U)` parameter descriptor, the authoritative JVM underlying type. (A type
-                // PARAMETER underlying — `Result<T>` — has no concrete box-impl param and stays `Any`.)
-                None => ci
-                    .methods
-                    .iter()
-                    .find(|m| m.name == "box-impl")
-                    .and_then(|m| m.descriptor.strip_prefix('('))
-                    .and_then(split_one)
-                    .map(|(d, _)| field_desc_to_ty(d))
-                    .unwrap_or_else(|| Ty::obj("kotlin/Any")),
-            }
-        });
-        let value_class_metadata_members = self.value_class_metadata_members_for_class(&ci);
-        // The class's own formal type parameters (`Pair` → `[A, B]`), for constructor type-argument
-        // inference; empty for a non-generic type.
-        let type_params = ci
-            .signature
-            .as_deref()
-            .and_then(parse_class_gsig)
-            .map(|(formals, _)| formals)
-            .unwrap_or_default();
-        // An enum entry is a `static` field of the enum's OWN type (`descriptor == L<internal>;`).
-        const ACC_STATIC: u16 = 0x0008;
-        let enum_entries: Vec<String> = ci
-            .fields
-            .iter()
-            .filter(|f| f.access & ACC_STATIC != 0 && f.descriptor == self_desc)
-            .map(|f| f.name.clone())
-            .collect();
-        // A defaulted value-class primary constructor surfaces as the `constructor-impl$default` synthetic.
-        let value_ctor_has_default = ci
-            .methods
-            .iter()
-            .any(|m| m.name == "constructor-impl$default");
-        Some(LibraryType {
-            is_public: ci.is_public(),
-            kind,
-            supertypes,
-            constructors,
-            members: members
-                .into_iter()
-                .chain(value_class_metadata_members)
-                .chain(self.builtin_members_for_type(internal))
-                .collect(),
-            companion,
-            companion_consts: self.companion_consts_for_type(&ci.this_class),
-            sam_method: self.sam_method_for_class(&ci.this_class),
-            companion_object,
-            value_companion_fns: self.value_companion_fns_for_class(&ci.this_class),
-            value_underlying,
-            type_params,
-            sealed_subclasses: metadata::class_sealed_subclasses(&ci),
-            enum_entries,
-            value_ctor_has_default,
-            ctor_named_params: metadata::class_constructor_params(&ci),
-            value_class_properties: self.value_class_property_members_for_class(&ci),
-        })
+            // A defaulted value-class primary constructor surfaces as the `constructor-impl$default` synthetic.
+            let value_ctor_has_default = ci
+                .methods
+                .iter()
+                .any(|m| m.name == "constructor-impl$default");
+            Some(LibraryType {
+                is_public: ci.is_public(),
+                kind,
+                supertypes,
+                constructors,
+                members: members
+                    .into_iter()
+                    .chain(value_class_metadata_members)
+                    .chain(self.builtin_members_for_type(internal))
+                    .collect(),
+                companion,
+                companion_consts: self.companion_consts_for_type(&ci.this_class),
+                sam_method: self.sam_method_for_class(&ci.this_class),
+                companion_object,
+                value_companion_fns: self.value_companion_fns_for_class(&ci.this_class),
+                value_underlying,
+                alias_target: None,
+                type_params,
+                sealed_subclasses: metadata::class_sealed_subclasses(&ci),
+                enum_entries,
+                value_ctor_has_default,
+                ctor_named_params: metadata::class_constructor_params(&ci),
+                value_class_properties: self.value_class_property_members_for_class(&ci),
+            })
+        })();
+        self.type_cache
+            .borrow_mut()
+            .insert(internal.to_string(), built.clone().map(std::rc::Rc::new));
+        built
     }
     fn functions(&self, name: &str, receiver: Option<Ty>) -> FunctionSet {
         let key = (name.to_string(), receiver);

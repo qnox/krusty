@@ -616,9 +616,47 @@ fn collect_file_type_names(file: &File, out: &mut std::collections::HashSet<Stri
     // import package simply isn't added — harmless. This is what lets a default-import-only seed (no
     // whole-classpath blanket) still resolve imported values.
     for e in &file.expr_arena {
-        if let Expr::Name(n) = e {
-            out.insert(n.clone());
+        match e {
+            Expr::Name(n) => {
+                out.insert(n.clone());
+            }
+            // Type names in EXPRESSION position — a cast (`x as T`), a type test (`x is T`), or a catch
+            // clause (`catch (e: T)`) — are just as much candidates as a declared parameter type, and are
+            // the only place some names (a caught `NotImplementedError`) appear. The signature phase's
+            // `ty_of_ref` / `catch_internal` resolve them through the same `class_names`, so they must be
+            // import-resolved here too.
+            Expr::Is { ty, .. } | Expr::As { ty, .. } => collect_typeref_names(ty, out),
+            Expr::Try { catches, .. } => {
+                for c in catches {
+                    collect_typeref_names(&c.ty, out);
+                }
+            }
+            _ => {}
         }
+    }
+    // A local declaration's type annotation (`val r: Reg`, `lateinit var x: T`) is a type-position name
+    // too, and may be the only place a name appears (a classpath alias used only for a local `val`).
+    for s in &file.stmt_arena {
+        match s {
+            Stmt::LocalLateinit { ty, .. } => collect_typeref_names(ty, out),
+            Stmt::Local { ty: Some(ty), .. } | Stmt::LocalDelegate { ty: Some(ty), .. } => {
+                collect_typeref_names(ty, out)
+            }
+            Stmt::LocalFun(f) => fun_names(f, file, out),
+            _ => {}
+        }
+    }
+    // Explicit call type arguments (`foo<Bar>()`, `arrayOf<Baz>()`) are type-position names too.
+    for targs in file.call_type_args.values() {
+        for t in targs {
+            collect_typeref_names(t, out);
+        }
+    }
+    // A `typealias A = Foo` TARGET is a candidate: alias expansion resolves `A` by looking up `Foo` in
+    // the resolved names, so `Foo` must itself be import-resolved (it may not appear in any other type
+    // position). Both simple (`Foo`) and dotted (`a.b.Foo`) targets go in; the resolver tries each.
+    for (_, target) in &file.type_aliases {
+        out.insert(target.clone());
     }
     for &d in &file.decls {
         match file.decl(d) {
@@ -755,14 +793,19 @@ fn object_member_import_sig(file: &File, name: &str, src: &dyn CompilerPlatform)
 }
 
 fn resolve_nested_internal(internal: &str, libraries: &dyn CompilerPlatform) -> Option<String> {
-    if libraries.resolve_type(internal).is_some() {
-        return Some(internal.to_string());
+    // A `typealias` resolves to its target internal, not to the (classless) alias name.
+    let resolved = |name: &str| -> Option<String> {
+        let t = libraries.resolve_type(name)?;
+        Some(t.alias_target.unwrap_or_else(|| name.to_string()))
+    };
+    if let Some(r) = resolved(internal) {
+        return Some(r);
     }
     let mut cand = internal.to_string();
     while let Some(pos) = cand.rfind('/') {
         cand.replace_range(pos..=pos, "$");
-        if libraries.resolve_type(&cand).is_some() {
-            return Some(cand);
+        if let Some(r) = resolved(&cand) {
+            return Some(r);
         }
     }
     None
@@ -855,14 +898,13 @@ pub fn collect_signatures_with_cp(
     diags: &mut DiagSink,
 ) -> SymbolTable {
     let platform_default_imports = libraries.platform_default_import_packages();
-    // The library set's type universe: importable names + type aliases (and intrinsic built-in maps).
-    // The (large) class-name base is shared by `Rc` — NOT cloned per compilation; only the small
-    // per-file overlay (user classes + aliases) is owned here.
-    let (base_class_names, base_aliases) = libraries.seed_shared();
-
-    // Pass 1: every class simple-name -> internal name (no bodies, just the type universe).
-    // Pre-seed from the library type index so imports/stdlib types are visible.
-    let mut class_names = ClassNames::new(base_class_names);
+    // Pass 1: every class simple-name -> internal name (no bodies, just the type universe). Nothing is
+    // pre-seeded: every referenced type resolves through the file's imports and default packages below
+    // (the import machinery), so a bare name binds ONLY to a default-import / imported / same-package class
+    // — kotlinc semantics — never to an arbitrary classpath class. A classpath `typealias`
+    // (`ArrayList` → `java/util/ArrayList`) resolves through the same probe: `resolve_type` returns the
+    // alias's target.
+    let mut class_names = ClassNames::new(std::rc::Rc::new(HashMap::new()));
     // A user-declared top-level class *shadows* any classpath/JDK type of the same simple name
     // (legal Kotlin — the JDK one would need an explicit import). Only a duplicate among the
     // user's own declarations is a conflict, so track which names the user has defined.
@@ -882,15 +924,81 @@ pub fn collect_signatures_with_cp(
     // (The library set's `seed` already merged the intrinsic Kotlin built-in → target class mapping,
     // e.g. the ported `JavaToKotlinClassMap`, beneath any classpath/user declarations.)
 
-    // Expand type aliases into class_names.
-    // `typealias A = B` where B is a user-defined class → A resolves to the same internal name.
+    // Resolve every referenced simple name through the file's imports — an explicit import, a
+    // wildcard/default-import package that actually provides the type, or a dotted FQ. This is Kotlin's
+    // import-driven name resolution (there is no global simple-name index): a bare name binds ONLY to a
+    // default-import / imported / same-package class, verified to exist via `resolve_type`. Runs BEFORE
+    // alias expansion so a user `typealias A = Foo` (Foo a classpath type) finds `Foo` already resolved.
+    // A name imported INCONSISTENTLY across files (different full internals) is left unresolved (ambiguous).
+    {
+        let mut from_import: HashMap<String, Option<String>> = HashMap::new();
+        for file in files {
+            let imap = import_map(file);
+            let wilds = import_wildcards(file, platform_default_imports);
+            // Candidate simple names: every type referenced in the file (so a WILDCARD import can supply
+            // it) plus the explicit-import names themselves.
+            let mut names = std::collections::HashSet::new();
+            collect_file_type_names(file, &mut names);
+            names.extend(imap.keys().cloned());
+            for name in names {
+                if class_names.contains_key(name.as_str()) || user_defined.contains(&name) {
+                    continue;
+                }
+                // An explicit import wins; else a wildcard package that actually provides the type. The
+                // explicit import is resolved through `resolve_nested_internal` so a NESTED-type import
+                // (`import lib.Outer.Ws` → flat `lib/Outer/Ws`) registers the real `lib/Outer$Ws` — needed
+                // for a TYPE-position use (`fun f(x: Ws)`), which the signature phase resolves via this map.
+                let full = imap
+                    .get(&name)
+                    .and_then(|f| resolve_nested_internal(f, &*libraries))
+                    .or_else(|| {
+                        // A wildcard/default package that actually provides the type. A `typealias`
+                        // candidate resolves to its target internal (`kotlin/collections/ArrayList` →
+                        // `java/util/ArrayList`); a real type resolves to itself.
+                        wilds.iter().find_map(|p| {
+                            let cand = wildcard_candidate(p, &name);
+                            let t = libraries.resolve_type(&cand)?;
+                            Some(t.alias_target.unwrap_or(cand))
+                        })
+                    })
+                    .or_else(|| {
+                        // A dotted type name (`lib.Thing`, `Wrap.Box`) — resolve the FQ package path
+                        // or a nested type under a resolvable outer prefix.
+                        resolve_dotted_classpath_type(
+                            &name,
+                            &class_names,
+                            &imap,
+                            &wilds,
+                            &*libraries,
+                        )
+                    });
+                if let Some(full) = full {
+                    match from_import.get(&name) {
+                        None => {
+                            from_import.insert(name, Some(full));
+                        }
+                        Some(Some(prev)) if *prev != full => {
+                            from_import.insert(name, None); // conflicting resolutions → leave unresolved
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        for (simple, full) in from_import {
+            if let Some(full) = full {
+                class_names.insert(simple, full);
+            }
+        }
+    }
+
+    // Expand the input files' USER type aliases into class_names (classpath aliases already resolved
+    // through the import pass, via `resolve_type`'s alias redirect).
+    // `typealias A = B` where B is a user/classpath/import-resolved class → A resolves to the same internal.
     // `typealias A = Primitive` → A maps to `"__ty/<PrimName>"` (decoded in ty_of_ref).
     // `typealias A = java.lang.Foo` → A resolves to the JVM internal name `java/lang/Foo`.
     // Multiple passes handle chains: A = B, B = C.
-    //
-    // Seed from classpath type aliases (read from @kotlin.Metadata in *TypeAliasesKt.class files)
-    // then from any user-defined typealiases in the input files.
-    let mut alias_map: HashMap<String, String> = (*base_aliases).clone();
+    let mut alias_map: HashMap<String, String> = HashMap::new();
     for file in files {
         for (alias, target) in &file.type_aliases {
             alias_map.insert(alias.clone(), target.clone());
@@ -922,71 +1030,6 @@ pub fn collect_signatures_with_cp(
         }
         if !changed {
             break;
-        }
-    }
-
-    // Explicit imports disambiguate a simple name that classpath ambiguity PRUNED from the global seed
-    // (`Encoder` collides with `java.beans.Encoder` once the JDK is on the classpath). For a name ABSENT
-    // from the seed (and not user-defined), resolve it to its imported full internal — verified to exist
-    // on the classpath — so the SIGNATURE phase's `ty_of_ref` matches the Checker's import-aware
-    // resolution. This only ADDS entries for otherwise-unresolved names (never overrides a resolving
-    // one), so it cannot regress an accepted file. A name imported INCONSISTENTLY across files (different
-    // full internals) is left pruned (ambiguous) rather than guessed.
-    {
-        let mut from_import: HashMap<String, Option<String>> = HashMap::new();
-        for file in files {
-            let imap = import_map(file);
-            let wilds = import_wildcards(file, platform_default_imports);
-            // Candidate simple names: every type referenced in the file (so a WILDCARD import can supply
-            // it) plus the explicit-import names themselves.
-            let mut names = std::collections::HashSet::new();
-            collect_file_type_names(file, &mut names);
-            names.extend(imap.keys().cloned());
-            for name in names {
-                if class_names.contains_key(name.as_str()) || user_defined.contains(&name) {
-                    continue;
-                }
-                // An explicit import wins; else a wildcard package that actually provides the type. The
-                // explicit import is resolved through `resolve_nested_internal` so a NESTED-type import
-                // (`import lib.Outer.Ws` → flat `lib/Outer/Ws`) registers the real `lib/Outer$Ws` — needed
-                // for a TYPE-position use (`fun f(x: Ws)`), which the signature phase resolves via this map.
-                let full = imap
-                    .get(&name)
-                    .and_then(|f| resolve_nested_internal(f, &*libraries))
-                    .or_else(|| {
-                        wilds
-                            .iter()
-                            .map(|p| wildcard_candidate(p, &name))
-                            .find(|cand| libraries.resolve_type(cand).is_some())
-                    })
-                    .or_else(|| {
-                        // A dotted type name (`lib.Thing`, `Wrap.Box`) — resolve the FQ package path
-                        // or a nested type under a resolvable outer prefix.
-                        resolve_dotted_classpath_type(
-                            &name,
-                            &class_names,
-                            &imap,
-                            &wilds,
-                            &*libraries,
-                        )
-                    });
-                if let Some(full) = full {
-                    match from_import.get(&name) {
-                        None => {
-                            from_import.insert(name, Some(full));
-                        }
-                        Some(Some(prev)) if *prev != full => {
-                            from_import.insert(name, None); // conflicting resolutions → leave unresolved
-                        }
-                        _ => {}
-                    }
-                }
-            }
-        }
-        for (simple, full) in from_import {
-            if let Some(full) = full {
-                class_names.insert(simple, full);
-            }
         }
     }
 
@@ -5142,6 +5185,15 @@ impl<'a> Checker<'a> {
             self.tparams.erase(&r.name)
         } else if let Some(cs) = self.syms.classes.get(&r.name) {
             Ty::obj(&cs.internal)
+        } else if let Some(internal) = self.syms.class_names.get(&r.name) {
+            // The block-resolved name→internal map (built-in mapped types, classpath classes, and
+            // typealiases resolved to their TARGET) — the same map `resolve_ty` narrows against, so a
+            // smart-cast's checkcast uses the real internal (`IllegalStateException` → `java/lang/…`, not
+            // the classless alias name). `"__ty/<prim>"` is an alias to a primitive, not modeled here.
+            match internal.strip_prefix("__ty/") {
+                Some(_) => Ty::Error,
+                None => Ty::obj(internal),
+            }
         } else if let Some(internal) = self
             .imported_type_internal(&r.name)
             .or_else(|| self.resolve_qualified_nested(&r.name))
@@ -5594,25 +5646,29 @@ impl<'a> Checker<'a> {
     /// Is `sub` a subtype of `sup`? Reflexive, through implemented interfaces, and up the base-class
     /// chain.
     fn obj_is_subtype(&self, sub: &str, sup: &str) -> bool {
-        // Cheap exact-match before folding (covers the common same-name case without a map lookup).
-        if sub == sup {
-            return true;
-        }
-        // The Kotlin collection interfaces all map to one platform interface; compare on the erased
-        // (descriptor-form) names so `MutableList`/`List` (and a `kotlin/collections/List` vs a platform
-        // `java/util/List`) are mutually assignable — the read-only/mutable distinction is enforced only
-        // at the `+=` operator, not in general assignability. Also lets a `kotlin/collections/MutableList`
-        // reach `java/util/Collection` via the hierarchy walk below. `jvm_descriptor_form` is the platform
-        // erasure the emitter uses, so resolution and codegen stay consistent.
-        let sub_norm = self.syms.libraries.jvm_descriptor_form(Ty::obj(sub));
-        let sup_norm = self.syms.libraries.jvm_descriptor_form(Ty::obj(sup));
-        let sub = sub_norm.obj_internal().unwrap_or(sub);
-        let sup = sup_norm.obj_internal().unwrap_or(sup);
-        if sub == sup {
+        // Decided in Kotlin type space (`kotlin/Double : kotlin/Number`), not by JVM erasure. The one
+        // exception: a Kotlin collection interface IS its single JVM interface (`kotlin/collections/List`
+        // and `…/MutableList` ARE `java/util/List`), so collection names compare on that JVM identity and
+        // everything else compares verbatim. Per-node (the `seen` walk stays finite).
+        let collection_id = |name: &str| -> String {
+            if name.starts_with("kotlin/collections/") {
+                self.syms
+                    .libraries
+                    .jvm_descriptor_form(Ty::obj(name))
+                    .obj_internal()
+                    .unwrap_or(name)
+                    .to_string()
+            } else {
+                name.to_string()
+            }
+        };
+        let sup_id = collection_id(sup);
+        let matches_sup = |name: &str| name == sup || collection_id(name) == sup_id;
+        if matches_sup(sub) {
             return true;
         }
         if let Some(c) = self.syms.class_by_internal(sub) {
-            if c.interfaces.iter().any(|i| i == sup) {
+            if c.interfaces.iter().any(|i| matches_sup(i)) {
                 return true;
             }
             if let Some(s) = &c.super_internal {
@@ -5620,13 +5676,12 @@ impl<'a> Checker<'a> {
             }
             return false;
         }
-        // A classpath type (`java/util/ArrayList`): walk its supertype chain (superclass + interfaces)
-        // through the library to see if `sup` (e.g. `java/util/List`) is reachable.
+        // A classpath type: walk its supertype chain (superclass + interfaces) to see if `sup` is reachable.
         let mut seen = std::collections::HashSet::new();
         let mut q = std::collections::VecDeque::new();
         q.push_back(sub.to_string());
         while let Some(cur) = q.pop_front() {
-            if cur == sup {
+            if matches_sup(&cur) {
                 return true;
             }
             if !seen.insert(cur.clone()) {

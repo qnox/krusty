@@ -1722,6 +1722,7 @@ mod tests {
                 companion_object: None,
                 value_companion_fns: Vec::new(),
                 value_underlying: (internal == "kotlin/UInt").then_some(Ty::Int),
+                alias_target: None,
                 type_params: Vec::new(),
                 sealed_subclasses: Vec::new(),
                 enum_entries: Vec::new(),

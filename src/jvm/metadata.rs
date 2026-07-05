@@ -754,7 +754,16 @@ pub fn package_type_aliases(ci: &ClassInfo) -> Vec<(String, String)> {
                     break;
                 };
                 if let Some((name, internal)) = parse_type_alias(body, &records, d2) {
-                    out.push((name, internal));
+                    // Key the alias by its FULL internal name — its declaring package (the facade's) plus
+                    // the alias's simple name — so `kotlin/collections/ArrayList` is distinct from any other
+                    // package's `ArrayList`. `resolve_type` looks it up by that full name.
+                    let pkg = ci.this_class.rsplit_once('/').map_or("", |(p, _)| p);
+                    let full = if pkg.is_empty() {
+                        name
+                    } else {
+                        format!("{pkg}/{name}")
+                    };
+                    out.push((full, internal));
                 }
             }
             (_, w) => {
@@ -1201,6 +1210,10 @@ pub struct BuiltinMember {
 pub struct BuiltinClass {
     pub supertypes: Vec<String>,
     pub members: Vec<BuiltinMember>,
+    /// Whether the builtin is an interface (`List`, `CharSequence`, `Comparable`) vs a class (`Number`,
+    /// `Enum`) — from the `@Metadata` `CLASS_KIND` flag. Needed when reporting a classless builtin whose
+    /// JVM class is absent (a no-JDK compile), so member calls emit the right invoke opcode.
+    pub is_interface: bool,
     /// Nullable returns for declared function members keyed by `(name, value-arity)`, INCLUDING
     /// members `members` drops because their return is a bare type parameter (`Map.get(K): V?`,
     /// `firstOrNull(): T?`). The resolved member for such a call is the erased classpath method (`java/util
@@ -1283,6 +1296,7 @@ pub fn parse_builtins(data: &[u8]) -> std::collections::HashMap<String, BuiltinC
     for cb in &classes {
         let mut cp = Pb { b: cb, i: 0 };
         let mut fq = None;
+        let mut flags = 0u64;
         let mut supids: Vec<u64> = Vec::new();
         let mut types: Vec<&[u8]> = Vec::new();
         let mut funcs: Vec<&[u8]> = Vec::new();
@@ -1290,6 +1304,9 @@ pub fn parse_builtins(data: &[u8]) -> std::collections::HashMap<String, BuiltinC
         while !cp.at_end() {
             let Some(tag) = cp.varint() else { break };
             match (tag >> 3, tag & 7) {
+                // Class.flags = 1 (varint). `CLASS_KIND` occupies bits 6..8 (after HAS_ANNOTATIONS,
+                // VISIBILITY[3], MODALITY[2]); 1 = INTERFACE.
+                (1, 0) => flags = cp.varint().unwrap_or(0),
                 (3, 0) => fq = cp.varint(),
                 (2, 2) => {
                     // supertype_id (packed) — indexes the class's type_table.
@@ -1466,6 +1483,7 @@ pub fn parse_builtins(data: &[u8]) -> std::collections::HashMap<String, BuiltinC
                 supertypes,
                 members,
                 nullable_member_returns,
+                is_interface: (flags >> 6) & 0x7 == 1,
             },
         );
     }

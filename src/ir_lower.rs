@@ -291,7 +291,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
         if let Decl::Class(c) = file.decl(d) {
             let internal = class_internal(file, &c.name);
             // A generic class gets a JVM class `Signature` (kotlinc does), matching its bytecode.
-            if let Some(s) = class_generic_sig(file, c, &*lo.syms.libraries) {
+            if let Some(s) = class_generic_sig(file, c, &*lo.syms.libraries, &lo.syms.class_names) {
                 lo.ir.class_signatures.insert(internal.clone(), s);
             }
             // A field whose declared type is a bare type parameter (`val a: A`) gets a field `Signature`
@@ -19227,6 +19227,7 @@ fn class_generic_sig(
     file: &ast::File,
     c: &ast::ClassDecl,
     libraries: &dyn CompilerPlatform,
+    class_names: &crate::resolve::ClassNames,
 ) -> Option<crate::ir::IrGenericSig> {
     // A CLASS with a PARAMETERIZED supertype (`object O : Operation<Result<Int>>`): carry the superclass
     // + interfaces as `Ty`s (with their type arguments) so the backend can format a class `Signature` a
@@ -19236,11 +19237,11 @@ fn class_generic_sig(
         // Superclass first (kotlin/Any → the backend's Object when no base). Base-class type args aren't
         // preserved yet (the base is a bare name), so a base class is emitted raw.
         supers.push(match &c.base_class {
-            Some(b) => Ty::obj(&resolve_super_internal(b, file, libraries)?),
+            Some(b) => Ty::obj(&resolve_super_internal(b, file, class_names)?),
             None => Ty::obj("kotlin/Any"),
         });
         for st in &c.supertypes {
-            supers.push(supertype_ty(st, file, libraries)?);
+            supers.push(supertype_ty(st, file, class_names)?);
         }
         let type_params = if c.type_params.is_empty() {
             Vec::new()
@@ -19273,19 +19274,19 @@ fn class_generic_sig(
 fn supertype_ty(
     tr: &ast::TypeRef,
     file: &ast::File,
-    libraries: &dyn CompilerPlatform,
+    class_names: &crate::resolve::ClassNames,
 ) -> Option<Ty> {
     if let Some(t) = Ty::from_name(&tr.name) {
         return Some(t); // a builtin scalar / String / Any / Unit
     }
-    let internal = resolve_super_internal(&tr.name, file, libraries)?;
+    let internal = resolve_super_internal(&tr.name, file, class_names)?;
     if tr.targs.is_empty() {
         return Some(Ty::obj(&internal));
     }
     let args: Vec<Ty> = tr
         .targs
         .iter()
-        .map(|a| supertype_ty(a, file, libraries))
+        .map(|a| supertype_ty(a, file, class_names))
         .collect::<Option<_>>()?;
     Some(Ty::obj_args(&internal, &args))
 }
@@ -19295,7 +19296,7 @@ fn supertype_ty(
 fn resolve_super_internal(
     name: &str,
     file: &ast::File,
-    libraries: &dyn CompilerPlatform,
+    class_names: &crate::resolve::ClassNames,
 ) -> Option<String> {
     if file
         .decls
@@ -19304,7 +19305,9 @@ fn resolve_super_internal(
     {
         return Some(class_internal(file, name));
     }
-    libraries.seed_shared().0.get(name).cloned()
+    // The signature phase's import-driven resolution already recorded this name → internal (a classpath
+    // supertype resolves through the file's imports/default packages), so read it back here.
+    class_names.get(name).cloned()
 }
 
 /// For a generic class, list `(field name, type-parameter name)` for each property whose declared type
