@@ -287,6 +287,43 @@ deeper unification — collapse branch 1 and branch 2 into ONE emit path that co
 Safe-to-convert now (same fn both sides): top-level (`resolve_top_level_callable`), and the
 `resolve_instance_member` source sites (done: main branch 2, this-member).
 
+### Progress (source-call re-resolution removed)
+
+Shipped, each `stored.get(&callExprId).or_else(resolve…)`, same resolver both sides:
+- member calls, branch 2 (`resolve_instance_member`) — `resolved_members`
+- implicit-receiver member calls (`this_member_call_ret` / `lower_this_member_call`)
+- top-level calls (`resolve_top_level_callable`) — `resolved_top_level`
+- classpath property reads (`resolve_property_member`) — reuses `resolved_members`
+- companion / `@JvmStatic` calls (`resolve_companion`) — `resolved_companions`
+
+### Remaining, and why each is not a swap
+
+- **branch-1 member sites** (`resolve_instance`: object-member `lower_object_member_call`, main-member
+  branch 1): the lowerer has TWO instance-call emit branches with DIFFERENT codegen:
+  - branch 1 emits then `coerce_generic_read(call, e, mret)` where `mret` is the `ReturnInfo`-applied
+    PHYSICAL return;
+  - branch 2 emits then `coerce_erased(call, ret, physical_ret)` where `ret` is the arg-BOUND logical
+    return.
+  A naive `stored.or_else(resolve_instance)` in branch 1 lets the stored member (recorded via
+  `resolve_instance_member`) fire where `resolve_instance` returns `None` (e.g. `Map.get` on
+  `kotlin/collections/Map`), routing the call through branch-1 codegen with the wrong ret →
+  `VerifyError`. Removing these requires first COLLAPSING branch 1 and branch 2 into one emit path
+  that consumes the stored `ResolvedMember` with its bound ret and a single coercion strategy. That
+  is a codegen change (not a resolver change) and must be staged against the box corpus carefully.
+- **constructors** (`resolve_constructor` + `resolve_synthetic_constructor` +
+  `synthetic_default_ctor`): the checker only asks a boolean (`library_ctor_resolves`) and the lowerer
+  (`lower_external_new`) rebuilds the marker/mask/placeholder args. Recording only the plain member
+  misses the synthetic shapes; needs a richer recorded model before conversion.
+- **synthesized operations** (`resolve_instance`/`resolve_instance_member` for for-loop
+  `iterator`/`hasNext`/`next`, destructuring `componentN`, `[]` get/set, `compareTo`, `hashCode`):
+  these have NO source-call `ExprId` — the checker never saw them as `Expr::Call`. They can only be
+  removed by recording keyed by the OWNING construct (the `for`/destructure/index/compare expr), a
+  larger change. Until then they legitimately re-resolve in the lowerer.
+
+So "ir_lower with zero `call_resolver::` references" is not the reachable goal — the synthesized
+sites must resolve somewhere. The reachable goal is "no SOURCE call is resolved twice", which the
+shipped slices achieve incrementally; branch-1 needs the emit-path unification first.
+
 ### Migration safety
 Keep a temporary invariant check: during steps 3–4, have the lowerer resolve AND compare against the
 stored `ResolvedCall`; any mismatch is a pre-existing checker/lowerer divergence surfaced — fix it,
