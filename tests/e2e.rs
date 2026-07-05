@@ -72,6 +72,8 @@ mod build840_jj1_param_soft_keyword_e2e;
 mod build840_kk1_inline_hof_enclosing_member_e2e;
 #[path = "build840_mm1_safe_call_lambda_ext_e2e.rs"]
 mod build840_mm1_safe_call_lambda_ext_e2e;
+#[path = "build840_nn1_suspend_inline_withlock_e2e.rs"]
+mod build840_nn1_suspend_inline_withlock_e2e;
 #[path = "builtin_intrinsics_coverage_e2e.rs"]
 mod builtin_intrinsics_coverage_e2e;
 #[path = "bytecode_parity_e2e.rs"]

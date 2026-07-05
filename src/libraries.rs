@@ -546,17 +546,17 @@ impl CallSig {
         sig
     }
 
-    pub fn metadata_extension(physical_param_count: usize, names: Vec<String>) -> Self {
+    pub fn metadata_extension(
+        physical_param_count: usize,
+        names: Vec<String>,
+        defaults: Vec<bool>,
+    ) -> Self {
+        // The physical param count includes the extension receiver; the source VALUE params (with their
+        // default flags — an `inline fun Mutex.withLock(owner: Any? = null, action)` needs them so an
+        // omitted-default trailing-lambda call resolves) follow it.
         physical_param_count
             .checked_sub(1)
-            .map(|param_count| {
-                let names = metadata_names(names, param_count);
-                CallSig {
-                    required: names.len(),
-                    param_names: names,
-                    ..Default::default()
-                }
-            })
+            .map(|param_count| CallSig::metadata_base(param_count, names, defaults))
             .unwrap_or_default()
     }
 
