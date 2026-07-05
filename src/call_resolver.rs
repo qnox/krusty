@@ -156,13 +156,14 @@ fn bind_gsig_return<'a>(
 }
 
 fn bind_ext_ret(gsig: &GenericSig, receiver: Ty, args: &[Ty], targs: &[Ty]) -> Ty {
-    bind_gsig_return(
-        gsig,
-        targs,
-        gsig.params
-            .iter()
-            .zip(std::iter::once(receiver).chain(args.iter().copied())),
-    )
+    let mut binds = seeded_gsig_binds(gsig, targs);
+    if let Some(recv_sig) = &gsig.receiver {
+        unify_gsig(recv_sig, receiver, &mut binds);
+    }
+    for (ps, a) in gsig.params.iter().zip(args.iter().copied()) {
+        unify_gsig(ps, a, &mut binds);
+    }
+    gsig_to_ty(&gsig.ret, &binds)
 }
 
 /// If `sig` is a function type, the substituted types of its lambda parameters. Empty for anything else.
@@ -178,9 +179,11 @@ pub(crate) fn function_input_types(sig: &GSig, binds: &GSigBinds) -> Vec<Ty> {
 /// `Pair` accepts an argument `Pair<Int, String>` — generic parameters erase to the raw type).
 pub(crate) fn arg_fits(p: &Ty, a: &Ty) -> bool {
     // A lambda value fits a function-typed parameter when arities agree; its body result is handled by
-    // the selected call's generic binding, not by erased descriptor matching.
+    // the selected call's generic binding, not by erased descriptor matching. An erased `Any` parameter —
+    // whether spelled `kotlin/Any` or its JVM form `java/lang/Object` (a generic vararg element erases to
+    // it) — accepts any reference argument.
     p == a
-        || *p == Ty::obj("kotlin/Any")
+        || matches!(p, Ty::Obj(n, _) if *n == "kotlin/Any" || *n == "java/lang/Object")
         || matches!((p.fun_arity(), a.fun_arity()), (Some(pn), Some(an)) if pn == an)
         || matches!((p, a), (Ty::Obj(pi, _), Ty::Obj(ai, _)) if pi == ai)
 }
@@ -354,7 +357,14 @@ impl<'a> CallResolver<'a> {
             .as_ref()
             .map(|gsig| {
                 let mut binds = seeded_gsig_binds(gsig, type_args);
-                let vararg = params.len() != args.len();
+                // A vararg call binds `T` from the ELEMENTS, not from the array param. Detect it by the
+                // trailing array parameter receiving element-wise args — NOT merely by arity: a SINGLE
+                // element (`listOf(pair)`) has `params.len() == args.len()`, yet still spreads into the
+                // vararg, so a plain `zip` would unify `Array<T>` against the non-array `Pair` and leave
+                // `T` unbound (→ `List<Any>`). A spread (`listOf(*arr)`) passes the array itself — same
+                // arity AND the last arg IS the array param — so it is not a vararg here.
+                let vararg = params.last().is_some_and(|p| p.array_elem().is_some())
+                    && (params.len() != args.len() || args.last() != params.last());
                 if vararg && !gsig.params.is_empty() {
                     let fixed = gsig.params.len() - 1;
                     for (i, ps) in gsig.params.iter().take(fixed).enumerate() {
@@ -504,10 +514,18 @@ impl<'a> CallResolver<'a> {
             .as_ref()
             .map(|gsig| {
                 let mut binds = seeded_gsig_binds(gsig, type_args);
-                if let Some(recv_sig) = gsig.params.first() {
+                if let Some(recv_sig) = &gsig.receiver {
                     unify_gsig(recv_sig, receiver, &mut binds);
                 }
-                let mut out = gsig_tys(&gsig.params, &binds);
+                // Emit-shaped list `[receiver, value-params…]` to match an extension's `callable.params`
+                // (receiver as the leading JVM arg); the caller compares `out[1..]` against the call args.
+                let recv_ty = gsig
+                    .receiver
+                    .as_ref()
+                    .map(|r| gsig_to_ty(r, &binds))
+                    .unwrap_or(receiver);
+                let mut out = vec![recv_ty];
+                out.extend(gsig_tys(&gsig.params, &binds));
                 // A VALUE-CLASS parameter is spelled as its ERASED underlying in the JVM `Signature`
                 // (`Id` → `kotlin/String`), but the callable's LOGICAL parameter carries the value-class
                 // type — prefer it so a value-class ARGUMENT (`getFor(id: Id)`) matches rather than being
@@ -879,11 +897,11 @@ impl<'a> CallResolver<'a> {
             .find_map(|o| {
                 let gsig = o.generic_sig.as_ref()?;
                 let mut binds = std::collections::HashMap::new();
-                if let Some(recv_sig) = gsig.params.first() {
+                if let Some(recv_sig) = &gsig.receiver {
                     unify_gsig(recv_sig, receiver, &mut binds);
                 }
                 gsig.params
-                    .get(1)
+                    .first()
                     .map(|selector| function_input_types(selector, &binds))
                     .filter(|params| !params.is_empty())
             })
@@ -1006,18 +1024,15 @@ impl<'a> CallResolver<'a> {
                 let Some(gsig) = o.generic_sig.as_ref() else {
                     continue;
                 };
-                if gsig.params.is_empty() {
-                    continue;
-                }
-                let Some(param_indices) =
-                    trailing_default_arg_indices(gsig.params.len() - 1, arg_tys)
+                let Some(param_indices) = trailing_default_arg_indices(gsig.params.len(), arg_tys)
                 else {
                     continue;
                 };
-                let mapped: Vec<&GSig> =
-                    param_indices.iter().map(|&i| &gsig.params[i + 1]).collect();
+                let mapped: Vec<&GSig> = param_indices.iter().map(|&i| &gsig.params[i]).collect();
                 let mut binds = std::collections::HashMap::new();
-                unify_gsig(&gsig.params[0], receiver, &mut binds);
+                if let Some(recv_sig) = &gsig.receiver {
+                    unify_gsig(recv_sig, receiver, &mut binds);
+                }
                 for (ps, at) in mapped.iter().zip(arg_tys) {
                     if let Some(t) = at {
                         unify_gsig(ps, *t, &mut binds);

@@ -26,10 +26,17 @@ pub enum GSig {
     Prim(Ty),
 }
 
-/// A parsed method generic signature: formal names, parameter signature nodes, and return signature.
+/// A parsed generic signature in Kotlin's logical shape: formal type-parameter names, an OPTIONAL
+/// receiver, the value parameters, and the return. The receiver is an ATTRIBUTE — never a value
+/// parameter — because at resolve/check level a member `A.foo(b): C` and an extension `fun A.foo(b): C`
+/// are the same shape (receiver `A`, one param `b`, return `C`); that an extension emits the receiver as
+/// a leading JVM argument, and a `suspend` fun emits a trailing `Continuation`, are EMIT concerns the
+/// backend adds — they are absent here. `params` therefore holds only the source value parameters.
 #[derive(Clone, Debug)]
 pub struct GenericSig {
     pub formals: Vec<String>,
+    /// The dispatch/extension receiver's signature (member self-type or extension receiver), if any.
+    pub receiver: Option<GSig>,
     pub params: Vec<GSig>,
     pub ret: GSig,
 }

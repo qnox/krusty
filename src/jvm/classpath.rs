@@ -54,6 +54,22 @@ fn meta_param_ty(name: Option<&str>) -> Ty {
             return Ty::fun(vec![Ty::obj("kotlin/Any"); n], Ty::obj("kotlin/Any"));
         }
     }
+    // Core carries `Array<T>` (`Ty::Array`), never the JVM-metadata array spellings (`kotlin/IntArray`,
+    // `kotlin/Array`). A primitive-array class fixes its element (`kotlin/IntArray` → `Array<Int>`); a
+    // generic `Array<T>` erases its element here (the class name alone doesn't carry it — arrays align
+    // element-agnostically). This keeps the resolver/checker platform-neutral.
+    if n == "kotlin/Array" {
+        return Ty::array(Ty::obj("kotlin/Any"));
+    }
+    if let Some(elem) = n
+        .strip_prefix("kotlin/")
+        .and_then(|s| s.strip_suffix("Array"))
+    {
+        let et = kotlin_name_to_ty(&format!("kotlin/{elem}"));
+        if !matches!(et, Ty::Obj(..)) {
+            return Ty::array(et);
+        }
+    }
     kotlin_name_to_ty(n)
 }
 
@@ -63,39 +79,29 @@ fn meta_param_ty(name: Option<&str>) -> Ty {
 /// names must match (so a `Function0` source param anchors to a `Function0` descriptor param and won't
 /// be confused with an `Any`/`Object` one).
 fn ty_compat(meta: &Ty, desc: &Ty) -> bool {
-    if meta == desc {
+    // A metadata type keeps its Kotlin name (`kotlin/collections/Iterable`, `kotlin/IntArray`, a type
+    // parameter's bound); the descriptor carries the mapped JVM type (`java/lang/Iterable`, `[I`, the
+    // erased bound). They denote the SAME JVM parameter when their erased descriptors are equal — computed
+    // through the same mapped-types machinery the emitter uses, so no per-type casing is needed here.
+    if crate::jvm::names::type_descriptor(*meta) == crate::jvm::names::type_descriptor(*desc) {
         return true;
     }
-    if let (Some(ma), Some(da)) = (meta.fun_arity(), desc.fun_arity()) {
-        return ma == da;
-    }
+    // A type-parameter / `Any` metadata type erases to `Object`, which accepts any reference (a generic
+    // param spelled `T` records as `kotlin/Any`, so this is how it matches a concrete descriptor position).
+    // Conversely, when the DESCRIPTOR is `Object` (a type variable, or a value class whose underlying is
+    // `Any`) a concrete metadata object CLASS matches it — but NOT an array or a function type (`Ty::Array`
+    // / `Ty::Fun`), which never erase to a plain `Object` descriptor. Both are LOOSE matches: the caller
+    // prefers an overload whose params match EXACTLY (equal descriptors), so `plusAssign(element: T)` /
+    // `plusAssign(elements: Iterable)` bind their own descriptors rather than one swallowing both.
     let erased =
         |t: &Ty| matches!(t, Ty::Obj(n, _) if *n == "kotlin/Any" || *n == "java/lang/Object");
-    if (erased(meta) && desc.is_reference()) || (erased(desc) && meta.is_reference()) {
+    if (erased(meta) && desc.is_reference()) || (erased(desc) && matches!(meta, Ty::Obj(_, _))) {
         return true;
     }
-    // A `@Metadata` `vararg` param is typed as a Kotlin array class (`kotlin/Array` for an object array,
-    // `kotlin/IntArray` … for a primitive one); the descriptor carries the JVM array (`[Ljava/lang/Object;`,
-    // `[I`). Align them so a vararg overload matches its descriptor (otherwise an empty-vparam sibling
-    // overload would prefix-match and wrongly truncate the array param).
-    matches!(meta, Ty::Obj(n, _) if is_kotlin_array_class(n)) && matches!(desc, Ty::Array(_))
-}
-
-/// Whether `name` is one of the nine Kotlin array builtin classes (`kotlin/Array` and the eight
-/// primitive arrays). These are the `@Metadata` types of a `vararg` parameter.
-fn is_kotlin_array_class(name: &str) -> bool {
-    matches!(
-        name,
-        "kotlin/Array"
-            | "kotlin/IntArray"
-            | "kotlin/LongArray"
-            | "kotlin/ShortArray"
-            | "kotlin/ByteArray"
-            | "kotlin/CharArray"
-            | "kotlin/BooleanArray"
-            | "kotlin/FloatArray"
-            | "kotlin/DoubleArray"
-    )
+    // A `vararg`/array metadata param erases its element (`Array<T>` → `Array<Any>`), while the descriptor
+    // has the concrete array (`[Lkotlin/Pair;`) — match array against array element-agnostically so a
+    // vararg overload aligns rather than losing to an empty sibling.
+    matches!(meta, Ty::Array(_)) && matches!(desc, Ty::Array(_))
 }
 
 enum Entry {
@@ -266,26 +272,79 @@ struct ClassMeta {
     fns: std::rc::Rc<[super::metadata::MetaFn]>,
 }
 
-fn aligned_meta_callable<'a>(
-    meta: &'a ClassMeta,
+/// Whether metadata callable `c` corresponds to a JVM method with these descriptor parameter types. An
+/// EXTENSION's receiver — a separate attribute, emitted as the leading JVM parameter — must match, then
+/// the value parameters align in order. Returns `(kept-param end, exact-match count)` — `end` is the count
+/// of SOURCE parameters (where the synthetic tail — a `suspend` Continuation, a `$default` mask — begins),
+/// and `exact` counts the value params matching by EQUAL erased descriptor (not through the loose
+/// type-variable rule), so the caller prefers the most-specific overload (`plusAssign(element: T)` binds
+/// the `Object` descriptor, `plusAssign(elements: Iterable)` the `Iterable` one).
+fn meta_callable_aligns(c: &MetaCallable, desc_params: &[Ty]) -> Option<(usize, usize)> {
+    use crate::jvm::names::type_descriptor;
+    let off = c.is_extension as usize;
+    let end = off + c.value_params.len();
+    if end > desc_params.len() {
+        return None;
+    }
+    let receiver_ok = !c.is_extension
+        || match &c.receiver_class {
+            Some(rc) => ty_compat(&kotlin_name_to_ty(rc), &desc_params[0]),
+            None => desc_params[0].is_reference(),
+        };
+    if !receiver_ok
+        || !c
+            .value_params
+            .iter()
+            .zip(&desc_params[off..end])
+            .all(|(m, d)| ty_compat(&m.ty, d))
+    {
+        return None;
+    }
+    let exact = c
+        .value_params
+        .iter()
+        .zip(&desc_params[off..end])
+        .filter(|(m, d)| type_descriptor(m.ty) == type_descriptor(**d))
+        .count();
+    Some((end, exact))
+}
+
+/// Pick the metadata function whose signature corresponds to the JVM method with `desc_params`, returning
+/// `(kept-param end, index into `meta.callables`/`meta.fns`)`. Disambiguates OVERLOADS sharing a JVM name
+/// (`any()` vs `any(predicate)`, `IntArray.any` vs `CharArray.any`) by receiver + value-parameter match,
+/// preferring the longest alignment. Both `meta.callables` and `meta.fns` index by the same function list.
+fn aligned_meta_index(
+    meta: &ClassMeta,
     fn_name: &str,
     desc_params: &[Ty],
-) -> Option<(usize, &'a MetaCallable)> {
+    desc_ret: &Ty,
+) -> Option<(usize, usize)> {
     meta.by_jvm_name
         .get(fn_name)?
         .iter()
         .filter_map(|&i| {
             let c = &meta.callables[i];
-            let off = c.is_extension as usize;
-            let end = off + c.value_params.len();
-            (end <= desc_params.len()
-                && c.value_params
-                    .iter()
-                    .zip(&desc_params[off..end])
-                    .all(|(m, d)| ty_compat(&m.ty, d)))
-            .then_some((end, c))
+            let (end, exact) = meta_callable_aligns(c, desc_params)?;
+            // Return match disambiguates overloads that differ ONLY by return (`sum` → `sumOfInt`/
+            // `sumOfLong`, same erased params). Soft tiebreaker: a concrete metadata return equal to the
+            // descriptor's return wins, but a generic/type-parameter return (`class` None) or one that
+            // erases differently (a value class vs its underlying) is left to the params match, so a sole
+            // candidate still wins.
+            let ret_match = c.ret.class.is_some_and(|rc| ty_compat(&rc, desc_ret));
+            Some((end, exact, ret_match, i))
         })
-        .max_by_key(|(end, _)| *end)
+        .max_by_key(|(end, exact, ret_match, _)| (*end, *exact, *ret_match))
+        .map(|(end, _, _, i)| (end, i))
+}
+
+fn aligned_meta_callable<'a>(
+    meta: &'a ClassMeta,
+    fn_name: &str,
+    desc_params: &[Ty],
+    desc_ret: &Ty,
+) -> Option<(usize, &'a MetaCallable)> {
+    aligned_meta_index(meta, fn_name, desc_params, desc_ret)
+        .map(|(end, i)| (end, &meta.callables[i]))
 }
 
 pub(super) fn metadata_return_info(class: Option<&str>, nullable: bool) -> ReturnInfo {
@@ -480,6 +539,29 @@ impl Classpath {
         self.class_meta(internal).fns.clone()
     }
 
+    /// Whether `@Metadata` describes a function named `jvm_name` on `internal` (facade parts merged). When
+    /// it does, the metadata signature is authoritative — callers must not fall back to the JVM `Signature`.
+    pub fn has_meta_function(&self, internal: &str, jvm_name: &str) -> bool {
+        self.class_meta(internal).by_jvm_name.contains_key(jvm_name)
+    }
+
+    /// The metadata-primary [`GenericSig`] for the `internal.jvm_name` overload corresponding to the JVM
+    /// method with `desc_params`. kotlinc omits the `method_signature` extension when it equals the
+    /// computed default, so the correct overload is picked by aligning the metadata signature to the
+    /// descriptor (receiver + value parameters) — the SAME selection the call-fact lookup uses, so both
+    /// agree. `None` when `@Metadata` has no matching function (a Java method / synthetic).
+    pub fn aligned_generic_sig(
+        &self,
+        internal: &str,
+        jvm_name: &str,
+        desc_params: &[Ty],
+        desc_ret: &Ty,
+    ) -> Option<crate::libraries::GenericSig> {
+        let meta = self.class_meta(internal);
+        let (_, idx) = aligned_meta_index(&meta, jvm_name, desc_params, desc_ret)?;
+        meta.fns.get(idx).and_then(|f| f.generic_sig.clone())
+    }
+
     /// The SOURCE value-parameter types of `internal.fn_name` from `@Metadata`, as `Ty`s — the signature
     /// a CALL is matched against. `@Metadata` records only the source `value_parameter`s, so this DROPS
     /// the synthetic params the JVM descriptor appends (a `suspend` Continuation, a `@Composable`
@@ -497,10 +579,11 @@ impl Classpath {
         internal: &str,
         fn_name: &str,
         desc_params: &[Ty],
+        desc_ret: &Ty,
         extension: bool,
     ) -> MetadataCallFacts {
         let meta = self.class_meta(internal);
-        let Some((end, c)) = aligned_meta_callable(&meta, fn_name, desc_params) else {
+        let Some((end, c)) = aligned_meta_callable(&meta, fn_name, desc_params, desc_ret) else {
             return MetadataCallFacts::fallback(if extension {
                 CallSig::default()
             } else {
