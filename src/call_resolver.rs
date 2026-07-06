@@ -280,11 +280,40 @@ fn callable_with_return(c: &LibraryCallable, ret: Ty, default_call: bool) -> Lib
 /// a specific call site. Holds the oracle by reference — cheap to construct per query.
 pub struct CallResolver<'a> {
     lib: &'a dyn CompilerPlatform,
+    /// The packages in scope for TOP-LEVEL function resolution (same-package, star/explicit imports,
+    /// defaults). `None` disables the filter (a context with no import scope — signature inference).
+    /// When `Some`, a top-level function resolves only if its facade's package is in scope, matching
+    /// kotlinc: an unqualified top-level call binds ONLY to an imported/same-package/default function,
+    /// not to any classpath function of that name.
+    fn_scope: Option<&'a [String]>,
 }
 
 impl<'a> CallResolver<'a> {
     pub fn new(lib: &'a dyn CompilerPlatform) -> Self {
-        CallResolver { lib }
+        CallResolver {
+            lib,
+            fn_scope: None,
+        }
+    }
+
+    /// A resolver whose top-level function resolution is restricted to `fn_scope`'s packages.
+    pub fn new_scoped(lib: &'a dyn CompilerPlatform, fn_scope: &'a [String]) -> Self {
+        CallResolver {
+            lib,
+            fn_scope: Some(fn_scope),
+        }
+    }
+
+    /// Whether a facade `owner`'s package is in scope for top-level resolution (always true when no
+    /// scope is set).
+    fn owner_in_scope(&self, owner: &str) -> bool {
+        match self.fn_scope {
+            None => true,
+            Some(scope) => {
+                let pkg = owner.rsplit_once('/').map_or("", |(p, _)| p);
+                scope.iter().any(|p| p == pkg)
+            }
+        }
     }
 
     /// Whether `name` has an `inline` extension overload on `receiver`.
@@ -335,7 +364,18 @@ impl<'a> CallResolver<'a> {
         args: &[Ty],
         type_args: &[Ty],
     ) -> Option<LibraryCallable> {
-        let fs = self.lib.functions(name, None);
+        // Restrict to functions whose facade is in the import scope — an unqualified top-level call binds
+        // ONLY to an imported / same-package / default-import function (kotlinc), not to any classpath
+        // function of that name. `None` scope (no import context) keeps every overload.
+        let fs = FunctionSet {
+            overloads: self
+                .lib
+                .functions(name, None)
+                .overloads
+                .into_iter()
+                .filter(|o| self.owner_in_scope(&o.callable.owner))
+                .collect(),
+        };
         let parsed: Vec<(&FunctionInfo, Vec<Ty>, Ty)> = fs
             .overloads
             .iter()
@@ -470,7 +510,10 @@ impl<'a> CallResolver<'a> {
             args,
             type_args,
             FnKind::Extension,
-            false,
+            ExtCtx {
+                allow_must_inline: false,
+                fn_scope: self.fn_scope,
+            },
         )?;
         self.build_extension_callable(name, receiver, args, type_args, &o)
     }
@@ -483,7 +526,18 @@ impl<'a> CallResolver<'a> {
         receiver: Ty,
         args: &[Ty],
     ) -> Option<LibraryCallable> {
-        let o = select_overload(self.lib, receiver, name, args, &[], FnKind::Extension, true)?;
+        let o = select_overload(
+            self.lib,
+            receiver,
+            name,
+            args,
+            &[],
+            FnKind::Extension,
+            ExtCtx {
+                allow_must_inline: true,
+                fn_scope: self.fn_scope,
+            },
+        )?;
         self.build_extension_callable(name, receiver, args, &[], &o)
     }
 
@@ -1613,7 +1667,27 @@ fn select_instance_info(
     name: &str,
     args: &[Ty],
 ) -> Option<FunctionInfo> {
-    select_overload(lib, recv, name, args, &[], FnKind::Member, false)
+    select_overload(
+        lib,
+        recv,
+        name,
+        args,
+        &[],
+        FnKind::Member,
+        ExtCtx {
+            allow_must_inline: false,
+            fn_scope: None,
+        },
+    )
+}
+
+/// Extension-selection context for [`select_overload`]: whether non-public `@InlineOnly` candidates are
+/// admitted (the bytecode inliner), and the packages in scope for an extension (`None` = unscoped). Both
+/// only affect EXTENSION selection — a member is always visible on its type.
+#[derive(Clone, Copy)]
+struct ExtCtx<'a> {
+    allow_must_inline: bool,
+    fn_scope: Option<&'a [String]>,
 }
 
 /// The single call-overload selector for a receiver call `recv.name(args)`. It is parameterized by
@@ -1630,7 +1704,7 @@ fn select_overload(
     args: &[Ty],
     type_args: &[Ty],
     kind: FnKind,
-    allow_must_inline: bool,
+    ext: ExtCtx,
 ) -> Option<FunctionInfo> {
     // A MEMBER call needs a public class receiver; an EXTENSION resolves on any receiver (primitives,
     // type variables, nullable types) that may have no `resolve_type` entry, so gate only members.
@@ -1640,6 +1714,17 @@ fn select_overload(
             return None;
         }
     }
+    let allow_must_inline = ext.allow_must_inline;
+    // An EXTENSION is only in scope if its facade's package is imported (same-package / star / explicit /
+    // default) — kotlinc; a member is always visible on its type, so the scope never gates it. `None`
+    // scope keeps every candidate (a context with no import scope).
+    let ext_in_scope = |owner: &str| match ext.fn_scope {
+        None => true,
+        Some(scope) => {
+            let pkg = owner.rsplit_once('/').map_or("", |(p, _)| p);
+            scope.iter().any(|p| p == pkg)
+        }
+    };
     let fs = lib.functions(name, Some(recv));
     // Candidates as `(overload, logical value params)`, grouped by receiver rank. An extension admits only
     // public overloads unless the caller is the bytecode inliner (which splices non-public `@InlineOnly`).
@@ -1649,7 +1734,8 @@ fn select_overload(
         o.kind == kind
             && (kind != FnKind::Extension
                 || (o.receiver_rank != u32::MAX
-                    && (o.public() || (allow_must_inline && o.flags.inline.must_inline()))))
+                    && (o.public() || (allow_must_inline && o.flags.inline.must_inline()))
+                    && ext_in_scope(&o.callable.owner)))
     }) {
         let lp = logical_value_params(lib, o, recv, type_args);
         by_rank.entry(o.receiver_rank).or_default().push((o, lp));
