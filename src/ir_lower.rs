@@ -8384,7 +8384,17 @@ impl<'a> Lower<'a> {
         }
         // Only a user-class method is modeled (the invoke does `invokevirtual`/`invokeinterface
         // internal.name`); a classpath/library receiver fails here → bail (skip), never miscompile.
-        self.resolve_method(&internal, name)?;
+        let (_, _, target_fid, _) = self.resolve_method(&internal, name)?;
+        // A PRIVATE target can't be invoked from the separate reference class (`IllegalAccessError`);
+        // retarget the reference's invoke at a synthetic `access$<name>` accessor on the owner (a public
+        // instance method that forwards to the private one). The reflection NAME (`fn_name`) stays the
+        // real method; only the physical `call_name` changes. Bail (skip) if the accessor can't be made,
+        // rather than emit an illegal private access.
+        let call_name = if self.ir.private_methods.contains(&target_fid) {
+            self.ensure_private_accessor(&internal, name)?
+        } else {
+            name.to_string()
+        };
         // Dispatch on the receiver's STATIC type: an interface receiver needs `invokeinterface`.
         let call_interface = self
             .classes
@@ -8406,7 +8416,7 @@ impl<'a> Lower<'a> {
             0, // member
             dispatch,
             internal,
-            name.to_string(),
+            call_name,
             call_interface,
             param_tys,
             ty_to_ir(ret),
@@ -8421,13 +8431,21 @@ impl<'a> Lower<'a> {
     /// isn't `Ty::Fun` / there's no member method), so they fall through.
     fn lower_implicit_this_method_ref(&mut self, e: AstExprId, name: &str) -> Option<u32> {
         let internal = self.cur_class.clone()?;
-        self.resolve_method(&internal, name)?;
+        let (_, _, target_fid, _) = self.resolve_method(&internal, name)?;
         let Ty::Fun(sig) = self.info.ty(e) else {
             return None;
         };
         if sig.ret == Ty::Nothing {
             return None;
         }
+        // A private target is reached through a synthetic accessor (the reference is a separate class).
+        // If the accessor can't be synthesized, BAIL (skip the file) rather than fall back to the private
+        // method, which would emit an illegal access.
+        let call_name = if self.ir.private_methods.contains(&target_fid) {
+            self.ensure_private_accessor(&internal, name)?
+        } else {
+            name.to_string()
+        };
         let call_interface = self
             .classes
             .get(&internal)
@@ -8443,7 +8461,7 @@ impl<'a> Lower<'a> {
             0,
             crate::ir::FrDispatch::VirtualBound,
             internal,
-            name.to_string(),
+            call_name,
             call_interface,
             param_tys,
             ty_to_ir(sig.ret),
@@ -8520,7 +8538,17 @@ impl<'a> Lower<'a> {
         // Bound member reference on a user-class receiver: synthesize `(recv, args…) -> recv.name(args…)`
         // and capture the receiver. (Library-type members aren't IR classes → `resolve_method` fails.)
         let internal = rty.obj_internal()?.to_string();
-        let (class_id, index, _fid, _ret) = self.resolve_method(&internal, name)?;
+        let (class_id, index, target_fid, _ret) = self.resolve_method(&internal, name)?;
+        // The synthesized impl lives in a SEPARATE reference class; a private target would be an illegal
+        // `invokespecial` from there. Target the public `access$name` accessor instead (an ordinary
+        // `invokevirtual`), forwarding to the private member from inside the owner.
+        let (class_id, index) = if self.ir.private_methods.contains(&target_fid) {
+            let acc = self.ensure_private_accessor(&internal, name)?;
+            let (cid, idx, _, _) = self.resolve_method(&internal, &acc)?;
+            (cid, idx)
+        } else {
+            (class_id, index)
+        };
         let cap = self.expr(recv)?;
         let recv_v = self.ir.add_expr(IrExpr::GetValue(0));
         let arg_vs: Vec<Option<u32>> = (0..params.len() as u32)
@@ -8562,6 +8590,61 @@ impl<'a> Lower<'a> {
             sam: None,
             inline_body: None,
         }))
+    }
+
+    /// Ensure a synthetic accessor for the PRIVATE member method `method_name` on `internal`, so a
+    /// SEPARATE class (a callable-reference impl) can reach it without an illegal private access. kotlinc
+    /// emits a `static synthetic access$m`; krusty emits an equivalent public INSTANCE method `access$<m>`
+    /// whose body is `this.<m>(args)` — an in-class call, so its `invokespecial` on the private method is
+    /// legal. Memoized by name. Returns the accessor's method name (to retarget the reference's invoke),
+    /// or `None` if the target method can't be resolved.
+    fn ensure_private_accessor(&mut self, internal: &str, method_name: &str) -> Option<String> {
+        let accessor = format!("access${method_name}");
+        if self
+            .classes
+            .get(internal)
+            .is_some_and(|ci| ci.methods.contains_key(&accessor))
+        {
+            return Some(accessor);
+        }
+        let (class_id, index, fid, ret) = self.resolve_method(internal, method_name)?;
+        let params = self.ir.functions[fid as usize].params.clone();
+        let ret_ir = self.ir.functions[fid as usize].ret;
+        let recv = self.ir.add_expr(IrExpr::GetValue(0));
+        let args: Vec<Option<u32>> = (0..params.len())
+            .map(|i| Some(self.ir.add_expr(IrExpr::GetValue((i + 1) as u32))))
+            .collect();
+        let call = self.ir.add_expr(IrExpr::MethodCall {
+            class: class_id,
+            index,
+            receiver: recv,
+            args,
+        });
+        // Wrap in an explicit return so the method's control flow terminates: `return this.<m>(args)`
+        // for a value-returning target, or the call then a bare `return` for a `Unit`/void one.
+        let stmts = if ret == Ty::Unit {
+            let r = self.ir.add_expr(IrExpr::Return(None));
+            vec![call, r]
+        } else {
+            vec![self.ir.add_expr(IrExpr::Return(Some(call)))]
+        };
+        let body = self.ir.add_expr(IrExpr::Block { stmts, value: None });
+        let acc_fid = self.ir.add_fun(IrFunction {
+            name: accessor.clone(),
+            params,
+            ret: ret_ir,
+            body: Some(body),
+            is_static: false,
+            dispatch_receiver: Some(internal.to_string()),
+            param_checks: Vec::new(),
+        });
+        let cid = self.classes.get(internal)?.id;
+        let idx = self.ir.classes[cid as usize].methods.len() as u32;
+        self.ir.classes[cid as usize].methods.push(acc_fid);
+        if let Some(ci) = self.classes.get_mut(internal) {
+            ci.methods.insert(accessor.clone(), (idx, acc_fid, ret));
+        }
+        Some(accessor)
     }
 
     /// Build a synthesized function-reference subclass of `FunctionReferenceImpl` (real Kotlin reference
@@ -16839,6 +16922,19 @@ impl<'a> Lower<'a> {
                         if args.len() != params.len() {
                             return None;
                         }
+                        // A PRIVATE enclosing method can't be invoked (`invokespecial`) from the inner
+                        // class — route through the owner's synthetic `access$foo` accessor (a public
+                        // `invokevirtual`), exactly as a callable reference to it does.
+                        let (class, index) = if self.ir.private_methods.contains(&mfid) {
+                            let owner = self.ir.classes[class as usize].fq_name.clone();
+                            // Bail (skip) if the accessor can't be made — never fall back to the private
+                            // method, which would emit an illegal `invokespecial` from the inner class.
+                            let acc = self.ensure_private_accessor(&owner, &fname)?;
+                            let (c, i, _, _) = self.resolve_method(&owner, &acc)?;
+                            (c, i)
+                        } else {
+                            (class, index)
+                        };
                         let this = self.ir.add_expr(IrExpr::GetValue(0));
                         let this0 = self.ir.add_expr(IrExpr::GetField {
                             receiver: this,

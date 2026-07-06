@@ -1544,13 +1544,17 @@ impl<'a> Parser<'a> {
                     Vec::new()
                 };
                 match self.kind() {
-                    TokenKind::KwFun => methods.push(self.parse_fun(
-                        emods.iter().any(|m| m == "inline"),
-                        emods.iter().any(|m| m == "final"),
-                        emods.iter().any(|m| m == "suspend"),
-                        emods.iter().any(|m| m == "tailrec"),
-                        emods.iter().any(|m| m == "abstract"),
-                    )),
+                    TokenKind::KwFun => {
+                        let mut f = self.parse_fun(
+                            emods.iter().any(|m| m == "inline"),
+                            emods.iter().any(|m| m == "final"),
+                            emods.iter().any(|m| m == "suspend"),
+                            emods.iter().any(|m| m == "tailrec"),
+                            emods.iter().any(|m| m == "abstract"),
+                        );
+                        f.visibility = visibility_of(&emods);
+                        methods.push(f);
+                    }
                     // Nested type declarations and secondary constructors in an enum body: parse
                     // them through the real grammar (no token-skipping) and discard — krusty doesn't
                     // emit them, so a reference fails to resolve and the file is cleanly skipped.
@@ -2062,13 +2066,17 @@ impl<'a> Parser<'a> {
                 let is_abstract = mods.iter().any(|m| m == "abstract");
                 match self.kind() {
                     TokenKind::RBrace | TokenKind::Eof => break,
-                    TokenKind::KwFun => methods.push(self.parse_fun(
-                        fun_inline,
-                        fun_final,
-                        fun_suspend,
-                        mods.iter().any(|m| m == "tailrec"),
-                        mods.iter().any(|m| m == "abstract"),
-                    )),
+                    TokenKind::KwFun => {
+                        let mut f = self.parse_fun(
+                            fun_inline,
+                            fun_final,
+                            fun_suspend,
+                            mods.iter().any(|m| m == "tailrec"),
+                            mods.iter().any(|m| m == "abstract"),
+                        );
+                        f.visibility = visibility_of(&mods);
+                        methods.push(f);
+                    }
                     TokenKind::KwVal | TokenKind::KwVar => {
                         // Non-abstract body props may omit the initializer (init blocks supply the
                         // value); an `abstract` property has no field and is marked accordingly.
@@ -2522,13 +2530,17 @@ impl<'a> Parser<'a> {
                 let fun_suspend = mods.iter().any(|m| m == "suspend");
                 match self.kind() {
                     TokenKind::RBrace | TokenKind::Eof => break,
-                    TokenKind::KwFun => methods.push(self.parse_fun(
-                        fun_inline,
-                        fun_final,
-                        fun_suspend,
-                        mods.iter().any(|m| m == "tailrec"),
-                        mods.iter().any(|m| m == "abstract"),
-                    )),
+                    TokenKind::KwFun => {
+                        let mut f = self.parse_fun(
+                            fun_inline,
+                            fun_final,
+                            fun_suspend,
+                            mods.iter().any(|m| m == "tailrec"),
+                            mods.iter().any(|m| m == "abstract"),
+                        );
+                        f.visibility = visibility_of(&mods);
+                        methods.push(f);
+                    }
                     TokenKind::KwVal | TokenKind::KwVar => {
                         let mut p = self.parse_top_property_c(
                             lateinit,
@@ -2667,13 +2679,17 @@ impl<'a> Parser<'a> {
                 let fun_suspend = mods.iter().any(|m| m == "suspend");
                 match self.kind() {
                     TokenKind::RBrace | TokenKind::Eof => break,
-                    TokenKind::KwFun => methods.push(self.parse_fun(
-                        fun_inline,
-                        fun_final,
-                        fun_suspend,
-                        mods.iter().any(|m| m == "tailrec"),
-                        mods.iter().any(|m| m == "abstract"),
-                    )),
+                    TokenKind::KwFun => {
+                        let mut f = self.parse_fun(
+                            fun_inline,
+                            fun_final,
+                            fun_suspend,
+                            mods.iter().any(|m| m == "tailrec"),
+                            mods.iter().any(|m| m == "abstract"),
+                        );
+                        f.visibility = visibility_of(&mods);
+                        methods.push(f);
+                    }
                     TokenKind::KwVal | TokenKind::KwVar => {
                         let mut p = self.parse_top_property_c(
                             lateinit,

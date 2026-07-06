@@ -538,6 +538,8 @@ mod suspend_member_after_call_e2e;
 mod suspend_return_type_recovery_e2e;
 #[path = "suspend_try_finally_e2e.rs"]
 mod suspend_try_finally_e2e;
+#[path = "synthetic_accessor_e2e.rs"]
+mod synthetic_accessor_e2e;
 #[path = "tailrec_e2e.rs"]
 mod tailrec_e2e;
 #[path = "this_callable_ref_e2e.rs"]
