@@ -11,7 +11,7 @@
 //! INSIDE one source (an extension's receiver-MRO rank is only comparable within one type hierarchy);
 //! the composite federates at the resolve boundary, never by flattening one global overload set.
 
-use crate::libraries::{FunctionSet, LibraryType, PropertySet};
+use crate::libraries::{FunctionSet, LibraryType, PropertySet, ResolvedSymbols};
 use crate::types::Ty;
 
 /// A provider of declarations — a module's AST or a compiled library. The arg-independent metadata
@@ -30,6 +30,15 @@ pub trait SymbolSource {
     /// `None` if this source has no such type.
     fn resolve_type(&self, _internal: &str) -> Option<LibraryType> {
         None
+    }
+
+    /// Resolve a fully-qualified name to its namespace record (classifier + callables) — THE FQN query
+    /// this source answers. The resolver forms candidate FQNs from the file's import scope and unions the
+    /// results across candidates + sources; this returns just what THIS source has at `fqn`. `receiver`
+    /// Receiver-coupled work (value-class receivers, `@JvmName` element variants, return binding) is
+    /// SELECTION + emit, done by the consumer — resolution is purely by fqn. Empty by default.
+    fn resolve_symbols(&self, _fqn: &str) -> ResolvedSymbols {
+        ResolvedSymbols::default()
     }
 
     /// ALL declarations of PROPERTY `name` applicable to an access — members + extensions
@@ -86,6 +95,37 @@ impl SymbolSource for CompositeSource {
 
     fn resolve_type(&self, internal: &str) -> Option<LibraryType> {
         self.children.iter().find_map(|c| c.resolve_type(internal))
+    }
+
+    fn resolve_symbols(&self, fqn: &str) -> ResolvedSymbols {
+        use crate::libraries::Callables;
+        // Classifier: first source wins (user shadows library). Callables: concatenate in precedence
+        // order (each overload keeps its origin) — functions XOR a property, so take whichever appears.
+        let mut classifier = None;
+        let mut fns = Vec::new();
+        let mut props = Vec::new();
+        for c in &self.children {
+            let r = c.resolve_symbols(fqn);
+            if classifier.is_none() {
+                classifier = r.classifier;
+            }
+            match r.callables {
+                Callables::Functions(f) => fns.extend(f.overloads),
+                Callables::Properties(p) => props.extend(p.overloads),
+                Callables::None => {}
+            }
+        }
+        let callables = if !fns.is_empty() {
+            Callables::Functions(FunctionSet { overloads: fns })
+        } else if !props.is_empty() {
+            Callables::Properties(PropertySet { overloads: props })
+        } else {
+            Callables::None
+        };
+        ResolvedSymbols {
+            classifier,
+            callables,
+        }
     }
 
     fn class_is_extensible(&self, internal: &str) -> bool {

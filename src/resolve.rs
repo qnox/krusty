@@ -764,10 +764,13 @@ fn wildcard_candidate(pkg: &str, name: &str) -> String {
 }
 
 /// A file's star/implicit import packages (internal form) grouped by kotlinc's descending precedence:
-/// L1 the file's own package (same-package), L2 explicit star imports (`import a.b.*`), L3 the default
-/// imports. The leveled form the spec's name resolution walks — the single source both the signature
-/// pass and the [`Checker`] build their import set from.
-fn import_levels(file: &File, platform_defaults: &[&str]) -> [Vec<String>; 3] {
+/// L1 the file's own package (same-package), L2 explicit star imports (`import a.b.*`), L3 the Kotlin
+/// default imports, L4 the PLATFORM default imports (`java.lang`, `kotlin.jvm`). Kotlin defaults outrank
+/// platform defaults so a name declared in BOTH (`Comparable`, `Number`, `CharSequence` — in `kotlin.*`
+/// AND `java.lang.*`) binds to the Kotlin one, exactly as kotlinc, rather than looking ambiguous. The
+/// leveled form the spec's name resolution walks — the single source both the signature pass and the
+/// [`Checker`] build their import set from.
+fn import_levels(file: &File, platform_defaults: &[&str]) -> [Vec<String>; 4] {
     let own = match &file.package {
         Some(p) => p.replace('.', "/"),
         None => String::new(),
@@ -777,12 +780,15 @@ fn import_levels(file: &File, platform_defaults: &[&str]) -> [Vec<String>; 3] {
         .iter()
         .filter_map(|fq| fq.strip_suffix(".*").map(|p| p.replace('.', "/")))
         .collect();
-    let defaults: Vec<String> = KOTLIN_DEFAULT_IMPORT_PACKAGES
+    let kotlin_defaults: Vec<String> = KOTLIN_DEFAULT_IMPORT_PACKAGES
         .iter()
-        .chain(platform_defaults.iter())
         .map(|s| s.replace('.', "/"))
         .collect();
-    [vec![own], explicit_star, defaults]
+    let platform: Vec<String> = platform_defaults
+        .iter()
+        .map(|s| s.replace('.', "/"))
+        .collect();
+    [vec![own], explicit_star, kotlin_defaults, platform]
 }
 
 /// Resolve a name to its fully-qualified internal name against a file's import set — the single
@@ -807,11 +813,14 @@ fn resolve_name_against_imports(
         }
     }
     for level in levels {
+        // The CLASSIFIER namespace of the shared unqualified-name resolution loop: each in-scope package
+        // yields a candidate fqn's namespace record; a type position consumes only its `classifier`. The
+        // level-precedence + within-level ambiguity is applied HERE (the caller's own rule), the record
+        // keeping classifier separate from callables so a coexisting `fun`/`val` never perturbs it.
         let mut hits: Vec<String> = Vec::new();
-        for p in level {
-            let cand = wildcard_candidate(p, name);
-            if let Some(t) = libraries.resolve_type(&cand) {
-                let internal = t.alias_target.unwrap_or(cand);
+        for (fqn, r) in crate::call_resolver::resolve_symbols_in_scope(libraries, name, level) {
+            if let Some(t) = r.classifier {
+                let internal = t.alias_target.unwrap_or(fqn);
                 if !hits.contains(&internal) {
                     hits.push(internal);
                 }
@@ -4454,9 +4463,9 @@ struct Checker<'a> {
     scopes: Vec<HashMap<String, Local>>,
     ret_ty: Ty,
     imports: HashMap<String, String>,
-    /// Star/implicit import packages by kotlinc precedence level (same-package, explicit stars,
-    /// defaults) — the import set [`Self::imported_type_internal`] resolves names against.
-    import_levels: [Vec<String>; 3],
+    /// Star/implicit import packages by kotlinc precedence level (same-package, explicit stars, Kotlin
+    /// defaults, platform defaults) — the import set [`Self::imported_type_internal`] resolves against.
+    import_levels: [Vec<String>; 4],
     /// The packages in scope for TOP-LEVEL function resolution: every `import_levels` package PLUS the
     /// package of each explicit import (`import a.b.foo` scopes `a/b`). A top-level call resolves only to
     /// a function whose facade is in this set (kotlinc), passed to the [`CallResolver`].

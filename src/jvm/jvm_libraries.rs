@@ -1515,6 +1515,118 @@ impl SymbolSource for JvmLibraries {
             .cache_library_type(internal, built.clone().map(std::rc::Rc::new));
         built
     }
+    fn resolve_symbols(&self, fqn: &str) -> crate::libraries::ResolvedSymbols {
+        use crate::libraries::{Callables, ResolvedSymbols};
+        // Classifier namespace: the class/interface/object (or a typealias's target) at the fqn.
+        let classifier = self.resolve_type(fqn);
+        // Callable namespace, receiver-AGNOSTIC (resolution is by fqn; the receiver binds later, in the
+        // consumer). Top-level functions of the source name declared in the fqn's package, plus the
+        // package's extensions (source-keyed via the tree, so a `@JvmName`-mangled extension `sum` →
+        // `sumOfInt` is found under its SOURCE name; the JVM name stays on the callable for emit).
+        let (pkg, name) = fqn.rsplit_once('/').unwrap_or(("", fqn));
+        // TOP-LEVEL functions of the package (receiver-less). The receiver-less `functions(name, None)`
+        // query classifies each candidate by its metadata receiver, so an EXTENSION compiled into the same
+        // facade surfaces here too — but with no receiver populated (`FnKind::Extension`, `receiver: None`),
+        // a malformed shape for extension selection. Take only genuine `TopLevel` here; extensions come
+        // from the receiver-carrying tree loop below, so the namespace has ONE clean source per kind.
+        let mut overloads: Vec<_> = self
+            .functions(name, None)
+            .overloads
+            .into_iter()
+            .filter(|o| {
+                o.kind == FnKind::TopLevel
+                    && o.callable.owner.rsplit_once('/').map_or("", |(p, _)| p) == pkg
+            })
+            .collect();
+        // Extension discovery is @Metadata-driven (the source of truth), NOT a scan of JVM statics: the
+        // package's PUBLIC facades' metadata carry each extension's SOURCE receiver, parameters, return
+        // (with nullability), visibility, and generic signature. The JVM method (`@JvmName`-mangled name +
+        // descriptor) is only the emit handle, rooted at the PUBLIC facade — kotlinc's `invokestatic`
+        // target — so a package-private multifile PART never leaks a `false` visibility. Receiver-coupled
+        // JVM specifics (element-variant `sumOfInt`, value-class mangling) are the emitter's job.
+        for facade in self.cp.package_facades(pkg) {
+            for mf in self.cp.meta_functions(&facade).iter() {
+                if mf.kotlin_name != name || !mf.is_extension {
+                    continue;
+                }
+                // SOURCE receiver, PRECISE: the metadata generic signature's receiver carries type
+                // arguments and value-class identity (`Iterable<Int>` vs `Iterable<Long>`, `UInt` vs `Int`)
+                // that the erased `receiver_class` loses — the consumer selects the element/value-class
+                // -appropriate `@JvmName` variant from these. Fall back to the bare receiver class, then to
+                // a universal `Any` for a type-variable receiver (`<T> T.let`).
+                let receiver = mf
+                    .generic_sig
+                    .as_ref()
+                    .and_then(|g| g.receiver.as_ref())
+                    .map(|r| crate::call_resolver::gsig_to_ty(r, &std::collections::HashMap::new()))
+                    .or_else(|| mf.receiver_class.map(kotlin_name_to_ty))
+                    .unwrap_or_else(|| Ty::obj("kotlin/Any"));
+                // Emit handle: the JVM method + descriptor on the public facade. Prefer the metadata
+                // `method_signature`. When it is absent, resolve the real bytecode method by name against the
+                // facade's super chain, trying: the metadata name, then the ELEMENT-materialized name kotlinc
+                // gives an `@OverloadResolutionByLambdaReturnType` reduction (`sum` on `Iterable<Byte>` →
+                // `sumOfByte`) — derived from the receiver's element type and VERIFIED against the bytecode,
+                // no hardcoded name list. The discovered method's real name becomes the emit `jvm_name`.
+                let elem_mangled = receiver
+                    .type_args()
+                    .first()
+                    .copied()
+                    .and_then(ty_simple_name)
+                    .map(|s| format!("{}Of{s}", mf.jvm_name));
+                let (jvm_name, descriptor) = if let Some(d) = mf.jvm_desc.map(str::to_string) {
+                    (mf.jvm_name.clone(), d)
+                } else if let Some(d) = self.cp.facade_method_descriptor(&facade, &mf.jvm_name) {
+                    (mf.jvm_name.clone(), d)
+                } else if let Some(d) = elem_mangled
+                    .as_ref()
+                    .and_then(|n| self.cp.facade_method_descriptor(&facade, n))
+                {
+                    (elem_mangled.unwrap(), d)
+                } else {
+                    continue;
+                };
+                let (params, pret) = parse_method_desc(&descriptor);
+                if params.is_empty() {
+                    continue;
+                }
+                let ret_class = mf.ret_class.map(kotlin_name_to_ty);
+                let ret = match ret_class {
+                    Some(t) if mf.ret_nullable && t.is_jvm_scalar() => Ty::nullable(t),
+                    Some(t) => t,
+                    None if mf.ret_nullable && pret.is_jvm_scalar() => Ty::nullable(pret),
+                    None => pret,
+                };
+                let callable = LibraryCallable::library(
+                    facade.clone(),
+                    jvm_name,
+                    params,
+                    ret,
+                    pret,
+                    descriptor,
+                );
+                overloads.push(FunctionInfo {
+                    ret: ReturnInfo::new(mf.ret_nullable, ret_class),
+                    visibility: crate::libraries::Visibility::from_public(mf.is_public),
+                    generic_sig: mf.generic_sig.clone(),
+                    flags: FnFlags {
+                        inline: InlineKind::from_flags(mf.is_inline, false),
+                        suspend: mf.is_suspend,
+                    },
+                    ..FunctionInfo::plain(FnKind::Extension, Some(receiver), callable)
+                });
+            }
+        }
+        let callables = if overloads.is_empty() {
+            Callables::None
+        } else {
+            Callables::Functions(FunctionSet { overloads })
+        };
+        ResolvedSymbols {
+            classifier,
+            callables,
+        }
+    }
+
     fn functions(&self, name: &str, receiver: Option<Ty>) -> FunctionSet {
         let key = (name.to_string(), receiver);
         if let Some(cached) = self.cp.cached_functions(&key) {
@@ -2342,6 +2454,52 @@ impl SymbolSource for JvmLibraries {
 impl crate::libraries::TargetRuntime for JvmLibraries {
     fn function_type(&self, arity: usize) -> Option<Ty> {
         Some(Ty::obj(&format!("kotlin/jvm/functions/Function{arity}")))
+    }
+
+    fn extension_receiver_rank(&self, recv: Ty, decl_recv: Ty) -> Option<u32> {
+        // VALUE-CLASS receivers match by IDENTITY, never by erasing to the underlying: a `UInt` receiver
+        // binds only a `UInt` extension (`UInt.downTo` → `UIntProgression`), never `Int`'s — they share the
+        // `I` descriptor, so the erased MRO below would tie them. Reject a value-class mismatch on either
+        // side up front; a genuine `UInt.downTo` matches at rung 0.
+        let recv_vc = TargetRuntime::value_underlying(self, recv).is_some();
+        let decl_vc = TargetRuntime::value_underlying(self, decl_recv).is_some();
+        if recv_vc || decl_vc {
+            return (recv.obj_internal() == decl_recv.obj_internal() && recv == decl_recv)
+                .then_some(0);
+        }
+        // Index the extension's declared-receiver descriptor into the receiver's most-specific-first MRO —
+        // the same supertype/widening order the classpath extension lookup ranks by (`Int → Number →
+        // Comparable → Any`, `List → Collection → Iterable`), so most-specific selection is preserved. The
+        // MRO carries JVM-form descriptors (`Ljava/lang/Object;`), so normalize the declared receiver to the
+        // same form first (`kotlin/Any` → `java/lang/Object`, a Kotlin collection → its `java/util/*` face).
+        let want = type_descriptor(
+            <Self as crate::libraries::TargetRuntime>::jvm_descriptor_form(self, decl_recv),
+        );
+        let rank = supertype_descriptors(&self.cp, recv)
+            .iter()
+            .position(|d| *d == want)
+            .map(|i| i as u32)
+            .or_else(|| {
+                // A universal receiver (`<T> T.let`, erased to `Any`/`Object`) applies to every receiver at
+                // the lowest precedence when the MRO does not list the implicit root explicitly.
+                matches!(want.as_str(), "Ljava/lang/Object;").then_some(u32::MAX - 1)
+            })?;
+        // ELEMENT (type-argument) compatibility: the erased receivers matched, but a concrete element must
+        // agree — `Iterable<Int>.sum` (`@JvmName sumOfInt`) must not bind an `Iterable<Long>` receiver. A
+        // type-VARIABLE decl element (a generic extension, decoded to `Any`) matches any element.
+        let any = Ty::obj("kotlin/Any");
+        if let (Some(re), Some(de)) = (
+            recv.type_args().first().copied(),
+            decl_recv.type_args().first().copied(),
+        ) {
+            if re != any
+                && de != any
+                && self.jvm_descriptor_form(re) != self.jvm_descriptor_form(de)
+            {
+                return None;
+            }
+        }
+        Some(rank)
     }
 
     fn value_underlying(&self, ty: Ty) -> Option<Ty> {

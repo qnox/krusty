@@ -54,8 +54,38 @@ On first resolution of a name in package `p` of jar `J`:
 Cache `(J, p) → PkgMembers`. Sibling packages' facades are never parsed.
 
 ### Top-level memo — on the `Classpath`
-`fqn → ResolvedEntry` (`Class | Function | Builtin | TypeAlias | Absent`). The single result cache; the
-per-(jar,package) parses are intermediate.
+`fqn → ResolvedEntry`. The single result cache; the per-(jar,package) parses are intermediate.
+
+`ResolvedEntry` is NOT an exclusive enum — Kotlin has **two namespaces** and one name can occupy both at
+once, so the entry is a **record of coexisting namespace occupants**:
+
+```
+ResolvedEntry {
+  classifier: Option<Classifier>,   // class | interface | object | typealias | builtin — at most one
+  callables:  Callables,            // Functions(FunctionSet) | Property(PropertySet) | None
+}
+```
+
+- **classifier** and **callables** live in SEPARATE namespaces, so `class test` may coexist with
+  `fun test` or with `val test`.
+- Within callables, `fun` and `val` of the same name are a **redeclaration error** (a name is functions
+  XOR a property, never both) — kotlinc reports "conflicting declarations".
+- `Absent` = both fields empty.
+
+### Namespaces and call resolution
+Resolution is **position-driven** — the syntactic position selects which namespaces of the entry apply:
+
+| Position | Consumes |
+|---|---|
+| type (`x: test`) | `classifier` only |
+| call (`test(args)`) | `callables.functions` ∪ the `classifier`'s **constructors** (direct candidates), then a function-typed `callables.property` invoked via `invoke` (strict FALLBACK) |
+| value (`val y = test`) | `callables.property`; the `classifier` only when it is an `object`/companion instance |
+
+**Constructors are not a separate resolver output** — a `classifier` used in call position contributes
+its constructors as function-like candidates. So a CALL resolves against the union
+`{ functions ∪ classifier-constructors }` by overload resolution; the variable-as-function (`invoke`)
+candidate is admitted ONLY when no function/constructor is applicable. Two applicable function-like
+candidates of equal specificity (`fun test()` and a no-arg `class test`) ⇒ overload-resolution ambiguity.
 
 ## Resolution
 
@@ -85,10 +115,20 @@ hits → ambiguity error** (matching kotlinc — `import java.util.*` + `import 
 is an error, *not* first-wins), unless the source qualifies the name. Explicit import (level 1) shadows
 all lower levels.
 
-### Functions (top-level / extension)
-`package node → jars → that jar's kotlin_module facades for the package → parse those facade parts'
-statics (lazy) → match by name (and receiver descriptor, for extensions)`. This replaces the eager
-`ensure_ext_index` full-`*Kt`-facade scan.
+### Functions and properties (top-level / extension)
+Top-level and extension **functions AND properties** resolve the same way, driven by the tree and the
+import scope:
+`for each in-scope package → tree node → jars → that jar's kotlin_module facades for the package → parse
+those facade parts' statics (lazy, cached per (jar,package) as PkgMembers) → match by name (and receiver
+descriptor, for extensions)`. A top-level property's static getter and an extension property's
+receiver-leading getter come from the same facades. This replaces the eager `ensure_ext_index`
+full-`*Kt`-facade scan.
+
+**Import scope is REQUIRED here**, not optional: an unqualified top-level/extension callable is visible
+only if its package is imported (same-package / explicit / star / default) — kotlinc. Scoping also makes
+the lookup cheap: only the ~10 in-scope packages' facades are consulted, not every `*Kt` class. A
+callable declared in the CURRENT module (not the classpath) is always visible and is never scope-filtered
+(module visibility is resolved separately; its facade may be package-less).
 
 ## Eager vs lazy summary
 
@@ -107,26 +147,42 @@ statics (lazy) → match by name (and receiver descriptor, for extensions)`. Thi
 - **Same-level star multi-hit = ambiguity error** (not first-wins).
 - Package/class same FQN: try longest-package split first, then backtrack.
 - Typealiases still consulted (`type_alias_target`); nested classes via split.
+- **Classifier is at most one** per resolved name. Two granularities decide it:
+  - the SAME fqn (`a/b/Test`) present in several classpath entries → the FIRST entry in classpath
+    declaration order wins (`find` searches `node.jars` in order, first hit; the duplicate dedups to one
+    internal name).
+  - the SAME simple name in DIFFERENT packages (distinct fqns) in scope at the same precedence level →
+    ambiguity error, not first-wins; a higher level shadows a lower one.
 - Correctness gate: **box conformance FAIL:0** (resolution byte-identical) at every step.
 
 ## Integration
 
 - Reuse `EntryCache<T>` (already committed, `d8bbc91`).
 - New: `JarPackages` + its shallow builder; the composed package tree (cached on `Classpath`); the
-  per-(jar,package) `PkgMembers` cache; the `fqn → entry` memo.
-- Route `resolve_type` / `SymbolSource::functions` through the tree instead of per-default-package probing.
+  per-(jar,package) `PkgMembers` cache; the `fqn → ResolvedEntry` namespace-record memo.
+- Route `resolve_type` / `SymbolSource::functions` / `SymbolSource::properties` through the tree instead
+  of per-default-package probing and the whole-classpath ext scan.
+- The import scope threads into function/property resolution (a current-module callable is never
+  scope-filtered; a classpath one needs its package imported).
 - Retire the eager `ensure_ext_index` scan in favour of lazy per-package facade parsing.
 
 ## Rollout — each step gated on box FAIL:0 + a re-profile
 
-0. **Re-profile** post-per-jar to pin the exact current top hot function (confirm probing vs
-   ext-scan vs `resolve_type` build is the 65% target).
-1. `JarPackages` + `EntryCache` + package-tree compose — built alongside, asserted to match, no
-   behaviour change.
-2. Lazy per-(jar,package) facade / builtin parse + `PkgMembers` cache.
-3. Wire simple-name (wildcard/default) resolution through the tree; verify precedence + ambiguity.
-4. Wire FQN / explicit-import resolution (longest-package split, backtrack) through the tree.
-5. Retire the eager ext-index scan and the per-package `resolve_type` probing.
+0. **Re-profile** to pin the hot function. ✅ Found the racing `scan_types`/`type_alias_target`
+   (`collect_signatures` ~67%), not the hypothesised ext-scan.
+1. `JarPackages` + `EntryCache` + package-tree compose (incl. jimage packages). ✅
+2. Lazy per-(jar,package) facade / builtin parse + `PkgMembers` cache. ◐ builtins + class `@Metadata`
+   lazy; facades enumerated from `kotlin_module`; distinct `PkgMembers` cache lands with step 5.
+3. Simple-name resolution through the tree; precedence LEVELS + same-level ambiguity — unified across the
+   signature pass and the Checker (`resolve_name_against_imports`). Kotlin defaults outrank platform
+   defaults so `Comparable`/`Number`/`CharSequence` (in both `kotlin.*` and `java.lang.*`) are not
+   spuriously ambiguous. ✅
+4. FQN / explicit-import (longest-package split via tree). ◐ `find` is tree-routed; explicit nested split
+   still the `/`→`$` heuristic.
+5. **Retire the eager ext scan; route function AND property resolution through the tree, scope-pruned;
+   the `ResolvedEntry` namespace record + call-position selection (functions ∪ classifier-constructors,
+   then property-`invoke` fallback).** ⬜ in progress — the current import-scoping is a post-filter over
+   the ext index, not yet tree-driven; classifier/callable unification at the call site not yet done.
 6. Measure the coverage gate on a **clean, uncontended** run — target 5–10 min.
 
 ## Risks
@@ -135,3 +191,36 @@ statics (lazy) → match by name (and receiver descriptor, for extensions)`. Thi
 - Precedence order — preserve the existing default-import list and its order (see `[[simple-name-overmatch]]`).
 - jimage — decide location-table catalog vs skip.
 - Measure the gate alone (concurrent builds/profiles inflate it ~3×).
+
+## Symbol-resolve rewrite — status & handoff (in progress)
+
+Goal: make `SymbolSource::resolve_symbols(fqn) -> ResolvedSymbols { classifier, callables }` THE query;
+delete `functions`/`properties`. A name is always an FQN; the resolver forms candidate FQNs from the
+import scope. Receiver-coupled work (value-class receivers, `@JvmName` element variants, MRO rank,
+return binding) is SELECTION+emit, done by the CONSUMER — resolution is receiver-less by fqn.
+
+DONE (green, full box = box()=OK 2381, FAIL:0):
+- `ResolvedSymbols`/`Callables` types (libraries.rs); `SymbolSource::resolve_symbols(fqn)` (no receiver)
+  on all 3 sources (JvmLibraries, ModuleSymbols, CompositeSource); TDD in classpath.rs `fq_tests`.
+- `PkgMembers` (`global_jar_pkg_members`, `jar_pkg_members`) re-keyed to `@Metadata` SOURCE name
+  (`kotlin_name`) — so `sum`→`sumOfInt` is found under source name; JVM name stays for emit only.
+- `resolve_symbols(fqn)` discovers classifier + top-level + EXTENSION declarations (receiver-agnostic,
+  carry `generic_sig`), source-keyed via the tree (`functions_in_scope`/`resolve_entry`).
+- TOP-LEVEL call path (`resolve_top_level_callable`) consumes `resolve_symbols(fqn)`.
+
+REMAINING (the consumer half) — `select_overload` (call_resolver.rs ~line 1720) still uses
+`functions(name, Some(recv))`. Switching it to `resolve_symbols` MINIMALLY regresses 185 box files, ALL
+in one group: iterator/range/unsigned/sequence-with-index (`iterator`, `downTo`, `until`, `contains`,
+`withIndex`, uint). Root cause: agnostic decls lose the receiver-coupled computations `functions()` does:
+  1. receiver_rank / MRO — decls are all rank 0; `functions()` ranks per receiver supertype rung. Compute
+     in `select_overload` from recv's MRO vs each decl's declared receiver.
+  2. `metadata_receivers_allow` (read-only vs mutable collection receiver) — decl must carry source
+     receiver types; consumer subtype-checks recv.
+  3. value-class receiver visibility (`Result.getOrThrow`: metadata-public+inline, bytecode-private →
+     must-inline) — decl carries a flag; consumer checks recv is the value class.
+  4. `@JvmName` element variant pick (`sumOfInt` vs `sumOfLong`) by recv element — via decl `generic_sig`.
+  5. return nullability (`Map.get: V?`).
+Plan: ENRICH decls in `resolve_symbols` (source receiver w/ element, ret nullability, vc flag) so the
+binding is NEUTRAL; `select_overload` filters/ranks/binds from the enriched decl (`unify_gsig` is
+pub(crate) in call_resolver). Gate EACH piece with the FULL box run (NOT `KRUSTY_NO_RUN` — it misses the
+runtime ClassCast/VerifyError this regresses). Then properties same pattern; delete `functions`/`properties`.
