@@ -13,7 +13,7 @@
 
 use crate::libraries::{
     CompilerPlatform, FnKind, FunctionInfo, FunctionSet, GSig, GenericSig, InlineKind,
-    LibraryCallable, LibraryMember, PropKind,
+    LibraryCallable, LibraryMember, Origin, PropKind,
 };
 use crate::types::Ty;
 
@@ -304,18 +304,6 @@ impl<'a> CallResolver<'a> {
         }
     }
 
-    /// Whether a facade `owner`'s package is in scope for top-level resolution (always true when no
-    /// scope is set).
-    fn owner_in_scope(&self, owner: &str) -> bool {
-        match self.fn_scope {
-            None => true,
-            Some(scope) => {
-                let pkg = owner.rsplit_once('/').map_or("", |(p, _)| p);
-                scope.iter().any(|p| p == pkg)
-            }
-        }
-    }
-
     /// Whether `name` has an `inline` extension overload on `receiver`.
     pub fn extension_is_inline(&self, receiver: Ty, name: &str) -> bool {
         self.lib
@@ -364,18 +352,9 @@ impl<'a> CallResolver<'a> {
         args: &[Ty],
         type_args: &[Ty],
     ) -> Option<LibraryCallable> {
-        // Restrict to functions whose facade is in the import scope — an unqualified top-level call binds
-        // ONLY to an imported / same-package / default-import function (kotlinc), not to any classpath
-        // function of that name. `None` scope (no import context) keeps every overload.
-        let fs = FunctionSet {
-            overloads: self
-                .lib
-                .functions(name, None)
-                .overloads
-                .into_iter()
-                .filter(|o| self.owner_in_scope(&o.callable.owner))
-                .collect(),
-        };
+        // FQN-driven resolution via the shared unqualified-callable seam: union `resolve_symbols` over the
+        // in-scope packages (receiver-less top-level query), then keep the top-level overloads below.
+        let fs = scoped_callables(self.lib, name, None, self.fn_scope);
         let parsed: Vec<(&FunctionInfo, Vec<Ty>, Ty)> = fs
             .overloads
             .iter()
@@ -1681,6 +1660,85 @@ fn select_instance_info(
     )
 }
 
+/// The unqualified-callable resolution seam (spec § Functions): form a candidate FQN `pkg/name` from
+/// each in-scope package and union the callables `resolve_symbols` returns — an unqualified top-level or
+/// extension call binds ONLY to an imported / same-package / default-import declaration (kotlinc). The
+/// returned [`FunctionSet`] carries every kind (top-level, extension); the caller filters by `FnKind`.
+/// A context with NO import scope (`fn_scope = None`) falls back to the legacy whole-classpath
+/// `functions(name, receiver)` query filtered by [`fn_in_scope`] (the `receiver` seeds that fallback's
+/// member/extension walk; it is unused on the scoped path, which is receiver-agnostic by fqn).
+fn scoped_callables(
+    lib: &dyn CompilerPlatform,
+    name: &str,
+    receiver: Option<Ty>,
+    fn_scope: Option<&[String]>,
+) -> FunctionSet {
+    match fn_scope {
+        Some(scope) => FunctionSet {
+            overloads: resolve_symbols_in_scope(lib, name, scope)
+                .into_iter()
+                .flat_map(|(_, r)| match r.callables {
+                    crate::libraries::Callables::Functions(f) => f.overloads,
+                    _ => Vec::new(),
+                })
+                .collect(),
+        },
+        None => FunctionSet {
+            overloads: lib
+                .functions(name, receiver)
+                .overloads
+                .into_iter()
+                .filter(|o| fn_in_scope(o, fn_scope))
+                .collect(),
+        },
+    }
+}
+
+/// The shared unqualified-name resolution LOOP (spec § Resolution): form a candidate FQN `pkg/name` for
+/// each in-scope `packages` entry and query [`crate::symbol_source::SymbolSource::resolve_symbols`] once
+/// per candidate, returning each `(fqn, record)` whose namespace record is non-empty. The helper does
+/// ONLY the loop — it does not decide anything. Because the record keeps the two namespaces SEPARATE
+/// (`classifier` vs `callables`), each caller applies its own selection rules organically: a type
+/// position reads `classifier` under level-precedence + within-level ambiguity; a call position flattens
+/// `callables` and runs overload resolution. The `fqn` is returned so a classifier caller can name the
+/// resolved internal (a non-alias classifier's internal name IS its fqn).
+pub(crate) fn resolve_symbols_in_scope(
+    lib: &dyn CompilerPlatform,
+    name: &str,
+    packages: &[String],
+) -> Vec<(String, crate::libraries::ResolvedSymbols)> {
+    packages
+        .iter()
+        .filter_map(|pkg| {
+            let fqn = if pkg.is_empty() {
+                name.to_string()
+            } else {
+                format!("{pkg}/{name}")
+            };
+            let r = lib.resolve_symbols(&fqn);
+            (!r.is_empty()).then_some((fqn, r))
+        })
+        .collect()
+}
+
+/// Whether callable overload `o` is visible for an UNQUALIFIED (top-level or extension) call given the
+/// in-scope packages `fn_scope`. A same-module callable ([`Origin::Module`]) is always visible — module
+/// visibility is resolved separately, and its facade owner may be package-less. Only a CLASSPATH
+/// ([`Origin::Library`]) callable must have its facade's package imported (same-package / star / explicit
+/// / default), matching kotlinc. `None` scope keeps everything (a context with no import scope).
+fn fn_in_scope(o: &FunctionInfo, fn_scope: Option<&[String]>) -> bool {
+    if !matches!(o.callable.origin, Origin::Library) {
+        return true;
+    }
+    match fn_scope {
+        None => true,
+        Some(scope) => {
+            let pkg = o.callable.owner.rsplit_once('/').map_or("", |(p, _)| p);
+            scope.iter().any(|p| p == pkg)
+        }
+    }
+}
+
 /// Extension-selection context for [`select_overload`]: whether non-public `@InlineOnly` candidates are
 /// admitted (the bytecode inliner), and the packages in scope for an extension (`None` = unscoped). Both
 /// only affect EXTENSION selection — a member is always visible on its type.
@@ -1715,17 +1773,33 @@ fn select_overload(
         }
     }
     let allow_must_inline = ext.allow_must_inline;
-    // An EXTENSION is only in scope if its facade's package is imported (same-package / star / explicit /
-    // default) — kotlinc; a member is always visible on its type, so the scope never gates it. `None`
-    // scope keeps every candidate (a context with no import scope).
-    let ext_in_scope = |owner: &str| match ext.fn_scope {
-        None => true,
-        Some(scope) => {
-            let pkg = owner.rsplit_once('/').map_or("", |(p, _)| p);
-            scope.iter().any(|p| p == pkg)
-        }
+    // EXTENSION candidates come from the shared FQN seam — union `resolve_symbols` over the in-scope
+    // packages (the spec's scope-pruned, tree-driven extension lookup) — so an unqualified extension binds
+    // only when its facade's package is imported, without the whole-classpath eager index. MEMBERS are
+    // always visible on their type (no scope), so they keep the direct `functions(name, receiver)` walk.
+    let fs = if kind == FnKind::Extension {
+        scoped_callables(lib, name, Some(recv), ext.fn_scope)
+    } else {
+        lib.functions(name, Some(recv))
     };
-    let fs = lib.functions(name, Some(recv));
+    crate::trace_compiler!(
+        "resolve",
+        "select_overload name={name} recv={recv:?} kind={kind:?} scope={:?} cands={}",
+        ext.fn_scope.map(<[String]>::len),
+        fs.overloads.len(),
+    );
+    for o in &fs.overloads {
+        crate::trace_compiler!(
+            "resolve",
+            "  raw {name} kind={:?} recv={:?} pub={} rank={} origin={:?} owner={}",
+            o.kind,
+            o.receiver,
+            o.public(),
+            o.receiver_rank,
+            o.callable.origin,
+            o.callable.owner,
+        );
+    }
     // Candidates as `(overload, logical value params)`, grouped by receiver rank. An extension admits only
     // public overloads unless the caller is the bytecode inliner (which splices non-public `@InlineOnly`).
     let mut by_rank: std::collections::BTreeMap<u32, Vec<(&FunctionInfo, Vec<Ty>)>> =
@@ -1735,10 +1809,37 @@ fn select_overload(
             && (kind != FnKind::Extension
                 || (o.receiver_rank != u32::MAX
                     && (o.public() || (allow_must_inline && o.flags.inline.must_inline()))
-                    && ext_in_scope(&o.callable.owner)))
+                    && fn_in_scope(o, ext.fn_scope)))
     }) {
+        // A receiver-agnostic `resolve_symbols` extension carries rank `0`; recover the real receiver-MRO
+        // rung from the actual receiver so most-specific selection (a `List` extension over an `Iterable`
+        // one) still holds. A candidate whose declared receiver is NOT in the receiver's supertype closure
+        // does not apply — drop it. Members and lambda-return (`u32::MAX`) keep their provider rank.
+        let rank = if kind == FnKind::Extension {
+            match o
+                .receiver
+                .and_then(|dr| lib.extension_receiver_rank(recv, dr))
+            {
+                Some(r) => r,
+                None => {
+                    crate::trace_compiler!(
+                        "resolve",
+                        "  drop {name} decl_recv={:?} (not in recv MRO)",
+                        o.receiver
+                    );
+                    continue;
+                }
+            }
+        } else {
+            o.receiver_rank
+        };
         let lp = logical_value_params(lib, o, recv, type_args);
-        by_rank.entry(o.receiver_rank).or_default().push((o, lp));
+        crate::trace_compiler!(
+            "resolve",
+            "  cand {name} rank={rank} logical_params={lp:?} owner={}",
+            o.callable.owner
+        );
+        by_rank.entry(rank).or_default().push((o, lp));
     }
     // A generic method erases its type-parameter arguments to `Any` (`List<E>.add(E)` → `add(Object)`),
     // so a reference argument matches against an `Any` parameter — try the exact args, then widened.

@@ -305,6 +305,32 @@ fn global_entry_types() -> &'static EntryCache<TypeIndex> {
     CACHE.get_or_init(EntryCache::new)
 }
 
+/// The spec's `(jar, package) → PkgMembers`: a per-(jar, package) index of the package's static
+/// callables, parsed once from that jar's `kotlin_module` facades and SHARED across every classpath that
+/// includes the jar (keyed by jar path + package), exactly like the other per-entry caches. Three
+/// indices from ONE facade-statics pass so every scoped query is O(1): [`Self::by_source`] for a
+/// source-name lookup (top-level/extension resolution), [`Self::by_jvm`] for a JVM-name lookup (the
+/// mangled `@JvmName` extension paths), and [`Self::owners_by_recv`] for the receiver-descriptor →
+/// declaring-facade query. `Arc` so a package touched by many worker threads is parsed once.
+#[derive(Default)]
+struct PkgMembers {
+    /// Static callables keyed by their `@Metadata` SOURCE name (`sum`), for the source-name resolution.
+    by_source: HashMap<String, Vec<ExtCandidate>>,
+    /// The same callables keyed by their JVM method name (`sumOfInt`), for the literal-name extension
+    /// lookup that mirrors [`Classpath::find_extensions`] (which keys by the bytecode name).
+    by_jvm: HashMap<String, Vec<ExtCandidate>>,
+    /// Receiver (first-parameter) descriptor → the facades declaring a static with that receiver — the
+    /// scoped analogue of [`Classpath::find_extension_owners`]. Deduped, declaration order.
+    owners_by_recv: HashMap<String, Vec<String>>,
+}
+type JarPkgMembers = std::sync::Arc<PkgMembers>;
+fn global_jar_pkg_members() -> &'static std::sync::Mutex<HashMap<(PathBuf, String), JarPkgMembers>>
+{
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<HashMap<(PathBuf, String), JarPkgMembers>>> =
+        std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
 /// Process-global composed package tree, keyed by the classpath entry set — like [`global_type_cache`],
 /// the stdlib/JDK entries are identical across every compiled file, so the compose runs once per process.
 fn global_pkg_tree_cache(
@@ -375,6 +401,30 @@ pub struct ExtCandidate {
     /// the bytecode inliner can splice it, but the resolver admits it only for inline-only selection,
     /// never as a callable (an `invokestatic` to a package-private method would `IllegalAccessError`).
     pub public: bool,
+}
+
+/// The namespace record a fully-qualified name resolves to on the classpath — the spec's top-level memo
+/// value. Kotlin has TWO namespaces (classifier vs callable) and one name can occupy both at once
+/// (`class test` may coexist with `fun test`), so this is a RECORD, not an exclusive enum. The caller
+/// selects by syntactic position: a type use consumes `classifier`; a call unions `callables` with the
+/// classifier's constructors; a value use consumes a callable property (or an `object` classifier).
+#[derive(Clone, Default)]
+pub struct ResolvedEntry {
+    /// The classifier internal name (a class/interface/object; a `typealias` resolved to its target), or
+    /// `None`. AT MOST ONE — the first classpath entry that declares the fqn wins (`find` searches the
+    /// package's jars in classpath declaration order).
+    pub classifier: Option<String>,
+    /// The static callables declared for the name by its package's `kotlin_module` facades: top-level
+    /// functions and extensions (a property getter is a static here too). Empty if the name is not a
+    /// classpath callable.
+    pub callables: Vec<ExtCandidate>,
+}
+
+impl ResolvedEntry {
+    /// Nothing on the classpath resolves this name (both namespaces empty).
+    pub fn is_absent(&self) -> bool {
+        self.classifier.is_none() && self.callables.is_empty()
+    }
 }
 
 /// Lazy index of static methods grouped by `(first_param_descriptor, method_name)`. Built on
@@ -630,6 +680,9 @@ pub struct Classpath {
     /// the process-global L2 where the one-time rebuild lives. Both hold only QUERIED names (the working set).
     ext_l1: RefCell<crate::lru::LruCache<String, std::sync::Arc<ExtByName>>>,
     ext_candidates: ExtCandCache,
+    /// The spec's top-level memo: `fqn → ResolvedEntry` (the namespace record). An LRU bounded to the
+    /// queried working set; a resolved name is looked up once and reused across the compile.
+    entries_memo: RefCell<crate::lru::LruCache<String, std::rc::Rc<ResolvedEntry>>>,
     /// Process-unique identity for this `Classpath`, assigned at construction. Caches keyed by a
     /// `Classpath` (e.g. the per-classpath library seed) MUST key on this — NOT on the `Rc<Classpath>`
     /// pointer address, which a freed-then-reallocated `Classpath` can reuse, yielding a false cache hit
@@ -702,6 +755,7 @@ impl Classpath {
             builtin_members: RefCell::new(crate::lru::LruCache::new(META_CAP)),
             ext_l1: RefCell::new(crate::lru::LruCache::new(FN_CAP)),
             ext_candidates: global_ext_candidates(&cache_key),
+            entries_memo: RefCell::new(crate::lru::LruCache::new(FN_CAP)),
             id,
         }
     }
@@ -1661,6 +1715,296 @@ impl Classpath {
         self.ext_by_name(method_name).all.clone()
     }
 
+    /// The JVM descriptor of the static method named `jvm_name` on facade `root` (walking the multifile
+    /// super chain) — the emit-handle fallback when a `@Metadata` function omits its `method_signature`.
+    pub fn facade_method_descriptor(&self, root: &str, jvm_name: &str) -> Option<String> {
+        self.facade_statics(root)
+            .into_iter()
+            .find(|c| c.name == jvm_name)
+            .map(|c| c.descriptor)
+    }
+
+    /// Every static callable a facade `root` declares (all names), following the multifile-facade super
+    /// chain — the name-agnostic form of [`Self::rebuild_ext_candidates`], used to build a package's
+    /// [`Self::pkg_members`] in one pass. Each `ClassInfo` is served from the L1/L2 cache.
+    fn facade_statics(&self, root: &str) -> Vec<ExtCandidate> {
+        let mut out = Vec::new();
+        let Some(root_ci) = self.find(root) else {
+            return out;
+        };
+        let root_public = root_ci.is_public();
+        let mut cur = Some(root.to_string());
+        let mut visited = std::collections::HashSet::new();
+        while let Some(cn) = cur {
+            if !visited.insert(cn.clone()) {
+                break;
+            }
+            let Some(ci) = self.find(&cn) else { break };
+            for m in &ci.methods {
+                if !m.is_static() || m.name.starts_with('<') {
+                    continue;
+                }
+                if !root_public && m.is_public() {
+                    continue;
+                }
+                let Some((_, ret_desc)) = descriptor_parts(&m.descriptor) else {
+                    continue;
+                };
+                out.push(ExtCandidate {
+                    owner: root.to_string(),
+                    name: m.name.clone(),
+                    descriptor: m.descriptor.clone(),
+                    ret_desc,
+                    signature: m.signature.clone(),
+                    public: root_public && m.is_public(),
+                });
+            }
+            cur = ci.super_class.clone();
+        }
+        out
+    }
+
+    /// The spec's `(jar, package) → PkgMembers`: the member index (`name → static callables`) that ONE
+    /// jar/dir contributes for `pkg`, built once from that jar's `kotlin_module` facades and shared across
+    /// classpaths (keyed by jar path + package in [`global_jar_pkg_members`]). Roots at the PUBLIC facade
+    /// (`CollectionsKt`), not the package-private multifile PART (`CollectionsKt__…`) `kotlin_module`
+    /// lists — the callable public statics live on the facade, and `facade_statics` drops a non-public
+    /// root's public statics (the `@InlineOnly` rule).
+    fn jar_pkg_members(&self, entry: &Entry, pkg: &str) -> JarPkgMembers {
+        let key = (entry.path().to_path_buf(), pkg.to_string());
+        let mut g = global_jar_pkg_members().lock().unwrap();
+        if let Some(m) = g.get(&key) {
+            return m.clone();
+        }
+        let jp = global_jar_packages().get_or_build(entry.path(), || build_jar_packages(entry));
+        let mut m = PkgMembers::default();
+        if let Some(pe) = jp.packages.get(pkg) {
+            let mut seen_facade = std::collections::HashSet::new();
+            for part in &pe.facades {
+                // The public multifile facade is the `__`-prefix of a part (`…/CollectionsKt__X` →
+                // `…/CollectionsKt`); a single-file facade has no `__` and roots at itself.
+                let facade = part.split_once("__").map_or(part.as_str(), |(f, _)| f);
+                if !seen_facade.insert(facade.to_string()) {
+                    continue;
+                }
+                let metas = self.meta_functions(facade);
+                for cand in self.facade_statics(facade) {
+                    // Key each static by its @Metadata SOURCE name (`kotlin_name`), NOT its JVM name — a
+                    // `@JvmName`-mangled extension (`sum` → `sumOfInt`) or value-class member resolves by
+                    // the source name; the JVM name is emit-only, kept on the candidate. A static with no
+                    // metadata (a Java method / synthetic) keeps its JVM name as the source key.
+                    let source = metas
+                        .iter()
+                        .find(|m| m.jvm_name == cand.name)
+                        .map(|m| m.kotlin_name.clone())
+                        .unwrap_or_else(|| cand.name.clone());
+                    // The receiver (first-parameter) descriptor marks `facade` as an extension owner for it
+                    // — the scoped `find_extension_owners`. Recorded before `cand` is moved into the maps.
+                    if let Some(recv) = descriptor_parts(&cand.descriptor).and_then(|(fp, _)| fp) {
+                        let owners = m.owners_by_recv.entry(recv).or_default();
+                        if owners.last().map(String::as_str) != Some(facade)
+                            && !owners.iter().any(|o| o == facade)
+                        {
+                            owners.push(facade.to_string());
+                        }
+                    }
+                    m.by_jvm
+                        .entry(cand.name.clone())
+                        .or_default()
+                        .push(cand.clone());
+                    m.by_source.entry(source).or_default().push(cand);
+                }
+            }
+        }
+        let rc = std::sync::Arc::new(m);
+        g.insert(key, rc.clone());
+        rc
+    }
+
+    /// The PUBLIC multifile facades a package declares, from the `kotlin_module` catalog (the parts
+    /// `…Kt__X` collapsed to their public facade `…Kt`), across every jar that declares the package. The
+    /// `@Metadata`-driven extension/top-level discovery reads each facade's merged metadata — the source
+    /// of truth — instead of scanning JVM statics. Declaration order, deduped.
+    pub fn package_facades(&self, pkg: &str) -> Vec<String> {
+        let tree = self.package_tree();
+        let mut out = Vec::new();
+        let Some(node) = tree.node_for(pkg) else {
+            return out;
+        };
+        for &jar_id in &node.jars {
+            let Some(entry) = self.entries.get(jar_id) else {
+                continue;
+            };
+            let jp = global_jar_packages().get_or_build(entry.path(), || build_jar_packages(entry));
+            if let Some(pe) = jp.packages.get(pkg) {
+                for part in &pe.facades {
+                    let facade = part.split_once("__").map_or(part.as_str(), |(f, _)| f);
+                    if !out.iter().any(|f| f == facade) {
+                        out.push(facade.to_string());
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// The scoped, lazy analogue of [`Self::find_extensions`]: the [`ExtCandidate`]s named `jvm_name`
+    /// (the bytecode method name) whose receiver (first-parameter) descriptor is `recv_desc`, declared by
+    /// the `kotlin_module` facades of the in-scope `packages`. Tree-driven and cached per (jar, package) —
+    /// NO whole-classpath `ensure_ext_index` scan. Only genuine Kotlin extensions live in facades, so the
+    /// caller's `@Metadata` extension check still gates a top-level function whose first parameter happens
+    /// to match. A package/facade is consulted at most once.
+    pub fn extensions_in_scope(
+        &self,
+        recv_desc: &str,
+        jvm_name: &str,
+        packages: &[String],
+    ) -> Vec<ExtCandidate> {
+        let tree = self.package_tree();
+        let mut out = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for pkg in packages {
+            if !seen.insert(pkg.as_str()) {
+                continue;
+            }
+            let Some(node) = tree.node_for(pkg) else {
+                continue;
+            };
+            for &jar_id in &node.jars {
+                let Some(entry) = self.entries.get(jar_id) else {
+                    continue;
+                };
+                if let Some(cands) = self.jar_pkg_members(entry, pkg).by_jvm.get(jvm_name) {
+                    for c in cands {
+                        if descriptor_parts(&c.descriptor)
+                            .and_then(|(fp, _)| fp)
+                            .as_deref()
+                            == Some(recv_desc)
+                        {
+                            out.push(c.clone());
+                        }
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// The scoped, lazy analogue of [`Self::find_extension_owners`]: the facades that declare a static
+    /// whose receiver (first-parameter) descriptor is `recv_desc`, among the in-scope `packages`. Reads
+    /// the per-(jar, package) `owners_by_recv` index — no `ensure_ext_index`.
+    pub fn extension_owners_in_scope(&self, recv_desc: &str, packages: &[String]) -> Vec<String> {
+        let tree = self.package_tree();
+        let mut out = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for pkg in packages {
+            if !seen.insert(pkg.as_str()) {
+                continue;
+            }
+            let Some(node) = tree.node_for(pkg) else {
+                continue;
+            };
+            for &jar_id in &node.jars {
+                let Some(entry) = self.entries.get(jar_id) else {
+                    continue;
+                };
+                if let Some(owners) = self
+                    .jar_pkg_members(entry, pkg)
+                    .owners_by_recv
+                    .get(recv_desc)
+                {
+                    for o in owners {
+                        if !out.contains(o) {
+                            out.push(o.clone());
+                        }
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// [`Self::find_extensions`] when `scope` is `None` (the whole-classpath eager index), else the
+    /// scoped, lazy tree lookup [`Self::extensions_in_scope`]. The seam that lets one enrichment body draw
+    /// its extension candidates from either backend.
+    pub fn find_extensions_scoped(
+        &self,
+        recv_desc: &str,
+        jvm_name: &str,
+        scope: Option<&[String]>,
+    ) -> Vec<ExtCandidate> {
+        match scope {
+            None => self.find_extensions(recv_desc, jvm_name),
+            Some(pkgs) => self.extensions_in_scope(recv_desc, jvm_name, pkgs),
+        }
+    }
+
+    /// [`Self::find_extension_owners`] when `scope` is `None`, else the scoped
+    /// [`Self::extension_owners_in_scope`].
+    pub fn find_extension_owners_scoped(
+        &self,
+        recv_desc: &str,
+        scope: Option<&[String]>,
+    ) -> Vec<String> {
+        match scope {
+            None => self.find_extension_owners(recv_desc),
+            Some(pkgs) => self.extension_owners_in_scope(recv_desc, pkgs),
+        }
+    }
+
+    /// The static callables named `name` declared by the `kotlin_module` facades of the in-scope
+    /// `packages` — the tree-driven, scope-pruned function/property lookup (spec § Functions). For each
+    /// package it consults only the jars that declare it (the tree), composing their per-(jar, package)
+    /// `PkgMembers`; NOT a whole-classpath scan. A package is consulted at most once.
+    pub fn functions_in_scope(&self, name: &str, packages: &[String]) -> Vec<ExtCandidate> {
+        let tree = self.package_tree();
+        let mut out = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for pkg in packages {
+            if !seen.insert(pkg.as_str()) {
+                continue;
+            }
+            let Some(node) = tree.node_for(pkg) else {
+                continue;
+            };
+            for &jar_id in &node.jars {
+                let Some(entry) = self.entries.get(jar_id) else {
+                    continue;
+                };
+                if let Some(cands) = self.jar_pkg_members(entry, pkg).by_source.get(name) {
+                    out.extend(cands.iter().cloned());
+                }
+            }
+        }
+        out
+    }
+
+    /// The spec's top-level memo lookup: the [`ResolvedEntry`] namespace record for a fully-qualified
+    /// name, cached in the `fqn → ResolvedEntry` LRU. `classifier` = the class/interface/object (or a
+    /// typealias's target) that exists at the fqn, first classpath entry winning; `callables` = the
+    /// static callables of the simple name declared by the package's facades. Both namespaces are filled
+    /// so the caller can select by syntactic position (type / call / value).
+    pub fn resolve_entry(&self, fqn: &str) -> std::rc::Rc<ResolvedEntry> {
+        if let Some(e) = self.entries_memo.borrow_mut().get(fqn) {
+            return e.clone();
+        }
+        let (pkg, name) = fqn.rsplit_once('/').unwrap_or(("", fqn));
+        let classifier = if self.find(fqn).is_some() || self.builtin_is_interface(fqn).is_some() {
+            Some(fqn.to_string())
+        } else {
+            self.type_alias_target(fqn)
+        };
+        let callables = self.functions_in_scope(name, std::slice::from_ref(&pkg.to_string()));
+        let entry = std::rc::Rc::new(ResolvedEntry {
+            classifier,
+            callables,
+        });
+        self.entries_memo
+            .borrow_mut()
+            .insert(fqn.to_string(), entry.clone());
+        entry
+    }
+
     /// The memoized rebuild for `method_name`, shared across threads and grouped by receiver — a hot name
     /// (`map`, `let`) is walked once for the whole process, and both `find_top_level` and `find_extensions`
     /// are then O(1) reads. This is what makes the lazy index perform: the WHERE map is tiny + retained;
@@ -2491,6 +2835,141 @@ mod fq_tests {
         assert!(cp.find("kotlin/collections/DoesNotExistXyz").is_none());
         // An absent class in a package no jar declares also misses (falls back cleanly).
         assert!(cp.find("no/such/pkg/Nope").is_none());
+    }
+
+    #[test]
+    fn resolve_entry_records_function_and_classifier_namespaces() {
+        let jar = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target/cache/kotlinc/2.4.0/kotlinc/lib/kotlin-stdlib.jar");
+        if !jar.exists() {
+            return; // toolchain not provisioned
+        }
+        let cp = Classpath::new(vec![jar]);
+        // A top-level function occupies the CALLABLE namespace, not the classifier one — found via the
+        // package's `kotlin_module` facades (tree-driven, no whole-classpath scan).
+        let f = cp.resolve_entry("kotlin/collections/emptyList");
+        assert!(f.classifier.is_none(), "emptyList is not a classifier");
+        assert!(
+            f.callables.iter().any(|c| c.name == "emptyList"),
+            "emptyList is a classpath callable"
+        );
+        // A class occupies the CLASSIFIER namespace (first-jar-wins internal name).
+        let c = cp.resolve_entry("kotlin/Pair");
+        assert_eq!(c.classifier.as_deref(), Some("kotlin/Pair"));
+        // An unknown name is absent in both namespaces.
+        assert!(cp
+            .resolve_entry("kotlin/collections/definitelyNotAThingXyz")
+            .is_absent());
+        // Memoized (LRU): the same fqn returns the same `Rc`.
+        let a = cp.resolve_entry("kotlin/Pair");
+        let b = cp.resolve_entry("kotlin/Pair");
+        assert!(std::rc::Rc::ptr_eq(&a, &b));
+    }
+
+    #[test]
+    fn functions_in_scope_is_tree_pruned() {
+        let jar = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target/cache/kotlinc/2.4.0/kotlinc/lib/kotlin-stdlib.jar");
+        if !jar.exists() {
+            return;
+        }
+        let cp = Classpath::new(vec![jar]);
+        // In scope: emptyList (kotlin/collections) resolves via the tree-driven per-package lookup.
+        let coll = vec!["kotlin/collections".to_string()];
+        assert!(cp
+            .functions_in_scope("emptyList", &coll)
+            .iter()
+            .any(|c| c.name == "emptyList"));
+        // Out of scope: the same name does NOT resolve (kotlinc import visibility) — the lookup only
+        // consults the given packages' facades, never the whole classpath.
+        let text = vec!["kotlin/text".to_string()];
+        assert!(cp.functions_in_scope("emptyList", &text).is_empty());
+    }
+
+    #[test]
+    fn extensions_in_scope_matches_scope_filtered_eager_index() {
+        let jar = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target/cache/kotlinc/2.4.0/kotlinc/lib/kotlin-stdlib.jar");
+        if !jar.exists() {
+            return;
+        }
+        let cp = Classpath::new(vec![jar]);
+        let coll = vec!["kotlin/collections".to_string()];
+        let recv = "Ljava/lang/Iterable;";
+        // The scoped, tree-driven enumeration returns exactly the eager index's candidates whose owner
+        // facade sits in the scoped package — the equivalence the `select_overload` switch relies on.
+        let want_owner_in_scope = |c: &ExtCandidate| {
+            c.owner.rsplit_once('/').map_or("", |(p, _)| p) == "kotlin/collections"
+        };
+        let mut eager: Vec<_> = cp
+            .find_extensions(recv, "map")
+            .into_iter()
+            .filter(want_owner_in_scope)
+            .map(|c| (c.owner, c.name, c.descriptor))
+            .collect();
+        let mut lazy: Vec<_> = cp
+            .extensions_in_scope(recv, "map", &coll)
+            .into_iter()
+            .map(|c| (c.owner, c.name, c.descriptor))
+            .collect();
+        eager.sort();
+        lazy.sort();
+        assert!(!lazy.is_empty(), "map is an Iterable extension in scope");
+        assert_eq!(lazy, eager, "tree-scoped == scope-filtered eager index");
+        // Owner query agrees on the PUBLIC facade: the eager index records the multifile PART
+        // (`…Kt__…`), the tree the `__`-stripped public facade (`…Kt`) — the form `meta_functions` and
+        // the emit path use. Compare facade-normalized.
+        let facade_of = |o: &str| o.split_once("__").map_or(o, |(f, _)| f).to_string();
+        let owners = cp.extension_owners_in_scope(recv, &coll);
+        assert!(
+            owners.iter().all(|o| o.starts_with("kotlin/collections/")),
+            "scoped owners live in the scoped package"
+        );
+        assert!(
+            cp.find_extension_owners(recv)
+                .iter()
+                .filter(|o| o.starts_with("kotlin/collections/"))
+                .all(|o| owners.contains(&facade_of(o))),
+            "every in-scope eager owner's facade is a scoped owner"
+        );
+        // Out of scope: an Iterable extension is invisible when its package is not imported.
+        assert!(cp
+            .extensions_in_scope(recv, "map", &["kotlin/text".to_string()])
+            .is_empty());
+    }
+
+    #[test]
+    fn resolve_symbols_returns_classifier_and_callable_namespaces() {
+        let jar = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target/cache/kotlinc/2.4.0/kotlinc/lib/kotlin-stdlib.jar");
+        if !jar.exists() {
+            return;
+        }
+        use crate::libraries::Callables;
+        use crate::symbol_source::SymbolSource;
+        let lib =
+            crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(Classpath::new(vec![
+                jar,
+            ])));
+        // Classifier namespace: a class fqn resolves its classifier, no callables.
+        let c = lib.resolve_symbols("kotlin/Pair");
+        assert!(c.classifier.is_some(), "kotlin/Pair is a classifier");
+        assert!(matches!(c.callables, Callables::None));
+        // Callable namespace: a top-level function fqn resolves callables, no classifier.
+        let f = lib.resolve_symbols("kotlin/collections/emptyList");
+        assert!(f.classifier.is_none());
+        assert!(
+            matches!(&f.callables, Callables::Functions(s) if !s.overloads.is_empty()),
+            "emptyList resolves as callables"
+        );
+        // Extension namespace: `map` is a kotlin/collections extension — resolve_symbols surfaces it as
+        // a receiver-agnostic Extension callable (discovered source-keyed via the tree).
+        let m = lib.resolve_symbols("kotlin/collections/map");
+        assert!(
+            matches!(&m.callables, Callables::Functions(s)
+                if s.overloads.iter().any(|o| o.kind == crate::libraries::FnKind::Extension)),
+            "map resolves as an extension callable"
+        );
     }
 
     #[test]

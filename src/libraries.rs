@@ -191,6 +191,18 @@ pub trait TargetRuntime {
         ty
     }
 
+    /// The receiver-MRO RUNG of an extension whose declared receiver is `decl_recv`, for an actual receiver
+    /// `recv`: `0` when the extension's receiver IS the receiver's own type, increasing up the receiver's
+    /// supertype chain (with the platform's primitive/array/value-class widening — an `Int` widens through
+    /// `Number`/`Comparable`/`Any`), so a `List` extension outranks an `Iterable` one. `None` when
+    /// `decl_recv` is not in the receiver's MRO (the extension does not apply). This is the receiver-coupled
+    /// "most specific receiver wins" order Kotlin overload resolution uses, recovered by the consumer for a
+    /// receiver-agnostic `resolve_symbols` overload (which carries no rung). Default: apply only on an exact
+    /// type match (a target with no supertype model).
+    fn extension_receiver_rank(&self, recv: Ty, decl_recv: Ty) -> Option<u32> {
+        (self.jvm_descriptor_form(recv) == self.jvm_descriptor_form(decl_recv)).then_some(0)
+    }
+
     /// If values of this type can be invoked like a Kotlin function, return their arity. Plain
     /// `Ty::Fun` is handled by the default; platform providers can add callable runtime types such as
     /// property references without the checker knowing their class names.
@@ -827,6 +839,35 @@ pub struct PropertyInfo {
 #[derive(Clone, Default)]
 pub struct PropertySet {
     pub overloads: Vec<PropertyInfo>,
+}
+
+/// The callable half of a [`ResolvedSymbols`]: a name is functions XOR a property, never both (a `fun`
+/// and a `val` of the same name are a redeclaration error), or neither.
+#[derive(Clone, Default)]
+pub enum Callables {
+    #[default]
+    None,
+    Functions(FunctionSet),
+    Properties(PropertySet),
+}
+
+/// What a fully-qualified name resolves to in a [`crate::symbol_source::SymbolSource`] — the
+/// platform-neutral namespace record (the spec's top-level memo value). Kotlin has TWO namespaces
+/// (classifier vs callable) and one name can occupy both at once, so this is a RECORD: the `classifier`
+/// (at most one) AND the `callables`. The resolver forms candidate FQNs from the import scope, queries
+/// `resolve_symbols` per fqn, and selects by syntactic position (type → classifier; call → callables ∪
+/// the classifier's constructors, then property-`invoke` fallback; value → property / object).
+#[derive(Clone, Default)]
+pub struct ResolvedSymbols {
+    pub classifier: Option<LibraryType>,
+    pub callables: Callables,
+}
+
+impl ResolvedSymbols {
+    /// Nothing resolves this name (both namespaces empty).
+    pub fn is_empty(&self) -> bool {
+        self.classifier.is_none() && matches!(self.callables, Callables::None)
+    }
 }
 
 /// The shape of a library type: enough for the front end to resolve member accesses against it

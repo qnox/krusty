@@ -141,6 +141,33 @@ fn fn_info(
 }
 
 impl SymbolSource for ModuleSymbols<'_> {
+    fn resolve_symbols(&self, fqn: &str) -> crate::libraries::ResolvedSymbols {
+        use crate::libraries::{Callables, ResolvedSymbols};
+        // Classifier: a module class at the fqn. Callables: `functions(name, receiver)` — members (always
+        // visible on their type) plus the module's top-level/extension functions when the fqn's package is
+        // their declaring package (a same-file function has no recorded facade — it lives in the file's own
+        // package, which the resolver queries as the same-package candidate fqn).
+        let classifier = self.resolve_type(fqn);
+        let (pkg, name) = fqn.rsplit_once('/').unwrap_or(("", fqn));
+        let facade = self.facade_of(name).unwrap_or_default();
+        let fac_pkg = facade.rsplit_once('/').map_or("", |(p, _)| p);
+        let overloads =
+            if self.syms.funs.contains_key(name) && (facade.is_empty() || fac_pkg == pkg) {
+                self.functions(name, None).overloads
+            } else {
+                Vec::new()
+            };
+        let callables = if overloads.is_empty() {
+            Callables::None
+        } else {
+            Callables::Functions(FunctionSet { overloads })
+        };
+        ResolvedSymbols {
+            classifier,
+            callables,
+        }
+    }
+
     fn functions(&self, name: &str, receiver: Option<Ty>) -> FunctionSet {
         let mut overloads = Vec::new();
         match receiver {
