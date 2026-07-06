@@ -22,7 +22,7 @@ fn collection_factory_return_types_distinguish_mutable() {
     let ret = |name: &str| {
         fns.iter()
             .find(|f| f.kotlin_name == name)
-            .and_then(|f| f.ret_class.as_deref())
+            .and_then(|f| f.ret_class)
     };
     assert_eq!(
         ret("listOf"),

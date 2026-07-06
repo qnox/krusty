@@ -441,7 +441,7 @@ impl JvmLibraries {
             .filter(|m| m.is_public)
             .filter_map(|m| {
                 let descriptor = m.jvm_desc?;
-                let (params, _) = parse_method_desc(&descriptor);
+                let (params, _) = parse_method_desc(descriptor);
                 Some(crate::libraries::CompanionFn {
                     class_internal: internal.to_string(),
                     companion_internal: companion_internal.clone(),
@@ -485,13 +485,12 @@ impl JvmLibraries {
                     m.jvm_desc,
                     m.ret_class
                 );
-                let descriptor = m.jvm_desc?;
+                let descriptor = m.jvm_desc?.to_string();
                 let (params, physical_ret) = parse_method_desc(&descriptor);
                 // Value-class implementation methods are static and take the erased receiver as their
                 // first JVM parameter. Source member resolution sees only the value parameters.
                 let logical_params = params.get(1..).unwrap_or(&[]).to_vec();
-                let ret = metadata_return_info(m.ret_class.as_deref(), m.ret_nullable)
-                    .apply(physical_ret);
+                let ret = metadata_return_info(m.ret_class, m.ret_nullable).apply(physical_ret);
                 let mut member = LibraryMember::new(m.kotlin_name, logical_params, ret, descriptor);
                 member.owner = Some(ci.this_class.clone());
                 member.physical_name = Some(m.jvm_name);
@@ -1360,7 +1359,7 @@ impl SymbolSource for JvmLibraries {
                 if !mf.is_public || mf.is_extension || mf.jvm_name == mf.kotlin_name {
                     continue;
                 }
-                let Some(desc) = mf.jvm_desc.as_deref() else {
+                let Some(desc) = mf.jvm_desc else {
                     continue;
                 };
                 let (params, physical_ret) = parse_method_desc(desc);
@@ -1386,8 +1385,7 @@ impl SymbolSource for JvmLibraries {
                 if mf.is_suspend {
                     logical.push(Ty::obj("kotlin/coroutines/Continuation"));
                 }
-                let ret = metadata_return_info(mf.ret_class.as_deref(), mf.ret_nullable)
-                    .apply(physical_ret);
+                let ret = metadata_return_info(mf.ret_class, mf.ret_nullable).apply(physical_ret);
                 let mut member =
                     LibraryMember::new(mf.kotlin_name.clone(), logical, ret, desc.to_string());
                 member.physical_name = Some(mf.jvm_name.clone());
@@ -1678,9 +1676,9 @@ impl SymbolSource for JvmLibraries {
                             .iter()
                             .find(|m| m.jvm_name == c.name && m.kotlin_name == name)
                             .filter(|m| m.is_public && m.is_inline)
-                            .and_then(|m| m.receiver_class.as_ref())
+                            .and_then(|m| m.receiver_class)
                             .is_some_and(|rc| {
-                                receiver.obj_internal() == Some(rc.as_str())
+                                receiver.obj_internal() == Some(rc)
                                     && self
                                         .cp
                                         .find(rc)
@@ -1894,14 +1892,13 @@ impl SymbolSource for JvmLibraries {
                         if mf.kotlin_name != name
                             || mf.jvm_name == name
                             || !mf.is_public
-                            || mf.receiver_class.as_deref() != Some(recv_internal)
+                            || mf.receiver_class != Some(recv_internal)
                         {
                             continue;
                         }
                         for c in self.cp.find_extensions(&recv_desc, &mf.jvm_name) {
                             let (params, pret) = parse_method_desc(&c.descriptor);
-                            let ret_metadata =
-                                metadata_return_info(mf.ret_class.as_deref(), mf.ret_nullable);
+                            let ret_metadata = metadata_return_info(mf.ret_class, mf.ret_nullable);
                             let ret = ret_metadata.class.unwrap_or(pret);
                             let inline_kind =
                                 InlineKind::from_flags(mf.is_inline, mf.is_inline && !c.public);
@@ -1959,7 +1956,7 @@ impl SymbolSource for JvmLibraries {
                             if mf.kotlin_name != name
                                 || mf.jvm_name == name
                                 || !mf.is_public
-                                || mf.receiver_class.as_deref() != Some(recv_internal)
+                                || mf.receiver_class != Some(recv_internal)
                             {
                                 continue;
                             }
@@ -1989,7 +1986,7 @@ impl SymbolSource for JvmLibraries {
                                 let mut params = vec![phys_params[0]];
                                 params.extend(logical_params.iter().copied());
                                 let ret_metadata =
-                                    metadata_return_info(mf.ret_class.as_deref(), mf.ret_nullable);
+                                    metadata_return_info(mf.ret_class, mf.ret_nullable);
                                 let ret = ret_metadata.class.unwrap_or(pret);
                                 crate::trace_compiler!(
                                     "resolve",

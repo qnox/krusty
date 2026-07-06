@@ -29,7 +29,7 @@ fn splices_real_empty_array_body() {
         let inl: Vec<_> = fns
             .iter()
             .filter(|f| f.is_inline)
-            .filter_map(|f| Some((f.jvm_name.as_str(), f.jvm_desc.as_deref()?)))
+            .filter_map(|f| Some((f.jvm_name.as_str(), f.jvm_desc?)))
             .collect();
         assert!(
             inl.iter().all(|(n, d)| !n.is_empty() && d.starts_with('(')),
