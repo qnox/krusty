@@ -1131,9 +1131,7 @@ impl SymbolSource for JvmLibraries {
                         .as_deref()
                         .map_or(Ty::obj("kotlin/Any"), Ty::obj);
                     let ty = GSig::Class(
-                        mp.ret_class
-                            .clone()
-                            .unwrap_or_else(|| "kotlin/Any".to_string()),
+                        intern(mp.ret_class.as_deref().unwrap_or("kotlin/Any")),
                         vec![],
                     );
                     let getter = LibraryCallable::library(
@@ -1158,7 +1156,7 @@ impl SymbolSource for JvmLibraries {
                     });
                     overloads.push(PropertyInfo {
                         kind: PropKind::Member,
-                        receiver: Some(GSig::Class(cn.clone(), vec![])),
+                        receiver: Some(GSig::Class(intern(&cn), vec![])),
                         formals: Vec::new(),
                         ty,
                         getter,

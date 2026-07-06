@@ -1649,7 +1649,7 @@ fn select_overload(
         o.kind == kind
             && (kind != FnKind::Extension
                 || (o.receiver_rank != u32::MAX
-                    && (o.public || (allow_must_inline && o.flags.inline.must_inline()))))
+                    && (o.public() || (allow_must_inline && o.flags.inline.must_inline()))))
     }) {
         let lp = logical_value_params(lib, o, recv, type_args);
         by_rank.entry(o.receiver_rank).or_default().push((o, lp));
