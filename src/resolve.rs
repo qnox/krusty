@@ -11753,21 +11753,34 @@ impl<'a> Checker<'a> {
                 } else {
                     match rt {
                         Ty::Error => {}
-                        Ty::Obj(internal, _) => match self.syms.prop_of(internal, &name) {
-                            Some((lty, is_var)) => {
+                        Ty::Obj(internal, _) => {
+                            if let Some((lty, is_var)) = self.syms.prop_of(internal, &name) {
                                 if !is_var {
                                     self.diags
                                         .error(span, "'val' cannot be reassigned.".to_string());
                                 }
                                 self.expect_assignable(lty, vt, span, "assignment");
-                            }
-                            None => {
+                            } else if let Some(setter) =
+                                crate::call_resolver::resolve_property_setter(
+                                    &*self.syms.libraries,
+                                    rt,
+                                    &name,
+                                )
+                            {
+                                // A `var` member of a CLASSPATH type: its setter comes from `@Metadata`
+                                // (the `properties` query), not the user-declared `props` map. A setter
+                                // existing means the property is a `var`; the value is checked against
+                                // the setter's parameter type. (A classpath `val` exposes no setter →
+                                // falls to the error below, as before.)
+                                let pty = setter.params.first().copied().unwrap_or(Ty::Error);
+                                self.expect_assignable(pty, vt, span, "assignment");
+                            } else {
                                 self.diags.error(
                                     span,
                                     format!("unresolved member '{name}' on '{}'", rt.name()),
                                 );
                             }
-                        },
+                        }
                         _ => self.diags.error(
                             span,
                             format!("cannot assign to a member of '{}'", rt.name()),

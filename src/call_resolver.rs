@@ -1555,6 +1555,36 @@ pub fn resolve_property_member(
         })
 }
 
+/// Resolve a `var` property's SETTER by its real `@Metadata` name — the write analogue of
+/// [`property_getter_via_query`]. Returns the setter `LibraryCallable` (its `owner`/`descriptor` drive
+/// the emitted `setX(v)` call, `params[0]` is the value type the write is checked against). `None` when
+/// the property is read-only (`val`, no setter), no source exposes it as a member property, or the
+/// setter is value-class `@JvmName`-mangled (`setId-<hash>` — left to the value-class path, which knows
+/// the logical type).
+pub fn resolve_property_setter(
+    lib: &dyn CompilerPlatform,
+    recv: Ty,
+    property: &str,
+) -> Option<LibraryCallable> {
+    let setter = lib
+        .properties(property, Some(recv))
+        .overloads
+        .into_iter()
+        .filter(|p| p.kind == PropKind::Member)
+        .min_by_key(|p| p.receiver_rank)
+        .and_then(|p| p.setter)?;
+    if setter.name.contains('-') {
+        return None;
+    }
+    // A real setter takes exactly one parameter (the value). Anything else is malformed metadata —
+    // treat it as absent so the checker and lowerer agree (both consult `params[0]`) rather than the
+    // checker accepting permissively while the lowerer falls back to the inferred value type.
+    if setter.params.len() != 1 {
+        return None;
+    }
+    Some(setter)
+}
+
 fn select_instance_info(
     lib: &dyn CompilerPlatform,
     recv: Ty,

@@ -83,3 +83,35 @@ fn jvmname_extension_property_resolves_via_metadata_getter() {
         );
     }
 }
+
+#[test]
+fn classpath_var_member_setter_assigns_via_metadata() {
+    // Assigning a classpath `var` member (`b.count = 7`) resolves the property's setter from @Metadata.
+    // Before the properties() write path, this was `unresolved member 'count'` — the checker only knew
+    // USER-declared props, never the classpath. Compiles AND runs end-to-end.
+    let lib = "package lib\nclass Box(var count: Int)";
+    let main = "import lib.Box\nfun box(): String {\n  val b = Box(1)\n  b.count = 7\n  \
+                return if (b.count == 7) \"OK\" else \"f:${b.count}\"\n}";
+    if let Some(out) = common::run_box_against("varsetterplain", lib, main) {
+        assert_eq!(
+            out, "OK",
+            "a classpath var member setter must resolve via its metadata setter"
+        );
+    }
+}
+
+#[test]
+fn classpath_jvmname_var_setter_assigns_via_metadata() {
+    // A classpath `var` whose accessors are `@JvmName`-renamed: the `setX` guess (`setN`) misses the real
+    // `stash`, so the assignment `b.n = 7` needs the metadata setter name from the properties() query.
+    let lib = "package lib\nclass Box(var raw: Int) {\n  var n: Int\n    \
+               @JvmName(\"grab\") get() = raw\n    @JvmName(\"stash\") set(v) { raw = v }\n}";
+    let main = "import lib.Box\nfun box(): String {\n  val b = Box(1)\n  b.n = 7\n  \
+                return if (b.n == 7) \"OK\" else \"f:${b.n}\"\n}";
+    if let Some(out) = common::run_box_against("varsetterjvmname", lib, main) {
+        assert_eq!(
+            out, "OK",
+            "an @JvmName var setter must resolve via its metadata setter"
+        );
+    }
+}
