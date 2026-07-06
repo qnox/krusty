@@ -289,6 +289,32 @@ fn global_entry_ext() -> &'static EntryCache<EntryExt> {
     CACHE.get_or_init(EntryCache::new)
 }
 
+/// Per-ENTRY package catalogs (one [`JarPackages`] per jar/dir), composed into the per-classpath
+/// [`PackageNode`] tree by [`Classpath::package_tree`]. See [`EntryCache`].
+fn global_jar_packages() -> &'static EntryCache<JarPackages> {
+    static CACHE: std::sync::OnceLock<EntryCache<JarPackages>> = std::sync::OnceLock::new();
+    CACHE.get_or_init(EntryCache::new)
+}
+
+/// Per-ENTRY type-alias tables (one [`TypeIndex`] per jar/dir), composed per classpath by
+/// [`Classpath::scan_types`]. See [`EntryCache`] — the build holds the map lock, so each jar's
+/// "parse every `*Kt` facade for aliases" scan runs ONCE for the whole process instead of racing
+/// across every worker thread on cold start (the cost the box-conformance flamegraph flagged).
+fn global_entry_types() -> &'static EntryCache<TypeIndex> {
+    static CACHE: std::sync::OnceLock<EntryCache<TypeIndex>> = std::sync::OnceLock::new();
+    CACHE.get_or_init(EntryCache::new)
+}
+
+/// Process-global composed package tree, keyed by the classpath entry set — like [`global_type_cache`],
+/// the stdlib/JDK entries are identical across every compiled file, so the compose runs once per process.
+fn global_pkg_tree_cache(
+) -> &'static std::sync::Mutex<HashMap<Vec<PathBuf>, std::sync::Arc<PackageNode>>> {
+    static CACHE: std::sync::OnceLock<
+        std::sync::Mutex<HashMap<Vec<PathBuf>, std::sync::Arc<PackageNode>>>,
+    > = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
 /// The rebuilt candidates for ONE method name, grouped for O(1) receiver lookup so `find_extensions`
 /// doesn't re-scan + re-parse the whole list on every call site (the cost the eager `by_recv` map avoided).
 #[derive(Default)]
@@ -556,6 +582,11 @@ pub struct Classpath {
     archives: RefCell<HashMap<PathBuf, zip::ZipArchive<File>>>,
     ext: RefCell<Option<std::sync::Arc<ExtIndex>>>,
     types: RefCell<Option<std::sync::Arc<TypeIndex>>>,
+    /// The composed package tree (`segment → PackageNode`, each node listing the jars that declare that
+    /// package) — the merged classpath view name resolution walks. Composed once from the per-jar
+    /// [`JarPackages`] (each cached per jar via [`EntryCache`]) and shared via `Arc` from a process-global
+    /// cache keyed by the entry set, so a cp that adds one library reuses every other jar's catalog.
+    pkg_tree: RefCell<Option<std::sync::Arc<PackageNode>>>,
     /// Lazily-built index of the JDK jimage: internal class name → [`JimageEntry`], so JDK class bytes
     /// can be seek-read (and inflated, for a compressed image) on demand. Shared via `Arc` from a
     /// process-global cache so the 146 MB parse happens once.
@@ -659,6 +690,7 @@ impl Classpath {
             archives: RefCell::new(HashMap::new()),
             ext: RefCell::new(None),
             types: RefCell::new(None),
+            pkg_tree: RefCell::new(None),
             jimage: RefCell::new(None),
             bodies: RefCell::new(crate::lru::LruCache::new(BODY_CAP)),
             suspend_names: RefCell::new(crate::lru::LruCache::new(META_CAP)),
@@ -696,9 +728,14 @@ impl Classpath {
             .borrow()
             .as_ref()
             .map_or(0, |i| i.by_name.len() + i.by_recv_owners.len());
+        let pkgtree = self
+            .pkg_tree
+            .borrow()
+            .as_ref()
+            .map_or(0, |t| t.package_count());
         format!(
             "classpath#{} L1_class={} L2_class={} fns={} meta_fns={} meta_ovl={} suspend={} bodies={} \
-             builtin={} | jimage={} type={} ext={}",
+             builtin={} | jimage={} type={} ext={} pkgtree={}",
             self.id,
             self.local_cache.borrow().len(),
             self.cache.read().unwrap().len(),
@@ -711,7 +748,39 @@ impl Classpath {
             jimage,
             types,
             ext,
+            pkgtree,
         )
+    }
+
+    /// The composed classpath package tree (`segment → node`, each node listing the jars that declare
+    /// that package), built once from the per-jar [`JarPackages`] and shared via `Arc`. The merged view
+    /// name resolution walks: `tree.node_for("kotlin/collections")` gives the jars to consult. Cached
+    /// per-instance and process-globally by the entry set.
+    pub fn package_tree(&self) -> std::sync::Arc<PackageNode> {
+        if let Some(t) = self.pkg_tree.borrow().as_ref() {
+            return t.clone();
+        }
+        let key: Vec<PathBuf> = self
+            .entries
+            .iter()
+            .map(|e| e.path().to_path_buf())
+            .collect();
+        if let Some(t) = global_pkg_tree_cache().lock().unwrap().get(&key) {
+            *self.pkg_tree.borrow_mut() = Some(t.clone());
+            return t.clone();
+        }
+        let parts: Vec<std::sync::Arc<JarPackages>> = self
+            .entries
+            .iter()
+            .map(|e| global_jar_packages().get_or_build(e.path(), || build_jar_packages(e)))
+            .collect();
+        let tree = std::sync::Arc::new(compose_package_tree(&parts));
+        global_pkg_tree_cache()
+            .lock()
+            .unwrap()
+            .insert(key, tree.clone());
+        *self.pkg_tree.borrow_mut() = Some(tree.clone());
+        tree
     }
 
     pub fn cached_functions(&self, key: &(String, Option<Ty>)) -> Option<FunctionSet> {
@@ -1272,14 +1341,23 @@ impl Classpath {
             *self.types.borrow_mut() = Some(idx.clone());
             return idx.clone();
         }
+        // Compose from per-ENTRY alias tables. Each entry's scan (parse every `*Kt` facade for type
+        // aliases) is built ONCE via `EntryCache` — which holds its map lock across the build — and shared
+        // by every classpath that includes the jar. So the expensive scan no longer races across all
+        // worker threads on cold start (it dominated `resolve_type` in the flamegraph via
+        // `type_alias_target`); only the cheap map merge runs per classpath. This mirrors the ext index's
+        // per-entry composition (d8bbc91).
         let mut idx = TypeIndex::default();
-        // Only Kotlin `*Kt` facades carry type aliases — scan jars/dirs for them. The JDK jimage has no
-        // Kotlin metadata, so it is skipped entirely (it used to be walked only for the dead class-name map).
         for e in &self.entries {
-            match e {
-                Entry::Dir(d) => scan_types_dir(d, &mut idx),
-                Entry::Jar(j) => scan_types_jar(j, &mut idx),
-                Entry::Jimage(_) => {}
+            let part = global_entry_types().get_or_build(e.path(), || build_entry_types(e));
+            for (alias, target) in &part.type_aliases {
+                // First entry on the classpath wins — kotlinc/java class-resolution order (and this doc's
+                // "first hit" invariant). The old inline scan `insert`ed in entry order, so a LATER jar
+                // overwrote an earlier one (last-wins); that was a latent divergence, masked only because
+                // no two corpus jars declare the same alias (box conformance stays FAIL:0 either way).
+                idx.type_aliases
+                    .entry(alias.clone())
+                    .or_insert_with(|| target.clone());
             }
         }
         let idx = std::sync::Arc::new(idx);
@@ -1742,6 +1820,174 @@ fn build_entry_ext(entry: &Entry) -> EntryExt {
     ext
 }
 
+/// A classpath entry's index into `Classpath::entries` — the jar/dir a package or class comes from,
+/// used only to order `find`/facade lookups by classpath declaration order.
+type JarId = usize;
+
+/// One package's facts within a single jar/dir. Built from the central-directory name pass plus the
+/// jar's `kotlin_module`; the members (facade statics, builtins) are parsed lazily elsewhere. The fields
+/// are the payload the later rollout steps consume (lazy facade/builtin resolution) — populated and
+/// unit-tested now, read once resolution is routed through the tree.
+#[allow(dead_code)]
+#[derive(Default)]
+struct PkgEntry {
+    /// File-facade internal names declared for this package by `kotlin_module` (`kotlin/collections/
+    /// CollectionsKt`). The roots whose `@Metadata` statics are the package's top-level/extension functions.
+    facades: Vec<String>,
+    /// The package directory holds `<pkg>/*.class` entries (regular classes / facades live here).
+    has_classes: bool,
+    /// The package has a `.kotlin_builtins` fragment (a builtin type with no `.class`: List, Int, Map…).
+    has_builtins: bool,
+}
+
+/// One classpath entry's package catalog: which packages it declares, and per-package facts. Built once
+/// per jar/dir (cached via [`EntryCache`]) from ONE shallow `kotlin_module` parse plus a
+/// central-directory package-name pass (entry names only — no decompression, no class parse).
+#[derive(Default)]
+struct JarPackages {
+    /// slashed package name (`kotlin/collections`, `""` for the default package) → its facts.
+    packages: HashMap<String, PkgEntry>,
+}
+
+/// A node in the composed classpath package tree: sub-packages by segment, and every jar that declares
+/// THIS package (union across the classpath, in declaration order). One jar sits in many nodes.
+#[derive(Default)]
+pub struct PackageNode {
+    children: HashMap<String, PackageNode>,
+    jars: Vec<JarId>,
+}
+
+impl PackageNode {
+    /// The node for a slashed package path (`""` = this root), or `None` if no jar declares it. The
+    /// resolution seam (wired in a later rollout step); exercised now by the compose unit tests.
+    #[allow(dead_code)]
+    fn node_for(&self, pkg: &str) -> Option<&PackageNode> {
+        let mut node = self;
+        if !pkg.is_empty() {
+            for seg in pkg.split('/') {
+                node = node.children.get(seg)?;
+            }
+        }
+        Some(node)
+    }
+
+    /// Total package count in the subtree (a package = a node that some jar declares). For memory
+    /// reporting.
+    fn package_count(&self) -> usize {
+        (!self.jars.is_empty()) as usize
+            + self
+                .children
+                .values()
+                .map(PackageNode::package_count)
+                .sum::<usize>()
+    }
+}
+
+/// Record one central-directory entry name into its package's facts (no bytes read). `a/b/C.class` marks
+/// package `a/b` as having classes; `a/b/b.kotlin_builtins` marks it as having builtins.
+fn record_pkg_entry_name(name: &str, jp: &mut JarPackages) {
+    let pkg_of = |n: &str| {
+        n.rsplit_once('/')
+            .map_or(String::new(), |(p, _)| p.to_string())
+    };
+    if name.ends_with(".class") {
+        jp.packages.entry(pkg_of(name)).or_default().has_classes = true;
+    } else if name.ends_with(".kotlin_builtins") {
+        jp.packages.entry(pkg_of(name)).or_default().has_builtins = true;
+    }
+}
+
+/// Merge a jar's `kotlin_module` bytes into its catalog: each package's facade internal names.
+fn record_kotlin_module(bytes: &[u8], jp: &mut JarPackages) {
+    for (pkg, facades) in super::metadata::read_kotlin_module(bytes) {
+        jp.packages.entry(pkg).or_default().facades.extend(facades);
+    }
+}
+
+/// Build one entry's [`JarPackages`] — the only eager per-jar work: a central-directory name pass plus
+/// the shallow `kotlin_module` read(s). The JDK jimage is skipped (no Kotlin metadata; JDK types reach
+/// the resolver via `jvm_class_map`, not package probing).
+fn build_jar_packages(entry: &Entry) -> JarPackages {
+    let mut jp = JarPackages::default();
+    match entry {
+        Entry::Jar(j) => build_jar_packages_jar(j, &mut jp),
+        Entry::Dir(d) => build_jar_packages_dir(d, d, &mut jp),
+        Entry::Jimage(_) => {}
+    }
+    jp
+}
+
+fn build_jar_packages_jar(jar: &Path, jp: &mut JarPackages) {
+    let Ok(f) = File::open(jar) else { return };
+    let Ok(mut archive) = zip::ZipArchive::new(f) else {
+        return;
+    };
+    // Name pass over the central directory — no decompression. Defer reading `kotlin_module` bytes.
+    let mut module_indices = Vec::new();
+    for i in 0..archive.len() {
+        let Ok(e) = archive.by_index(i) else { continue };
+        let name = e.name();
+        if name.starts_with("META-INF/") && name.ends_with(".kotlin_module") {
+            module_indices.push(i);
+        } else {
+            record_pkg_entry_name(name, jp);
+        }
+    }
+    for i in module_indices {
+        let Ok(mut e) = archive.by_index(i) else {
+            continue;
+        };
+        let mut buf = Vec::new();
+        if e.read_to_end(&mut buf).is_ok() {
+            record_kotlin_module(&buf, jp);
+        }
+    }
+}
+
+fn build_jar_packages_dir(root: &Path, dir: &Path, jp: &mut JarPackages) {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for e in rd.flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            build_jar_packages_dir(root, &p, jp);
+            continue;
+        }
+        let Ok(rel) = p.strip_prefix(root) else {
+            continue;
+        };
+        let rel = rel.to_string_lossy().replace('\\', "/");
+        if rel.ends_with(".kotlin_module") {
+            if let Ok(b) = std::fs::read(&p) {
+                record_kotlin_module(&b, jp);
+            }
+        } else {
+            record_pkg_entry_name(&rel, jp);
+        }
+    }
+}
+
+/// Compose per-jar [`JarPackages`] into the merged [`PackageNode`] tree — a cheap union: every package a
+/// jar declares adds that jar to the package's node (in classpath declaration order).
+fn compose_package_tree(parts: &[std::sync::Arc<JarPackages>]) -> PackageNode {
+    let mut root = PackageNode::default();
+    for (jar_id, jp) in parts.iter().enumerate() {
+        for pkg in jp.packages.keys() {
+            let mut node = &mut root;
+            if !pkg.is_empty() {
+                for seg in pkg.split('/') {
+                    node = node.children.entry(seg.to_string()).or_default();
+                }
+            }
+            if !node.jars.contains(&jar_id) {
+                node.jars.push(jar_id);
+            }
+        }
+    }
+    root
+}
+
 /// The classpath is the JVM realization of the inliner's narrow [`MethodBodies`] capability — the
 /// emitter sees only this, not the whole `Classpath`.
 impl super::inline::MethodBodies for Classpath {
@@ -1925,6 +2171,18 @@ fn is_type_aliases_kt(internal: &str) -> bool {
         .ends_with("Kt")
 }
 
+/// Build ONE classpath entry's type-alias table — the per-entry unit `EntryCache` memoizes (built once
+/// per jar, race-free). The JDK jimage carries no Kotlin metadata, so it contributes nothing.
+fn build_entry_types(entry: &Entry) -> TypeIndex {
+    let mut idx = TypeIndex::default();
+    match entry {
+        Entry::Dir(d) => scan_types_dir(d, &mut idx),
+        Entry::Jar(j) => scan_types_jar(j, &mut idx),
+        Entry::Jimage(_) => {}
+    }
+    idx
+}
+
 fn scan_types_dir(dir: &Path, idx: &mut TypeIndex) {
     scan_types_dir_rooted(dir, dir, idx);
 }
@@ -2096,6 +2354,99 @@ mod fq_tests {
         assert_ne!(id_a, b.id(), "a reallocated Classpath must not reuse an id");
         let c = Classpath::new(vec![PathBuf::from("/nonexistent/c")]);
         assert_ne!(b.id(), c.id(), "distinct live Classpaths have distinct ids");
+    }
+
+    fn jar_packages(pkgs: &[(&str, PkgEntry)]) -> std::sync::Arc<JarPackages> {
+        let mut jp = JarPackages::default();
+        for (p, e) in pkgs {
+            jp.packages.insert(
+                p.to_string(),
+                PkgEntry {
+                    facades: e.facades.clone(),
+                    has_classes: e.has_classes,
+                    has_builtins: e.has_builtins,
+                },
+            );
+        }
+        std::sync::Arc::new(jp)
+    }
+
+    #[test]
+    fn compose_unions_jars_per_package_and_nests() {
+        let jar0 = jar_packages(&[
+            (
+                "kotlin/collections",
+                PkgEntry {
+                    has_classes: true,
+                    ..PkgEntry::default()
+                },
+            ),
+            (
+                "kotlin",
+                PkgEntry {
+                    has_classes: true,
+                    ..PkgEntry::default()
+                },
+            ),
+        ]);
+        // A second jar ALSO declares `kotlin/collections` — the node must list both jars, in cp order.
+        let jar1 = jar_packages(&[(
+            "kotlin/collections",
+            PkgEntry {
+                has_builtins: true,
+                ..PkgEntry::default()
+            },
+        )]);
+        let tree = compose_package_tree(&[jar0, jar1]);
+        assert_eq!(tree.node_for("kotlin").unwrap().jars, vec![0]);
+        assert_eq!(
+            tree.node_for("kotlin/collections").unwrap().jars,
+            vec![0, 1]
+        );
+        assert!(tree.node_for("kotlin/ranges").is_none());
+        // `kotlin` and `kotlin/collections` are the two packages.
+        assert_eq!(tree.package_count(), 2);
+    }
+
+    #[test]
+    fn record_entry_name_classifies_packages() {
+        let mut jp = JarPackages::default();
+        record_pkg_entry_name("kotlin/collections/CollectionsKt.class", &mut jp);
+        record_pkg_entry_name("kotlin/collections/collections.kotlin_builtins", &mut jp);
+        record_pkg_entry_name("Top.class", &mut jp); // default package
+        let c = &jp.packages["kotlin/collections"];
+        assert!(c.has_classes && c.has_builtins);
+        assert!(jp.packages[""].has_classes);
+    }
+
+    #[test]
+    fn real_stdlib_jar_declares_known_packages_and_facades() {
+        let jar = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target/cache/kotlinc/2.4.0/kotlinc/lib/kotlin-stdlib.jar");
+        if !jar.exists() {
+            return; // toolchain not provisioned in this environment
+        }
+        let jp = build_jar_packages(&Entry::Jar(jar));
+        // Central-directory pass sees the class-bearing + builtins packages.
+        let coll = &jp.packages["kotlin/collections"];
+        assert!(coll.has_classes, "kotlin/collections has .class entries");
+        assert!(
+            coll.has_builtins,
+            "kotlin/collections has a .kotlin_builtins"
+        );
+        // `kotlin_module` names the multifile-facade PART classes (`CollectionsKt__CollectionsKt`),
+        // which carry the package's top-level statics — exactly the roots lazy facade parsing needs.
+        assert!(
+            coll.facades
+                .iter()
+                .any(|f| f.starts_with("kotlin/collections/CollectionsKt")),
+            "kotlin_module names the CollectionsKt parts, got {:?}",
+            coll.facades
+        );
+        // Compose into a tree; the nested package resolves and the root does not falsely appear.
+        let tree = compose_package_tree(&[std::sync::Arc::new(jp)]);
+        assert_eq!(tree.node_for("kotlin/collections").unwrap().jars, vec![0]);
+        assert!(tree.node_for("kotlin").unwrap().jars == vec![0]);
     }
 
     #[test]

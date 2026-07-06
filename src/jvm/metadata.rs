@@ -1965,6 +1965,76 @@ pub fn parse_builtins(data: &[u8]) -> std::collections::HashMap<String, BuiltinC
 /// bit). A call to a method of one of these names (in this class) is a suspension point. Both function
 /// carriers are read: a file facade's `Package.function` (field 3, top-level `suspend fun`s) AND a
 /// `Class.function` (field 9, `suspend` members of a class/interface).
+/// Parse a `META-INF/*.kotlin_module` file → `(package fq-name /slashed/, [facade internal names])`.
+/// The counterpart of [`crate::metadata::module::build_kotlin_module`]: a 20-byte header (five
+/// big-endian `i32` words `[len, maj, min, patch, flags]`) then a `Module` protobuf whose field 1 is
+/// repeated `PackageParts { package_fq_name = 1 (dotted), short_class_name = 2 (repeated) }`. The
+/// package name is returned slashed (`kotlin/collections`) and each facade as a full internal name
+/// (`kotlin/collections/CollectionsKt`) so the caller can resolve it directly.
+pub fn read_kotlin_module(bytes: &[u8]) -> Vec<(String, Vec<String>)> {
+    if bytes.len() < 20 {
+        return Vec::new();
+    }
+    let mut pb = Pb {
+        b: &bytes[20..],
+        i: 0,
+    };
+    let mut out = Vec::new();
+    while !pb.at_end() {
+        let Some(tag) = pb.varint() else { break };
+        match (tag >> 3, tag & 7) {
+            (1, 2) => {
+                let Some(n) = pb.varint() else { break };
+                let Some(msg) = pb.bytes(n as usize) else {
+                    break;
+                };
+                if let Some(pp) = parse_package_parts(msg) {
+                    out.push(pp);
+                }
+            }
+            (_, w) => {
+                if pb.skip(w).is_none() {
+                    break;
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Decode one `PackageParts` message → slashed package + full facade internal names.
+fn parse_package_parts(body: &[u8]) -> Option<(String, Vec<String>)> {
+    let mut pb = Pb { b: body, i: 0 };
+    let mut pkg: Option<String> = None;
+    let mut facades: Vec<String> = Vec::new();
+    while !pb.at_end() {
+        let tag = pb.varint()?;
+        match (tag >> 3, tag & 7) {
+            (1, 2) => {
+                let n = pb.varint()? as usize;
+                pkg = Some(std::str::from_utf8(pb.bytes(n)?).ok()?.replace('.', "/"));
+            }
+            (2, 2) => {
+                let n = pb.varint()? as usize;
+                facades.push(std::str::from_utf8(pb.bytes(n)?).ok()?.to_string());
+            }
+            (_, w) => pb.skip(w)?,
+        }
+    }
+    let pkg = pkg?;
+    let facades = facades
+        .into_iter()
+        .map(|f| {
+            if pkg.is_empty() {
+                f
+            } else {
+                format!("{pkg}/{f}")
+            }
+        })
+        .collect();
+    Some((pkg, facades))
+}
+
 pub fn suspend_method_names(ci: &ClassInfo) -> HashSet<String> {
     if ci.kotlin_d1.is_empty() {
         return HashSet::new();
@@ -1975,4 +2045,33 @@ pub fn suspend_method_names(ci: &ClassInfo) -> HashSet<String> {
         .filter(|f| f.is_suspend)
         .map(|f| f.kotlin_name)
         .collect()
+}
+
+#[cfg(test)]
+mod module_reader_tests {
+    use super::read_kotlin_module;
+    use crate::metadata::module::build_kotlin_module;
+
+    #[test]
+    fn round_trips_package_facades() {
+        let bytes = build_kotlin_module(&[
+            ("kotlin.collections".into(), vec!["CollectionsKt".into()]),
+            ("demo".into(), vec!["Lib1Kt".into(), "Lib2Kt".into()]),
+        ]);
+        let got = read_kotlin_module(&bytes);
+        assert!(got.contains(&(
+            "kotlin/collections".to_string(),
+            vec!["kotlin/collections/CollectionsKt".to_string()]
+        )));
+        assert!(got.contains(&(
+            "demo".to_string(),
+            vec!["demo/Lib1Kt".to_string(), "demo/Lib2Kt".to_string()]
+        )));
+    }
+
+    #[test]
+    fn empty_or_short_input_is_empty() {
+        assert!(read_kotlin_module(&[]).is_empty());
+        assert!(read_kotlin_module(&[0u8; 8]).is_empty());
+    }
 }
