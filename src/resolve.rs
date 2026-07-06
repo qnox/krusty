@@ -3668,6 +3668,15 @@ fn is_nothing_ty(t: Ty) -> bool {
 fn make_checker<'a>(file: &'a File, syms: &'a SymbolTable, diags: &'a mut DiagSink) -> Checker<'a> {
     let imports = import_map(file);
     let import_levels = import_levels(file, syms.libraries.platform_default_import_packages());
+    // Top-level function scope: the leveled import packages plus each explicit import's package.
+    let mut fn_scope: Vec<String> = import_levels.iter().flatten().cloned().collect();
+    for fq in imports.values() {
+        if let Some((pkg, _)) = fq.rsplit_once('/') {
+            if !fn_scope.iter().any(|p| p == pkg) {
+                fn_scope.push(pkg.to_string());
+            }
+        }
+    }
     Checker {
         file,
         syms,
@@ -3677,6 +3686,7 @@ fn make_checker<'a>(file: &'a File, syms: &'a SymbolTable, diags: &'a mut DiagSi
         ret_ty: Ty::Unit,
         imports,
         import_levels,
+        fn_scope,
         tparams: Default::default(),
         reified_tparams: std::collections::HashSet::new(),
         this_ty: None,
@@ -4447,6 +4457,10 @@ struct Checker<'a> {
     /// Star/implicit import packages by kotlinc precedence level (same-package, explicit stars,
     /// defaults) — the import set [`Self::imported_type_internal`] resolves names against.
     import_levels: [Vec<String>; 3],
+    /// The packages in scope for TOP-LEVEL function resolution: every `import_levels` package PLUS the
+    /// package of each explicit import (`import a.b.foo` scopes `a/b`). A top-level call resolves only to
+    /// a function whose facade is in this set (kotlinc), passed to the [`CallResolver`].
+    fn_scope: Vec<String>,
     /// Generic type parameters in scope (erased to `java/lang/Object`).
     tparams: TParams,
     /// The `reified` type parameters in scope (a subset of `tparams`, from the enclosing `inline fun`).
@@ -4507,7 +4521,7 @@ struct Checker<'a> {
 impl<'a> Checker<'a> {
     /// The arg-binding call-resolution layer over this checker's [`SymbolSource`]. Cheap to construct.
     fn resolver(&self) -> crate::call_resolver::CallResolver<'_> {
-        crate::call_resolver::CallResolver::new(&*self.syms.libraries)
+        crate::call_resolver::CallResolver::new_scoped(&*self.syms.libraries, &self.fn_scope)
     }
     /// Whether the current module declares a top-level function `name` (shadow-precedence test) — asked
     /// through the module source rather than touching `syms.funs` directly.
