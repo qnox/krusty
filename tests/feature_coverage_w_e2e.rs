@@ -15,7 +15,6 @@
 
 use std::fs;
 use std::path::PathBuf;
-use std::process::Command;
 
 use super::common;
 
@@ -431,25 +430,26 @@ fn run_suspend(name: &str, src: &str, expect: i32) {
         }
     };
     let _ = &jh;
-    let Some(stdlib) = common::stdlib_jar() else {
+    let Some(stdlib_path) = common::stdlib_jar() else {
         eprintln!("skipping {name}: no kotlin-stdlib jar");
         return;
     };
-    let stdlib = stdlib.to_string_lossy().into_owned();
-    let krusty = env!("CARGO_BIN_EXE_krusty");
+    let stdlib = stdlib_path.to_string_lossy().into_owned();
+    let jdk = common::jdk_modules();
     let dir = std::env::temp_dir().join(format!("krusty_covw_{name}_{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
-    fs::write(dir.join("S.kt"), src).unwrap();
-    let kc = Command::new(krusty)
-        .args(["-cp", &stdlib, "-d", dir.to_str().unwrap()])
-        .arg(dir.join("S.kt"))
-        .output()
-        .unwrap();
+    // Compile the suspend source in-process (warm classpath), not via a cold krusty CLI spawn.
     assert!(
-        kc.status.success(),
-        "{name}: krusty failed to compile:\n{}",
-        String::from_utf8_lossy(&kc.stderr)
+        common::compile_to_dir(
+            src,
+            "S",
+            std::slice::from_ref(&stdlib_path),
+            jdk.as_deref(),
+            &dir
+        )
+        .is_some(),
+        "{name}: krusty failed to compile"
     );
     let driver = format!(
         "import kotlin.coroutines.*;\n\

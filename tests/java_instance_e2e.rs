@@ -1,6 +1,10 @@
 //! Java-interop breadth: constructing a classpath Java object (`Calc(10)`) and calling its
 //! *instance* methods (`c.add(5)`, `c.tag()`), resolved via the `.class` reader → `invokespecial`
 //! `<init>` + `invokevirtual`. Uses a real javac-compiled class.
+//!
+//! Compiles Kotlin IN-PROCESS (`compile_to_dir`, warm classpath cache) and runs the Java driver
+//! through the persistent `javac_run` server — never spawning the krusty CLI or a cold `java` per
+//! case (see `tests/common`), so this stays fast even under coverage instrumentation.
 
 use std::fs;
 use std::process::Command;
@@ -18,11 +22,12 @@ fn constructs_and_calls_java_instance_methods() {
         return;
     };
     let javac = format!("{java_home}/bin/javac");
-    let java = format!("{java_home}/bin/java");
     if !std::path::Path::new(&javac).exists() {
         return;
     }
-    let krusty = env!("CARGO_BIN_EXE_krusty");
+    let (Some(jdk), Some(stdlib)) = (common::jdk_modules(), common::stdlib_jar()) else {
+        return;
+    };
     let root = std::env::temp_dir().join(format!("krusty_ji_{}", std::process::id()));
     let cp = root.join("cp");
     let _ = fs::remove_dir_all(&root);
@@ -39,53 +44,28 @@ fn constructs_and_calls_java_instance_methods() {
         .status
         .success());
 
-    // krusty constructs it and calls instance methods.
-    fs::write(root.join("Use.kt"),
-        "import util.Calc\nfun box(): String {\n  val c = Calc(10)\n  if (c.add(5) != 15) return \"f1\"\n  if (c.tag() != \"calc\") return \"f2\"\n  return \"OK\"\n}\n").unwrap();
+    // krusty constructs it and calls instance methods — compiled in-process against the cp dir.
+    let use_src = "import util.Calc\nfun box(): String {\n  val c = Calc(10)\n  if (c.add(5) != 15) return \"f1\"\n  if (c.tag() != \"calc\") return \"f2\"\n  return \"OK\"\n}\n";
     let kr = root.join("kr");
-    let out = Command::new(krusty)
-        .args(["-cp", cp.to_str().unwrap(), "-d", kr.to_str().unwrap()])
-        .arg(root.join("Use.kt"))
-        .output()
-        .unwrap();
-    if !out.status.success() {
-        eprintln!(
-            "skip (IR unsupported): {}",
-            String::from_utf8_lossy(&out.stderr)
-        );
+    if common::compile_to_dir(use_src, "Use", std::slice::from_ref(&cp), Some(&jdk), &kr).is_none()
+    {
+        eprintln!("skip (IR unsupported)");
         return;
     }
 
     let main = "public class M { public static void main(String[] a) { System.out.println(UseKt.box()); } }";
-    fs::write(kr.join("M.java"), main).unwrap();
+    let m_path = kr.join("M.java");
+    fs::write(&m_path, main).unwrap();
     // The compiled output may reference `kotlin/jvm/internal/Intrinsics` (parameter null-checks, like
     // kotlinc) — put the stdlib on the run classpath.
-    let stdlib = common::stdlib_jar()
-        .map(|p| format!(":{}", p.display()))
-        .unwrap_or_default();
     let kcp = format!(
-        "{}:{}{}",
+        "{}:{}:{}",
         kr.to_str().unwrap(),
         cp.to_str().unwrap(),
-        stdlib
+        stdlib.display()
     );
-    assert!(Command::new(&javac)
-        .args(["-cp", &kcp, "-d", kr.to_str().unwrap()])
-        .arg(kr.join("M.java"))
-        .output()
-        .unwrap()
-        .status
-        .success());
-    let run = Command::new(&java)
-        .args(["-Xverify:all", "-cp", &kcp, "M"])
-        .output()
-        .unwrap();
-    assert_eq!(
-        String::from_utf8_lossy(&run.stdout).trim(),
-        "OK",
-        "stderr={}",
-        String::from_utf8_lossy(&run.stderr)
-    );
+    let out = common::javac_run(m_path.to_str().unwrap(), &kcp, kr.to_str().unwrap(), "M");
+    assert_eq!(out.as_deref().map(str::trim), Some("OK"), "run={out:?}");
     let _ = fs::remove_dir_all(&root);
 }
 
@@ -99,11 +79,12 @@ fn calls_java_static_overloaded_methods() {
         return;
     };
     let javac = format!("{java_home}/bin/javac");
-    let java = format!("{java_home}/bin/java");
     if !std::path::Path::new(&javac).exists() {
         return;
     }
-    let krusty = env!("CARGO_BIN_EXE_krusty");
+    let (Some(jdk), Some(stdlib)) = (common::jdk_modules(), common::stdlib_jar()) else {
+        return;
+    };
     let root = std::env::temp_dir().join(format!("krusty_js_{}", std::process::id()));
     let cp = root.join("cp");
     let _ = fs::remove_dir_all(&root);
@@ -127,54 +108,28 @@ fn calls_java_static_overloaded_methods() {
         .status
         .success());
 
-    fs::write(
-        root.join("Use.kt"),
-        "import lib.Logf\nfun box(): String {\n\
+    let use_src = "import lib.Logf\nfun box(): String {\n\
          if (Logf.make(\"x\") != \"n:x\") return \"f1\"\n\
          if (Logf.parse(\"10\") != 10) return \"f2\"\n\
          if (Logf.parse(\"ff\", 16) != 255) return \"f3\"\n\
-         return \"OK\"\n}\n",
-    )
-    .unwrap();
+         return \"OK\"\n}\n";
     let kr = root.join("kr");
-    let out = Command::new(krusty)
-        .args(["-cp", cp.to_str().unwrap(), "-d", kr.to_str().unwrap()])
-        .arg(root.join("Use.kt"))
-        .output()
-        .unwrap();
     assert!(
-        out.status.success(),
-        "krusty failed on Java static call:\n{}",
-        String::from_utf8_lossy(&out.stderr)
+        common::compile_to_dir(use_src, "Use", std::slice::from_ref(&cp), Some(&jdk), &kr)
+            .is_some(),
+        "krusty failed on Java static call"
     );
 
     let main = "public class M { public static void main(String[] a) { System.out.println(UseKt.box()); } }";
-    fs::write(kr.join("M.java"), main).unwrap();
-    let stdlib = common::stdlib_jar()
-        .map(|p| format!(":{}", p.display()))
-        .unwrap_or_default();
+    let m_path = kr.join("M.java");
+    fs::write(&m_path, main).unwrap();
     let kcp = format!(
-        "{}:{}{}",
+        "{}:{}:{}",
         kr.to_str().unwrap(),
         cp.to_str().unwrap(),
-        stdlib
+        stdlib.display()
     );
-    assert!(Command::new(&javac)
-        .args(["-cp", &kcp, "-d", kr.to_str().unwrap()])
-        .arg(kr.join("M.java"))
-        .output()
-        .unwrap()
-        .status
-        .success());
-    let run = Command::new(&java)
-        .args(["-Xverify:all", "-cp", &kcp, "M"])
-        .output()
-        .unwrap();
-    assert_eq!(
-        String::from_utf8_lossy(&run.stdout).trim(),
-        "OK",
-        "stderr={}",
-        String::from_utf8_lossy(&run.stderr)
-    );
+    let out = common::javac_run(m_path.to_str().unwrap(), &kcp, kr.to_str().unwrap(), "M");
+    assert_eq!(out.as_deref().map(str::trim), Some("OK"), "run={out:?}");
     let _ = fs::remove_dir_all(&root);
 }

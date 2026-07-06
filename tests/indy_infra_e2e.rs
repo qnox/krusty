@@ -6,7 +6,8 @@
 
 use krusty::jvm::classfile::{ClassWriter, CodeBuilder, ACC_PRIVATE, ACC_PUBLIC, ACC_STATIC};
 use std::fs;
-use std::process::Command;
+
+use super::common;
 
 fn env(k: &str) -> Option<String> {
     std::env::var(k).ok().filter(|v| !v.is_empty())
@@ -18,9 +19,7 @@ fn invokedynamic_lambda_runs() {
         eprintln!("skipping indy_infra_e2e: set JAVA_HOME");
         return;
     };
-    let java = format!("{java_home}/bin/java");
-    let javac = format!("{java_home}/bin/javac");
-    if !std::path::Path::new(&javac).exists() {
+    if !std::path::Path::new(&format!("{java_home}/bin/javac")).exists() {
         return;
     }
 
@@ -72,22 +71,18 @@ Ljava/lang/invoke/CallSite;",
         "public class M { public static void main(String[] a) { System.out.println(Indy.run()); } }",
     )
     .unwrap();
-    assert!(Command::new(&javac)
-        .args(["-cp", dir.to_str().unwrap(), "-d", dir.to_str().unwrap()])
-        .arg(dir.join("M.java"))
-        .output()
-        .unwrap()
-        .status
-        .success());
-    let r = Command::new(&java)
-        .args(["-Xverify:all", "-cp", dir.to_str().unwrap(), "M"])
-        .output()
-        .unwrap();
+    // Persistent `javac_run` (its JavaRunner JVM uses `-Xverify:all`, verifying the krusty-emitted
+    // invokedynamic class on load) — no cold `javac`/`java` per case.
+    let out = common::javac_run(
+        dir.join("M.java").to_str().unwrap(),
+        dir.to_str().unwrap(),
+        dir.to_str().unwrap(),
+        "M",
+    );
     assert_eq!(
-        String::from_utf8_lossy(&r.stdout).trim(),
-        "42",
-        "stderr={}",
-        String::from_utf8_lossy(&r.stderr)
+        out.as_deref().map(str::trim),
+        Some("42"),
+        "indy run: {out:?}"
     );
     let _ = fs::remove_dir_all(&dir);
 }

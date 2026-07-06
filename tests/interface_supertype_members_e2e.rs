@@ -5,7 +5,6 @@
 
 use std::fs;
 use std::path::PathBuf;
-use std::process::Command;
 
 use super::common;
 
@@ -160,9 +159,7 @@ fn suspend_interface_member() {
         return;
     };
 
-    fs::write(
-        work.join("Main.kt"),
-        "package app\n\
+    let main_src = "package app\n\
          suspend fun grab(r: ConfigRepo): String {\n\
          \x20 val c = r.getConfig(\"k\")\n\
          \x20 return c.name\n\
@@ -170,18 +167,20 @@ fn suspend_interface_member() {
          suspend fun grabUnit(r: ConfigRepo): String {\n\
          \x20 r.updateStatus(\"k\", \"done\")\n\
          \x20 return \"unit\"\n\
-         }\n",
-    )
-    .unwrap();
-    let cp = format!("{}:{}", libout.display(), stdlib.display());
-    let ok = Command::new(env!("CARGO_BIN_EXE_krusty"))
-        .args(["-cp", &cp, "-d", work.to_str().unwrap()])
-        .arg(work.join("Main.kt"))
-        .output()
-        .unwrap()
-        .status
-        .success();
-    assert!(ok, "krusty failed on the suspend interface-member caller");
+         }\n";
+    // Compile in-process against the kotlinc-built lib + stdlib (warm classpath), not a cold CLI spawn.
+    let jdk = common::jdk_modules();
+    assert!(
+        common::compile_to_dir(
+            main_src,
+            "Main",
+            &[libout.clone(), stdlib.clone()],
+            jdk.as_deref(),
+            &work,
+        )
+        .is_some(),
+        "krusty failed on the suspend interface-member caller"
+    );
 
     fs::write(
         work.join("M.java"),
