@@ -240,12 +240,13 @@ struct ExtIndex {
     toplevel_only: std::collections::HashSet<String>,
 }
 
-/// Full type index from the classpath: class names and Kotlin type aliases.
+/// Classpath Kotlin type aliases (`typealias X = Y` in a library), simple alias name → JVM internal name.
+/// A simple/FQ name → internal CLASS map used to live here too, but name resolution is import-driven (via
+/// `resolve_type` probes and the ext index's `resolve_top_level_callable`), not table-driven — verified by
+/// building it empty with no test regression. Building it eagerly for every class on the classpath (the
+/// whole ~30k-class JDK jimage included) was ~85 MB of retained dead weight + a full-image name scan.
 #[derive(Default, Clone, Debug)]
 pub struct TypeIndex {
-    /// Simple name → JVM internal name (e.g. `"StringBuilder"` → `"java/lang/StringBuilder"`).
-    /// Only includes unambiguous mappings (if two classes share a simple name, neither appears).
-    pub class_names: HashMap<String, String>,
     /// Kotlin type alias simple name → JVM internal name
     /// (e.g. `"StringBuilder"` → `"java/lang/StringBuilder"`).
     pub type_aliases: HashMap<String, String>,
@@ -537,7 +538,7 @@ impl Classpath {
             .types
             .borrow()
             .as_ref()
-            .map_or(0, |i| i.class_names.len() + i.type_aliases.len());
+            .map_or(0, |i| i.type_aliases.len());
         let ext = self
             .ext
             .borrow()
@@ -1094,19 +1095,14 @@ impl Classpath {
             return idx.clone();
         }
         let mut idx = TypeIndex::default();
-        // Track ambiguous simple names so we can remove them.
-        let mut ambiguous: std::collections::HashSet<String> = std::collections::HashSet::new();
-
+        // Only Kotlin `*Kt` facades carry type aliases — scan jars/dirs for them. The JDK jimage has no
+        // Kotlin metadata, so it is skipped entirely (it used to be walked only for the dead class-name map).
         for e in &self.entries {
             match e {
-                Entry::Dir(d) => scan_types_dir(d, &mut idx, &mut ambiguous),
-                Entry::Jar(j) => scan_types_jar(j, &mut idx, &mut ambiguous),
-                Entry::Jimage(p) => scan_types_jimage(p, &mut idx, &mut ambiguous),
+                Entry::Dir(d) => scan_types_dir(d, &mut idx),
+                Entry::Jar(j) => scan_types_jar(j, &mut idx),
+                Entry::Jimage(_) => {}
             }
-        }
-        // Remove ambiguous simple names that map to multiple internal names.
-        for name in &ambiguous {
-            idx.class_names.remove(name.as_str());
         }
         let idx = std::sync::Arc::new(idx);
         global_type_cache().lock().unwrap().insert(key, idx.clone());
@@ -1690,57 +1686,6 @@ fn read_one_type<'a>(s: &mut &'a str) -> &'a str {
     }
 }
 
-/// Register `internal` (e.g. `java/lang/StringBuilder`) into the simple-name → internal index,
-/// tracking ambiguity. **Name-based** — does not parse the class file. This is the lazy path:
-/// kotlinc/javac likewise index by entry/package name and only read a `.class` when its members
-/// are actually needed (see `find`).
-fn register_class_name(
-    internal: &str,
-    idx: &mut TypeIndex,
-    ambiguous: &mut std::collections::HashSet<String>,
-) {
-    if internal.is_empty() {
-        return;
-    }
-    let simple = internal.rsplit('/').next().unwrap_or(internal);
-    // Skip synthetic/anonymous/nested (`$`) and module/package descriptors.
-    if simple.contains('$') || simple == "module-info" || simple == "package-info" {
-        return;
-    }
-    // A fully-qualified type reference (`kotlin.time.TimeSource`) resolves WITHOUT an import — Kotlin
-    // always permits the fully-qualified name. Register the dotted FQ form → internal; it is unique
-    // (one class per FQ name), so it never participates in the simple-name ambiguity pruning.
-    if internal.contains('/') {
-        idx.class_names
-            .entry(internal.replace('/', "."))
-            .or_insert_with(|| internal.to_string());
-    }
-    match idx.class_names.get(simple) {
-        Some(existing) if existing != internal => {
-            // A `kotlin/*` type WINS its simple name over a non-kotlin one — mirrors kotlinc, where the
-            // `kotlin.*` packages are default-imported, so `Continuation` means `kotlin/coroutines/
-            // Continuation`, not the JVM's `jdk/internal/vm/Continuation`. Only a clash between two
-            // same-tier (both `kotlin/*`, or both non-kotlin) types is genuinely ambiguous → pruned.
-            let existing_kotlin = existing.starts_with("kotlin/");
-            let new_kotlin = internal.starts_with("kotlin/");
-            if new_kotlin && !existing_kotlin {
-                idx.class_names
-                    .insert(simple.to_string(), internal.to_string());
-                ambiguous.remove(simple);
-            } else if existing_kotlin && !new_kotlin {
-                // keep the kotlin winner already recorded
-            } else {
-                ambiguous.insert(simple.to_string());
-            }
-        }
-        Some(_) => {}
-        None => {
-            idx.class_names
-                .insert(simple.to_string(), internal.to_string());
-        }
-    }
-}
-
 /// `Xxx.class` entry name (jar/jimage path) → internal name, or `None` if not an indexable class.
 fn class_internal_from_entry(name: &str) -> Option<&str> {
     name.strip_suffix(".class").filter(|s| !s.is_empty())
@@ -1769,29 +1714,21 @@ fn is_type_aliases_kt(internal: &str) -> bool {
         .ends_with("Kt")
 }
 
-fn scan_types_dir(
-    dir: &Path,
-    idx: &mut TypeIndex,
-    ambiguous: &mut std::collections::HashSet<String>,
-) {
-    scan_types_dir_rooted(dir, dir, idx, ambiguous);
+fn scan_types_dir(dir: &Path, idx: &mut TypeIndex) {
+    scan_types_dir_rooted(dir, dir, idx);
 }
 
-/// Walk `dir`, registering each `*.class` by its path relative to `root` (the internal name).
-/// Only `*TypeAliasesKt.class` files are read+parsed (for aliases); all others are name-only.
-fn scan_types_dir_rooted(
-    root: &Path,
-    dir: &Path,
-    idx: &mut TypeIndex,
-    ambiguous: &mut std::collections::HashSet<String>,
-) {
+/// Walk `dir` for `*TypeAliasesKt.class` files and decode their Kotlin type aliases. Other classes are
+/// skipped — the classpath no longer builds a name → internal map (it was dead; import-driven resolution
+/// goes through `resolve_type` / the ext index).
+fn scan_types_dir_rooted(root: &Path, dir: &Path, idx: &mut TypeIndex) {
     let Ok(rd) = std::fs::read_dir(dir) else {
         return;
     };
     for e in rd.flatten() {
         let p = e.path();
         if p.is_dir() {
-            scan_types_dir_rooted(root, &p, idx, ambiguous);
+            scan_types_dir_rooted(root, &p, idx);
         } else if p.extension().map_or(false, |x| x == "class") {
             let Ok(rel) = p.strip_prefix(root) else {
                 continue;
@@ -1800,7 +1737,6 @@ fn scan_types_dir_rooted(
             let Some(internal) = class_internal_from_entry(&rel) else {
                 continue;
             };
-            register_class_name(internal, idx, ambiguous);
             if is_type_aliases_kt(internal) {
                 if let Ok(b) = std::fs::read(&p) {
                     parse_aliases_from_bytes(&b, idx);
@@ -1810,11 +1746,7 @@ fn scan_types_dir_rooted(
     }
 }
 
-fn scan_types_jar(
-    jar: &Path,
-    idx: &mut TypeIndex,
-    ambiguous: &mut std::collections::HashSet<String>,
-) {
+fn scan_types_jar(jar: &Path, idx: &mut TypeIndex) {
     let Ok(f) = File::open(jar) else { return };
     let Ok(mut archive) = zip::ZipArchive::new(f) else {
         return;
@@ -1827,8 +1759,7 @@ fn scan_types_jar(
         let Some(internal) = class_internal_from_entry(&name) else {
             continue;
         };
-        register_class_name(internal, idx, ambiguous);
-        // Parse bytes only for the rare alias-carrier classes — everything else is name-only.
+        // Parse bytes only for the rare alias-carrier classes — everything else is skipped.
         if is_type_aliases_kt(internal) {
             let mut buf = Vec::new();
             if entry.read_to_end(&mut buf).is_ok() {
@@ -1838,13 +1769,11 @@ fn scan_types_jar(
     }
 }
 
-/// Index class names from a JDK `lib/modules` jimage. Name-only (no class parsing), reading the
-/// jimage location table directly — the bootclasspath equivalent of a jar's central directory.
+/// Build the jimage class index: internal name → [`JimageEntry`] (content offset + on-disk size +
+/// compressed flag) for each `.class` resource, read from the jimage location table directly — the
+/// bootclasspath equivalent of a jar's central directory — so JDK class bytes can be seek-read on demand.
 /// Format reference (little-endian header): jdk.internal.jimage.BasicImageReader / ImageHeader /
-/// ImageLocation. Inner classes (`A$B`) and ambiguous simple names are dropped, like any entry.
-/// Build the jimage class index: internal name → [`JimageEntry`] for each `.class` resource (storing
-/// the on-disk size + whether it is "zip"-compressed). Mirrors `scan_types_jimage`'s navigation but
-/// keeps content offsets.
+/// ImageLocation.
 fn build_jimage_index(path: &Path) -> Option<JimageIndex> {
     use std::io::Read;
     // Read ONLY the header + location/string tables (a few MB), NOT the ~146 MB content blob that follows
@@ -1937,140 +1866,9 @@ fn build_jimage_index(path: &Path) -> Option<JimageIndex> {
     Some(idx)
 }
 
-fn scan_types_jimage(
-    path: &Path,
-    idx: &mut TypeIndex,
-    ambiguous: &mut std::collections::HashSet<String>,
-) {
-    let Ok(b) = std::fs::read(path) else { return };
-    if b.len() < 28 {
-        return;
-    }
-    let u32le = |o: usize| u32::from_le_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]]);
-    if u32le(0) != 0xCAFE_DADA {
-        return;
-    }
-    let table_length = u32le(16) as usize;
-    let locations_size = u32le(20) as usize;
-    let header = 28;
-    let offsets = header + table_length * 4; // skip redirect table (table_length × i32)
-    let locations = offsets + table_length * 4;
-    let strings = locations + locations_size;
-    if strings > b.len() {
-        return;
-    }
-    // A jimage string is NUL-terminated modified-UTF8 at `strings + off` (off 0 = empty).
-    let read_str = |off: usize| -> &str {
-        if off == 0 {
-            return "";
-        }
-        let start = strings + off;
-        let mut e = start;
-        while e < b.len() && b[e] != 0 {
-            e += 1;
-        }
-        std::str::from_utf8(&b[start..e]).unwrap_or("")
-    };
-    // Decode an ImageLocation attribute stream into (module, parent, base, extension) string offsets.
-    let decode = |mut p: usize| -> (usize, usize, usize, usize) {
-        let (mut m, mut par, mut base, mut ext) = (0usize, 0usize, 0usize, 0usize);
-        while p < b.len() {
-            let byte = b[p];
-            p += 1;
-            let kind = byte >> 3;
-            if kind == 0 {
-                break;
-            } // ATTRIBUTE_END
-            let len = ((byte & 0x7) + 1) as usize;
-            let mut v = 0usize;
-            for _ in 0..len {
-                if p >= b.len() {
-                    break;
-                }
-                v = (v << 8) | b[p] as usize;
-                p += 1;
-            }
-            match kind {
-                1 => m = v,    // MODULE
-                2 => par = v,  // PARENT (package, '/'-separated)
-                3 => base = v, // BASE (simple file name, incl. extension separator handling below)
-                4 => ext = v,  // EXTENSION
-                _ => {} // OFFSET/COMPRESSED/UNCOMPRESSED — content attrs, unused for the index
-            }
-        }
-        (m, par, base, ext)
-    };
-    for i in 0..table_length {
-        let loc_off = u32le(offsets + i * 4) as usize;
-        if loc_off == 0 {
-            continue;
-        }
-        let (m, par, base, ext) = decode(locations + loc_off);
-        // Index java module classes (`java.base`, `java.*`); skip the JDK's own `jdk.*`/`sun.*`
-        // implementation modules' resources only by what they expose by name + ambiguity rules.
-        if read_str(ext) != "class" {
-            continue;
-        }
-        let parent = read_str(par);
-        if parent.is_empty() {
-            continue;
-        }
-        let internal = format!("{parent}/{}", read_str(base));
-        let _ = m;
-        register_class_name(&internal, idx, ambiguous);
-    }
-}
-
 #[cfg(test)]
 mod fq_tests {
     use super::*;
-
-    #[test]
-    fn registers_fully_qualified_name() {
-        let mut idx = TypeIndex::default();
-        let mut amb = std::collections::HashSet::new();
-        register_class_name("kotlin/time/TimeSource", &mut idx, &mut amb);
-        // Both the simple name AND the dotted fully-qualified name resolve to the internal — a FQ type
-        // reference needs no import.
-        assert_eq!(
-            idx.class_names.get("TimeSource").map(String::as_str),
-            Some("kotlin/time/TimeSource")
-        );
-        assert_eq!(
-            idx.class_names
-                .get("kotlin.time.TimeSource")
-                .map(String::as_str),
-            Some("kotlin/time/TimeSource")
-        );
-        // A second class with the same simple name: the simple name is contested (here `kotlin/*` wins,
-        // mirroring kotlinc's default imports), but each distinct FQ name stays independently resolvable.
-        register_class_name("com/example/TimeSource", &mut idx, &mut amb);
-        assert_eq!(
-            idx.class_names
-                .get("com.example.TimeSource")
-                .map(String::as_str),
-            Some("com/example/TimeSource")
-        );
-        assert_eq!(
-            idx.class_names
-                .get("kotlin.time.TimeSource")
-                .map(String::as_str),
-            Some("kotlin/time/TimeSource")
-        );
-
-        // Two genuinely ambiguous (same-tier) simple names ARE pruned, yet both FQ names still resolve.
-        register_class_name("a/b/Widget", &mut idx, &mut amb);
-        register_class_name("c/d/Widget", &mut idx, &mut amb);
-        assert!(amb.contains("Widget"), "same-tier simple name is ambiguous");
-        assert_eq!(
-            idx.class_names.get("a.b.Widget").map(String::as_str),
-            Some("a/b/Widget")
-        );
-        assert_eq!(
-            idx.class_names.get("c.d.Widget").map(String::as_str),
-            Some("c/d/Widget")
-        );
-    }
 
     // Every `Classpath` gets a distinct process-unique `id`, EVEN when an earlier instance has been
     // dropped (and its heap address could be reused). Per-classpath caches (the library seed) key on this
