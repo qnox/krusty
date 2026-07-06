@@ -184,6 +184,9 @@ pub struct ClassSig {
     /// outside the declaring class. Only body properties are recorded; primary-constructor properties
     /// default to `public`.
     pub prop_visibility: HashMap<String, Visibility>,
+    /// Visibility of each MEMBER function that is not `public`, keyed by name — the function analogue of
+    /// [`Self::prop_visibility`], read by the same access check for a member call.
+    pub fn_visibility: HashMap<String, Visibility>,
 }
 
 /// The un-erased declared shape of a generic higher-order method, retained so a call site can
@@ -1883,6 +1886,13 @@ pub fn collect_signatures_with_cp(
                         .filter(|bp| bp.visibility != Visibility::Public)
                         .map(|bp| (bp.name.clone(), bp.visibility))
                         .collect();
+                    // Non-public member-function visibility (the function analogue of `prop_visibility`).
+                    let fn_visibility: HashMap<String, Visibility> = c
+                        .methods
+                        .iter()
+                        .filter(|m| m.visibility != Visibility::Public)
+                        .map(|m| (m.name.clone(), m.visibility))
+                        .collect();
                     let comp_internal = format!("{internal}$Companion");
                     table.classes.insert(
                         c.name.clone(),
@@ -1907,6 +1917,7 @@ pub fn collect_signatures_with_cp(
                             tparam_names,
                             generic_props,
                             prop_visibility,
+                            fn_visibility,
                             value_field,
                             generic_methods,
                         },
@@ -1944,6 +1955,7 @@ pub fn collect_signatures_with_cp(
                                 value_field: None,
                                 generic_methods: HashMap::new(),
                                 prop_visibility: HashMap::new(),
+                                fn_visibility: HashMap::new(),
                             },
                         );
                     }
@@ -8581,6 +8593,57 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// The EFFECTIVE visibility of member `name` on `receiver` and the class that declares it, walking
+    /// the base-class chain. Stops at the FIRST class that declares `name` (a subclass member shadows a
+    /// same-named base one), so an inherited `private` on a superclass is checked against that
+    /// superclass — not silently allowed because the receiver's own map lacks it. `is_fn` selects the
+    /// function vs property table. `None` when no class in the chain declares it (a builtin/absent member).
+    fn effective_member_visibility(
+        &self,
+        receiver: &str,
+        name: &str,
+        is_fn: bool,
+    ) -> Option<(Visibility, String)> {
+        let mut cur = Some(receiver.to_string());
+        while let Some(internal) = cur {
+            let cs = self.syms.class_by_internal(&internal)?;
+            let declares = if is_fn {
+                cs.methods.contains_key(name)
+            } else {
+                cs.prop(name).is_some()
+            };
+            if declares {
+                let vis = if is_fn {
+                    cs.fn_visibility.get(name)
+                } else {
+                    cs.prop_visibility.get(name)
+                }
+                .copied()
+                .unwrap_or(Visibility::Public);
+                return Some((vis, internal));
+            }
+            cur = cs.super_internal.clone();
+        }
+        None
+    }
+
+    /// Emit kotlinc's access diagnostic when a member of `owner` with visibility `vis` is NOT reachable
+    /// from the current site. Shared by the property-read and member-call checks.
+    fn reject_if_inaccessible(&mut self, vis: Visibility, name: &str, owner: &str, span: Span) {
+        if !self.member_accessible(vis, owner) {
+            let kind = match vis {
+                Visibility::Private => "private",
+                Visibility::Protected => "protected",
+                Visibility::Internal => "internal",
+                Visibility::Public => "public",
+            };
+            self.diags.error(
+                span,
+                format!("cannot access '{name}': it is {kind} in '{owner}'"),
+            );
+        }
+    }
+
     fn check_member(&mut self, rt: Ty, name: &str, span: Span, mexpr: Option<ExprId>) -> Ty {
         if rt == Ty::Error {
             return Ty::Error;
@@ -8602,23 +8665,10 @@ impl<'a> Checker<'a> {
                 // The member DOES resolve here, so surface kotlinc's diagnostic rather than silently
                 // compiling an illegal read. (Under-enforcement is safe — a legal program is never
                 // rejected; over-enforcement would be a false positive, so the rule stays conservative.)
-                if let Some(vis) = self
-                    .syms
-                    .class_by_internal(internal)
-                    .and_then(|cs| cs.prop_visibility.get(name))
-                    .copied()
+                if let Some((vis, owner)) = self.effective_member_visibility(internal, name, false)
                 {
-                    if !self.member_accessible(vis, internal) {
-                        let kind = match vis {
-                            Visibility::Private => "private",
-                            Visibility::Protected => "protected",
-                            Visibility::Internal => "internal",
-                            Visibility::Public => "public",
-                        };
-                        self.diags.error(
-                            span,
-                            format!("cannot access '{name}': it is {kind} in '{internal}'"),
-                        );
+                    if vis != Visibility::Public {
+                        self.reject_if_inaccessible(vis, name, &owner, span);
                     }
                 }
                 // Generic substitution: if `name` is declared as one of the receiver class's type
@@ -9692,7 +9742,16 @@ impl<'a> Checker<'a> {
                     return ret;
                 }
                 // Instance method call on a class value: `p.method(args)` (own or inherited).
-                if let Ty::Obj(_, _) = rt {
+                if let Ty::Obj(internal, _) = rt {
+                    // A non-public member FUNCTION may be inaccessible from this site — kotlinc rejects it;
+                    // surface the same diagnostic rather than silently compiling an illegal call.
+                    if let Some((vis, owner)) =
+                        self.effective_member_visibility(internal, &name, true)
+                    {
+                        if vis != Visibility::Public {
+                            self.reject_if_inaccessible(vis, &name, &owner, span);
+                        }
+                    }
                     // The user member resolved through the current module as a `SymbolSource`
                     // (`ModuleSymbols`); its DFS member walk matches `lookup_method`, so the first Member
                     // overload is the same one hand-rolled lookup would pick. Collected owned so the
@@ -12169,6 +12228,17 @@ mod tests {
         // A class NESTED inside the owner (here an `inner class`) may read the enclosing private property
         // through an instance of the owner — kotlinc allows it, so the access check must not reject it.
         ok("class C {\n  private val secret = 42\n  inner class N {\n    fun r(o: C): Int = o.secret\n  }\n}");
+    }
+
+    #[test]
+    fn private_member_function_access_is_checked() {
+        // A `private` member FUNCTION is callable only from within its class — a qualified call from
+        // outside is rejected (kotlinc); a same-class call is accepted.
+        err_contains(
+            "class C { private fun secret(): Int = 1 }\nfun box(): String { C().secret(); return \"OK\" }",
+            "it is private in 'C'",
+        );
+        ok("class C {\n  private fun secret(): Int = 1\n  fun via(o: C): Int = o.secret()\n}");
     }
 
     #[test]
