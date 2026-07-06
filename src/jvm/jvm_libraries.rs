@@ -1058,8 +1058,10 @@ impl SymbolSource for JvmLibraries {
         // top-level property (`receiver = None`) is a later slice. Each carries the REAL getter/setter
         // from `@Metadata`'s `JvmPropertySignature`, so the caller emits the accessor by name rather than
         // guessing `getX`.
-        let Some(internal) = receiver.and_then(|r| r.kotlin_class_internal().map(str::to_string))
-        else {
+        let Some(recv) = receiver else {
+            return PropertySet::default();
+        };
+        let Some(internal) = recv.kotlin_class_internal().map(str::to_string) else {
             return PropertySet::default();
         };
         let mut overloads = Vec::new();
@@ -1129,6 +1131,72 @@ impl SymbolSource for JvmLibraries {
                 queue.extend(t.supertypes);
             }
             rung += 1;
+        }
+        // Extension properties on the receiver (and its supertypes). A facade's `Package` metadata
+        // declares them WITH a receiver type; the getter is a static `getFoo(Recv)` on the facade, which
+        // the extension index (keyed by a static method's first-parameter receiver) points at. Rung =
+        // receiver-MRO position, mirroring extension functions.
+        for (rank, recv_desc) in supertype_descriptors(&self.cp, recv)
+            .into_iter()
+            .enumerate()
+        {
+            for owner in self.cp.find_extension_owners(&recv_desc) {
+                let Some(fci) = self.cp.find(&owner) else {
+                    continue;
+                };
+                for mp in metadata::package_properties(&fci) {
+                    if mp.name != name {
+                        continue;
+                    }
+                    // Must be an EXTENSION property whose declared receiver is EXACTLY this rung's type —
+                    // the facade may declare same-named extensions on several receivers.
+                    let Some(rc) = &mp.receiver_class else {
+                        continue;
+                    };
+                    if format!("L{};", to_jvm_internal(rc)) != recv_desc {
+                        continue;
+                    }
+                    let (Some(getter_name), Some(getter_desc)) = (mp.getter_name, mp.getter_desc)
+                    else {
+                        continue;
+                    };
+                    let ret_ty = mp
+                        .ret_class
+                        .as_deref()
+                        .map_or(Ty::obj("kotlin/Any"), Ty::obj);
+                    let ty = GSig::Class(
+                        mp.ret_class
+                            .clone()
+                            .unwrap_or_else(|| "kotlin/Any".to_string()),
+                        vec![],
+                    );
+                    // The static getter's signature leads with the receiver (`getFoo(Recv)`).
+                    let (params, physical_ret) = parse_method_desc(&getter_desc);
+                    let getter = LibraryCallable::library(
+                        owner.clone(),
+                        getter_name,
+                        params,
+                        ret_ty,
+                        physical_ret,
+                        getter_desc,
+                    );
+                    overloads.push(PropertyInfo {
+                        kind: PropKind::Extension,
+                        receiver: Some(GSig::Class(
+                            mp.receiver_class.clone().unwrap_or_default(),
+                            vec![],
+                        )),
+                        formals: Vec::new(),
+                        ty,
+                        getter,
+                        setter: None,
+                        is_const: mp.is_const,
+                        visibility: mp.visibility,
+                        owner: owner.clone(),
+                        receiver_rank: rank as u32,
+                    });
+                }
+            }
         }
         PropertySet { overloads }
     }
