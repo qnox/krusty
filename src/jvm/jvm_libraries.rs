@@ -16,7 +16,7 @@ use crate::libraries::{
     RangeConstruction, ReturnInfo, RuntimeCtor, RuntimeOp, TargetRuntime, Visibility,
 };
 use crate::symbol_source::SymbolSource;
-use crate::types::Ty;
+use crate::types::{intern, Ty};
 
 /// The JVM platform's contribution to Kotlin's default imports (the LANGUAGE-level `kotlin.*` set lives
 /// in [`crate::resolve::KOTLIN_DEFAULT_IMPORT_PACKAGES`]; the two are composed in `import_wildcards` and
@@ -283,7 +283,7 @@ impl JvmLibraries {
                 for sup in supers {
                     if let GSig::Class(sup_internal, sup_args) = sup {
                         let sup_targs = gsig_tys(&sup_args, &binds);
-                        q.push_back((to_jvm_internal(&sup_internal).to_string(), sup_targs));
+                        q.push_back((to_jvm_internal(sup_internal).to_string(), sup_targs));
                     }
                 }
             } else {
@@ -382,7 +382,7 @@ impl JvmLibraries {
                 for sup in supers {
                     if let GSig::Class(sup_internal, sup_args) = sup {
                         let sup_targs = gsig_tys(&sup_args, &binds);
-                        q.push_back((to_jvm_internal(&sup_internal).to_string(), sup_targs));
+                        q.push_back((to_jvm_internal(sup_internal).to_string(), sup_targs));
                     }
                 }
             } else {
@@ -553,7 +553,7 @@ fn parse_gsig(s: &str) -> Option<(GSig, &str)> {
     match *b.first()? {
         b'T' => {
             let end = s.find(';')?;
-            Some((GSig::Var(s[1..end].to_string()), &s[end + 1..]))
+            Some((GSig::Var(intern(&s[1..end])), &s[end + 1..]))
         }
         b'[' => {
             let (inner, rest) = parse_gsig(&s[1..])?;
@@ -566,13 +566,13 @@ fn parse_gsig(s: &str) -> Option<(GSig, &str)> {
                 Some(i) if i < semi => i,
                 _ => semi,
             };
-            let internal = to_kotlin_internal(&s[1..name_end]).to_string();
+            let internal = intern(to_kotlin_internal(&s[1..name_end]));
             if let Some(i) = lt.filter(|&i| i < semi) {
                 let mut rest = &s[i + 1..];
                 let mut args = Vec::new();
                 while !rest.starts_with('>') {
                     if let Some(stripped) = rest.strip_prefix('*') {
-                        args.push(GSig::Class("kotlin/Any".to_string(), vec![]));
+                        args.push(GSig::Class(intern("kotlin/Any"), vec![]));
                         rest = stripped;
                         continue;
                     }
@@ -615,7 +615,7 @@ fn parse_gsig(s: &str) -> Option<(GSig, &str)> {
 
 fn gsig_unbox_wrapper(g: GSig) -> GSig {
     match g {
-        GSig::Class(internal, args) => match internal.as_str() {
+        GSig::Class(internal, args) => match internal {
             "java/lang/Integer" | "kotlin/Int" => GSig::Prim(Ty::Int),
             "java/lang/Long" | "kotlin/Long" => GSig::Prim(Ty::Long),
             "java/lang/Short" | "kotlin/Short" => GSig::Prim(Ty::Short),
@@ -767,32 +767,34 @@ fn suspend_return_from_gsig(
     binds: &std::collections::HashMap<String, Ty>,
 ) -> Option<Ty> {
     match gsig.params.last()? {
-        GSig::Class(n, args) if n == "kotlin/coroutines/Continuation" => match args.first()? {
-            // A bare class → its CANONICAL `Ty` (`kotlin/String` → `Ty::String`, `kotlin/Int` → `Ty::Int`,
-            // `kotlin/Unit` → `Ty::Unit`), so the recovered return unifies with the source-spelled type
-            // rather than a non-canonical `Obj("kotlin/String")`. A generic class (`List<Item>`) keeps its
-            // arguments via the general converter.
-            GSig::Class(name, cargs) if cargs.is_empty() => {
-                // Canonicalize a JVM built-in the generic signature spells in Java terms
-                // (`java/lang/String` → `kotlin/String`, `java/lang/Object` → `kotlin/Any`) so the
-                // recovered return unifies with the source-spelled type rather than a non-canonical
-                // `Obj("java/lang/String")`. A boxed PRIMITIVE (`java/lang/Long`) stays an `Obj` here —
-                // the call site unboxes it to the source primitive only when the return is non-nullable
-                // (a `Long?` return must keep the boxed form).
-                Some(kotlin_name_to_ty(to_kotlin_internal(name)))
+        GSig::Class(n, args) if crate::types::same(n, crate::types::wk::continuation()) => {
+            match args.first()? {
+                // A bare class → its CANONICAL `Ty` (`kotlin/String` → `Ty::String`, `kotlin/Int` → `Ty::Int`,
+                // `kotlin/Unit` → `Ty::Unit`), so the recovered return unifies with the source-spelled type
+                // rather than a non-canonical `Obj("kotlin/String")`. A generic class (`List<Item>`) keeps its
+                // arguments via the general converter.
+                GSig::Class(name, cargs) if cargs.is_empty() => {
+                    // Canonicalize a JVM built-in the generic signature spells in Java terms
+                    // (`java/lang/String` → `kotlin/String`, `java/lang/Object` → `kotlin/Any`) so the
+                    // recovered return unifies with the source-spelled type rather than a non-canonical
+                    // `Obj("java/lang/String")`. A boxed PRIMITIVE (`java/lang/Long`) stays an `Obj` here —
+                    // the call site unboxes it to the source primitive only when the return is non-nullable
+                    // (a `Long?` return must keep the boxed form).
+                    Some(kotlin_name_to_ty(to_kotlin_internal(name)))
+                }
+                // A generic class (`List<Item>`) keeps its arguments via the general converter, then any JVM
+                // collection name the signature spelled in Java terms (`java/util/List`) is canonicalized to
+                // its Kotlin type (`kotlin/collections/List`) so a `.map { … }` / `.first()` extension — keyed
+                // on the Kotlin collection — resolves on the recovered suspend result (a member such as `.size`
+                // already resolved on either form). A BARE type parameter (`Continuation<T>` from a generic
+                // `suspend fun byId(): T` on a `Repo<Cfg>` receiver) is substituted under `binds` to the
+                // receiver's concrete argument (`T` → `Cfg`) — otherwise it erases to `Any` and every member
+                // access on the result fails ("member … on Any").
+                other => Some(canonicalize_jvm_collections(
+                    crate::call_resolver::gsig_to_ty(other, binds),
+                )),
             }
-            // A generic class (`List<Item>`) keeps its arguments via the general converter, then any JVM
-            // collection name the signature spelled in Java terms (`java/util/List`) is canonicalized to
-            // its Kotlin type (`kotlin/collections/List`) so a `.map { … }` / `.first()` extension — keyed
-            // on the Kotlin collection — resolves on the recovered suspend result (a member such as `.size`
-            // already resolved on either form). A BARE type parameter (`Continuation<T>` from a generic
-            // `suspend fun byId(): T` on a `Repo<Cfg>` receiver) is substituted under `binds` to the
-            // receiver's concrete argument (`T` → `Cfg`) — otherwise it erases to `Any` and every member
-            // access on the result fails ("member … on Any").
-            other => Some(canonicalize_jvm_collections(
-                crate::call_resolver::gsig_to_ty(other, binds),
-            )),
-        },
+        }
         _ => None,
     }
 }

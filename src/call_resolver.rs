@@ -64,7 +64,7 @@ pub fn infer_constructor_type_args(
 pub(crate) fn unify_gsig(sig: &GSig, actual: Ty, binds: &mut GSigBinds) {
     match sig {
         GSig::Var(n) => {
-            binds.entry(n.clone()).or_insert(actual);
+            binds.entry((*n).to_string()).or_insert(actual);
         }
         GSig::Arr(inner) => {
             if let Some(elem) = actual.array_elem() {
@@ -85,7 +85,8 @@ pub(crate) fn unify_gsig(sig: &GSig, actual: Ty, binds: &mut GSigBinds) {
                 // `fsig.ret` instead, and skip the `Continuation` param so it isn't double-unified.
                 let value_params: &[GSig] = match params.last() {
                     Some(GSig::Class(n, cargs))
-                        if n == "kotlin/coroutines/Continuation" && !cargs.is_empty() =>
+                        if crate::types::same(n, crate::types::wk::continuation())
+                            && !cargs.is_empty() =>
                     {
                         unify_gsig(&cargs[0], fsig.ret, binds);
                         &params[..params.len() - 1]
@@ -115,7 +116,7 @@ pub(crate) fn unify_gsig(sig: &GSig, actual: Ty, binds: &mut GSigBinds) {
 pub(crate) fn gsig_to_ty(sig: &GSig, binds: &GSigBinds) -> Ty {
     match sig {
         GSig::Var(n) => binds
-            .get(n)
+            .get(*n)
             .copied()
             .unwrap_or_else(|| Ty::obj("kotlin/Any")),
         GSig::Prim(t) => *t,
@@ -217,7 +218,8 @@ pub(crate) fn arg_fits(p: &Ty, a: &Ty) -> bool {
     // whether spelled `kotlin/Any` or its JVM form `java/lang/Object` (a generic vararg element erases to
     // it) — accepts any reference argument.
     p == a
-        || matches!(p, Ty::Obj(n, _) if *n == "kotlin/Any" || *n == "java/lang/Object")
+        || matches!(p, Ty::Obj(n, _) if crate::types::same(n, crate::types::wk::any())
+            || crate::types::same(n, crate::types::wk::java_object()))
         || matches!((p.fun_arity(), a.fun_arity()), (Some(pn), Some(an)) if pn == an)
         || matches!((p, a), (Ty::Obj(pi, _), Ty::Obj(ai, _)) if pi == ai)
 }

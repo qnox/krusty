@@ -20,9 +20,16 @@ use std::collections::HashMap;
 /// this tree; call resolution unifies and substitutes over it without knowing which backend produced it.
 #[derive(Clone, Debug)]
 pub enum GSig {
-    Var(String),
-    Class(String, Vec<GSig>),
-    Function { params: Vec<GSig>, ret: Box<GSig> },
+    /// A type-variable name (`T`). Interned (`crate::types::intern`) — the pool is shared with `Ty`, so
+    /// the same class/var name is one leaked `&'static str` across every `GSig`/`MetaFn`/`Ty`.
+    Var(&'static str),
+    /// A class internal name (`kotlin/collections/List`) + its type arguments. The name is interned so
+    /// thousands of repeated stdlib class names in decoded signatures share one allocation.
+    Class(&'static str, Vec<GSig>),
+    Function {
+        params: Vec<GSig>,
+        ret: Box<GSig>,
+    },
     Arr(Box<GSig>),
     Prim(Ty),
 }
