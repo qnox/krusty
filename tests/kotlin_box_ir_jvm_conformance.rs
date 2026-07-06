@@ -943,6 +943,10 @@ fn kotlin_codegen_box_conformance() {
             n_threads,
         );
     }
+    // Cache hit-rate summary: whole-process efficiency of every classpath cache, for sizing the caps.
+    // Emitted through the `cache` trace category (build `--features trace`, run `KRUSTY_TRACE=cache`);
+    // a no-op otherwise, so it never touches the differential harness's stdout/stderr on a normal run.
+    krusty::jvm::classpath::trace_cache_stats();
 
     // Emit the flamegraph (if profiling was on) before computing summaries.
     if let Some(g) = flame_guard {

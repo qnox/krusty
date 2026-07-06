@@ -22,10 +22,18 @@
 //! - `suspend` — coroutine / suspend-function lowering (`jvm/suspend.rs`).
 //! - `value_classes` — inline/value-class transform (`jvm/value_classes.rs`).
 //! - `splice` — inline-function bytecode splicing (`jvm/ir_emit.rs`).
+//! - `cache` — classpath cache hit-rate summary (`jvm/classpath.rs`), emitted once at end of a run.
 
 /// The canonical trace categories (see the module docs). Listed here so the set is discoverable in one
 /// place; `KRUSTY_TRACE=all` enables every category regardless.
-pub const CATEGORIES: &[&str] = &["resolve", "lower", "suspend", "value_classes", "splice"];
+pub const CATEGORIES: &[&str] = &[
+    "resolve",
+    "lower",
+    "suspend",
+    "value_classes",
+    "splice",
+    "cache",
+];
 
 #[cfg(feature = "trace")]
 mod imp {

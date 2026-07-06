@@ -130,6 +130,99 @@ fn global_type_cache() -> &'static std::sync::Mutex<HashMap<Vec<PathBuf>, std::s
     CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
 }
 
+/// Record a classpath-cache hit (`true`) or miss (`false`) for the named counter. Compiled out ENTIRELY
+/// unless built `--features trace` — so normal/release builds pay nothing (no atomic, no cache-line
+/// contention on the hot lookup paths). Under the feature, view the summary with `KRUSTY_TRACE=cache`.
+macro_rules! cache_stat {
+    ($field:ident, $hit:expr) => {{
+        #[cfg(feature = "trace")]
+        {
+            cache_stats().$field.record($hit);
+        }
+        #[cfg(not(feature = "trace"))]
+        {
+            let _ = $hit;
+        }
+    }};
+}
+
+/// Hit/miss counter for one cache, aggregated across every `Classpath` and worker thread (per-instance
+/// caches are short-lived, so only a process-global tally shows whole-run efficiency).
+#[cfg(feature = "trace")]
+#[derive(Default)]
+struct CacheCounter {
+    hit: std::sync::atomic::AtomicU64,
+    miss: std::sync::atomic::AtomicU64,
+}
+
+#[cfg(feature = "trace")]
+impl CacheCounter {
+    #[inline]
+    fn record(&self, hit: bool) {
+        let c = if hit { &self.hit } else { &self.miss };
+        c.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+    fn line(&self, name: &str) -> String {
+        let h = self.hit.load(std::sync::atomic::Ordering::Relaxed);
+        let m = self.miss.load(std::sync::atomic::Ordering::Relaxed);
+        let t = h + m;
+        let rate = if t == 0 {
+            0.0
+        } else {
+            100.0 * h as f64 / t as f64
+        };
+        format!("{name} {h}/{t} ({rate:.1}%)")
+    }
+}
+
+/// Process-wide cache hit/miss tallies. Each field tracks one cache; a MISS on a level means the lookup
+/// fell through to the next level (L1_class miss → try L2; L2_class miss → parse from disk). Compare
+/// L1 vs L2 hit rates to see whether the per-thread cap is too small, and the fall-through (miss) counts
+/// to see how often a level actually saves work.
+#[cfg(feature = "trace")]
+#[derive(Default)]
+struct CacheStats {
+    l1_class: CacheCounter,
+    l2_class: CacheCounter,
+    ext_l1: CacheCounter,
+    ext_l2: CacheCounter,
+    functions: CacheCounter,
+    meta_fns: CacheCounter,
+    bodies: CacheCounter,
+    suspend_names: CacheCounter,
+    builtin_members: CacheCounter,
+}
+
+#[cfg(feature = "trace")]
+fn cache_stats() -> &'static CacheStats {
+    static S: std::sync::OnceLock<CacheStats> = std::sync::OnceLock::new();
+    S.get_or_init(CacheStats::default)
+}
+
+/// Emit the whole-process cache hit-rate summary through the `cache` trace category — a single line,
+/// only when built `--features trace` and `KRUSTY_TRACE=cache` (or `all`). No-op otherwise, so callers
+/// (e.g. the box harness at end of a run) can invoke it unconditionally.
+pub fn trace_cache_stats() {
+    #[cfg(feature = "trace")]
+    {
+        let s = cache_stats();
+        crate::trace_compiler!(
+            "cache",
+            "class L1 {} · L2 {} | ext L1 {} · L2 {} | fns {} | meta_fns {} | bodies {} | \
+             suspend {} | builtin {}",
+            s.l1_class.line("hits"),
+            s.l2_class.line("hits"),
+            s.ext_l1.line("hits"),
+            s.ext_l2.line("hits"),
+            s.functions.line("hits"),
+            s.meta_fns.line("hits"),
+            s.bodies.line("hits"),
+            s.suspend_names.line("hits"),
+            s.builtin_members.line("hits"),
+        );
+    }
+}
+
 /// One jimage resource: `(file offset, ON-DISK byte size, zlib-compressed?)`. The size is the stored
 /// (compressed) length when the resource uses the "zip" decompressor, else the raw class length; the
 /// flag is set ONLY for the "zip" decompressor (authoritatively, from the strings table) so the reader
@@ -563,7 +656,9 @@ impl Classpath {
     }
 
     pub fn cached_functions(&self, key: &(String, Option<Ty>)) -> Option<FunctionSet> {
-        self.functions.borrow_mut().get(key).cloned()
+        let hit = self.functions.borrow_mut().get(key).cloned();
+        cache_stat!(functions, hit.is_some());
+        hit
     }
 
     pub fn cache_functions(&self, key: (String, Option<Ty>), set: FunctionSet) {
@@ -575,8 +670,10 @@ impl Classpath {
     /// `metadata_call_facts` all project over.
     fn class_meta(&self, internal: &str) -> std::rc::Rc<ClassMeta> {
         if let Some(m) = self.meta_fns.borrow_mut().get(internal) {
+            cache_stat!(meta_fns, true);
             return m.clone();
         }
+        cache_stat!(meta_fns, false);
         let ci = self.find(internal);
         let mut fns = ci
             .as_ref()
@@ -899,8 +996,10 @@ impl Classpath {
     /// backend/provider and descriptor data.
     pub fn builtin_members(&self, internal: &str) -> Vec<crate::libraries::LibraryMember> {
         if let Some(members) = self.builtin_members.borrow_mut().get(internal) {
+            cache_stat!(builtin_members, true);
             return members.as_ref().clone();
         }
+        cache_stat!(builtin_members, false);
         let path = Self::builtins_path_for(internal);
         let f = self.builtins_file(&path);
         let members: Vec<_> = f
@@ -1200,15 +1299,19 @@ impl Classpath {
         let internal = super::jvm_class_map::to_jvm_internal(internal);
         // L1: per-thread, no lock.
         if let Some(hit) = self.local_cache.borrow_mut().get(internal) {
+            cache_stat!(l1_class, true);
             return hit.clone();
         }
+        cache_stat!(l1_class, false);
         // L2: process-global, shared across threads — a class parsed by ANY thread is reused here.
         if let Some(hit) = self.cache.read().unwrap().get(internal).cloned() {
+            cache_stat!(l2_class, true);
             self.local_cache
                 .borrow_mut()
                 .insert(internal.to_string(), hit.clone());
             return hit;
         }
+        cache_stat!(l2_class, false);
         let name = format!("{internal}.class");
         let mut found = None;
         for e in &self.entries {
@@ -1263,8 +1366,10 @@ impl Classpath {
             descriptor.to_string(),
         );
         if let Some(hit) = self.bodies.borrow_mut().get(&key) {
+            cache_stat!(bodies, true);
             return hit.clone();
         }
+        cache_stat!(bodies, false);
         let mut code = self
             .class_bytes(internal)
             .and_then(|b| read_method_code(&b, name, descriptor));
@@ -1325,8 +1430,10 @@ impl Classpath {
     /// point. Includes the multifile-facade part-class superclass walk.
     pub fn is_suspend_method(&self, internal: &str, name: &str) -> bool {
         if let Some(set) = self.suspend_names.borrow_mut().get(internal) {
+            cache_stat!(suspend_names, true);
             return set.contains(name);
         }
+        cache_stat!(suspend_names, false);
         let ci = self.find(internal);
         let mut names = ci
             .as_ref()
@@ -1389,8 +1496,10 @@ impl Classpath {
     fn ext_by_name(&self, method_name: &str) -> std::sync::Arc<ExtByName> {
         // L1: per-thread, no lock — the hot resolver path.
         if let Some(hit) = self.ext_l1.borrow_mut().get(method_name).cloned() {
+            cache_stat!(ext_l1, true);
             return hit;
         }
+        cache_stat!(ext_l1, false);
         // L2: process-global, shared across threads (the rebuild happens once here).
         if let Some(hit) = self
             .ext_candidates
@@ -1399,11 +1508,13 @@ impl Classpath {
             .get(method_name)
             .cloned()
         {
+            cache_stat!(ext_l2, true);
             self.ext_l1
                 .borrow_mut()
                 .insert(method_name.to_string(), hit.clone());
             return hit;
         }
+        cache_stat!(ext_l2, false);
         self.ensure_ext_index();
         // Clone the small owner list, releasing the `ext` borrow before `rebuild` (which borrows the class
         // caches). Candidates are rebuilt from each owner's cached `ClassInfo`, then grouped by receiver.
