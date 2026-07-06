@@ -13,7 +13,7 @@
 
 use crate::libraries::{
     CompilerPlatform, FnKind, FunctionInfo, FunctionSet, GSig, GenericSig, InlineKind,
-    LibraryCallable, LibraryMember,
+    LibraryCallable, LibraryMember, PropKind,
 };
 use crate::types::Ty;
 
@@ -1485,14 +1485,42 @@ pub fn resolve_instance_member(
     })
 }
 
-/// Resolve a zero-arg property read on `recv`. The semantic Kotlin property name is tried first; if
-/// the source has only a physical getter method, the source supplies that fallback spelling.
+/// The property's getter resolved by its REAL name from the source's `properties` query — replacing the
+/// `getX`/`is`-Boolean/`@JvmName` getter-name GUESSING with the authoritative metadata spelling. The
+/// member itself is still built through `resolve_instance_member`, so the full member metadata (return
+/// nullability, generic signature) is recovered exactly as before. `None` when no source exposes it as a
+/// property, or the resolved getter isn't a read-value member.
+fn property_getter_via_query(
+    lib: &dyn CompilerPlatform,
+    recv: Ty,
+    property: &str,
+) -> Option<ResolvedMember> {
+    let getter = lib
+        .properties(property, Some(recv))
+        .overloads
+        .into_iter()
+        .filter(|p| p.kind == PropKind::Member)
+        .min_by_key(|p| p.receiver_rank)
+        .map(|p| p.getter.name)?;
+    // A value-class-typed property's getter is `@JvmName`-mangled (`getId-<hash>`) and erases its return
+    // to the underlying type; resolving it as a plain member would type the read as the underlying, not
+    // the value class. Leave those to the value-class fallback, which recovers the logical type.
+    if getter.contains('-') {
+        return None;
+    }
+    resolve_instance_member(lib, recv, &getter, &[]).filter(|m| m.ret.is_read_value_result())
+}
+
+/// Resolve a zero-arg property read on `recv`. The `@Metadata` `properties` query supplies the real
+/// getter name first (no guessing); then the legacy fallbacks — the semantic Kotlin name (a
+/// computed/builtin member), a `getX` physical getter, and a value-class-mangled getter.
 pub fn resolve_property_member(
     lib: &dyn CompilerPlatform,
     recv: Ty,
     property: &str,
 ) -> Option<ResolvedMember> {
-    resolve_instance_member(lib, recv, property, &[])
+    property_getter_via_query(lib, recv, property)
+        .or_else(|| resolve_instance_member(lib, recv, property, &[]))
         .filter(|m| m.ret.is_read_value_result())
         .or_else(|| {
             let getter = lib.physical_property_getter_name(property)?;
