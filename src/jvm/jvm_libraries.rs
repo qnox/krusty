@@ -1206,9 +1206,7 @@ impl SymbolSource for JvmLibraries {
                         .as_deref()
                         .map_or(Ty::obj("kotlin/Any"), Ty::obj);
                     let ty = GSig::Class(
-                        mp.ret_class
-                            .clone()
-                            .unwrap_or_else(|| "kotlin/Any".to_string()),
+                        intern(mp.ret_class.as_deref().unwrap_or("kotlin/Any")),
                         vec![],
                     );
                     // The static getter's signature leads with the receiver (`getFoo(Recv)`).
@@ -1224,7 +1222,7 @@ impl SymbolSource for JvmLibraries {
                     overloads.push(PropertyInfo {
                         kind: PropKind::Extension,
                         receiver: Some(GSig::Class(
-                            mp.receiver_class.clone().unwrap_or_default(),
+                            intern(mp.receiver_class.as_deref().unwrap_or_default()),
                             vec![],
                         )),
                         formals: Vec::new(),
