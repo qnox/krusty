@@ -29,20 +29,11 @@ const PLATFORM_DEFAULT_IMPORT_PACKAGES: &[&str] = &["java.lang", "kotlin.jvm"];
 /// abstraction.
 pub struct JvmLibraries {
     cp: std::rc::Rc<Classpath>,
-    /// Memoized `resolve_type` results (an `Rc` per internal, `None` cached too). Since name resolution
-    /// now probes `resolve_type` per referenced name × default package instead of reading a pre-built
-    /// simple-name index, the same type is asked for many times; building its `LibraryType` (descriptor
-    /// parses + `@Metadata` decodes) once and cloning from the cache keeps that lazy probing cheap.
-    type_cache:
-        std::cell::RefCell<std::collections::HashMap<String, Option<std::rc::Rc<LibraryType>>>>,
 }
 
 impl JvmLibraries {
     pub fn new(cp: std::rc::Rc<Classpath>) -> JvmLibraries {
-        JvmLibraries {
-            cp,
-            type_cache: std::cell::RefCell::new(std::collections::HashMap::new()),
-        }
+        JvmLibraries { cp }
     }
 
     fn const_fields<F>(
@@ -1264,7 +1255,7 @@ impl SymbolSource for JvmLibraries {
     }
 
     fn resolve_type(&self, internal: &str) -> Option<LibraryType> {
-        if let Some(hit) = self.type_cache.borrow().get(internal) {
+        if let Some(hit) = self.cp.cached_library_type(internal) {
             return hit.as_ref().map(|rc| (**rc).clone());
         }
         let built = (|| -> Option<LibraryType> {
@@ -1524,9 +1515,8 @@ impl SymbolSource for JvmLibraries {
                 value_class_properties: self.value_class_property_members_for_class(&ci),
             })
         })();
-        self.type_cache
-            .borrow_mut()
-            .insert(internal.to_string(), built.clone().map(std::rc::Rc::new));
+        self.cp
+            .cache_library_type(internal, built.clone().map(std::rc::Rc::new));
         built
     }
     fn functions(&self, name: &str, receiver: Option<Ty>) -> FunctionSet {
