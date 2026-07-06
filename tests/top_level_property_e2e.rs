@@ -22,51 +22,36 @@ fn top_level_properties_run_and_round_trip() {
     if !std::path::Path::new(&javac).exists() {
         return;
     }
-    let krusty = env!("CARGO_BIN_EXE_krusty");
     let root = std::env::temp_dir().join(format!("krusty_tlp_{}", std::process::id()));
     let lib = root.join("lib");
     let _ = fs::remove_dir_all(&root);
     fs::create_dir_all(&root).unwrap();
 
-    fs::write(root.join("Lib.kt"), "package demo\nval greeting: String = \"hi\"\nvar counter: Int = 10\nfun bump(): Int { counter = counter + 1; return counter }\n").unwrap();
-    let kc = Command::new(krusty)
-        .args(["-d", lib.to_str().unwrap()])
-        .arg(root.join("Lib.kt"))
-        .output()
-        .expect("krusty");
-    if !kc.status.success() {
-        eprintln!(
-            "skip (IR unsupported): {}",
-            String::from_utf8_lossy(&kc.stderr)
-        );
+    // Compile the property library in-process (warm classpath cache), not via a cold krusty CLI spawn.
+    let lib_src = "package demo\nval greeting: String = \"hi\"\nvar counter: Int = 10\nfun bump(): Int { counter = counter + 1; return counter }\n";
+    let jdk = common::jdk_modules();
+    if common::compile_to_dir(lib_src, "Lib", &[], jdk.as_deref(), &lib).is_none() {
+        eprintln!("skip (IR unsupported)");
         return;
     }
 
-    // (1) Run via Java: getter + var mutation through the generated accessors.
+    // (1) Run via Java: getter + var mutation through the generated accessors — the IR backend emits
+    // top-level `val`/`var` as Kotlin's `private static [final]` field + a `public static getX()`/
+    // `setX()` accessor ABI, so a Java consumer compiles + links against the accessors (phase 398).
+    // Driven through the persistent `javac_run` server (no cold `javac`/`java` per case). MUST succeed.
     let main = "public class M { public static void main(String[] a) { System.out.println(demo.LibKt.getGreeting() + \":\" + demo.LibKt.bump() + \":\" + demo.LibKt.bump()); } }";
-    fs::write(root.join("M.java"), main).unwrap();
-    // The IR backend emits top-level `val`/`var` as Kotlin's `private static [final]` field + a
-    // `public static getX()`/`setX()` accessor ABI, so a Java consumer compiles + links against the
-    // accessors (phase 398). This MUST now succeed.
-    let jc = Command::new(&javac)
-        .args(["-cp", lib.to_str().unwrap(), "-d", lib.to_str().unwrap()])
-        .arg(root.join("M.java"))
-        .output()
-        .unwrap();
-    assert!(
-        jc.status.success(),
-        "javac failed against krusty's top-level property accessors: {}",
-        String::from_utf8_lossy(&jc.stderr)
+    let m_path = root.join("M.java");
+    fs::write(&m_path, main).unwrap();
+    let out = common::javac_run(
+        m_path.to_str().unwrap(),
+        lib.to_str().unwrap(),
+        lib.to_str().unwrap(),
+        "M",
     );
-    let run = Command::new(&java)
-        .args(["-Xverify:all", "-cp", lib.to_str().unwrap(), "M"])
-        .output()
-        .unwrap();
     assert_eq!(
-        String::from_utf8_lossy(&run.stdout).trim(),
-        "hi:11:12",
-        "stderr={}",
-        String::from_utf8_lossy(&run.stderr)
+        out.as_deref().map(str::trim),
+        Some("hi:11:12"),
+        "javac/run against krusty's top-level property accessors: {out:?}"
     );
 
     // (2) A Kotlin consumer (real kotlinc) imports + uses the properties via metadata.

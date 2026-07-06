@@ -2,7 +2,6 @@
 //! and run it (via a Java `Main` that calls the method). This is the Phase 3 exit gate.
 
 use std::fs;
-use std::process::Command;
 
 use krusty::jvm::classfile::*;
 
@@ -10,12 +9,10 @@ use super::common;
 
 #[test]
 fn emitted_add_class_verifies_and_runs() {
-    let Some(java_home) = common::java_home() else {
+    if common::java_home().is_none() {
         eprintln!("skipping: javac/java not available");
         return;
-    };
-    let javac_bin = format!("{java_home}/bin/javac");
-    let java_bin = format!("{java_home}/bin/java");
+    }
 
     // FooKt.add(int,int):int = a + b
     let mut cw = ClassWriter::new("FooKt", "java/lang/Object");
@@ -37,29 +34,20 @@ fn emitted_add_class_verifies_and_runs() {
     )
     .unwrap();
 
-    let javac = Command::new(&javac_bin)
-        .args(["-cp", dir.to_str().unwrap(), "Main.java"])
-        .current_dir(&dir)
-        .output()
-        .expect("run javac");
-    assert!(
-        javac.status.success(),
-        "javac failed (krusty class rejected by compiler):\n{}",
-        String::from_utf8_lossy(&javac.stderr)
+    // Compile the Java driver + run it through the persistent `javac_run` server (its `JavaRunner`
+    // JVM runs with `-Xverify:all`, so the krusty-emitted class is still fully bytecode-verified on
+    // load). No cold `javac`/`java` spawn per case.
+    let out = common::javac_run(
+        dir.join("Main.java").to_str().unwrap(),
+        dir.to_str().unwrap(),
+        dir.to_str().unwrap(),
+        "Main",
     );
-
-    // -Xverify:all forces full bytecode verification of the loaded krusty class.
-    let run = Command::new(&java_bin)
-        .args(["-Xverify:all", "-cp", dir.to_str().unwrap(), "Main"])
-        .output()
-        .expect("run java");
-    let out = String::from_utf8_lossy(&run.stdout);
-    let err = String::from_utf8_lossy(&run.stderr);
-    assert!(
-        run.status.success(),
-        "java failed (verify/run):\nstdout={out}\nstderr={err}"
+    assert_eq!(
+        out.as_deref().map(str::trim),
+        Some("7"),
+        "javac/run of krusty-emitted class (verify/result): {out:?}"
     );
-    assert_eq!(out.trim(), "7", "wrong result; stderr={err}");
 
     let _ = fs::remove_dir_all(&dir);
 }
