@@ -12,9 +12,9 @@ use std::sync::OnceLock;
 
 use super::common;
 
-/// Recursively find a `<prefix>*.jar` (no `-sources`) under `dir`.
-fn walk(dir: &Path, prefix: &str, depth: usize, out: &mut Option<PathBuf>) {
-    if out.is_some() || depth > 8 {
+/// Recursively collect every `<prefix>*.jar` (no `-sources`) under `dir`.
+fn walk(dir: &Path, prefix: &str, depth: usize, out: &mut Vec<PathBuf>) {
+    if depth > 8 {
         return;
     }
     let Ok(rd) = std::fs::read_dir(dir) else {
@@ -26,15 +26,31 @@ fn walk(dir: &Path, prefix: &str, depth: usize, out: &mut Option<PathBuf>) {
             walk(&p, prefix, depth + 1, out);
         } else if let Some(n) = p.file_name().and_then(|n| n.to_str()) {
             if n.starts_with(prefix) && n.ends_with(".jar") && !n.contains("sources") {
-                *out = Some(p.clone());
-                return;
+                out.push(p.clone());
             }
         }
     }
 }
 
+/// The numeric version tuple embedded in a `…-<major>.<minor>.<patch>.jar` name, for ordering.
+fn jar_version(p: &Path) -> (u32, u32, u32) {
+    let ver = p
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .and_then(|s| s.rsplit('-').next())
+        .unwrap_or("");
+    let mut it = ver.split('.').map(|x| x.parse::<u32>().unwrap_or(0));
+    (
+        it.next().unwrap_or(0),
+        it.next().unwrap_or(0),
+        it.next().unwrap_or(0),
+    )
+}
+
 /// Locate a serialization runtime jar by prefix across the common cache roots (gradle/m2 + any
-/// distribution-bundled gradle lib).
+/// distribution-bundled gradle lib). Picks the NEWEST version available — an old artifact (e.g. 1.4.1,
+/// which predates the reified `encodeToString`/`decodeFromString` overloads krusty resolves) may also be
+/// cached, and grabbing whichever the directory walk hits first is non-deterministic.
 fn find(prefix: &str) -> Option<PathBuf> {
     let home = std::env::var("HOME").ok()?;
     let mut roots = vec![
@@ -44,14 +60,11 @@ fn find(prefix: &str) -> Option<PathBuf> {
     if let Ok(rd) = std::fs::read_dir("/opt/mise/installs/gradle") {
         roots.extend(rd.flatten().map(|e| e.path()));
     }
-    let mut out = None;
+    let mut all = Vec::new();
     for r in &roots {
-        walk(r, prefix, 0, &mut out);
-        if out.is_some() {
-            break;
-        }
+        walk(r, prefix, 0, &mut all);
     }
-    out
+    all.into_iter().max_by_key(|p| jar_version(p))
 }
 
 fn serialization_runtime_jars() -> Option<Vec<PathBuf>> {
