@@ -524,6 +524,12 @@ pub struct Classpath {
     /// rebuilt for every snippet, but the `Classpath` is reused on the worker thread, so keeping this here
     /// avoids re-walking metadata/extension indexes for common stdlib calls across thousands of snippets.
     functions: RefCell<crate::lru::LruCache<(String, Option<Ty>), FunctionSet>>,
+    /// Cache of resolved `LibraryType`s by internal name. Like `functions`, kept on the reused-per-thread
+    /// `Classpath` (NOT the per-compile `JvmLibraries`) so the import-driven `resolve_type` probing — which
+    /// asks for the same stdlib types across thousands of snippets — warms across compiles instead of
+    /// rebuilding each `LibraryType` (descriptor parses + `@Metadata` decodes) from cold every file.
+    resolved_types:
+        RefCell<crate::lru::LruCache<String, Option<std::rc::Rc<crate::libraries::LibraryType>>>>,
     /// Parsed `.kotlin_builtins` fragments, keyed by resource path (e.g. `kotlin/kotlin.kotlin_builtins`,
     /// `kotlin/collections/collections.kotlin_builtins`), each mapping class internal name → its
     /// supertypes + members. Built once per file on first use — the single source for BOTH the collection
@@ -607,6 +613,7 @@ impl Classpath {
             meta_fns: RefCell::new(crate::lru::LruCache::new(META_CAP)),
             meta_overloads: RefCell::new(crate::lru::LruCache::new(META_CAP)),
             functions: RefCell::new(crate::lru::LruCache::new(FN_CAP)),
+            resolved_types: RefCell::new(crate::lru::LruCache::new(CLASS_CAP)),
             builtins: RefCell::new(HashMap::new()),
             builtin_members: RefCell::new(crate::lru::LruCache::new(META_CAP)),
             ext_l1: RefCell::new(crate::lru::LruCache::new(FN_CAP)),
@@ -663,6 +670,25 @@ impl Classpath {
 
     pub fn cache_functions(&self, key: (String, Option<Ty>), set: FunctionSet) {
         self.functions.borrow_mut().insert(key, set);
+    }
+
+    /// Memoized `resolve_type` result for `internal` (the outer `Option` = cached-vs-not; the inner =
+    /// resolved-vs-absent). Warm across compiles because this `Classpath` is reused per worker thread.
+    pub fn cached_library_type(
+        &self,
+        internal: &str,
+    ) -> Option<Option<std::rc::Rc<crate::libraries::LibraryType>>> {
+        self.resolved_types.borrow_mut().get(internal).cloned()
+    }
+
+    pub fn cache_library_type(
+        &self,
+        internal: &str,
+        ty: Option<std::rc::Rc<crate::libraries::LibraryType>>,
+    ) {
+        self.resolved_types
+            .borrow_mut()
+            .insert(internal.to_string(), ty);
     }
 
     /// The decoded `@Metadata` function lookups for `internal` (facade parts merged), decoded once and
@@ -1556,6 +1582,19 @@ impl Classpath {
             .iter()
             .map(|e| e.path().to_path_buf())
             .collect();
+        if let Some(idx) = global_ext_cache().lock().unwrap().get(&key) {
+            *self.ext.borrow_mut() = Some(idx.clone());
+            return;
+        }
+        // Serialize the (expensive, all-class-scanning) build so worker threads that start together on
+        // the same classpath build the index ONCE, not N times: whoever wins the lock builds + caches;
+        // the rest block, then hit the re-checked cache below. Without this the rayon threads all miss
+        // the cache simultaneously at startup and each rescan the whole stdlib (~30% of compile time).
+        static BUILD: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        let _build = BUILD
+            .get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .unwrap();
         if let Some(idx) = global_ext_cache().lock().unwrap().get(&key) {
             *self.ext.borrow_mut() = Some(idx.clone());
             return;
