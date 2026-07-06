@@ -252,6 +252,43 @@ fn global_ext_cache() -> &'static std::sync::Mutex<HashMap<Vec<PathBuf>, std::sy
     CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
 }
 
+/// A process-global cache of a value derived from a SINGLE classpath entry (jar / dir / jimage), keyed
+/// by that entry's path. A jar's classes, extension statics, and type aliases are identical wherever the
+/// jar appears, so its contribution is built ONCE and shared by every classpath that includes it — a
+/// classpath that only adds one library reuses every other entry's cached contribution and builds just
+/// the new one. This is the composable layer UNDER the whole-classpath indexes: compose an index per cp
+/// from these per-entry parts instead of rescanning every jar when the cp differs by a single entry.
+struct EntryCache<T> {
+    map: std::sync::Mutex<HashMap<PathBuf, std::sync::Arc<T>>>,
+}
+
+impl<T> EntryCache<T> {
+    fn new() -> Self {
+        EntryCache {
+            map: std::sync::Mutex::new(HashMap::new()),
+        }
+    }
+    /// The entry's cached value, built once via `build` on first request. The map lock is held across
+    /// the build so worker threads starting together build each entry exactly once, not N times (this
+    /// subsumes the ad-hoc per-index build locks).
+    fn get_or_build(&self, path: &Path, build: impl FnOnce() -> T) -> std::sync::Arc<T> {
+        let mut map = self.map.lock().unwrap();
+        if let Some(v) = map.get(path) {
+            return v.clone();
+        }
+        let v = std::sync::Arc::new(build());
+        map.insert(path.to_path_buf(), v.clone());
+        v
+    }
+}
+
+/// Per-ENTRY extension-index contributions (one per jar/dir), composed per classpath by
+/// [`Classpath::ensure_ext_index`]. See [`EntryCache`].
+fn global_entry_ext() -> &'static EntryCache<EntryExt> {
+    static CACHE: std::sync::OnceLock<EntryCache<EntryExt>> = std::sync::OnceLock::new();
+    CACHE.get_or_init(EntryCache::new)
+}
+
 /// The rebuilt candidates for ONE method name, grouped for O(1) receiver lookup so `find_extensions`
 /// doesn't re-scan + re-parse the whole list on every call site (the cost the eager `by_recv` map avoided).
 #[derive(Default)]
@@ -331,6 +368,21 @@ struct ExtIndex {
     /// Names `@Metadata` marks as GENUINE top-level (a receiver-less function, never an extension) — these
     /// are never keyed by their first parameter, so `find_extensions` must not return them for any receiver.
     toplevel_only: std::collections::HashSet<String>,
+}
+
+/// ONE classpath entry's contribution to the extension index, built once per jar/dir and composed per
+/// classpath (see [`EntryCache`] / [`Classpath::ensure_ext_index`]). `by_recv_raw` stays UNFILTERED — the
+/// `toplevel_only` decision is global across the whole cp, so it can only be applied when composing.
+#[derive(Default)]
+struct EntryExt {
+    /// method name → owner ROOT classes in THIS entry (super-walk within the entry).
+    by_name: HashMap<String, Vec<String>>,
+    /// receiver descriptor → `(method name, owner)` for each receiver-taking static in this entry.
+    by_recv_raw: HashMap<String, Vec<(String, String)>>,
+    /// JVM names this entry marks as genuine top-level, and as extensions (unioned across the cp at
+    /// compose to decide `toplevel_only = union(top) - union(ext)`).
+    toplevel_names: std::collections::HashSet<String>,
+    ext_names: std::collections::HashSet<String>,
 }
 
 /// Classpath Kotlin type aliases (`typealias X = Y` in a library), simple alias name → JVM internal name.
@@ -1575,8 +1627,6 @@ impl Classpath {
         if self.ext.borrow().is_some() {
             return;
         }
-        // Built once per classpath process-wide (scanning every jar's statics is identical for a given
-        // classpath) — shared across worker threads via the global cache, like the type/jimage indexes.
         let key: Vec<PathBuf> = self
             .entries
             .iter()
@@ -1586,100 +1636,110 @@ impl Classpath {
             *self.ext.borrow_mut() = Some(idx.clone());
             return;
         }
-        // Serialize the (expensive, all-class-scanning) build so worker threads that start together on
-        // the same classpath build the index ONCE, not N times: whoever wins the lock builds + caches;
-        // the rest block, then hit the re-checked cache below. Without this the rayon threads all miss
-        // the cache simultaneously at startup and each rescan the whole stdlib (~30% of compile time).
-        static BUILD: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-        let _build = BUILD
-            .get_or_init(|| std::sync::Mutex::new(()))
-            .lock()
-            .unwrap();
-        if let Some(idx) = global_ext_cache().lock().unwrap().get(&key) {
-            *self.ext.borrow_mut() = Some(idx.clone());
-            return;
-        }
-        // Pass 1: collect a *lean* record per class — its `super_class` and its public static methods
-        // (names+descriptors only, not the full `ClassInfo`). The stdlib's extension/top-level functions
-        // live in package-private multifile *part* classes (`RangesKt___RangesKt`) that the public
-        // facade (`RangesKt`) extends, so we need the parts even though they aren't public.
-        let mut all: HashMap<String, ClassLite> = HashMap::new();
-        for e in &self.entries {
-            match e {
-                Entry::Dir(d) => collect_dir(d, &mut all),
-                Entry::Jar(j) => collect_jar(j, &mut all),
-                // No Kotlin extensions live in the JDK.
-                Entry::Jimage(_) => {}
-            }
-        }
-        // Pass 2: index static methods reachable from each class. Public facade roots expose callable
-        // statics (owner = facade, like kotlinc); non-public roots are kept too so private `@InlineOnly`
-        // package-part functions can be selected as splice-only candidates. Those candidates are marked
-        // non-public, so normal resolution never emits an illegal `invokestatic` to them.
-        // Global `(name)` sets: declared as a genuine top-level function vs as an extension anywhere on the
-        // classpath. A name that is ever an extension is NEVER excluded from the ext index; a name that is
-        // ONLY ever top-level is excluded (its first parameter is a real value parameter, not a receiver).
-        // Built across ALL classes so a multifile facade's bridge statics match the function metadata that
-        // lives in its (separate) part classes.
-        let global_toplevel: std::collections::HashSet<&str> = all
-            .values()
-            .flat_map(|c| c.toplevel_names.iter().map(|s| s.as_str()))
-            .collect();
-        let global_ext: std::collections::HashSet<&str> = all
-            .values()
-            .flat_map(|c| c.ext_names.iter().map(|s| s.as_str()))
-            .collect();
-        // Names that are top-level EVERYWHERE and never an extension — precomputed once (the same for
-        // every occurrence, since the `@Metadata` classification is per name).
-        let toplevel_only: std::collections::HashSet<String> = global_toplevel
+        // Compose the index from PER-ENTRY contributions: each jar/dir is scanned once (cached by its
+        // path via `global_entry_ext`) and shared by every classpath that includes it, so a cp that only
+        // adds one library reuses the stdlib's cached scan instead of rescanning it (rescanning the whole
+        // stdlib per unique cp was ~30% of compile). Only the cross-entry `toplevel_only` decision — a
+        // name is top-level EVERYWHERE and never an extension — is global, so it is computed here, and the
+        // receiver keying (skip a `toplevel_only` name) is applied while merging.
+        let parts: Vec<std::sync::Arc<EntryExt>> = self
+            .entries
             .iter()
-            .filter(|n| !global_ext.contains(*n))
+            .map(|e| global_entry_ext().get_or_build(e.path(), || build_entry_ext(e)))
+            .collect();
+        let mut top: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        let mut ext_names: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        for p in &parts {
+            top.extend(p.toplevel_names.iter().map(String::as_str));
+            ext_names.extend(p.ext_names.iter().map(String::as_str));
+        }
+        let toplevel_only: std::collections::HashSet<String> = top
+            .iter()
+            .filter(|n| !ext_names.contains(*n))
             .map(|s| s.to_string())
             .collect();
         let mut idx = ExtIndex {
             toplevel_only,
             ..ExtIndex::default()
         };
-        // Record only WHERE each static lives (root class + receiver → owner) — the candidate records are
-        // rebuilt on query from the root's `ClassInfo`, so the retained index is names + owners, not the
-        // materialized statics.
-        let push_dedup = |m: &mut HashMap<String, Vec<String>>, k: String, owner: &str| {
-            let v = m.entry(k).or_default();
+        let push_dedup = |m: &mut HashMap<String, Vec<String>>, k: &str, owner: &str| {
+            let v = m.entry(k.to_string()).or_default();
             if v.last().map(String::as_str) != Some(owner) && !v.iter().any(|o| o == owner) {
                 v.push(owner.to_string());
             }
         };
-        for (root, lite) in &all {
-            let mut cur = Some(root.clone());
-            let mut visited = std::collections::HashSet::new();
-            while let Some(cn) = cur {
-                if !visited.insert(cn.clone()) {
-                    break;
+        for p in &parts {
+            for (name, owners) in &p.by_name {
+                for o in owners {
+                    push_dedup(&mut idx.by_name, name, o);
                 }
-                let Some(c) = all.get(&cn) else { break };
-                for (mname, mdesc, _msig, public) in &c.statics {
-                    if !lite.is_public && *public {
-                        continue;
-                    }
-                    let Some((first_param, _ret_desc)) = descriptor_parts(mdesc) else {
-                        continue;
-                    };
-                    push_dedup(&mut idx.by_name, mname.clone(), root);
-                    // Receiver keying: a genuine top-level (no first param, or a name that is top-level and
-                    // never an extension) is NOT reachable via a receiver — skip `by_recv_owners` for it.
-                    if let Some(first_param) = first_param {
-                        if !idx.toplevel_only.contains(mname) {
-                            push_dedup(&mut idx.by_recv_owners, first_param, root);
-                        }
+            }
+            for (recv, statics) in &p.by_recv_raw {
+                for (name, owner) in statics {
+                    if !idx.toplevel_only.contains(name) {
+                        push_dedup(&mut idx.by_recv_owners, recv, owner);
                     }
                 }
-                cur = c.super_class.clone();
             }
         }
         let idx = std::sync::Arc::new(idx);
         global_ext_cache().lock().unwrap().insert(key, idx.clone());
         *self.ext.borrow_mut() = Some(idx);
     }
+}
+
+/// Scan ONE classpath entry into its [`EntryExt`] contribution: collect each class's lean record, then
+/// index the statics reachable via each class's super-walk WITHIN this entry (a Kotlin multifile facade
+/// and its `*___*Kt` part classes are compiled into the same jar, so the chain never crosses entries).
+/// The `toplevel_only` filter is a whole-classpath decision, so it is deferred to the per-cp compose in
+/// [`Classpath::ensure_ext_index`] — here every receiver-taking static is recorded raw in `by_recv_raw`.
+fn build_entry_ext(entry: &Entry) -> EntryExt {
+    let mut all: HashMap<String, ClassLite> = HashMap::new();
+    match entry {
+        Entry::Dir(d) => collect_dir(d, &mut all),
+        Entry::Jar(j) => collect_jar(j, &mut all),
+        // No Kotlin extensions live in the JDK.
+        Entry::Jimage(_) => {}
+    }
+    let mut ext = EntryExt::default();
+    for lite in all.values() {
+        ext.toplevel_names
+            .extend(lite.toplevel_names.iter().cloned());
+        ext.ext_names.extend(lite.ext_names.iter().cloned());
+    }
+    let push_dedup = |m: &mut HashMap<String, Vec<String>>, k: &str, owner: &str| {
+        let v = m.entry(k.to_string()).or_default();
+        if v.last().map(String::as_str) != Some(owner) && !v.iter().any(|o| o == owner) {
+            v.push(owner.to_string());
+        }
+    };
+    for (root, lite) in &all {
+        let mut cur = Some(root.clone());
+        let mut visited = std::collections::HashSet::new();
+        while let Some(cn) = cur {
+            if !visited.insert(cn.clone()) {
+                break;
+            }
+            let Some(c) = all.get(&cn) else { break };
+            for (mname, mdesc, _msig, public) in &c.statics {
+                if !lite.is_public && *public {
+                    continue;
+                }
+                let Some((first_param, _ret_desc)) = descriptor_parts(mdesc) else {
+                    continue;
+                };
+                push_dedup(&mut ext.by_name, mname, root);
+                if let Some(recv) = first_param {
+                    ext.by_recv_raw
+                        .entry(recv)
+                        .or_default()
+                        .push((mname.clone(), root.clone()));
+                }
+            }
+            cur = c.super_class.clone();
+        }
+    }
+    ext
 }
 
 /// The classpath is the JVM realization of the inliner's narrow [`MethodBodies`] capability — the
