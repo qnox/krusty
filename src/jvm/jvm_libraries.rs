@@ -12,8 +12,8 @@ use crate::jvm::names::{method_descriptor, property_getter_name, type_descriptor
 use crate::libraries::{
     CountedLoopInfo, FnFlags, FnKind, FunctionInfo, FunctionSet, GSig, GenericSig, InlineKind,
     LibConst, LibraryCallable, LibraryConst, LibraryMember, LibraryType, PlatformAccessor,
-    PlatformCtor, PlatformField, PlatformRangeCtor, RangeConstruction, ReturnInfo, RuntimeCtor,
-    RuntimeOp, TargetRuntime, Visibility,
+    PlatformCtor, PlatformField, PlatformRangeCtor, PropKind, PropertyInfo, PropertySet,
+    RangeConstruction, ReturnInfo, RuntimeCtor, RuntimeOp, TargetRuntime, Visibility,
 };
 use crate::symbol_source::SymbolSource;
 use crate::types::Ty;
@@ -1053,6 +1053,86 @@ fn class_implements(cp: &Classpath, internal: &str, target: &str) -> bool {
 }
 
 impl SymbolSource for JvmLibraries {
+    fn properties(&self, name: &str, receiver: Option<Ty>) -> PropertySet {
+        // Member properties of the receiver's type + its supertypes, most-derived first (rung 0). A
+        // top-level property (`receiver = None`) is a later slice. Each carries the REAL getter/setter
+        // from `@Metadata`'s `JvmPropertySignature`, so the caller emits the accessor by name rather than
+        // guessing `getX`.
+        let Some(internal) = receiver.and_then(|r| r.kotlin_class_internal().map(str::to_string))
+        else {
+            return PropertySet::default();
+        };
+        let mut overloads = Vec::new();
+        let mut queue = std::collections::VecDeque::new();
+        queue.push_back(internal);
+        let mut seen = std::collections::HashSet::new();
+        let mut rung = 0u32;
+        while let Some(cn) = queue.pop_front() {
+            if !seen.insert(cn.clone()) {
+                continue;
+            }
+            if let Some(ci) = self.cp.find(&cn) {
+                for mp in metadata::class_properties(&ci) {
+                    if mp.name != name {
+                        continue;
+                    }
+                    // Need the real accessor to emit anything; skip a property whose metadata omits it.
+                    let (Some(getter_name), Some(getter_desc)) = (mp.getter_name, mp.getter_desc)
+                    else {
+                        continue;
+                    };
+                    let ret_ty = mp
+                        .ret_class
+                        .as_deref()
+                        .map_or(Ty::obj("kotlin/Any"), Ty::obj);
+                    let ty = GSig::Class(
+                        mp.ret_class
+                            .clone()
+                            .unwrap_or_else(|| "kotlin/Any".to_string()),
+                        vec![],
+                    );
+                    let getter = LibraryCallable::library(
+                        cn.clone(),
+                        getter_name,
+                        vec![],
+                        ret_ty,
+                        ret_ty,
+                        getter_desc,
+                    );
+                    // Only expose a setter when BOTH its name and descriptor are present — an empty
+                    // descriptor would corrupt the emit lookup.
+                    let setter = mp.setter_name.zip(mp.setter_desc).map(|(sn, sd)| {
+                        LibraryCallable::library(
+                            cn.clone(),
+                            sn,
+                            vec![ret_ty],
+                            Ty::Unit,
+                            Ty::Unit,
+                            sd,
+                        )
+                    });
+                    overloads.push(PropertyInfo {
+                        kind: PropKind::Member,
+                        receiver: Some(GSig::Class(cn.clone(), vec![])),
+                        formals: Vec::new(),
+                        ty,
+                        getter,
+                        setter,
+                        is_const: mp.is_const,
+                        visibility: mp.visibility,
+                        owner: cn.clone(),
+                        receiver_rank: rung,
+                    });
+                }
+            }
+            if let Some(t) = self.resolve_type(&cn) {
+                queue.extend(t.supertypes);
+            }
+            rung += 1;
+        }
+        PropertySet { overloads }
+    }
+
     fn class_is_extensible(&self, internal: &str) -> bool {
         // Only a real, concrete (non-final, non-abstract) non-interface `.class` is a safe superclass to
         // emit a `super(…)` to. A mapped/builtin type (no own `.class`) or a final/abstract/interface

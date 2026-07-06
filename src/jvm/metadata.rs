@@ -606,6 +606,29 @@ pub struct MetaFn {
     pub value_params: Vec<MetaValueParam>,
 }
 
+/// One `Property` decoded from a class's `@Metadata`: its source name, logical (Kotlin) return-type
+/// class, the REAL getter/setter JVM method names + descriptors (from the `JvmPropertySignature`
+/// extension — so a caller need not guess `getX`), and the source facts a resolver needs (visibility,
+/// `const`). The property analogue of [`MetaFn`].
+#[derive(Clone, Debug)]
+pub struct MetaProp {
+    pub name: String,
+    /// The Kotlin return-type class name (`kotlin/String`), if it is a class type; `None` for a bare
+    /// type parameter.
+    pub ret_class: Option<String>,
+    /// The JVM getter method name (`getLength`, or a `@JvmName`/value-class-mangled spelling) + its
+    /// descriptor, from the `JvmPropertySignature`. `None` if the metadata omits an explicit getter.
+    pub getter_name: Option<String>,
+    pub getter_desc: Option<String>,
+    /// The JVM setter (present iff the property is a `var` with an emitted setter).
+    pub setter_name: Option<String>,
+    pub setter_desc: Option<String>,
+    pub visibility: crate::types::Visibility,
+    pub is_const: bool,
+    /// `var` (has a setter) vs `val`.
+    pub is_var: bool,
+}
+
 /// Decode every `Function` (proto field `fn_field`: 9 in a `Class`, 3 in a `Package`) of this class's
 /// `@Metadata` message into [`MetaFn`]s. The single metadata-primary function reader.
 fn decode_functions(ci: &ClassInfo, fn_field: u64) -> Vec<MetaFn> {
@@ -1051,6 +1074,167 @@ pub fn class_property_return_classes(ci: &ClassInfo) -> std::collections::HashMa
                 out.insert(name, ret);
             }
         }
+    }
+    out
+}
+
+/// A `JvmMethodSignature` reference decoded from metadata: `(name string id, descriptor string id)`.
+type JvmSig = Option<(u64, u64)>;
+
+/// Parse a `JvmPropertySignature` extension body → the getter (field 3) and setter (field 4)
+/// `JvmMethodSignature`s. Either is `None` when absent.
+fn parse_jvm_property_signature(body: &[u8]) -> (JvmSig, JvmSig) {
+    let mut pb = Pb { b: body, i: 0 };
+    let mut getter = None;
+    let mut setter = None;
+    while !pb.at_end() {
+        let Some(tag) = pb.varint() else { break };
+        match (tag >> 3, tag & 7) {
+            (3, 2) => {
+                if let Some(n) = pb.varint() {
+                    if let Some(b) = pb.bytes(n as usize) {
+                        getter = parse_jvm_signature(b);
+                    }
+                }
+            }
+            (4, 2) => {
+                if let Some(n) = pb.varint() {
+                    if let Some(b) = pb.bytes(n as usize) {
+                        setter = parse_jvm_signature(b);
+                    }
+                }
+            }
+            (_, w) => {
+                if pb.skip(w).is_none() {
+                    break;
+                }
+            }
+        }
+    }
+    (getter, setter)
+}
+
+/// Every `Property` (field 10) declared in this class's `@Metadata`, decoded to [`MetaProp`] — the
+/// property analogue of [`class_functions`]. Carries the REAL getter/setter JVM names from the
+/// `JvmPropertySignature`, so a resolver reads the accessor instead of guessing `getX`.
+pub fn class_properties(ci: &ClassInfo) -> Vec<MetaProp> {
+    let mut out = Vec::new();
+    if ci.kotlin_d1.is_empty() {
+        return out;
+    }
+    let bytes = decode_d1(&ci.kotlin_d1);
+    let (st_body, msg_body) = split_d1(&bytes);
+    let records = parse_string_table(st_body);
+    let d2 = &ci.kotlin_d2;
+    let mut types: Vec<&[u8]> = Vec::new();
+    let mut props: Vec<&[u8]> = Vec::new();
+    let mut pb = Pb { b: msg_body, i: 0 };
+    while !pb.at_end() {
+        let Some(tag) = pb.varint() else { break };
+        match (tag >> 3, tag & 7) {
+            (10, 2) => {
+                let Some(n) = pb.varint() else { break };
+                let Some(b) = pb.bytes(n as usize) else { break };
+                props.push(b);
+            }
+            (30, 2) => {
+                let Some(n) = pb.varint() else { break };
+                let Some(b) = pb.bytes(n as usize) else { break };
+                let mut tp = Pb { b, i: 0 };
+                while !tp.at_end() {
+                    let Some(t) = tp.varint() else { break };
+                    match (t >> 3, t & 7) {
+                        (1, 2) => {
+                            let Some(m) = tp.varint() else { break };
+                            let Some(ty) = tp.bytes(m as usize) else {
+                                break;
+                            };
+                            types.push(ty);
+                        }
+                        (_, w) => {
+                            if tp.skip(w).is_none() {
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            (_, w) => {
+                if pb.skip(w).is_none() {
+                    break;
+                }
+            }
+        }
+    }
+    let type_of_id = |tid: u64| -> Option<String> {
+        let tb = types.get(tid as usize)?;
+        let cn = parse_type_class_name(tb)?;
+        resolve_class_name(&records, d2, cn as usize)
+    };
+    // `Property.flags`: HAS_ANNOTATIONS(0) · VISIBILITY(1..3) · MODALITY(4..5) · IS_VAR(6) ·
+    // HAS_GETTER(7) · HAS_SETTER(8) · IS_CONST(9) · …
+    const IS_VAR_BIT: u64 = 1 << 6;
+    const IS_CONST_BIT: u64 = 1 << 9;
+    for prop in props {
+        let mut p = Pb { b: prop, i: 0 };
+        let mut name_id = None;
+        let mut ret = None;
+        let mut flags = 0u64;
+        let mut sig = (None, None);
+        while !p.at_end() {
+            let Some(tag) = p.varint() else { break };
+            match (tag >> 3, tag & 7) {
+                (1, 0) => flags = p.varint().unwrap_or(0),
+                (2, 0) => name_id = p.varint(),
+                (3, 2) => {
+                    let Some(n) = p.varint() else { break };
+                    let Some(tb) = p.bytes(n as usize) else { break };
+                    ret = parse_type_class_name(tb)
+                        .and_then(|cn| resolve_class_name(&records, d2, cn as usize));
+                }
+                (9, 0) => ret = p.varint().and_then(type_of_id),
+                (100, 2) => {
+                    let Some(n) = p.varint() else { break };
+                    let Some(ext) = p.bytes(n as usize) else {
+                        break;
+                    };
+                    sig = parse_jvm_property_signature(ext);
+                }
+                (_, w) => {
+                    if p.skip(w).is_none() {
+                        break;
+                    }
+                }
+            }
+        }
+        let Some(name_id) = name_id else { continue };
+        let Some(name) = resolve_string(&records, d2, name_id as usize) else {
+            continue;
+        };
+        let (getter, setter) = sig;
+        let resolve_sig = |s: Option<(u64, u64)>| -> (Option<String>, Option<String>) {
+            match s {
+                Some((nid, did)) => (
+                    resolve_string(&records, d2, nid as usize),
+                    resolve_string(&records, d2, did as usize),
+                ),
+                None => (None, None),
+            }
+        };
+        let (getter_name, getter_desc) = resolve_sig(getter);
+        let (setter_name, setter_desc) = resolve_sig(setter);
+        let is_var = setter.is_some() || flags & IS_VAR_BIT != 0;
+        out.push(MetaProp {
+            name,
+            ret_class: ret,
+            getter_name,
+            getter_desc,
+            setter_name,
+            setter_desc,
+            visibility: crate::types::Visibility::from_metadata(flags_visibility(flags)),
+            is_const: flags & IS_CONST_BIT != 0,
+            is_var,
+        });
     }
     out
 }

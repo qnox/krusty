@@ -118,6 +118,8 @@ mod classpath_object_member_import_e2e;
 mod classpath_object_nested_e2e;
 #[path = "classpath_object_value_e2e.rs"]
 mod classpath_object_value_e2e;
+#[path = "classpath_properties_query_e2e.rs"]
+mod classpath_properties_query_e2e;
 #[path = "classpath_protected_member_e2e.rs"]
 mod classpath_protected_member_e2e;
 #[path = "classpath_qualified_nested_named_ctor_e2e.rs"]
