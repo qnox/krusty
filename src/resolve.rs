@@ -763,6 +763,69 @@ fn wildcard_candidate(pkg: &str, name: &str) -> String {
     }
 }
 
+/// A file's star/implicit import packages (internal form) grouped by kotlinc's descending precedence:
+/// L1 the file's own package (same-package), L2 explicit star imports (`import a.b.*`), L3 the default
+/// imports. The leveled form the spec's name resolution walks — the single source both the signature
+/// pass and the [`Checker`] build their import set from.
+fn import_levels(file: &File, platform_defaults: &[&str]) -> [Vec<String>; 3] {
+    let own = match &file.package {
+        Some(p) => p.replace('.', "/"),
+        None => String::new(),
+    };
+    let explicit_star: Vec<String> = file
+        .imports
+        .iter()
+        .filter_map(|fq| fq.strip_suffix(".*").map(|p| p.replace('.', "/")))
+        .collect();
+    let defaults: Vec<String> = KOTLIN_DEFAULT_IMPORT_PACKAGES
+        .iter()
+        .chain(platform_defaults.iter())
+        .map(|s| s.replace('.', "/"))
+        .collect();
+    [vec![own], explicit_star, defaults]
+}
+
+/// Resolve a name to its fully-qualified internal name against a file's import set — the single
+/// kotlinc-conforming resolver both the signature pass and the [`Checker`] use, so a name resolves
+/// identically wherever it appears. A name is ALWAYS an FQN; an unqualified use forms candidate FQNs
+/// `pkg/name` from the in-scope packages. Precedence (spec § resolution): an explicit non-star import
+/// names the FQN directly (highest); otherwise each precedence level (`levels`, descending) supplies
+/// candidates and the FIRST level with any resolving candidate wins. Two or more DISTINCT resolutions
+/// within one level are AMBIGUOUS — kotlinc rejects a name two star-imports both supply — and resolve
+/// to `None` (a genuinely ambiguous name never appears in a compiling program). A classpath `typealias`
+/// candidate resolves to its target internal. Existence is verified via `resolve_type`.
+fn resolve_name_against_imports(
+    name: &str,
+    explicit: &HashMap<String, String>,
+    levels: &[Vec<String>],
+    libraries: &dyn CompilerPlatform,
+) -> Option<String> {
+    if let Some(fq) = explicit.get(name) {
+        // A nested-type import (`import lib.Outer.Ws` → `lib/Outer$Ws`) resolves through the flat form.
+        if let Some(internal) = resolve_nested_internal(fq, libraries) {
+            return Some(internal);
+        }
+    }
+    for level in levels {
+        let mut hits: Vec<String> = Vec::new();
+        for p in level {
+            let cand = wildcard_candidate(p, name);
+            if let Some(t) = libraries.resolve_type(&cand) {
+                let internal = t.alias_target.unwrap_or(cand);
+                if !hits.contains(&internal) {
+                    hits.push(internal);
+                }
+            }
+        }
+        match hits.len() {
+            0 => continue,
+            1 => return hits.into_iter().next(),
+            _ => return None, // ambiguous within this level — kotlinc rejects; leave unresolved
+        }
+    }
+    None
+}
+
 /// Resolve a DOTTED type name written in type position to a classpath internal name, so the SIGNATURE
 /// phase (and, via the shared `class_names` map, the checker) accepts it. Two complementary forms:
 ///   * A fully-qualified package path — `lib.Thing` → `lib/Thing`, `a.b.C` → `a/b/C` — verified via
@@ -943,6 +1006,7 @@ pub fn collect_signatures_with_cp(
         for file in files {
             let imap = import_map(file);
             let wilds = import_wildcards(file, platform_default_imports);
+            let levels = import_levels(file, platform_default_imports);
             // Candidate simple names: every type referenced in the file (so a WILDCARD import can supply
             // it) plus the explicit-import names themselves.
             let mut names = std::collections::HashSet::new();
@@ -952,23 +1016,10 @@ pub fn collect_signatures_with_cp(
                 if class_names.contains_key(name.as_str()) || user_defined.contains(&name) {
                     continue;
                 }
-                // An explicit import wins; else a wildcard package that actually provides the type. The
-                // explicit import is resolved through `resolve_nested_internal` so a NESTED-type import
-                // (`import lib.Outer.Ws` → flat `lib/Outer/Ws`) registers the real `lib/Outer$Ws` — needed
-                // for a TYPE-position use (`fun f(x: Ws)`), which the signature phase resolves via this map.
-                let full = imap
-                    .get(&name)
-                    .and_then(|f| resolve_nested_internal(f, &*libraries))
-                    .or_else(|| {
-                        // A wildcard/default package that actually provides the type. A `typealias`
-                        // candidate resolves to its target internal (`kotlin/collections/ArrayList` →
-                        // `java/util/ArrayList`); a real type resolves to itself.
-                        wilds.iter().find_map(|p| {
-                            let cand = wildcard_candidate(p, &name);
-                            let t = libraries.resolve_type(&cand)?;
-                            Some(t.alias_target.unwrap_or(cand))
-                        })
-                    })
+                // Resolve the name to an FQN against the file's import set (explicit import, then the
+                // implicit FQN candidates by kotlinc precedence) — the SAME resolver the checker uses.
+                // Fall back to a dotted FQ / nested-under-prefix.
+                let full = resolve_name_against_imports(&name, &imap, &levels, &*libraries)
                     .or_else(|| {
                         // A dotted type name (`lib.Thing`, `Wrap.Box`) — resolve the FQ package path
                         // or a nested type under a resolvable outer prefix.
@@ -3616,8 +3667,7 @@ fn is_nothing_ty(t: Ty) -> bool {
 
 fn make_checker<'a>(file: &'a File, syms: &'a SymbolTable, diags: &'a mut DiagSink) -> Checker<'a> {
     let imports = import_map(file);
-    let import_wildcards =
-        import_wildcards(file, syms.libraries.platform_default_import_packages());
+    let import_levels = import_levels(file, syms.libraries.platform_default_import_packages());
     Checker {
         file,
         syms,
@@ -3626,7 +3676,7 @@ fn make_checker<'a>(file: &'a File, syms: &'a SymbolTable, diags: &'a mut DiagSi
         scopes: Vec::new(),
         ret_ty: Ty::Unit,
         imports,
-        import_wildcards,
+        import_levels,
         tparams: Default::default(),
         reified_tparams: std::collections::HashSet::new(),
         this_ty: None,
@@ -4394,7 +4444,9 @@ struct Checker<'a> {
     scopes: Vec<HashMap<String, Local>>,
     ret_ty: Ty,
     imports: HashMap<String, String>,
-    import_wildcards: Vec<String>,
+    /// Star/implicit import packages by kotlinc precedence level (same-package, explicit stars,
+    /// defaults) — the import set [`Self::imported_type_internal`] resolves names against.
+    import_levels: [Vec<String>; 3],
     /// Generic type parameters in scope (erased to `java/lang/Object`).
     tparams: TParams,
     /// The `reified` type parameters in scope (a subset of `tparams`, from the enclosing `inline fun`).
@@ -4733,22 +4785,17 @@ impl<'a> Checker<'a> {
     }
 
     /// Resolve a bare type `name` through this file's imports to an internal name that actually exists on
-    /// the classpath — covering names the global simple-name index dropped as ambiguous (e.g.
-    /// `Continuation`). Checks the explicit import first, then each wildcard-imported package. Existence
-    /// is verified via the federated source's `resolve_type` (no guessing a non-existent `Obj`).
+    /// the classpath — the SAME kotlinc-conforming resolver the signature pass uses
+    /// ([`resolve_name_against_imports`]): explicit import first, then the implicit FQN candidates by
+    /// precedence level, with same-level ambiguity left unresolved. Existence is verified via
+    /// `resolve_type`.
     fn imported_type_internal(&self, name: &str) -> Option<String> {
-        if let Some(internal) = self.imports.get(name) {
-            if let Some(resolved) = self.nested_internal(internal) {
-                return Some(resolved);
-            }
-        }
-        for pkg in &self.import_wildcards {
-            let cand = wildcard_candidate(pkg, name);
-            if self.syms.libraries.resolve_type(&cand).is_some() {
-                return Some(cand);
-            }
-        }
-        None
+        resolve_name_against_imports(
+            name,
+            &self.imports,
+            &self.import_levels,
+            &*self.syms.libraries,
+        )
     }
 
     /// Resolve a dotted import flattened to slashes (`import lib.Scope.Ws` → `lib/Scope/Ws`) to the
