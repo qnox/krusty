@@ -49,3 +49,33 @@ fn explicit_import_makes_it_resolve() {
     fun box(): String = \"OK\"\n";
     assert_eq!(run(SRC).expect("imported type resolves"), "OK");
 }
+
+#[test]
+fn ambiguous_star_imports_are_rejected_like_kotlinc() {
+    // kotlinc rejects a bare `Date` when TWO star-imports both supply it (`java.util.*` AND
+    // `java.sql.*`): the name is ambiguous. krusty must also leave it unresolved (a compile error),
+    // not silently pick one — the spec's same-level-ambiguity rule.
+    const SRC: &str = "import java.util.*\n\
+    import java.sql.*\n\
+    fun useDate(d: Date): String = \"OK\"\n\
+    fun box(): String = \"OK\"\n";
+    assert!(
+        run(SRC).is_none(),
+        "ambiguous star-imported `Date` must be unresolved, matching kotlinc"
+    );
+}
+
+#[test]
+fn explicit_import_resolves_the_star_ambiguity() {
+    // …and an explicit import of one of them resolves the ambiguity — an explicit import outranks the
+    // star imports, so `Date` binds to `java.util.Date`.
+    const SRC: &str = "import java.util.*\n\
+    import java.sql.*\n\
+    import java.util.Date\n\
+    fun useDate(d: Date): String = if (d.time >= 0L) \"OK\" else \"NO\"\n\
+    fun box(): String = useDate(Date(0L))\n";
+    assert_eq!(
+        run(SRC).expect("explicit import outranks the ambiguous star imports"),
+        "OK"
+    );
+}
