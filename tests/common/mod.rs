@@ -542,20 +542,17 @@ impl Drop for BoxRunner {
 impl BoxRunner {
     fn new(java: &str, cp: &str) -> Option<Self> {
         let mut cmd = Command::new(java);
-        // Cap the runner heap and favour fast startup / low footprint over peak throughput: a box() test
-        // is tiny, so a 512 MB heap + serial GC + C1-only JIT keeps each persistent runner small (they
-        // used to grow to ~1 GB, and several run at once), easing memory pressure on the gate.
-        cmd.args([
-            "-Xmx512m",
-            "-XX:+UseSerialGC",
-            "-XX:TieredStopAtLevel=1",
-            "-cp",
-            cp,
-            "BoxRunner",
-        ])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
+        // Cap the runner heap (-Xmx512m) to keep each persistent runner small — they used to grow to
+        // ~1 GB and several run at once, so this eases gate memory pressure. Deliberately keep the
+        // DEFAULT collector + full tiered JIT: BoxRunner dispatches box() bodies on a cached thread pool
+        // (they run concurrently), so a single-threaded stop-the-world collector (-XX:+UseSerialGC) or
+        // C1-only JIT (-XX:TieredStopAtLevel=1) throttles the whole pool at every GC / starves hot loops
+        // — that alone ballooned the suite from minutes to hours. The heap cap bounds footprint; G1 keeps
+        // throughput.
+        cmd.args(["-Xmx512m", "-cp", cp, "BoxRunner"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
         die_with_parent(&mut cmd);
         let mut child = cmd.spawn().ok()?;
         let stdin = child.stdin.take()?;
@@ -1274,11 +1271,11 @@ struct JavaRunner {
 impl JavaRunner {
     fn new(java: &str, runner_dir: &Path) -> Option<Self> {
         let mut cmd = Command::new(java);
+        // Cap heap for footprint, but keep the default collector + full tiered JIT: JavaRunner executes
+        // the reference javac output on a thread pool, so serial GC / C1-only throttles it (see BoxRunner).
         cmd.args([
             "-Xverify:all",
             "-Xmx512m",
-            "-XX:+UseSerialGC",
-            "-XX:TieredStopAtLevel=1",
             "-cp",
             &runner_dir.to_string_lossy(),
             "JavaRunner",
