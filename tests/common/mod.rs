@@ -1134,8 +1134,15 @@ impl KotlincServer {
 /// is success — or `None` if the toolchain/JVM is unavailable (caller skips, exactly like a missing
 /// `kotlinc`). One server JVM is shared across all calls (keyed by the compiler jar).
 #[allow(dead_code)]
+/// A per-classpath pool of persistent compiler servers, each behind its own `Arc<Mutex>` so callers
+/// hold the (brief) map lock only to pick/grow a server, then release it before the long compile.
+type ServerPool<S> = Mutex<HashMap<String, Vec<Arc<Mutex<S>>>>>;
+
 pub fn kotlinc_compile(args: &[String]) -> Option<(i32, String)> {
-    static POOL: OnceLock<Mutex<HashMap<String, Mutex<KotlincServer>>>> = OnceLock::new();
+    // A per-classpath POOL of servers (not one), so reference-compiler work runs N-wide instead of
+    // serializing on a single mutex — the coverage-gate's ~1-core bottleneck. The outer map lock is
+    // held only to pick/grow a server (an `Arc`), then released BEFORE the multi-second compile.
+    static POOL: OnceLock<ServerPool<KotlincServer>> = OnceLock::new();
     let java_home = java_home()?;
     let java = format!("{java_home}/bin/java");
     if !Path::new(&java).exists() {
@@ -1148,16 +1155,22 @@ pub fn kotlinc_compile(args: &[String]) -> Option<(i32, String)> {
         server_dir.to_string_lossy(),
         compiler_jar.to_string_lossy()
     );
-    let pool = POOL.get_or_init(|| Mutex::new(HashMap::new()));
-    {
+    let server = {
+        let pool = POOL.get_or_init(|| Mutex::new(HashMap::new()));
         let mut map = pool.lock().unwrap();
-        if !map.contains_key(&cp) {
-            map.insert(cp.clone(), Mutex::new(KotlincServer::new(&java, &cp)?));
+        let servers = map.entry(cp.clone()).or_default();
+        if let Some(idle) = servers.iter().find(|s| s.try_lock().is_ok()) {
+            idle.clone()
+        } else if servers.len() < server_pool_cap() {
+            let s = Arc::new(Mutex::new(KotlincServer::new(&java, &cp)?));
+            servers.push(s.clone());
+            s
+        } else {
+            // At cap and all busy — block on the least-recently-added (spreads simple contention).
+            servers[0].clone()
         }
-    }
-    let map = pool.lock().unwrap();
-    let server_mx = map.get(&cp).unwrap();
-    let mut server = server_mx.lock().unwrap();
+    };
+    let mut server = server.lock().unwrap();
     match server.try_compile(args) {
         Ok(r) => Some(r),
         Err(_) => {
@@ -1166,6 +1179,23 @@ pub fn kotlinc_compile(args: &[String]) -> Option<(i32, String)> {
             server.try_compile(args).ok()
         }
     }
+}
+
+/// How many persistent compiler/runner JVMs to pool per classpath. Sized to the worker-thread count so
+/// tests run N-wide, but capped (each `KotlincServer` is a ~1 GB kotlinc JVM) to bound test-time memory.
+/// Override with `KRUSTY_SERVER_POOL`.
+#[allow(dead_code)]
+fn server_pool_cap() -> usize {
+    std::env::var("KRUSTY_SERVER_POOL")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|&n| n >= 1)
+        .unwrap_or_else(|| {
+            std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(3)
+                .clamp(1, 4)
+        })
 }
 
 // --- Persistent javac+run server ------------------------------------------
@@ -1327,15 +1357,29 @@ impl JavaRunner {
 /// classpath (krusty output dirs + stdlib); `outdir` receives the driver's `.class`.
 #[allow(dead_code)]
 pub fn javac_run(driver_path: &str, cp: &str, outdir: &str, main_class: &str) -> Option<String> {
-    static POOL: OnceLock<Mutex<JavaRunner>> = OnceLock::new();
+    // A POOL of runner JVMs (not one global), so Java-driver tests run N-wide instead of serializing
+    // on a single mutex held across the whole javac+run. The pool lock is released before the run.
+    static POOL: OnceLock<Mutex<Vec<Arc<Mutex<JavaRunner>>>>> = OnceLock::new();
     let java_home = java_home()?;
     let java = format!("{java_home}/bin/java");
     if !Path::new(&java).exists() {
         return None;
     }
     let runner_dir = setup_java_runner(&java_home)?;
-    let mx = POOL.get_or_init(|| Mutex::new(JavaRunner::new(&java, &runner_dir).unwrap()));
-    let mut runner = mx.lock().unwrap();
+    let runner = {
+        let pool = POOL.get_or_init(|| Mutex::new(Vec::new()));
+        let mut v = pool.lock().unwrap();
+        if let Some(idle) = v.iter().find(|r| r.try_lock().is_ok()) {
+            idle.clone()
+        } else if v.len() < server_pool_cap() {
+            let r = Arc::new(Mutex::new(JavaRunner::new(&java, &runner_dir)?));
+            v.push(r.clone());
+            r
+        } else {
+            v[0].clone()
+        }
+    };
+    let mut runner = runner.lock().unwrap();
     match runner.try_run(driver_path, cp, outdir, main_class) {
         Ok(s) => Some(s),
         Err(_) => {
