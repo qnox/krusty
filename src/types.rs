@@ -18,6 +18,36 @@ pub fn intern(name: &str) -> &'static str {
     leaked
 }
 
+/// Identity comparison of two INTERNED names. Both operands MUST come from [`intern`] (or [`wk`]); then
+/// equal content ⇒ one shared allocation ⇒ this is an O(1) pointer compare instead of a byte-wise `==`.
+/// Do NOT use on a raw (un-interned) string — it would report distinct for equal content.
+#[inline]
+pub fn same(a: &str, b: &str) -> bool {
+    std::ptr::eq(a.as_ptr(), b.as_ptr())
+}
+
+/// Well-known class internal names, each interned ONCE on first use and reused for identity comparison
+/// ([`same`]) against other interned names — so a hot check like "is this `Continuation`?" is a pointer
+/// compare, and the literal is interned a single time rather than re-scanned per call.
+pub mod wk {
+    use super::intern;
+    use std::sync::OnceLock;
+    macro_rules! names {
+        ($($f:ident => $lit:literal),* $(,)?) => { $(
+            #[inline]
+            pub fn $f() -> &'static str {
+                static S: OnceLock<&'static str> = OnceLock::new();
+                S.get_or_init(|| intern($lit))
+            }
+        )* };
+    }
+    names! {
+        continuation => "kotlin/coroutines/Continuation",
+        any => "kotlin/Any",
+        java_object => "java/lang/Object",
+    }
+}
+
 /// Intern a `Ty` to a canonical `&'static Ty` so array element types compare by value (the derived
 /// `Eq`/`Hash` on `Ty::Array` follow the reference, so equal elements must share one pointer).
 pub fn intern_ty(t: Ty) -> &'static Ty {

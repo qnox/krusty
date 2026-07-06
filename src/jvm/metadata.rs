@@ -9,6 +9,7 @@
 
 use super::classreader::ClassInfo;
 use crate::libraries::{GSig, GenericSig};
+use crate::types::intern;
 use std::collections::HashMap;
 use std::collections::HashSet;
 
@@ -55,7 +56,7 @@ fn parse_type_gsig(
                         (_, w) => ap.skip(w)?,
                     }
                 }
-                args.push(arg.unwrap_or_else(|| GSig::Class("kotlin/Any".to_string(), vec![])));
+                args.push(arg.unwrap_or_else(|| GSig::Class(intern("kotlin/Any"), vec![])));
             }
             (_, w) => pb.skip(w)?,
         }
@@ -65,10 +66,10 @@ fn parse_type_gsig(
         return Some(gsig_from_kotlin_class(&internal, args));
     }
     if let Some(id) = tp_id {
-        return tparams.get(&id).map(|n| GSig::Var(n.clone()));
+        return tparams.get(&id).map(|n| GSig::Var(intern(n)));
     }
     if let Some(id) = tpn_id {
-        return resolve_string(records, d2, id as usize).map(GSig::Var);
+        return resolve_string(records, d2, id as usize).map(|s| GSig::Var(intern(&s)));
     }
     None
 }
@@ -81,7 +82,7 @@ fn gsig_from_kotlin_class(internal: &str, mut args: Vec<GSig>) -> GSig {
         if arity.parse::<u8>().is_ok() {
             let ret = Box::new(
                 args.pop()
-                    .unwrap_or(GSig::Class("kotlin/Any".to_string(), vec![])),
+                    .unwrap_or(GSig::Class(intern("kotlin/Any"), vec![])),
             );
             return GSig::Function { params: args, ret };
         }
@@ -92,7 +93,7 @@ fn gsig_from_kotlin_class(internal: &str, mut args: Vec<GSig>) -> GSig {
     if internal == "kotlin/Array" {
         return GSig::Arr(Box::new(
             args.pop()
-                .unwrap_or(GSig::Class("kotlin/Any".to_string(), vec![])),
+                .unwrap_or(GSig::Class(intern("kotlin/Any"), vec![])),
         ));
     }
     if let Some(elem) = internal.strip_suffix("Array").and_then(kotlin_primitive) {
@@ -104,7 +105,7 @@ fn gsig_from_kotlin_class(internal: &str, mut args: Vec<GSig>) -> GSig {
     // `areturn`'s `Unit.INSTANCE` materialization the way `Ty::Unit` does.
     match kotlin_canonical_ty(internal) {
         Some(t) => GSig::Prim(t),
-        None => GSig::Class(internal.to_string(), args),
+        None => GSig::Class(intern(internal), args),
     }
 }
 
@@ -781,8 +782,8 @@ fn build_generic_sig(
         // actual receiver binds `T` exactly like an extension. `None` for a top-level function.
         class_receiver.map(|(internal, ctps)| {
             GSig::Class(
-                internal.to_string(),
-                ctps.iter().map(|(_, n)| GSig::Var(n.clone())).collect(),
+                intern(internal),
+                ctps.iter().map(|(_, n)| GSig::Var(intern(n))).collect(),
             )
         })
     };
@@ -798,14 +799,14 @@ fn build_generic_sig(
                 parse_type_gsig(&vp.type_body, records, d2, &tparams)
             };
             // An unresolvable param erases to a fresh unbound var (→ `Any` downstream).
-            decoded.unwrap_or(GSig::Var("\u{0}".to_string()))
+            decoded.unwrap_or(GSig::Var(intern("\u{0}")))
         })
         .collect();
     let ret = pf
         .return_body
         .as_ref()
         .and_then(|rb| parse_type_gsig(rb, records, d2, &tparams))
-        .unwrap_or(GSig::Class("kotlin/Any".to_string(), vec![]));
+        .unwrap_or(GSig::Class(intern("kotlin/Any"), vec![]));
     Some(GenericSig {
         formals,
         receiver,
