@@ -11,7 +11,7 @@
 //! INSIDE one source (an extension's receiver-MRO rank is only comparable within one type hierarchy);
 //! the composite federates at the resolve boundary, never by flattening one global overload set.
 
-use crate::libraries::{FunctionSet, LibraryType};
+use crate::libraries::{FunctionSet, LibraryType, PropertySet};
 use crate::types::Ty;
 
 /// A provider of declarations — a module's AST or a compiled library. The arg-independent metadata
@@ -30,6 +30,15 @@ pub trait SymbolSource {
     /// `None` if this source has no such type.
     fn resolve_type(&self, _internal: &str) -> Option<LibraryType> {
         None
+    }
+
+    /// ALL declarations of PROPERTY `name` applicable to an access — members + extensions
+    /// (`receiver = Some`) or top-level properties (`receiver = None`) — in ONE query, symmetric to
+    /// [`Self::functions`]. Each carries its [`crate::libraries::PropKind`], type, accessors, and
+    /// visibility. Empty by default (a source with no such property). This is the seam that replaces
+    /// resolving a property by guessing its physical getter name and routing it through `functions`.
+    fn properties(&self, _name: &str, _receiver: Option<Ty>) -> PropertySet {
+        PropertySet::default()
     }
 
     /// Whether `internal` names a plain class this source can be used as a SUPERCLASS of an emitted
@@ -84,12 +93,27 @@ impl SymbolSource for CompositeSource {
             .iter()
             .any(|c| c.class_is_extensible(internal))
     }
+
+    fn properties(&self, name: &str, receiver: Option<Ty>) -> PropertySet {
+        // Concatenate in precedence order, exactly like `functions` — selection (receiver rank) stays
+        // per-source, so order is enough.
+        PropertySet {
+            overloads: self
+                .children
+                .iter()
+                .flat_map(|c| c.properties(name, receiver).overloads)
+                .collect(),
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::libraries::{FnKind, FunctionInfo, LibraryCallable, LibraryType};
+    use crate::libraries::{
+        FnKind, FunctionInfo, GSig, LibraryCallable, LibraryType, PropKind, PropertyInfo,
+        Visibility,
+    };
     use crate::types::Ty;
 
     /// A minimal source: one top-level overload of a chosen name, one type shape.
@@ -115,6 +139,28 @@ mod tests {
                 }
             } else {
                 FunctionSet::default()
+            }
+        }
+        fn properties(&self, name: &str, receiver: Option<Ty>) -> PropertySet {
+            // A source provides ONE top-level property whose name matches its `fn_name` (reused as the
+            // property name), owner-stamped so federation order is observable.
+            if receiver.is_none() && self.fn_name.as_deref() == Some(name) {
+                PropertySet {
+                    overloads: vec![PropertyInfo {
+                        kind: PropKind::TopLevel,
+                        receiver: None,
+                        formals: Vec::new(),
+                        ty: GSig::Prim(Ty::Int),
+                        getter: callable(&self.owner, name),
+                        setter: None,
+                        is_const: false,
+                        visibility: Visibility::Public,
+                        owner: self.owner.clone(),
+                        receiver_rank: 0,
+                    }],
+                }
+            } else {
+                PropertySet::default()
             }
         }
         fn resolve_type(&self, internal: &str) -> Option<LibraryType> {
@@ -175,6 +221,28 @@ mod tests {
     fn functions_empty_when_no_source_has_name() {
         let c = CompositeSource::new(vec![Box::new(module()), Box::new(library())]);
         assert!(c.functions("absent", None).overloads.is_empty());
+    }
+
+    #[test]
+    fn properties_concatenate_in_precedence_order() {
+        // The property query federates exactly like `functions`: both sources contribute an overload of
+        // `greet`, the module's (first) coming first, each keeping its own origin.
+        let c = CompositeSource::new(vec![Box::new(module()), Box::new(library())]);
+        let ps = c.properties("greet", None);
+        assert_eq!(ps.overloads.len(), 2);
+        assert_eq!(ps.overloads[0].owner, "module");
+        assert_eq!(ps.overloads[1].owner, "library");
+    }
+
+    #[test]
+    fn properties_empty_when_no_source_has_name() {
+        let c = CompositeSource::new(vec![Box::new(module()), Box::new(library())]);
+        assert!(c.properties("absent", None).overloads.is_empty());
+        // A receiver-scoped query also finds nothing here (the fakes only provide top-level props).
+        assert!(c
+            .properties("greet", Some(Ty::obj("X")))
+            .overloads
+            .is_empty());
     }
 
     #[test]

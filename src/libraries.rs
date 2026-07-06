@@ -765,6 +765,56 @@ pub struct FunctionSet {
     pub overloads: Vec<FunctionInfo>,
 }
 
+/// How a resolved PROPERTY relates to the access's receiver — the property analogue of [`FnKind`]
+/// (member wins over extension; a top-level property has no receiver).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PropKind {
+    /// A property of the receiver's type (or an inherited one).
+    Member,
+    /// An extension property on the receiver's type.
+    Extension,
+    /// A receiver-less top-level property.
+    TopLevel,
+}
+
+/// One property declaration a source exposes, arg-independent — the property analogue of
+/// [`FunctionInfo`], so a resolver can query properties symmetrically with `functions`.
+///
+/// The type is carried as a platform-neutral [`GSig`] (NOT an erased `Ty`): the resolver reads the
+/// Kotlin type; erasure to a descriptor happens only at the emit boundary, inside the opaque accessor
+/// [`LibraryCallable`]s. (Nullability lands in the `GSig` node once the metadata decode that populates
+/// it is added — the seam here does not yet consume the type.)
+#[derive(Clone)]
+pub struct PropertyInfo {
+    pub kind: PropKind,
+    /// The extension/member receiver type; `None` for a top-level property.
+    pub receiver: Option<GSig>,
+    /// The property's own formal type parameters (`val <T> List<T>.foo`); empty for a plain property.
+    pub formals: Vec<String>,
+    /// The property's declared type.
+    pub ty: GSig,
+    /// The real getter — an opaque platform emit handle (the erased descriptor lives here).
+    pub getter: LibraryCallable,
+    /// The setter, present iff the property is a `var`.
+    pub setter: Option<LibraryCallable>,
+    /// `const val` — a compile-time constant whose value use sites inline.
+    pub is_const: bool,
+    /// The property's Kotlin visibility.
+    pub visibility: Visibility,
+    /// The declaring type's internal name — for the resolver's access check (`protected`/`private`).
+    pub owner: String,
+    /// For an [`PropKind::Extension`], the receiver-MRO rung it was found at (0 = the receiver's own
+    /// type); `0` for member/top-level. Mirrors [`FunctionInfo::receiver_rank`].
+    pub receiver_rank: u32,
+}
+
+/// ALL properties of one name applicable to an access — members AND extensions AND top-level, in one
+/// query, each tagged with its [`PropKind`]. The property analogue of [`FunctionSet`].
+#[derive(Clone, Default)]
+pub struct PropertySet {
+    pub overloads: Vec<PropertyInfo>,
+}
+
 /// The shape of a library type: enough for the front end to resolve member accesses against it
 /// (publicness, kind, supertypes, constructors, instance members, and companion members) without
 /// knowing the target ABI.
