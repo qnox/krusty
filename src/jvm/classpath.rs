@@ -1717,11 +1717,53 @@ impl Classpath {
 
     /// The JVM descriptor of the static method named `jvm_name` on facade `root` (walking the multifile
     /// super chain) — the emit-handle fallback when a `@Metadata` function omits its `method_signature`.
-    pub fn facade_method_descriptor(&self, root: &str, jvm_name: &str) -> Option<String> {
-        self.facade_statics(root)
+    /// When `recv_desc` is `Some`, the method whose FIRST parameter (the extension receiver) matches it is
+    /// chosen — a name like `maxOrNull` has many receiver-typed overloads (`[I`, `[D`, `Iterable`), so name
+    /// alone would pick the wrong one; `None` takes the first method of that name.
+    pub fn facade_method_descriptor(
+        &self,
+        root: &str,
+        jvm_name: &str,
+        recv_desc: Option<&str>,
+        ret_desc: Option<&str>,
+    ) -> Option<String> {
+        let cands: Vec<String> = self
+            .facade_statics(root)
             .into_iter()
-            .find(|c| c.name == jvm_name)
+            .filter(|c| {
+                c.name == jvm_name
+                    && match recv_desc {
+                        None => true,
+                        Some(rd) => {
+                            descriptor_parts(&c.descriptor)
+                                .and_then(|(fp, _)| fp)
+                                .as_deref()
+                                == Some(rd)
+                        }
+                    }
+            })
             .map(|c| c.descriptor)
+            .collect();
+        let ret_of = |d: &str| d.rsplit_once(')').map(|(_, r)| r.to_string());
+        // A concrete expected return picks the exact overload (`maxOrNull(Iterable)Double`); a type-var
+        // return (none given) prefers the generic-bound overload (`…Comparable`/`…Object`) over the numeric
+        // specializations that share the receiver.
+        match ret_desc {
+            Some(rd) => cands
+                .iter()
+                .find(|d| ret_of(d).as_deref() == Some(rd))
+                .cloned(),
+            None => cands
+                .iter()
+                .find(|d| matches!(ret_of(d).as_deref(), Some("Ljava/lang/Comparable;")))
+                .or_else(|| {
+                    cands
+                        .iter()
+                        .find(|d| matches!(ret_of(d).as_deref(), Some("Ljava/lang/Object;")))
+                })
+                .cloned(),
+        }
+        .or_else(|| cands.into_iter().next())
     }
 
     /// Every static callable a facade `root` declares (all names), following the multifile-facade super
@@ -2707,6 +2749,14 @@ fn build_jimage_index(path: &Path) -> Option<JimageIndex> {
 mod fq_tests {
     use super::*;
 
+    /// The provisioned kotlin-stdlib jar via the project's single CI-safe resolver
+    /// ([`crate::toolchain::stdlib_jar`] — the dist env vars `KRUSTY_KOTLINC`/`KRUSTY_KOTLIN_STDLIB`, then
+    /// the gradle/m2 caches). A test returns early when it is absent (toolchain not provisioned), so it
+    /// never fails on CI regardless of where the stdlib lives.
+    fn test_stdlib_jar() -> Option<PathBuf> {
+        crate::toolchain::stdlib_jar()
+    }
+
     // Every `Classpath` gets a distinct process-unique `id`, EVEN when an earlier instance has been
     // dropped (and its heap address could be reused). Per-classpath caches (the library seed) key on this
     // id, so a freed-then-reallocated `Classpath` cannot collide with a stale entry — the regression that
@@ -2789,11 +2839,9 @@ mod fq_tests {
 
     #[test]
     fn real_stdlib_jar_declares_known_packages_and_facades() {
-        let jar = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("target/cache/kotlinc/2.4.0/kotlinc/lib/kotlin-stdlib.jar");
-        if !jar.exists() {
-            return; // toolchain not provisioned in this environment
-        }
+        let Some(jar) = test_stdlib_jar() else {
+            return;
+        };
         let jp = build_jar_packages(&Entry::Jar(jar));
         // Central-directory pass sees the class-bearing + builtins packages.
         let coll = &jp.packages["kotlin/collections"];
@@ -2819,11 +2867,9 @@ mod fq_tests {
 
     #[test]
     fn tree_routed_find_matches_a_real_stdlib_class_and_misses_absent() {
-        let jar = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("target/cache/kotlinc/2.4.0/kotlinc/lib/kotlin-stdlib.jar");
-        if !jar.exists() {
-            return; // toolchain not provisioned
-        }
+        let Some(jar) = test_stdlib_jar() else {
+            return;
+        };
         let cp = Classpath::new(vec![jar]);
         // A real facade part in kotlin/collections resolves through the package-scoped entry search.
         assert!(
@@ -2839,11 +2885,9 @@ mod fq_tests {
 
     #[test]
     fn resolve_entry_records_function_and_classifier_namespaces() {
-        let jar = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("target/cache/kotlinc/2.4.0/kotlinc/lib/kotlin-stdlib.jar");
-        if !jar.exists() {
-            return; // toolchain not provisioned
-        }
+        let Some(jar) = test_stdlib_jar() else {
+            return;
+        };
         let cp = Classpath::new(vec![jar]);
         // A top-level function occupies the CALLABLE namespace, not the classifier one — found via the
         // package's `kotlin_module` facades (tree-driven, no whole-classpath scan).
@@ -2868,11 +2912,9 @@ mod fq_tests {
 
     #[test]
     fn functions_in_scope_is_tree_pruned() {
-        let jar = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("target/cache/kotlinc/2.4.0/kotlinc/lib/kotlin-stdlib.jar");
-        if !jar.exists() {
+        let Some(jar) = test_stdlib_jar() else {
             return;
-        }
+        };
         let cp = Classpath::new(vec![jar]);
         // In scope: emptyList (kotlin/collections) resolves via the tree-driven per-package lookup.
         let coll = vec!["kotlin/collections".to_string()];
@@ -2888,11 +2930,9 @@ mod fq_tests {
 
     #[test]
     fn extensions_in_scope_matches_scope_filtered_eager_index() {
-        let jar = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("target/cache/kotlinc/2.4.0/kotlinc/lib/kotlin-stdlib.jar");
-        if !jar.exists() {
+        let Some(jar) = test_stdlib_jar() else {
             return;
-        }
+        };
         let cp = Classpath::new(vec![jar]);
         let coll = vec!["kotlin/collections".to_string()];
         let recv = "Ljava/lang/Iterable;";
@@ -2939,12 +2979,65 @@ mod fq_tests {
     }
 
     #[test]
-    fn resolve_symbols_returns_classifier_and_callable_namespaces() {
-        let jar = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("target/cache/kotlinc/2.4.0/kotlinc/lib/kotlin-stdlib.jar");
-        if !jar.exists() {
+    fn package_facades_lists_public_multifile_facades() {
+        let Some(jar) = test_stdlib_jar() else {
             return;
-        }
+        };
+        let cp = Classpath::new(vec![jar]);
+        let facades = cp.package_facades("kotlin/collections");
+        // The public facade is listed (the `__`-part is collapsed to it) and deduped.
+        assert!(facades
+            .iter()
+            .any(|f| f == "kotlin/collections/CollectionsKt"));
+        assert!(
+            !facades.iter().any(|f| f.contains("__")),
+            "parts collapse to the public facade"
+        );
+        let mut deduped = facades.clone();
+        deduped.sort();
+        deduped.dedup();
+        assert_eq!(deduped.len(), facades.len(), "no duplicate facades");
+        // A package no jar declares yields nothing.
+        assert!(cp.package_facades("no/such/pkg").is_empty());
+    }
+
+    #[test]
+    fn facade_method_descriptor_disambiguates_by_receiver_and_return() {
+        let Some(jar) = test_stdlib_jar() else {
+            return;
+        };
+        let cp = Classpath::new(vec![jar]);
+        let facade = "kotlin/collections/CollectionsKt";
+        // `maxOrNull` has many same-named receiver overloads; the receiver descriptor selects the
+        // Iterable form, and a concrete return descriptor the numeric specialization.
+        let d = cp.facade_method_descriptor(
+            facade,
+            "maxOrNull",
+            Some("Ljava/lang/Iterable;"),
+            Some("Ljava/lang/Double;"),
+        );
+        assert_eq!(
+            d.as_deref(),
+            Some("(Ljava/lang/Iterable;)Ljava/lang/Double;")
+        );
+        // A type-variable return (None) prefers the generic-bound (`Comparable`) overload.
+        let g =
+            cp.facade_method_descriptor(facade, "maxOrNull", Some("Ljava/lang/Iterable;"), None);
+        assert_eq!(
+            g.as_deref(),
+            Some("(Ljava/lang/Iterable;)Ljava/lang/Comparable;")
+        );
+        // A name with no method on the facade chain is absent.
+        assert!(cp
+            .facade_method_descriptor(facade, "definitelyNotAMethodXyz", None, None)
+            .is_none());
+    }
+
+    #[test]
+    fn resolve_symbols_returns_classifier_and_callable_namespaces() {
+        let Some(jar) = test_stdlib_jar() else {
+            return;
+        };
         use crate::libraries::Callables;
         use crate::symbol_source::SymbolSource;
         let lib =
