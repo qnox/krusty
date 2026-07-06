@@ -1471,7 +1471,22 @@ impl Classpath {
         cache_stat!(l2_class, false);
         let name = format!("{internal}.class");
         let mut found = None;
-        for e in &self.entries {
+        // Search only the entries the package tree says declare this class's package, in classpath order
+        // (the spec's qualified-name step: search `node.jars`). The tree lists EVERY jar/dir/jimage that
+        // declares the package, so the result is identical to scanning all entries — just fewer reads
+        // (a probe for an absent class touches the one jar that owns the package, not every entry + the
+        // jimage). Fall back to all entries when the package isn't cataloged (defensive).
+        let pkg = internal.rsplit_once('/').map_or("", |(p, _)| p);
+        let scoped = self
+            .package_tree()
+            .node_for(pkg)
+            .filter(|n| !n.jars.is_empty())
+            .map(|n| n.jars.clone());
+        let indices = scoped.unwrap_or_else(|| (0..self.entries.len()).collect());
+        for i in indices {
+            let Some(e) = self.entries.get(i) else {
+                continue;
+            };
             let bytes = match e {
                 Entry::Dir(d) => std::fs::read(d.join(&name)).ok(),
                 Entry::Jar(j) => self.jar_entry(j, &name),
@@ -1905,14 +1920,23 @@ fn record_kotlin_module(bytes: &[u8], jp: &mut JarPackages) {
 }
 
 /// Build one entry's [`JarPackages`] — the only eager per-jar work: a central-directory name pass plus
-/// the shallow `kotlin_module` read(s). The JDK jimage is skipped (no Kotlin metadata; JDK types reach
-/// the resolver via `jvm_class_map`, not package probing).
+/// the shallow `kotlin_module` read(s). The JDK jimage contributes its package membership from the
+/// location table (names only — no class parse), so `find` can scope a JDK type to the jimage instead
+/// of scanning every entry (spec § jimage: "build package membership from its location table").
 fn build_jar_packages(entry: &Entry) -> JarPackages {
     let mut jp = JarPackages::default();
     match entry {
         Entry::Jar(j) => build_jar_packages_jar(j, &mut jp),
         Entry::Dir(d) => build_jar_packages_dir(d, d, &mut jp),
-        Entry::Jimage(_) => {}
+        Entry::Jimage(p) => {
+            if let Some(idx) = build_jimage_index(p) {
+                for internal in idx.keys() {
+                    if let Some((pkg, _)) = internal.rsplit_once('/') {
+                        jp.packages.entry(pkg.to_string()).or_default().has_classes = true;
+                    }
+                }
+            }
+        }
     }
     jp
 }
@@ -2447,6 +2471,26 @@ mod fq_tests {
         let tree = compose_package_tree(&[std::sync::Arc::new(jp)]);
         assert_eq!(tree.node_for("kotlin/collections").unwrap().jars, vec![0]);
         assert!(tree.node_for("kotlin").unwrap().jars == vec![0]);
+    }
+
+    #[test]
+    fn tree_routed_find_matches_a_real_stdlib_class_and_misses_absent() {
+        let jar = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target/cache/kotlinc/2.4.0/kotlinc/lib/kotlin-stdlib.jar");
+        if !jar.exists() {
+            return; // toolchain not provisioned
+        }
+        let cp = Classpath::new(vec![jar]);
+        // A real facade part in kotlin/collections resolves through the package-scoped entry search.
+        assert!(
+            cp.find("kotlin/collections/CollectionsKt").is_some(),
+            "scoped find must locate a class in a cataloged package"
+        );
+        // An absent class in a REAL package resolves to None (the negative probe, now scoped to the one
+        // jar that owns the package) — and is cached.
+        assert!(cp.find("kotlin/collections/DoesNotExistXyz").is_none());
+        // An absent class in a package no jar declares also misses (falls back cleanly).
+        assert!(cp.find("no/such/pkg/Nope").is_none());
     }
 
     #[test]
