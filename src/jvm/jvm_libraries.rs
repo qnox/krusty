@@ -1573,14 +1573,34 @@ impl SymbolSource for JvmLibraries {
                     .copied()
                     .and_then(ty_simple_name)
                     .map(|s| format!("{}Of{s}", mf.jvm_name));
+                // The receiver's erased descriptor disambiguates same-named overloads on the facade
+                // (`maxOrNull([I)` vs `maxOrNull([D)`); the return descriptor disambiguates same-receiver
+                // overloads (`maxOrNull(Iterable)Double` vs `…Comparable`). A type-var return has no class,
+                // so `None` selects the generic-bound overload in the fallback.
+                let recv_desc = type_descriptor(
+                    <Self as crate::libraries::TargetRuntime>::jvm_descriptor_form(self, receiver),
+                );
+                let ret_desc = mf.ret_class.map(|r| {
+                    type_descriptor(
+                        <Self as crate::libraries::TargetRuntime>::jvm_descriptor_form(
+                            self,
+                            kotlin_name_to_ty(r),
+                        ),
+                    )
+                });
+                let by_name = |n: &str| {
+                    self.cp.facade_method_descriptor(
+                        &facade,
+                        n,
+                        Some(&recv_desc),
+                        ret_desc.as_deref(),
+                    )
+                };
                 let (jvm_name, descriptor) = if let Some(d) = mf.jvm_desc.map(str::to_string) {
                     (mf.jvm_name.clone(), d)
-                } else if let Some(d) = self.cp.facade_method_descriptor(&facade, &mf.jvm_name) {
+                } else if let Some(d) = by_name(&mf.jvm_name) {
                     (mf.jvm_name.clone(), d)
-                } else if let Some(d) = elem_mangled
-                    .as_ref()
-                    .and_then(|n| self.cp.facade_method_descriptor(&facade, n))
-                {
+                } else if let Some(d) = elem_mangled.as_ref().and_then(|n| by_name(n)) {
                     (elem_mangled.unwrap(), d)
                 } else {
                     continue;

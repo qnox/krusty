@@ -33,12 +33,12 @@ pre-push:
     lint:
       priority: 1
       run: just lint
-    # Own tests WITH coverage: `coverage-gate` runs the own suite instrumented, which both checks
-    # correctness (a failing test fails the run) AND enforces coverage >= the master baseline. No
-    # separate plain own-suite run — this one covers both.
-    coverage:
+    # Own tests, PLAIN (no coverage): the instrumented `coverage-gate` is ~10-20 min and belongs on CI
+    # (`just ci` runs it across all Kotlin versions as the unbypassable backstop). Locally, run the own
+    # suite plain for correctness only — fast — and leave the coverage floor to CI.
+    test:
       priority: 2
-      run: just coverage-gate
+      run: just test
     # Conformance WITHOUT coverage: the kotlin box/codegen corpus, plain (instrumenting it would be
     # slow and it's excluded from the coverage metric anyway). Runs after coverage. On a 4-core box
     # the full gate lands around ~3 minutes — the hardware floor for this scope; CI (`just ci`) runs
