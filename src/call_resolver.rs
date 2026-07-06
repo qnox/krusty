@@ -430,7 +430,17 @@ impl<'a> CallResolver<'a> {
         property: &str,
         receiver: Ty,
     ) -> Option<LibraryCallable> {
-        let getter = self.lib.physical_property_getter_name(property)?;
+        // The REAL extension-property getter name from `@Metadata` (no `getX`/`@JvmName`/`is`-Boolean
+        // guessing); fall back to the `getX` convention for a source that doesn't expose the property.
+        let getter = self
+            .lib
+            .properties(property, Some(receiver))
+            .overloads
+            .into_iter()
+            .filter(|p| p.kind == PropKind::Extension)
+            .min_by_key(|p| p.receiver_rank)
+            .map(|p| p.getter.name)
+            .or_else(|| self.lib.physical_property_getter_name(property))?;
         self.resolve_extension_callable(&getter, receiver, &[], &[])
             .filter(|c| c.ret.is_read_value_result())
     }

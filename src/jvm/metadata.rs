@@ -627,6 +627,9 @@ pub struct MetaProp {
     pub is_const: bool,
     /// `var` (has a setter) vs `val`.
     pub is_var: bool,
+    /// The EXTENSION receiver's class name (`val String.foo` → `kotlin/String`) — `None` for an
+    /// ordinary member/top-level property.
+    pub receiver_class: Option<String>,
 }
 
 /// Decode every `Function` (proto field `fn_field`: 9 in a `Class`, 3 in a `Package`) of this class's
@@ -1114,10 +1117,21 @@ fn parse_jvm_property_signature(body: &[u8]) -> (JvmSig, JvmSig) {
     (getter, setter)
 }
 
-/// Every `Property` (field 10) declared in this class's `@Metadata`, decoded to [`MetaProp`] — the
-/// property analogue of [`class_functions`]. Carries the REAL getter/setter JVM names from the
-/// `JvmPropertySignature`, so a resolver reads the accessor instead of guessing `getX`.
+/// Member properties declared in a class's `@Metadata` (`Class.property` = field 10).
 pub fn class_properties(ci: &ClassInfo) -> Vec<MetaProp> {
+    decode_properties(ci, 10)
+}
+
+/// Top-level / extension properties declared in a file facade's `Package` `@Metadata`
+/// (`Package.property` = field 4). An extension property carries a non-`None` `receiver_class`.
+pub fn package_properties(ci: &ClassInfo) -> Vec<MetaProp> {
+    decode_properties(ci, 4)
+}
+
+/// Decode every `Property` (`prop_field`: 10 in a `Class`, 4 in a `Package`) of this metadata message
+/// into [`MetaProp`]s — the property analogue of [`decode_functions`]. Carries the REAL getter/setter
+/// JVM names from the `JvmPropertySignature`, so a resolver reads the accessor instead of guessing `getX`.
+fn decode_properties(ci: &ClassInfo, prop_field: u64) -> Vec<MetaProp> {
     let mut out = Vec::new();
     if ci.kotlin_d1.is_empty() {
         return out;
@@ -1132,7 +1146,7 @@ pub fn class_properties(ci: &ClassInfo) -> Vec<MetaProp> {
     while !pb.at_end() {
         let Some(tag) = pb.varint() else { break };
         match (tag >> 3, tag & 7) {
-            (10, 2) => {
+            (f, 2) if f == prop_field => {
                 let Some(n) = pb.varint() else { break };
                 let Some(b) = pb.bytes(n as usize) else { break };
                 props.push(b);
@@ -1181,6 +1195,7 @@ pub fn class_properties(ci: &ClassInfo) -> Vec<MetaProp> {
         let mut ret = None;
         let mut flags = 0u64;
         let mut sig = (None, None);
+        let mut receiver_class = None;
         while !p.at_end() {
             let Some(tag) = p.varint() else { break };
             match (tag >> 3, tag & 7) {
@@ -1193,6 +1208,15 @@ pub fn class_properties(ci: &ClassInfo) -> Vec<MetaProp> {
                         .and_then(|cn| resolve_class_name(&records, d2, cn as usize));
                 }
                 (9, 0) => ret = p.varint().and_then(type_of_id),
+                // `Property.receiver_type` (field 5, inline `Type`) / `receiver_type_id` (field 10) —
+                // PRESENCE marks an EXTENSION property; recover the receiver's class name.
+                (5, 2) => {
+                    let Some(n) = p.varint() else { break };
+                    let Some(tb) = p.bytes(n as usize) else { break };
+                    receiver_class = parse_type_class_name(tb)
+                        .and_then(|cn| resolve_class_name(&records, d2, cn as usize));
+                }
+                (10, 0) => receiver_class = p.varint().and_then(type_of_id),
                 (100, 2) => {
                     let Some(n) = p.varint() else { break };
                     let Some(ext) = p.bytes(n as usize) else {
@@ -1234,6 +1258,7 @@ pub fn class_properties(ci: &ClassInfo) -> Vec<MetaProp> {
             visibility: crate::types::Visibility::from_metadata(flags_visibility(flags)),
             is_const: flags & IS_CONST_BIT != 0,
             is_var,
+            receiver_class,
         });
     }
     out
