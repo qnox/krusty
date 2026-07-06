@@ -135,7 +135,7 @@ fn package_extension_receiver_round_trips() {
         "the receiver_type must mark it an extension"
     );
     assert_eq!(
-        f.receiver_class.as_deref(),
+        f.receiver_class,
         Some("androidx/navigation/NavGraphBuilder"),
         "the extension receiver class must round-trip"
     );

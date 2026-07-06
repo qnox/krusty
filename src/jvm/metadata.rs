@@ -836,19 +836,19 @@ pub struct MetaFn {
     pub jvm_name: String,
     /// The JVM descriptor from the `method_signature` extension; `None` when metadata omits it (the
     /// caller may then fall back to a bytecode method of the same name, or compute it from proto types).
-    pub jvm_desc: Option<String>,
+    pub jvm_desc: Option<&'static str>,
     pub is_public: bool,
     pub is_inline: bool,
     pub is_suspend: bool,
     /// Extension-receiver Kotlin class name (`kotlin/Result` for `Result.getOrThrow`), if any. `None` for a
     /// top-level fn AND for an extension on a type PARAMETER — use [`MetaFn::is_extension`] to disambiguate.
-    pub receiver_class: Option<String>,
+    pub receiver_class: Option<&'static str>,
     /// Whether this is an EXTENSION (has a receiver of any kind — class or type parameter) vs a true
     /// top-level function. Lets the classpath ext index avoid mis-indexing a top-level generic as an
     /// extension on its first parameter's type.
     pub is_extension: bool,
     /// The Kotlin return-type class name (`kotlin/UInt` for `UInt.coerceAtMost`), if it is a class type.
-    pub ret_class: Option<String>,
+    pub ret_class: Option<&'static str>,
     /// Whether the Kotlin return type is nullable (`T?`) — `Type.nullable`. The JVM descriptor/`Signature`
     /// erase this; only `@Metadata` carries it. Drives the elvis null-check for a nullable-returning scope
     /// fn (`takeIf`/`takeUnless` return `T?`).
@@ -982,13 +982,13 @@ fn decode_functions(ci: &ClassInfo, fn_field: u64) -> Vec<MetaFn> {
                     out.push(MetaFn {
                         kotlin_name,
                         jvm_name,
-                        jvm_desc,
+                        jvm_desc: jvm_desc.map(|s| intern(&s)),
                         is_public: pf.is_public,
                         is_inline: pf.is_inline,
                         is_suspend: pf.is_suspend,
-                        receiver_class,
+                        receiver_class: receiver_class.map(|s| intern(&s)),
                         is_extension: pf.has_receiver,
-                        ret_class,
+                        ret_class: ret_class.map(|s| intern(&s)),
                         ret_nullable: pf.ret_nullable,
                         value_params,
                         generic_sig,

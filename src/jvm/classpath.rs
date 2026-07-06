@@ -357,7 +357,7 @@ type MetaFnsCache = RefCell<crate::lru::LruCache<String, std::rc::Rc<ClassMeta>>
 struct MetaCallable {
     kotlin_name: String,
     jvm_name: String,
-    receiver_class: Option<String>,
+    receiver_class: Option<&'static str>,
     is_extension: bool,
     ret: ReturnInfo,
     value_params: Vec<MetaCallableParam>,
@@ -695,9 +695,9 @@ impl Classpath {
             .map(|f| MetaCallable {
                 kotlin_name: f.kotlin_name.clone(),
                 jvm_name: f.jvm_name.clone(),
-                receiver_class: f.receiver_class.clone(),
+                receiver_class: f.receiver_class,
                 is_extension: f.is_extension,
-                ret: metadata_return_info(f.ret_class.as_deref(), f.ret_nullable),
+                ret: metadata_return_info(f.ret_class, f.ret_nullable),
                 value_params: f
                     .value_params
                     .iter()
@@ -842,7 +842,7 @@ impl Classpath {
                 f.value_params.iter().map(|p| p.name.clone()).collect(),
                 f.value_params.iter().map(|p| p.has_default).collect(),
             ),
-            ret: metadata_return_info(f.ret_class.as_deref(), f.ret_nullable),
+            ret: metadata_return_info(f.ret_class, f.ret_nullable),
         }
     }
 
@@ -856,9 +856,10 @@ impl Classpath {
         let mut out = Vec::new();
         if let Some(idxs) = meta.by_kotlin_name.get(fn_name) {
             for &i in idxs {
-                if let Some(cn) = &meta.callables[i].receiver_class {
-                    if !out.contains(cn) {
-                        out.push(cn.clone());
+                if let Some(cn) = meta.callables[i].receiver_class {
+                    let cn = cn.to_string();
+                    if !out.contains(&cn) {
+                        out.push(cn);
                     }
                 }
             }
@@ -1409,7 +1410,7 @@ impl Classpath {
             if !f.is_inline || f.jvm_name != name {
                 return false;
             }
-            if f.jvm_desc.as_deref() == Some(descriptor) {
+            if f.jvm_desc == Some(descriptor) {
                 return true;
             }
             if f.jvm_desc.is_some() {

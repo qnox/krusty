@@ -47,7 +47,7 @@ fn result_companion_success_is_public_inline_in_metadata() {
     assert!(success.is_inline, "success must be inline");
     assert_eq!(success.jvm_name, "success");
     assert_eq!(
-        success.jvm_desc.as_deref(),
+        success.jvm_desc,
         Some("(Ljava/lang/Object;)Ljava/lang/Object;")
     );
     assert!(fns.iter().any(|f| f.kotlin_name == "failure"));
@@ -70,7 +70,7 @@ fn resultkt_get_or_throw_is_public_inline_extension_in_metadata() {
     assert!(g.is_public, "getOrThrow must be public in metadata");
     assert!(g.is_inline, "getOrThrow must be inline");
     assert_eq!(
-        g.receiver_class.as_deref(),
+        g.receiver_class,
         Some("kotlin/Result"),
         "getOrThrow is an extension on Result"
     );
