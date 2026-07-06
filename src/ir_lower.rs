@@ -12043,6 +12043,38 @@ impl<'a> Lower<'a> {
                         }
                     }
                 }
+                // A `var` member of a CLASSPATH type → its setter resolved by real `@Metadata` name
+                // (mirrors the getter read in `lower_member_read_on`). The setter `LibraryCallable`
+                // carries the owner/descriptor for the `invokevirtual`; its parameter type coerces the
+                // value (`Int` literal into a `Long` setter).
+                if self.class_of(rt).is_none() {
+                    if let Ty::Obj(_, _) = &rt {
+                        if let Some(setter) = crate::call_resolver::resolve_property_setter(
+                            &*self.syms.libraries,
+                            rt,
+                            &name,
+                        ) {
+                            let pty = setter
+                                .params
+                                .first()
+                                .map(|t| ty_to_ir(*t))
+                                .unwrap_or_else(|| ty_to_ir(self.info.ty(value)));
+                            let is_iface = self.library_type_is_interface(&setter.owner);
+                            let r = self.expr(receiver)?;
+                            let v = self.lower_arg(value, &pty)?;
+                            return Some(self.ir.add_expr(IrExpr::Call {
+                                callee: Callee::Virtual {
+                                    owner: setter.owner,
+                                    name: setter.name,
+                                    descriptor: setter.descriptor,
+                                    interface: is_iface,
+                                },
+                                dispatch_receiver: Some(r),
+                                args: vec![v],
+                            }));
+                        }
+                    }
+                }
                 let owner_internal = self.class_of(rt)?.internal.clone();
                 // The backing field is private; a write from outside the declaring class goes through
                 // the public `setX()` accessor (matching kotlinc). Inside the class, write directly.
