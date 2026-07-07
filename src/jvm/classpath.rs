@@ -1720,14 +1720,14 @@ impl Classpath {
     /// When `recv_desc` is `Some`, the method whose FIRST parameter (the extension receiver) matches it is
     /// chosen — a name like `maxOrNull` has many receiver-typed overloads (`[I`, `[D`, `Iterable`), so name
     /// alone would pick the wrong one; `None` takes the first method of that name.
-    pub fn facade_method_descriptor(
+    pub fn facade_method(
         &self,
         root: &str,
         jvm_name: &str,
         recv_desc: Option<&str>,
         ret_desc: Option<&str>,
-    ) -> Option<String> {
-        let cands: Vec<String> = self
+    ) -> Option<ExtCandidate> {
+        let cands: Vec<ExtCandidate> = self
             .facade_statics(root)
             .into_iter()
             .filter(|c| {
@@ -1742,24 +1742,23 @@ impl Classpath {
                         }
                     }
             })
-            .map(|c| c.descriptor)
             .collect();
-        let ret_of = |d: &str| d.rsplit_once(')').map(|(_, r)| r.to_string());
+        let ret_of = |c: &ExtCandidate| c.descriptor.rsplit_once(')').map(|(_, r)| r.to_string());
         // A concrete expected return picks the exact overload (`maxOrNull(Iterable)Double`); a type-var
         // return (none given) prefers the generic-bound overload (`…Comparable`/`…Object`) over the numeric
         // specializations that share the receiver.
         match ret_desc {
             Some(rd) => cands
                 .iter()
-                .find(|d| ret_of(d).as_deref() == Some(rd))
+                .find(|c| ret_of(c).as_deref() == Some(rd))
                 .cloned(),
             None => cands
                 .iter()
-                .find(|d| matches!(ret_of(d).as_deref(), Some("Ljava/lang/Comparable;")))
+                .find(|c| matches!(ret_of(c).as_deref(), Some("Ljava/lang/Comparable;")))
                 .or_else(|| {
                     cands
                         .iter()
-                        .find(|d| matches!(ret_of(d).as_deref(), Some("Ljava/lang/Object;")))
+                        .find(|c| matches!(ret_of(c).as_deref(), Some("Ljava/lang/Object;")))
                 })
                 .cloned(),
         }
@@ -3010,26 +3009,25 @@ mod fq_tests {
         let facade = "kotlin/collections/CollectionsKt";
         // `maxOrNull` has many same-named receiver overloads; the receiver descriptor selects the
         // Iterable form, and a concrete return descriptor the numeric specialization.
-        let d = cp.facade_method_descriptor(
+        let d = cp.facade_method(
             facade,
             "maxOrNull",
             Some("Ljava/lang/Iterable;"),
             Some("Ljava/lang/Double;"),
         );
         assert_eq!(
-            d.as_deref(),
+            d.map(|c| c.descriptor).as_deref(),
             Some("(Ljava/lang/Iterable;)Ljava/lang/Double;")
         );
         // A type-variable return (None) prefers the generic-bound (`Comparable`) overload.
-        let g =
-            cp.facade_method_descriptor(facade, "maxOrNull", Some("Ljava/lang/Iterable;"), None);
+        let g = cp.facade_method(facade, "maxOrNull", Some("Ljava/lang/Iterable;"), None);
         assert_eq!(
-            g.as_deref(),
+            g.map(|c| c.descriptor).as_deref(),
             Some("(Ljava/lang/Iterable;)Ljava/lang/Comparable;")
         );
         // A name with no method on the facade chain is absent.
         assert!(cp
-            .facade_method_descriptor(facade, "definitelyNotAMethodXyz", None, None)
+            .facade_method(facade, "definitelyNotAMethodXyz", None, None)
             .is_none());
     }
 

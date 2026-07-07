@@ -304,6 +304,16 @@ impl<'a> CallResolver<'a> {
         }
     }
 
+    /// The unqualified-name resolution loop for this resolver's import scope — `resolve_symbols` per
+    /// candidate fqn `pkg/name`. THE way to resolve an unqualified name: the caller extracts `classifier`,
+    /// `callables.functions` (∪ classifier constructors, then `invoke`), or `callables.properties` from the
+    /// returned namespace records. Empty when there is no import scope (the caller falls back separately).
+    fn symbols_in_scope(&self, name: &str) -> Vec<(String, crate::libraries::ResolvedSymbols)> {
+        self.fn_scope
+            .map(|scope| resolve_symbols_in_scope(self.lib, name, scope))
+            .unwrap_or_default()
+    }
+
     /// Whether `name` has an `inline` extension overload on `receiver`.
     pub fn extension_is_inline(&self, receiver: Ty, name: &str) -> bool {
         self.lib
@@ -352,9 +362,28 @@ impl<'a> CallResolver<'a> {
         args: &[Ty],
         type_args: &[Ty],
     ) -> Option<LibraryCallable> {
-        // FQN-driven resolution via the shared unqualified-callable seam: union `resolve_symbols` over the
-        // in-scope packages (receiver-less top-level query), then keep the top-level overloads below.
-        let fs = scoped_callables(self.lib, name, None, self.fn_scope);
+        // FQN-driven resolution: union `resolve_symbols`' callables over the in-scope packages (the ONE
+        // query, via `symbols_in_scope`), then keep the top-level overloads below. A context with NO import
+        // scope falls back to the legacy whole-classpath `functions()` query (removed once every consumer
+        // is scoped — task A).
+        let fs = FunctionSet {
+            overloads: if self.fn_scope.is_some() {
+                self.symbols_in_scope(name)
+                    .into_iter()
+                    .flat_map(|(_, r)| match r.callables {
+                        crate::libraries::Callables::Functions(f) => f.overloads,
+                        _ => Vec::new(),
+                    })
+                    .collect()
+            } else {
+                self.lib
+                    .functions(name, None)
+                    .overloads
+                    .into_iter()
+                    .filter(|o| fn_in_scope(o, self.fn_scope))
+                    .collect()
+            },
+        };
         let parsed: Vec<(&FunctionInfo, Vec<Ty>, Ty)> = fs
             .overloads
             .iter()
@@ -584,19 +613,27 @@ impl<'a> CallResolver<'a> {
         property: &str,
         receiver: Ty,
     ) -> Option<LibraryCallable> {
-        // The REAL extension-property getter name from `@Metadata` (no `getX`/`@JvmName`/`is`-Boolean
-        // guessing); fall back to the `getX` convention for a source that doesn't expose the property.
-        let getter = self
-            .lib
-            .properties(property, Some(receiver))
-            .overloads
+        // Resolve the extension property through the ONE query — union `resolve_symbols`' property overloads
+        // over the import scope. Its getter is the REAL `@Metadata` accessor (public-facade owner, exact
+        // `JvmPropertySignature` name) — never a `getX` guess. Pick the most-specific applicable receiver
+        // rung. The getter's `ret` is already the property's declared type (normalized — a primitive stays
+        // `Ty::Int`, not a boxed `kotlin/Int`), so it is used directly.
+        let p = self
+            .symbols_in_scope(property)
             .into_iter()
+            .flat_map(|(_, r)| match r.callables {
+                crate::libraries::Callables::Properties(p) => p.overloads,
+                _ => Vec::new(),
+            })
             .filter(|p| p.kind == PropKind::Extension)
-            .min_by_key(|p| p.receiver_rank)
-            .map(|p| p.getter.name)
-            .or_else(|| self.lib.physical_property_getter_name(property))?;
-        self.resolve_extension_callable(&getter, receiver, &[], &[])
-            .filter(|c| c.ret.is_read_value_result())
+            .filter_map(|p| {
+                let decl_recv = gsig_to_ty(p.receiver.as_ref()?, &std::collections::HashMap::new());
+                let rank = self.lib.extension_receiver_rank(receiver, decl_recv)?;
+                Some((rank, p))
+            })
+            .min_by_key(|(rank, _)| *rank)
+            .map(|(_, p)| p)?;
+        Some(p.getter).filter(|c| c.ret.is_read_value_result())
     }
 
     fn bind_extension_callable(
@@ -1660,40 +1697,6 @@ fn select_instance_info(
     )
 }
 
-/// The unqualified-callable resolution seam (spec § Functions): form a candidate FQN `pkg/name` from
-/// each in-scope package and union the callables `resolve_symbols` returns — an unqualified top-level or
-/// extension call binds ONLY to an imported / same-package / default-import declaration (kotlinc). The
-/// returned [`FunctionSet`] carries every kind (top-level, extension); the caller filters by `FnKind`.
-/// A context with NO import scope (`fn_scope = None`) falls back to the legacy whole-classpath
-/// `functions(name, receiver)` query filtered by [`fn_in_scope`] (the `receiver` seeds that fallback's
-/// member/extension walk; it is unused on the scoped path, which is receiver-agnostic by fqn).
-fn scoped_callables(
-    lib: &dyn CompilerPlatform,
-    name: &str,
-    receiver: Option<Ty>,
-    fn_scope: Option<&[String]>,
-) -> FunctionSet {
-    match fn_scope {
-        Some(scope) => FunctionSet {
-            overloads: resolve_symbols_in_scope(lib, name, scope)
-                .into_iter()
-                .flat_map(|(_, r)| match r.callables {
-                    crate::libraries::Callables::Functions(f) => f.overloads,
-                    _ => Vec::new(),
-                })
-                .collect(),
-        },
-        None => FunctionSet {
-            overloads: lib
-                .functions(name, receiver)
-                .overloads
-                .into_iter()
-                .filter(|o| fn_in_scope(o, fn_scope))
-                .collect(),
-        },
-    }
-}
-
 /// The shared unqualified-name resolution LOOP (spec § Resolution): form a candidate FQN `pkg/name` for
 /// each in-scope `packages` entry and query [`crate::symbol_source::SymbolSource::resolve_symbols`] once
 /// per candidate, returning each `(fqn, record)` whose namespace record is non-empty. The helper does
@@ -1777,10 +1780,21 @@ fn select_overload(
     // packages (the spec's scope-pruned, tree-driven extension lookup) — so an unqualified extension binds
     // only when its facade's package is imported, without the whole-classpath eager index. MEMBERS are
     // always visible on their type (no scope), so they keep the direct `functions(name, receiver)` walk.
-    let fs = if kind == FnKind::Extension {
-        scoped_callables(lib, name, Some(recv), ext.fn_scope)
-    } else {
-        lib.functions(name, Some(recv))
+    // EXTENSION candidates come from the ONE query — union `resolve_symbols`' function callables over the
+    // in-scope packages (scope-pruned, tree-driven), so an unqualified extension binds only when its
+    // facade's package is imported. No import scope → the legacy whole-classpath `functions()` fallback
+    // (removed once every consumer is scoped — task A). MEMBERS are always visible on their type.
+    let fs = match (kind, ext.fn_scope) {
+        (FnKind::Extension, Some(scope)) => FunctionSet {
+            overloads: resolve_symbols_in_scope(lib, name, scope)
+                .into_iter()
+                .flat_map(|(_, r)| match r.callables {
+                    crate::libraries::Callables::Functions(f) => f.overloads,
+                    _ => Vec::new(),
+                })
+                .collect(),
+        },
+        _ => lib.functions(name, Some(recv)),
     };
     crate::trace_compiler!(
         "resolve",

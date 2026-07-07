@@ -14014,6 +14014,16 @@ impl<'a> Lower<'a> {
                         }
                     }
                 };
+                crate::trace_compiler!(
+                    "value_classes",
+                    "safecall {name} result_ty={result_ty:?} obj_internal={:?} vc={}",
+                    result_ty.obj_internal(),
+                    result_ty.obj_internal().is_some_and(|i| self
+                        .syms
+                        .classes
+                        .get(i.rsplit('/').next().unwrap_or(i))
+                        .is_some_and(|c| c.value_field.is_some()))
+                );
                 // A nullable-primitive result (`s?.length` : `Int?`): box the primitive member value so
                 // both `when` branches are the wrapper reference (the other branch is `null`).
                 let member = if result_ty.nullable_primitive().is_some() {
