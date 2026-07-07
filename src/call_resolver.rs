@@ -384,6 +384,41 @@ impl<'a> CallResolver<'a> {
                     .collect()
             },
         };
+        self.pick_top_level(name, &fs, args, type_args)
+    }
+
+    /// Resolve a FULLY-QUALIFIED top-level call `pkg.name(args)` where `pkg` is a package path the source
+    /// wrote explicitly (`kotlin.math.max`, `kotlinx.coroutines.runBlocking`). The name need NOT be in the
+    /// import scope — a FQ reference names its package directly — so overloads come from `resolve_symbols`
+    /// on the ONE `pkg` (the FQN seam), not from the in-scope union.
+    pub fn resolve_top_level_callable_in_package(
+        &self,
+        name: &str,
+        pkg: &str,
+        args: &[Ty],
+        type_args: &[Ty],
+    ) -> Option<LibraryCallable> {
+        let fs = FunctionSet {
+            overloads: resolve_symbols_in_scope(self.lib, name, &[pkg.to_string()])
+                .into_iter()
+                .flat_map(|(_, r)| match r.callables {
+                    crate::libraries::Callables::Functions(f) => f.overloads,
+                    _ => Vec::new(),
+                })
+                .collect(),
+        };
+        self.pick_top_level(name, &fs, args, type_args)
+    }
+
+    /// Overload-resolve a top-level call against an already-built [`FunctionSet`] (from the in-scope union
+    /// or an explicit FQ package). Shared tail of [`Self::resolve_top_level_callable`].
+    fn pick_top_level(
+        &self,
+        name: &str,
+        fs: &FunctionSet,
+        args: &[Ty],
+        type_args: &[Ty],
+    ) -> Option<LibraryCallable> {
         let parsed: Vec<(&FunctionInfo, Vec<Ty>, Ty)> = fs
             .overloads
             .iter()
@@ -429,7 +464,7 @@ impl<'a> CallResolver<'a> {
             }
         }
 
-        if let Some(c) = self.resolve_top_level_inline_only_callable(&fs, args, type_args) {
+        if let Some(c) = self.resolve_top_level_inline_only_callable(fs, args, type_args) {
             crate::trace_compiler!(
                 "resolve",
                 "top-level {name} args={args:?} -> {}.{}{} inline-only",
