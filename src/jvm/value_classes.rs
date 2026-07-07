@@ -390,6 +390,15 @@ pub fn lower_value_classes(ir: &mut IrFile) -> bool {
         fr.box_ret = fr.ret_ty.non_null().obj_internal().and_then(|fq| {
             (under.contains_key(fq) && fr.ret_ty != fr.target_ret_ty).then(|| fq.to_string())
         });
+        crate::trace_compiler!(
+            "value_classes",
+            "func_ref {} call_name={} ret_ty={:?} target_ret={:?} box_ret={:?}",
+            c.fq_name,
+            fr.call_name,
+            fr.ret_ty,
+            fr.target_ret_ty,
+            fr.box_ret
+        );
     }
     // A covariant-override bridge delegates to the concrete method by name (mangle the target if it was
     // mangled). When the override returns a value class, the concrete method returns the erased underlying,
