@@ -8793,22 +8793,20 @@ impl<'a> Checker<'a> {
         // Classpath EXTENSION property: `recv.name` whose getter is a top-level `get<Name>(recv)` static
         // (e.g. `descriptor.elementDescriptors` → `SerialDescriptorKt.getElementDescriptors(descriptor)`).
         // Tried last, after members/user-ext-props/library getters, so it never shadows a real member.
-        // A reference-receiver extension property (`recv.name` whose getter is a static `get<Name>(recv)`
-        // on a facade). Tried LAST (after members / user-ext-props / library getters), so it never shadows
-        // a real member. Restricted to `Ty::Obj` — the array/primitive-receiver getter emit still boxes the
-        // receiver wrong (`arr.indices` VerifyErrors), so those stay a skip until that emit path is fixed.
-        if let Ty::Obj(_, _) = rt {
-            if let Some(getter) = self.resolver().resolve_extension_property_getter(name, rt) {
-                if let Some(e) = mexpr {
-                    self.expr_lowers.insert(
-                        e,
-                        ExprLowering::ExtensionPropertyGet {
-                            getter: Box::new(getter.clone()),
-                        },
-                    );
-                }
-                return getter.ret;
+        // An extension property (`recv.name` whose getter is a static `get<Name>(recv)` on a facade). Tried
+        // LAST (after members / user-ext-props / library getters), so it never shadows a real member. Any
+        // receiver — reference, array, primitive, or value class — is allowed: the emit coerces the receiver
+        // to the getter's parameter type (see `lower_arg` in the `ExtensionPropertyGet` lowering).
+        if let Some(getter) = self.resolver().resolve_extension_property_getter(name, rt) {
+            if let Some(e) = mexpr {
+                self.expr_lowers.insert(
+                    e,
+                    ExprLowering::ExtensionPropertyGet {
+                        getter: Box::new(getter.clone()),
+                    },
+                );
             }
+            return getter.ret;
         }
         if let Some(m) =
             crate::call_resolver::resolve_instance_member(&*self.syms.libraries, rt, name, &[])
