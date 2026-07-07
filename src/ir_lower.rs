@@ -3964,8 +3964,8 @@ pub(crate) struct Lower<'a> {
 
 impl<'a> Lower<'a> {
     /// The arg-binding call-resolution layer over this lowerer's [`SymbolSource`]. Cheap to construct.
-    fn resolver(&self) -> crate::call_resolver::CallResolver<'_> {
-        crate::call_resolver::CallResolver::new(&*self.syms.libraries)
+    fn resolver(&self) -> crate::symbol_resolver::SymbolResolver<'_> {
+        crate::symbol_resolver::SymbolResolver::new(&*self.syms.libraries)
     }
 
     fn arg_tys(&self, args: &[AstExprId]) -> Vec<Ty> {
@@ -4074,7 +4074,7 @@ impl<'a> Lower<'a> {
         args: &[AstExprId],
         call_expr: AstExprId,
     ) -> Option<u32> {
-        let m = crate::call_resolver::resolve_instance(
+        let m = crate::symbol_resolver::resolve_instance(
             &*self.syms.libraries,
             &internal,
             name,
@@ -4837,7 +4837,7 @@ impl<'a> Lower<'a> {
             }
         }
         if let Some(ctor) =
-            crate::call_resolver::resolve_constructor(&*self.syms.libraries, internal, &arg_tys)
+            crate::symbol_resolver::resolve_constructor(&*self.syms.libraries, internal, &arg_tys)
                 .filter(|c| c.params.len() == args.len())
         {
             let mut a = Vec::new();
@@ -4855,7 +4855,7 @@ impl<'a> Lower<'a> {
         // parameter (`Rec(id: Vid, …)` → `<init>(String, …, marker)`, caller appends `null`), or omitted
         // DEFAULTS (`Cfg(1)` for `Cfg(a, b = 9)` → `<init>(int, int, int mask, marker)`, caller appends a
         // placeholder per omitted param + the bitmask + `null`). See `resolve_synthetic_constructor`.
-        if let Some(sc) = crate::call_resolver::resolve_synthetic_constructor(
+        if let Some(sc) = crate::symbol_resolver::resolve_synthetic_constructor(
             &*self.syms.libraries,
             internal,
             &arg_tys,
@@ -4913,7 +4913,7 @@ impl<'a> Lower<'a> {
             return self.lower_external_new(internal, &ordered);
         }
         // A defaulted parameter was omitted → the `<init>$default` synthetic fills it.
-        let (desc, real) = crate::call_resolver::synthetic_default_ctor(
+        let (desc, real) = crate::symbol_resolver::synthetic_default_ctor(
             &*self.syms.libraries,
             internal,
             slots.len(),
@@ -5280,7 +5280,7 @@ impl<'a> Lower<'a> {
                     args: vec![],
                 });
                 (c, ret)
-            } else if let Some(m) = crate::call_resolver::resolve_instance_member(
+            } else if let Some(m) = crate::symbol_resolver::resolve_instance_member(
                 &*self.syms.libraries,
                 it_ty,
                 &comp,
@@ -5328,7 +5328,7 @@ impl<'a> Lower<'a> {
                 (c, ret)
             } else {
                 // An indexable type: `componentN` is the inline `get(N-1)`.
-                let m = crate::call_resolver::resolve_instance_member(
+                let m = crate::symbol_resolver::resolve_instance_member(
                     &*self.syms.libraries,
                     it_ty,
                     "get",
@@ -5776,7 +5776,7 @@ impl<'a> Lower<'a> {
                         {
                             return true;
                         }
-                        if crate::call_resolver::resolve_instance_member(
+                        if crate::symbol_resolver::resolve_instance_member(
                             &*self.syms.libraries,
                             recv_ty,
                             name,
@@ -6778,7 +6778,7 @@ impl<'a> Lower<'a> {
             // returning 0 for `null`) — the null-guarded-ternary form is a future parity item. The member's
             // JVM owner/descriptor come from the provider (mapped builtin), not a `java/lang/*` core literal.
             t if !nullable && t.non_null().kotlin_class_internal() == Some("kotlin/String") => {
-                let m = crate::call_resolver::resolve_instance_member(
+                let m = crate::symbol_resolver::resolve_instance_member(
                     &*self.syms.libraries,
                     t.non_null(),
                     "hashCode",
@@ -7372,7 +7372,7 @@ impl<'a> Lower<'a> {
     /// Whether classpath type `internal` is a kotlinx `StringFormat` — detected structurally by the
     /// presence of the 2-arg `encodeToString(SerializationStrategy, Any)` member (no hardcoded subtype).
     fn is_string_format(&self, internal: &str) -> bool {
-        crate::call_resolver::resolve_instance(
+        crate::symbol_resolver::resolve_instance(
             &*self.syms.libraries,
             internal,
             "encodeToString",
@@ -9333,8 +9333,12 @@ impl<'a> Lower<'a> {
         // `iterator` *extension* (`for (e in map)` uses `Map.iterator()` → `Iterator<Map.Entry<K,V>>`).
         // `iter_ret` is the (possibly parameterized) iterator type; `ext_iter` flags the static call.
         let (iter_ret, iter_desc, iter_owner, iter_ext, iter_inline) = if let Some(m) =
-            crate::call_resolver::resolve_instance(&*self.syms.libraries, internal, "iterator", &[])
-        {
+            crate::symbol_resolver::resolve_instance(
+                &*self.syms.libraries,
+                internal,
+                "iterator",
+                &[],
+            ) {
             (
                 m.ret,
                 m.descriptor,
@@ -9355,13 +9359,13 @@ impl<'a> Lower<'a> {
         };
         let iter_ty = iter_ret;
         let iter_internal = iter_ty.obj_internal()?.to_string();
-        let hasnext_m = crate::call_resolver::resolve_instance(
+        let hasnext_m = crate::symbol_resolver::resolve_instance(
             &*self.syms.libraries,
             &iter_internal,
             "hasNext",
             &[],
         )?;
-        let next_m = crate::call_resolver::resolve_instance(
+        let next_m = crate::symbol_resolver::resolve_instance(
             &*self.syms.libraries,
             &iter_internal,
             "next",
@@ -10146,7 +10150,7 @@ impl<'a> Lower<'a> {
             // Reuse the getter the checker resolved for this property read (keyed by the access
             // ExprId); resolve only when it was recorded through a different path.
             .or_else(|| {
-                crate::call_resolver::resolve_property_member(&*self.syms.libraries, rt, name)
+                crate::symbol_resolver::resolve_property_member(&*self.syms.libraries, rt, name)
             })
             .map(|r| {
                 let m = r.member;
@@ -10174,7 +10178,7 @@ impl<'a> Lower<'a> {
 
     fn lower_library_property_read_on(&mut self, recv: u32, rt: Ty, name: &str) -> Option<u32> {
         let resolved =
-            crate::call_resolver::resolve_property_member(&*self.syms.libraries, rt, name)?;
+            crate::symbol_resolver::resolve_property_member(&*self.syms.libraries, rt, name)?;
         let m = resolved.member;
         let owner = m.owner.clone().unwrap_or_else(|| {
             rt.kotlin_class_internal()
@@ -10202,7 +10206,7 @@ impl<'a> Lower<'a> {
         arg_exprs: Vec<u32>,
         arg_tys: &[Ty],
     ) -> Option<u32> {
-        let resolved = crate::call_resolver::resolve_instance_member(
+        let resolved = crate::symbol_resolver::resolve_instance_member(
             &*self.syms.libraries,
             rt,
             name,
@@ -10293,7 +10297,7 @@ impl<'a> Lower<'a> {
             &cs.param_defaults,
         )
         .ok()?;
-        let (desc, real, _ret, suspend) = crate::call_resolver::synthetic_default_member(
+        let (desc, real, _ret, suspend) = crate::symbol_resolver::synthetic_default_member(
             &*self.syms.libraries,
             &owner,
             &phys,
@@ -10568,7 +10572,7 @@ impl<'a> Lower<'a> {
             _ => None,
         };
         if let Some(internal) = &lib_owner {
-            if let Some(m) = crate::call_resolver::resolve_instance(
+            if let Some(m) = crate::symbol_resolver::resolve_instance(
                 &*self.syms.libraries,
                 internal,
                 name,
@@ -10607,7 +10611,7 @@ impl<'a> Lower<'a> {
             // back to resolving when it was recorded through a different path (see
             // [`TypeInfo::resolved_members`]).
             .or_else(|| {
-                crate::call_resolver::resolve_instance_member(
+                crate::symbol_resolver::resolve_instance_member(
                     &*self.syms.libraries,
                     this_ty,
                     name,
@@ -12172,7 +12176,7 @@ impl<'a> Lower<'a> {
                 // value (`Int` literal into a `Long` setter).
                 if self.class_of(rt).is_none() {
                     if let Ty::Obj(_, _) = &rt {
-                        if let Some(setter) = crate::call_resolver::resolve_property_setter(
+                        if let Some(setter) = crate::symbol_resolver::resolve_property_setter(
                             &*self.syms.libraries,
                             rt,
                             &name,
@@ -12768,7 +12772,7 @@ impl<'a> Lower<'a> {
                 let (it, vt) = (self.info.ty(index), self.info.ty(value));
                 // `MutableList.set(Int, E)`, or `MutableMap.put(K, V)` — Kotlin's `m[k] = v`
                 // operator maps to `put` on a map.
-                let resolved = crate::call_resolver::resolve_instance(
+                let resolved = crate::symbol_resolver::resolve_instance(
                     &*self.syms.libraries,
                     internal,
                     "set",
@@ -12776,7 +12780,7 @@ impl<'a> Lower<'a> {
                 )
                 .map(|m| ("set", m))
                 .or_else(|| {
-                    crate::call_resolver::resolve_instance(
+                    crate::symbol_resolver::resolve_instance(
                         &*self.syms.libraries,
                         internal,
                         "put",
@@ -12788,7 +12792,7 @@ impl<'a> Lower<'a> {
                     // A narrowing store into a primitive-element collection (`List<Byte>[i] = intVal`)
                     // needs `(value).toByte()` before boxing as the element wrapper — not yet modeled.
                     // Bail (skip the file) rather than box the wrong wrapper type.
-                    if let Some(elem) = crate::call_resolver::resolve_instance_member(
+                    if let Some(elem) = crate::symbol_resolver::resolve_instance_member(
                         &*self.syms.libraries,
                         at,
                         "get",
@@ -13441,7 +13445,7 @@ impl<'a> Lower<'a> {
                 let Ty::Obj(internal, _) = rt else {
                     return None;
                 };
-                let resolved = crate::call_resolver::resolve_instance_member(
+                let resolved = crate::symbol_resolver::resolve_instance_member(
                     &*self.syms.libraries,
                     rt,
                     "invoke",
@@ -13988,7 +13992,7 @@ impl<'a> Lower<'a> {
                             } else {
                                 // A classpath instance method (`s?.substring(1)`).
                                 let arg_tys = self.arg_tys(&args);
-                                if let Some(m) = crate::call_resolver::resolve_instance(
+                                if let Some(m) = crate::symbol_resolver::resolve_instance(
                                     &*self.syms.libraries,
                                     &internal,
                                     &name,
@@ -14892,7 +14896,7 @@ impl<'a> Lower<'a> {
                 if let Ty::Obj(internal, _) = at {
                     if at.array_elem().is_none() {
                         let it = self.info.ty(index);
-                        if let Some(m) = crate::call_resolver::resolve_instance(
+                        if let Some(m) = crate::symbol_resolver::resolve_instance(
                             &*self.syms.libraries,
                             internal,
                             "get",
@@ -17463,45 +17467,46 @@ impl<'a> Lower<'a> {
                         // ABSTRACT (a diamond `class C : AbstractBase(), Iface` where `Base.f` is abstract and
                         // `Iface.f` is a default). Then dispatch to the concrete superinterface DEFAULT via
                         // `invokespecial` on the interface (else `invokespecial AbstractBase.f` → AME).
-                        let (owner, interface, params, descriptor) =
-                            if !self.class_method_is_abstract(&sup, &name) {
-                                let (params, descriptor) =
-                                    if let Some(sig) = self.syms.method_of(&sup, &name) {
-                                        (
-                                            sig.params.clone(),
-                                            self.syms
-                                                .libraries
-                                                .method_descriptor(&sig.params, sig.ret)?,
-                                        )
-                                    } else if let Some(m) = crate::call_resolver::resolve_instance(
-                                        &*self.syms.libraries,
-                                        &sup,
-                                        &name,
-                                        &arg_tys,
-                                    ) {
-                                        (m.params.clone(), m.descriptor.clone())
-                                    } else {
-                                        return None;
-                                    };
-                                (sup.clone(), false, params, descriptor)
-                            } else {
-                                // Find a concrete interface DEFAULT for `name` among the current class's
-                                // interfaces (transitively). Emit `invokespecial <iface>.name`.
-                                let iface = self
-                                    .ir
-                                    .classes
-                                    .get(self.classes.get(&cur)?.id as usize)?
-                                    .interfaces
-                                    .iter()
-                                    .find(|itf| self.iface_method_is_default(itf, &name))
-                                    .cloned()?;
-                                let sig = self.syms.method_of(&iface, &name)?;
-                                let descriptor = self
-                                    .syms
-                                    .libraries
-                                    .method_descriptor(&sig.params, sig.ret)?;
-                                (iface, true, sig.params.clone(), descriptor)
-                            };
+                        let (owner, interface, params, descriptor) = if !self
+                            .class_method_is_abstract(&sup, &name)
+                        {
+                            let (params, descriptor) =
+                                if let Some(sig) = self.syms.method_of(&sup, &name) {
+                                    (
+                                        sig.params.clone(),
+                                        self.syms
+                                            .libraries
+                                            .method_descriptor(&sig.params, sig.ret)?,
+                                    )
+                                } else if let Some(m) = crate::symbol_resolver::resolve_instance(
+                                    &*self.syms.libraries,
+                                    &sup,
+                                    &name,
+                                    &arg_tys,
+                                ) {
+                                    (m.params.clone(), m.descriptor.clone())
+                                } else {
+                                    return None;
+                                };
+                            (sup.clone(), false, params, descriptor)
+                        } else {
+                            // Find a concrete interface DEFAULT for `name` among the current class's
+                            // interfaces (transitively). Emit `invokespecial <iface>.name`.
+                            let iface = self
+                                .ir
+                                .classes
+                                .get(self.classes.get(&cur)?.id as usize)?
+                                .interfaces
+                                .iter()
+                                .find(|itf| self.iface_method_is_default(itf, &name))
+                                .cloned()?;
+                            let sig = self.syms.method_of(&iface, &name)?;
+                            let descriptor = self
+                                .syms
+                                .libraries
+                                .method_descriptor(&sig.params, sig.ret)?;
+                            (iface, true, sig.params.clone(), descriptor)
+                        };
                         if params.len() != args.len() {
                             return None;
                         }
@@ -17629,7 +17634,7 @@ impl<'a> Lower<'a> {
                                 || rty == Ty::String
                                 || rty.obj_internal().map_or(false, |i| {
                                     self.syms.libraries.counted_loop_info(i).is_some()
-                                        || crate::call_resolver::resolve_instance(
+                                        || crate::symbol_resolver::resolve_instance(
                                             &*self.syms.libraries,
                                             i,
                                             "iterator",
@@ -17655,7 +17660,7 @@ impl<'a> Lower<'a> {
                         {
                             let rty = self.info.ty(receiver);
                             let iterable = rty.obj_internal().map_or(false, |i| {
-                                crate::call_resolver::resolve_instance(
+                                crate::symbol_resolver::resolve_instance(
                                     &*self.syms.libraries,
                                     i,
                                     "iterator",
@@ -18292,7 +18297,7 @@ impl<'a> Lower<'a> {
                                 }
                             })
                             .and_then(|internal| {
-                                crate::call_resolver::resolve_instance(
+                                crate::symbol_resolver::resolve_instance(
                                     &*self.syms.libraries,
                                     &internal,
                                     &name,
@@ -18398,7 +18403,7 @@ impl<'a> Lower<'a> {
                         // resolved once. Fall back to resolving for a call the checker did not record
                         // through this path (its resolution came from an earlier branch above).
                         .or_else(|| {
-                            crate::call_resolver::resolve_instance_member(
+                            crate::symbol_resolver::resolve_instance_member(
                                 &*self.syms.libraries,
                                 rt,
                                 &name,
@@ -18442,7 +18447,7 @@ impl<'a> Lower<'a> {
                                 // Reuse the static member the checker resolved for this call (keyed by
                                 // the call ExprId); resolve only when not recorded.
                                 .or_else(|| {
-                                    crate::call_resolver::resolve_companion(
+                                    crate::symbol_resolver::resolve_companion(
                                         &*self.syms.libraries,
                                         internal,
                                         &name,
