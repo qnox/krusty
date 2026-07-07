@@ -10095,15 +10095,10 @@ impl<'a> Checker<'a> {
                     .filter(|ns| ns.iter().any(Option::is_some))
                 {
                     let sets: Vec<Vec<String>> = self
-                        .syms
-                        .libraries
-                        .functions(&name, Some(rt))
-                        .overloads
+                        .resolver()
+                        .receiver_extensions(rt, &name)
                         .into_iter()
-                        .filter(|o| {
-                            o.kind == crate::libraries::FnKind::Extension
-                                && !o.call_sig.param_names.is_empty()
-                        })
+                        .filter(|o| !o.call_sig.param_names.is_empty())
                         .map(|o| o.call_sig.param_names)
                         .collect();
                     if let [pn] = sets.as_slice() {

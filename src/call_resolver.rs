@@ -321,7 +321,7 @@ impl<'a> CallResolver<'a> {
     /// value-class ones) by its LOGICAL `@Metadata` name + receiver, so no per-mangling special-case is
     /// needed here (the mangling is a jvm-emit concern). Falls back to the legacy `functions()` extension
     /// slice only when there is no import scope.
-    fn receiver_extensions(&self, recv: Ty, name: &str) -> Vec<FunctionInfo> {
+    pub(crate) fn receiver_extensions(&self, recv: Ty, name: &str) -> Vec<FunctionInfo> {
         let applies = |o: &FunctionInfo| {
             o.kind == FnKind::Extension
                 && o.receiver
