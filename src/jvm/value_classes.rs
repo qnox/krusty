@@ -89,7 +89,7 @@ pub fn lower_value_classes(ir: &mut IrFile) -> bool {
 
     // Pre-erasure signatures, so box/unbox at call boundaries can see `Object`/generic param/field
     // types (which erasure leaves alone but values flowing in must be boxed to reach).
-    let orig_params: Vec<Vec<Ty>> = ir.functions.iter().map(|f| f.params.clone()).collect();
+    let mut orig_params: Vec<Vec<Ty>> = ir.functions.iter().map(|f| f.params.clone()).collect();
     let orig_fields: Vec<Vec<Ty>> = ir
         .classes
         .iter()
@@ -196,6 +196,79 @@ pub fn lower_value_classes(ir: &mut IrFile) -> bool {
             m
         })
         .collect();
+
+    // A member method OVERRIDING a generic supertype method receives its VALUE-CLASS param BOXED: the
+    // supertype's erased signature passes `Object`, so the incoming arg is a boxed `X`, not the underlying.
+    // The IR's bridge record carries the evidence — a concrete VC param (`Result`) whose supertype-erased
+    // counterpart is a generic reference (`Any`), with NO mangled target unboxing it (a degenerate
+    // `target_name = None` bridge; a mangled `foo-<hash>` target would unbox in the bridge instead). Mark
+    // such a param slot as the BOXED value class so the body unboxes it at each value-class member call —
+    // matching kotlinc, which unboxes the incoming box before use. (Only the repr analysis sees this; the
+    // emitted method signature is unchanged.)
+    // A GENERIC value class (`IC<T>`, its field typed by a type parameter → `Object`) has representation
+    // krusty can't box-mark at a generic-override param without a stack-type conflict (its box/unbox differ
+    // from a concrete-underlying value class). Leave such a param unmarked. A NON-generic value class marks
+    // fine.
+    let generic_vcs: std::collections::HashSet<&str> = ir
+        .classes
+        .iter()
+        .filter(|c| c.is_value && !c.type_params.is_empty())
+        .map(|c| c.fq_name.as_str())
+        .collect();
+    let mut slot_types = slot_types;
+    for c in &ir.classes {
+        for b in &c.bridges {
+            // A VALUE-CLASS-returning override is MANGLED with fully UNBOXED params — kotlinc keeps it
+            // unboxed. Only a NON-value-class-returning override keeps the erased supertype name and receives
+            // its value-class param BOXED. So skip a value-class return (and a mangled-target bridge).
+            if b.target_name.is_some()
+                || b.concrete_ret
+                    .non_null()
+                    .obj_internal()
+                    .is_some_and(|fq| under.contains_key(fq))
+            {
+                continue;
+            }
+            let Some(&fid) = c
+                .methods
+                .iter()
+                .find(|&&fid| ir.functions[fid as usize].name == b.name)
+            else {
+                continue;
+            };
+            let f = &ir.functions[fid as usize];
+            let base = u32::from(f.dispatch_receiver.is_some() && !f.is_static);
+            for (i, (cp, ep)) in b
+                .concrete_params
+                .iter()
+                .zip(b.erased_params.iter())
+                .enumerate()
+            {
+                if let Some(x) = cp.non_null().obj_internal() {
+                    // The supertype must pass a GENERIC `Any`/`Object` at this position — i.e. the param was a
+                    // type PARAMETER there (`I<Result>.foo(T)`), so the arg is boxed. A value class that is
+                    // CONCRETE in the supertype (`Core.getFor(id: Aid)`) erases to its OWN underlying
+                    // (`String`), the method is mangled, and its param arrives UNBOXED — do NOT mark it.
+                    let supertype_generic = matches!(
+                        ep.non_null().obj_internal(),
+                        Some("kotlin/Any" | "java/lang/Object")
+                    );
+                    if under.contains_key(x) && supertype_generic && !generic_vcs.contains(x) {
+                        // Mark BOXED in both the body's slot repr AND the call-boundary target
+                        // (`orig_params`), so a CALLER boxes its arg into this generic-`Object` slot and the
+                        // BODY unboxes it — the param is a boxed position at every boundary, consistently.
+                        let boxed = Ty::nullable(Ty::obj(x));
+                        slot_types[fid as usize].insert(base + i as u32, boxed);
+                        if let Some(p) =
+                            orig_params.get_mut(fid as usize).and_then(|v| v.get_mut(i))
+                        {
+                            *p = boxed;
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     // 1. Erase signatures + drop null-checks on params that erased to a non-reference. `box-impl`
     //    returns the boxed `X` (the one position not erased).
@@ -405,7 +478,6 @@ pub fn lower_value_classes(ir: &mut IrFile) -> bool {
     // so the bridge boxes the result back to `X` (`box_ret`). Runs even with an empty `mangle_map` — a
     // value-class GETTER bridge (`Child2.prop: Child` through `Base2.prop: Base`) needs the erase+box with
     // no mangling involved.
-    let external_vc: HashSet<String> = ir.external_value_classes.keys().cloned().collect();
     {
         for c in &mut ir.classes {
             // A value class keeps its own members' value-class PARAMS boxed (`compareTo(LFoo;)`), so a
@@ -487,15 +559,7 @@ pub fn lower_value_classes(ir: &mut IrFile) -> bool {
                     // kotlinc materializes the box (`Result.box-impl(Object)Lkotlin/Result;`) so the caller
                     // observes the boxed object (its `toString`/identity), and krusty must match: `box_ret`
                     // references the classpath `box-impl`, exactly like a user value class.
-                    // The supertype's erased return is a bare type variable — its front-end form is
-                    // `kotlin/Any` (the resolver's top type), which the emitter lowers to `Object`.
-                    let supertype_is_generic_object = matches!(
-                        b.erased_ret.non_null().obj_internal(),
-                        Some("kotlin/Any" | "java/lang/Object")
-                    );
-                    if supertype_returns_vc
-                        || (external_vc.contains(&fq_name) && !supertype_is_generic_object)
-                    {
+                    if supertype_returns_vc {
                         b.concrete_ret = erase(&b.concrete_ret, &under);
                         b.erased_ret = b.concrete_ret.clone();
                     } else {
@@ -530,24 +594,20 @@ pub fn lower_value_classes(ir: &mut IrFile) -> bool {
                     if supertype_returns_unboxed_vc {
                         b.erased_ret = erase(&b.erased_ret, &under);
                     }
-                } else if b.target_name.is_some() && !owner_is_value {
-                    // A bridge to a mangled override whose VALUE-CLASS PARAMS erased to their underlying:
-                    // a generic supertype method (`B.f(T,U)`) keeps its erased `f(Object,Object)` bridge
-                    // signature but delegates to the concrete mangled `f-<hash>(<underlying>…)`. The
-                    // incoming args are BOXED `X` (the generic call site boxes), so record each value-class
-                    // param to `checkcast` + `unbox-impl`, then erase the param to its underlying for the
-                    // target call descriptor. The bridge's OWN name/params (the erased generic) are unchanged.
-                    // EXTERNAL value classes (`Result`) are different: they are already represented by
-                    // their erased underlying (`Object`) everywhere in krusty, so a bridge must not
-                    // materialize a nonexistent boxed `Result`.
+                } else if !owner_is_value {
+                    // A bridge (mangled `f-<hash>` OR same-name) delegating to a concrete method with a
+                    // VALUE-CLASS PARAM, where the bridge's OWN param is the erased-generic `Object`: a
+                    // generic supertype method (`I<Result>.foo(T)`) keeps its `foo(Object)` bridge signature,
+                    // but the incoming arg is a BOXED `X` (the generic call site boxes). Record each such
+                    // param to `checkcast` + `unbox-impl`, then erase the concrete param to its underlying for
+                    // the delegated call. A param already AT its underlying (bridge param not a reference —
+                    // a primitive-underlying value class) needs no unbox.
                     let vc_params: Vec<Option<String>> = b
                         .concrete_params
                         .iter()
-                        .map(|p| match p {
-                            Ty::Obj(fq_name, _)
-                                if under.contains_key(*fq_name)
-                                    && !external_vc.contains(*fq_name) =>
-                            {
+                        .zip(b.erased_params.iter())
+                        .map(|(cp, ep)| match cp {
+                            Ty::Obj(fq_name, _) if under.contains_key(*fq_name) && is_ref(ep) => {
                                 Some(fq_name.to_string())
                             }
                             _ => None,
@@ -621,44 +681,6 @@ pub fn lower_value_classes(ir: &mut IrFile) -> bool {
         })
         .collect();
 
-    // A user `as Result` (external value class) applied to a value obtained through a GENERIC / `Any`
-    // boundary — where krusty now BOXES the result (see the bridge `box_ret`) — observes a BOXED `Result`.
-    // kotlinc unboxes at that cast: `checkcast kotlin/Result; invokevirtual unbox-impl()`. Collect these
-    // casts to append the `unbox-impl` after the erase pass (which would otherwise erase the target to
-    // `Any` and drop the `checkcast`). A cast already feeding an `unbox-impl` (krusty's own unbox sequence)
-    // is excluded. An external value class has NO user-materialized box, so the ONLY boxed source is such a
-    // boundary — hence a source-level `as Result` always unboxes.
-    let external_cast: Vec<(u32, u32, String)> = ir
-        .exprs
-        .iter()
-        .enumerate()
-        .filter_map(|(i, e)| match e {
-            IrExpr::TypeOp {
-                op: crate::ir::IrTypeOp::CastNonNull,
-                arg,
-                type_operand,
-            } => type_operand
-                .non_null()
-                .obj_internal()
-                .filter(|fq| {
-                    external_vc.contains(*fq) && !unbox_receiver_casts.contains(&(i as u32))
-                })
-                .map(|fq| (i as u32, *arg, fq.to_string())),
-            _ => None,
-        })
-        .collect();
-    let all_external_cast_ids: HashSet<u32> = external_cast.iter().map(|(i, ..)| *i).collect();
-    // Drop a chained `(x as Result) as Result`: its operand is already another external-VC cast, so the
-    // inner cast has ALREADY unboxed to the underlying — a second `checkcast Result; unbox-impl` would
-    // `checkcast` the raw underlying (not a box) and double-unbox. (Degenerate in real source, but keep
-    // the rewrite sound.) The retained ids are those actually rewritten; exclude them from erasure too.
-    let external_cast_unbox: Vec<(u32, String)> = external_cast
-        .iter()
-        .filter(|(_, arg, _)| !all_external_cast_ids.contains(arg))
-        .map(|(i, _, vc)| (*i, vc.clone()))
-        .collect();
-    let external_cast_ids: HashSet<u32> = external_cast_unbox.iter().map(|(i, _)| *i).collect();
-
     // 3. Erase every type carried inside an expression (locals, casts, vararg/array elements, …).
     //    Inside a value-class member body, an `is X`/`(X)other` whose type IS a value class must stay
     //    the BOXED class (the synthesized `equals` checks/casts the box) — keep it; everything else
@@ -668,21 +690,14 @@ pub fn lower_value_classes(ir: &mut IrFile) -> bool {
         match e {
             IrExpr::Variable { ty, .. } => *ty = erase(ty, &under),
             IrExpr::TypeOp { type_operand, .. } => {
-                // `is X` / `as X` on a USER value class keep the BOXED type — the box is the only object
-                // that is `instanceof X`, and a `checkcast X` of an `Any` yields a box the property access
-                // then unboxes. An EXTERNAL value class (`Result`) has NO box — it is always its underlying
-                // — so `as Result` must erase to the underlying (`as Any` → no `checkcast Result`, which
-                // would `ClassCastException` the raw value).
+                // `is X` / `as X` on a value class keeps the BOXED type — the box is the only object that is
+                // `instanceof X`, and a `checkcast X` of an `Any` yields a box the property access then
+                // unboxes. Applies to every value class, classpath ones (`kotlin/Result`) included.
                 let is_vc_ty = type_operand
                     .non_null()
                     .obj_internal()
-                    .is_some_and(|fq_name| {
-                        under.contains_key(fq_name) && !external_vc.contains(fq_name)
-                    });
-                if !is_vc_ty
-                    && !unbox_receiver_casts.contains(&(i as u32))
-                    && !external_cast_ids.contains(&(i as u32))
-                {
+                    .is_some_and(|fq_name| under.contains_key(fq_name));
+                if !is_vc_ty && !unbox_receiver_casts.contains(&(i as u32)) {
                     *type_operand = erase(type_operand, &under);
                 }
                 let _ = keep_box;
@@ -691,7 +706,21 @@ pub fn lower_value_classes(ir: &mut IrFile) -> bool {
                 ctor_params: Some(ps),
                 ..
             } => ps.iter_mut().for_each(|p| *p = erase(p, &under)),
-            IrExpr::InvokeFunction { ret, .. } => *ret = erase(ret, &under),
+            // A function value's `invoke` returns its declared type through the `FunctionN` generic slot — a
+            // REFERENCE. A value-class return is therefore the BOXED value class (an `X` object): keep it as
+            // `X` (do NOT erase to the underlying) so emit does `checkcast X` and a `.field` on the result
+            // `unbox-impl`s it (see `is_boxed_vc`). The invariant — a VC in an `Object`/`FunctionN` slot is
+            // the boxed VC — is upheld symmetrically by every producer (the callable-ref adapter and the
+            // lambda/coroutine tail boxing).
+            IrExpr::InvokeFunction { ret, .. } => {
+                let boxed_vc = ret
+                    .non_null()
+                    .obj_internal()
+                    .is_some_and(|fq| under.contains_key(fq));
+                if !boxed_vc {
+                    *ret = erase(ret, &under);
+                }
+            }
             // An `Array<X>` of a value class is a reference array of the BOXED `X` (kotlinc) — keep the
             // element boxed (don't erase to the underlying); elements are `box-impl`'d when stored. A
             // non-value-class element is erased; a primitive array (`kotlin/IntArray`) has no element arg.
@@ -717,30 +746,6 @@ pub fn lower_value_classes(ir: &mut IrFile) -> bool {
             IrExpr::Try { result, .. } => *result = erase(result, &under),
             _ => {}
         }
-    }
-
-    // Append `unbox-impl` to each external-value-class `as Result` cast (its retained `CastNonNull` still
-    // emits the `checkcast kotlin/Result`): the boxed `Result` the boundary produced is unwrapped to its
-    // underlying, exactly as kotlinc's `checkcast; invokevirtual unbox-impl` — so a following member call
-    // (`getOrThrow()`) or `==` sees the underlying, not the box.
-    for (id, vc) in external_cast_unbox {
-        let cast_id = ir.exprs.len() as ExprId;
-        ir.exprs.push(ir.exprs[id as usize].clone());
-        let u = under
-            .get(&vc)
-            .map(|t| erase(t, &under))
-            .unwrap_or(Ty::Error);
-        let d = desc(&u);
-        ir.exprs[id as usize] = IrExpr::Call {
-            callee: Callee::Virtual {
-                owner: vc,
-                name: "unbox-impl".to_string(),
-                descriptor: format!("(){d}"),
-                interface: false,
-            },
-            dispatch_receiver: Some(cast_id),
-            args: vec![],
-        };
     }
 
     // 4. Rewrite construction / property access — only in bodies that are NOT value-class members
@@ -830,6 +835,7 @@ pub fn lower_value_classes(ir: &mut IrFile) -> bool {
             fields: &orig_fields,
             slots,
             under: &under,
+            logical: &ir.logical_types,
         };
         let boxed_this = body.2;
         let i = id as usize;
@@ -1001,6 +1007,7 @@ pub fn lower_value_classes(ir: &mut IrFile) -> bool {
             fields: &orig_fields,
             slots,
             under: &under,
+            logical: &ir.logical_types,
         };
         let mut reach = HashSet::new();
         collect_reachable(&ir.exprs, root, &mut reach);
@@ -1071,12 +1078,13 @@ pub fn lower_value_classes(ir: &mut IrFile) -> bool {
                     }
                 }
             }
-            // An `Object`-typed value coerced to a (non-null) USER value class `X` is a BOXED `X` (it sat
-            // in a generic/`Object` slot — a `FunctionN` SAM param, a suspension `Object` result) — unbox
+            // An `Object`-typed value coerced to a (non-null) value class `X` is a BOXED `X` (it sat in a
+            // generic/`Object` slot — a `FunctionN` SAM param/result, a suspension `Object` result) — unbox
             // it to the underlying. This loop excludes value-class MEMBER bodies (where the raw underlying
-            // legitimately flows), so there's no boxed-vs-underlying ambiguity here. An external value
-            // class is excluded (never materializes a box). `repr=NotVc` keeps an already-unboxed `X`
-            // (`Repr::Unboxed`) and a boxed `X` (`Repr::Boxed`, handled by the boundary unbox) untouched.
+            // legitimately flows), so there's no boxed-vs-underlying ambiguity here. Applies to EVERY value
+            // class, classpath ones included (a `kotlin/Result` in a `FunctionN` slot is boxed like any
+            // other). `repr=NotVc` keeps an already-unboxed `X` (`Repr::Unboxed`) and a boxed `X`
+            // (`Repr::Boxed`, handled by the boundary unbox) untouched.
             if let IrExpr::TypeOp {
                 op: crate::ir::IrTypeOp::ImplicitCoercion,
                 arg,
@@ -1086,7 +1094,6 @@ pub fn lower_value_classes(ir: &mut IrFile) -> bool {
                 if let Some(x) = type_operand.non_null().obj_internal() {
                     if !type_operand.is_nullable()
                         && under.contains_key(x)
-                        && !external_vc.contains(x)
                         && matches!(repr_ctx.repr(*arg), Repr::NotVc)
                     {
                         ops.push((id, BoxOp::Unbox(x.to_string())));
@@ -1201,6 +1208,27 @@ pub fn lower_value_classes(ir: &mut IrFile) -> bool {
                     ops.push((*recv, repr_ctx.box_op(*recv, x)));
                 }
             }
+            // The RECEIVER of a value-class MEMBER realized as a static `-impl` (`Result.getOrNull-impl(U)`,
+            // `X.foo-<hash>(U, …)`) is the UNBOXED underlying `$this`. A BOXED value-class receiver reaching
+            // it (a `FunctionN.invoke` result, a boxed local, a boxed member arg) must unbox. `box-impl` /
+            // `constructor-impl` are static with no receiver; `unbox-impl` takes the box itself — both excluded.
+            if let IrExpr::Call {
+                callee: Callee::Static { owner, name, .. } | Callee::Virtual { owner, name, .. },
+                dispatch_receiver: Some(recv),
+                ..
+            } = &ir.exprs[id as usize]
+            {
+                if under.contains_key(owner)
+                    && name.contains("-impl")
+                    && name != "unbox-impl"
+                    && name != "box-impl"
+                    && name != "constructor-impl"
+                {
+                    if let Repr::Boxed(x) = repr_ctx.repr(*recv) {
+                        ops.push((*recv, BoxOp::Unbox(x)));
+                    }
+                }
+            }
             // An unboxed value class flowing into a stdlib (`External`) call or a dynamic `invoke`
             // (string-template `append`/`toString`, a generic `Object` param), or stored as a reference
             // array element (`arrayOf(X(..))` → `X[]`), must be boxed.
@@ -1284,7 +1312,18 @@ pub fn lower_value_classes(ir: &mut IrFile) -> bool {
                             .get(k)
                             .is_some_and(|p| *p == format!("L{x};") || p == "Ljava/lang/Object;")
                     } else {
-                        refs.get(k).copied().unwrap_or(false)
+                        // A reference param boxes an unboxed value-class arg — UNLESS the param IS the value
+                        // class's OWN erased underlying (a mangled `getFor-<hash>(String)` for `Aid(String)`):
+                        // there the value is already its native form and passes UNBOXED (identity). This only
+                        // holds for a DISTINCT non-`Object` underlying: when the underlying erases to `Object`
+                        // (`Value(Any)`) the descriptor `Ljava/lang/Object;` no longer tells a concrete
+                        // VC-param apart from a generic/erased `T` slot (`.let(Foo::foo)`'s boxed receiver),
+                        // and kotlinc boxes there — so only exclude when the underlying is a concrete type.
+                        let under_desc = under.get(&x).map(|u| desc(&erase(u, &under)));
+                        let own_underlying = ptypes.get(k).map(String::as_str)
+                            == under_desc.as_deref()
+                            && under_desc.as_deref() != Some("Ljava/lang/Object;");
+                        refs.get(k).copied().unwrap_or(false) && !own_underlying
                     };
                     if box_here {
                         ops.push((a, repr_ctx.box_op(a, x)));
@@ -1374,14 +1413,25 @@ pub fn lower_value_classes(ir: &mut IrFile) -> bool {
                 // class implements, a generic `T` — must be boxed (the box satisfies that type; the raw
                 // underlying does not). `Target::Boxed` covers `Any`/nullable-`X`; a plain interface/class
                 // target (`Target::Other` that is a reference and not the value class itself) also boxes.
+                // EXCEPT the value class's OWN erased underlying (`Aid(String)` → a `getFor-<hash>(String)`
+                // param): that is the value's native representation, so it passes UNBOXED (identity), not a
+                // spurious `box-impl` the callee's `String` signature would then reject (`VerifyError`).
                 let supertype_box = matches!(&tgt, Target::Boxed)
                     || (matches!(tgt, Target::Other)
                         && is_ref(&p)
-                        && p.non_null().obj_internal()
-                            != Some(match &repr_ctx.repr(a) {
-                                Repr::Unboxed(x) | Repr::Boxed(x) => x.as_str(),
-                                Repr::NotVc => "",
-                            }));
+                        && match &repr_ctx.repr(a) {
+                            Repr::Unboxed(x) | Repr::Boxed(x) => {
+                                // Own-erased-underlying exclusion, but only for a DISTINCT non-`Object`
+                                // underlying — an `Object` underlying can't be told apart from a generic
+                                // supertype slot, where kotlinc boxes (see the call-arg site above).
+                                let u = under.get(x).map(|u| erase(u, &under).non_null());
+                                let own_underlying = u.as_ref() == Some(&p.non_null())
+                                    && u.as_ref().and_then(|t| t.obj_internal())
+                                        != Some("java/lang/Object");
+                                p.non_null().obj_internal() != Some(x.as_str()) && !own_underlying
+                            }
+                            Repr::NotVc => false,
+                        });
                 match repr_ctx.repr(a) {
                     Repr::Unboxed(x) if supertype_box => {
                         // A possibly-null operand (`X?` over a reference) boxes null-safely so the
@@ -1434,24 +1484,10 @@ pub fn lower_value_classes(ir: &mut IrFile) -> bool {
         .unwrap_or(0)
         + 1;
     for (id, op) in ops {
-        // A CLASSPATH value class (`Result`) is only ever held in its erased (underlying) form here —
-        // krusty never materializes its boxed `box-impl` object — so box/unbox at a boundary is identity.
-        // (kotlinc agrees: a `Result`-erased `Object` value flows into an `Object`/extension-receiver
-        // position with no `box-impl`.) Skip the op for an external value class.
-        let x = match &op {
-            BoxOp::Box(x) | BoxOp::BoxNull(x) | BoxOp::Unbox(x) => x,
-        };
-        if ir.external_value_classes.contains_key(x) {
-            // Skipped: an external value class is held UNBOXED. This is where `"$r"`/`r == q`/`r.hashCode()`
-            // on a classpath value class currently diverge from kotlinc (which observes the boxed form's
-            // `toString`/`equals`/`hashCode`) — the box/unbox op is dropped rather than routed to the
-            // classpath `-impl`. Traced so the divergence is diagnosable on the real corpus.
-            crate::trace_compiler!(
-                "value_classes",
-                "SKIP external-vc box/unbox op on {x} at id={id}"
-            );
-            continue;
-        }
+        // Box/unbox a value class at a boundary uniformly — a classpath value class (`kotlin/Result`) has
+        // `box-impl`/`unbox-impl` on the classpath and is boxed in reference slots and unboxed at its
+        // members like any user value class. (kotlinc observes the boxed form's `toString`/`equals`/
+        // `hashCode` for a `Result` in an `Object` slot too.)
         match op {
             BoxOp::Box(x) => box_wrap(ir, id, &x, &under),
             BoxOp::BoxNull(x) => {
@@ -1538,12 +1574,31 @@ pub fn lower_value_classes(ir: &mut IrFile) -> bool {
         }
     }
     for (impl_fn, body) in lambda_impls {
-        // A value-class result is boxed; the impl method then returns the BOX type `X` (its erased
-        // underlying return would mis-type the boxed value, e.g. `LX;` vs `String`).
-        if let Some(x) = tail_vc(&ir.exprs, &orig_rets, &under, body) {
+        // A lambda's `invoke` returns `Object` (the SAM erases its result), so a value-class result occupies
+        // a REFERENCE slot and must be the BOXED value class. When the lambda's declared return is a value
+        // class `X`, box the tail to `X` uniformly — for EVERY value class (a classpath `kotlin/Result` is a
+        // value class like any other) and EVERY tail form (`this`, a library call, a constructor) — unless
+        // it is already a boxed `X`. The impl method's JVM return becomes the box type `X`.
+        if let Some(x) = orig_rets[impl_fn as usize]
+            .non_null()
+            .obj_internal()
+            .filter(|fq| under.contains_key(*fq))
+            .map(str::to_string)
+        {
             ir.functions[impl_fn as usize].ret = Ty::obj(&x);
+            box_ref_tail(
+                ir,
+                body,
+                &x,
+                &under,
+                &orig_rets,
+                &orig_fields,
+                &slot_types[impl_fn as usize],
+            );
+        } else {
+            // A lambda returning `Any`/an interface (not a value class itself) still boxes a value-class tail.
+            box_vc_tail(ir, body, &under, &orig_rets, false);
         }
-        box_vc_tail(ir, body, &under, &orig_rets, false);
     }
     for body in inline_bodies {
         box_vc_tail(ir, body, &under, &orig_rets, false);
@@ -1611,26 +1666,6 @@ fn box_vc_tail(
     }
 }
 
-/// The value class produced at a tail position of `id` (recursing `when`/block/return tails), if any.
-fn tail_vc(
-    exprs: &[IrExpr],
-    rets: &[Ty],
-    under: &HashMap<String, Ty>,
-    id: ExprId,
-) -> Option<String> {
-    match &exprs[id as usize] {
-        IrExpr::When { branches } => branches
-            .iter()
-            .find_map(|(_, r)| tail_vc(exprs, rets, under, *r)),
-        IrExpr::Block { value: Some(v), .. } => tail_vc(exprs, rets, under, *v),
-        IrExpr::Block { value: None, stmts } => {
-            stmts.last().and_then(|&s| tail_vc(exprs, rets, under, s))
-        }
-        IrExpr::Return(Some(v)) => tail_vc(exprs, rets, under, *v),
-        _ => unboxed_vc_class(exprs, rets, under, id, false),
-    }
-}
-
 /// The value class an expr produces UNBOXED (a `constructor-impl`/`unbox-impl` result, or a local call
 /// whose return type is a non-null value class), if any.
 fn unboxed_vc_class(
@@ -1690,6 +1725,7 @@ struct ReprCtx<'a> {
     fields: &'a [Vec<Ty>],
     slots: &'a HashMap<u32, Ty>,
     under: &'a HashMap<String, Ty>,
+    logical: &'a HashMap<u32, Ty>,
 }
 
 impl ReprCtx<'_> {
@@ -1700,6 +1736,7 @@ impl ReprCtx<'_> {
             self.fields,
             self.slots,
             self.under,
+            self.logical,
             id,
         )
     }
@@ -1829,6 +1866,7 @@ fn repr(
     fields: &[Vec<Ty>],
     slots: &HashMap<u32, Ty>,
     under: &HashMap<String, Ty>,
+    logical: &HashMap<u32, Ty>,
     id: ExprId,
 ) -> Repr {
     match &exprs[id as usize] {
@@ -1875,7 +1913,7 @@ fn repr(
             .is_some_and(|fq| under.contains_key(fq)) =>
         {
             let fq_name = type_operand.non_null().obj_internal().unwrap();
-            match repr(exprs, rets, fields, slots, under, *arg) {
+            match repr(exprs, rets, fields, slots, under, logical, *arg) {
                 Repr::Unboxed(x) if x == fq_name => Repr::Unboxed(x),
                 _ => Repr::Boxed(fq_name.to_string()),
             }
@@ -1887,20 +1925,60 @@ fn repr(
             type_operand,
             ..
         } => repr_of_ty(type_operand, under),
-        IrExpr::NotNullAssert { operand } => repr(exprs, rets, fields, slots, under, *operand),
+        IrExpr::NotNullAssert { operand } => {
+            repr(exprs, rets, fields, slots, under, logical, *operand)
+        }
         // Reading a captured mutable local through its `Ref` holder: its representation is that of the
         // boxed element type (`var res: Result<T>?` → a boxed `Result`).
         IrExpr::RefGet { elem, .. } => repr_of_ty(elem, under),
-        IrExpr::Block { value: Some(v), .. } => repr(exprs, rets, fields, slots, under, *v),
+        IrExpr::Block { value: Some(v), .. } => {
+            repr(exprs, rets, fields, slots, under, logical, *v)
+        }
         // A `when`/safe-call selects one of its branch values (`s?.foo()` → `when { s!=null -> foo(s);
         // else -> null }`): its representation is a value-producing branch's — the FIRST branch that is a
         // value class, so a boxed value-class result flowing out of a `?.` is recognized (the `null`
         // default branch is `NotVc` and skipped).
         IrExpr::When { branches } => branches
             .iter()
-            .map(|(_, v)| repr(exprs, rets, fields, slots, under, *v))
+            .map(|(_, v)| repr(exprs, rets, fields, slots, under, logical, *v))
             .find(|r| !matches!(r, Repr::NotVc))
             .unwrap_or(Repr::NotVc),
+        // A function value's `invoke` returns its declared type through the `FunctionN` `Object` slot — a
+        // value-class result is therefore the BOXED value class (the callable-ref adapter / lambda tail box
+        // it). So a `.member` on the result unboxes it.
+        IrExpr::InvokeFunction { ret, .. } => match ret.non_null().obj_internal() {
+            Some(fq) if under.contains_key(fq) => Repr::Boxed(fq.to_string()),
+            _ => Repr::NotVc,
+        },
+        // A call not matched by the value-class-specific arms above — a LIBRARY call whose logical result
+        // type the lowerer recorded. Its representation depends on whether the PHYSICAL return is the value
+        // class's own UNDERLYING or a generic-erased `Object`: `runCatching{…}: Result` physically returns
+        // `Object` = `Result`'s underlying → the UNBOXED value class; a generic `decode(): TO = IC` returns
+        // `Object` ≠ `IC`'s `double` underlying → a BOXED value class (it sat in a type-parameter slot).
+        IrExpr::Call { callee, .. } => {
+            let Some(t) = logical.get(&id) else {
+                return Repr::NotVc;
+            };
+            let Some(x) = t
+                .non_null()
+                .obj_internal()
+                .filter(|fq| under.contains_key(*fq))
+            else {
+                return Repr::NotVc;
+            };
+            let phys_ret = match callee {
+                Callee::Static { descriptor, .. }
+                | Callee::Virtual { descriptor, .. }
+                | Callee::Special { descriptor, .. } => descriptor.rsplit(')').next(),
+                _ => None,
+            };
+            let u_desc = desc(&erase(&under[x], under));
+            if phys_ret == Some(u_desc.as_str()) {
+                repr_of_ty(t, under)
+            } else {
+                Repr::Boxed(x.to_string())
+            }
+        }
         _ => Repr::NotVc,
     }
 }
@@ -1958,6 +2036,7 @@ fn prop_access(
             rets,
             slots,
             under,
+            &ir.logical_types,
             receiver,
             x,
         ) {
@@ -1992,6 +2071,7 @@ fn is_boxed_vc(
     rets: &[Ty],
     slots: &HashMap<u32, Ty>,
     under: &HashMap<String, Ty>,
+    logical: &HashMap<u32, Ty>,
     id: ExprId,
     x: &str,
 ) -> bool {
@@ -2014,6 +2094,10 @@ fn is_boxed_vc(
             callee: Callee::Local(fid),
             ..
         } => funcs.get(*fid as usize).is_some_and(|f| is_x(&f.ret)),
+        // A function-value invocation (`fn.invoke(..)`) whose logical return is a value class `x`: the
+        // generated `Function{N}.invoke` adapter returns a BOXED `x` (the underlying `box-impl`'d back —
+        // a `Function`'s reference type argument is the box), so a `.field` on the result `unbox-impl`s it.
+        IrExpr::InvokeFunction { ret, .. } => is_x(ret),
         IrExpr::Call {
             callee: Callee::Static { descriptor, .. } | Callee::Virtual { descriptor, .. },
             ..
@@ -2037,16 +2121,16 @@ fn is_boxed_vc(
             type_operand,
         } => {
             is_x(type_operand)
-                && !matches!(repr(exprs, rets, fields, slots, under, *arg), Repr::Unboxed(ref c) if c == x)
+                && !matches!(repr(exprs, rets, fields, slots, under, logical, *arg), Repr::Unboxed(ref c) if c == x)
         }
-        IrExpr::NotNullAssert { operand } => {
-            is_boxed_vc(exprs, funcs, fields, rets, slots, under, *operand, x)
-        }
+        IrExpr::NotNullAssert { operand } => is_boxed_vc(
+            exprs, funcs, fields, rets, slots, under, logical, *operand, x,
+        ),
         // A `when` whose non-null branch yields a boxed `x` (a nullable safe-call: `box-impl` vs `null`) is
         // a boxed `x`.
         IrExpr::When { branches } => branches
             .iter()
-            .any(|(_, r)| is_boxed_vc(exprs, funcs, fields, rets, slots, under, *r, x)),
+            .any(|(_, r)| is_boxed_vc(exprs, funcs, fields, rets, slots, under, logical, *r, x)),
         // A sole-field access of a value class whose underlying is itself a BOXED value class
         // (`ZN(val z: Z1?)`) reads as `ImplicitCoercion(ZN.unbox-impl(): LZ1;)` — transparently a boxed
         // `Z1`. Recurse into the coerced value so a further `.x` on it `unbox-impl`s.
@@ -2054,9 +2138,9 @@ fn is_boxed_vc(
             op: crate::ir::IrTypeOp::ImplicitCoercion,
             arg,
             ..
-        } => is_boxed_vc(exprs, funcs, fields, rets, slots, under, *arg, x),
+        } => is_boxed_vc(exprs, funcs, fields, rets, slots, under, logical, *arg, x),
         IrExpr::Block { value: Some(v), .. } => {
-            is_boxed_vc(exprs, funcs, fields, rets, slots, under, *v, x)
+            is_boxed_vc(exprs, funcs, fields, rets, slots, under, logical, *v, x)
         }
         _ => false,
     }
@@ -2111,7 +2195,17 @@ fn unbox_tail(
             }
         }
         _ => {
-            if is_boxed_vc(&ir.exprs, &ir.functions, fields, rets, slots, under, id, x) {
+            if is_boxed_vc(
+                &ir.exprs,
+                &ir.functions,
+                fields,
+                rets,
+                slots,
+                under,
+                &ir.logical_types,
+                id,
+                x,
+            ) {
                 unbox_wrap(ir, id, x, under);
             }
         }
@@ -2142,6 +2236,61 @@ fn box_tail(ir: &mut IrFile, id: ExprId, x: &str, under: &HashMap<String, Ty>) {
         }
         _ => {
             if is_unboxed_vc(&ir.exprs, id, x) {
+                box_wrap(ir, id, x, under);
+            }
+        }
+    }
+}
+
+/// Box the tail of `id` to value class `X` for a REFERENCE-slot return (a lambda's `Object`-returning
+/// `invoke`): recurse `when`/block/`return` tails, and box any tail value that is not ALREADY a boxed `X`.
+/// Unlike [`box_tail`] (which only boxes the syntactic `constructor-impl`/`unbox-impl` forms), this boxes
+/// EVERY unboxed tail — `this`, a captured field, a library call returning the unboxed underlying — since
+/// the declared value-class return `X` fixes what the box must be. Uniform across all value classes.
+#[allow(clippy::too_many_arguments)]
+fn box_ref_tail(
+    ir: &mut IrFile,
+    id: ExprId,
+    x: &str,
+    under: &HashMap<String, Ty>,
+    rets: &[Ty],
+    fields: &[Vec<Ty>],
+    slots: &HashMap<u32, Ty>,
+) {
+    match &ir.exprs[id as usize] {
+        IrExpr::When { branches } => {
+            let rs: Vec<ExprId> = branches.iter().map(|(_, r)| *r).collect();
+            for r in rs {
+                box_ref_tail(ir, r, x, under, rets, fields, slots);
+            }
+        }
+        IrExpr::Block { value: Some(v), .. } => {
+            let v = *v;
+            box_ref_tail(ir, v, x, under, rets, fields, slots);
+        }
+        IrExpr::Block { value: None, stmts } => {
+            if let Some(&last) = stmts.last() {
+                box_ref_tail(ir, last, x, under, rets, fields, slots);
+            }
+        }
+        IrExpr::Return(Some(v)) => {
+            let v = *v;
+            box_ref_tail(ir, v, x, under, rets, fields, slots);
+        }
+        _ => {
+            // Already a boxed `X` (a `box-impl` result, a call/slot typed `X`, a `?.`-`when` box) → leave it;
+            // otherwise the tail is the unboxed underlying and must be boxed to `X`.
+            if !is_boxed_vc(
+                &ir.exprs,
+                &ir.functions,
+                fields,
+                rets,
+                slots,
+                under,
+                &ir.logical_types,
+                id,
+                x,
+            ) {
                 box_wrap(ir, id, x, under);
             }
         }

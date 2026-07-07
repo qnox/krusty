@@ -1397,10 +1397,27 @@ fn emit_func_ref_class(c: &crate::ir::IrClass, facade: &str) -> Vec<u8> {
             inv.invokevirtual(m, call_arg_words, ret_words);
         }
     }
-    // Adapt the result: a `void` target yields the `Unit` singleton; a primitive is boxed.
+    // Adapt the result to `Object`: a `void` target yields the `Unit` singleton; a value-class-returning
+    // reference boxes the erased underlying back to the value class; a plain primitive is wrapper-boxed.
     if returns_void {
         let unit = cw.fieldref("kotlin/Unit", "INSTANCE", "Lkotlin/Unit;");
         inv.getstatic(unit, 1);
+    } else if let Some(owner) = &fr.box_ret {
+        // A value-class-returning reference: the target returns the ERASED underlying (primitive or the
+        // reference underlying) — exactly what `call_desc` requested. Box it back to the value class via
+        // `box-impl` so the `Function` result is the boxed VC (`X` object) the invariant requires — a VC in
+        // a `FunctionN` slot is boxed. Without it a `typeAdapter::decode` returning `X` hands back the bare
+        // underlying that the caller then `checkcast X`es → `ClassCastException`.
+        let bi = cw.methodref(
+            owner,
+            "box-impl",
+            &format!(
+                "({}){}",
+                type_descriptor(target_ret_jvm),
+                type_descriptor(Ty::obj(owner))
+            ),
+        );
+        inv.invokestatic(bi, slot_words(target_ret_jvm) as i32, 1);
     } else if target_ret_jvm.is_jvm_scalar() {
         box_prim_free(&mut cw, &mut inv, target_ret_jvm);
     }
@@ -3318,6 +3335,19 @@ impl<'a> Emitter<'a> {
         if returns_void {
             let unit = self.cw.fieldref("kotlin/Unit", "INSTANCE", "Lkotlin/Unit;");
             scratch.getstatic(unit, 1);
+        } else if let Some(owner) = &fr.box_ret {
+            // A value-class-returning reference: box the erased underlying back to the boxed VC (`X` object)
+            // — a VC in a `FunctionN` slot is boxed. See the sibling adapter above.
+            let bi = self.cw.methodref(
+                owner,
+                "box-impl",
+                &format!(
+                    "({}){}",
+                    type_descriptor(ret_jvm),
+                    type_descriptor(Ty::obj(owner))
+                ),
+            );
+            scratch.invokestatic(bi, slot_words(ret_jvm) as i32, 1);
         } else if ret_jvm.is_jvm_scalar() {
             box_prim_free(self.cw, scratch, ret_jvm);
         }

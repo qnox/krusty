@@ -5026,6 +5026,12 @@ impl<'a> Lower<'a> {
         // (`asSeq<String>(x): String` physically `CharSequence`), insert the `checkcast` kotlinc emits so
         // a member access on the result verifies.
         let st = self.info.ty(e);
+        // Record the CALL's logical type keyed by its own id (the outer `fn expr` records only the wrapper
+        // this returns). The value-class pass reads it so a library value-class return (`runCatching: Result`)
+        // reprs as its UNBOXED underlying — letting the wrapping coercion strip as a redundant same-type cast.
+        if st != Ty::Error {
+            self.ir.logical_types.insert(call, ty_to_ir(st));
+        }
         if self.has_scalar_value_repr(st) && phys == Ty::obj("kotlin/Any") {
             return self.ir.add_expr(IrExpr::TypeOp {
                 op: IrTypeOp::ImplicitCoercion,
@@ -13652,6 +13658,15 @@ impl<'a> Lower<'a> {
         }
         let r = self.expr_inner(e);
         self.expr_depth -= 1;
+        // Record the expression's LOGICAL (source) type verbatim, keyed by its IR id — the value-class
+        // pass reads it to recover a value's representation when the IR node alone is ambiguous (a library
+        // call's physical `Object` result whose logical type is a value class). VC-agnostic: just the type.
+        if let Some(id) = r {
+            let ty = self.info.ty(e);
+            if ty != Ty::Error {
+                self.ir.logical_types.insert(id, ty_to_ir(ty));
+            }
+        }
         // Survey diagnostic: tag the innermost unsupported expression that caused the bail (the first
         // `None` to bubble up wins, since deeper frames run first and a tag is only refined from a
         // coarse `deep*` phase). A `Call` is tagged by its callee name — the single most useful signal.
