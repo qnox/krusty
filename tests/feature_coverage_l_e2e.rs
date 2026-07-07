@@ -1,7 +1,7 @@
 //! End-to-end "box" coverage for the standard-library collection / map / set / sequence / string
 //! callables. Each test compiles a `fun box(): String` that computes real values with stdlib
 //! operations and returns "OK" only when every assertion holds, then round-trips it on the JVM.
-//! Exercises stdlib callable resolution across resolve.rs, call_resolver.rs, jvm_libraries.rs and
+//! Exercises stdlib callable resolution across resolve.rs, symbol_resolver.rs, jvm_libraries.rs and
 //! metadata.rs.
 
 use super::common;

@@ -52,7 +52,7 @@ fn classpath_class_companion_object_is_detected() {
     let (_, cty) = random
         .companion_object
         .expect("Random has a companion object");
-    let nextint = krusty::call_resolver::resolve_instance(&libs, &cty, "nextInt", &[Ty::Int]);
+    let nextint = krusty::symbol_resolver::resolve_instance(&libs, &cty, "nextInt", &[Ty::Int]);
     assert!(
         nextint.is_some(),
         "nextInt(Int) resolves as an instance method on the companion type {cty}"

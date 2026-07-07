@@ -62,25 +62,26 @@ pub trait SymbolSource {
 
 /// An ordered federation of sources — itself a [`SymbolSource`], so it nests. Earlier children win:
 /// `functions` concatenates in order (each overload keeps its own origin), `resolve_type` takes the
-/// first/earliest contributor on a name clash.
+/// first/earliest contributor on a name clash. Holds children by REFERENCE so a resolver can federate the
+/// borrowed live sources (the current module over the classpath) without allocation or moving them.
 #[derive(Default)]
-pub struct CompositeSource {
-    children: Vec<Box<dyn SymbolSource>>,
+pub struct CompositeSource<'a> {
+    children: Vec<&'a dyn SymbolSource>,
 }
 
-impl CompositeSource {
+impl<'a> CompositeSource<'a> {
     /// Build a composite from sources in PRECEDENCE order (first shadows later).
-    pub fn new(children: Vec<Box<dyn SymbolSource>>) -> Self {
+    pub fn new(children: Vec<&'a dyn SymbolSource>) -> Self {
         CompositeSource { children }
     }
 
     /// Append a source at the lowest precedence (consulted last).
-    pub fn push(&mut self, source: Box<dyn SymbolSource>) {
+    pub fn push(&mut self, source: &'a dyn SymbolSource) {
         self.children.push(source);
     }
 }
 
-impl SymbolSource for CompositeSource {
+impl SymbolSource for CompositeSource<'_> {
     fn functions(&self, name: &str, receiver: Option<Ty>) -> FunctionSet {
         // Concatenate in precedence order — each `FunctionInfo` already carries its source's origin, and
         // selection is done per-source (ranks are not comparable across sources), so order is enough.
@@ -249,7 +250,9 @@ mod tests {
 
     #[test]
     fn functions_concatenates_in_precedence_order() {
-        let c = CompositeSource::new(vec![Box::new(module()), Box::new(library())]);
+        let m = module();
+        let l = library();
+        let c = CompositeSource::new(vec![&m as &dyn SymbolSource, &l]);
         let fs = c.functions("greet", None);
         // Both contribute; the module's (first) overload comes first.
         assert_eq!(fs.overloads.len(), 2);
@@ -259,7 +262,9 @@ mod tests {
 
     #[test]
     fn functions_empty_when_no_source_has_name() {
-        let c = CompositeSource::new(vec![Box::new(module()), Box::new(library())]);
+        let m = module();
+        let l = library();
+        let c = CompositeSource::new(vec![&m as &dyn SymbolSource, &l]);
         assert!(c.functions("absent", None).overloads.is_empty());
     }
 
@@ -267,7 +272,9 @@ mod tests {
     fn properties_concatenate_in_precedence_order() {
         // The property query federates exactly like `functions`: both sources contribute an overload of
         // `greet`, the module's (first) coming first, each keeping its own origin.
-        let c = CompositeSource::new(vec![Box::new(module()), Box::new(library())]);
+        let m = module();
+        let l = library();
+        let c = CompositeSource::new(vec![&m as &dyn SymbolSource, &l]);
         let ps = c.properties("greet", None);
         assert_eq!(ps.overloads.len(), 2);
         assert_eq!(ps.overloads[0].owner, "module");
@@ -276,7 +283,9 @@ mod tests {
 
     #[test]
     fn properties_empty_when_no_source_has_name() {
-        let c = CompositeSource::new(vec![Box::new(module()), Box::new(library())]);
+        let m = module();
+        let l = library();
+        let c = CompositeSource::new(vec![&m as &dyn SymbolSource, &l]);
         assert!(c.properties("absent", None).overloads.is_empty());
         // A receiver-scoped query also finds nothing here (the fakes only provide top-level props).
         assert!(c
@@ -287,7 +296,9 @@ mod tests {
 
     #[test]
     fn resolve_type_takes_the_earliest_source() {
-        let c = CompositeSource::new(vec![Box::new(module()), Box::new(library())]);
+        let m = module();
+        let l = library();
+        let c = CompositeSource::new(vec![&m as &dyn SymbolSource, &l]);
         // Both define `shared`; the module (first) wins.
         let t = c.resolve_type("shared").expect("a shape");
         assert_eq!(t.supertypes, vec!["module".to_string()]);
@@ -301,15 +312,18 @@ mod tests {
             owner: "library".into(),
             typed: Some("lib/only".into()),
         };
-        let c = CompositeSource::new(vec![Box::new(module()), Box::new(lib)]);
+        let m = module();
+        let c = CompositeSource::new(vec![&m as &dyn SymbolSource, &lib]);
         assert!(c.resolve_type("lib/only").is_some());
         assert!(c.resolve_type("nope").is_none());
     }
 
     #[test]
     fn nested_composite_is_a_source() {
-        let inner = CompositeSource::new(vec![Box::new(module())]);
-        let outer = CompositeSource::new(vec![Box::new(inner), Box::new(library())]);
+        let m = module();
+        let inner = CompositeSource::new(vec![&m as &dyn SymbolSource]);
+        let l = library();
+        let outer = CompositeSource::new(vec![&inner as &dyn SymbolSource, &l]);
         // Nesting works: the inner composite's module overload is found, library appends after.
         let fs = outer.functions("greet", None);
         assert_eq!(fs.overloads.len(), 2);
@@ -318,8 +332,10 @@ mod tests {
 
     #[test]
     fn push_appends_at_lowest_precedence() {
-        let mut c = CompositeSource::new(vec![Box::new(module())]);
-        c.push(Box::new(library()));
+        let m = module();
+        let l = library();
+        let mut c = CompositeSource::new(vec![&m as &dyn SymbolSource]);
+        c.push(&l);
         let fs = c.functions("greet", None);
         assert_eq!(fs.overloads.len(), 2);
         // The pushed library is consulted last.

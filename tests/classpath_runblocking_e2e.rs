@@ -1,7 +1,7 @@
 //! `kotlinx.coroutines.runBlocking { … }` — the classpath coroutine driver — resolves, lowers, and RUNS
 //! end-to-end against the real coroutines runtime. Two coordinated fixes made this work:
 //!
-//!  1. RESOLUTION (`call_resolver.rs`): `runBlocking { }` passes ONE trailing lambda but the function has
+//!  1. RESOLUTION (`symbol_resolver.rs`): `runBlocking { }` passes ONE trailing lambda but the function has
 //!     two parameters (a defaulted `context` + the `block`). `default_omit_lambda_param_indices` aligns the
 //!     trailing lambda to the LAST parameter (omitting leading defaults) so the checker's lambda helpers
 //!     type the block and the call resolves to `BuildersKt.runBlocking$default`.
