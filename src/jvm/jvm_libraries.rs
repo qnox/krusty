@@ -1517,6 +1517,13 @@ impl SymbolSource for JvmLibraries {
     }
     fn resolve_symbols(&self, fqn: &str) -> crate::libraries::ResolvedSymbols {
         use crate::libraries::{Callables, ResolvedSymbols};
+        // The spec's top-level memo: this classpath `SymbolSource` composes the namespace record for `fqn`
+        // once and reuses it across the compile. A `JvmLibraries` wrapper is rebuilt per snippet, but the
+        // `Classpath` (which owns the memo) is reused on the worker thread, so hot stdlib names resolve
+        // without re-walking metadata/extension indexes.
+        if let Some(cached) = self.cp.cached_symbols(fqn) {
+            return (*cached).clone();
+        }
         // Classifier namespace: the class/interface/object (or a typealias's target) at the fqn.
         let classifier = self.resolve_type(fqn);
         // Callable namespace, receiver-AGNOSTIC (resolution is by fqn; the receiver binds later, in the
@@ -1719,10 +1726,14 @@ impl SymbolSource for JvmLibraries {
         } else {
             Callables::None
         };
-        ResolvedSymbols {
-            classifier,
-            callables,
-        }
+        (*self.cp.memoize_symbols(
+            fqn,
+            ResolvedSymbols {
+                classifier,
+                callables,
+            },
+        ))
+        .clone()
     }
 
     fn functions(&self, name: &str, receiver: Option<Ty>) -> FunctionSet {

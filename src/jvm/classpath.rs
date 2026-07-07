@@ -403,30 +403,6 @@ pub struct ExtCandidate {
     pub public: bool,
 }
 
-/// The namespace record a fully-qualified name resolves to on the classpath — the spec's top-level memo
-/// value. Kotlin has TWO namespaces (classifier vs callable) and one name can occupy both at once
-/// (`class test` may coexist with `fun test`), so this is a RECORD, not an exclusive enum. The caller
-/// selects by syntactic position: a type use consumes `classifier`; a call unions `callables` with the
-/// classifier's constructors; a value use consumes a callable property (or an `object` classifier).
-#[derive(Clone, Default)]
-pub struct ResolvedEntry {
-    /// The classifier internal name (a class/interface/object; a `typealias` resolved to its target), or
-    /// `None`. AT MOST ONE — the first classpath entry that declares the fqn wins (`find` searches the
-    /// package's jars in classpath declaration order).
-    pub classifier: Option<String>,
-    /// The static callables declared for the name by its package's `kotlin_module` facades: top-level
-    /// functions and extensions (a property getter is a static here too). Empty if the name is not a
-    /// classpath callable.
-    pub callables: Vec<ExtCandidate>,
-}
-
-impl ResolvedEntry {
-    /// Nothing on the classpath resolves this name (both namespaces empty).
-    pub fn is_absent(&self) -> bool {
-        self.classifier.is_none() && self.callables.is_empty()
-    }
-}
-
 /// Lazy index of static methods grouped by `(first_param_descriptor, method_name)`. Built on
 /// first use from all entries in the classpath.
 /// A LAZY index of the classpath's static (top-level + extension) functions. Only the small "where" map
@@ -680,9 +656,12 @@ pub struct Classpath {
     /// the process-global L2 where the one-time rebuild lives. Both hold only QUERIED names (the working set).
     ext_l1: RefCell<crate::lru::LruCache<String, std::sync::Arc<ExtByName>>>,
     ext_candidates: ExtCandCache,
-    /// The spec's top-level memo: `fqn → ResolvedEntry` (the namespace record). An LRU bounded to the
-    /// queried working set; a resolved name is looked up once and reused across the compile.
-    entries_memo: RefCell<crate::lru::LruCache<String, std::rc::Rc<ResolvedEntry>>>,
+    /// The spec's top-level memo: `fqn → ResolvedSymbols` (the namespace record — classifier + callables).
+    /// The single result cache of the classpath `SymbolSource`: `resolve_symbols(fqn)` is composed once
+    /// per name and reused across the compile (the per-(jar,package) parses are the intermediate caches).
+    /// An LRU bounded to the queried working set.
+    symbols_memo:
+        RefCell<crate::lru::LruCache<String, std::rc::Rc<crate::libraries::ResolvedSymbols>>>,
     /// Process-unique identity for this `Classpath`, assigned at construction. Caches keyed by a
     /// `Classpath` (e.g. the per-classpath library seed) MUST key on this — NOT on the `Rc<Classpath>`
     /// pointer address, which a freed-then-reallocated `Classpath` can reuse, yielding a false cache hit
@@ -755,7 +734,7 @@ impl Classpath {
             builtin_members: RefCell::new(crate::lru::LruCache::new(META_CAP)),
             ext_l1: RefCell::new(crate::lru::LruCache::new(FN_CAP)),
             ext_candidates: global_ext_candidates(&cache_key),
-            entries_memo: RefCell::new(crate::lru::LruCache::new(FN_CAP)),
+            symbols_memo: RefCell::new(crate::lru::LruCache::new(FN_CAP)),
             id,
         }
     }
@@ -2020,30 +1999,29 @@ impl Classpath {
         out
     }
 
-    /// The spec's top-level memo lookup: the [`ResolvedEntry`] namespace record for a fully-qualified
-    /// name, cached in the `fqn → ResolvedEntry` LRU. `classifier` = the class/interface/object (or a
-    /// typealias's target) that exists at the fqn, first classpath entry winning; `callables` = the
-    /// static callables of the simple name declared by the package's facades. Both namespaces are filled
-    /// so the caller can select by syntactic position (type / call / value).
-    pub fn resolve_entry(&self, fqn: &str) -> std::rc::Rc<ResolvedEntry> {
-        if let Some(e) = self.entries_memo.borrow_mut().get(fqn) {
-            return e.clone();
-        }
-        let (pkg, name) = fqn.rsplit_once('/').unwrap_or(("", fqn));
-        let classifier = if self.find(fqn).is_some() || self.builtin_is_interface(fqn).is_some() {
-            Some(fqn.to_string())
-        } else {
-            self.type_alias_target(fqn)
-        };
-        let callables = self.functions_in_scope(name, std::slice::from_ref(&pkg.to_string()));
-        let entry = std::rc::Rc::new(ResolvedEntry {
-            classifier,
-            callables,
-        });
-        self.entries_memo
+    /// The spec's top-level memo lookup: the already-composed [`ResolvedSymbols`](crate::libraries::ResolvedSymbols)
+    /// namespace record for a fully-qualified name, or `None` on a cold miss. The classpath `SymbolSource`
+    /// composes the record once (classifier + callables) via `resolve_symbols` and stores it with
+    /// [`memoize_symbols`](Self::memoize_symbols); every later resolution of the same fqn reuses it.
+    pub fn cached_symbols(
+        &self,
+        fqn: &str,
+    ) -> Option<std::rc::Rc<crate::libraries::ResolvedSymbols>> {
+        self.symbols_memo.borrow_mut().get(fqn).cloned()
+    }
+
+    /// Store the composed namespace record for `fqn` in the top-level memo, returning the shared `Rc` the
+    /// caller hands back. See [`cached_symbols`](Self::cached_symbols).
+    pub fn memoize_symbols(
+        &self,
+        fqn: &str,
+        symbols: crate::libraries::ResolvedSymbols,
+    ) -> std::rc::Rc<crate::libraries::ResolvedSymbols> {
+        let rc = std::rc::Rc::new(symbols);
+        self.symbols_memo
             .borrow_mut()
-            .insert(fqn.to_string(), entry.clone());
-        entry
+            .insert(fqn.to_string(), rc.clone());
+        rc
     }
 
     /// The memoized rebuild for `method_name`, shared across threads and grouped by receiver — a hot name
@@ -2883,29 +2861,33 @@ mod fq_tests {
     }
 
     #[test]
-    fn resolve_entry_records_function_and_classifier_namespaces() {
+    fn resolve_symbols_records_function_and_classifier_namespaces() {
+        use crate::libraries::Callables;
+        use crate::symbol_source::SymbolSource;
         let Some(jar) = test_stdlib_jar() else {
             return;
         };
-        let cp = Classpath::new(vec![jar]);
+        let cp = std::rc::Rc::new(Classpath::new(vec![jar]));
+        let libs = crate::jvm::jvm_libraries::JvmLibraries::new(cp.clone());
         // A top-level function occupies the CALLABLE namespace, not the classifier one — found via the
         // package's `kotlin_module` facades (tree-driven, no whole-classpath scan).
-        let f = cp.resolve_entry("kotlin/collections/emptyList");
+        let f = libs.resolve_symbols("kotlin/collections/emptyList");
         assert!(f.classifier.is_none(), "emptyList is not a classifier");
         assert!(
-            f.callables.iter().any(|c| c.name == "emptyList"),
+            matches!(f.callables, Callables::Functions(_)),
             "emptyList is a classpath callable"
         );
         // A class occupies the CLASSIFIER namespace (first-jar-wins internal name).
-        let c = cp.resolve_entry("kotlin/Pair");
-        assert_eq!(c.classifier.as_deref(), Some("kotlin/Pair"));
+        let c = libs.resolve_symbols("kotlin/Pair");
+        assert!(c.classifier.is_some(), "Pair is a classifier");
         // An unknown name is absent in both namespaces.
-        assert!(cp
-            .resolve_entry("kotlin/collections/definitelyNotAThingXyz")
-            .is_absent());
-        // Memoized (LRU): the same fqn returns the same `Rc`.
-        let a = cp.resolve_entry("kotlin/Pair");
-        let b = cp.resolve_entry("kotlin/Pair");
+        assert!(libs
+            .resolve_symbols("kotlin/collections/definitelyNotAThingXyz")
+            .is_empty());
+        // Memoized (LRU): the same fqn returns the same `Rc` from the classpath's top-level memo.
+        libs.resolve_symbols("kotlin/Pair");
+        let a = cp.cached_symbols("kotlin/Pair").expect("memoized");
+        let b = cp.cached_symbols("kotlin/Pair").expect("memoized");
         assert!(std::rc::Rc::ptr_eq(&a, &b));
     }
 

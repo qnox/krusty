@@ -759,6 +759,11 @@ fn kotlin_codegen_box_conformance() {
 
     let mut files = Vec::new();
     collect_kt(&box_dir, &mut files);
+    // KRUSTY_BOX_ONLY: run only files whose path contains this substring — a focused single-test debug
+    // loop (pair with a `trace`-feature build + KRUSTY_TRACE=<category>). Empty/unset runs the corpus.
+    if let Some(only) = env("KRUSTY_BOX_ONLY") {
+        files.retain(|f| f.to_string_lossy().contains(&only));
+    }
     // KRUSTY_BOX_LIMIT caps the run for fast dev rounds. Sample evenly across the *sorted* corpus
     // (a stride) rather than truncating to the first N — the first N are all `annotations/…`, which
     // would hide coverage in every other package. A full (unset) run keeps the whole corpus.

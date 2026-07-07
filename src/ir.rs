@@ -837,6 +837,13 @@ pub struct IrFile {
     /// Top-level properties — static fields on the facade, initialized in `<clinit>` in order.
     pub statics: Vec<IrStatic>,
     pub exprs: Vec<IrExpr>,
+    /// `ExprId` → the expression's LOGICAL (source) type as the checker inferred it, recorded verbatim by
+    /// the lowerer — NOT erased. The value-class pass consults it to recover the representation of a value
+    /// whose IR node alone is ambiguous: a library call returns a physical `Object` descriptor, but its
+    /// logical type may be a value class (`runCatching{…}: Result`), so the pass knows the result is the
+    /// value class's UNBOXED underlying, not an opaque `Object`. Populated for every lowered expression;
+    /// consumed ONLY by the value-class pass (the sole owner of value-class knowledge).
+    pub logical_types: std::collections::HashMap<u32, Ty>,
     /// `FunId` → each parameter's default-value expression (`None` = required). The *meaning* of a
     /// default is backend-agnostic language data; a backend chooses how to realize it (the JVM emits a
     /// `name$default(params, mask, marker)` stub; JS uses native default parameters).
