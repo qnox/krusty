@@ -407,6 +407,7 @@ impl LibraryCallable {
             vararg_elem: None,
             signature: None,
             origin: Origin::Library,
+            source_receiver: None,
         }
     }
 }
@@ -466,6 +467,13 @@ pub struct LibraryCallable {
     /// Which source produced this callable — the lowerer's cue for the emit form. [`Origin::Library`]
     /// for a classpath callable; [`Origin::Module`] (with its facade) for a current-/sibling-module one.
     pub origin: Origin,
+    /// For an EXTENSION callable: its DECLARED receiver source type, un-erased (`fun Result<T>.getOrThrow`
+    /// → `Some(Obj("kotlin/Result", …))`). A generic type-variable receiver (`fun <T> T.foo`) is `None` —
+    /// it erases to `Object` and carries no value-class identity. `None` for a non-extension callable.
+    /// The value-class pass reads this (via `IrFile::ext_call_source_receiver`) to decide whether a boxed
+    /// extension receiver must unbox to the value class's underlying; `params[0]` is already erased and
+    /// cannot make that distinction. This is the un-erased-source-type down payment on task B.
+    pub source_receiver: Option<Ty>,
 }
 
 /// How a resolved function relates to the call's receiver — drives Kotlin overload precedence (a member

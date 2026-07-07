@@ -913,6 +913,21 @@ pub struct IrFile {
     /// classpath analogue of the IR inliner's `reified_subst` (which only has same-file bodies). The
     /// concrete type is a backend-agnostic `Ty`; the JVM splicer maps it to an internal name.
     pub reified_call_subst: std::collections::HashMap<u32, Vec<(String, Ty)>>,
+    /// Extension-call `ExprId` → the extension's DECLARED (un-erased) receiver source type, forwarded
+    /// verbatim from the resolved callable's `source_receiver`. `ir_lower` records it with NO value-class
+    /// reasoning of its own; the value-class pass reads it to decide box/unbox at the receiver. The signal
+    /// distinguishes `fun Result<T>.getOrThrow()` (receiver `kotlin/Result` — a value class whose facade
+    /// method takes the UNBOXED underlying, so a `Boxed` receiver unboxes) from a generic `fun <T> T.foo()`
+    /// (receiver a type variable — erases to `Object`, receiver stays boxed) even though both erase
+    /// identically in the JVM descriptor. Only concrete declared receivers are recorded (a `Var` receiver
+    /// is `None` at the source and never inserted).
+    pub ext_call_source_receiver: std::collections::HashMap<u32, Ty>,
+    /// Lifted-lambda function id → the parameter INDEX at which the lambda's OWN parameters begin (its
+    /// captured variables occupy the lower indices). A lambda's own parameters arrive through the
+    /// `FunctionN` generic (`Object`) invoke slot, so a reference-underlying value-class parameter is
+    /// BOXED there — the value-class pass reads this to type such a slot as the boxed value class (so
+    /// `it.getOrThrow()` unboxes it), without the lowerer probing value-class-ness itself.
+    pub lambda_own_params_from: std::collections::HashMap<u32, u32>,
 }
 
 /// Backend-agnostic generic-signature shape of a declaration (the data a JVM `Signature` / a future
