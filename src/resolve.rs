@@ -9033,10 +9033,9 @@ impl<'a> Checker<'a> {
                                 .get(&call.0)
                                 .map(|ts| ts.iter().map(|r| self.resolve_ty(r)).collect())
                                 .unwrap_or_default();
-                            if let Some(c) = self
-                                .resolver()
-                                .resolve_top_level_callable(&name, &arg_tys, &targs)
-                            {
+                            if let Some(c) = self.resolver().resolve_top_level_callable_in_package(
+                                &name, &pkg, &arg_tys, &targs,
+                            ) {
                                 if c.owner.rsplit_once('/').map(|(p, _)| p) == Some(pkg.as_str()) {
                                     crate::trace_compiler!(
                                         "resolve",
@@ -9099,9 +9098,10 @@ impl<'a> Checker<'a> {
                                     };
                                     let mut full = arg_tys.clone();
                                     full[last] = lam_ty;
-                                    if let Some(c) = self
-                                        .resolver()
-                                        .resolve_top_level_callable(&name, &full, &targs)
+                                    if let Some(c) =
+                                        self.resolver().resolve_top_level_callable_in_package(
+                                            &name, &pkg, &full, &targs,
+                                        )
                                     {
                                         if c.owner.rsplit_once('/').map(|(p, _)| p)
                                             == Some(pkg.as_str())
