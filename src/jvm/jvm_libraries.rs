@@ -1538,6 +1538,9 @@ impl SymbolSource for JvmLibraries {
                     && o.callable.owner.rsplit_once('/').map_or("", |(p, _)| p) == pkg
             })
             .collect();
+        // Extension PROPERTIES of the source name live in the CALLABLE namespace's property half. A name is
+        // functions XOR a property, so these are surfaced separately and chosen when there are no functions.
+        let mut props: Vec<PropertyInfo> = Vec::new();
         // Extension discovery is @Metadata-driven (the source of truth), NOT a scan of JVM statics: the
         // package's PUBLIC facades' metadata carry each extension's SOURCE receiver, parameters, return
         // (with nullability), visibility, and generic signature. The JVM method (`@JvmName`-mangled name +
@@ -1589,22 +1592,23 @@ impl SymbolSource for JvmLibraries {
                     )
                 });
                 let by_name = |n: &str| {
-                    self.cp.facade_method_descriptor(
-                        &facade,
-                        n,
-                        Some(&recv_desc),
-                        ret_desc.as_deref(),
-                    )
+                    self.cp
+                        .facade_method(&facade, n, Some(&recv_desc), ret_desc.as_deref())
                 };
-                let (jvm_name, descriptor) = if let Some(d) = mf.jvm_desc.map(str::to_string) {
-                    (mf.jvm_name.clone(), d)
-                } else if let Some(d) = by_name(&mf.jvm_name) {
-                    (mf.jvm_name.clone(), d)
-                } else if let Some(d) = elem_mangled.as_ref().and_then(|n| by_name(n)) {
-                    (elem_mangled.unwrap(), d)
+                // The real bytecode method (public flag + descriptor), matched to the CHOSEN name so the
+                // visibility is that method's own — an `@InlineOnly` extension (`let`/`run`) is source-public
+                // but bytecode-non-public and MUST be inlined, never called. When metadata supplies the
+                // descriptor the candidate is still looked up (by that same name) only for its visibility.
+                let (jvm_name, descriptor, cand) = if let Some(d) = mf.jvm_desc {
+                    (mf.jvm_name.clone(), d.to_string(), by_name(&mf.jvm_name))
+                } else if let Some(c) = by_name(&mf.jvm_name) {
+                    (c.name.clone(), c.descriptor.clone(), Some(c))
+                } else if let Some(c) = elem_mangled.as_ref().and_then(|n| by_name(n)) {
+                    (c.name.clone(), c.descriptor.clone(), Some(c))
                 } else {
                     continue;
                 };
+                let bytecode_public = cand.as_ref().map_or(mf.is_public, |c| c.public);
                 let (params, pret) = parse_method_desc(&descriptor);
                 if params.is_empty() {
                     continue;
@@ -1616,30 +1620,104 @@ impl SymbolSource for JvmLibraries {
                     None if mf.ret_nullable && pret.is_jvm_scalar() => Ty::nullable(pret),
                     None => pret,
                 };
-                let callable = LibraryCallable::library(
-                    facade.clone(),
-                    jvm_name,
-                    params,
-                    ret,
-                    pret,
-                    descriptor,
-                );
+                // The metadata-primary generic signature drives lambda-parameter and return binding.
+                let generic_sig = mf.generic_sig.clone();
+                // `@InlineOnly` (`inline` + bytecode-non-public) MUST be spliced; a plain `inline` MAY be.
+                let inline = InlineKind::from_flags(mf.is_inline, mf.is_inline && !bytecode_public);
+                let callable = LibraryCallable {
+                    inline,
+                    ..LibraryCallable::library(
+                        facade.clone(),
+                        jvm_name,
+                        params,
+                        ret,
+                        pret,
+                        descriptor,
+                    )
+                };
                 overloads.push(FunctionInfo {
                     ret: ReturnInfo::new(mf.ret_nullable, ret_class),
                     visibility: crate::libraries::Visibility::from_public(mf.is_public),
-                    generic_sig: mf.generic_sig.clone(),
+                    generic_sig,
                     flags: FnFlags {
-                        inline: InlineKind::from_flags(mf.is_inline, false),
+                        inline,
                         suspend: mf.is_suspend,
                     },
                     ..FunctionInfo::plain(FnKind::Extension, Some(receiver), callable)
                 });
             }
+            // Extension PROPERTIES declared by the facade — `arr.lastIndex`, `list.indices`. Metadata
+            // records the property with its REAL accessor names (`JvmPropertySignature`), so the getter
+            // name is authoritative, never a `getX` guess. A multifile FACADE holds no property metadata of
+            // its own — its `d1` names the PART classes that do; merge them (mirrors the `meta_functions`
+            // part merge). A single-file facade carries its properties directly.
+            let Some(fci) = self.cp.find(&facade) else {
+                continue;
+            };
+            let mut mprops = metadata::package_properties(&fci);
+            if mprops.is_empty() {
+                for part in &fci.kotlin_d1 {
+                    if let Some(pci) = self.cp.find(part) {
+                        mprops.extend(metadata::package_properties(&pci));
+                    }
+                }
+            }
+            for mp in mprops {
+                if mp.name != name || mp.receiver_class.is_none() {
+                    continue; // this property name, extension only
+                }
+                let (Some(gname), Some(gdesc)) = (mp.getter_name.clone(), mp.getter_desc.clone())
+                else {
+                    continue;
+                };
+                let (gparams, gret) = parse_method_desc(&gdesc);
+                if gparams.is_empty() {
+                    continue;
+                }
+                let ret_ty = mp.ret_class.as_deref().map_or(gret, kotlin_name_to_ty);
+                let getter =
+                    LibraryCallable::library(facade.clone(), gname, gparams, ret_ty, gret, gdesc);
+                let setter = match (mp.setter_name.clone(), mp.setter_desc.clone()) {
+                    (Some(sname), Some(sdesc)) => {
+                        let (sparams, sret) = parse_method_desc(&sdesc);
+                        Some(LibraryCallable::library(
+                            facade.clone(),
+                            sname,
+                            sparams,
+                            sret,
+                            sret,
+                            sdesc,
+                        ))
+                    }
+                    _ => None,
+                };
+                props.push(PropertyInfo {
+                    kind: PropKind::Extension,
+                    receiver: Some(GSig::Class(
+                        intern(mp.receiver_class.as_deref().unwrap_or_default()),
+                        vec![],
+                    )),
+                    formals: Vec::new(),
+                    ty: GSig::Class(
+                        intern(mp.ret_class.as_deref().unwrap_or("kotlin/Any")),
+                        vec![],
+                    ),
+                    getter,
+                    setter,
+                    is_const: mp.is_const,
+                    visibility: mp.visibility,
+                    owner: facade.clone(),
+                    receiver_rank: 0,
+                });
+            }
         }
-        let callables = if overloads.is_empty() {
-            Callables::None
-        } else {
+        // A name is functions XOR a property (never both) — prefer functions when present.
+        let callables = if !overloads.is_empty() {
             Callables::Functions(FunctionSet { overloads })
+        } else if !props.is_empty() {
+            Callables::Properties(PropertySet { overloads: props })
+        } else {
+            Callables::None
         };
         ResolvedSymbols {
             classifier,

@@ -1883,6 +1883,15 @@ fn repr(
         // boxed element type (`var res: Result<T>?` → a boxed `Result`).
         IrExpr::RefGet { elem, .. } => repr_of_ty(elem, under),
         IrExpr::Block { value: Some(v), .. } => repr(exprs, rets, fields, slots, under, *v),
+        // A `when`/safe-call selects one of its branch values (`s?.foo()` → `when { s!=null -> foo(s);
+        // else -> null }`): its representation is a value-producing branch's — the FIRST branch that is a
+        // value class, so a boxed value-class result flowing out of a `?.` is recognized (the `null`
+        // default branch is `NotVc` and skipped).
+        IrExpr::When { branches } => branches
+            .iter()
+            .map(|(_, v)| repr(exprs, rets, fields, slots, under, *v))
+            .find(|r| !matches!(r, Repr::NotVc))
+            .unwrap_or(Repr::NotVc),
         _ => Repr::NotVc,
     }
 }
