@@ -7491,9 +7491,8 @@ impl<'a> Checker<'a> {
                     // the lowering emits a `FunctionReferenceImpl` whose `invoke` calls it.
                     if !self.syms.classes.contains_key(&name) && self.lookup(&name).is_none() {
                         let tl: Vec<_> = self
-                            .syms
-                            .libraries
-                            .functions(&name, None)
+                            .resolver()
+                            .top_level_function_set(&name)
                             .overloads
                             .into_iter()
                             .filter(|o| o.kind == crate::libraries::FnKind::TopLevel)
@@ -8911,9 +8910,8 @@ impl<'a> Checker<'a> {
                         // top-level functions are covered by `module_declares`; this queries the federated
                         // library set for a classpath overload carrying names.
                         || self
-                            .syms
-                            .libraries
-                            .functions(n, None)
+                            .resolver()
+                            .top_level_function_set(n)
                             .overloads
                             .iter()
                             .any(|o| {
@@ -11228,9 +11226,8 @@ impl<'a> Checker<'a> {
                     {
                         Some(names) => {
                             let pnames: Vec<Vec<String>> = self
-                                .syms
-                                .libraries
-                                .functions(&fname, None)
+                                .resolver()
+                                .top_level_function_set(&fname)
                                 .overloads
                                 .into_iter()
                                 .filter(|o| {
