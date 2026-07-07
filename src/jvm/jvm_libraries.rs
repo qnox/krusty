@@ -7,7 +7,6 @@ use super::classpath::{kotlin_name_to_ty, metadata_return_info, Classpath};
 use super::classreader::{ConstVal, FieldSig};
 use super::jvm_class_map::{to_jvm_internal, to_kotlin_internal};
 use super::metadata;
-use crate::call_resolver::{arg_fits, function_input_types, gsig_to_ty, gsig_tys, unify_gsig};
 use crate::jvm::names::{method_descriptor, property_getter_name, type_descriptor};
 use crate::libraries::{
     CountedLoopInfo, FnFlags, FnKind, FunctionInfo, FunctionSet, GSig, GenericSig, InlineKind,
@@ -15,6 +14,7 @@ use crate::libraries::{
     PlatformCtor, PlatformField, PlatformRangeCtor, PropKind, PropertyInfo, PropertySet,
     RangeConstruction, ReturnInfo, RuntimeCtor, RuntimeOp, TargetRuntime, Visibility,
 };
+use crate::symbol_resolver::{arg_fits, function_input_types, gsig_to_ty, gsig_tys, unify_gsig};
 use crate::symbol_source::SymbolSource;
 use crate::types::{intern, Ty};
 
@@ -709,7 +709,7 @@ fn gsig_receiver_element(gsig: &GenericSig) -> Option<Ty> {
             // Unbox a boxed-primitive wrapper (`java/lang/Integer`/`kotlin/Int` → `Int`) so the element
             // compares equal to the receiver's primitive element; a reference element stays its class.
             let elem_gsig = gsig_unbox_wrapper(args.first()?.clone());
-            Some(crate::call_resolver::gsig_to_ty(
+            Some(crate::symbol_resolver::gsig_to_ty(
                 &elem_gsig,
                 &std::collections::HashMap::new(),
             ))
@@ -742,7 +742,7 @@ fn concrete_generic_ret(gsig: &GenericSig) -> Option<Ty> {
             // it, a classpath property `items: List<Int>` reads as raw `java/util/List<Integer>`:
             // `xs.sum()` is unresolved and `for (x in xs) { s += x }` compares `Int` vs `java/lang/Integer`.
             Some(canonicalize_jvm_collections(
-                crate::call_resolver::gsig_to_ty(&gsig.ret, &std::collections::HashMap::new()),
+                crate::symbol_resolver::gsig_to_ty(&gsig.ret, &std::collections::HashMap::new()),
             ))
         }
         _ => None,
@@ -781,7 +781,7 @@ fn suspend_return_from_gsig(
                 // receiver's concrete argument (`T` → `Cfg`) — otherwise it erases to `Any` and every member
                 // access on the result fails ("member … on Any").
                 other => Some(canonicalize_jvm_collections(
-                    crate::call_resolver::gsig_to_ty(other, binds),
+                    crate::symbol_resolver::gsig_to_ty(other, binds),
                 )),
             }
         }
@@ -1568,7 +1568,9 @@ impl SymbolSource for JvmLibraries {
                     .generic_sig
                     .as_ref()
                     .and_then(|g| g.receiver.as_ref())
-                    .map(|r| crate::call_resolver::gsig_to_ty(r, &std::collections::HashMap::new()))
+                    .map(|r| {
+                        crate::symbol_resolver::gsig_to_ty(r, &std::collections::HashMap::new())
+                    })
                     .or_else(|| mf.receiver_class.map(kotlin_name_to_ty))
                     .unwrap_or_else(|| Ty::obj("kotlin/Any"));
                 // Emit handle: the JVM method + descriptor on the public facade. Prefer the metadata
@@ -1941,7 +1943,7 @@ impl SymbolSource for JvmLibraries {
                     let ret_metadata = meta.ret;
                     // Logical return, recovered RECEIVER-substituted (arg-independent): `<T> T.takeIf(…): T?`
                     // → `receiver`. A type var the receiver doesn't bind (`fold`'s `R`) stays as the erased
-                    // physical type — arg-binding selection in `CallResolver` refines that.
+                    // physical type — arg-binding selection in `SymbolResolver` refines that.
                     let ret = generic_sig
                         .as_ref()
                         .map(|gsig| {

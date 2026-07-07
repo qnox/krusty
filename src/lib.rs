@@ -12,7 +12,6 @@ pub use dhat;
 
 pub mod ast;
 pub mod backend;
-pub mod call_resolver;
 pub mod cli;
 pub mod conformance;
 pub mod diag;
@@ -29,6 +28,7 @@ pub mod module_symbols;
 pub mod parser;
 pub mod plugins;
 pub mod resolve;
+pub mod symbol_resolver;
 pub mod symbol_source;
 pub mod synthetics;
 pub mod token;

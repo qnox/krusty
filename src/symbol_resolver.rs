@@ -4,7 +4,7 @@
 //! it returns every overload with its raw signature and flags ([`crate::libraries::FunctionSet`]). It
 //! does no overload selection and no type-variable binding.
 //!
-//! [`CallResolver`] is the arg-DEPENDENT layer on top: given the actual argument types at a call site
+//! [`SymbolResolver`] is the arg-DEPENDENT layer on top: given the actual argument types at a call site
 //! it selects the right overload and binds the generic receiver/parameter/return types. It is platform
 //! agnostic — it only ever talks to the oracle through the [`SymbolSource`] trait, so the same binding
 //! logic serves every backend (JVM today, JS later). The platform-specific bits (parsing a backend's
@@ -278,7 +278,7 @@ fn callable_with_return(c: &LibraryCallable, ret: Ty, default_call: bool) -> Lib
 
 /// The arg-dependent binding layer over a [`SymbolSource`]: it selects overloads and binds generics for
 /// a specific call site. Holds the oracle by reference — cheap to construct per query.
-pub struct CallResolver<'a> {
+pub struct SymbolResolver<'a> {
     lib: &'a dyn CompilerPlatform,
     /// The packages in scope for TOP-LEVEL function resolution (same-package, star/explicit imports,
     /// defaults). `None` disables the filter (a context with no import scope — signature inference).
@@ -288,9 +288,9 @@ pub struct CallResolver<'a> {
     fn_scope: Option<&'a [String]>,
 }
 
-impl<'a> CallResolver<'a> {
+impl<'a> SymbolResolver<'a> {
     pub fn new(lib: &'a dyn CompilerPlatform) -> Self {
-        CallResolver {
+        SymbolResolver {
             lib,
             fn_scope: None,
         }
@@ -298,7 +298,7 @@ impl<'a> CallResolver<'a> {
 
     /// A resolver whose top-level function resolution is restricted to `fn_scope`'s packages.
     pub fn new_scoped(lib: &'a dyn CompilerPlatform, fn_scope: &'a [String]) -> Self {
-        CallResolver {
+        SymbolResolver {
             lib,
             fn_scope: Some(fn_scope),
         }
@@ -2318,7 +2318,7 @@ mod tests {
             receiver: None,
             info: top_level_default_uint_info(),
         };
-        let resolver = CallResolver::new(&source);
+        let resolver = SymbolResolver::new(&source);
         let call = resolver
             .resolve_top_level_callable("make", &[], &[])
             .expect("default callable should resolve");
@@ -2334,7 +2334,7 @@ mod tests {
             receiver: None,
             info: top_level_nullable_string_info(),
         };
-        let resolver = CallResolver::new(&source);
+        let resolver = SymbolResolver::new(&source);
         let call = resolver
             .resolve_top_level_callable("maybe", &[], &[])
             .expect("nullable callable should resolve");
@@ -2349,7 +2349,7 @@ mod tests {
             receiver: Some(Ty::String),
             info: extension_nullable_string_info(),
         };
-        let resolver = CallResolver::new(&source);
+        let resolver = SymbolResolver::new(&source);
         let call = resolver
             .resolve_extension_callable("maybeSuffix", Ty::String, &[], &[])
             .expect("nullable extension callable should resolve");
