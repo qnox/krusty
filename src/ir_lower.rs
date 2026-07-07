@@ -14942,7 +14942,16 @@ impl<'a> Lower<'a> {
                 if let Some(ExprLowering::ExtensionPropertyGet { getter }) =
                     self.info.expr_lowers.get(&e).cloned()
                 {
-                    let a = self.expr(receiver)?;
+                    // Coerce the receiver to the getter's first (receiver) parameter type — a primitive /
+                    // array / value-class receiver must be boxed/unboxed to match the static getter's
+                    // descriptor, exactly as an extension-function call coerces its receiver arg. Passing the
+                    // raw receiver value VerifyErrors (`arr.indices`).
+                    let target = getter
+                        .params
+                        .first()
+                        .copied()
+                        .unwrap_or_else(|| self.info.ty(receiver));
+                    let a = self.lower_arg(receiver, &target)?;
                     return Some(self.ir.add_expr(IrExpr::Call {
                         callee: Callee::Static {
                             owner: getter.owner,
