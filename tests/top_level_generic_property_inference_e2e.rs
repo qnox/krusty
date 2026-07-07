@@ -2,7 +2,7 @@
 //! `val m = mapOf("a" to 1)`) infers its type from the call's ARGUMENTS. The signature-phase property
 //! inferrer used a return-agreement probe that can't decide a generic return (every call erases to the
 //! same type), so it gave up with "cannot infer the type of property". It now resolves through the same
-//! federated `CallResolver` the full checker uses, binding the type parameters from the inferred
+//! federated `SymbolResolver` the full checker uses, binding the type parameters from the inferred
 //! argument types. Round-tripped on the JVM.
 
 use super::common;

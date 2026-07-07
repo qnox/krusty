@@ -15,6 +15,7 @@ use crate::libraries::{
     CompilerPlatform, FnKind, FunctionInfo, FunctionSet, GSig, GenericSig, InlineKind,
     LibraryCallable, LibraryMember, Origin, PropKind,
 };
+use crate::symbol_source::SymbolSource;
 use crate::types::Ty;
 
 type GSigBinds = std::collections::HashMap<String, Ty>;
@@ -279,7 +280,12 @@ fn callable_with_return(c: &LibraryCallable, ret: Ty, default_call: bool) -> Lib
 /// The arg-dependent binding layer over a [`SymbolSource`]: it selects overloads and binds generics for
 /// a specific call site. Holds the oracle by reference — cheap to construct per query.
 pub struct SymbolResolver<'a> {
+    /// The classpath platform — used ONLY for `TargetRuntime`/emit concerns (descriptors, value-class
+    /// underlying, receiver-rank). Symbol RESOLUTION never goes through it directly; it goes through `src`.
     lib: &'a dyn CompilerPlatform,
+    /// The aggregated resolution source: the current MODULE over the CLASSPATH (module shadows a library
+    /// declaration of the same name). Every `resolve_symbols`/`resolve_type` query federates both.
+    src: crate::symbol_source::CompositeSource<'a>,
     /// The packages in scope for TOP-LEVEL function resolution (same-package, star/explicit imports,
     /// defaults). `None` disables the filter (a context with no import scope — signature inference).
     /// When `Some`, a top-level function resolves only if its facade's package is in scope, matching
@@ -292,6 +298,7 @@ impl<'a> SymbolResolver<'a> {
     pub fn new(lib: &'a dyn CompilerPlatform) -> Self {
         SymbolResolver {
             lib,
+            src: crate::symbol_source::CompositeSource::new(vec![lib as &dyn SymbolSource]),
             fn_scope: None,
         }
     }
@@ -300,17 +307,31 @@ impl<'a> SymbolResolver<'a> {
     pub fn new_scoped(lib: &'a dyn CompilerPlatform, fn_scope: &'a [String]) -> Self {
         SymbolResolver {
             lib,
+            src: crate::symbol_source::CompositeSource::new(vec![lib as &dyn SymbolSource]),
+            fn_scope: Some(fn_scope),
+        }
+    }
+
+    /// The primary resolver: symbol resolution federates the current `module` over the classpath `lib`.
+    pub fn new_scoped_with_module(
+        lib: &'a dyn CompilerPlatform,
+        module: &'a dyn SymbolSource,
+        fn_scope: &'a [String],
+    ) -> Self {
+        SymbolResolver {
+            lib,
+            src: crate::symbol_source::CompositeSource::new(vec![module, lib as &dyn SymbolSource]),
             fn_scope: Some(fn_scope),
         }
     }
 
     /// The unqualified-name resolution loop for this resolver's import scope — `resolve_symbols` per
-    /// candidate fqn `pkg/name`. THE way to resolve an unqualified name: the caller extracts `classifier`,
-    /// `callables.functions` (∪ classifier constructors, then `invoke`), or `callables.properties` from the
-    /// returned namespace records. Empty when there is no import scope (the caller falls back separately).
+    /// candidate fqn `pkg/name` over the federated source. THE way to resolve an unqualified name: the
+    /// caller extracts `classifier`, `callables.functions` (∪ classifier constructors, then `invoke`), or
+    /// `callables.properties` from the records. Empty when there is no import scope (caller falls back).
     fn symbols_in_scope(&self, name: &str) -> Vec<(String, crate::libraries::ResolvedSymbols)> {
         self.fn_scope
-            .map(|scope| resolve_symbols_in_scope(self.lib, name, scope))
+            .map(|scope| resolve_symbols_in_scope(&self.src, name, scope))
             .unwrap_or_default()
     }
 
@@ -435,7 +456,7 @@ impl<'a> SymbolResolver<'a> {
         type_args: &[Ty],
     ) -> Option<LibraryCallable> {
         let fs = FunctionSet {
-            overloads: resolve_symbols_in_scope(self.lib, name, &[pkg.to_string()])
+            overloads: resolve_symbols_in_scope(&self.src, name, &[pkg.to_string()])
                 .into_iter()
                 .flat_map(|(_, r)| match r.callables {
                     crate::libraries::Callables::Functions(f) => f.overloads,
@@ -809,7 +830,7 @@ impl<'a> SymbolResolver<'a> {
             if !seen.insert(internal.clone()) {
                 continue;
             }
-            let Some(t) = self.lib.resolve_type(&internal) else {
+            let Some(t) = self.src.resolve_type(&internal) else {
                 continue;
             };
             for sup in t.supertypes {
@@ -890,7 +911,7 @@ impl<'a> SymbolResolver<'a> {
         args: &[Ty],
         type_args: &[Ty],
     ) -> Option<LibraryCallable> {
-        let fsd = self.lib.functions(&format!("{name}$default"), None);
+        let fsd = self.src.functions(&format!("{name}$default"), None);
         for o in fsd.overloads.iter().filter(|o| o.kind == FnKind::TopLevel) {
             let c = &o.callable;
             if !o.public() && !o.flags.inline.must_inline() {
@@ -1073,7 +1094,10 @@ impl<'a> SymbolResolver<'a> {
         name: &str,
         arg_tys: &[Option<Ty>],
     ) -> Option<Vec<Vec<Ty>>> {
-        let fs = self.top_level_function_set(name);
+        // Lambda-SHAPE info for a name the caller already validated resolves (via import scope OR an
+        // explicit FQ package). UNSCOPED over the federated source so a fully-qualified, unimported callee
+        // (`kotlinx.coroutines.runBlocking { … }`) still yields its lambda parameter types.
+        let fs = self.src.functions(name, None);
         // The default-omitted trailing-lambda alignment (`runBlocking { … }`) applies ONLY when NO overload
         // of this name matches the provided argument count exactly. A name WITH an exact-arity overload
         // (`run { … }`) always uses that overload's own parameter positions — never an alignment against a
@@ -1121,7 +1145,9 @@ impl<'a> SymbolResolver<'a> {
         name: &str,
         arg_tys: &[Option<Ty>],
     ) -> Option<Vec<Option<Ty>>> {
-        let fs = self.top_level_function_set(name);
+        // Unscoped over the federated source, like `top_level_lambda_param_types` — an FQ unimported callee
+        // must still yield receivers.
+        let fs = self.src.functions(name, None);
         // Same rule as `top_level_lambda_param_types`: only fall back to the default-omitted trailing-lambda
         // alignment (`runBlocking { … }` binds `this: CoroutineScope`) when NO overload matches the argument
         // count exactly, so an exact-arity call never mis-binds a receiver from a wider overload.
@@ -1154,7 +1180,9 @@ impl<'a> SymbolResolver<'a> {
         name: &str,
         arg_tys: &[Option<Ty>],
     ) -> Option<Vec<bool>> {
-        self.top_level_function_set(name)
+        // Unscoped over the federated source — lambda-shape must cover an FQ unimported callee.
+        self.src
+            .functions(name, None)
             .overloads
             .iter()
             .filter(|o| o.kind == FnKind::TopLevel)
@@ -1174,7 +1202,7 @@ impl<'a> SymbolResolver<'a> {
         name: &str,
         arg_tys: &[Option<Ty>],
     ) -> Option<Vec<Vec<Ty>>> {
-        let fs = self.lib.functions(name, Some(receiver));
+        let fs = self.src.functions(name, Some(receiver));
         for allow_must_inline in [false, true] {
             for o in ranked_extension_overloads(&fs, allow_must_inline) {
                 let Some(gsig) = o.generic_sig.as_ref() else {
@@ -1212,7 +1240,7 @@ impl<'a> SymbolResolver<'a> {
         name: &str,
         arg_tys: &[Option<Ty>],
     ) -> Option<Vec<Option<Ty>>> {
-        let fs = self.lib.functions(name, Some(receiver));
+        let fs = self.src.functions(name, Some(receiver));
         for allow_must_inline in [false, true] {
             for o in ranked_extension_overloads(&fs, allow_must_inline) {
                 let Some(gsig) = o.generic_sig.as_ref() else {
@@ -1775,10 +1803,11 @@ fn select_instance_info(
 /// `callables` and runs overload resolution. The `fqn` is returned so a classifier caller can name the
 /// resolved internal (a non-alias classifier's internal name IS its fqn).
 pub(crate) fn resolve_symbols_in_scope(
-    lib: &dyn CompilerPlatform,
+    src: &dyn SymbolSource,
     name: &str,
     packages: &[String],
 ) -> Vec<(String, crate::libraries::ResolvedSymbols)> {
+    let lib = src;
     packages
         .iter()
         .filter_map(|pkg| {

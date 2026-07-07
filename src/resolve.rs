@@ -3689,6 +3689,7 @@ fn make_checker<'a>(file: &'a File, syms: &'a SymbolTable, diags: &'a mut DiagSi
     Checker {
         file,
         syms,
+        module: crate::module_symbols::ModuleSymbols::new(syms),
         diags,
         expr_types: vec![Ty::Error; file.expr_arena.len()],
         scopes: Vec::new(),
@@ -4458,6 +4459,9 @@ pub fn check_file(file: &File, syms: &mut SymbolTable, diags: &mut DiagSink) -> 
 struct Checker<'a> {
     file: &'a File,
     syms: &'a SymbolTable,
+    /// This compilation's declarations as a [`SymbolSource`], federated OVER the classpath by the resolver
+    /// so a user function/type shadows a library one of the same name. Borrows the same `syms`.
+    module: crate::module_symbols::ModuleSymbols<'a>,
     diags: &'a mut DiagSink,
     expr_types: Vec<Ty>,
     scopes: Vec<HashMap<String, Local>>,
@@ -4530,7 +4534,11 @@ struct Checker<'a> {
 impl<'a> Checker<'a> {
     /// The arg-binding call-resolution layer over this checker's [`SymbolSource`]. Cheap to construct.
     fn resolver(&self) -> crate::symbol_resolver::SymbolResolver<'_> {
-        crate::symbol_resolver::SymbolResolver::new_scoped(&*self.syms.libraries, &self.fn_scope)
+        crate::symbol_resolver::SymbolResolver::new_scoped_with_module(
+            &*self.syms.libraries,
+            &self.module,
+            &self.fn_scope,
+        )
     }
     /// Whether the current module declares a top-level function `name` (shadow-precedence test) — asked
     /// through the module source rather than touching `syms.funs` directly.
