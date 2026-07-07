@@ -314,13 +314,44 @@ impl<'a> CallResolver<'a> {
             .unwrap_or_default()
     }
 
+    /// Extension overloads of `name` APPLICABLE to `recv`, resolved through the ONE `resolve_symbols` seam:
+    /// the scoped extension callables whose declared receiver is in `recv`'s supertype closure (the same
+    /// `extension_receiver_rank` applicability [`select_overload`] uses). This replaces the receiver-indexed
+    /// `functions(name, Some(recv))` extension lookup — `resolve_symbols` surfaces every extension (including
+    /// value-class ones) by its LOGICAL `@Metadata` name + receiver, so no per-mangling special-case is
+    /// needed here (the mangling is a jvm-emit concern). Falls back to the legacy `functions()` extension
+    /// slice only when there is no import scope.
+    fn receiver_extensions(&self, recv: Ty, name: &str) -> Vec<FunctionInfo> {
+        let applies = |o: &FunctionInfo| {
+            o.kind == FnKind::Extension
+                && o.receiver
+                    .and_then(|dr| self.lib.extension_receiver_rank(recv, dr))
+                    .is_some()
+        };
+        if self.fn_scope.is_some() {
+            self.symbols_in_scope(name)
+                .into_iter()
+                .flat_map(|(_, r)| match r.callables {
+                    crate::libraries::Callables::Functions(f) => f.overloads,
+                    _ => Vec::new(),
+                })
+                .filter(|o| applies(o))
+                .collect()
+        } else {
+            self.lib
+                .functions(name, Some(recv))
+                .overloads
+                .into_iter()
+                .filter(|o| o.kind == FnKind::Extension)
+                .collect()
+        }
+    }
+
     /// Whether `name` has an `inline` extension overload on `receiver`.
     pub fn extension_is_inline(&self, receiver: Ty, name: &str) -> bool {
-        self.lib
-            .functions(name, Some(receiver))
-            .overloads
+        self.receiver_extensions(receiver, name)
             .iter()
-            .any(|o| o.kind == FnKind::Extension && o.flags.inline.can_inline())
+            .any(|o| o.flags.inline.can_inline())
     }
 
     /// All TOP-LEVEL (and same-facade extension) function overloads of `name`, resolved through the ONE
@@ -372,11 +403,9 @@ impl<'a> CallResolver<'a> {
     /// query in the lowerer only sees instance members; a suspend extension is invisible to it, so the
     /// coroutine pass would miss the suspension point without this. Mirrors [`Self::toplevel_is_suspend`].
     pub fn extension_is_suspend(&self, name: &str, receiver: Ty) -> bool {
-        self.lib
-            .functions(name, Some(receiver))
-            .overloads
+        self.receiver_extensions(receiver, name)
             .iter()
-            .any(|o| o.kind == FnKind::Extension && o.flags.suspend)
+            .any(|o| o.flags.suspend)
     }
 
     /// Resolve a receiver-less top-level library callable for a concrete call site. This is the
