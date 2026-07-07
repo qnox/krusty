@@ -323,22 +323,48 @@ impl<'a> CallResolver<'a> {
             .any(|o| o.kind == FnKind::Extension && o.flags.inline.can_inline())
     }
 
+    /// All TOP-LEVEL (and same-facade extension) function overloads of `name`, resolved through the ONE
+    /// `resolve_symbols` seam over this resolver's import scope. Falls back to the legacy whole-classpath
+    /// `functions()` query ONLY when there is no import scope — the last `functions()` users are being
+    /// migrated here (task A), after which the fallback and `functions()` itself are deleted. Callers filter
+    /// by [`FnKind`] as they need (`TopLevel` for a plain call, etc.).
+    fn top_level_function_set(&self, name: &str) -> FunctionSet {
+        FunctionSet {
+            overloads: if self.fn_scope.is_some() {
+                self.symbols_in_scope(name)
+                    .into_iter()
+                    .flat_map(|(_, r)| match r.callables {
+                        crate::libraries::Callables::Functions(f) => f.overloads,
+                        _ => Vec::new(),
+                    })
+                    .collect()
+            } else {
+                self.lib
+                    .functions(name, None)
+                    .overloads
+                    .into_iter()
+                    .filter(|o| fn_in_scope(o, self.fn_scope))
+                    .collect()
+            },
+        }
+    }
+
     /// Whether `name` has an `inline` top-level overload.
     pub fn toplevel_is_inline(&self, name: &str) -> bool {
-        self.lib
-            .functions(name, None)
+        self.top_level_function_set(name)
             .overloads
             .iter()
+            .filter(|o| o.kind == FnKind::TopLevel)
             .any(|o| o.flags.inline.can_inline())
     }
 
     /// Whether `name` has a `suspend` top-level overload. The flag flows uniformly from the AST
     /// (same-module `suspend fun`, via `module_symbols`) and from `@Metadata` (classpath callees).
     pub fn toplevel_is_suspend(&self, name: &str) -> bool {
-        self.lib
-            .functions(name, None)
+        self.top_level_function_set(name)
             .overloads
             .iter()
+            .filter(|o| o.kind == FnKind::TopLevel)
             .any(|o| o.flags.suspend)
     }
 
@@ -363,27 +389,8 @@ impl<'a> CallResolver<'a> {
         type_args: &[Ty],
     ) -> Option<LibraryCallable> {
         // FQN-driven resolution: union `resolve_symbols`' callables over the in-scope packages (the ONE
-        // query, via `symbols_in_scope`), then keep the top-level overloads below. A context with NO import
-        // scope falls back to the legacy whole-classpath `functions()` query (removed once every consumer
-        // is scoped — task A).
-        let fs = FunctionSet {
-            overloads: if self.fn_scope.is_some() {
-                self.symbols_in_scope(name)
-                    .into_iter()
-                    .flat_map(|(_, r)| match r.callables {
-                        crate::libraries::Callables::Functions(f) => f.overloads,
-                        _ => Vec::new(),
-                    })
-                    .collect()
-            } else {
-                self.lib
-                    .functions(name, None)
-                    .overloads
-                    .into_iter()
-                    .filter(|o| fn_in_scope(o, self.fn_scope))
-                    .collect()
-            },
-        };
+        // query), then keep the top-level overloads below.
+        let fs = self.top_level_function_set(name);
         self.pick_top_level(name, &fs, args, type_args)
     }
 
@@ -876,8 +883,7 @@ impl<'a> CallResolver<'a> {
                 // generic `fun <T> …(): T` form we need to bind), so a same-name/same-arity non-generic
                 // sibling doesn't cross-bind.
                 let bases: Vec<FunctionInfo> = self
-                    .lib
-                    .functions(name, None)
+                    .top_level_function_set(name)
                     .overloads
                     .into_iter()
                     .filter(|b| {
@@ -956,10 +962,10 @@ impl<'a> CallResolver<'a> {
 
     /// Whether `name` has a top-level overload that MUST be inlined (`@InlineOnly`, no callable method).
     pub fn toplevel_has_must_inline(&self, name: &str) -> bool {
-        self.lib
-            .functions(name, None)
+        self.top_level_function_set(name)
             .overloads
             .iter()
+            .filter(|o| o.kind == FnKind::TopLevel)
             .any(|o| o.flags.inline.must_inline())
     }
 
@@ -1038,7 +1044,7 @@ impl<'a> CallResolver<'a> {
         name: &str,
         arg_tys: &[Option<Ty>],
     ) -> Option<Vec<Vec<Ty>>> {
-        let fs = self.lib.functions(name, None);
+        let fs = self.top_level_function_set(name);
         // The default-omitted trailing-lambda alignment (`runBlocking { … }`) applies ONLY when NO overload
         // of this name matches the provided argument count exactly. A name WITH an exact-arity overload
         // (`run { … }`) always uses that overload's own parameter positions — never an alignment against a
@@ -1086,7 +1092,7 @@ impl<'a> CallResolver<'a> {
         name: &str,
         arg_tys: &[Option<Ty>],
     ) -> Option<Vec<Option<Ty>>> {
-        let fs = self.lib.functions(name, None);
+        let fs = self.top_level_function_set(name);
         // Same rule as `top_level_lambda_param_types`: only fall back to the default-omitted trailing-lambda
         // alignment (`runBlocking { … }` binds `this: CoroutineScope`) when NO overload matches the argument
         // count exactly, so an exact-arity call never mis-binds a receiver from a wider overload.
@@ -1119,8 +1125,7 @@ impl<'a> CallResolver<'a> {
         name: &str,
         arg_tys: &[Option<Ty>],
     ) -> Option<Vec<bool>> {
-        self.lib
-            .functions(name, None)
+        self.top_level_function_set(name)
             .overloads
             .iter()
             .filter(|o| o.kind == FnKind::TopLevel)
