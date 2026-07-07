@@ -101,37 +101,35 @@ fi
 
 ncpu="$(nproc 2>/dev/null || sysctl -n hw.ncpu)"
 jobs="${KRUSTY_TEST_JOBS:-$ncpu}"
-# Per-binary test threads. Keep the default at 1 because many formerly separate e2e files now
-# share one process; callers can raise KRUSTY_TEST_THREADS after checking for temp-dir/state races.
+# Per-binary test threads for the SMALL binaries run in the cross-binary xargs pool: keep 1 so `-P jobs`
+# parallelizes ACROSS those fast unit-style suites without each ALSO spawning `ncpu` threads and
+# over-subscribing the cores.
 threads="${KRUSTY_TEST_THREADS:-1}"
+
 rest=()
 while IFS= read -r b; do
   rest+=("$b")
 done < <(printf '%s\n' "${bins[@]}" | grep -v '/conformance-')
 
-# Long-running binaries first: otherwise alphabetical order leaves slow binaries to start late, creating
-# a long tail on 4-core machines.
-priority=(
-  e2e
-)
-ordered=()
-for p in "${priority[@]}"; do
-  for b in "${rest[@]}"; do
-    case "$(basename "$b")" in
-      "$p"-*) ordered+=("$b") ;;
-    esac
-  done
-done
-for b in "${rest[@]}"; do
-  seen=0
-  for o in "${ordered[@]}"; do
-    [ "$b" = "$o" ] && { seen=1; break; }
-  done
-  [ "$seen" -eq 0 ] && ordered+=("$b")
-done
+# The e2e binary joins ~250 formerly-separate e2e tests, many of which drive the real kotlinc plus a
+# persistent JVM box runner. Run it DEDICATED and SEQUENTIALLY — after conformance, before the small-binary
+# pool — with `--test-threads=$ncpu` so its tests parallelize INTERNALLY across all cores, and size the
+# per-process box-runner pool to match so `ncpu` in-flight `box()` calls don't queue on too few runners.
+# Running it alone (outside the `-P jobs` fan-out) keeps it from over-subscribing while it owns the cores.
+e2e_bin="$(printf '%s\n' "${rest[@]}" | grep '/e2e-' | head -1 || true)"
+pool="${KRUSTY_BOX_RUNNER_POOL:-$ncpu}"
+if [ -n "$e2e_bin" ]; then
+  KRUSTY_BOX_RUNNER_POOL="$pool" run_one "$logdir" "$e2e_bin::--test-threads=$ncpu"
+fi
 
-if [ "${#ordered[@]}" -gt 0 ]; then
-  printf '%s\n' "${ordered[@]}" \
+# Everything except conformance and e2e — small suites parallelized across binaries.
+pool_bins=()
+while IFS= read -r b; do
+  pool_bins+=("$b")
+done < <(printf '%s\n' "${rest[@]}" | grep -v '/e2e-')
+
+if [ "${#pool_bins[@]}" -gt 0 ]; then
+  printf '%s\n' "${pool_bins[@]}" \
     | xargs -P "$jobs" -I{} bash -c 'run_one "$0" "$1::--test-threads='"$threads"'"' "$logdir" {}
 fi
 

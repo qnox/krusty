@@ -29,6 +29,33 @@ fn die_with_parent(cmd: &mut Command) {
     }
 }
 
+/// Per-phase timing guard for e2e profiling, gated by the `KRUSTY_PROF` env var (off by default so a
+/// normal run pays nothing). On drop it prints `PROF\t<phase>\t<ms>` to stderr; aggregate the lines to see
+/// where the e2e wall clock goes (krusty compile vs real-kotlinc dep build vs JVM `box()` round-trip).
+#[allow(dead_code)]
+struct ProfGuard {
+    phase: &'static str,
+    start: Instant,
+    on: bool,
+}
+#[allow(dead_code)]
+impl ProfGuard {
+    fn new(phase: &'static str) -> Self {
+        Self {
+            phase,
+            start: Instant::now(),
+            on: std::env::var_os("KRUSTY_PROF").is_some(),
+        }
+    }
+}
+impl Drop for ProfGuard {
+    fn drop(&mut self) {
+        if self.on {
+            eprintln!("PROF\t{}\t{}", self.phase, self.start.elapsed().as_millis());
+        }
+    }
+}
+
 /// Best-effort removal of `krusty_lib_*` / `krusty_node_*` temp dirs left by DEAD test processes — a
 /// crashed or gate-killed prior run can't clean up after itself, so its compiled-class scratch dirs would
 /// accumulate. Runs once per binary. A dir owned by a LIVE pid is left alone (a concurrent test binary may
@@ -76,6 +103,7 @@ pub fn compile_in_process(
     use krusty::jvm::names::file_class_name;
     use krusty::resolve::{check_file, collect_signatures_with_cp};
 
+    let _pg = ProfGuard::new("krusty");
     let mut diags = DiagSink::new();
     // Language features are taken from the source's `// LANGUAGE:` directives, exactly as the kotlinc
     // test infrastructure supplies them — so flag-gated syntax compiles iff the test enables it.
@@ -779,6 +807,7 @@ pub fn run_box(
     cp_jars: &[PathBuf],
 ) -> Option<String> {
     static POOL: OnceLock<Mutex<RunnerPool>> = OnceLock::new();
+    let _pg = ProfGuard::new("box");
     let java_home = java_home()?;
     let java = format!("{java_home}/bin/java");
     if !Path::new(&java).exists() {
@@ -985,23 +1014,54 @@ pub fn run_box_corpus_case(rel: &str) -> Option<String> {
 
 // --- Persistent kotlinc compiler server -----------------------------------
 //
-// The reference `kotlinc` is a JVM program; spawning its CLI per test pays a ~2-4s JVM + compiler
-// cold start each time (the dominant cost of the differential e2e). Instead run ONE persistent JVM
-// that invokes the compiler class (`K2JVMCompiler.exec`, which returns an `ExitCode` without
-// `System.exit`) in-process per request — the same thing the Kotlin compile daemon does. Class state
-// from one compile doesn't leak destructively into the next (exec creates+disposes its own
-// environment per call).
-
+// The reference `kotlinc` is a JVM program; spawning its CLI per test pays a ~2-4s JVM + compiler cold
+// start each time (the dominant cost of the differential e2e). Reusing `K2JVMCompiler.exec()` in one
+// persistent JVM is warm (~0.4s) BUT leaks: the compiler accumulates global caches (its IntelliJ-core
+// application environment + jar-filesystem handlers) across calls, so the 2nd+ compile in one process
+// death-spirals the collector (1st ~4s, 2nd >120s, independent of heap). The official compile daemon
+// avoids this not by magic but by CLEARING those caches between compiles.
+//
+// So this driver does the same, in ONE JVM: it holds a single `URLClassLoader` over the compiler jars
+// (classes loaded ONCE — that is where the warmth is), runs each request through `K2JVMCompiler.exec()`,
+// then resets the leaky global via `KotlinCoreEnvironment.disposeApplicationEnvironment()`. The next
+// compile recreates a fresh application environment, so state never accumulates. Result: ~0.4s warm
+// compiles, STABLE across compiles (measured 3990/417/523/422/400ms), in a single ~1 GB JVM — no second
+// daemon process (fits small/shared RAM), no RMI, no per-compile class reload. The driver uses only JDK
+// APIs (reflection + URLClassLoader), so it needs no compiler jar on its OWN classpath; it builds the
+// loader from the dist lib dir passed as argv[0].
 const KOTLINC_SERVER_SRC: &str = r#"
 import java.io.*;
-import org.jetbrains.kotlin.cli.jvm.K2JVMCompiler;
-import org.jetbrains.kotlin.cli.common.ExitCode;
+import java.net.*;
+import java.util.*;
+import java.lang.reflect.Method;
 
 public class KotlincServer {
     public static void main(String[] a) throws Exception {
-        DataInputStream din = new DataInputStream(new BufferedInputStream(System.in, 65536));
-        DataOutputStream dout = new DataOutputStream(new BufferedOutputStream(System.out, 4096));
+        // Compiler jars for the loader — drop `-sources`/JS/WASM jars (not needed to compile plain JVM
+        // Kotlin) so the one loader holds less.
+        File[] files = new File(a[0]).listFiles();
+        ArrayList<URL> urls = new ArrayList<>();
+        if (files != null) for (File f : files) {
+            String n = f.getName();
+            if (n.endsWith(".jar") && !n.endsWith("-sources.jar") && !n.contains("-js") && !n.contains("-wasm"))
+                urls.add(f.toURI().toURL());
+        }
+        // ONE loader for the whole session: the compiler classes load once (this is the warmth). Parent is
+        // the platform loader only, so the compiler's classes stay private to it.
+        URLClassLoader cl = new URLClassLoader(urls.toArray(new URL[0]), ClassLoader.getPlatformClassLoader());
+        Class<?> k = cl.loadClass("org.jetbrains.kotlin.cli.jvm.K2JVMCompiler");
+        Method exec = k.getMethod("exec", PrintStream.class, String[].class);
+        // The reset the compile daemon uses: dispose the accumulated global application environment after
+        // each compile so the next one starts clean — without this the reused compiler leaks and stalls.
+        Method disposeAppEnv = cl.loadClass("org.jetbrains.kotlin.cli.jvm.compiler.KotlinCoreEnvironment")
+            .getMethod("disposeApplicationEnvironment");
+
+        // Bind the framed protocol to the RAW stdin/stdout fds, THEN redirect System.out to stderr, so the
+        // compiler's own prints to System.out cannot corrupt a response frame.
+        DataInputStream din = new DataInputStream(new BufferedInputStream(new FileInputStream(FileDescriptor.in), 65536));
+        DataOutputStream dout = new DataOutputStream(new BufferedOutputStream(new FileOutputStream(FileDescriptor.out), 4096));
         System.setOut(System.err);
+
         while (true) {
             int n;
             try { n = din.readInt(); } catch (EOFException e) { break; }
@@ -1014,11 +1074,15 @@ public class KotlincServer {
             PrintStream err = new PrintStream(errBuf, true, "UTF-8");
             int codeNum;
             try {
-                ExitCode code = new K2JVMCompiler().exec(err, args);
-                codeNum = code.getCode();
+                Object comp = k.getDeclaredConstructor().newInstance();
+                Object code = exec.invoke(comp, err, (Object) args);
+                codeNum = (int) code.getClass().getMethod("getCode").invoke(code);
             } catch (Throwable t) {
                 t.printStackTrace(err);
                 codeNum = 2;
+            } finally {
+                // Clear the leaky global compiler state — the key to reusing one JVM without degrading.
+                try { disposeAppEnv.invoke(null); } catch (Throwable ignore) {}
             }
             byte[] eb = errBuf.toByteArray();
             dout.writeInt(codeNum);
@@ -1038,8 +1102,9 @@ pub fn kotlin_compiler_jar() -> Option<PathBuf> {
     p.is_file().then_some(p)
 }
 
-/// Compile `KotlincServer.java` once (against the compiler jar) into a stable cache dir; return it.
-fn setup_kotlinc_server(java_home: &str, compiler_jar: &Path) -> Option<PathBuf> {
+/// Compile the pure-JDK `KotlincServer.java` driver once (via `javac`) into a stable cache dir; return it.
+/// The driver uses only reflection + `URLClassLoader`, so it needs no compiler jar to compile OR to run.
+fn setup_kotlinc_server(java_home: &str, _compiler_jar: &Path) -> Option<PathBuf> {
     let mut hash: u64 = 0xcbf29ce484222325;
     for b in KOTLINC_SERVER_SRC.bytes() {
         hash = (hash ^ b as u64).wrapping_mul(0x100000001b3);
@@ -1057,12 +1122,12 @@ fn setup_kotlinc_server(java_home: &str, compiler_jar: &Path) -> Option<PathBuf>
         return None;
     }
     let out = Command::new(&javac)
-        .args(["-cp", &compiler_jar.to_string_lossy(), "-d"])
+        .arg("-d")
         .arg(&dir)
         .arg(&src_path)
         .output()
         .ok()?;
-    if !out.status.success() {
+    if !dir.join("KotlincServer.class").is_file() {
         eprintln!(
             "KotlincServer javac failed: {}",
             String::from_utf8_lossy(&out.stderr)
@@ -1072,7 +1137,14 @@ fn setup_kotlinc_server(java_home: &str, compiler_jar: &Path) -> Option<PathBuf>
     Some(dir)
 }
 
-/// A persistent JVM running `KotlincServer`, fed compiler arg-lists over a pipe.
+/// The reference compiler dist's lib dir (holds `kotlin-compiler.jar`) — the jars the isolating-loader
+/// driver builds its per-compile `URLClassLoader` from. Passed to the driver as its argv[0].
+#[allow(dead_code)]
+fn kotlinc_lib_of(compiler_jar: &Path) -> Option<PathBuf> {
+    compiler_jar.parent().map(Path::to_path_buf)
+}
+
+/// A persistent JVM running the in-process `KotlincServer` compiler, fed compiler arg-lists over a pipe.
 struct KotlincServer {
     _child: Child,
     stdin: ChildStdin,
@@ -1080,19 +1152,21 @@ struct KotlincServer {
 }
 
 impl KotlincServer {
-    fn new(java: &str, cp: &str) -> Option<Self> {
+    /// `cp` is the driver's run classpath (just its `server_dir` — the driver is pure JDK and loads the
+    /// compiler itself); `lib_dir` is passed as argv[0] so the driver builds its compiler `URLClassLoader`.
+    fn new(java: &str, cp: &str, lib_dir: &str) -> Option<Self> {
         let mut cmd = Command::new(java);
-        // Test compiles aren't perf-critical; favour fast startup over peak codegen throughput
-        // (cap JIT at C1, serial GC) so the one-time JVM+compiler warmup is small.
+        // One persistent JVM that compiles in-process. 1 GB holds a single compile's working set (the leaky
+        // global state is reset after each — see the driver), so it stays flat across compiles. Fast-startup
+        // JIT/GC since each compile is short.
         cmd.args([
             "-XX:TieredStopAtLevel=1",
             "-XX:+UseSerialGC",
-            // Reference kotlinc needs more headroom than the box/java runners, but still cap it — the
-            // differential harness compiles small snippets, so 1 GB is ample and bounds the daemon.
             "-Xmx1g",
             "-cp",
             cp,
             "KotlincServer",
+            lib_dir,
         ])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -1139,10 +1213,11 @@ impl KotlincServer {
 type ServerPool<S> = Mutex<HashMap<String, Vec<Arc<Mutex<S>>>>>;
 
 pub fn kotlinc_compile(args: &[String]) -> Option<(i32, String)> {
-    // A per-classpath POOL of servers (not one), so reference-compiler work runs N-wide instead of
-    // serializing on a single mutex — the coverage-gate's ~1-core bottleneck. The outer map lock is
-    // held only to pick/grow a server (an `Arc`), then released BEFORE the multi-second compile.
+    // A POOL of persistent compiler-server JVMs, so reference-compiler work can run N-wide instead of
+    // serializing on a single mutex. The outer map lock is held only to pick/grow a server (an `Arc`),
+    // then released BEFORE the multi-hundred-ms compile.
     static POOL: OnceLock<ServerPool<KotlincServer>> = OnceLock::new();
+    let _pg = ProfGuard::new("kotlinc");
     let java_home = java_home()?;
     let java = format!("{java_home}/bin/java");
     if !Path::new(&java).exists() {
@@ -1150,11 +1225,12 @@ pub fn kotlinc_compile(args: &[String]) -> Option<(i32, String)> {
     }
     let compiler_jar = kotlin_compiler_jar()?;
     let server_dir = setup_kotlinc_server(&java_home, &compiler_jar)?;
-    let cp = format!(
-        "{}:{}",
-        server_dir.to_string_lossy(),
-        compiler_jar.to_string_lossy()
-    );
+    let lib_dir = kotlinc_lib_of(&compiler_jar)?
+        .to_string_lossy()
+        .into_owned();
+    // The driver is pure JDK and loads the compiler itself (from `lib_dir`), so its OWN classpath is just
+    // its `server_dir`.
+    let cp = server_dir.to_string_lossy().into_owned();
     let server = {
         let pool = POOL.get_or_init(|| Mutex::new(HashMap::new()));
         let mut map = pool.lock().unwrap();
@@ -1162,7 +1238,7 @@ pub fn kotlinc_compile(args: &[String]) -> Option<(i32, String)> {
         if let Some(idle) = servers.iter().find(|s| s.try_lock().is_ok()) {
             idle.clone()
         } else if servers.len() < server_pool_cap() {
-            let s = Arc::new(Mutex::new(KotlincServer::new(&java, &cp)?));
+            let s = Arc::new(Mutex::new(KotlincServer::new(&java, &cp, &lib_dir)?));
             servers.push(s.clone());
             s
         } else {
@@ -1174,28 +1250,25 @@ pub fn kotlinc_compile(args: &[String]) -> Option<(i32, String)> {
     match server.try_compile(args) {
         Ok(r) => Some(r),
         Err(_) => {
-            // Server died — restart once and retry.
-            *server = KotlincServer::new(&java, &cp)?;
+            // Server JVM died — restart once and retry.
+            *server = KotlincServer::new(&java, &cp, &lib_dir)?;
             server.try_compile(args).ok()
         }
     }
 }
 
-/// How many persistent compiler/runner JVMs to pool per classpath. Sized to the worker-thread count so
-/// tests run N-wide, but capped (each `KotlincServer` is a ~1 GB kotlinc JVM) to bound test-time memory.
-/// Override with `KRUSTY_SERVER_POOL`.
+/// How many persistent compiler-server JVMs to pool per classpath. Default 1: each server is a full ~1 GB
+/// compiler JVM, so on a small/shared-RAM host running several alongside the box-runner JVMs and the test
+/// binary would swap. One server serializes the kotlinc-dependency compiles (each ~0.4s warm) while every
+/// non-kotlinc test still runs N-wide. Override with `KRUSTY_SERVER_POOL` on a large-RAM host to compile
+/// several dependencies concurrently.
 #[allow(dead_code)]
 fn server_pool_cap() -> usize {
     std::env::var("KRUSTY_SERVER_POOL")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
         .filter(|&n| n >= 1)
-        .unwrap_or_else(|| {
-            std::thread::available_parallelism()
-                .map(|n| n.get())
-                .unwrap_or(3)
-                .clamp(1, 4)
-        })
+        .unwrap_or(1)
 }
 
 // --- Persistent javac+run server ------------------------------------------
