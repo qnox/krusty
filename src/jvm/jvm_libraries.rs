@@ -1968,10 +1968,20 @@ impl SymbolSource for JvmLibraries {
                     };
                     let call_sig = meta.call_sig;
                     let inline_kind = InlineKind::from_flags(inline, inline && !c.public);
+                    // The extension's DECLARED receiver source type: `None` for a type-variable receiver
+                    // (`fun <T> T.foo` — erases to `Object`, no value-class identity), else the concrete
+                    // receiver (`fun Result<T>.getOrThrow` → `kotlin/Result`). The value-class pass uses it
+                    // to unbox a boxed receiver only for a genuine value-class-declared extension.
+                    let source_receiver = match generic_sig.as_ref().and_then(|g| g.params.first())
+                    {
+                        Some(GSig::Var(_)) => None,
+                        _ => Some(receiver),
+                    };
                     let callable = LibraryCallable {
                         inline: inline_kind,
                         default_call: is_default,
                         signature: c.signature.clone(),
+                        source_receiver,
                         ..LibraryCallable::library(
                             c.owner.clone(),
                             c.name.clone(),
@@ -2132,6 +2142,9 @@ impl SymbolSource for JvmLibraries {
                                     LibraryCallable {
                                         inline: inline_kind,
                                         signature: c.signature.clone(),
+                                        // This path binds only extensions whose `@Metadata` receiver IS
+                                        // this value class, so the declared receiver is the value class.
+                                        source_receiver: Some(receiver),
                                         ..LibraryCallable::library(
                                             c.owner.clone(),
                                             c.name.clone(),

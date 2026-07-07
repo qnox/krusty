@@ -178,11 +178,25 @@ pub fn lower_value_classes(ir: &mut IrFile) -> bool {
     let slot_types: Vec<HashMap<u32, Ty>> = ir
         .functions
         .iter()
-        .map(|f| {
+        .enumerate()
+        .map(|(fid, f)| {
             let mut m: HashMap<u32, Ty> = HashMap::new();
             let base = u32::from(f.dispatch_receiver.is_some() && !f.is_static);
+            // A lifted lambda's OWN parameters (from this index on) arrive through the `FunctionN` generic
+            // `Object` invoke slot, so a reference-underlying value-class parameter is BOXED there — type it
+            // as the NULLABLE (boxed) value class so `repr` reads a boxed `X` and a value-class member/
+            // extension call on it (`it.getOrThrow()`) unboxes it. A scalar-underlying value class keeps its
+            // own handling. Value-class-ness is decided HERE (with `under`), not in the lambda-agnostic lowerer.
+            let own_from = ir.lambda_own_params_from.get(&(fid as u32)).copied();
             for (i, p) in f.params.iter().enumerate() {
-                m.insert(base + i as u32, p.clone());
+                let boxed_own = own_from.is_some_and(|s| i as u32 >= s)
+                    && !p.is_nullable()
+                    && p.non_null()
+                        .obj_internal()
+                        .and_then(|fq| under.get(fq))
+                        .is_some_and(|u| u.is_reference());
+                let slot_ty = if boxed_own { Ty::nullable(*p) } else { *p };
+                m.insert(base + i as u32, slot_ty);
             }
             if let Some(root) = f.body {
                 let mut reach = HashSet::new();
@@ -237,6 +251,23 @@ pub fn lower_value_classes(ir: &mut IrFile) -> bool {
                 continue;
             };
             let f = &ir.functions[fid as usize];
+            // A method MANGLED by a value-class PARAMETER (not only a value-class return) is likewise
+            // unboxed in its bridge — `call(Result, IC)` mangles to `call-<hash>` because of the user value
+            // class `IC` (kotlinc EXEMPTS a `kotlin.Result` param from mangling), and its bridge unboxes
+            // BOTH params. The `target_name`/return checks above miss this shape (non-value-class return,
+            // `target_name = None`), so its params would be wrongly marked boxed and double-unboxed at use.
+            // Skip when the method is mangled — same predicate the mangle pass below applies.
+            let is_file_class = f.dispatch_receiver.is_none();
+            if vc_mangle(
+                &f.name,
+                &orig_params[fid as usize],
+                &orig_rets[fid as usize],
+                &under,
+                is_file_class,
+            ) != f.name
+            {
+                continue;
+            }
             let base = u32::from(f.dispatch_receiver.is_some() && !f.is_static);
             for (i, (cp, ep)) in b
                 .concrete_params
@@ -1229,6 +1260,28 @@ pub fn lower_value_classes(ir: &mut IrFile) -> bool {
                     }
                 }
             }
+            // The RECEIVER of a value-class EXTENSION realized as a static FACADE method
+            // (`kotlin/ResultKt.getOrThrow-impl(Object)` for `fun Result<T>.getOrThrow()`) is carried as
+            // `args[0]` (NOT `dispatch_receiver`) and the facade takes the UNBOXED underlying. The lowerer
+            // records the extension's declared source receiver (`ext_call_source_receiver`) with no
+            // value-class reasoning of its own; decide here: when that receiver is a REFERENCE-underlying
+            // value class and `args[0]` arrives BOXED (a bridge `C().foo()` overriding `Any`, a nullable
+            // `x!!`, or an `as Result` cast), unbox it. A generic type-variable receiver is never recorded,
+            // so `foo`-style generics keep their boxed receiver.
+            let recv_is_ref_vc = ir
+                .ext_call_source_receiver
+                .get(&id)
+                .and_then(|t| t.obj_internal())
+                .is_some_and(|fq| under.get(fq).is_some_and(|u| u.is_reference()));
+            if recv_is_ref_vc {
+                if let IrExpr::Call { args, .. } = &ir.exprs[id as usize] {
+                    if let Some(&a0) = args.first() {
+                        if let Repr::Boxed(x) = repr_ctx.repr(a0) {
+                            ops.push((a0, BoxOp::Unbox(x)));
+                        }
+                    }
+                }
+            }
             // An unboxed value class flowing into a stdlib (`External`) call or a dynamic `invoke`
             // (string-template `append`/`toString`, a generic `Object` param), or stored as a reference
             // array element (`arrayOf(X(..))` → `X[]`), must be boxed.
@@ -1299,6 +1352,13 @@ pub fn lower_value_classes(ir: &mut IrFile) -> bool {
                     }
                 }
                 for (k, a) in args.clone().into_iter().enumerate() {
+                    // The RECEIVER (`args[0]`) of a value-class extension facade call takes the value class's
+                    // OWN underlying (`getOrThrow-impl(Object)` for `Result`), so it passes UNBOXED — the
+                    // dedicated `ext_call_source_receiver` handling above owns it. Never box it here, even
+                    // though its `Object` param would otherwise look like a generic boxed slot.
+                    if recv_is_ref_vc && k == 0 {
+                        continue;
+                    }
                     let Repr::Unboxed(x) = repr_ctx.repr(a) else {
                         continue;
                     };

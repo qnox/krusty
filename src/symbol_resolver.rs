@@ -346,7 +346,7 @@ impl<'a> SymbolResolver<'a> {
         let applies = |o: &FunctionInfo| {
             o.kind == FnKind::Extension
                 && o.receiver
-                    .and_then(|dr| self.lib.extension_receiver_rank(recv, dr))
+                    .and_then(|dr| source_receiver_rank(&self.src, recv, dr))
                     .is_some()
         };
         if self.fn_scope.is_some() {
@@ -720,7 +720,7 @@ impl<'a> SymbolResolver<'a> {
             .filter(|p| p.kind == PropKind::Extension)
             .filter_map(|p| {
                 let decl_recv = gsig_to_ty(p.receiver.as_ref()?, &std::collections::HashMap::new());
-                let rank = self.lib.extension_receiver_rank(receiver, decl_recv)?;
+                let rank = source_receiver_rank(&self.src, receiver, decl_recv)?;
                 Some((rank, p))
             })
             .min_by_key(|(rank, _)| *rank)
@@ -1802,6 +1802,40 @@ fn select_instance_info(
 /// position reads `classifier` under level-precedence + within-level ambiguity; a call position flattens
 /// `callables` and runs overload resolution. The `fqn` is returned so a classifier caller can name the
 /// resolved internal (a non-alias classifier's internal name IS its fqn).
+/// The rung of `decl_recv` in `recv`'s SOURCE-type supertype closure (0 = same class), or `None` if the
+/// extension's declared receiver is neither `recv` nor a supertype of it. Uses `erased_recv` Kotlin-level
+/// keys + `resolve_type` supertypes — NO JVM descriptors — so `kotlin/UInt` ≠ `kotlin/Int` ≠ `kotlin/Result`
+/// are distinct by their class, a generic value-class receiver (`Result<T>`) binds a concrete one
+/// (`Result<String>` — `erased_recv` drops type arguments), and `UInt` never binds an `Int` extension.
+/// Replaces the descriptor-based `extension_receiver_rank`, whose value-class special-case existed only
+/// because the erased `I`/`Object` descriptors tied distinct value classes together.
+fn source_receiver_rank(src: &dyn SymbolSource, recv: Ty, decl_recv: Ty) -> Option<u32> {
+    let want = decl_recv.erased_recv().kotlin_class_internal()?;
+    let start = recv.erased_recv().kotlin_class_internal()?;
+    let mut frontier = vec![start.to_string()];
+    let mut seen: std::collections::HashSet<String> = std::iter::once(start.to_string()).collect();
+    let mut rung = 0u32;
+    while !frontier.is_empty() {
+        if frontier.iter().any(|t| t == want) {
+            return Some(rung);
+        }
+        let mut next = Vec::new();
+        for t in &frontier {
+            if let Some(lt) = src.resolve_type(t) {
+                for s in lt.supertypes {
+                    if seen.insert(s.clone()) {
+                        next.push(s);
+                    }
+                }
+            }
+        }
+        frontier = next;
+        rung += 1;
+    }
+    // A universal `Any`-receiver extension (`<T> T.let`) applies to every receiver at lowest precedence.
+    (want == "kotlin/Any").then_some(u32::MAX - 1)
+}
+
 pub(crate) fn resolve_symbols_in_scope(
     src: &dyn SymbolSource,
     name: &str,
@@ -1930,7 +1964,7 @@ fn select_overload(
         let rank = if kind == FnKind::Extension {
             match o
                 .receiver
-                .and_then(|dr| lib.extension_receiver_rank(recv, dr))
+                .and_then(|dr| source_receiver_rank(lib, recv, dr))
             {
                 Some(r) => r,
                 None => {
@@ -2262,6 +2296,7 @@ mod tests {
             vararg_elem: None,
             signature: None,
             origin: Origin::Library,
+            source_receiver: None,
         };
         FunctionInfo {
             ret: crate::libraries::ReturnInfo::new(false, Some(Ty::UInt)),

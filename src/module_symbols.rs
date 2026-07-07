@@ -119,6 +119,9 @@ fn fn_info(
         vararg_elem: None,
         signature: None,
         origin,
+        // A module extension's declared receiver, verbatim; the value-class pass filters by value-class
+        // identity, so a generic or non-value-class receiver is inert here.
+        source_receiver: receiver,
     };
     FunctionInfo {
         receiver_rank: rank,
