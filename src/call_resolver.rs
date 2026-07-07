@@ -359,7 +359,7 @@ impl<'a> CallResolver<'a> {
     /// `functions()` query ONLY when there is no import scope — the last `functions()` users are being
     /// migrated here (task A), after which the fallback and `functions()` itself are deleted. Callers filter
     /// by [`FnKind`] as they need (`TopLevel` for a plain call, etc.).
-    fn top_level_function_set(&self, name: &str) -> FunctionSet {
+    pub(crate) fn top_level_function_set(&self, name: &str) -> FunctionSet {
         FunctionSet {
             overloads: if self.fn_scope.is_some() {
                 self.symbols_in_scope(name)
