@@ -1810,30 +1810,40 @@ fn select_instance_info(
 /// Replaces the descriptor-based `extension_receiver_rank`, whose value-class special-case existed only
 /// because the erased `I`/`Object` descriptors tied distinct value classes together.
 fn source_receiver_rank(src: &dyn SymbolSource, recv: Ty, decl_recv: Ty) -> Option<u32> {
-    let want = decl_recv.erased_recv().kotlin_class_internal()?;
-    let start = recv.erased_recv().kotlin_class_internal()?;
-    let mut frontier = vec![start.to_string()];
-    let mut seen: std::collections::HashSet<String> = std::iter::once(start.to_string()).collect();
-    let mut rung = 0u32;
-    while !frontier.is_empty() {
-        if frontier.iter().any(|t| t == want) {
-            return Some(rung);
-        }
-        let mut next = Vec::new();
-        for t in &frontier {
-            if let Some(lt) = src.resolve_type(t) {
-                for s in lt.supertypes {
-                    if seen.insert(s.clone()) {
-                        next.push(s);
+    // Same source type — rung 0. Plain `Ty` equality (interned, NO erasure): the exact receiver an
+    // extension is declared on. This is the ONLY rank an ARRAY receiver (`IntArray.sum()`) can carry
+    // besides the universal `Any` — an array has no class-name key for the supertype walk below, and its
+    // element type must be matched exactly (an `IntArray` extension must not bind an `Array<String>`).
+    if recv.non_null() == decl_recv.non_null() {
+        return Some(0);
+    }
+    let want = decl_recv.erased_recv().kotlin_class_internal();
+    if let (Some(want), Some(start)) = (want, recv.erased_recv().kotlin_class_internal()) {
+        let mut frontier = vec![start.to_string()];
+        let mut seen: std::collections::HashSet<String> =
+            std::iter::once(start.to_string()).collect();
+        let mut rung = 0u32;
+        while !frontier.is_empty() {
+            if frontier.iter().any(|t| t == want) {
+                return Some(rung);
+            }
+            let mut next = Vec::new();
+            for t in &frontier {
+                if let Some(lt) = src.resolve_type(t) {
+                    for s in lt.supertypes {
+                        if seen.insert(s.clone()) {
+                            next.push(s);
+                        }
                     }
                 }
             }
+            frontier = next;
+            rung += 1;
         }
-        frontier = next;
-        rung += 1;
     }
-    // A universal `Any`-receiver extension (`<T> T.let`) applies to every receiver at lowest precedence.
-    (want == "kotlin/Any").then_some(u32::MAX - 1)
+    // A universal `Any`-receiver extension (`<T> T.let`) applies to every receiver — arrays included — at
+    // lowest precedence.
+    (want == Some("kotlin/Any")).then_some(u32::MAX - 1)
 }
 
 pub(crate) fn resolve_symbols_in_scope(

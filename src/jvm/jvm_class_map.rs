@@ -97,7 +97,10 @@ pub fn jvm_collection_to_kotlin(internal: &str) -> Option<&'static str> {
         "java/util/List" => "kotlin/collections/List",
         "java/util/Set" => "kotlin/collections/Set",
         "java/util/Map" => "kotlin/collections/Map",
-        "java/util/Map$Entry" => "kotlin/collections/Map$Entry",
+        // The front end spells the nested Kotlin type with a DOT (`kotlin/collections/Map.Entry`, see the
+        // `kotlin_builtin_to_jvm` key above), not a `$` — so the reverse map must too, or a `Map.Entry`
+        // extension (`component1`/`component2`) won't match a `java/util/Map$Entry` receiver.
+        "java/util/Map$Entry" => "kotlin/collections/Map.Entry",
         _ => return None,
     })
 }
