@@ -1414,6 +1414,21 @@ impl SymbolSource for JvmLibraries {
                     supertypes.push(s);
                 }
             }
+            // A JVM collection type (`java/util/Set`) and its JVM supertypes ARE their Kotlin mapped types
+            // (`kotlin/collections/Set`) at the source level — an extension declared on
+            // `kotlin/collections/Iterable` applies to a `java/util/Set` receiver (`entries.first()`). Add
+            // each Kotlin equivalent as a supertype so the source-type receiver walk bridges the
+            // java.util ↔ kotlin.collections platform mapping instead of dead-ending in the JDK hierarchy.
+            let mapped: Vec<String> = std::iter::once(internal)
+                .chain(supertypes.iter().map(String::as_str))
+                .filter_map(super::jvm_class_map::jvm_collection_to_kotlin)
+                .map(str::to_string)
+                .collect();
+            for k in mapped {
+                if !supertypes.iter().any(|existing| existing == &k) {
+                    supertypes.push(k);
+                }
+            }
             // A companion object compiles to a `public static final C$Name` field on `C` (default name
             // `Companion`; e.g. `Json.Default: Json$Default`). Detect it by the descriptor pattern
             // `L<this>$<fieldname>;` so a bare `C` reference can resolve to the companion instance.
