@@ -567,9 +567,29 @@ impl Drop for BoxRunner {
     }
 }
 
+/// Opt-in JVM diagnostics for a runner: set `KRUSTY_JVM_GCLOG=<dir>` to make every runner JVM log GC,
+/// metaspace, and class-unload events to `<dir>/<role>-<pid>.gclog` (unified `-Xlog`). Empty ⇒ no args,
+/// zero overhead. Lets a profiling run see GC frequency/pauses and whether metaspace/class-unloading is
+/// a bottleneck, instead of guessing. Pair with `KRUSTY_PROF=1` for the per-phase (compile/box) timings.
+#[allow(dead_code)]
+fn jvm_gclog_args(role: &str) -> Vec<String> {
+    let Some(dir) = std::env::var("KRUSTY_JVM_GCLOG")
+        .ok()
+        .filter(|v| !v.is_empty())
+    else {
+        return Vec::new();
+    };
+    let _ = std::fs::create_dir_all(&dir);
+    let pid = std::process::id();
+    vec![format!(
+        "-Xlog:gc*=info,gc+metaspace=info,class+unload=info:file={dir}/{role}-{pid}.gclog:time,uptime,level,tags"
+    )]
+}
+
 impl BoxRunner {
     fn new(java: &str, cp: &str) -> Option<Self> {
         let mut cmd = Command::new(java);
+        cmd.args(jvm_gclog_args("boxrunner"));
         // Cap the runner heap (-Xmx512m) to keep each persistent runner small — they used to grow to
         // ~1 GB and several run at once, so this eases gate memory pressure. Deliberately keep the
         // DEFAULT collector + full tiered JIT: BoxRunner dispatches box() bodies on a cached thread pool
@@ -579,8 +599,28 @@ impl BoxRunner {
         // throughput.
         cmd.args(["-Xmx512m", "-cp", cp, "BoxRunner"])
             .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null());
+            .stdout(Stdio::piped());
+        // Under KRUSTY_JVM_GCLOG, keep the runner's stderr (a crash/OOM reason) instead of discarding it.
+        match std::env::var("KRUSTY_JVM_GCLOG")
+            .ok()
+            .filter(|v| !v.is_empty())
+        {
+            Some(dir) => match std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(format!("{dir}/boxrunner-{}.stderr", std::process::id()))
+            {
+                Ok(f) => {
+                    cmd.stderr(Stdio::from(f));
+                }
+                Err(_) => {
+                    cmd.stderr(Stdio::null());
+                }
+            },
+            None => {
+                cmd.stderr(Stdio::null());
+            }
+        }
         die_with_parent(&mut cmd);
         let mut child = cmd.spawn().ok()?;
         let stdin = child.stdin.take()?;
@@ -1159,6 +1199,7 @@ impl KotlincServer {
         // One persistent JVM that compiles in-process. 1 GB holds a single compile's working set (the leaky
         // global state is reset after each — see the driver), so it stays flat across compiles. Fast-startup
         // JIT/GC since each compile is short.
+        cmd.args(jvm_gclog_args("kotlinc"));
         cmd.args([
             "-XX:TieredStopAtLevel=1",
             "-XX:+UseSerialGC",
