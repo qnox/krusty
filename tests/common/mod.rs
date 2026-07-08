@@ -11,10 +11,14 @@ use std::time::{Duration, Instant};
 
 use krusty::jvm::classpath::Classpath;
 
-/// Make a spawned child receive `SIGKILL` when THIS test process dies. libtest's worker threads live for
-/// the whole binary, so a persistent JVM runner spawned from one is killed at process teardown — a clean
-/// exit OR the gate SIGKILL-ing the binary — instead of orphaning and holding ~1 GB until the OS reaps it.
-/// Apply to the `Command` before `spawn()`. Linux `PR_SET_PDEATHSIG`; a no-op on other platforms.
+/// Make a spawned child receive `SIGKILL` when THIS test process dies, so a persistent JVM runner is
+/// killed at teardown (clean exit OR the gate SIGKILL-ing the binary) instead of orphaning ~1 GB.
+/// Linux `PR_SET_PDEATHSIG`; a no-op elsewhere. MUST be paired with [`spawn_owned`]: on Linux the
+/// parent-death signal fires when the CREATING THREAD exits, not the process — and libtest worker
+/// threads come and go per test, so a JVM spawned directly from one is SIGKILL'd the moment that test's
+/// thread ends, forcing a cold respawn (measured: a reference compile ballooning 1.5s → 40-120s). Spawning
+/// from the single immortal owner thread instead binds the signal to a thread that lives for the whole
+/// process, so it fires only at real teardown.
 #[allow(dead_code)]
 fn die_with_parent(cmd: &mut Command) {
     #[cfg(target_os = "linux")]
@@ -27,6 +31,39 @@ fn die_with_parent(cmd: &mut Command) {
             Ok(())
         });
     }
+}
+
+/// Spawn a child process from ONE immortal owner thread shared by the whole binary, so a `PR_SET_PDEATHSIG`
+/// set on it (see [`die_with_parent`]) binds to a thread that never exits until process teardown — not to
+/// a transient libtest worker thread. Every persistent JVM (box runner, kotlinc/java servers) MUST spawn
+/// through here; without it the parent-death signal mis-fires per test and the JVMs churn.
+#[allow(dead_code)]
+fn spawn_owned(cmd: Command) -> std::io::Result<Child> {
+    type Job = Box<dyn FnOnce() + Send>;
+    static OWNER: OnceLock<Mutex<mpsc::Sender<Job>>> = OnceLock::new();
+    let tx = OWNER.get_or_init(|| {
+        let (tx, rx) = mpsc::channel::<Job>();
+        // The immortal owner thread: it only ever runs spawn closures, so every child it forks is parented
+        // to it. It never returns (the receiver stays open via the retained `tx`), so PDEATHSIG fires only
+        // when the process itself dies.
+        std::thread::Builder::new()
+            .name("jvm-spawner".into())
+            .spawn(move || {
+                for job in rx {
+                    job();
+                }
+            })
+            .expect("spawn jvm-spawner thread");
+        Mutex::new(tx)
+    });
+    let (rtx, rrx) = mpsc::channel();
+    let job: Job = Box::new(move || {
+        let mut cmd = cmd;
+        let _ = rtx.send(cmd.spawn());
+    });
+    tx.lock().unwrap_or_else(|e| e.into_inner()).send(job).ok();
+    rrx.recv()
+        .unwrap_or_else(|_| Err(std::io::Error::other("jvm-spawner gone")))
 }
 
 /// Per-phase timing guard for e2e profiling, gated by the `KRUSTY_PROF` env var (off by default so a
@@ -92,7 +129,6 @@ fn sweep_stale_temp_dirs() {
 /// spawning the `krusty` binary once per snippet (each subprocess rebuilds those indexes from scratch).
 /// `cp_jars` are the `-classpath` jars; `jdk_modules` is the JDK `lib/modules` jimage (the bootclasspath).
 /// Returns `None` on any compile error (an unsupported feature), like the CLI's non-zero exit.
-#[allow(dead_code)]
 pub fn compile_in_process(
     src: &str,
     stem: &str,
@@ -622,7 +658,7 @@ impl BoxRunner {
             }
         }
         die_with_parent(&mut cmd);
-        let mut child = cmd.spawn().ok()?;
+        let mut child = spawn_owned(cmd).ok()?;
         let stdin = child.stdin.take()?;
         let mut stdout = child.stdout.take()?;
         let waiters: Arc<Mutex<HashMap<u64, mpsc::Sender<Vec<u8>>>>> =
@@ -1213,7 +1249,7 @@ impl KotlincServer {
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
         die_with_parent(&mut cmd);
-        let mut child = cmd.spawn().ok()?;
+        let mut child = spawn_owned(cmd).ok()?;
         let stdin = child.stdin.take()?;
         let stdout = child.stdout.take()?;
         Some(KotlincServer {
@@ -1254,9 +1290,6 @@ impl KotlincServer {
 type ServerPool<S> = Mutex<HashMap<String, Vec<Arc<Mutex<S>>>>>;
 
 pub fn kotlinc_compile(args: &[String]) -> Option<(i32, String)> {
-    // A POOL of persistent compiler-server JVMs, so reference-compiler work can run N-wide instead of
-    // serializing on a single mutex. The outer map lock is held only to pick/grow a server (an `Arc`),
-    // then released BEFORE the multi-hundred-ms compile.
     static POOL: OnceLock<ServerPool<KotlincServer>> = OnceLock::new();
     let _pg = ProfGuard::new("kotlinc");
     let java_home = java_home()?;
@@ -1428,7 +1461,7 @@ impl JavaRunner {
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
         die_with_parent(&mut cmd);
-        let mut child = cmd.spawn().ok()?;
+        let mut child = spawn_owned(cmd).ok()?;
         let stdin = child.stdin.take()?;
         let stdout = child.stdout.take()?;
         Some(JavaRunner {
