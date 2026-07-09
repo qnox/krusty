@@ -69,11 +69,15 @@ fn class_simple(fq: &str) -> &str {
 
 /// `x instanceof T` in JS — `String` is a primitive (`typeof`), a class is a real `instanceof`.
 fn js_instanceof(arg: &str, t: &Ty) -> String {
-    if let Some(fq_name) = t.non_null().obj_internal() {
-        match fq_name {
-            "kotlin/String" => return format!("(typeof {arg} === \"string\")"),
-            _ => return format!("({arg} instanceof {})", class_simple(fq_name)),
-        }
+    let nn = t.non_null();
+    // A bare `Ty::String` has no `obj_internal()` (the Array→Obj migration landmine), so key it
+    // explicitly → JS `typeof === "string"`. Other bare primitives (`is Int`) have no JS class/`typeof`
+    // mapping here, so they keep the safe `false` default rather than a nonexistent `instanceof Int`.
+    if nn == Ty::String || nn.obj_internal() == Some("kotlin/String") {
+        return format!("(typeof {arg} === \"string\")");
+    }
+    if let Some(fq_name) = nn.obj_internal() {
+        return format!("({arg} instanceof {})", class_simple(fq_name));
     }
     "false".to_string()
 }
