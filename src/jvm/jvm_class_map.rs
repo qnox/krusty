@@ -105,6 +105,27 @@ pub fn jvm_collection_to_kotlin(internal: &str) -> Option<&'static str> {
     })
 }
 
+/// The MUTABLE Kotlin collection interface a JVM collection type also realizes. A `java.util.*` collection
+/// is a Kotlin PLATFORM (flexible) type — `(Mutable)List!` — so it is simultaneously the read-only face
+/// ([`jvm_collection_to_kotlin`]) AND the mutable one. Adding the mutable face as a supertype lets a
+/// `MutableCollection.plusAssign` / `MutableList.add` extension apply to a `java/util/ArrayList` receiver,
+/// exactly as kotlinc resolves it. `None` for a non-collection JVM type.
+pub fn jvm_collection_to_kotlin_mutable(internal: &str) -> Option<&'static str> {
+    Some(match internal {
+        "java/lang/Iterable" => "kotlin/collections/MutableIterable",
+        "java/util/Iterator" => "kotlin/collections/MutableIterator",
+        "java/util/ListIterator" => "kotlin/collections/MutableListIterator",
+        "java/util/Collection" => "kotlin/collections/MutableCollection",
+        "java/util/List" => "kotlin/collections/MutableList",
+        "java/util/Set" => "kotlin/collections/MutableSet",
+        "java/util/Map" => "kotlin/collections/MutableMap",
+        // The mutable sibling of the read-only `Map.Entry` map above — a concrete entry (`AbstractMap`'s
+        // `SimpleEntry`) supports `setValue`; front-end DOT form, not a `$`, like the read-only key.
+        "java/util/Map$Entry" => "kotlin/collections/MutableMap.MutableEntry",
+        _ => return None,
+    })
+}
+
 /// Map a Kotlin built-in type's **simple name** to its FRONT-END Kotlin internal name. Differs from
 /// [`kotlin_builtin_to_jvm`] only for the COLLECTION types: the front end keeps `List` vs `MutableList`
 /// distinct (`kotlin/collections/List` vs `…/MutableList`) so the read-only/mutable distinction survives
