@@ -11490,6 +11490,36 @@ impl<'a> Checker<'a> {
                         return m.ret;
                     }
                 }
+                // `println`/`print` are `kotlin.io` intrinsics whose `ConsoleKt` realization is a PRIVATE
+                // `@InlineOnly` method — it resolves through `resolve_top_level_callable` only when the
+                // stdlib is on the classpath. Off-classpath (a bare checker snippet) synthesize the callable
+                // so the call still types as `Unit` and the lowerer emits `System.out.<name>` (a real user
+                // `println` already shadowed via `module_declares` in the top-level path above).
+                if matches!(fname.as_str(), "println" | "print")
+                    && arg_tys.len() <= 1
+                    && !self.module_declares(&fname)
+                {
+                    let (param, desc) = match arg_tys.first() {
+                        None => (None, "()V"),
+                        Some(Ty::Int | Ty::Short | Ty::Byte) => (Some(Ty::Int), "(I)V"),
+                        Some(Ty::Long) => (Some(Ty::Long), "(J)V"),
+                        Some(Ty::Char) => (Some(Ty::Char), "(C)V"),
+                        Some(Ty::Boolean) => (Some(Ty::Boolean), "(Z)V"),
+                        Some(Ty::Float) => (Some(Ty::Float), "(F)V"),
+                        Some(Ty::Double) => (Some(Ty::Double), "(D)V"),
+                        Some(_) => (Some(Ty::obj("kotlin/Any")), "(Ljava/lang/Object;)V"),
+                    };
+                    let c = crate::libraries::LibraryCallable::library(
+                        "kotlin/io/ConsoleKt",
+                        fname.clone(),
+                        param.into_iter().collect(),
+                        Ty::Unit,
+                        Ty::Unit,
+                        desc,
+                    );
+                    self.resolved_calls.insert(call, ResolvedCall::TopLevel(c));
+                    return Ty::Unit;
+                }
                 self.diags
                     .error(span, format!("unresolved function '{fname}'"));
                 Ty::Error
