@@ -56,7 +56,13 @@ impl Backend for JvmBackend {
         // JVM-only IR→IR transform: realize `@JvmInline value class`es as their unboxed underlying type
         // (the IR keeps them as plain classes so JS / a native-value-type JVM are unaffected). A
         // value-class shape it can't yet lower → skip the file (same as any unsupported construct).
-        if !crate::jvm::value_classes::lower_value_classes(&mut ir) {
+        let vc_module = crate::module_symbols::ModuleSymbols::new(syms);
+        let vc_resolver = crate::symbol_resolver::SymbolResolver::new_scoped_with_module(
+            &*syms.libraries,
+            &vc_module,
+            &[],
+        );
+        if !crate::jvm::value_classes::lower_value_classes(&mut ir, &vc_resolver) {
             diags.error(
                 crate::diag::Span::new(0, 0),
                 "krusty: this value-class shape is not yet supported by the IR backend".to_string(),

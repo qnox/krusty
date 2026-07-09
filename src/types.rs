@@ -48,8 +48,9 @@ pub mod wk {
     }
 }
 
-/// Intern a `Ty` to a canonical `&'static Ty` so array element types compare by value (the derived
-/// `Eq`/`Hash` on `Ty::Array` follow the reference, so equal elements must share one pointer).
+/// Intern a `Ty` to a canonical `&'static Ty` so a wrapped inner type (a `Nullable`/`TyParam` bound)
+/// compares by value — the derived `Eq`/`Hash` follow the reference, so equal inner types must share
+/// one pointer.
 pub fn intern_ty(t: Ty) -> &'static Ty {
     static I: OnceLock<Mutex<HashSet<&'static Ty>>> = OnceLock::new();
     let set = I.get_or_init(|| Mutex::new(HashSet::new()));
@@ -102,6 +103,45 @@ pub fn intern_fnsig(s: FnSig) -> &'static FnSig {
     leaked
 }
 
+/// The element type of a primitive specialized array class (`kotlin/IntArray` → `Int`), or `None` for a
+/// non-primitive-array name. The unsigned arrays (`UIntArray`, …) keep their unsigned element so their
+/// value-class identity survives; they still erase to the signed primitive array descriptor (`[I`).
+/// The single canonical table — [`Ty::array_elem`], the constructor, and the backend descriptor logic
+/// all route through it rather than each carrying their own copy.
+pub fn prim_array_element(internal: &str) -> Option<Ty> {
+    Some(match internal {
+        "kotlin/IntArray" => Ty::Int,
+        "kotlin/LongArray" => Ty::Long,
+        "kotlin/ShortArray" => Ty::Short,
+        "kotlin/ByteArray" => Ty::Byte,
+        "kotlin/BooleanArray" => Ty::Boolean,
+        "kotlin/CharArray" => Ty::Char,
+        "kotlin/FloatArray" => Ty::Float,
+        "kotlin/DoubleArray" => Ty::Double,
+        "kotlin/UIntArray" => Ty::UInt,
+        "kotlin/ULongArray" => Ty::ULong,
+        _ => return None,
+    })
+}
+
+/// The primitive specialized array class name for a primitive element (`Int` → `kotlin/IntArray`), or
+/// `None` for a reference element (which lives in a boxed `Array<T>`). Inverse of [`prim_array_element`].
+pub fn prim_array_name(elem: Ty) -> Option<&'static str> {
+    Some(match elem {
+        Ty::Int => "kotlin/IntArray",
+        Ty::Long => "kotlin/LongArray",
+        Ty::Short => "kotlin/ShortArray",
+        Ty::Byte => "kotlin/ByteArray",
+        Ty::Boolean => "kotlin/BooleanArray",
+        Ty::Char => "kotlin/CharArray",
+        Ty::Float => "kotlin/FloatArray",
+        Ty::Double => "kotlin/DoubleArray",
+        Ty::UInt => "kotlin/UIntArray",
+        Ty::ULong => "kotlin/ULongArray",
+        _ => return None,
+    })
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub enum Ty {
     Int,
@@ -123,9 +163,6 @@ pub enum Ty {
     /// so equal instantiations share a pointer and the front end can recover element/member types.
     /// Empty for a non-generic class.
     Obj(&'static str, &'static [Ty]),
-    /// An array type with the given element type (`IntArray` → `Array(&Int)`, `Array<String>` →
-    /// `Array(&String)`). Element `Ty`s are interned (`intern_ty`) so equal arrays share a pointer.
-    Array(&'static Ty),
     /// The type of the `null` literal — assignable to any reference type.
     Null,
     /// The bottom type (`Nothing`): the type of `throw`/`return` expressions. Assignable to every
@@ -166,9 +203,16 @@ impl Ty {
         }
     }
 
-    /// An array type with the given element type.
+    /// An array whose element is `elem`, choosing the array *kind* the way Kotlin does: a primitive
+    /// element yields the specialized primitive array (`Int` → `IntArray` = `Obj("kotlin/IntArray")`,
+    /// `[I`), any reference element yields the boxed `Array<T>` (`String` → `Obj("kotlin/Array", [String])`,
+    /// `[Ljava/lang/String;`). To force a boxed `Array<Int>` (`[Ljava/lang/Integer;`) construct it
+    /// directly as `Ty::obj_args("kotlin/Array", &[Ty::Int])`.
     pub fn array(elem: Ty) -> Ty {
-        Ty::Array(intern_ty(elem))
+        match prim_array_name(elem) {
+            Some(n) => Ty::obj(n),
+            None => Ty::obj_args("kotlin/Array", &[elem]),
+        }
     }
 
     /// The element type if this is an array — a primitive specialized array (`IntArray` → `Int`) or a
@@ -176,11 +220,25 @@ impl Ty {
     /// `Array<Int>`; the wrapper boxing is the backend's concern, not the type's).
     pub fn array_elem(self) -> Option<Ty> {
         match self {
-            Ty::Array(e) => Some(*e),
             Ty::Obj("kotlin/Array", args) => args.first().copied(),
+            Ty::Obj(n, _) => prim_array_element(n),
             Ty::TyParam(_, b) => b.array_elem(),
             _ => None,
         }
+    }
+
+    /// Whether this type is any array — a primitive specialized array (`kotlin/IntArray`, …) or a boxed
+    /// `Array<T>` (`Obj("kotlin/Array", [T])`). The single array-ness predicate; consumers must use this
+    /// instead of pattern-matching a specific spelling so the representation can migrate under them.
+    pub fn is_array(self) -> bool {
+        matches!(self, Ty::Obj(n, _) if n == "kotlin/Array" || prim_array_element(n).is_some())
+    }
+
+    /// Whether this is a boxed `Array<T>` (`aaload`/`aastore`, elements stored as objects) as opposed to
+    /// a primitive specialized array (`IntArray` → `iaload`/`iastore`). The only bit the backend needs to
+    /// pick array opcodes; a reference array boxes primitive [`array_elem`]s at the store boundary.
+    pub fn is_reference_array(self) -> bool {
+        matches!(self, Ty::Obj("kotlin/Array", _))
     }
 
     /// The nullable form `T?` of a type. Idempotent (Kotlin has no `T??`), and degenerate inputs
@@ -260,8 +318,18 @@ impl Ty {
                 other => other.erased_recv(),
             },
             Ty::TyParam(_, b) => b.erased_recv(),
+            // `Array<T>` keeps its array-ness but erases the ELEMENT's own generics (`Array<List<Int>>` →
+            // `Array<List>`) — an array receiver keys per element class. Use `obj_args` (NOT `Ty::array`,
+            // which collapses a bare-primitive element to a `IntArray` = `[I`, breaking the boxed
+            // `Array<Int>` = `[Integer;` receiver) so the boxed array form is preserved.
+            Ty::Obj("kotlin/Array", args) => {
+                let e = args
+                    .first()
+                    .copied()
+                    .unwrap_or_else(|| Ty::obj("kotlin/Any"));
+                Ty::obj_args("kotlin/Array", &[e.erased_recv()])
+            }
             Ty::Obj(n, _) => Ty::Obj(n, &[]),
-            Ty::Array(e) => Ty::array(e.erased_recv()),
             // `null`/`Nothing` (and the error placeholder) are subtypes of every reference type, so a
             // receiver of one of these can invoke an `Any`/`Any?`-receiver extension — key them under
             // `Any` (`null.unsafeCast()` reaches `fun <T> Any?.unsafeCast()`).
@@ -454,7 +522,6 @@ impl Ty {
             Ty::Obj(n, _) => n,
             Ty::Null => "Null",
             Ty::Nothing => "Nothing",
-            Ty::Array(_) => "Array",
             Ty::Error => "<error>",
             Ty::Fun(_) => "Function",
             Ty::Nullable(inner) => inner.name(),
@@ -479,7 +546,7 @@ impl Ty {
             Ty::TyParam(_, b) => b.is_reference(),
             _ => matches!(
                 self,
-                Ty::String | Ty::Obj(..) | Ty::Null | Ty::Array(_) | Ty::Fun(_) | Ty::Nullable(_)
+                Ty::String | Ty::Obj(..) | Ty::Null | Ty::Fun(_) | Ty::Nullable(_)
             ),
         }
     }

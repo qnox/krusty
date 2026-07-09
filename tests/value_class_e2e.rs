@@ -36,7 +36,15 @@ fn value_class_synthesizes_box_unbox_constructor_impl() {
 
     let mut ir = lower_file(&files[0], &info, &syms).expect("value class should lower");
     // The value-class `-impl` members are synthesized by the JVM pass (not `ir_lower`).
-    assert!(krusty::jvm::value_classes::lower_value_classes(&mut ir));
+    assert!({
+        let vc_module = krusty::module_symbols::ModuleSymbols::new(&syms);
+        let vc_resolver = krusty::symbol_resolver::SymbolResolver::new_scoped_with_module(
+            &*syms.libraries,
+            &vc_module,
+            &[],
+        );
+        krusty::jvm::value_classes::lower_value_classes(&mut ir, &vc_resolver)
+    });
     let facade = file_class_name("S", None);
     let cp = Classpath::new(vec![]);
     let classes = emit_all(&ir, &facade, &cp, None).expect("emit");
@@ -99,7 +107,15 @@ fn value_class_is_property_uses_javabean_getter_name() {
     assert!(!d.has_errors(), "value-class file should check clean");
 
     let mut ir = lower_file(&files[0], &info, &syms).expect("value class should lower");
-    assert!(krusty::jvm::value_classes::lower_value_classes(&mut ir));
+    assert!({
+        let vc_module = krusty::module_symbols::ModuleSymbols::new(&syms);
+        let vc_resolver = krusty::symbol_resolver::SymbolResolver::new_scoped_with_module(
+            &*syms.libraries,
+            &vc_module,
+            &[],
+        );
+        krusty::jvm::value_classes::lower_value_classes(&mut ir, &vc_resolver)
+    });
     let facade = file_class_name("Flag", None);
     let cp = Classpath::new(vec![]);
     let classes = emit_all(&ir, &facade, &cp, None).expect("emit");

@@ -9,14 +9,34 @@ use super::jvm_class_map::{to_jvm_internal, to_kotlin_internal};
 use super::metadata;
 use crate::jvm::names::{method_descriptor, property_getter_name, type_descriptor};
 use crate::libraries::{
-    CountedLoopInfo, FnFlags, FnKind, FunctionInfo, FunctionSet, GSig, GenericSig, InlineKind,
-    LibConst, LibraryCallable, LibraryConst, LibraryMember, LibraryType, PlatformAccessor,
-    PlatformCtor, PlatformField, PlatformRangeCtor, PropKind, PropertyInfo, PropertySet,
-    RangeConstruction, ReturnInfo, RuntimeCtor, RuntimeOp, TargetRuntime, Visibility,
+    CountedLoopInfo, FnFlags, FnKind, FunctionInfo, FunctionSet, GenericSig, InlineKind, LibConst,
+    LibraryCallable, LibraryConst, LibraryMember, LibraryType, PlatformAccessor, PlatformCtor,
+    PlatformField, PlatformRangeCtor, PropKind, PropertyInfo, PropertySet, RangeConstruction,
+    ReturnInfo, RuntimeCtor, RuntimeOp, TargetRuntime, Visibility,
 };
-use crate::symbol_resolver::{arg_fits, function_input_types, gsig_to_ty, gsig_tys, unify_gsig};
+use crate::symbol_resolver::{arg_fits, ty_subst, ty_subst_all, unify_ty};
 use crate::symbol_source::SymbolSource;
 use crate::types::{intern, Ty};
+
+/// The `kotlin/…Array` classifier name for an array `Ty` — a primitive specialized array
+/// (`kotlin/IntArray`) or the boxed `Array<T>` (`kotlin/Array`). `None` for a non-array type. Arrays are
+/// `Obj` types carrying their class name directly, so this is a straight class-name match.
+fn array_kotlin_fq(ty: Ty) -> Option<&'static str> {
+    match ty.non_null().obj_internal() {
+        Some(
+            n @ ("kotlin/BooleanArray"
+            | "kotlin/CharArray"
+            | "kotlin/ByteArray"
+            | "kotlin/ShortArray"
+            | "kotlin/IntArray"
+            | "kotlin/LongArray"
+            | "kotlin/FloatArray"
+            | "kotlin/DoubleArray"
+            | "kotlin/Array"),
+        ) => Some(n),
+        _ => None,
+    }
+}
 
 /// The JVM platform's contribution to Kotlin's default imports (the LANGUAGE-level `kotlin.*` set lives
 /// in [`crate::resolve::KOTLIN_DEFAULT_IMPORT_PACKAGES`]; the two are composed in `import_wildcards` and
@@ -268,12 +288,12 @@ impl JvmLibraries {
                 for f in &gsig.formals {
                     binds.remove(f);
                 }
-                return Some(gsig_to_ty(&gsig.ret, &binds));
+                return Some(ty_subst(gsig.ret, &binds));
             }
             if let Some(supers) = supers {
                 for sup in supers {
-                    if let GSig::Class(sup_internal, sup_args) = sup {
-                        let sup_targs = gsig_tys(&sup_args, &binds);
+                    if let Ty::Obj(sup_internal, sup_args) = sup {
+                        let sup_targs = ty_subst_all(sup_args, &binds);
                         q.push_back((to_jvm_internal(sup_internal).to_string(), sup_targs));
                     }
                 }
@@ -371,8 +391,8 @@ impl JvmLibraries {
             }
             if let Some(supers) = supers {
                 for sup in supers {
-                    if let GSig::Class(sup_internal, sup_args) = sup {
-                        let sup_targs = gsig_tys(&sup_args, &binds);
+                    if let Ty::Obj(sup_internal, sup_args) = sup {
+                        let sup_targs = ty_subst_all(sup_args, &binds);
                         q.push_back((to_jvm_internal(sup_internal).to_string(), sup_targs));
                     }
                 }
@@ -537,17 +557,21 @@ impl JvmLibraries {
     }
 }
 
-/// Parse one JVM generic-signature type off the front of `s`, returning `(node, rest)`.
-fn parse_gsig(s: &str) -> Option<(GSig, &str)> {
+/// Parse one JVM generic-signature type off the front of `s` into a signature [`Ty`], returning
+/// `(node, rest)`. A type variable becomes a [`Ty::TyParam`] (`kotlin/Any` bound).
+fn parse_gsig(s: &str) -> Option<(Ty, &str)> {
     let b = s.as_bytes();
     match *b.first()? {
         b'T' => {
             let end = s.find(';')?;
-            Some((GSig::Var(intern(&s[1..end])), &s[end + 1..]))
+            Some((
+                Ty::ty_param(&s[1..end], Ty::obj("kotlin/Any")),
+                &s[end + 1..],
+            ))
         }
         b'[' => {
             let (inner, rest) = parse_gsig(&s[1..])?;
-            Some((GSig::Arr(Box::new(inner)), rest))
+            Some((Ty::array(inner), rest))
         }
         b'L' => {
             let lt = s.find('<');
@@ -562,7 +586,7 @@ fn parse_gsig(s: &str) -> Option<(GSig, &str)> {
                 let mut args = Vec::new();
                 while !rest.starts_with('>') {
                     if let Some(stripped) = rest.strip_prefix('*') {
-                        args.push(GSig::Class(intern("kotlin/Any"), vec![]));
+                        args.push(Ty::obj("kotlin/Any"));
                         rest = stripped;
                         continue;
                     }
@@ -576,15 +600,15 @@ fn parse_gsig(s: &str) -> Option<(GSig, &str)> {
                 }
                 let after = rest.strip_prefix('>')?.strip_prefix(';')?;
                 let node = if internal.starts_with("kotlin/jvm/functions/Function") {
-                    let ret = Box::new(gsig_unbox_wrapper(args.pop()?));
-                    let params = args.into_iter().map(gsig_unbox_wrapper).collect();
-                    GSig::Function { params, ret }
+                    let ret = gsig_unbox_wrapper(args.pop()?);
+                    let params: Vec<Ty> = args.into_iter().map(gsig_unbox_wrapper).collect();
+                    Ty::fun(params, ret)
                 } else {
-                    GSig::Class(internal, args)
+                    Ty::obj_args(internal, &args)
                 };
                 Some((node, after))
             } else {
-                Some((GSig::Class(internal, vec![]), &s[semi + 1..]))
+                Some((Ty::obj(internal), &s[semi + 1..]))
             }
         }
         c => {
@@ -598,25 +622,25 @@ fn parse_gsig(s: &str) -> Option<(GSig, &str)> {
                 b'V' => Ty::Unit,
                 _ => return None,
             };
-            Some((GSig::Prim(t), &s[1..]))
+            Some((t, &s[1..]))
         }
     }
 }
 
-fn gsig_unbox_wrapper(g: GSig) -> GSig {
-    match g {
-        GSig::Class(internal, args) => match internal {
-            "java/lang/Integer" | "kotlin/Int" => GSig::Prim(Ty::Int),
-            "java/lang/Long" | "kotlin/Long" => GSig::Prim(Ty::Long),
-            "java/lang/Short" | "kotlin/Short" => GSig::Prim(Ty::Short),
-            "java/lang/Byte" | "kotlin/Byte" => GSig::Prim(Ty::Byte),
-            "java/lang/Character" | "kotlin/Char" => GSig::Prim(Ty::Char),
-            "java/lang/Boolean" | "kotlin/Boolean" => GSig::Prim(Ty::Boolean),
-            "java/lang/Double" | "kotlin/Double" => GSig::Prim(Ty::Double),
-            "java/lang/Float" | "kotlin/Float" => GSig::Prim(Ty::Float),
-            _ => GSig::Class(internal, args),
-        },
-        other => other,
+fn gsig_unbox_wrapper(g: Ty) -> Ty {
+    let Ty::Obj(internal, _) = g else {
+        return g;
+    };
+    match internal {
+        "java/lang/Integer" | "kotlin/Int" => Ty::Int,
+        "java/lang/Long" | "kotlin/Long" => Ty::Long,
+        "java/lang/Short" | "kotlin/Short" => Ty::Short,
+        "java/lang/Byte" | "kotlin/Byte" => Ty::Byte,
+        "java/lang/Character" | "kotlin/Char" => Ty::Char,
+        "java/lang/Boolean" | "kotlin/Boolean" => Ty::Boolean,
+        "java/lang/Double" | "kotlin/Double" => Ty::Double,
+        "java/lang/Float" | "kotlin/Float" => Ty::Float,
+        _ => g,
     }
 }
 
@@ -704,13 +728,13 @@ fn ty_simple_name(t: Ty) -> Option<&'static str> {
 /// `sum`/`average`/… among the per-element methods that share a Kotlin source name. `None` if the
 /// signature's receiver isn't a single-type-argument container.
 fn gsig_receiver_element(gsig: &GenericSig) -> Option<Ty> {
-    match gsig.params.first()? {
-        GSig::Class(_, args) => {
+    match *gsig.params.first()? {
+        Ty::Obj(_, args) => {
             // Unbox a boxed-primitive wrapper (`java/lang/Integer`/`kotlin/Int` → `Int`) so the element
             // compares equal to the receiver's primitive element; a reference element stays its class.
-            let elem_gsig = gsig_unbox_wrapper(args.first()?.clone());
-            Some(crate::symbol_resolver::gsig_to_ty(
-                &elem_gsig,
+            let elem = gsig_unbox_wrapper(*args.first()?);
+            Some(crate::symbol_resolver::ty_subst(
+                elem,
                 &std::collections::HashMap::new(),
             ))
         }
@@ -725,24 +749,23 @@ fn gsig_receiver_element(gsig: &GenericSig) -> Option<Ty> {
 /// (`fun <T> load(): T`, `List<E>.get(): E`) is NOT recovered here — it stays erased / is bound by
 /// `member_return` under the receiver's arguments.
 fn concrete_generic_ret(gsig: &GenericSig) -> Option<Ty> {
-    fn is_concrete(g: &GSig) -> bool {
+    fn is_concrete(g: Ty) -> bool {
         match g {
-            GSig::Var(_) => false,
-            GSig::Prim(_) => true,
-            GSig::Arr(inner) => is_concrete(inner),
-            GSig::Function { params, ret } => params.iter().all(is_concrete) && is_concrete(ret),
-            GSig::Class(_, args) => args.iter().all(is_concrete),
+            Ty::TyParam(..) => false,
+            Ty::Fun(fsig) => fsig.params.iter().all(|p| is_concrete(*p)) && is_concrete(fsig.ret),
+            Ty::Obj(_, args) => args.iter().all(|a| is_concrete(*a)),
+            _ => true,
         }
     }
-    match &gsig.ret {
-        GSig::Class(_, args) if !args.is_empty() && is_concrete(&gsig.ret) => {
+    match gsig.ret {
+        Ty::Obj(_, args) if !args.is_empty() && is_concrete(gsig.ret) => {
             // Canonicalize the recovered type to Kotlin form (`java/util/List<java/lang/Integer>` →
             // `kotlin/collections/List<kotlin/Int>`), so a member/`for`/extension keyed on the Kotlin
             // collection + a primitive element resolves and unboxes — mirroring the suspend path. Without
             // it, a classpath property `items: List<Int>` reads as raw `java/util/List<Integer>`:
             // `xs.sum()` is unresolved and `for (x in xs) { s += x }` compares `Int` vs `java/lang/Integer`.
             Some(canonicalize_jvm_collections(
-                crate::symbol_resolver::gsig_to_ty(&gsig.ret, &std::collections::HashMap::new()),
+                crate::symbol_resolver::ty_subst(gsig.ret, &std::collections::HashMap::new()),
             ))
         }
         _ => None,
@@ -756,14 +779,14 @@ fn suspend_return_from_gsig(
     gsig: &GenericSig,
     binds: &std::collections::HashMap<String, Ty>,
 ) -> Option<Ty> {
-    match gsig.params.last()? {
-        GSig::Class(n, args) if crate::types::same(n, crate::types::wk::continuation()) => {
-            match args.first()? {
+    match *gsig.params.last()? {
+        Ty::Obj(n, args) if crate::types::same(n, crate::types::wk::continuation()) => {
+            match *args.first()? {
                 // A bare class → its CANONICAL `Ty` (`kotlin/String` → `Ty::String`, `kotlin/Int` → `Ty::Int`,
                 // `kotlin/Unit` → `Ty::Unit`), so the recovered return unifies with the source-spelled type
                 // rather than a non-canonical `Obj("kotlin/String")`. A generic class (`List<Item>`) keeps its
                 // arguments via the general converter.
-                GSig::Class(name, cargs) if cargs.is_empty() => {
+                Ty::Obj(name, []) => {
                     // Canonicalize a JVM built-in the generic signature spells in Java terms
                     // (`java/lang/String` → `kotlin/String`, `java/lang/Object` → `kotlin/Any`) so the
                     // recovered return unifies with the source-spelled type rather than a non-canonical
@@ -781,7 +804,7 @@ fn suspend_return_from_gsig(
                 // receiver's concrete argument (`T` → `Cfg`) — otherwise it erases to `Any` and every member
                 // access on the result fails ("member … on Any").
                 other => Some(canonicalize_jvm_collections(
-                    crate::symbol_resolver::gsig_to_ty(other, binds),
+                    crate::symbol_resolver::ty_subst(other, binds),
                 )),
             }
         }
@@ -817,7 +840,6 @@ fn canonicalize_jvm_collections(ty: Ty) -> Ty {
                 .collect();
             Ty::obj_args(kname, &cargs)
         }
-        Ty::Array(e) => Ty::array(canonicalize_jvm_collections(*e)),
         other => other,
     }
 }
@@ -988,7 +1010,7 @@ fn builtin_library_type(
 /// `<E:Ljava/lang/Object;>Ljava/lang/Object;Ljava/util/Collection<TE;>;` → (`[E]`, `[Object,
 /// Collection<E>]`). The supertypes carry their own type arguments (in terms of this class's formals),
 /// which is what lets a type argument propagate up the hierarchy (`List<Int>` → `Collection<Int>`).
-fn parse_class_gsig(sig: &str) -> Option<(Vec<String>, Vec<GSig>)> {
+fn parse_class_gsig(sig: &str) -> Option<(Vec<String>, Vec<Ty>)> {
     let (formals, mut s) = parse_formals(sig);
     let mut supers = Vec::new();
     while !s.is_empty() {
@@ -1044,6 +1066,10 @@ fn supertype_descriptors(cp: &Classpath, receiver: Ty) -> Vec<String> {
     // applies to any receiver — always try `java/lang/Object` last (after the specific supertypes).
     let object = "Ljava/lang/Object;".to_string();
     let start = match receiver {
+        // Arrays are `Obj("kotlin/IntArray")`/`Obj("kotlin/Array", [T])` but their extensions are indexed
+        // by the JVM ARRAY descriptor (`[I`, `[Ljava/lang/String;`), not a `Lkotlin/…Array;` class name —
+        // so key off the array descriptor + `Object`, exactly as the legacy `Ty::Array` spelling did.
+        _ if receiver.is_array() => return vec![type_descriptor(receiver), object],
         Ty::Obj(i, _) => to_jvm_internal(i).to_string(),
         Ty::String => to_jvm_internal("kotlin/String").to_string(),
         _ => return vec![type_descriptor(receiver), object],
@@ -1130,10 +1156,7 @@ impl SymbolSource for JvmLibraries {
                         .ret_class
                         .as_deref()
                         .map_or(Ty::obj("kotlin/Any"), Ty::obj);
-                    let ty = GSig::Class(
-                        intern(mp.ret_class.as_deref().unwrap_or("kotlin/Any")),
-                        vec![],
-                    );
+                    let ty = Ty::obj(mp.ret_class.as_deref().unwrap_or("kotlin/Any"));
                     let getter = LibraryCallable::library(
                         cn.clone(),
                         getter_name,
@@ -1156,7 +1179,7 @@ impl SymbolSource for JvmLibraries {
                     });
                     overloads.push(PropertyInfo {
                         kind: PropKind::Member,
-                        receiver: Some(GSig::Class(intern(&cn), vec![])),
+                        receiver: Some(Ty::obj(&cn)),
                         formals: Vec::new(),
                         ty,
                         getter,
@@ -1205,10 +1228,7 @@ impl SymbolSource for JvmLibraries {
                         .ret_class
                         .as_deref()
                         .map_or(Ty::obj("kotlin/Any"), Ty::obj);
-                    let ty = GSig::Class(
-                        intern(mp.ret_class.as_deref().unwrap_or("kotlin/Any")),
-                        vec![],
-                    );
+                    let ty = Ty::obj(mp.ret_class.as_deref().unwrap_or("kotlin/Any"));
                     // The static getter's signature leads with the receiver (`getFoo(Recv)`).
                     let (params, physical_ret) = parse_method_desc(&getter_desc);
                     let getter = LibraryCallable::library(
@@ -1221,10 +1241,7 @@ impl SymbolSource for JvmLibraries {
                     );
                     overloads.push(PropertyInfo {
                         kind: PropKind::Extension,
-                        receiver: Some(GSig::Class(
-                            intern(mp.receiver_class.as_deref().unwrap_or_default()),
-                            vec![],
-                        )),
+                        receiver: Some(Ty::obj(mp.receiver_class.as_deref().unwrap_or_default())),
                         formals: Vec::new(),
                         ty,
                         getter,
@@ -1582,10 +1599,8 @@ impl SymbolSource for JvmLibraries {
                 let receiver = mf
                     .generic_sig
                     .as_ref()
-                    .and_then(|g| g.receiver.as_ref())
-                    .map(|r| {
-                        crate::symbol_resolver::gsig_to_ty(r, &std::collections::HashMap::new())
-                    })
+                    .and_then(|g| g.receiver)
+                    .map(|r| ty_subst(r, &std::collections::HashMap::new()))
                     .or_else(|| mf.receiver_class.map(kotlin_name_to_ty))
                     .unwrap_or_else(|| Ty::obj("kotlin/Any"));
                 // Emit handle: the JVM method + descriptor on the public facade. Prefer the metadata
@@ -1615,9 +1630,33 @@ impl SymbolSource for JvmLibraries {
                         ),
                     )
                 });
+                // The value parameters' ERASED JVM descriptors, from the metadata generic signature, so a
+                // bytecode lookup disambiguates same-receiver/same-return overloads by their VALUE param —
+                // both a concrete type (`appendLine(StringBuilder, int)` vs `appendLine(StringBuilder)`) and
+                // a FUNCTION type (`any(Iterable, Function1)` vs `any(Iterable)`). A type-variable param
+                // erases to `Object`; a function type to `FunctionN`. `None` (match by receiver alone) only
+                // when there is no generic signature.
+                let value_param_descs: Option<Vec<String>> = mf.generic_sig.as_ref().map(|g| {
+                    g.params
+                        .iter()
+                        .map(|p| {
+                            let ty = ty_subst(*p, &std::collections::HashMap::new());
+                            type_descriptor(
+                                <Self as crate::libraries::TargetRuntime>::jvm_descriptor_form(
+                                    self, ty,
+                                ),
+                            )
+                        })
+                        .collect()
+                });
                 let by_name = |n: &str| {
-                    self.cp
-                        .facade_method(&facade, n, Some(&recv_desc), ret_desc.as_deref())
+                    self.cp.facade_method(
+                        &facade,
+                        n,
+                        Some(&recv_desc),
+                        ret_desc.as_deref(),
+                        value_param_descs.as_deref(),
+                    )
                 };
                 // The real bytecode method (public flag + descriptor), matched to the CHOSEN name so the
                 // visibility is that method's own — an `@InlineOnly` extension (`let`/`run`) is source-public
@@ -1646,10 +1685,25 @@ impl SymbolSource for JvmLibraries {
                 };
                 // The metadata-primary generic signature drives lambda-parameter and return binding.
                 let generic_sig = mf.generic_sig.clone();
+                // The extension's DECLARED receiver source type — carried so the value-class pass can unbox
+                // a boxed receiver (`fun Result<T>.getOrThrow` on a boxed `kotlin.Result`). `None` for a
+                // type-VARIABLE receiver (`fun <T> T.let` — erases to `Object`, no value-class identity).
+                let source_receiver = match generic_sig.as_ref().and_then(|g| g.receiver) {
+                    Some(r) if r.is_ty_param() => None,
+                    None => None,
+                    _ => Some(receiver),
+                };
                 // `@InlineOnly` (`inline` + bytecode-non-public) MUST be spliced; a plain `inline` MAY be.
                 let inline = InlineKind::from_flags(mf.is_inline, mf.is_inline && !bytecode_public);
                 let callable = LibraryCallable {
                     inline,
+                    suspend: mf.is_suspend,
+                    source_receiver,
+                    // Carry the resolved bytecode method's generic `Signature` — a `<reified T>` extension's
+                    // splice reads its formal-type-parameter NAMES from here to bind the call's explicit
+                    // type arguments. Without it the reified body cannot be specialized and the call falls
+                    // back to a (throwing) direct invoke of the inline-only method.
+                    signature: cand.as_ref().and_then(|c| c.signature.clone()),
                     ..LibraryCallable::library(
                         facade.clone(),
                         jvm_name,
@@ -1717,15 +1771,9 @@ impl SymbolSource for JvmLibraries {
                 };
                 props.push(PropertyInfo {
                     kind: PropKind::Extension,
-                    receiver: Some(GSig::Class(
-                        intern(mp.receiver_class.as_deref().unwrap_or_default()),
-                        vec![],
-                    )),
+                    receiver: Some(Ty::obj(mp.receiver_class.as_deref().unwrap_or_default())),
                     formals: Vec::new(),
-                    ty: GSig::Class(
-                        intern(mp.ret_class.as_deref().unwrap_or("kotlin/Any")),
-                        vec![],
-                    ),
+                    ty: Ty::obj(mp.ret_class.as_deref().unwrap_or("kotlin/Any")),
                     getter,
                     setter,
                     is_const: mp.is_const,
@@ -1759,108 +1807,7 @@ impl SymbolSource for JvmLibraries {
             return cached;
         }
         let mut overloads = Vec::new();
-        // Slice 1 of the `FunctionSet` consolidation: the `@OverloadResolutionByLambdaReturnType` family
-        // (`sumOf` → `sumOfInt`/`sumOfLong`/…). One query returns every numeric-return overload applicable
-        // to `receiver`, each as a `FunctionInfo` with its real callable + flags; the caller picks by the
-        // lambda's return type. (Plain extensions, members, and top-level functions migrate here next.)
         if let Some(receiver) = receiver {
-            // The receiver's ELEMENT type — the selector's `it`. Distinguishes `IntArray.sumOf` (`(Int)->R`)
-            // from `UIntArray.sumOf` (`(UInt)->R`), which erase to the same `([I, Function1)` descriptor.
-            let want_elem = receiver
-                .array_elem()
-                .or_else(|| receiver.type_args().first().copied());
-            for recv_desc in supertype_descriptors(&self.cp, receiver) {
-                for owner in self.cp.find_extension_owners(&recv_desc) {
-                    // Gate: `name` genuinely resolves by lambda return type on this facade.
-                    if !self.cp.lambda_return_overloads(&owner).contains(name) {
-                        continue;
-                    }
-                    // The `@JvmName`-mangled method is `name` + the return type's simple name (`sumOf` +
-                    // `Int` → `sumOfInt`); DERIVE it per numeric return and VERIFY against the real method.
-                    for (ret, simple) in [
-                        (Ty::Int, "Int"),
-                        (Ty::Long, "Long"),
-                        (Ty::Double, "Double"),
-                        (Ty::Float, "Float"),
-                        (Ty::Byte, "Byte"),
-                        (Ty::Short, "Short"),
-                    ] {
-                        let jname = format!("{name}{simple}");
-                        for c in self.cp.find_extensions(&recv_desc, &jname) {
-                            let generic_sig = c.signature.as_deref().and_then(parse_method_gsig);
-                            let (params, pret) = parse_method_desc(&c.descriptor);
-                            // A single-selector overload whose receiver is THIS supertype and whose JVM
-                            // return is the wanted primitive.
-                            if params.len() != 2
-                                || !c.descriptor.contains("Lkotlin/jvm/functions/Function")
-                                || params.first().map(|p| type_descriptor(*p)).as_deref()
-                                    != Some(recv_desc.as_str())
-                                || type_descriptor(pret) != type_descriptor(ret)
-                            {
-                                continue;
-                            }
-                            // Disambiguate `IntArray.sumOf` from `UIntArray.sumOf` (both erase to
-                            // `([I, Function1)I`) by the SELECTOR parameter type from the generic signature
-                            // == the receiver's element type — so an `Int` lambda never binds a `UInt` body.
-                            if let Some(elem) = want_elem {
-                                let Some(gsig) = generic_sig.as_ref() else {
-                                    continue;
-                                };
-                                let mut binds = std::collections::HashMap::new();
-                                if let Some(recv_sig) = gsig.params.first() {
-                                    unify_gsig(recv_sig, receiver, &mut binds);
-                                }
-                                let selector_matches = gsig
-                                    .params
-                                    .get(1)
-                                    .map(|sel| function_input_types(sel, &binds) == vec![elem])
-                                    .unwrap_or(false);
-                                if !selector_matches {
-                                    continue;
-                                }
-                            }
-                            let inline = InlineKind::from_flags(true, !c.public);
-                            overloads.push(FunctionInfo {
-                                visibility: Visibility::from_public(c.public),
-                                // The lambda-return family is resolved by return type, never through the
-                                // arg-binding extension selector — mark it so it can't preempt a real rung.
-                                receiver_rank: u32::MAX,
-                                overload_rank: descriptor_narrowing(&c.descriptor) as u32,
-                                // `c.name` is the emit-mangled JVM name (`sumOfInt`); metadata is keyed by
-                                // the LOGICAL name (`sumOf`), so look the signature up by that. The metadata
-                                // form carries the receiver as an ATTRIBUTE (never `params[0]`).
-                                generic_sig: self.callable_generic_sig(
-                                    &c.owner,
-                                    name,
-                                    &c.descriptor,
-                                    c.signature.as_deref(),
-                                    true,
-                                ),
-                                flags: FnFlags {
-                                    inline,
-                                    suspend: self.cp.is_suspend_method(&c.owner, &c.name),
-                                },
-                                ..FunctionInfo::plain(
-                                    FnKind::Extension,
-                                    Some(receiver),
-                                    LibraryCallable {
-                                        inline,
-                                        signature: c.signature.clone(),
-                                        ..LibraryCallable::library(
-                                            c.owner.clone(),
-                                            c.name.clone(),
-                                            params,
-                                            ret,
-                                            pret,
-                                            c.descriptor.clone(),
-                                        )
-                                    },
-                                )
-                            });
-                        }
-                    }
-                }
-            }
             // Plain extensions of `name` on the receiver (and supertypes) — `uppercase`, `map`, `let`, … —
             // with their inline/`@InlineOnly` flags and return nullability decoded once. The enumeration
             // index is the receiver-MRO rung (`receiver_rank`) the arg-binding selector orders candidates by.
@@ -1918,9 +1865,9 @@ impl SymbolSource for JvmLibraries {
                     // `List.map`; value-class-specific mangled lookup below handles the real receiver.
                     if !public
                         && recv_desc == "Ljava/lang/Object;"
-                        && !generic_sig
-                            .as_ref()
-                            .is_some_and(|gsig| matches!(gsig.params.first(), Some(GSig::Var(_))))
+                        && !generic_sig.as_ref().is_some_and(|gsig| {
+                            gsig.params.first().is_some_and(|p| p.is_ty_param())
+                        })
                     {
                         continue;
                     }
@@ -1964,9 +1911,9 @@ impl SymbolSource for JvmLibraries {
                         .map(|gsig| {
                             let mut binds = std::collections::HashMap::new();
                             if let Some(recv_sig) = gsig.params.first() {
-                                unify_gsig(recv_sig, receiver, &mut binds);
+                                unify_ty(*recv_sig, receiver, &mut binds);
                             }
-                            gsig_to_ty(&gsig.ret, &binds)
+                            ty_subst(gsig.ret, &binds)
                         })
                         .unwrap_or(pret);
                     let ret = if ret_metadata.nullable && ret.is_jvm_scalar() {
@@ -1989,11 +1936,12 @@ impl SymbolSource for JvmLibraries {
                     // to unbox a boxed receiver only for a genuine value-class-declared extension.
                     let source_receiver = match generic_sig.as_ref().and_then(|g| g.params.first())
                     {
-                        Some(GSig::Var(_)) => None,
+                        Some(p) if p.is_ty_param() => None,
                         _ => Some(receiver),
                     };
                     let callable = LibraryCallable {
                         inline: inline_kind,
+                        suspend,
                         default_call: is_default,
                         signature: c.signature.clone(),
                         source_receiver,
@@ -2156,6 +2104,7 @@ impl SymbolSource for JvmLibraries {
                                     Some(receiver),
                                     LibraryCallable {
                                         inline: inline_kind,
+                                        suspend: mf.is_suspend,
                                         signature: c.signature.clone(),
                                         // This path binds only extensions whose `@Metadata` receiver IS
                                         // this value class, so the declared receiver is the value class.
@@ -2261,6 +2210,7 @@ impl SymbolSource for JvmLibraries {
                                         Some(receiver),
                                         LibraryCallable {
                                             inline: inline_kind,
+                                            suspend: mf.is_suspend,
                                             signature: c.signature.clone(),
                                             ..LibraryCallable::library(
                                                 c.owner.clone(),
@@ -2434,6 +2384,7 @@ impl SymbolSource for JvmLibraries {
                                 );
                             let callable = LibraryCallable {
                                 inline: m.inline,
+                                suspend,
                                 signature: m.signature.clone(),
                                 ..LibraryCallable::library(
                                     m.owner.clone().unwrap_or_else(|| cn.clone()),
@@ -2542,6 +2493,7 @@ impl SymbolSource for JvmLibraries {
                 let inline_kind = InlineKind::from_flags(inline, inline && !c.public);
                 let callable = LibraryCallable {
                     inline: inline_kind,
+                    suspend,
                     default_call: is_default,
                     signature: c.signature.clone(),
                     ..LibraryCallable::library(
@@ -2657,8 +2609,15 @@ impl crate::libraries::TargetRuntime for JvmLibraries {
         // → `[Ljava/util/Set;` on the descriptor side), so a nested collection element normalizes too.
         // Other kinds (primitives, `String`, function types) already compare exactly across the sides.
         match ty {
+            // A boxed `Array<T>` keeps its kind and recurses into the element (erasing the element's own
+            // generic args), so `Array<Set<String>>` → `Array<Set>` (`[Ljava/util/Set;`). Mapping it
+            // through the generic `Obj` arm would drop the element entirely and collapse a reference
+            // `Array<Int>` (`[Ljava/lang/Integer;`) to a primitive `IntArray` (`[I`).
+            _ if ty.is_reference_array() => {
+                let e = ty.array_elem().unwrap_or_else(|| Ty::obj("kotlin/Any"));
+                Ty::obj_args("kotlin/Array", &[self.jvm_descriptor_form(e)])
+            }
             Ty::Obj(internal, _) => Ty::obj(super::jvm_class_map::to_jvm_internal(internal)),
-            Ty::Array(e) => Ty::array(self.jvm_descriptor_form(*e)),
             _ => ty,
         }
     }
@@ -2995,7 +2954,7 @@ impl crate::libraries::TargetRuntime for JvmLibraries {
                 )
             }
             RuntimeOp::ArrayToString => {
-                let desc = match ty.non_null().obj_internal()? {
+                let desc = match array_kotlin_fq(ty.non_null())? {
                     "kotlin/BooleanArray" => "([Z)Ljava/lang/String;",
                     "kotlin/CharArray" => "([C)Ljava/lang/String;",
                     "kotlin/ByteArray" => "([B)Ljava/lang/String;",
@@ -3017,7 +2976,7 @@ impl crate::libraries::TargetRuntime for JvmLibraries {
                 )
             }
             RuntimeOp::ArrayCopyOf => {
-                let desc = match ty.non_null().obj_internal()? {
+                let desc = match array_kotlin_fq(ty.non_null())? {
                     "kotlin/BooleanArray" => "([ZI)[Z",
                     "kotlin/CharArray" => "([CI)[C",
                     "kotlin/ByteArray" => "([BI)[B",

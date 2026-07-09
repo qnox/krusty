@@ -2153,6 +2153,8 @@ fn build_continuation_class(
         companion_class: None,
         secondary_ctors: vec![],
         has_primary_ctor: true,
+        applied_annotations: Vec::new(),
+        runtime_retained: false,
     };
     ir.add_class(class)
 }
@@ -2199,7 +2201,7 @@ fn unbox(ir: &mut IrFile, value: ExprId, target: &Ty) -> ExprId {
 fn reference_needs_checkcast(t: &Ty) -> bool {
     match t {
         Ty::Nullable(inner) | Ty::TyParam(_, inner) => reference_needs_checkcast(inner),
-        Ty::String | Ty::Array(_) => true,
+        Ty::String => true,
         Ty::Obj(i, _) => *i != "kotlin/Any" && !is_boxed_primitive_internal(i),
         _ => false,
     }

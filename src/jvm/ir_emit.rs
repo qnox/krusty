@@ -256,7 +256,7 @@ type ResolvedFrames = Vec<(usize, Vec<VerifType>, Vec<VerifType>)>;
 fn checkcast_internal(ty: Ty) -> Option<String> {
     match ty {
         Ty::String => Some("java/lang/String".to_string()),
-        Ty::Array(_) => Some(type_descriptor(ty)),
+        _ if ty.is_array() => Some(type_descriptor(ty)),
         Ty::Obj(n, _) if n != "java/lang/Object" && n != "kotlin/Any" => Some(n.to_string()),
         _ => None,
     }
@@ -874,6 +874,7 @@ fn emit_class(
         }
     }
     emit_bridges(c, &mut cw);
+    cw.set_runtime_annotations(&c.applied_annotations);
     if let Some(m) = class_meta {
         cw.set_kotlin_metadata(m.k, &m.mv, m.xi, &m.d1, &m.d2);
     }
@@ -1324,7 +1325,21 @@ fn emit_func_ref_class(c: &crate::ir::IrClass, facade: &str) -> Vec<u8> {
             inv.aload(0);
             let recv_f = cw.fieldref(&c.superclass, "receiver", "Ljava/lang/Object;");
             inv.getfield(recv_f, 1);
-            if let Some(internal) = fr
+            if let Some(vc) = &fr.staticbound_recv_unbox {
+                // A VALUE-CLASS receiver (`Z(42)::ext`) is stored BOXED: `checkcast` to the box class then
+                // `unbox-impl` to the underlying the mangled target expects (`Z`→`int`).
+                let cref = cw.class_ref(vc);
+                inv.checkcast(cref);
+                let under = ir_ty_to_jvm(
+                    fr.target_param_tys
+                        .first()
+                        .copied()
+                        .as_ref()
+                        .unwrap_or(&Ty::Error),
+                );
+                let m = cw.methodref(vc, "unbox-impl", &format!("(){}", type_descriptor(under)));
+                inv.invokevirtual(m, 0, slot_words(under) as i32);
+            } else if let Some(internal) = fr
                 .target_param_tys
                 .first()
                 .map(ir_ty_to_jvm)
@@ -1457,8 +1472,8 @@ fn verif_for_jvm_free(cw: &mut ClassWriter, t: Ty) -> VerifType {
         Ty::Double => VerifType::Double,
         Ty::Float => VerifType::Float,
         Ty::String => VerifType::Object(cw.class_ref("java/lang/String")),
+        t if t.is_array() => VerifType::Object(cw.class_ref(&type_descriptor(t))),
         Ty::Obj(n, _) => VerifType::Object(cw.class_ref(n)),
-        Ty::Array(_) => VerifType::Object(cw.class_ref(&type_descriptor(t))),
         Ty::Null => VerifType::Null,
         _ => VerifType::Top,
     }
@@ -1637,9 +1652,7 @@ fn emit_bridges(c: &crate::ir::IrClass, cw: &mut ClassWriter) {
                 // value class box) must refine the verifier type before `areturn`.
                 let ci = cw.class_ref(&ref_internal(er));
                 code.checkcast(ci);
-            } else if er.is_reference()
-                && !matches!(er, Ty::Array(_))
-                && ref_internal(cr) == "java/lang/Object"
+            } else if er.is_reference() && !er.is_array() && ref_internal(cr) == "java/lang/Object"
             {
                 // Covariant generic DIAMOND: the inherited concrete getter returns the erased
                 // `Object` (`val x: T` in a generic base), but an interface in the hierarchy requires
@@ -1721,6 +1734,23 @@ fn emit_annotation_class(c: &crate::ir::IrClass, class_meta: Option<&KotlinMetad
         cw.add_abstract_method(0x0401, &field.name, &format!("(){}", type_descriptor(ret)));
         // PUBLIC|ABSTRACT
     }
+    // A RUNTIME-retention Kotlin annotation emits `@java.lang.annotation.Retention(RUNTIME)` so the JVM
+    // keeps its USES (`@Anno` in `RuntimeVisibleAnnotations`) visible to reflection.
+    let mut meta: Vec<crate::ir::AppliedAnnotation> = Vec::new();
+    if c.runtime_retained {
+        meta.push(crate::ir::AppliedAnnotation {
+            internal: "java/lang/annotation/Retention".to_string(),
+            values: vec![(
+                "value".to_string(),
+                crate::ir::AnnoValue::Enum(
+                    "java/lang/annotation/RetentionPolicy".to_string(),
+                    "RUNTIME".to_string(),
+                ),
+            )],
+        });
+    }
+    meta.extend(c.applied_annotations.iter().cloned());
+    cw.set_runtime_annotations(&meta);
     if let Some(m) = class_meta {
         cw.set_kotlin_metadata(m.k, &m.mv, m.xi, &m.d1, &m.d2);
     }
@@ -1874,8 +1904,8 @@ fn emit_annotation_equals(cw: &mut ClassWriter, fq: &str, iface: &str, members: 
                 cb.invokevirtual(eq, 1, 1);
                 cb.ifeq(lfalse);
             }
-            Ty::Array(elem) => {
-                let arr_desc = arrays_param_desc(elem);
+            _ if jt.is_array() => {
+                let arr_desc = arrays_param_desc(*jt);
                 let eq = cw.methodref(
                     "java/util/Arrays",
                     "equals",
@@ -1913,22 +1943,15 @@ fn emit_annotation_equals(cw: &mut ClassWriter, fq: &str, iface: &str, members: 
     cw.add_method(0x0011, "equals", "(Ljava/lang/Object;)Z", &cb);
 }
 
-/// `Arrays.equals`/`Arrays.hashCode` parameter descriptor for an array whose element `Ty` is `elem`: a
-/// primitive array has its own overload (`[I`), a reference array uses `[Ljava/lang/Object;` (array
-/// covariance lets a `String[]`/`Enum[]` flow in).
-fn arrays_param_desc(elem: &Ty) -> String {
-    match elem {
-        Ty::Boolean
-        | Ty::Byte
-        | Ty::Short
-        | Ty::Char
-        | Ty::Int
-        | Ty::Long
-        | Ty::Float
-        | Ty::Double => {
-            format!("[{}", type_descriptor(*elem))
-        }
-        _ => "[Ljava/lang/Object;".to_string(),
+/// `Arrays.equals`/`Arrays.hashCode`/`Arrays.toString` parameter descriptor for an array member: a
+/// primitive specialized array has its own overload (`[I`), a reference `Array<T>` uses
+/// `[Ljava/lang/Object;` (array covariance lets a `String[]`/`Enum[]` flow in). Keyed off the array
+/// KIND (its class), not the element — `Array<Int>` is a reference `Integer[]`, not `[I`.
+fn arrays_param_desc(array: Ty) -> String {
+    if array.is_reference_array() {
+        "[Ljava/lang/Object;".to_string()
+    } else {
+        type_descriptor(array)
     }
 }
 
@@ -1951,8 +1974,8 @@ fn emit_annotation_hashcode(cw: &mut ClassWriter, fq: &str, members: &[(String, 
                 let hc = cw.methodref(wrap, "hashCode", &format!("({pd})I"));
                 cb.invokestatic(hc, slot_words(*jt) as i32, 1);
             }
-            Ty::Array(elem) => {
-                let ad = arrays_param_desc(elem);
+            _ if jt.is_array() => {
+                let ad = arrays_param_desc(*jt);
                 let hc = cw.methodref("java/util/Arrays", "hashCode", &format!("({ad})I"));
                 cb.invokestatic(hc, 1, 1);
             }
@@ -1998,10 +2021,10 @@ fn emit_annotation_tostring(cw: &mut ClassWriter, fq: &str, iface: &str, members
         );
         let fref = cw.fieldref(fq, name, &type_descriptor(*jt));
         match jt {
-            Ty::Array(elem) => {
+            _ if jt.is_array() => {
                 cb.aload(0);
                 cb.getfield(fref, 1);
-                let ad = arrays_param_desc(elem);
+                let ad = arrays_param_desc(*jt);
                 let ats = cw.methodref(
                     "java/util/Arrays",
                     "toString",
@@ -3409,8 +3432,11 @@ impl<'a> Emitter<'a> {
                 subst
                     .iter()
                     .filter_map(|(name, ty)| {
+                        // `kotlin_class_internal` (not `obj_internal`): a reified type arg inferred from a
+                        // receiver arrives as a bare `Ty::Int`/`Ty::String` variant whose `obj_internal()`
+                        // is `None` — the boxed reified array element is `java/lang/Integer` etc.
                         let internal =
-                            crate::jvm::jvm_class_map::to_jvm_internal(ty.obj_internal()?);
+                            crate::jvm::jvm_class_map::to_jvm_internal(ty.kotlin_class_internal()?);
                         Some((name.clone(), internal.to_string()))
                     })
                     .collect()
@@ -3617,7 +3643,8 @@ impl<'a> Emitter<'a> {
             }
             IrExpr::Return(v) => match v {
                 Some(v) => {
-                    self.emit_value(v, code);
+                    let ret = self.ret;
+                    self.emit_value_as(v, &ret, code);
                     // `return <diverging>` (`return throw e`, `return error(..)`): the value already
                     // transferred control (athrow / a `Nothing`-returning call), so the trailing return
                     // opcode is unreachable dead code the verifier rejects (no stack-map frame). Skip it.
@@ -3805,6 +3832,38 @@ impl<'a> Emitter<'a> {
         CUR_EXPR.with(|c| c.set(e));
         self.emit_value_node(&node, code);
         self.terminate_if_nothing_call(&node, code);
+    }
+
+    /// Emit `e` and then narrow it to the CONSUMPTION type `expected` — the `checkcast` kotlinc inserts
+    /// when a value out of an ERASED slot (a type parameter's `Object`, a generic `Array<T>`'s `Object[]`)
+    /// flows to a more specific reference (a `return`/argument/receiver of that type). Keyed on the value's
+    /// ACTUAL physical type: a concrete source (already the target, or an unrelated concrete type such as a
+    /// value class's unboxed underlying) is left alone — the backend owns this erasure decision.
+    fn emit_value_as(&mut self, e: u32, expected: &Ty, code: &mut CodeBuilder) {
+        self.emit_value(e, code);
+        let src = self.value_ty(e);
+        self.narrow_on_stack(src, expected, code);
+    }
+
+    /// Narrow the value on top of the stack (whose actual type is `src`) to the CONSUMPTION type
+    /// `expected` — the `checkcast` kotlinc inserts when an ERASED value (a type parameter's `Object`, a
+    /// generic `Array<T>`'s `Object[]`) flows to a more specific reference. Keyed on `src`: a concrete
+    /// source (already the target, or an unrelated concrete type such as a value class's unboxed
+    /// underlying) is left alone.
+    fn narrow_on_stack(&mut self, src: Ty, expected: &Ty, code: &mut CodeBuilder) {
+        let s = ir_ty_to_jvm(&src);
+        if !jvm_is_erased_top(s) {
+            return;
+        }
+        let exp = ir_ty_to_jvm(expected);
+        if !exp.is_reference() || type_descriptor(s) == type_descriptor(exp) {
+            return;
+        }
+        let internal = ref_internal(exp);
+        if internal != "java/lang/Object" {
+            let ci = self.cw.class_ref(&internal);
+            code.checkcast(ci);
+        }
     }
 
     /// A `Nothing`-returning REAL-invoke call (`exit(): Nothing`) physically leaves a `java/lang/Void`
@@ -4383,9 +4442,13 @@ impl<'a> Emitter<'a> {
                         code.ixor();
                     }
                     IrTypeOp::Cast => {
-                        // A cast whose erased target is `java/lang/Object` (e.g. an unbounded `as T`) is
-                        // a no-op — kotlinc emits no `checkcast` to `Object`.
-                        if internal != "java/lang/Object" {
+                        // The emitter owns erasure: a `checkcast` to `java/lang/Object` (an unbounded `as T`)
+                        // is a no-op, and so is one whose target descriptor already equals the value's
+                        // actual (physical) descriptor — an erasure-narrowing tag where the value is already
+                        // that type (`List<T>` read tagged `List<Int>`). kotlinc emits neither.
+                        let redundant =
+                            type_descriptor(self.value_ty(*arg)) == type_descriptor(jvm_ty);
+                        if internal != "java/lang/Object" && !redundant {
                             let ci = self.cw.class_ref(&internal);
                             code.checkcast(ci);
                         }
@@ -4705,7 +4768,8 @@ impl<'a> Emitter<'a> {
             // (like `throw`) nothing is left for the surrounding merge.
             IrExpr::Return(ret_val) => match ret_val {
                 Some(rv) => {
-                    self.emit_value(*rv, code);
+                    let ret = self.ret;
+                    self.emit_value_as(*rv, &ret, code);
                     if !self.diverges(*rv) {
                         emit_return(self.ret, code);
                     }
@@ -4745,7 +4809,9 @@ impl<'a> Emitter<'a> {
                 if et.is_jvm_scalar() {
                     code.newarray(prim_newarray_atype(et));
                 } else {
-                    let ci = self.cw.class_ref(&ref_internal(et));
+                    // Peel a nullable element's `?`: `Array<Int?>` = `Integer[]`, so the `anewarray` class
+                    // is `java/lang/Integer` (the `?` only tells `Array.get`/`.set` to keep it boxed).
+                    let ci = self.cw.class_ref(&ref_internal(et.non_null()));
                     code.anewarray(ci);
                 }
             }
@@ -4908,12 +4974,12 @@ impl<'a> Emitter<'a> {
                         let ci = self.cw.class_ref("java/lang/String");
                         code.checkcast(ci);
                     }
-                    Ty::Obj(internal, _) => {
-                        let ci = self.cw.class_ref(internal);
+                    _ if rt.is_array() => {
+                        let ci = self.cw.class_ref(&type_descriptor(rt));
                         code.checkcast(ci);
                     }
-                    Ty::Array(_) => {
-                        let ci = self.cw.class_ref(&type_descriptor(rt));
+                    Ty::Obj(internal, _) => {
+                        let ci = self.cw.class_ref(internal);
                         code.checkcast(ci);
                     }
                     _ => {}
@@ -5304,6 +5370,13 @@ impl<'a> Emitter<'a> {
     ) {
         let recv_ty = self.value_ty(recv);
         let box_recv_as = wrapper_owner_primitive(owner).filter(|_| recv_ty.is_jvm_scalar());
+        // A member call on a value whose static type is `owner` but whose ERASED physical type is a top
+        // (`Object`) needs the `checkcast owner` kotlinc inserts before the dispatch verifies.
+        let narrow_recv = |e: &mut Self, src: Ty, code: &mut CodeBuilder| {
+            if box_recv_as.is_none() {
+                e.narrow_on_stack(src, &Ty::obj(owner), code);
+            }
+        };
         if args.iter().any(|&o| self.records_frame(o)) {
             let mut ops = vec![recv];
             ops.extend(args.iter().copied());
@@ -5313,6 +5386,8 @@ impl<'a> Emitter<'a> {
                 if i == 0 {
                     if let Some(box_ty) = box_recv_as {
                         box_prim_free(self.cw, code, box_ty);
+                    } else {
+                        narrow_recv(self, t, code);
                     }
                 }
             }
@@ -5323,6 +5398,8 @@ impl<'a> Emitter<'a> {
             self.emit_value(recv, code);
             if let Some(box_ty) = box_recv_as {
                 box_prim_free(self.cw, code, box_ty);
+            } else {
+                narrow_recv(self, recv_ty, code);
             }
             for &arg in args {
                 self.emit_value(arg, code);
@@ -6288,8 +6365,8 @@ impl<'a> Emitter<'a> {
             let internal = |t: &Ty| -> Option<String> {
                 match t {
                     Ty::String => Some("java/lang/String".to_string()),
+                    _ if t.is_array() => Some(type_descriptor(*t)),
                     Ty::Obj(n, _) => Some(n.to_string()),
-                    Ty::Array(_) => Some(type_descriptor(*t)),
                     _ => None,
                 }
             };
@@ -6351,9 +6428,9 @@ impl<'a> Emitter<'a> {
             Ty::Double => VerifType::Double,
             Ty::Float => VerifType::Float,
             Ty::String => VerifType::Object(self.cw.class_ref("java/lang/String")),
-            Ty::Obj(n, _) => VerifType::Object(self.cw.class_ref(n)),
             // An array's verification type is an `Object` whose class name is its descriptor (`[I`).
-            Ty::Array(_) => VerifType::Object(self.cw.class_ref(&type_descriptor(ty))),
+            t if t.is_array() => VerifType::Object(self.cw.class_ref(&type_descriptor(ty))),
+            Ty::Obj(n, _) => VerifType::Object(self.cw.class_ref(n)),
             _ => VerifType::Top,
         }
     }
@@ -6600,10 +6677,12 @@ fn emit_num_conv(from: Ty, to: Ty, code: &mut CodeBuilder) {
 fn ref_internal(t: Ty) -> String {
     match t {
         Ty::String => "java/lang/String".to_string(),
+        // An array's reference identity is its descriptor (`[I`, `[Ljava/lang/String;`) — checked before
+        // the `Obj` arm since arrays are now `Obj("kotlin/Array")`/`Obj("kotlin/IntArray")` too.
+        t if t.is_array() => type_descriptor(t),
         // Erase a Kotlin built-in name (`kotlin/collections/MutableList`) to its JVM identity here at the
         // bytecode boundary, so `instanceof`/`checkcast`/method-owner refs never leak a Kotlin-only name.
         Ty::Obj(n, _) => crate::jvm::jvm_class_map::to_jvm_internal(n).to_string(),
-        Ty::Array(_) => type_descriptor(t),
         _ => "java/lang/Object".to_string(),
     }
 }
@@ -6766,11 +6845,38 @@ fn norm_nothing(t: Ty) -> Ty {
 }
 
 pub fn ir_ty_to_jvm(t: &Ty) -> Ty {
-    // Nullability is erased at the JVM-type level (a nullable reference keeps its descriptor; a
-    // nullable primitive's boxing is handled where it matters), so peel the `?` first.
+    // A nullable PRIMITIVE is a JVM reference — its boxed wrapper (`Int?` → `java/lang/Integer`, a
+    // 1-slot reference), NOT the unboxed scalar. Map it before peeling `?`, so descriptors, slots and
+    // stackmap frames all see the reference. A nullable REFERENCE keeps its descriptor (peel below).
+    if let Ty::Nullable(inner) = t {
+        if let Some(boxed) = inner.boxed_ref() {
+            // `boxed_ref` already picks the right wrapper — `java/lang/Integer` for `Int?`, the inline-class
+            // `kotlin/UInt` for `UInt?` — so do NOT re-map through `ir_ty_to_jvm` (which would erase the
+            // unsigned wrapper to `Integer`).
+            return boxed;
+        }
+    }
+    // Nullability is otherwise erased at the JVM-type level (a nullable reference keeps its descriptor),
+    // so peel the `?` first.
     match t.non_null() {
         Ty::Unit => Ty::Unit,
         Ty::Nothing => Ty::Nothing,
+        // Bare scalar/`String` variants are already JVM types — pass through. (Front-end/`ir_lower` types
+        // can arrive either as these variants or as their `Obj("kotlin/…")` spelling; both must map here.)
+        Ty::Int => Ty::Int,
+        Ty::Long => Ty::Long,
+        Ty::Short => Ty::Short,
+        Ty::Byte => Ty::Byte,
+        Ty::Boolean => Ty::Boolean,
+        Ty::Char => Ty::Char,
+        Ty::Double => Ty::Double,
+        Ty::Float => Ty::Float,
+        Ty::String => Ty::String,
+        // Unsigned scalars are inline classes over the signed primitive; unboxed they ARE that primitive
+        // (`UInt` = `int`, `ULong` = `long`) — same JVM slots and `istore`/`iload`/arithmetic. Unsigned
+        // semantics live in the intrinsic calls (`Integer.compareUnsigned`, …) ir_lower already inserted.
+        Ty::UInt => Ty::Int,
+        Ty::ULong => Ty::Long,
         Ty::Obj(fq_name, type_args) => match fq_name {
             "kotlin/Int" => Ty::Int,
             "kotlin/Long" => Ty::Long,
@@ -6790,6 +6896,11 @@ pub fn ir_ty_to_jvm(t: &Ty) -> Ty {
             "kotlin/CharArray" => Ty::array(Ty::Char),
             "kotlin/ByteArray" => Ty::array(Ty::Byte),
             "kotlin/ShortArray" => Ty::array(Ty::Short),
+            // Unsigned arrays are `inline class`es over the signed primitive array; at the JVM level they
+            // ARE that array (`UIntArray` = `[I`). The unsigned element semantics are a source/checker
+            // concern already resolved before emit, so collapse to the physical signed array here.
+            "kotlin/UIntArray" => Ty::array(Ty::Int),
+            "kotlin/ULongArray" => Ty::array(Ty::Long),
             // A `kotlin/Array<T>` is a JVM reference array: a primitive element `T` is BOXED
             // (`Array<Int>` = `[Ljava/lang/Integer;`, distinct from the unboxed `IntArray` = `[I`).
             "kotlin/Array" => Ty::array(
@@ -6797,7 +6908,17 @@ pub fn ir_ty_to_jvm(t: &Ty) -> Ty {
                     .first()
                     .map(|e| {
                         let et = ir_ty_to_jvm(e);
-                        et.boxed_ref().unwrap_or(et)
+                        let boxed = et.boxed_ref().unwrap_or(et);
+                        // Keep a NULLABLE element's `?`: `Array<Int?>` = `Integer[]` whose `get` yields the
+                        // BOXED element (it can be `null`), UNLIKE `Array<Int>` whose `get` unboxes.
+                        // `boxed_prim_of` returns `None` for a `Nullable(..)`, so the emitter's `Array.get`
+                        // keeps it boxed and `.set` skips the extra box — matching the value the front end
+                        // supplies (boxed for a nullable element, unboxed for a non-null one).
+                        if e.is_nullable() {
+                            Ty::nullable(boxed)
+                        } else {
+                            boxed
+                        }
                     })
                     .unwrap_or(Ty::obj("java/lang/Object")),
             ),
@@ -6819,6 +6940,17 @@ pub fn ir_ty_to_jvm(t: &Ty) -> Ty {
 
 pub(crate) fn jvm_tys(tys: &[Ty]) -> Vec<Ty> {
     tys.iter().map(ir_ty_to_jvm).collect()
+}
+
+/// Whether a JVM type is an ERASED TOP reference — the `java/lang/Object` a type parameter erases to, or
+/// an `Object[]` a generic `Array<T>` erases to (recursively). A value of this type is a candidate for the
+/// narrowing `checkcast` at a consumption site; a concrete type (`String`, `Integer`, `IntArray`, a value
+/// class) is not.
+fn jvm_is_erased_top(t: Ty) -> bool {
+    match t.obj_internal() {
+        Some("java/lang/Object") | Some("kotlin/Any") => true,
+        _ => t.array_elem().is_some_and(jvm_is_erased_top),
+    }
 }
 
 fn ir_type_desc(t: &Ty) -> String {

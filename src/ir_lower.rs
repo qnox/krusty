@@ -26,6 +26,14 @@ use crate::resolve::{
 };
 use crate::types::Ty;
 
+thread_local! {
+    /// The DECLARED element type for the immediately-following array-creating call, set by a NESTED-array
+    /// local's initializer (`val x: Array<Array<*>> = arrayOf(arrayOf(1))`) so the OUTER array is built
+    /// over the declared (wider) element `Array<*>` = `Object[]` — able to hold a later `arrayOf("OK")`.
+    /// Consumed take-once by [`Lower::synth_array_elem`] (the inner `arrayOf(1)` keeps its own element).
+    static EXPECTED_ARRAY_ELEM: std::cell::Cell<Option<Ty>> = const { std::cell::Cell::new(None) };
+}
+
 // --- Lower-bail diagnostics ----------------------------------------------------------------------
 // `lower_file` returns `None` (silently skips a file) for any construct outside the IR subset. That is
 // correct for the compiler, but opaque for the box-corpus `survey` — the roadmap of what to grow next.
@@ -734,6 +742,11 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 companion_class: None,
                 secondary_ctors: vec![],
                 has_primary_ctor: c.has_primary_ctor,
+                applied_annotations: class_applied_annotations(file, c),
+                // A Kotlin `annotation class` is RUNTIME-retained unless it opts out — emit the
+                // `@Retention(RUNTIME)` meta-annotation so its uses stay visible to reflection.
+                runtime_retained: c.kind == ast::ClassKind::Annotation
+                    && runtime_annotation_decl(file, &c.name).is_some(),
             });
             // For an `annotation class`, ALSO emit the synthetic IMPLEMENTATION class (kotlinc's
             // `…$annotationImpl`) implementing the annotation interface + the `java.lang.annotation.
@@ -1278,6 +1291,8 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     companion_class: None,
                     secondary_ctors: vec![],
                     has_primary_ctor: true,
+                    applied_annotations: Vec::new(),
+                    runtime_retained: false,
                 });
                 let csig = syms.classes.get(&c.name)?;
                 let mut cmethods = HashMap::new();
@@ -2165,7 +2180,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     });
                     // A generic delegate's `getValue` returns the erased `Object`; coerce to the property
                     // type (`checkcast`/unbox), exactly as kotlinc does.
-                    let coerced = lo.coerce_erased(call, prop_ty, gv.ret);
+                    let coerced = lo.coerce_to_static(call, prop_ty, gv.ret);
                     let ret = lo.ir.add_expr(IrExpr::Return(Some(coerced)));
                     let body = lo.ir.add_expr(IrExpr::Block {
                         stmts: vec![ret],
@@ -2930,6 +2945,8 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                             companion_class: None,
                             secondary_ctors: vec![],
                             has_primary_ctor: true,
+                            applied_annotations: Vec::new(),
+                            runtime_retained: false,
                         });
                         // Register the subclass so an override body resolves a prop as `this.<field>` and
                         // getter synthesis can attach. Methods are filled in below.
@@ -3286,6 +3303,12 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     == Some(fq.as_str())
             });
             if native_unsigned {
+                continue;
+            }
+            // The unsigned specialized arrays (`UIntArray`, `ULongArray`) are inline classes over
+            // `[I`/`[J`, but the compiler models and emits them AS the primitive array — never boxing to
+            // the wrapper object. Excluding them here keeps them out of the value-class erasure map.
+            if crate::types::prim_array_element(&fq).is_some() {
                 continue;
             }
             let Some(t) = lo.syms.libraries.resolve_type(&fq) else {
@@ -3957,11 +3980,6 @@ pub(crate) struct Lower<'a> {
 }
 
 impl<'a> Lower<'a> {
-    /// The arg-binding call-resolution layer over this lowerer's [`SymbolSource`]. Cheap to construct.
-    fn resolver(&self) -> crate::symbol_resolver::SymbolResolver<'_> {
-        crate::symbol_resolver::SymbolResolver::new(&*self.syms.libraries)
-    }
-
     fn arg_tys(&self, args: &[AstExprId]) -> Vec<Ty> {
         args.iter().map(|&a| self.info.ty(a)).collect()
     }
@@ -4278,6 +4296,11 @@ impl<'a> Lower<'a> {
     /// reified `T` inside an expanded `<reified T>` inline body specializes the element (`new String[]`,
     /// not the erased `Object[]`); falls back to the checker-inferred `Array<T>` element otherwise.
     pub(crate) fn synth_array_elem(&self, call: AstExprId) -> Option<Ty> {
+        // A nested-array local's outermost array creation uses the DECLARED (wider) element — see
+        // `EXPECTED_ARRAY_ELEM`. Take-once, so only the outermost creation consumes it.
+        if let Some(t) = EXPECTED_ARRAY_ELEM.with(|c| c.take()) {
+            return Some(t);
+        }
         if let Some(t) = self
             .afile
             .call_type_args
@@ -4585,7 +4608,7 @@ impl<'a> Lower<'a> {
     fn lower_fq_toplevel_call(
         &mut self,
         receiver: AstExprId,
-        name: &str,
+        _name: &str,
         args: &[AstExprId],
         e: AstExprId,
     ) -> Option<u32> {
@@ -4599,9 +4622,9 @@ impl<'a> Lower<'a> {
         // so its stored type already carries the right arity for overload resolution here.
         let has_trailing_lambda =
             self.afile.call_has_trailing_lambda.contains(&e.0) && !arg_tys.is_empty();
-        let c = self
-            .resolver()
-            .resolve_top_level_callable(name, &arg_tys, &[])?;
+        // The CHECKER resolved this FQ top-level call and recorded the callable (keyed by the call
+        // `ExprId`); the lowerer reads it.
+        let c = self.info.resolved_top_level(e).cloned()?;
         if c.owner.rsplit_once('/').map(|(p, _)| p) != Some(pkg.as_str()) {
             return None;
         }
@@ -4662,7 +4685,7 @@ impl<'a> Lower<'a> {
             dispatch_receiver: None,
             args: a,
         });
-        if self.resolver().toplevel_is_suspend(name) {
+        if c.suspend {
             self.ir.suspend_calls.insert(call, ty_to_ir(c.ret));
         }
         Some(if c.inline.can_inline() {
@@ -4864,19 +4887,6 @@ impl<'a> Lower<'a> {
             ctor_desc: desc,
             args: a,
         }))
-    }
-
-    /// Whether `internal` names a `@JvmInline value`/inline class (unboxed representation) — a file
-    /// class in this compilation or a classpath one.
-    fn is_value_class(&self, internal: &str) -> bool {
-        self.syms
-            .class_by_internal(internal)
-            .is_some_and(|cs| cs.value_field.is_some())
-            || self
-                .syms
-                .libraries
-                .resolve_type(internal)
-                .is_some_and(|t| t.value_underlying.is_some())
     }
 
     /// A call to a type-parameter-returning function whose erased `Object` result needs a coercion
@@ -5232,14 +5242,15 @@ impl<'a> Lower<'a> {
                     dispatch_receiver: Some(recv),
                     args: vec![],
                 });
-                (self.coerce_erased(c, m.ret, m.member.physical_ret), m.ret)
-            } else if let Some(c) =
-                self.resolver()
-                    .resolve_extension_inline_callable(&comp, it_ty, &[])
-            {
+                (
+                    self.coerce_to_static(c, m.ret, m.member.physical_ret),
+                    m.ret,
+                )
+            } else if let Some(c) = self.info.synthetic_ext(init, &comp).cloned() {
                 // `componentN` as a stdlib extension: a public one (`List.component1()`) or an
-                // `@InlineOnly` one (`Map.Entry.component1` → `getKey()`). The inline-admitting resolver
-                // covers both; `c.inline` drives whether the emit splices the `invokestatic` or calls it.
+                // `@InlineOnly` one (`Map.Entry.component1` → `getKey()`). The CHECKER resolved and
+                // recorded it (keyed by the initializer + name); `c.inline` drives whether the emit
+                // splices the `invokestatic` or calls it.
                 let call = self.ir.add_expr(IrExpr::Call {
                     callee: Callee::Static {
                         owner: c.owner,
@@ -5250,7 +5261,7 @@ impl<'a> Lower<'a> {
                     dispatch_receiver: None,
                     args: vec![recv],
                 });
-                (self.coerce_erased(call, c.ret, c.physical_ret), c.ret)
+                (self.coerce_to_static(call, c.ret, c.physical_ret), c.ret)
             } else if let Some(&fid) = self.ext_fun_ids.get(&(it_ty.erased_recv(), comp.clone())) {
                 // A USER-defined `operator fun Recv.componentN()` extension → `invokestatic` it with
                 // the receiver as the sole argument (its lowered first param).
@@ -5281,14 +5292,17 @@ impl<'a> Lower<'a> {
                     dispatch_receiver: Some(recv),
                     args: vec![i],
                 });
-                (self.coerce_erased(c, m.ret, m.member.physical_ret), m.ret)
+                (
+                    self.coerce_to_static(c, m.ret, m.member.physical_ret),
+                    m.ret,
+                )
             };
             // A `var` component captured AND written by a closure is boxed into a `Ref$XxxRef`, exactly
             // like a plain mutable local (see the `Stmt::Local` path) — without this the closure mutates
             // a private copy and the outer read misses it (e.g. `var [a,b]=A(); { a=3 }()`).
             if self.shared_cell_vars.contains(name) {
                 let elem_ty = self.shared_cell_elem_ty(log_ty);
-                let elem = ty_to_ir(elem_ty);
+                let elem = ref_elem_ir(elem_ty);
                 let holder = self.fresh_value();
                 let holder_ty = self.mutable_local_ref_type(elem_ty)?;
                 self.scope.push((name.clone(), holder, holder_ty));
@@ -5690,10 +5704,19 @@ impl<'a> Lower<'a> {
                         _ => {}
                     }
                 }
-                // A plain member call `recv.m(args)` to a suspend method — a USER class method, or a
-                // CLASSPATH member (`repo.get(...)` on a `suspend fun` of a classpath interface), whose
-                // suspend-ness lives on the resolved library member, not in `syms`.
-                if let ast::Expr::Call { callee, args } = self.afile.expr(call) {
+                // A classpath top-level `suspend fun` called by name (`delay(…)`): the CHECKER recorded
+                // the resolved callable with its suspend flag.
+                if self
+                    .info
+                    .resolved_top_level(call)
+                    .is_some_and(|c| c.suspend)
+                {
+                    return true;
+                }
+                // A plain member call `recv.m(args)` to a suspend method — a USER class method (its
+                // suspend flag is in `syms`), or a CLASSPATH member / suspend EXTENSION (`Mutex.withLock`)
+                // whose suspend-ness the CHECKER recorded on the resolved callable. The lowerer only reads.
+                if let ast::Expr::Call { callee, .. } = self.afile.expr(call) {
                     if let ast::Expr::Member { receiver, name } = self.afile.expr(*callee) {
                         let recv_ty = self.info.ty(*receiver);
                         if recv_ty
@@ -5702,28 +5725,24 @@ impl<'a> Lower<'a> {
                         {
                             return true;
                         }
-                        if crate::symbol_resolver::resolve_instance_member(
-                            &*self.syms.libraries,
-                            recv_ty,
-                            name,
-                            &self.arg_tys(args),
-                        )
-                        .is_some_and(|m| m.suspend)
+                        if self
+                            .info
+                            .resolved_member(call)
+                            .is_some_and(|m| m.member.suspend)
+                            || self
+                                .info
+                                .resolved_extension(call)
+                                .is_some_and(|c| c.suspend)
                         {
                             return true;
                         }
-                        // A suspend EXTENSION (`Mutex.withLock`) is invisible to the member query above —
-                        // recognize it so the enclosing lambda becomes a coroutine state machine.
-                        return self.resolver().extension_is_suspend(name, recv_ty);
                     }
                 }
                 false
             })
         };
-        let body_suspends = suspend_member_call
-            || call_names
-                .iter()
-                .any(|n| susp_names.contains(n) || self.resolver().toplevel_is_suspend(n));
+        let body_suspends =
+            suspend_member_call || call_names.iter().any(|n| susp_names.contains(n));
         let jvm_arity = arity + 1; // + the trailing continuation
         let function_iface = self
             .syms
@@ -5837,6 +5856,8 @@ impl<'a> Lower<'a> {
             companion_class: None,
             secondary_ctors: vec![],
             has_primary_ctor: true,
+            applied_annotations: Vec::new(),
+            runtime_retained: false,
         };
         let class_id = self.ir.add_class(class);
         // Patch the `<init>` field stores with the now-known class id.
@@ -5925,19 +5946,9 @@ impl<'a> Lower<'a> {
             let is_susp = matches!(&self.ir.exprs[tail as usize],
                 IrExpr::Call { callee: Callee::Local(fid), .. } if self.ir.suspend_funs.contains(fid))
                 || self.ir.suspend_calls.contains_key(&tail);
-            // Only a SINGLE suspension is modeled by this two-state form. If the body calls a suspend fn
-            // more than once (a second suspension in the tail or elsewhere), bail for the general machine.
-            let n_susp = {
-                let c = std::cell::RefCell::new(Vec::new());
-                collect_call_names(self.afile, body, &c);
-                c.into_inner()
-                    .iter()
-                    .filter(|n| susp_names.contains(*n) || self.resolver().toplevel_is_suspend(n))
-                    .count()
-            };
             // All suspend lambdas use the general lambda-mode machine from the coroutine pass; the inline
             // two-state hand-roll is retired (it duplicated the state machine and miscompiled frames).
-            let _ = (is_susp, n_susp);
+            let _ = is_susp;
             let handroll = false;
             if !handroll {
                 needs_pass_sm = true;
@@ -6510,17 +6521,7 @@ impl<'a> Lower<'a> {
             )?;
         }
         // Expression delegates (`: I by Impl()`) always use a synthesized `$$delegate_e<j>` field.
-        for (j, (iface_name, e)) in c.delegation_exprs.iter().enumerate() {
-            // A VALUE-class delegate is unboxed (e.g. `Z(x)` → `Integer`) and does not implement the
-            // interface at runtime — forwarding an interface call to it fails. Skip (never miscompile).
-            if self
-                .info
-                .ty(*e)
-                .obj_internal()
-                .is_some_and(|i| self.is_value_class(i))
-            {
-                return None;
-            }
+        for (j, (iface_name, _e)) in c.delegation_exprs.iter().enumerate() {
             let synth_name = format!("$$delegate_e{j}");
             let delegate_idx = self
                 .classes
@@ -7058,10 +7059,9 @@ impl<'a> Lower<'a> {
     /// emitter is guaranteed to splice); `None` ⇒ the call falls through to its desugar / normal lowering.
     fn try_route_lambda_inline(
         &mut self,
-        name: &str,
+        e: AstExprId,
         receiver: AstExprId,
         lam_arg: AstExprId,
-        rty: Ty,
     ) -> Option<u32> {
         // The bytecode splicer substitutes the receiver inline; it can relocate a simple value but not
         // an `invokedynamic` (a lambda literal or callable reference `::A` as the receiver), so the
@@ -7074,13 +7074,9 @@ impl<'a> Lower<'a> {
         ) {
             return None;
         }
-        // Resolve via the inline-only path, which (unlike ordinary extension selection) matches `@InlineOnly`
-        // package-private scope fns (`let`/`also`) — safe because we *inline* it (no call is emitted).
-        let c = self.resolver().resolve_extension_inline_callable(
-            name,
-            rty,
-            &[self.info.ty(lam_arg)],
-        )?;
+        // The CHECKER resolved this `@InlineOnly` scope fn (`let`/`also`) and recorded the callable; read
+        // it. `c.inline` gates the splice (no call is emitted for a `must_inline` callee).
+        let c = self.info.resolved_extension(e).cloned()?;
         if !c.inline.can_inline() {
             return None;
         }
@@ -7126,7 +7122,7 @@ impl<'a> Lower<'a> {
         });
         // The inline fn's erased return is `Object` (a generic `R`); coerce the spliced result to the
         // logical return type (`5.let { it+1 }: Int` unboxes `Integer`→`int`), as a normal call would.
-        Some(self.coerce_erased(call, logical, physical))
+        Some(self.coerce_to_static(call, logical, physical))
     }
 
     fn top_fun_decl(&self, name: &str) -> Option<&ast::FunDecl> {
@@ -8221,6 +8217,8 @@ impl<'a> Lower<'a> {
             companion_class: None,
             secondary_ctors: vec![],
             has_primary_ctor: true,
+            applied_annotations: Vec::new(),
+            runtime_retained: false,
         });
         if let Some(v) = recv_val {
             // `new <Synth>(receiver)` — the captured receiver is the constructor's `Object` argument.
@@ -8319,6 +8317,8 @@ impl<'a> Lower<'a> {
             companion_class: None,
             secondary_ctors: vec![],
             has_primary_ctor: true,
+            applied_annotations: Vec::new(),
+            runtime_retained: false,
         });
         let _ = e;
         Some(self.ir.add_expr(IrExpr::StaticInstance {
@@ -8408,7 +8408,6 @@ impl<'a> Lower<'a> {
         // `obj::ext` is handled by `lower_bound_expr_ref`. A value-class receiver is skipped.)
         if capture.is_none()
             && self.resolve_method(&internal, name).is_none()
-            && !self.is_value_class(&internal)
             && self
                 .ext_fun_ids
                 .contains_key(&(recv_ty.erased_recv(), name.to_string()))
@@ -8545,7 +8544,7 @@ impl<'a> Lower<'a> {
             // whose captured receiver is passed as the first `invokestatic <facade>.ext(recv, args)`
             // argument (`StaticBound`) — real reference equality (two `obj::ext` on the same receiver are
             // equal), unlike an `invokedynamic` lambda. The target signature leads with the receiver type.
-            if rty.obj_internal().is_some_and(|i| !self.is_value_class(i)) {
+            if rty.obj_internal().is_some() {
                 let cap = self.expr(recv)?;
                 let param_tys = tys_to_ir(params);
                 let mut target = vec![ty_to_ir(rty)];
@@ -8772,6 +8771,7 @@ impl<'a> Lower<'a> {
                 param_tys,
                 ret_ty,
                 box_ret: None,
+                staticbound_recv_unbox: None,
             }),
             bridges: vec![],
             interfaces: vec![],
@@ -8780,6 +8780,8 @@ impl<'a> Lower<'a> {
             companion_class: None,
             secondary_ctors: vec![],
             has_primary_ctor: true,
+            applied_annotations: Vec::new(),
+            runtime_retained: false,
         });
         match capture {
             Some(cap) => Some(self.ir.add_expr(IrExpr::New {
@@ -9272,13 +9274,10 @@ impl<'a> Lower<'a> {
                 false,
                 InlineKind::None,
             )
-        } else if let Some(c) =
-            self.resolver()
-                .resolve_extension_inline_callable("iterator", it_ty, &[])
-        {
+        } else if let Some(c) = self.info.synthetic_ext(iterable, "iterator").cloned() {
             // `iterator` is an EXTENSION — public (an `Iterable`-shaped receiver) or `@InlineOnly`
-            // (`Map<K,V>.iterator()` inlines to `entries.iterator()`). The inline-admitting resolver
-            // covers both; `c.inline` then drives whether the emit splices it or calls it.
+            // (`Map<K,V>.iterator()` inlines to `entries.iterator()`). The CHECKER resolved and recorded
+            // it (keyed by the iterable expr); `c.inline` drives whether the emit splices it or calls it.
             (c.ret, c.descriptor, c.owner, true, c.inline)
         } else {
             return None;
@@ -9490,15 +9489,7 @@ impl<'a> Lower<'a> {
             // Generic fun interfaces allowed (erased SAM descriptor); value-class methods excluded —
             // see the matching note in `resolve::simple_fun_interface`.
             c.is_fun_interface
-                && c.methods.values().all(|sig| {
-                    !self.is_value_class_ty(sig.ret)
-                        && sig.params.iter().all(|p| !self.is_value_class_ty(*p))
-                })
         })
-    }
-
-    fn is_value_class_ty(&self, t: Ty) -> bool {
-        t.obj_internal().is_some_and(|i| self.is_value_class(i))
     }
 
     /// Turn a void `Unit` result into the 1-slot `kotlin/Unit.INSTANCE` reference value: run `effect`
@@ -9933,8 +9924,12 @@ impl<'a> Lower<'a> {
         }))
     }
 
-    fn coerce_erased(&mut self, read: u32, logical: Ty, physical: Ty) -> u32 {
-        if logical == physical {
+    /// Mark a value's substituted STATIC type for the backend's box/unbox coercion (an unsigned/primitive
+    /// value out of an erased `Object` unboxes). A REFERENCE narrowing (`Object`→`String`, `Object[]`→
+    /// `Array<Int>`) is NOT tagged here: the backend owns erasure and inserts that `checkcast` at the
+    /// CONSUMPTION site (return / argument / receiver), keyed on the value's actual physical type.
+    fn coerce_to_static(&mut self, read: u32, logical: Ty, physical: Ty) -> u32 {
+        if logical == physical || matches!(logical, Ty::Null | Ty::Error) {
             return read;
         }
         // An unsigned value out of an erased reference: checkcast to the inline-class object, then
@@ -9944,8 +9939,8 @@ impl<'a> Lower<'a> {
                 .unbox_unsigned(read, logical)
                 .expect("unsigned integer target must provide box/unbox shape");
         }
-        // A primitive flowing out of any erased reference (`Object`, or a type-parameter bound like
-        // `Comparable`/`Number` — `maxOrNull(): T`) unboxes; a reference erased to `Object` checkcasts.
+        // A primitive out of an erased reference unboxes through the value-class pass's `ImplicitCoercion`
+        // channel — the emitter decides (box/unbox/nothing) from the value's actual type.
         if self.has_scalar_value_repr(logical) && physical.is_reference() {
             self.ir.add_expr(IrExpr::TypeOp {
                 op: IrTypeOp::ImplicitCoercion,
@@ -9954,8 +9949,13 @@ impl<'a> Lower<'a> {
             })
         } else if logical.is_reference()
             && !matches!(logical, Ty::Null)
-            && physical == Ty::obj("kotlin/Any")
+            && physical.is_reference()
+            && logical.non_null() != physical.non_null()
         {
+            // Tag the substituted static type on a reference read whose declared (physical) type differs.
+            // NO erasure OR value-class decision here — a plain `Cast`. The value-class PASS rewrites a
+            // `Cast` to a value class into box/unbox; the EMITTER emits the `checkcast` for a genuine
+            // erased-top narrowing and NOTHING otherwise (both keyed on the value's physical type).
             self.ir.add_expr(IrExpr::TypeOp {
                 op: IrTypeOp::Cast,
                 arg: read,
@@ -9971,7 +9971,7 @@ impl<'a> Lower<'a> {
         if lt == Ty::Error {
             return read;
         }
-        self.coerce_erased(read, lt, pty)
+        self.coerce_to_static(read, lt, pty)
     }
 
     /// Read a backing-field property `recv.name` on an in-file class, given the ALREADY-LOWERED receiver
@@ -10070,8 +10070,7 @@ impl<'a> Lower<'a> {
         };
         let resolved = self
             .info
-            .resolved_members
-            .get(&e)
+            .resolved_member(e)
             .cloned()
             // Reuse the getter the checker resolved for this property read (keyed by the access
             // ExprId); resolve only when it was recorded through a different path.
@@ -10275,58 +10274,11 @@ impl<'a> Lower<'a> {
     /// arguments widened to `Long` — Kotlin adapts an integer literal to a wider expected type, so
     /// `longRange step 3` resolves `LongProgression.step(Long)`. A non-literal `Int` is left as-is
     /// (kotlinc rejects `longRange step intVar`). Mirrors the checker's classpath-extension adaptation.
-    fn resolve_ext_lit_widened(
-        &self,
-        name: &str,
-        rt: Ty,
-        args: &[AstExprId],
-        arg_tys: &[Ty],
-    ) -> Option<crate::libraries::LibraryCallable> {
-        if let Some(c) = self.library_extension_callable(name, rt, arg_tys, &[]) {
-            return Some(c);
-        }
-        let widened: Vec<Ty> = arg_tys
-            .iter()
-            .zip(args.iter())
-            .map(|(t, &a)| {
-                if *t == Ty::Int && matches!(self.afile.expr(a), Expr::IntLit(_)) {
-                    Ty::Long
-                } else {
-                    *t
-                }
-            })
-            .collect();
-        if widened == arg_tys {
-            return None;
-        }
-        self.library_extension_callable(name, rt, &widened, &[])
-    }
-
-    fn library_extension_callable(
-        &self,
-        name: &str,
-        receiver: Ty,
-        arg_tys: &[Ty],
-        type_args: &[Ty],
-    ) -> Option<crate::libraries::LibraryCallable> {
-        self.resolver()
-            .resolve_extension_callable(name, receiver, arg_tys, type_args)
-    }
-
-    fn library_extension_return(
-        &self,
-        name: &str,
-        receiver: Ty,
-        arg_tys: &[Ty],
-        type_args: &[Ty],
-    ) -> Option<Ty> {
-        self.library_extension_callable(name, receiver, arg_tys, type_args)
-            .map(|c| c.ret)
-    }
-
-    fn has_library_iterator_extension(&self, receiver: Ty) -> bool {
-        self.library_extension_return("iterator", receiver, &[], &[])
-            .is_some()
+    /// Whether the receiver expression `receiver` has an `iterator` EXTENSION the checker recorded (for a
+    /// `forEach`/`forEachIndexed` inline lowering). A member `iterator` is a separate `syms` lookup at the
+    /// call site; this covers only the extension case (`Map`).
+    fn has_library_iterator_extension(&self, receiver: AstExprId) -> bool {
+        self.info.synthetic_ext(receiver, "iterator").is_some()
     }
 
     /// The reified-type substitution to record for a spliceable classpath extension call: pair the
@@ -10338,6 +10290,7 @@ impl<'a> Lower<'a> {
         &self,
         ast_call: AstExprId,
         c: &crate::libraries::LibraryCallable,
+        recv_ty: Option<Ty>,
     ) -> Vec<(String, Ty)> {
         if !c.inline.can_inline() {
             return Vec::new();
@@ -10349,41 +10302,50 @@ impl<'a> Lower<'a> {
             .unwrap_or_default();
         // The type ARGUMENTS come pre-resolved from the checker (`resolved_call_type_args`) — the checker
         // resolves imports/classpath types the lowerer's local `ty_ref` can't (a wildcard-imported class).
-        self.info
-            .resolved_call_type_args
-            .get(&ast_call)
-            .map(|targs| {
-                formals
+        if let Some(targs) = self.info.resolved_call_type_args.get(&ast_call) {
+            return formals
+                .iter()
+                .zip(targs)
+                .map(|(name, ty)| (name.clone(), *ty))
+                .collect();
+        }
+        // No EXPLICIT type arguments: a reified `T` that appears in the RECEIVER position
+        // (`Collection<T>.toTypedArray()`, `T` inferred from the receiver `List<Int>`) is bound by the
+        // receiver's type arguments — pair the reified formals with them positionally.
+        // Guarded to an EXACT count match (`Collection<T>` = 1 formal ↔ 1 receiver type-arg) so a receiver
+        // whose type-parameter arity differs from the reified formals can't mis-bind — a positional pairing
+        // is only sound when they align.
+        if let Some(Ty::Obj(_, args)) = recv_ty.map(|t| t.non_null()) {
+            if !formals.is_empty() && formals.len() == args.len() {
+                return formals
                     .iter()
-                    .zip(targs)
+                    .zip(args.iter())
                     .map(|(name, ty)| (name.clone(), *ty))
-                    .collect()
-            })
-            .unwrap_or_default()
+                    .collect();
+            }
+        }
+        Vec::new()
     }
 
     fn lower_ext_call_on(
         &mut self,
         recv_ir: u32,
         rt: Ty,
-        name: &str,
+        _name: &str,
         args: &[AstExprId],
         e: AstExprId,
     ) -> Option<u32> {
-        let arg_tys = self.arg_tys(args);
+        // The CHECKER resolved this extension and recorded the callable (keyed by the call `ExprId`).
         let c = self
-            .resolve_ext_lit_widened(name, rt, args, &arg_tys)
-            .filter(|c| !c.default_call) // a defaulted extension needs the AST receiver expr — bail
-            .or_else(|| {
-                self.resolver()
-                    .resolve_extension_inline_callable(name, rt, &arg_tys)
-                    .filter(|c| c.inline.can_inline())
-            })?;
-        // The first parameter is the extension receiver. Box a primitive receiver flowing into a generic
-        // `Object` receiver param; a reference receiver widens to its declared param type for free.
+            .info
+            .resolved_extension(e)
+            .cloned()
+            .filter(|c| !c.default_call)?; // a defaulted extension needs the AST receiver expr — bail
+                                           // The first parameter is the extension receiver. Box a primitive receiver flowing into a generic
+                                           // `Object` receiver param; a reference receiver widens to its declared param type for free.
         let p0 = *c.params.first().unwrap_or(&rt);
         let recv = if self.has_scalar_value_repr(rt) && p0.is_reference() {
-            self.coerce_erased(recv_ir, rt, p0)
+            self.coerce_to_static(recv_ir, rt, p0)
         } else {
             recv_ir
         };
@@ -10396,9 +10358,11 @@ impl<'a> Lower<'a> {
             }
         }
         // For a `<reified T>` extension the backend must SPLICE (its compiled body carries a
-        // `reifiedOperationMarker`/`T::class` the JVM can't call directly), record the call's explicit
-        // type arguments against the callee's type-parameter NAMES so the splicer specializes the body.
-        let reified_subst = self.reified_call_subst_for(e, &c);
+        // `reifiedOperationMarker`/`T::class` the JVM can't call directly): bind the callee's reified
+        // type-parameter NAMES to the call's explicit type arguments, or — when omitted — to the RECEIVER's
+        // type arguments (`Collection<T>.toTypedArray()` infers `T` from the receiver) so the splicer
+        // specializes the body.
+        let reified_subst = self.reified_call_subst_for(e, &c, Some(rt));
         let call = self.ir.add_expr(IrExpr::Call {
             callee: Callee::Static {
                 owner: c.owner,
@@ -10526,12 +10490,11 @@ impl<'a> Lower<'a> {
         }
         if let Some(member) = self
             .info
-            .resolved_members
-            .get(&e)
+            .resolved_member(e)
             .cloned()
             // Reuse the member the checker resolved for this call (keyed by the call `ExprId`); fall
             // back to resolving when it was recorded through a different path (see
-            // [`TypeInfo::resolved_members`]).
+            // [`TypeInfo::resolved_calls`]).
             .or_else(|| {
                 crate::symbol_resolver::resolve_instance_member(
                     &*self.syms.libraries,
@@ -11359,13 +11322,8 @@ impl<'a> Lower<'a> {
         }
         // Classpath inline `MutableCollection.plusAssign` (`@InlineOnly`): emit an inline
         // `invokestatic owner.plusAssign(recv, arg)` — the bytecode splicer expands its real body
-        // (`add`/`addAll`) at the call site (nothing about `add`/`addAll` is hardcoded here).
-        let arg_ty = self.info.ty(rhs);
-        let c = self.resolver().resolve_extension_inline_callable(
-            aname,
-            self.recv_ty(lhs),
-            &[arg_ty],
-        )?;
+        // (`add`/`addAll`) at the call site. The CHECKER resolved and recorded it (keyed by the target).
+        let c = self.info.synthetic_ext(lhs, aname).cloned()?;
         if c.params.len() == 2 {
             let r = self.lower_arg(lhs, &ty_to_ir(c.params[0]))?;
             let a = self.lower_arg(rhs, &ty_to_ir(c.params[1]))?;
@@ -11374,7 +11332,7 @@ impl<'a> Lower<'a> {
                     owner: c.owner,
                     name: c.name,
                     descriptor: c.descriptor,
-                    inline: InlineKind::CanInline,
+                    inline: c.inline,
                 },
                 dispatch_receiver: None,
                 args: vec![r, a],
@@ -11662,7 +11620,7 @@ impl<'a> Lower<'a> {
                     // `Ref` holder + element use that underlying type (`var z: Z(Int)` → `Ref.IntRef`) —
                     // except a nullable reference value class (`Result<T>?`) stays BOXED (see helper).
                     let elem_ty = self.shared_cell_elem_ty(kty);
-                    let elem = ty_to_ir(elem_ty);
+                    let elem = ref_elem_ir(elem_ty);
                     let it = self.lower_arg(init, &ty_to_ir(kty))?;
                     let holder = self.fresh_value();
                     let holder_ty = self.mutable_local_ref_type(elem_ty)?;
@@ -11677,9 +11635,22 @@ impl<'a> Lower<'a> {
                         init: Some(new_ref),
                     }));
                 }
+                // A NESTED-array local (`val x: Array<Array<*>> = arrayOf(arrayOf(1))`): its outermost
+                // array-creating initializer builds over the DECLARED element (`Array<*>` = `Object[]`),
+                // wide enough to hold a later `arrayOf("OK")`. Narrow to a nested-array element only — a
+                // concrete/nullable element (`Array<Int?>`) keeps its inferred creation (see
+                // `collectionLiterals`). Take-once (consumed by the outer creation's `synth_array_elem`).
+                let nested_array_elem = (kty.non_null().obj_internal() == Some("kotlin/Array"))
+                    .then(|| kty.array_elem())
+                    .flatten()
+                    .filter(|e| e.non_null().obj_internal() == Some("kotlin/Array"));
+                // SAVE-RESTORE (not set-then-clear): a nested-array local INSIDE the initializer (`… = run
+                // { val y: Array<Array<Int>> = …; arrayOf(y) }`) must not clobber this one's expected element.
+                let prev_expected = EXPECTED_ARRAY_ELEM.with(|c| c.replace(nested_array_elem));
                 // Coerce the initializer to the declared type (a generic-erased `Object` flowing into a
                 // typed `val` gets the `checkcast` kotlinc inserts).
                 let it = self.lower_arg(init, &ty_to_ir(kty))?;
+                EXPECTED_ARRAY_ELEM.with(|c| c.set(prev_expected));
                 let v = self.fresh_value();
                 self.scope.push((name.clone(), v, kty));
                 // A nullable-declared local (`val v: X? = null`) carries its nullability into the IrType —
@@ -11840,7 +11811,7 @@ impl<'a> Lower<'a> {
                     let val = self.lower_arg(value, &ty_to_ir(elem))?;
                     return Some(self.ir.add_expr(IrExpr::RefSet {
                         holder: hv,
-                        elem: ty_to_ir(elem),
+                        elem: ref_elem_ir(elem),
                         value: val,
                     }));
                 }
@@ -12746,12 +12717,25 @@ impl<'a> Lower<'a> {
             }
         }
         let a = self.expr(array)?;
-        let i = self.expr(index)?;
+        // The index is always an `Int` — unbox a generic/erased `Object` index (a destructured
+        // `IndexedValue` element used as `arr[value]`) so `aastore`/`iastore` gets an `int`, not an `Object`.
+        let i = self.lower_arg(index, &ty_to_ir(Ty::Int))?;
         // Coerce the element to the array's element type (boxing/unboxing, and materializing
         // `Unit.INSTANCE` for a `Unit` value into an `Array<Any>`) — same as the user-`set`/
-        // collection paths above, rather than storing the raw value.
+        // collection paths above, rather than storing the raw value. EXCEPT a NON-NULL primitive element
+        // (`Array<Int>` = `Integer[]`): `kotlin/Array.set` boxes the value exactly ONCE before `aastore`,
+        // so pass it the UNBOXED primitive — coercing to the boxed element would double-box (`valueOf`
+        // fed an `Integer`). A NULLABLE element (`Array<Int?>`) keeps `boxed_prim_of == None`, so
+        // `Array.set` does NOT box: coerce the value to the boxed element (`Integer`/`null`) here instead.
         let elem = at.array_elem().unwrap_or_else(|| Ty::obj("kotlin/Any"));
-        let v = self.lower_arg(value, &ty_to_ir(elem))?;
+        let en = elem.non_null();
+        let value_ty =
+            if !elem.is_nullable() && (en.is_jvm_scalar() || en.unboxed_primitive().is_some()) {
+                en.unboxed_primitive().unwrap_or(en)
+            } else {
+                elem
+            };
+        let v = self.lower_arg(value, &ty_to_ir(value_ty))?;
         Some(self.ir.add_expr(IrExpr::Call {
             callee: Callee::External("kotlin/Array.set".to_string()),
             dispatch_receiver: Some(a),
@@ -13259,19 +13243,21 @@ impl<'a> Lower<'a> {
             if !unit_ret {
                 // Initialize the result slot to a type default so its frame type is consistent at the
                 // loop head (an uninitialized slot is `top` there but the body assigns it → mismatch).
+                // Map through `kotlin_class_internal` so a SOURCE primitive `Ty` (`Ty::Long`) and the
+                // legacy `Obj("kotlin/Long")` scalar form both resolve — `obj_internal` alone is `None`
+                // for the source variants and would fall to a wrong `Null` default (VerifyError: storing
+                // `null` into an `int` slot).
                 let init = if ir_type_is_reference(&ret_ty) {
                     IrConst::Null
-                } else if let Some(fq_name) = ret_ty.non_null().obj_internal() {
-                    match fq_name {
-                        "kotlin/Long" => IrConst::Long(0),
-                        "kotlin/Float" => IrConst::Float(0.0),
-                        "kotlin/Double" => IrConst::Double(0.0),
-                        "kotlin/Boolean" => IrConst::Boolean(false),
-                        "kotlin/Char" => IrConst::Char('\0'),
+                } else {
+                    match ret_ty.non_null().kotlin_class_internal() {
+                        Some("kotlin/Long") => IrConst::Long(0),
+                        Some("kotlin/Float") => IrConst::Float(0.0),
+                        Some("kotlin/Double") => IrConst::Double(0.0),
+                        Some("kotlin/Boolean") => IrConst::Boolean(false),
+                        Some("kotlin/Char") => IrConst::Char('\0'),
                         _ => IrConst::Int(0), // Int/Short/Byte
                     }
-                } else {
-                    IrConst::Null
                 };
                 let init = self.ir.add_expr(IrExpr::Const(init));
                 stmts.push(self.ir.add_expr(IrExpr::Variable {
@@ -13395,7 +13381,7 @@ impl<'a> Lower<'a> {
                     dispatch_receiver: Some(recv),
                     args: a,
                 });
-                Some(self.coerce_erased(call, ret, physical_ret))
+                Some(self.coerce_to_static(call, ret, physical_ret))
             }
             InvokeKind::ExtensionOperator { receiver_ty: rt } => {
                 // `recv(args)` via an `operator fun Recv.invoke(...)` EXTENSION → `invokestatic
@@ -14514,7 +14500,7 @@ impl<'a> Lower<'a> {
                     let hv = self.ir.add_expr(IrExpr::GetValue(holder));
                     return Some(self.ir.add_expr(IrExpr::RefGet {
                         holder: hv,
-                        elem: ty_to_ir(elem),
+                        elem: ref_elem_ir(elem),
                     }));
                 }
                 if let Some((v, slot_ty)) = self.lookup(&n) {
@@ -15262,14 +15248,13 @@ impl<'a> Lower<'a> {
                     }
                 }
                 // A library operator function on a reference receiver (`list + x` → `CollectionsKt.plus(list,
-                // x)`): re-resolve through the library set (most-specific overload) and emit the call,
-                // lowering the receiver and argument to the callee's parameter types (a primitive element
-                // boxes to `Object`).
-                if let Some(opn) = op_name {
+                // x)`): the CHECKER resolved `a.plus(b)` and recorded the callable (keyed by the binary
+                // `ExprId`); the lowerer reads it and emits, lowering operands to the callee's parameter
+                // types (a primitive element boxes to `Object`).
+                if op_name.is_some() {
                     let lt = self.info.ty(lhs);
                     if lt.is_reference() && self.info.ty(rhs) != Ty::Error {
-                        let rt = self.info.ty(rhs);
-                        if let Some(c) = self.library_extension_callable(opn, lt, &[rt], &[]) {
+                        if let Some(c) = self.info.resolved_extension(e).cloned() {
                             if c.params.len() == 2 {
                                 let l = self.lower_arg(lhs, &ty_to_ir(c.params[0]))?;
                                 let r = self.lower_arg(rhs, &ty_to_ir(c.params[1]))?;
@@ -16035,16 +16020,15 @@ impl<'a> Lower<'a> {
                     ..ty.clone()
                 };
                 let target = self.ty_ref(&non_null_ty)?;
-                // A nullable VALUE-class cast (`as Str?`) keeps the boxed wrapper; the value-class pass
-                // would unbox a `null` (`Str.unbox-impl()` on null → NPE), so skip rather than miscompile.
-                if ty.nullable
-                    && target
-                        .obj_internal()
-                        .is_some_and(|i| self.is_value_class(i))
-                {
-                    return None;
-                }
-                let type_operand = ty_to_ir(target);
+                // Preserve the target's `?` on the cast: the JVM `checkcast` class is the same either way,
+                // but the value-class pass needs the nullability to decide a `Str?` (`= String?`, unboxed)
+                // vs a non-null `Str` cast — a plain (non-VC) reference cast is unaffected (the emitter
+                // peels the `?` for `checkcast`). Nullability tracking is otherwise erased in `Ty`.
+                let type_operand = if ty.nullable {
+                    ty_to_ir(Ty::nullable(target))
+                } else {
+                    ty_to_ir(target)
+                };
                 // `as T` to a non-null reference type throws on `null` (kotlinc null-checks before the
                 // `checkcast`); `as T?` and primitive casts are a plain `checkcast`/coercion.
                 let op = if !ty.nullable && target.is_reference() {
@@ -16760,11 +16744,11 @@ impl<'a> Lower<'a> {
                         // member of a CLASSPATH superclass (`class Sub : lib.Base()` calling `secret()`).
                         // `resolve_method` walks user classes only, so this lowers as neither a sibling nor
                         // a top-level call; route it through the enclosing `this` (slot 0) and the member
-                        // the checker recorded (`lower_this_member_call` reuses `resolved_members`).
+                        // the checker recorded (`lower_this_member_call` reuses `resolved_calls`).
                         if self.cur_class.is_some()
                             && self.lookup(&fname).is_none()
                             && !self.module_declares(&fname)
-                            && self.info.resolved_members.contains_key(&e)
+                            && self.info.resolved_member(e).is_some()
                         {
                             self.lookup("this").and_then(|(this_v, this_ty)| {
                                 self.lower_this_member_call(this_v, this_ty, &fname, &args, e)
@@ -16797,35 +16781,9 @@ impl<'a> Lower<'a> {
                         {
                             None
                         } else {
-                            let arg_tys = self.arg_tys(&args);
-                            // Forward the call's explicit type arguments (`listOf<Long>(…)`), as the checker
-                            // does — they bind the generic vararg's element type for literal adaptation below.
-                            let call_targs: Vec<Ty> = self
-                                .afile
-                                .call_type_args
-                                .get(&e.0)
-                                .map(|ts| {
-                                    ts.iter()
-                                        .map(|r| {
-                                            crate::types::Ty::from_name(&r.name)
-                                                .filter(|_| !r.nullable)
-                                                .or_else(|| self.ty_ref(r))
-                                                .unwrap_or(Ty::Error)
-                                        })
-                                        .collect()
-                                })
-                                .unwrap_or_default();
-                            // Reuse the callable the checker resolved for this call (keyed by the call
-                            // ExprId); resolve only when it recorded through a different path (a
-                            // local/module/FQ call). Both sides call `resolve_top_level_callable`, so a
-                            // recorded hit is identical to re-resolving.
-                            self.info.resolved_top_level.get(&e).cloned().or_else(|| {
-                                self.resolver().resolve_top_level_callable(
-                                    &fname,
-                                    &arg_tys,
-                                    &call_targs,
-                                )
-                            })
+                            // The callable the checker resolved for this call (keyed by the call ExprId).
+                            // The checker is the sole resolver; the lowerer only reads.
+                            self.info.resolved_top_level(e).cloned()
                         }
                     } {
                         // For a spliced top-level `inline fun` (`run { 2 + 3 }`), the body returns the
@@ -16840,12 +16798,12 @@ impl<'a> Lower<'a> {
                         if let Some(intrinsic) = self.lower_assert(&c, &args) {
                             return Some(intrinsic);
                         }
-                        // Is the callee a `suspend fun`? Ask the resolver (the flag flows uniformly from
-                        // the AST for a module/sibling-file fn and from `@Metadata` for a classpath one).
-                        // A suspend call is recorded by `ExprId` so the coroutine pass threads the
-                        // continuation even when the callee lives in another compilation unit (absent from
-                        // this file's `suspend_funs`).
-                        let call_suspend = self.resolver().toplevel_is_suspend(&fname);
+                        // Is the callee a `suspend fun`? Read the flag the CHECKER recorded on the resolved
+                        // callable (it flows uniformly from the AST for a module/sibling-file fn and from
+                        // `@Metadata` for a classpath one). A suspend call is recorded by `ExprId` so the
+                        // coroutine pass threads the continuation even when the callee lives in another
+                        // compilation unit (absent from this file's `suspend_funs`).
+                        let call_suspend = c.suspend;
                         // A sub-`Int` primitive type argument (`listOf<Short>(1, 2)`) erases its
                         // element to `Object`, so a wider literal would box as `Integer` and a later
                         // narrowing read (`map(::shortFoo)`) throws `ClassCastException`. kotlinc boxes
@@ -17563,7 +17521,7 @@ impl<'a> Lower<'a> {
                                             &[],
                                         )
                                         .is_some()
-                                        || self.has_library_iterator_extension(rty)
+                                        || self.has_library_iterator_extension(receiver)
                                 });
                             if iterable {
                                 let param = ast::first_lambda_param_or_it(&params);
@@ -17589,7 +17547,7 @@ impl<'a> Lower<'a> {
                                     &[],
                                 )
                                 .is_some()
-                                    || self.has_library_iterator_extension(rty)
+                                    || self.has_library_iterator_extension(receiver)
                             });
                             if iterable && params.len() == 2 {
                                 let idx = params[0].clone();
@@ -17618,12 +17576,7 @@ impl<'a> Lower<'a> {
                         && !matches!(name.as_str(), "run" | "apply")
                         && matches!(self.afile.expr(args[0]), Expr::Lambda { .. })
                     {
-                        if let Some(call) = self.try_route_lambda_inline(
-                            &name,
-                            receiver,
-                            args[0],
-                            self.info.ty(receiver),
-                        ) {
+                        if let Some(call) = self.try_route_lambda_inline(e, receiver, args[0]) {
                             return Some(call);
                         }
                     }
@@ -18317,11 +18270,10 @@ impl<'a> Lower<'a> {
                         self.coerce_generic_read(call, e, mret)
                     } else if let Some(resolved) = self
                         .info
-                        .resolved_members
-                        .get(&e)
+                        .resolved_member(e)
                         .cloned()
                         // The checker records the member it resolved for this source call keyed by the
-                        // call `ExprId` (see [`TypeInfo::resolved_members`]); reuse it so the call is
+                        // call `ExprId` (see [`TypeInfo::resolved_calls`]); reuse it so the call is
                         // resolved once. Fall back to resolving for a call the checker did not record
                         // through this path (its resolution came from an earlier branch above).
                         .or_else(|| {
@@ -18357,14 +18309,13 @@ impl<'a> Lower<'a> {
                             dispatch_receiver: Some(recv),
                             args: a,
                         });
-                        self.coerce_erased(call, ret, physical_ret)
+                        self.coerce_to_static(call, ret, physical_ret)
                     } else if let Some(m) = {
                         // A `@JvmStatic` member of a classpath `object` (`Base58Uuid.of(x)`) → a static
                         // method on the object class (`invokestatic`), found in the type's static list.
                         rt.obj_internal().and_then(|internal| {
                             self.info
-                                .resolved_companions
-                                .get(&e)
+                                .resolved_companion(e)
                                 .cloned()
                                 // Reuse the static member the checker resolved for this call (keyed by
                                 // the call ExprId); resolve only when not recorded.
@@ -18402,13 +18353,11 @@ impl<'a> Lower<'a> {
                             dispatch_receiver: None,
                             args: a,
                         });
-                        self.coerce_erased(call, m.ret, m.physical_ret)
-                    } else if let Some(c) = {
-                        // A library-resolved extension `recv.name(args)` → `invokestatic
-                        // facade.name(recv, args)`. Owner + descriptor come from resolver data, so no
-                        // stdlib name is hardcoded here.
-                        self.resolve_ext_lit_widened(&name, rt, &args, &self.arg_tys(&args))
-                    } {
+                        self.coerce_to_static(call, m.ret, m.physical_ret)
+                    } else if let Some(c) = self.info.resolved_extension(e).cloned() {
+                        // A library extension `recv.name(args)` → `invokestatic facade.name(recv, args)`.
+                        // The CHECKER resolved it (sole resolver) and recorded the callable; the lowerer
+                        // only reads it. Owner + descriptor come from that record — no name hardcoded.
                         // Coerce the receiver + arguments to the extension's parameter types so a
                         // primitive flowing into a generic `Object` parameter (`fun <T> T.to(…)`) boxes.
                         let p0 = *c.params.first().unwrap_or(&rt);
@@ -18466,9 +18415,10 @@ impl<'a> Lower<'a> {
                         // continuation value there (`append_continuation`, `$default` arm). `c.ret` is the
                         // logical return the pass unboxes the erased `Object` suspension result by.
                         let logical_ret = c.ret;
-                        let suspend_default =
-                            c.default_call && self.resolver().extension_is_suspend(&name, rt);
-                        let reified_subst = self.reified_call_subst_for(e, &c);
+                        let suspend_default = c.default_call && c.suspend;
+                        // `rt` is the extension receiver's type — its type args bind a reified `T` that is
+                        // inferred from the receiver (`Collection<T>.toTypedArray()`) when none is explicit.
+                        let reified_subst = self.reified_call_subst_for(e, &c, Some(rt));
                         let call = self.ir.add_expr(IrExpr::Call {
                             callee: Callee::Static {
                                 owner: c.owner,
@@ -18487,118 +18437,36 @@ impl<'a> Lower<'a> {
                             self.ir.suspend_calls.insert(call, ty_to_ir(logical_ret));
                         }
                         self.coerce_generic_read(call, e, c.physical_ret)
-                    } else if let Some(c) = {
-                        // A call selected by lambda RETURN type (`recv.sumOf { it * 2 }`): resolve the
-                        // `@JvmName`-mangled `@InlineOnly` method (`sumOfInt`) matching the lambda's return,
-                        // then splice it (its body is a fold loop). The lambda return comes from the typed
-                        // lambda arg.
-                        let arg_tys = self.arg_tys(&args);
-                        arg_tys
-                            .iter()
-                            .find_map(|t| {
-                                if let Ty::Fun(s) = t {
-                                    Some(s.ret)
-                                } else {
-                                    None
-                                }
-                            })
-                            .and_then(|lam_ret| {
-                                self.resolver()
-                                    .resolve_lambda_return_overload(rt, &name, lam_ret, &arg_tys)
-                            })
-                    } {
-                        let (c, is_member) = c;
+                    } else if let Some(c) = self.info.resolved_lambda_member(e).cloned() {
+                        // An INSTANCE MEMBER selected by lambda-return overload resolution (`recv.run2
+                        // { … }`): the receiver is the DISPATCH receiver (`invokevirtual`/`invokeinterface`),
+                        // NOT an argument. The checker recorded it; the lowerer has no other path for it
+                        // (emitting it static would leave the receiver on the operand stack → `VerifyError`).
                         let phys = c.physical_ret;
-                        let call = if is_member {
-                            // Instance MEMBER (`recv.foo { … }`): the receiver is the DISPATCH receiver
-                            // (`invokevirtual`/`invokeinterface`), NOT an argument. `c.params` are the
-                            // value parameters only (no receiver). Emitting it static would leave the
-                            // receiver on the operand stack → `VerifyError`.
-                            let interface = self.library_type_is_interface(&c.owner);
-                            let recv = self.expr(receiver)?;
-                            let mut a = Vec::new();
-                            for (i, &arg) in args.iter().enumerate() {
-                                match c.params.get(i) {
-                                    Some(p) => a.push(self.lower_arg(arg, &ty_to_ir(*p))?),
-                                    None => a.push(self.expr(arg)?),
-                                }
-                            }
-                            self.ir.add_expr(IrExpr::Call {
-                                callee: Callee::Virtual {
-                                    owner: c.owner,
-                                    name: c.name,
-                                    descriptor: c.descriptor,
-                                    interface,
-                                },
-                                dispatch_receiver: Some(recv),
-                                args: a,
-                            })
-                        } else {
-                            // Extension: a static method whose receiver is the FIRST argument.
-                            let p0 = *c.params.first().unwrap_or(&rt);
-                            let recv = self.lower_arg(receiver, &ty_to_ir(p0))?;
-                            let mut a = vec![recv];
-                            for (i, &arg) in args.iter().enumerate() {
-                                match c.params.get(i + 1) {
-                                    Some(p) => a.push(self.lower_arg(arg, &ty_to_ir(*p))?),
-                                    None => a.push(self.expr(arg)?),
-                                }
-                            }
-                            let call = self.ir.add_expr(IrExpr::Call {
-                                callee: Callee::Static {
-                                    owner: c.owner,
-                                    name: c.name,
-                                    descriptor: c.descriptor,
-                                    inline: c.inline,
-                                },
-                                dispatch_receiver: None,
-                                args: a,
-                            });
-                            self.record_ext_source_receiver(call, c.source_receiver);
-                            call
-                        };
-                        self.coerce_generic_read(call, e, phys)
-                    } else if let Some(c) = {
-                        // A private `@InlineOnly` extension (`String.uppercase()` → inlines
-                        // `toUpperCase(Locale.ROOT)`): resolve via the inline-only path and emit an inline
-                        // `Callee::Static` so the backend splices its REAL body (no call to the
-                        // package-private method is emitted). Gated on provider-computed spliceability, which
-                        // DRY-RUNS the
-                        // actual splice — so a body the emitter couldn't splice (and would fall back to an
-                        // `invokestatic` on the private method) is never routed; the call simply skips.
-                        self.resolver()
-                            .resolve_extension_inline_callable(&name, rt, &self.arg_tys(&args))
-                            .filter(|c| {
-                                // The `@Metadata` `inline` flag is keyed by the Kotlin name; a
-                                // `@JvmName`-mangled method (`sumOf` → `sumOfInt`) loses it, reading back
-                                // `is_inline=false`. A PRIVATE (`must_inline`) extension has no callable
-                                // method regardless, so it MUST be spliced — gate on the real splice dry-run,
-                                // which is the actual current backend correctness condition.
-                                c.inline.can_inline()
-                            })
-                    } {
-                        let p0 = *c.params.first().unwrap_or(&rt);
-                        let recv = self.lower_arg(receiver, &ty_to_ir(p0))?;
-                        let mut a = vec![recv];
+                        let interface = self.library_type_is_interface(&c.owner);
+                        let recv = self.expr(receiver)?;
+                        let mut a = Vec::new();
                         for (i, &arg) in args.iter().enumerate() {
-                            match c.params.get(i + 1) {
+                            match c.params.get(i) {
                                 Some(p) => a.push(self.lower_arg(arg, &ty_to_ir(*p))?),
                                 None => a.push(self.expr(arg)?),
                             }
                         }
                         let call = self.ir.add_expr(IrExpr::Call {
-                            callee: Callee::Static {
+                            callee: Callee::Virtual {
                                 owner: c.owner,
                                 name: c.name,
                                 descriptor: c.descriptor,
-                                inline: c.inline,
+                                interface,
                             },
-                            dispatch_receiver: None,
+                            dispatch_receiver: Some(recv),
                             args: a,
                         });
-                        self.record_ext_source_receiver(call, c.source_receiver);
-                        self.coerce_generic_read(call, e, c.physical_ret)
+                        self.coerce_generic_read(call, e, phys)
                     } else {
+                        // A private `@InlineOnly` extension (scope fn / `String.uppercase()`) is recorded
+                        // as an [`Extension`] by the checker and handled by the general branch above (its
+                        // `inline` metadata makes the backend splice). Nothing left to resolve here.
                         return None;
                     }
                 }
@@ -19508,6 +19376,116 @@ fn class_internal(file: &ast::File, name: &str) -> String {
     }
 }
 
+/// The `ClassDecl` for a class named `name` (simple name) declared in this file, if any.
+fn file_class_decl<'a>(file: &'a ast::File, name: &str) -> Option<&'a ast::ClassDecl> {
+    file.decls.iter().find_map(|&d| match file.decl(d) {
+        ast::Decl::Class(c) if c.name == name => Some(c),
+        _ => None,
+    })
+}
+
+/// The `ClassDecl` of a RUNTIME-retained `annotation class` named `name` declared in this file — the only
+/// annotations krusty emits into `RuntimeVisibleAnnotations`. `None` for a non-annotation / non-file /
+/// `SOURCE`/`BINARY`-retained annotation. Kotlin's default retention is RUNTIME.
+fn runtime_annotation_decl<'a>(file: &'a ast::File, name: &str) -> Option<&'a ast::ClassDecl> {
+    let cd = file_class_decl(file, name).filter(|c| c.kind == ast::ClassKind::Annotation)?;
+    // `@Retention(AnnotationRetention.SOURCE|BINARY)` opts out; anything else (incl. no `@Retention`) is
+    // RUNTIME. The retention argument is `AnnotationRetention.<X>` — an `Expr::Member`.
+    let non_runtime = cd
+        .annotations
+        .iter()
+        .zip(cd.annotation_args.iter())
+        .any(|(n, a)| {
+            n == "Retention"
+                && a.first().is_some_and(|&arg| {
+                    matches!(file.expr(arg), ast::Expr::Member { name, .. } if name == "SOURCE" || name == "BINARY")
+                })
+        });
+    (!non_runtime).then_some(cd)
+}
+
+/// Fold an annotation argument expression to an encodable `AnnoValue` (JVMS §4.7.16.1), or `None` for a
+/// shape not modeled — in which case the whole annotation is dropped (never emitted with a wrong value).
+fn eval_anno_value(file: &ast::File, e: AstExprId) -> Option<crate::ir::AnnoValue> {
+    use crate::ir::{AnnoValue, IrConst};
+    Some(match file.expr(e) {
+        Expr::StringLit(s) => AnnoValue::Const(IrConst::String(s.clone())),
+        Expr::IntLit(v) | Expr::UIntLit(v) => AnnoValue::Const(IrConst::Int(*v as i32)),
+        Expr::LongLit(v) | Expr::ULongLit(v) => AnnoValue::Const(IrConst::Long(*v)),
+        Expr::DoubleLit(v) => AnnoValue::Const(IrConst::Double(*v)),
+        Expr::FloatLit(v) => AnnoValue::Const(IrConst::Float(*v)),
+        Expr::BoolLit(v) => AnnoValue::Const(IrConst::Boolean(*v)),
+        Expr::CharLit(v) => AnnoValue::Const(IrConst::Char(*v)),
+        // `E.E0` — an ENUM constant (`receiver` names an enum class declared in this file).
+        Expr::Member { receiver, name } => {
+            let Expr::Name(enum_name) = file.expr(*receiver) else {
+                return None;
+            };
+            file_class_decl(file, enum_name).filter(|c| c.kind == ast::ClassKind::Enum)?;
+            AnnoValue::Enum(class_internal(file, enum_name), name.clone())
+        }
+        // `A::class` — a class literal.
+        Expr::CallableRef {
+            receiver: Some(r),
+            name,
+        } if name == "class" => {
+            let Expr::Name(cn) = file.expr(*r) else {
+                return None;
+            };
+            AnnoValue::Class(class_internal(file, cn))
+        }
+        Expr::Call { callee, args } => {
+            let Expr::Name(fname) = file.expr(*callee) else {
+                return None;
+            };
+            match fname.as_str() {
+                "emptyArray" => AnnoValue::Array(Vec::new()),
+                "arrayOf" | "intArrayOf" | "longArrayOf" | "doubleArrayOf" | "floatArrayOf"
+                | "booleanArrayOf" | "charArrayOf" | "byteArrayOf" | "shortArrayOf" => {
+                    let items: Option<Vec<_>> =
+                        args.iter().map(|&a| eval_anno_value(file, a)).collect();
+                    AnnoValue::Array(items?)
+                }
+                // A NESTED annotation instance `A(...)`.
+                _ => AnnoValue::Annotation(build_applied_annotation(file, fname, args)?),
+            }
+        }
+        _ => return None,
+    })
+}
+
+/// Fold `@Name(args…)` (positional) to an `AppliedAnnotation`, pairing each argument with the annotation's
+/// constructor-parameter name. `None` unless `Name` is a RUNTIME-retained file annotation class and every
+/// argument folds to a constant.
+fn build_applied_annotation(
+    file: &ast::File,
+    name: &str,
+    args: &[AstExprId],
+) -> Option<crate::ir::AppliedAnnotation> {
+    let cd = runtime_annotation_decl(file, name)?;
+    let mut values = Vec::new();
+    for (i, &arg) in args.iter().enumerate() {
+        let pname = cd.props.get(i)?.name.clone();
+        values.push((pname, eval_anno_value(file, arg)?));
+    }
+    Some(crate::ir::AppliedAnnotation {
+        internal: class_internal(file, name),
+        values,
+    })
+}
+
+/// The RUNTIME-retained applied annotations on a class declaration, folded for `RuntimeVisibleAnnotations`.
+fn class_applied_annotations(
+    file: &ast::File,
+    c: &ast::ClassDecl,
+) -> Vec<crate::ir::AppliedAnnotation> {
+    c.annotations
+        .iter()
+        .zip(c.annotation_args.iter())
+        .filter_map(|(name, args)| build_applied_annotation(file, name, args))
+        .collect()
+}
+
 /// Extract the BACKEND-AGNOSTIC generic-signature shape of a generic class (`class Box<T>`), or `None`
 /// for a non-generic class / one with explicit supertypes (whose generic args aren't modeled yet) / an
 /// unsupported bound. The `jvm` backend formats this into the class `Signature` attribute.
@@ -19782,8 +19760,18 @@ fn ty_of(file: &ast::File, r: &ast::TypeRef) -> Ty {
 
 /// Whether an `IrType` is a reference type (anything except a primitive class FqName / Unit).
 fn ir_type_is_reference(t: &Ty) -> bool {
-    let t = t.non_null();
-    matches!(t, Ty::Fun(_))
+    // A NULLABLE value is always a reference: a nullable reference keeps its descriptor, and a nullable
+    // PRIMITIVE (`Int?`, `UInt?`) is its BOXED wrapper (`java/lang/Integer`, `kotlin/UInt`) — a `?`
+    // primitive can never occupy a primitive slot. (The IR used to carry these pre-boxed as `Obj(..)`;
+    // with source types the `?`-primitive stays `Nullable(Int)`, so recognize it here.)
+    if t.is_nullable() {
+        return true;
+    }
+    // The IR now carries SOURCE `Ty` variants directly — `Ty::String` is a reference but has no
+    // `obj_internal()`, so recognize it explicitly (before it was always `Obj("kotlin/String")` and
+    // matched the fallback). `Ty::Fun` is a `FunctionN` reference; arrays are `Obj("kotlin/Array")` /
+    // `Obj("kotlin/IntArray")` and fall through to the `obj_internal` clause.
+    matches!(t, Ty::Fun(_) | Ty::String)
         || t.obj_internal()
             .is_some_and(|_| t.unboxed_primitive().is_none())
 }
@@ -19882,81 +19870,25 @@ fn mark_nullable(t: Ty) -> Ty {
 }
 
 pub(crate) fn ty_to_ir(t: Ty) -> Ty {
-    let fq = match t {
-        Ty::Int => "kotlin/Int",
-        Ty::Long => "kotlin/Long",
-        // Unboxed unsigned types ARE their signed primitive on the JVM (`UInt` = int, `ULong` = long);
-        // unsigned-specific operations are selected earlier from the checker `Ty`, not here.
-        Ty::UInt => "kotlin/Int",
-        Ty::ULong => "kotlin/Long",
-        Ty::Short => "kotlin/Short",
-        Ty::Byte => "kotlin/Byte",
-        Ty::Boolean => "kotlin/Boolean",
-        Ty::Char => "kotlin/Char",
-        Ty::Double => "kotlin/Double",
-        Ty::Float => "kotlin/Float",
-        Ty::String => "kotlin/String",
-        Ty::Unit => return Ty::Unit,
-        Ty::Nothing => return Ty::Nothing,
-        // (see `ir_array_element` below for the inverse — extracting an array IrType's element.)
-        // A reference `Array<T>` keeps its element as a type argument (the JVM backend boxes a
-        // primitive `T` when it lays out the array; the front end keeps the logical element).
-        Ty::Obj("kotlin/Array", args) => return Ty::obj_args("kotlin/Array", &tys_to_ir(args)),
-        Ty::Obj(n, _) => return Ty::obj(n),
-        // A Kotlin function type `(A,…) -> R` is kept structural so each backend picks its own
-        // representation (the JVM maps it to `kotlin/jvm/functions/FunctionN`, JS to a closure, …).
-        Ty::Fun(s) => {
-            let params = tys_to_ir(&s.params);
-            let ret = ty_to_ir(s.ret);
-            return if s.suspend {
-                Ty::fun_suspend(params, ret)
-            } else {
-                Ty::fun(params, ret)
-            };
-        }
-        // An array is a regular class type (`kotlin/IntArray`, `kotlin/Array<T>`); the backend lowers
-        // its representation. Primitive arrays encode the element in the class name.
-        Ty::Array(e) => {
-            let fq = match *e {
-                Ty::Int => "kotlin/IntArray",
-                Ty::Long => "kotlin/LongArray",
-                Ty::Double => "kotlin/DoubleArray",
-                Ty::Float => "kotlin/FloatArray",
-                Ty::Boolean => "kotlin/BooleanArray",
-                Ty::Char => "kotlin/CharArray",
-                Ty::Byte => "kotlin/ByteArray",
-                Ty::Short => "kotlin/ShortArray",
-                // An unsigned array (e.g. a `vararg x: UInt` → `UIntArray`) is the unboxed underlying
-                // primitive array (`[I`/`[J`), NOT a boxed `kotlin/Array`. Keep it primitive so it
-                // doesn't collide with a boxed `Array<Int>` at the `kotlin/Array` element-boxing step.
-                Ty::UInt => "kotlin/IntArray",
-                Ty::ULong => "kotlin/LongArray",
-                _ => return Ty::obj_args("kotlin/Array", &[ty_to_ir(*e)]),
-            };
-            return Ty::obj(fq);
-        }
-        // A nullable type. A nullable PRIMITIVE is a boxed wrapper reference in the IR (the wrapper
-        // class) — matching the representation from before nullable primitives became `Ty::Nullable`,
-        // so the codegen for a boxed `Int?` is unchanged (a reference, never an unboxed `int` slot). A
-        // nullable REFERENCE keeps its reference form. Without this arm a nullable primitive fell to
-        // `Ty::Error` and miscompiled.
-        Ty::Nullable(inner) => {
-            return match crate::jvm::jvm_class_map::wrapper_internal(*inner) {
-                Some(wrapper) => Ty::obj(wrapper),
-                None => ty_to_ir(*inner),
-            };
-        }
-        // A type parameter `T` erases to its declared bound in the IR (JVM erasure). When generic
-        // substitution lands this will instead carry the `TyParam` so the backend erases at emit; for
-        // now erasing here keeps codegen identical to the pre-`TyParam` representation.
-        Ty::TyParam(_, bound) => return ty_to_ir(*bound),
-        _ => return Ty::Error,
-    };
-    Ty::obj(fq)
+    t
 }
 
 fn tys_to_ir(tys: &[Ty]) -> Vec<Ty> {
-    tys.iter().map(|t| ty_to_ir(*t)).collect()
+    tys.to_vec()
+}
+
+/// The IR element type of a captured mutable local's `Ref` holder — like [`ty_to_ir`], but PRESERVING a
+/// reference type's nullability. `ty_to_ir` drops `?` on references (the IR carries no reference
+/// nullability), but a shared cell must keep it: a NULLABLE reference-underlying value class (`var
+/// res: Result<T>?`) is stored BOXED, and the value-class pass distinguishes that boxed form from a
+/// non-null (unboxed-underlying) one ONLY by the element type's nullability. Without this the `?` is lost,
+/// the pass reads the cell as an unboxed underlying, and a `res!!.getOrThrow()` fails to unbox the box.
+fn ref_elem_ir(t: Ty) -> Ty {
+    if t.is_nullable() {
+        Ty::nullable(ty_to_ir(t.non_null()))
+    } else {
+        ty_to_ir(t)
+    }
 }
 
 /// The element `IrType` of an array `IrType` target — a reference `Array<E>` (its type argument) or a

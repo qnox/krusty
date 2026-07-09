@@ -16,37 +16,24 @@ use crate::types::Ty;
 pub use crate::types::Visibility;
 use std::collections::HashMap;
 
-/// A parsed generic-signature node, platform neutral. A backend parses its own signature format into
-/// this tree; call resolution unifies and substitutes over it without knowing which backend produced it.
-#[derive(Clone, Debug)]
-pub enum GSig {
-    /// A type-variable name (`T`). Interned (`crate::types::intern`) — the pool is shared with `Ty`, so
-    /// the same class/var name is one leaked `&'static str` across every `GSig`/`MetaFn`/`Ty`.
-    Var(&'static str),
-    /// A class internal name (`kotlin/collections/List`) + its type arguments. The name is interned so
-    /// thousands of repeated stdlib class names in decoded signatures share one allocation.
-    Class(&'static str, Vec<GSig>),
-    Function {
-        params: Vec<GSig>,
-        ret: Box<GSig>,
-    },
-    Arr(Box<GSig>),
-    Prim(Ty),
-}
-
 /// A parsed generic signature in Kotlin's logical shape: formal type-parameter names, an OPTIONAL
-/// receiver, the value parameters, and the return. The receiver is an ATTRIBUTE — never a value
-/// parameter — because at resolve/check level a member `A.foo(b): C` and an extension `fun A.foo(b): C`
-/// are the same shape (receiver `A`, one param `b`, return `C`); that an extension emits the receiver as
-/// a leading JVM argument, and a `suspend` fun emits a trailing `Continuation`, are EMIT concerns the
-/// backend adds — they are absent here. `params` therefore holds only the source value parameters.
+/// receiver, the value parameters, and the return. Every node is a plain [`Ty`] — a type variable is a
+/// [`Ty::TyParam`] (name + `kotlin/Any` bound), a generic class carries its arguments in [`Ty::Obj`], a
+/// function type is [`Ty::Fun`]. A backend parses its own signature format straight into `Ty`; call
+/// resolution unifies and substitutes over it with [`crate::symbol_resolver::unify_ty`] /
+/// [`crate::symbol_resolver::ty_subst`] without knowing which backend produced it. The receiver is an
+/// ATTRIBUTE — never a value parameter — because at resolve/check level a member `A.foo(b): C` and an
+/// extension `fun A.foo(b): C` are the same shape (receiver `A`, one param `b`, return `C`); that an
+/// extension emits the receiver as a leading JVM argument, and a `suspend` fun emits a trailing
+/// `Continuation`, are EMIT concerns the backend adds — they are absent here. `params` therefore holds
+/// only the source value parameters.
 #[derive(Clone, Debug)]
 pub struct GenericSig {
     pub formals: Vec<String>,
-    /// The dispatch/extension receiver's signature (member self-type or extension receiver), if any.
-    pub receiver: Option<GSig>,
-    pub params: Vec<GSig>,
-    pub ret: GSig,
+    /// The dispatch/extension receiver's type (member self-type or extension receiver), if any.
+    pub receiver: Option<Ty>,
+    pub params: Vec<Ty>,
+    pub ret: Ty,
 }
 
 /// One member (constructor, member function/property accessor, or companion member) of a library
@@ -402,6 +389,7 @@ impl LibraryCallable {
             ret,
             physical_ret,
             descriptor: descriptor.into(),
+            suspend: false,
             inline: InlineKind::None,
             default_call: false,
             vararg_elem: None,
@@ -443,6 +431,10 @@ pub struct LibraryCallable {
     /// type parameter). The backend inserts the unbox/checkcast bridging `physical_ret` → `ret`.
     pub physical_ret: Ty,
     pub descriptor: String,
+    /// The callee is a `suspend` fun/extension — a call to it inside a suspend body threads a
+    /// `Continuation` (and a lambda whose body calls one becomes a coroutine state machine). The checker
+    /// records this on the resolved callable so the lowerer never re-queries the library for it.
+    pub suspend: bool,
     /// The callee's inline-ness in one field (was `is_inline` + `must_inline`): [`InlineKind::CanInline`]
     /// for a Kotlin `inline` function the backend MAY splice instead of emitting an `invokestatic`,
     /// [`InlineKind::MustInline`] for a non-public `@InlineOnly` callee the backend MUST splice (no legal
@@ -814,19 +806,18 @@ pub enum PropKind {
 /// One property declaration a source exposes, arg-independent — the property analogue of
 /// [`FunctionInfo`], so a resolver can query properties symmetrically with `functions`.
 ///
-/// The type is carried as a platform-neutral [`GSig`] (NOT an erased `Ty`): the resolver reads the
-/// Kotlin type; erasure to a descriptor happens only at the emit boundary, inside the opaque accessor
-/// [`LibraryCallable`]s. (Nullability lands in the `GSig` node once the metadata decode that populates
-/// it is added — the seam here does not yet consume the type.)
+/// The type is carried as a Kotlin-level [`Ty`] (a type variable is a [`Ty::TyParam`]): the resolver
+/// reads the Kotlin type; erasure to a descriptor happens only at the emit boundary, inside the opaque
+/// accessor [`LibraryCallable`]s.
 #[derive(Clone)]
 pub struct PropertyInfo {
     pub kind: PropKind,
     /// The extension/member receiver type; `None` for a top-level property.
-    pub receiver: Option<GSig>,
+    pub receiver: Option<Ty>,
     /// The property's own formal type parameters (`val <T> List<T>.foo`); empty for a plain property.
     pub formals: Vec<String>,
     /// The property's declared type.
-    pub ty: GSig,
+    pub ty: Ty,
     /// The real getter — an opaque platform emit handle (the erased descriptor lives here).
     pub getter: LibraryCallable,
     /// The setter, present iff the property is a `var`.

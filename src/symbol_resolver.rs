@@ -8,17 +8,55 @@
 //! it selects the right overload and binds the generic receiver/parameter/return types. It is platform
 //! agnostic — it only ever talks to the oracle through the [`SymbolSource`] trait, so the same binding
 //! logic serves every backend (JVM today, JS later). The platform-specific bits (parsing a backend's
-//! generic-signature string into [`GSig`]) live behind the trait; the binding *algorithm* over [`GSig`]
-//! lives here.
+//! generic-signature string into a signature `Ty`) live behind the trait; the binding *algorithm* over
+//! those `Ty` nodes lives here.
 
 use crate::libraries::{
-    CompilerPlatform, FnKind, FunctionInfo, FunctionSet, GSig, GenericSig, InlineKind,
-    LibraryCallable, LibraryMember, Origin, PropKind,
+    CompilerPlatform, FnKind, FunctionInfo, FunctionSet, GenericSig, InlineKind, LibraryCallable,
+    LibraryMember, Origin, PropKind,
 };
 use crate::symbol_source::SymbolSource;
 use crate::types::Ty;
 
 type GSigBinds = std::collections::HashMap<String, Ty>;
+
+/// [`crate::assignable::TypeOracle`] over a federated [`SymbolSource`] (module ∪ classpath): the class
+/// hierarchy walk the one assignability relation needs. Kotlin-name supertypes, no JVM canonicalization —
+/// source-type space, as `source_receiver_rank` uses.
+pub(crate) struct SourceOracle<'a>(pub &'a dyn SymbolSource);
+
+impl crate::assignable::TypeOracle for SourceOracle<'_> {
+    fn direct_supertypes(&self, internal: &str) -> Vec<String> {
+        self.0
+            .resolve_type(internal)
+            .map(|t| t.supertypes)
+            .unwrap_or_default()
+    }
+}
+
+/// [`crate::assignable::TypeOracle`] over a [`CompilerPlatform`]: adds value-class underlying and the
+/// collection JVM-identity canonicalization (`kotlin/collections/List` ≡ `java/util/List`) the classpath
+/// subtype checks rely on.
+pub(crate) struct PlatformOracle<'a>(pub &'a dyn CompilerPlatform);
+
+impl crate::assignable::TypeOracle for PlatformOracle<'_> {
+    fn direct_supertypes(&self, internal: &str) -> Vec<String> {
+        self.0
+            .resolve_type(internal)
+            .map(|t| t.supertypes)
+            .unwrap_or_default()
+    }
+    fn value_underlying(&self, ty: Ty) -> Option<Ty> {
+        self.0.value_underlying(ty)
+    }
+    fn canonical_class(&self, internal: &str) -> String {
+        self.0
+            .jvm_descriptor_form(Ty::obj(internal))
+            .obj_internal()
+            .unwrap_or(internal)
+            .to_string()
+    }
+}
 
 /// The type arguments of a constructed generic type INFERRED from a construction's argument types
 /// (`Pair(1, 2)` → `[Int, Int]`, so `Pair(1, 2)` types as `Pair<Int, Int>`). Each of the type's formal
@@ -41,7 +79,7 @@ pub fn infer_constructor_type_args(
             continue;
         }
         for (p, a) in gsig.params.iter().zip(arg_tys) {
-            unify_gsig(p, *a, &mut binds);
+            unify_ty(*p, *a, &mut binds);
         }
         break;
     }
@@ -61,80 +99,72 @@ pub fn infer_constructor_type_args(
     )
 }
 
-/// Bind type variables by unifying a parameter signature node with an actual argument `Ty`.
-pub(crate) fn unify_gsig(sig: &GSig, actual: Ty, binds: &mut GSigBinds) {
+/// Bind type variables by unifying a signature `Ty` (whose type variables are [`Ty::TyParam`]) against
+/// an actual argument `Ty`.
+pub(crate) fn unify_ty(sig: Ty, actual: Ty, binds: &mut GSigBinds) {
     match sig {
-        GSig::Var(n) => {
-            binds.entry((*n).to_string()).or_insert(actual);
+        Ty::TyParam(n, _) => {
+            binds.entry(n.to_string()).or_insert(actual);
         }
-        GSig::Arr(inner) => {
-            if let Some(elem) = actual.array_elem() {
-                unify_gsig(inner, elem, binds);
-            }
-        }
-        GSig::Function { params, ret } => {
+        Ty::Fun(fsig) => {
             // A function parameter (`Function1<T, R>`) unifies against a lambda argument (`Ty::Fun`):
             // the parameter nodes bind the lambda's parameters and the return node binds its return, so
             // `map`'s `R` binds from the lambda body's type (`{ it * 2 }` → `Int`).
-            if let Ty::Fun(fsig) = actual {
+            if let Ty::Fun(afsig) = actual {
                 // A SUSPEND SAM parameter (`suspend CoroutineScope.() -> T`) erases to
                 // `Function2<CoroutineScope, Continuation<T>, Object>` — the RESULT type parameter `T`
                 // lives inside the trailing `Continuation<T>`, and the JVM return node is `Object`. The
                 // lambda argument, however, ERASES its own `Continuation` type argument (to `Any`) and
-                // carries its real result in `fsig.ret`. Binding `T` from the erased `Continuation<Any>`
+                // carries its real result in `afsig.ret`. Binding `T` from the erased `Continuation<Any>`
                 // would fix it to `Any` (`runBlocking { … } : Any`, losing the block's type); bind it from
-                // `fsig.ret` instead, and skip the `Continuation` param so it isn't double-unified.
-                let value_params: &[GSig] = match params.last() {
-                    Some(GSig::Class(n, cargs))
+                // `afsig.ret` instead, and skip the `Continuation` param so it isn't double-unified.
+                let value_params: &[Ty] = match fsig.params.last() {
+                    Some(Ty::Obj(n, cargs))
                         if crate::types::same(n, crate::types::wk::continuation())
                             && !cargs.is_empty() =>
                     {
-                        unify_gsig(&cargs[0], fsig.ret, binds);
-                        &params[..params.len() - 1]
+                        unify_ty(cargs[0], afsig.ret, binds);
+                        &fsig.params[..fsig.params.len() - 1]
                     }
-                    _ => params,
+                    _ => &fsig.params,
                 };
-                for (a, p) in value_params.iter().zip(fsig.params.iter()) {
-                    unify_gsig(a, *p, binds);
+                for (a, p) in value_params.iter().zip(afsig.params.iter()) {
+                    unify_ty(*a, *p, binds);
                 }
-                unify_gsig(ret, fsig.ret, binds);
+                unify_ty(fsig.ret, afsig.ret, binds);
             }
         }
-        GSig::Class(_, args) => {
+        Ty::Obj(_, args) => {
             // Unify the type arguments positionally against the actual's carried arguments, if any.
             if let Ty::Obj(_, targs) = actual {
                 for (a, t) in args.iter().zip(targs.iter()) {
-                    unify_gsig(a, *t, binds);
+                    unify_ty(*a, *t, binds);
                 }
             }
         }
-        GSig::Prim(_) => {}
+        _ => {}
     }
 }
 
-/// Realize a signature node to a `Ty` under the current bindings — an unbound variable erases to
-/// `Any`, a class becomes `Ty::obj_args` carrying its (substituted) type arguments.
-pub(crate) fn gsig_to_ty(sig: &GSig, binds: &GSigBinds) -> Ty {
+/// Realize a signature `Ty` under the current bindings — a bound type variable substitutes to its
+/// binding, an unbound one erases to `Any`; a class substitutes its carried type arguments in place.
+pub(crate) fn ty_subst(sig: Ty, binds: &GSigBinds) -> Ty {
     match sig {
-        GSig::Var(n) => binds
-            .get(*n)
+        Ty::TyParam(n, _) => binds
+            .get(n)
             .copied()
             .unwrap_or_else(|| Ty::obj("kotlin/Any")),
-        GSig::Prim(t) => *t,
-        GSig::Arr(inner) => Ty::array(gsig_to_ty(inner, binds)),
-        GSig::Function { params, ret } => Ty::fun(gsig_tys(params, binds), gsig_to_ty(ret, binds)),
-        GSig::Class(internal, args) => {
-            if args.is_empty() {
-                Ty::obj(internal)
-            } else {
-                Ty::obj_args(internal, &gsig_tys(args, binds))
-            }
+        Ty::Fun(fsig) => Ty::fun(ty_subst_all(&fsig.params, binds), ty_subst(fsig.ret, binds)),
+        Ty::Nullable(inner) => Ty::nullable(ty_subst(*inner, binds)),
+        Ty::Obj(internal, args) if !args.is_empty() => {
+            Ty::obj_args(internal, &ty_subst_all(args, binds))
         }
+        _ => sig,
     }
 }
 
-pub(crate) fn gsig_tys(sigs: &[GSig], binds: &GSigBinds) -> Vec<Ty> {
-    sigs.iter().map(|s| gsig_to_ty(s, binds)).collect()
+pub(crate) fn ty_subst_all(sigs: &[Ty], binds: &GSigBinds) -> Vec<Ty> {
+    sigs.iter().map(|s| ty_subst(*s, binds)).collect()
 }
 
 fn seeded_gsig_binds(gsig: &GenericSig, type_args: &[Ty]) -> GSigBinds {
@@ -145,27 +175,27 @@ fn seeded_gsig_binds(gsig: &GenericSig, type_args: &[Ty]) -> GSigBinds {
         .collect()
 }
 
-fn bind_gsig_return<'a>(
+fn bind_gsig_return(
     gsig: &GenericSig,
     type_args: &[Ty],
-    actuals: impl IntoIterator<Item = (&'a GSig, Ty)>,
+    actuals: impl IntoIterator<Item = (Ty, Ty)>,
 ) -> Ty {
     let mut binds = seeded_gsig_binds(gsig, type_args);
     for (ps, a) in actuals {
-        unify_gsig(ps, a, &mut binds);
+        unify_ty(ps, a, &mut binds);
     }
-    gsig_to_ty(&gsig.ret, &binds)
+    ty_subst(gsig.ret, &binds)
 }
 
 fn bind_ext_ret(gsig: &GenericSig, receiver: Ty, args: &[Ty], targs: &[Ty]) -> Ty {
     let mut binds = seeded_gsig_binds(gsig, targs);
-    if let Some(recv_sig) = &gsig.receiver {
-        unify_gsig(recv_sig, receiver, &mut binds);
+    if let Some(recv_sig) = gsig.receiver {
+        unify_ty(recv_sig, receiver, &mut binds);
     }
     for (ps, a) in gsig.params.iter().zip(args.iter().copied()) {
-        unify_gsig(ps, a, &mut binds);
+        unify_ty(*ps, a, &mut binds);
     }
-    gsig_to_ty(&gsig.ret, &binds)
+    ty_subst(gsig.ret, &binds)
 }
 
 /// Bind an extension's generic return when OMITTED defaults leave the call args misaligned with the
@@ -183,29 +213,29 @@ fn bind_defaulted_ext_ret(
         return o.callable.ret;
     };
     let mut binds = seeded_gsig_binds(gsig, targs);
-    if let Some(recv_sig) = &gsig.receiver {
-        unify_gsig(recv_sig, receiver, &mut binds);
+    if let Some(recv_sig) = gsig.receiver {
+        unify_ty(recv_sig, receiver, &mut binds);
     }
     if trailing_lambda {
         let prefix = args.len().saturating_sub(1);
         for (ps, a) in gsig.params.iter().take(prefix).zip(args) {
-            unify_gsig(ps, *a, &mut binds);
+            unify_ty(*ps, *a, &mut binds);
         }
         if let (Some(ls), Some(la)) = (gsig.params.last(), args.last()) {
-            unify_gsig(ls, *la, &mut binds);
+            unify_ty(*ls, *la, &mut binds);
         }
     } else {
         for (ps, a) in gsig.params.iter().zip(args) {
-            unify_gsig(ps, *a, &mut binds);
+            unify_ty(*ps, *a, &mut binds);
         }
     }
-    gsig_to_ty(&gsig.ret, &binds)
+    ty_subst(gsig.ret, &binds)
 }
 
 /// If `sig` is a function type, the substituted types of its lambda parameters. Empty for anything else.
-pub(crate) fn function_input_types(sig: &GSig, binds: &GSigBinds) -> Vec<Ty> {
+pub(crate) fn function_input_types(sig: Ty, binds: &GSigBinds) -> Vec<Ty> {
     match sig {
-        GSig::Function { params, .. } => gsig_tys(params, binds),
+        Ty::Fun(fsig) => ty_subst_all(&fsig.params, binds),
         _ => Vec::new(),
     }
 }
@@ -323,6 +353,21 @@ impl<'a> SymbolResolver<'a> {
             src: crate::symbol_source::CompositeSource::new(vec![module, lib as &dyn SymbolSource]),
             fn_scope: Some(fn_scope),
         }
+    }
+
+    /// Whether `internal` names a `@JvmInline value`/inline class — resolved through the FEDERATED source
+    /// (the current module over the classpath), so an in-file value class and a classpath one answer alike.
+    /// The one authority for value-class-ness; callers ask the resolver, not a `SymbolSource` directly.
+    pub fn is_value(&self, internal: &str) -> bool {
+        self.src.is_value(internal)
+    }
+
+    /// The single-field UNDERLYING type of the value class named `internal` (`Result` → `Object`), resolved
+    /// through the federated source. `None` if not a value class this resolver knows.
+    pub fn value_underlying(&self, internal: &str) -> Option<Ty> {
+        self.src
+            .resolve_type(internal)
+            .and_then(|t| t.value_underlying)
     }
 
     /// The unqualified-name resolution loop for this resolver's import scope — `resolve_symbols` per
@@ -556,21 +601,21 @@ impl<'a> SymbolResolver<'a> {
                     let fixed = gsig.params.len() - 1;
                     for (i, ps) in gsig.params.iter().take(fixed).enumerate() {
                         if let Some(a) = args.get(i) {
-                            unify_gsig(ps, *a, &mut binds);
+                            unify_ty(*ps, *a, &mut binds);
                         }
                     }
-                    if let GSig::Arr(inner) = &gsig.params[fixed] {
+                    if let Some(inner) = gsig.params[fixed].array_elem() {
                         for a in &args[fixed..] {
-                            unify_gsig(inner, *a, &mut binds);
+                            unify_ty(inner, *a, &mut binds);
                         }
-                        vararg_elem = Some(gsig_to_ty(inner, &binds));
+                        vararg_elem = Some(ty_subst(inner, &binds));
                     }
                 } else {
                     for (ps, a) in gsig.params.iter().zip(args) {
-                        unify_gsig(ps, *a, &mut binds);
+                        unify_ty(*ps, *a, &mut binds);
                     }
                 }
-                gsig_to_ty(&gsig.ret, &binds)
+                ty_subst(gsig.ret, &binds)
             })
             .unwrap_or(*ret);
         let ret_ty = o.ret.apply(if o.flags.suspend { c.ret } else { ret_ty });
@@ -603,6 +648,8 @@ impl<'a> SymbolResolver<'a> {
         args: &[Ty],
         type_args: &[Ty],
     ) -> Option<LibraryCallable> {
+        // One extension resolution admits `@InlineOnly` (`must_inline`) candidates: a regular and an
+        // inline call resolve identically; only the emitter differs (it splices when `inline` is set).
         let o = select_overload(
             self.lib,
             receiver,
@@ -611,7 +658,7 @@ impl<'a> SymbolResolver<'a> {
             type_args,
             FnKind::Extension,
             ExtCtx {
-                allow_must_inline: false,
+                allow_must_inline: true,
                 fn_scope: self.fn_scope,
             },
         )?;
@@ -719,7 +766,7 @@ impl<'a> SymbolResolver<'a> {
             })
             .filter(|p| p.kind == PropKind::Extension)
             .filter_map(|p| {
-                let decl_recv = gsig_to_ty(p.receiver.as_ref()?, &std::collections::HashMap::new());
+                let decl_recv = ty_subst(p.receiver?, &std::collections::HashMap::new());
                 let rank = source_receiver_rank(&self.src, receiver, decl_recv)?;
                 Some((rank, p))
             })
@@ -944,7 +991,7 @@ impl<'a> SymbolResolver<'a> {
                     .collect();
                 bases
                     .iter()
-                    .find(|b| matches!(b.generic_sig.as_ref().map(|g| &g.ret), Some(GSig::Var(_))))
+                    .find(|b| b.generic_sig.as_ref().is_some_and(|g| g.ret.is_ty_param()))
                     .or_else(|| bases.first())
                     .and_then(|b| b.generic_sig.clone())
             });
@@ -955,7 +1002,7 @@ impl<'a> SymbolResolver<'a> {
                         gsig,
                         type_args,
                         mapping.iter().filter_map(|(param_i, arg_i)| {
-                            gsig.params.get(*param_i).map(|ps| (ps, args[*arg_i]))
+                            gsig.params.get(*param_i).map(|ps| (*ps, args[*arg_i]))
                         }),
                     )
                 })
@@ -998,7 +1045,7 @@ impl<'a> SymbolResolver<'a> {
                     bind_gsig_return(
                         gsig,
                         type_args,
-                        gsig.params.iter().zip(args.iter().copied()),
+                        gsig.params.iter().copied().zip(args.iter().copied()),
                     )
                 })
                 .unwrap_or(c.ret);
@@ -1042,12 +1089,35 @@ impl<'a> SymbolResolver<'a> {
         // them — emitting a member static with the receiver as an argument — leaves the receiver on the
         // operand stack (`VerifyError: Inconsistent stackmap frames`), which is exactly what a classpath
         // instance member taking a trailing lambda hit. Return the kind so the caller branches.
-        self.lib
-            .functions(name, Some(receiver))
-            .overloads
+        // Candidates from the scope-pruned `resolve_symbols` seam, NOT the plain `functions(name, …)`
+        // walk: a `@OverloadResolutionByLambdaReturnType` family carries a `@JvmName` (`sumOf` →
+        // `sumOfInt`) that the Kotlin name never matches, so the legacy walk returns nothing and the call
+        // bails ("not yet supported by the IR backend"). This mirrors `lambda_return_overload_param_types`.
+        // Fall back to the receiver-indexed `functions()` only when there is no import scope.
+        let candidates: Vec<FunctionInfo> = match self.fn_scope {
+            Some(scope) => resolve_symbols_in_scope(&self.src, name, scope)
+                .into_iter()
+                .flat_map(|(_, r)| match r.callables {
+                    crate::libraries::Callables::Functions(f) => f.overloads,
+                    _ => Vec::new(),
+                })
+                .collect(),
+            None => self.lib.functions(name, Some(receiver)).overloads,
+        };
+        candidates
             .into_iter()
             .find(|o| {
-                matches!(o.kind, FnKind::Extension | FnKind::Member) && o.callable.ret == lambda_ret
+                matches!(o.kind, FnKind::Extension | FnKind::Member)
+                    && o.callable.ret == lambda_ret
+                    // Scoped candidates include every same-named overload (e.g. `Array<Int>.sumOf` as
+                    // well as `Iterable<Int>.sumOf`); an extension must match THIS receiver, else a
+                    // wrong-owner descriptor (`ArraysKt.sumOfInt([I)` for a `List`) is emitted.
+                    && match o.kind {
+                        FnKind::Extension => o.receiver.is_none_or(|dr| {
+                            source_receiver_rank(&self.src, receiver, dr).is_some()
+                        }),
+                        _ => true,
+                    }
             })
             .map(|o| {
                 crate::trace_compiler!(
@@ -1067,20 +1137,37 @@ impl<'a> SymbolResolver<'a> {
     /// `receiver_rank = u32::MAX`; bind the receiver into the generic signature and read the function
     /// parameter's input types from that selected family instead of asking the provider a second time.
     pub fn lambda_return_overload_param_types(&self, receiver: Ty, name: &str) -> Option<Vec<Ty>> {
-        self.lib
-            .functions(name, Some(receiver))
-            .overloads
+        // Candidates from the ONE query (`resolve_symbols`, scope-pruned) — the plain `functions()` walk
+        // finds the family by the bytecode `@JvmName` (`sumOfInt`), which the Kotlin name never matches.
+        // A `@OverloadResolutionByLambdaReturnType` group's overloads all share the SAME selector INPUT
+        // (`(T) -> R` — only `R` varies), so binding `it` from any of them is unambiguous: bind the
+        // receiver's type args into the selector and read its input (`Iterable<Int>.sumOf` → `it: Int`).
+        let candidates: Vec<FunctionInfo> = match self.fn_scope {
+            Some(scope) => resolve_symbols_in_scope(&self.src, name, scope)
+                .into_iter()
+                .flat_map(|(_, r)| match r.callables {
+                    crate::libraries::Callables::Functions(f) => f.overloads,
+                    _ => Vec::new(),
+                })
+                .collect(),
+            None => self.lib.functions(name, Some(receiver)).overloads,
+        };
+        candidates
             .iter()
-            .filter(|o| o.kind == FnKind::Extension && o.receiver_rank == u32::MAX)
+            .filter(|o| {
+                o.kind == FnKind::Extension
+                    && o.receiver
+                        .is_none_or(|dr| source_receiver_rank(self.lib, receiver, dr).is_some())
+            })
             .find_map(|o| {
                 let gsig = o.generic_sig.as_ref()?;
                 let mut binds = std::collections::HashMap::new();
-                if let Some(recv_sig) = &gsig.receiver {
-                    unify_gsig(recv_sig, receiver, &mut binds);
+                if let Some(recv_sig) = gsig.receiver {
+                    unify_ty(recv_sig, receiver, &mut binds);
                 }
                 gsig.params
                     .first()
-                    .map(|selector| function_input_types(selector, &binds))
+                    .map(|selector| function_input_types(*selector, &binds))
                     .filter(|params| !params.is_empty())
             })
     }
@@ -1118,7 +1205,7 @@ impl<'a> SymbolResolver<'a> {
                 let mut binds = std::collections::HashMap::new();
                 for (ai, at) in arg_tys.iter().enumerate() {
                     if let (Some(t), Some(ps)) = (at, gsig.params.get(map[ai])) {
-                        unify_gsig(ps, *t, &mut binds);
+                        unify_ty(*ps, *t, &mut binds);
                     }
                 }
                 let out: Vec<Vec<Ty>> = map
@@ -1126,7 +1213,7 @@ impl<'a> SymbolResolver<'a> {
                     .map(|&pi| {
                         gsig.params
                             .get(pi)
-                            .map(|ps| function_input_types(ps, &binds))
+                            .map(|ps| function_input_types(*ps, &binds))
                             .unwrap_or_default()
                     })
                     .collect();
@@ -1212,19 +1299,19 @@ impl<'a> SymbolResolver<'a> {
                 else {
                     continue;
                 };
-                let mapped: Vec<&GSig> = param_indices.iter().map(|&i| &gsig.params[i]).collect();
+                let mapped: Vec<Ty> = param_indices.iter().map(|&i| gsig.params[i]).collect();
                 let mut binds = std::collections::HashMap::new();
-                if let Some(recv_sig) = &gsig.receiver {
-                    unify_gsig(recv_sig, receiver, &mut binds);
+                if let Some(recv_sig) = gsig.receiver {
+                    unify_ty(recv_sig, receiver, &mut binds);
                 }
                 for (ps, at) in mapped.iter().zip(arg_tys) {
                     if let Some(t) = at {
-                        unify_gsig(ps, *t, &mut binds);
+                        unify_ty(*ps, *t, &mut binds);
                     }
                 }
                 let out: Vec<Vec<Ty>> = mapped
                     .iter()
-                    .map(|ps| function_input_types(ps, &binds))
+                    .map(|ps| function_input_types(*ps, &binds))
                     .collect();
                 if out.iter().any(|v| !v.is_empty()) {
                     return Some(out);
@@ -1254,15 +1341,15 @@ impl<'a> SymbolResolver<'a> {
                 else {
                     continue;
                 };
-                let mapped: Vec<(usize, &GSig)> = param_indices
+                let mapped: Vec<(usize, Ty)> = param_indices
                     .iter()
-                    .map(|&i| (i, &gsig.params[i + 1]))
+                    .map(|&i| (i, gsig.params[i + 1]))
                     .collect();
                 let mut binds = std::collections::HashMap::new();
-                unify_gsig(&gsig.params[0], receiver, &mut binds);
+                unify_ty(gsig.params[0], receiver, &mut binds);
                 for ((_, ps), at) in mapped.iter().zip(arg_tys) {
                     if let Some(t) = at {
-                        unify_gsig(ps, *t, &mut binds);
+                        unify_ty(*ps, *t, &mut binds);
                     }
                 }
                 let out: Vec<Option<Ty>> = mapped
@@ -1283,7 +1370,7 @@ impl<'a> SymbolResolver<'a> {
                             .copied()
                             .unwrap_or(false)
                         {
-                            return function_input_types(ps, &binds).first().copied();
+                            return function_input_types(*ps, &binds).first().copied();
                         }
                         None
                     })
@@ -1662,9 +1749,9 @@ pub fn resolve_instance_member(
             .map(|gsig| {
                 let mut binds = std::collections::HashMap::new();
                 for (ps, a) in gsig.params.iter().zip(args) {
-                    unify_gsig(ps, *a, &mut binds);
+                    unify_ty(*ps, *a, &mut binds);
                 }
-                let arg_bound = gsig_to_ty(&gsig.ret, &binds);
+                let arg_bound = ty_subst(gsig.ret, &binds);
                 if arg_bound == Ty::obj("kotlin/Any") && o.callable.ret != Ty::obj("kotlin/Any") {
                     o.callable.ret
                 } else {
@@ -1809,6 +1896,38 @@ fn select_instance_info(
 /// (`Result<String>` — `erased_recv` drops type arguments), and `UInt` never binds an `Int` extension.
 /// Replaces the descriptor-based `extension_receiver_rank`, whose value-class special-case existed only
 /// because the erased `I`/`Object` descriptors tied distinct value classes together.
+/// Whether the declared receiver's type arguments are consistent with the actual receiver's, position by
+/// position, under Kotlin's COVARIANT reading of a receiver position: each actual argument must be
+/// assignable to the declared one (`source_receiver_rank` reaching from actual to declared). A declared
+/// argument that is a type variable or `Any`/`Object` is a wildcard (an `Iterable<T>` / erased
+/// `Iterable<Any>` extension binds any element). This rejects the `@JvmName` reduction variant whose
+/// element does not match (`Iterable<Byte>.averageOfByte` against a `List<Double>` — `Double` is not
+/// assignable to `Byte`) while accepting a nested-generic supertype (`Iterable<Iterable<T>>.flatten`
+/// against `List<List<Int>>` — `List<Int>` IS assignable to `Iterable<Any>`). The erased supertype walk
+/// in `source_receiver_rank` alone keys on the outer class only, so it would tie the reduction variants.
+fn receiver_type_args_match(src: &dyn SymbolSource, decl_recv: Ty, recv: Ty) -> bool {
+    // Each actual argument must be assignable to the declared one under Kotlin's covariant receiver
+    // reading. A declared argument that is a type variable or erased `Any` is a WILDCARD — the metadata
+    // decode drops the nullability flag, so a `T?` receiver element reads as bare `Any`, and a nullable
+    // actual (`Int?`) must still match it (`is_assignable(Int?, Any)` is correctly `false` under strict
+    // Kotlin, but here `Any` stands for the erased variable, not the type `Any`).
+    let cx = crate::assignable::TyCtx::new();
+    let oracle = SourceOracle(src);
+    let wildcard = |t: Ty| {
+        t.is_ty_param()
+            || matches!(t.non_null(), Ty::Obj(n, _)
+                if crate::types::same(n, crate::types::wk::any())
+                    || crate::types::same(n, crate::types::wk::java_object()))
+    };
+    decl_recv
+        .type_args()
+        .iter()
+        .zip(recv.type_args().iter())
+        .all(|(&d, &r)| {
+            wildcard(d) || wildcard(r) || crate::assignable::is_assignable(&cx, &oracle, r, d)
+        })
+}
+
 fn source_receiver_rank(src: &dyn SymbolSource, recv: Ty, decl_recv: Ty) -> Option<u32> {
     // Same source type — rung 0. Plain `Ty` equality (interned, NO erasure): the exact receiver an
     // extension is declared on. This is the ONLY rank an ARRAY receiver (`IntArray.sum()`) can carry
@@ -1816,6 +1935,15 @@ fn source_receiver_rank(src: &dyn SymbolSource, recv: Ty, decl_recv: Ty) -> Opti
     // element type must be matched exactly (an `IntArray` extension must not bind an `Array<String>`).
     if recv.non_null() == decl_recv.non_null() {
         return Some(0);
+    }
+    // A concrete type argument on the declared receiver must match the actual receiver's — the
+    // `@JvmName` reduction families (`average`/`sum`) declare one overload per element (`averageOfByte`
+    // on `Iterable<Byte>`, `…OfDouble` on `Iterable<Double>`), all erasing to the same class, so the
+    // supertype walk below would tie them and pick the first. `Iterable<Double>` binds a `List<Double>`
+    // receiver; `Iterable<Byte>` does not. A type-variable argument (`Iterable<T>.map`, projected to
+    // `Any`) matches anything, so generic extensions are untouched.
+    if !receiver_type_args_match(src, decl_recv, recv) {
+        return None;
     }
     let want = decl_recv.erased_recv().kotlin_class_internal();
     if let (Some(want), Some(start)) = (want, recv.erased_recv().kotlin_class_internal()) {
@@ -1938,6 +2066,12 @@ fn select_overload(
         },
         _ => lib.functions(name, Some(recv)),
     };
+    // Candidates from the scoped query are IN-SCOPE by construction: each came from a `resolve_symbols`
+    // over an imported package, so its declared package is in scope even when `@JvmPackageName` relocated
+    // its facade to a different JVM package (`kotlin.collections`'s `UArraysKt` → `kotlin/collections/
+    // unsigned/`). Re-deriving scope from the JVM owner (`fn_in_scope`) would wrongly drop those, so trust
+    // the query.
+    let pre_scoped = kind == FnKind::Extension && ext.fn_scope.is_some();
     crate::trace_compiler!(
         "resolve",
         "select_overload name={name} recv={recv:?} kind={kind:?} scope={:?} cands={}",
@@ -1965,7 +2099,7 @@ fn select_overload(
             && (kind != FnKind::Extension
                 || (o.receiver_rank != u32::MAX
                     && (o.public() || (allow_must_inline && o.flags.inline.must_inline()))
-                    && fn_in_scope(o, ext.fn_scope)))
+                    && (pre_scoped || fn_in_scope(o, ext.fn_scope))))
     }) {
         // A receiver-agnostic `resolve_symbols` extension carries rank `0`; recover the real receiver-MRO
         // rung from the actual receiver so most-specific selection (a `List` extension over an `Iterable`
@@ -2063,10 +2197,10 @@ fn logical_value_params(
     match o.generic_sig.as_ref() {
         Some(gsig) => {
             let mut binds = seeded_gsig_binds(gsig, type_args);
-            if let Some(recv_sig) = &gsig.receiver {
-                unify_gsig(recv_sig, recv, &mut binds);
+            if let Some(recv_sig) = gsig.receiver {
+                unify_ty(recv_sig, recv, &mut binds);
             }
-            let mut out = gsig_tys(&gsig.params, &binds);
+            let mut out = ty_subst_all(&gsig.params, &binds);
             for (i, p) in out.iter_mut().enumerate() {
                 // `callable.params[0]` is the receiver in the emit shape, so value params start at `+1`.
                 if let Some(cp) = o.callable.params.get(i + 1) {
@@ -2188,12 +2322,34 @@ fn fun_arg_matches(param: &Ty, arg: &Ty) -> bool {
         Ty::Nullable(inner) => **inner,
         _ => *param,
     };
-    param.fun_arity().is_some_and(|pn| pn == arg_arity)
+    let arity_ok = param.fun_arity().is_some_and(|pn| pn == arg_arity)
         || param
             .obj_internal()
             .and_then(|p| p.strip_prefix("kotlin/jvm/functions/Function"))
             .and_then(|d| d.parse::<u8>().ok())
-            == Some(arg_arity)
+            == Some(arg_arity);
+    arity_ok && fun_return_compatible(param, *arg)
+}
+
+/// A function-typed argument fits a function-typed parameter's RETURN. A parameter `(T) -> R` with a
+/// CONCRETE `R` (`sumOfInt`'s `(T) -> Int`) accepts ONLY a lambda whose body returns that `R` — this is
+/// how a `@OverloadResolutionByLambdaReturnType` group (whose overloads share value params and differ only
+/// in the selector's return) is resolved: the lambda's return is just another parameter of the check. A
+/// type-variable / erased-`Any` parameter return (an ordinary generic HOF `(T) -> R`), or an unresolved
+/// lambda body, stays permissive so normal HOFs keep matching.
+fn fun_return_compatible(param: Ty, arg: Ty) -> bool {
+    let (Some(pr), Some(ar)) = (param.fun_ret(), arg.fun_ret()) else {
+        return true;
+    };
+    if matches!(pr, Ty::TyParam(..) | Ty::Error)
+        || pr.non_null().obj_internal() == Some("kotlin/Any")
+    {
+        return true;
+    }
+    if matches!(ar, Ty::Error) {
+        return true;
+    }
+    pr.non_null() == ar.non_null()
 }
 
 /// Whether `arg` is assignable to `param` allowing a reference SUBTYPE (`arg`'s classpath supertype
@@ -2218,25 +2374,17 @@ fn arg_subtype_assignable(lib: &dyn CompilerPlatform, param: &Ty, arg: &Ty) -> b
     }
 }
 
-/// `sub` is `super_` or transitively extends/implements it (via the classpath supertype walk). `depth`
-/// bounds the recursion: real class hierarchies are shallow, and the bound also guarantees termination
-/// on a malformed (cyclic) classpath rather than overflowing the stack.
-fn is_classpath_subtype(lib: &dyn CompilerPlatform, sub: &str, super_: &str, depth: u32) -> bool {
-    let sub_desc = lib.jvm_descriptor_form(Ty::obj(sub));
-    let super_desc = lib.jvm_descriptor_form(Ty::obj(super_));
-    if sub == super_ || sub_desc == super_desc {
-        return true;
-    }
-    if depth > 64 {
-        return false;
-    }
-    if let Some(t) = lib.resolve_type(sub) {
-        return t
-            .supertypes
-            .iter()
-            .any(|s| is_classpath_subtype(lib, s, super_, depth + 1));
-    }
-    false
+/// `sub` is `super_` or transitively extends/implements it, via the ONE `is_subtype` relation over the
+/// class hierarchy (`PlatformOracle` supplies the classpath supertype walk and the collection JVM-identity
+/// canonicalization that equates `kotlin/collections/List` with `java/util/List`). `_depth` is retained
+/// for the call signature; the relation bounds its own walk with a `seen` set.
+fn is_classpath_subtype(lib: &dyn CompilerPlatform, sub: &str, super_: &str, _depth: u32) -> bool {
+    crate::assignable::is_subtype(
+        &crate::assignable::TyCtx::new(),
+        &PlatformOracle(lib),
+        Ty::obj(sub),
+        Ty::obj(super_),
+    )
 }
 
 #[cfg(test)]
@@ -2301,6 +2449,7 @@ mod tests {
             ret: Ty::Int,
             physical_ret: Ty::Int,
             descriptor: "(I)I".to_string(),
+            suspend: false,
             inline: InlineKind::None,
             default_call: true,
             vararg_elem: None,

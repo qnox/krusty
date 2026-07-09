@@ -195,7 +195,7 @@ fn specialize_reified_placeholders(ir: &mut IrFile) {
 /// primitive is carried as its boxed type (`Int?` → `Ljava/lang/Integer;`), matching the getter krusty
 /// emits for a nullable primitive property.
 fn ty_descriptor(ty: &Ty) -> String {
-    let (fq, nullable) = match ty.non_null().obj_internal() {
+    let (fq, nullable) = match ty.kotlin_class_internal() {
         Some(fq_name) => (fq_name, ty.is_nullable()),
         None => ("kotlin/Any", false),
     };
@@ -223,10 +223,7 @@ fn ty_descriptor(ty: &Ty) -> String {
 /// reference/richer type (which needs `decodeSerializableElement`). Covers the full primitive set +
 /// String; Long/Double are 2-slot and their field locals are sized via `slot_width`.
 fn decode_element_method(ty: &Ty) -> Option<(&'static str, &'static str)> {
-    let fq = match ty.non_null().obj_internal() {
-        Some(fq_name) => fq_name,
-        None => return None,
-    };
+    let fq = ty.kotlin_class_internal()?;
     Some(match fq {
         "kotlin/Int" => (
             "decodeIntElement",
@@ -260,6 +257,10 @@ fn decode_element_method(ty: &Ty) -> Option<(&'static str, &'static str)> {
 /// carried boxed (`java.lang.Long`/`Double`), a one-slot reference.
 fn slot_width(ty: &Ty) -> u32 {
     match ty {
+        // A non-nullable Long/Double occupies two slots, whether carried as a de-erased primitive
+        // (`Ty::Long`) or an erased `Obj("kotlin/Long")`. A NULLABLE one is boxed (`java/lang/Long`,
+        // `Ty::Nullable`) — a one-slot reference — and falls through to 1.
+        Ty::Long | Ty::Double => 2,
         Ty::Obj(fq_name, _) if *fq_name == "kotlin/Long" || *fq_name == "kotlin/Double" => 2,
         _ => 1,
     }
@@ -267,7 +268,7 @@ fn slot_width(ty: &Ty) -> u32 {
 
 /// The default value for a field's local before the decode loop fills it.
 fn default_const(ty: &Ty) -> IrConst {
-    match ty.non_null().obj_internal() {
+    match ty.kotlin_class_internal() {
         Some("kotlin/Int") => IrConst::Int(0),
         Some("kotlin/Long") => IrConst::Long(0),
         Some("kotlin/Boolean") => IrConst::Boolean(false),
@@ -291,10 +292,7 @@ fn virtual_iface(owner: &str, name: &str, descriptor: &str) -> Callee {
 /// The `CompositeEncoder.encode<T>Element` method + descriptor for a property type, or `None` if the
 /// type isn't a directly-encodable primitive/String (a richer type needs `encodeSerializableElement`).
 fn encode_element_method(ty: &Ty) -> Option<(&'static str, &'static str)> {
-    let fq = match ty.non_null().obj_internal() {
-        Some(fq_name) => fq_name,
-        None => return None,
-    };
+    let fq = ty.kotlin_class_internal()?;
     let d = "Lkotlinx/serialization/descriptors/SerialDescriptor;";
     Some(match fq {
         "kotlin/Int" => (
@@ -403,9 +401,10 @@ fn collection_serializer_builder(fq_name: &str) -> Option<(&'static str, usize)>
 
 fn element_serializer_expr(ir: &mut IrFile, ty: &Ty) -> Option<ExprId> {
     let nn = ty.non_null();
-    let Some(fq_name) = nn.obj_internal() else {
-        return None;
-    };
+    // Include de-erased primitives/`String` (`List<Int>` element `Ty::Int`): they own no `Obj` internal
+    // name but DO have a builtin element serializer (resolved at the tail via `builtin_element_serializer`).
+    // The old `obj_internal()` guard returned `None` for them, leaving a null child serializer → runtime NPE.
+    let fq_name = ty.kotlin_class_internal()?;
     let type_args = nn.type_args();
     // A sealed `@Serializable` class has NO `$serializer` (its `serializer()` returns a runtime
     // `SealedClassSerializer`); a field of that type uses `Class.serializer()` directly. Requires the
@@ -636,7 +635,10 @@ fn build_polymorphic_serializer(ir: &mut IrFile, base_internal: &str) -> ExprId 
 /// this so it stubs cleanly instead of emitting a `null` element serializer for an un-derivable type.
 fn can_derive_element_serializer(ir: &IrFile, ty: &Ty) -> bool {
     let nn = ty.non_null();
-    let Some(fq_name) = nn.obj_internal() else {
+    // Include de-erased primitives/`String` (mirrors `element_serializer_expr`): they own no `Obj`
+    // internal name but ARE derivable via the `builtin_element_serializer` tail. The old `obj_internal()`
+    // guard rejected them, so a `List<Int>` field looked un-derivable and `deserialize` stubbed out.
+    let Some(fq_name) = ty.kotlin_class_internal() else {
         return false;
     };
     let type_args = nn.type_args();
@@ -716,10 +718,7 @@ fn can_derive_element_serializer(ir: &IrFile, ty: &Ty) -> bool {
 /// the value reaching `encode/decodeNullableSerializableElement(…, Object)` is already a reference — no
 /// extra autoboxing. The serializer singleton itself serializes the unboxed primitive.
 fn builtin_element_serializer(ty: &Ty) -> Option<&'static str> {
-    let fq = match ty.non_null().obj_internal() {
-        Some(fq_name) => fq_name,
-        None => return None,
-    };
+    let fq = ty.kotlin_class_internal()?;
     // A nullable primitive is lowered to its BOXED fq name (`Int?` → `java/lang/Integer`), so match
     // both the Kotlin primitive name and the boxed name.
     Some(match fq {
@@ -750,10 +749,7 @@ fn value_class_underlying(ir: &IrFile, ty: &Ty) -> Option<Ty> {
         if depth > 32 {
             return None;
         }
-        let fq = match ty.non_null().obj_internal() {
-            Some(fq_name) => fq_name,
-            None => return None,
-        };
+        let fq = ty.kotlin_class_internal()?;
         let c = ir.classes.iter().find(|c| c.fq_name == fq)?;
         if !c.is_value {
             return None;
@@ -770,10 +766,7 @@ fn value_class_underlying(ir: &IrFile, ty: &Ty) -> Option<Ty> {
 fn inline_prim_methods(
     ty: &Ty,
 ) -> Option<(&'static str, &'static str, &'static str, &'static str)> {
-    let fq = match ty.non_null().obj_internal() {
-        Some(fq_name) => fq_name,
-        None => return None,
-    };
+    let fq = ty.kotlin_class_internal()?;
     Some(match fq {
         "kotlin/Int" | "java/lang/Integer" => ("encodeInt", "(I)V", "decodeInt", "()I"),
         "kotlin/Long" | "java/lang/Long" => ("encodeLong", "(J)V", "decodeLong", "()J"),

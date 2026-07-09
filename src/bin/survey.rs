@@ -87,7 +87,9 @@ fn first_error(src: &str, cp: &Rc<Classpath>, stem: &str) -> Option<String> {
 }
 
 fn emit_checked_ir(ir: &mut IrFile, facade: &str, cp: &Rc<Classpath>) -> Option<String> {
-    if !lower_value_classes(ir) {
+    let vc_lib = krusty::jvm::jvm_libraries::JvmLibraries::new(cp.clone());
+    let vc_resolver = krusty::symbol_resolver::SymbolResolver::new_scoped(&vc_lib, &[]);
+    if !lower_value_classes(ir, &vc_resolver) {
         return Some("lower: value-class shape not lowered".into());
     }
     if !krusty::jvm::suspend::lower_suspend(ir, facade) {

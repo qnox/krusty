@@ -182,7 +182,15 @@ pub fn compile_in_process(
     // does (jvm/backend.rs), between lowering and the value-class pass. A no-op without `@Serializable`,
     // so non-serialization snippets are unaffected; with it, `compile_in_process` matches the binary.
     krusty::plugins::run_enabled(&mut ir, file);
-    if !krusty::jvm::value_classes::lower_value_classes(&mut ir) {
+    if !{
+        let vc_module = krusty::module_symbols::ModuleSymbols::new(&syms);
+        let vc_resolver = krusty::symbol_resolver::SymbolResolver::new_scoped_with_module(
+            &*syms.libraries,
+            &vc_module,
+            &[],
+        );
+        krusty::jvm::value_classes::lower_value_classes(&mut ir, &vc_resolver)
+    } {
         return None; // value-class shape not lowered — skip, don't miscompile
     }
     // The CPS (suspend) transform — the real backend (jvm/backend.rs) runs it right after the value-class
@@ -273,7 +281,15 @@ pub fn backend_rejects_in_process(
         return Some(true);
     };
     krusty::plugins::run_enabled(&mut ir, file);
-    if !krusty::jvm::value_classes::lower_value_classes(&mut ir) {
+    if !{
+        let vc_module = krusty::module_symbols::ModuleSymbols::new(&syms);
+        let vc_resolver = krusty::symbol_resolver::SymbolResolver::new_scoped_with_module(
+            &*syms.libraries,
+            &vc_module,
+            &[],
+        );
+        krusty::jvm::value_classes::lower_value_classes(&mut ir, &vc_resolver)
+    } {
         return Some(true);
     }
     if !krusty::jvm::suspend::lower_suspend(&mut ir, &facade) {

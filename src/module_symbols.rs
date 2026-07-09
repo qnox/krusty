@@ -114,6 +114,7 @@ fn fn_info(
         params,
         ret: sig.ret,
         physical_ret: sig.ret,
+        suspend: sig.is_suspend,
         inline: InlineKind::from_flags(sig.is_inline, false),
         default_call: false,
         vararg_elem: None,

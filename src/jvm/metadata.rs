@@ -8,31 +8,32 @@
 //! String ids index the `d2` table.
 
 use super::classreader::ClassInfo;
-use crate::libraries::{GSig, GenericSig};
-use crate::types::intern;
+use crate::libraries::GenericSig;
+use crate::types::{intern, Ty};
 use std::collections::HashMap;
 use std::collections::HashSet;
 
-/// Decode a Kotlin `@Metadata` `Type` message into a [`GSig`] — the metadata-primary, JVM-agnostic
-/// generic-signature node. Kotlin generics come straight from `@Metadata` (the same source kotlinc
+/// Decode a Kotlin `@Metadata` `Type` message into a signature [`Ty`] — the metadata-primary,
+/// JVM-agnostic generic type. Kotlin generics come straight from `@Metadata` (the same source kotlinc
 /// resolves against), NOT the JVM `Signature` attribute. `tparams` maps a `Type.type_parameter` id to its
 /// name (built from the enclosing function's + class's `type_parameter` tables).
 ///
 /// Proto (`ProtoBuf.Type`): `nullable`=3, `argument`=2 (repeated `Argument{projection=1, type=2}`),
 /// `class_name`=6, `type_parameter`=8 (id), `type_parameter_name`=9 (string id). A `kotlin/FunctionN`
-/// class becomes a [`GSig::Function`] (its args are `[P1..Pn, R]`); a Kotlin primitive class collapses to
-/// [`GSig::Prim`] so it matches the rest of the pipeline. A `*`/unresolved argument erases to `Any`.
+/// class becomes a [`Ty::Fun`] (its args are `[P1..Pn, R]`); a Kotlin primitive class collapses to its
+/// dedicated [`Ty`] variant so it matches the rest of the pipeline. A type variable is a [`Ty::TyParam`]
+/// (`kotlin/Any` bound). A `*`/unresolved argument erases to `Any`.
 fn parse_type_gsig(
     body: &[u8],
     records: &[Rec],
     d2: &[String],
     tparams: &HashMap<u64, String>,
-) -> Option<GSig> {
+) -> Option<Ty> {
     let mut pb = Pb { b: body, i: 0 };
     let mut class_id = None;
     let mut tp_id = None;
     let mut tpn_id = None;
-    let mut args: Vec<GSig> = Vec::new();
+    let mut args: Vec<Ty> = Vec::new();
     while !pb.at_end() {
         let tag = pb.varint()?;
         match (tag >> 3, tag & 7) {
@@ -56,7 +57,7 @@ fn parse_type_gsig(
                         (_, w) => ap.skip(w)?,
                     }
                 }
-                args.push(arg.unwrap_or_else(|| GSig::Class(intern("kotlin/Any"), vec![])));
+                args.push(arg.unwrap_or_else(|| Ty::obj("kotlin/Any")));
             }
             (_, w) => pb.skip(w)?,
         }
@@ -66,46 +67,47 @@ fn parse_type_gsig(
         return Some(gsig_from_kotlin_class(&internal, args));
     }
     if let Some(id) = tp_id {
-        return tparams.get(&id).map(|n| GSig::Var(intern(n)));
+        return tparams
+            .get(&id)
+            .map(|n| Ty::ty_param(n, Ty::obj("kotlin/Any")));
     }
     if let Some(id) = tpn_id {
-        return resolve_string(records, d2, id as usize).map(|s| GSig::Var(intern(&s)));
+        return resolve_string(records, d2, id as usize)
+            .map(|s| Ty::ty_param(&s, Ty::obj("kotlin/Any")));
     }
     None
 }
 
-/// A `@Metadata` class name + decoded type args → a [`GSig`]: a `kotlin/FunctionN` becomes a
-/// [`GSig::Function`] (args are `[P1..Pn, R]`), a Kotlin primitive collapses to [`GSig::Prim`] (so it
-/// matches a JVM-descriptor primitive downstream), everything else stays a [`GSig::Class`].
-fn gsig_from_kotlin_class(internal: &str, mut args: Vec<GSig>) -> GSig {
+/// A `@Metadata` class name + decoded type args → a signature [`Ty`]: a `kotlin/FunctionN` becomes a
+/// [`Ty::Fun`] (args are `[P1..Pn, R]`), a Kotlin primitive collapses to its dedicated [`Ty`] variant (so
+/// it matches a JVM-descriptor primitive downstream), everything else stays a [`Ty::Obj`].
+fn gsig_from_kotlin_class(internal: &str, mut args: Vec<Ty>) -> Ty {
     if let Some(arity) = internal.strip_prefix("kotlin/Function") {
         if arity.parse::<u8>().is_ok() {
-            let ret = Box::new(
-                args.pop()
-                    .unwrap_or(GSig::Class(intern("kotlin/Any"), vec![])),
-            );
-            return GSig::Function { params: args, ret };
+            let ret = args.pop().unwrap_or_else(|| Ty::obj("kotlin/Any"));
+            return Ty::fun(args, ret);
         }
     }
-    // Arrays are `GSig::Arr` (as the JVM `Signature` parser also produces), NOT `Class("kotlin/Array")` —
-    // the vararg/spread machinery matches on `Arr`. `Array<T>` carries its element as a type argument; a
-    // primitive-array class (`IntArray`) carries the (unboxed) element implicitly (its name minus `Array`).
+    // Arrays are `Obj` types. A boxed `Array<T>` carries its element as a type argument — built directly
+    // so a primitive element stays the LOGICAL `Array<Int>` (`Obj("kotlin/Array", [Int])`), NOT the
+    // primitive `IntArray` that `Ty::array(Int)` would mint. A primitive-array class (`IntArray`) carries
+    // the (unboxed) element implicitly (its name minus `Array`) and IS `Ty::array`'s primitive form.
     if internal == "kotlin/Array" {
-        return GSig::Arr(Box::new(
-            args.pop()
-                .unwrap_or(GSig::Class(intern("kotlin/Any"), vec![])),
-        ));
+        return Ty::obj_args(
+            "kotlin/Array",
+            &[args.pop().unwrap_or_else(|| Ty::obj("kotlin/Any"))],
+        );
     }
     if let Some(elem) = internal.strip_suffix("Array").and_then(kotlin_primitive) {
-        return GSig::Arr(Box::new(GSig::Prim(elem)));
+        return Ty::array(elem);
     }
     // A canonical scalar/reference type (`Int`, `String`, `Unit`, `Nothing`) has ONE dedicated `Ty`
-    // variant; decode it to that here (a `GSig::Prim` leaf) so a gsig-derived return is identical to the
-    // one a source annotation produces — `Obj("kotlin/Unit")` would not drive the expression-body
-    // `areturn`'s `Unit.INSTANCE` materialization the way `Ty::Unit` does.
+    // variant; decode it to that here so a gsig-derived return is identical to the one a source annotation
+    // produces — `Obj("kotlin/Unit")` would not drive the expression-body `areturn`'s `Unit.INSTANCE`
+    // materialization the way `Ty::Unit` does.
     match kotlin_canonical_ty(internal) {
-        Some(t) => GSig::Prim(t),
-        None => GSig::Class(intern(internal), args),
+        Some(t) => t,
+        None => Ty::obj_args(internal, &args),
     }
 }
 
@@ -573,7 +575,7 @@ struct ParsedValueParam {
     has_default: bool,
     materialized: bool,
     recv_fun: (Option<u64>, Option<u64>),
-    /// The raw `ValueParameter.type` (field 3) `Type` message body — decoded to a [`GSig`] with the
+    /// The raw `ValueParameter.type` (field 3) `Type` message body — decoded to a signature [`Ty`] with the
     /// enclosing type-parameter table (needs `records`/`d2`, so it happens in `decode_functions`).
     type_body: Vec<u8>,
     /// The raw `ValueParameter.varargElementType` (field 5) `Type` body when the parameter is a `vararg`.
@@ -611,6 +613,10 @@ struct ParsedFunction {
     return_body: Option<Vec<u8>>,
     /// Raw `Function.receiver_type` (field 5) `Type` body (extensions only), for the metadata gsig.
     receiver_body: Option<Vec<u8>>,
+    /// Raw `Annotation` message bodies on the function (`Function.annotation`, field 12) — decoded to
+    /// `(class name, arguments)` downstream where the string table is available. Kotlin stores an
+    /// annotation here when it has `BINARY`/`RUNTIME` retention (`@JvmName`, `@OverloadResolutionBy…`).
+    annotation_bodies: Vec<Vec<u8>>,
 }
 
 /// Parse one `Function` message. The return type is `Function.return_type = 3` and the extension
@@ -628,9 +634,15 @@ fn parse_function(body: &[u8]) -> Option<ParsedFunction> {
     let mut type_params: Vec<(u64, u64)> = Vec::new();
     let mut return_body: Option<Vec<u8>> = None;
     let mut receiver_body: Option<Vec<u8>> = None;
+    let mut annotation_bodies: Vec<Vec<u8>> = Vec::new();
     while !pb.at_end() {
         let tag = pb.varint()?;
         match (tag >> 3, tag & 7) {
+            (12, 2) => {
+                // Function.annotation (repeated `Annotation`) — decoded downstream (needs the string table).
+                let n = pb.varint()? as usize;
+                annotation_bodies.push(pb.bytes(n)?.to_vec());
+            }
             (9, 0) => flags = pb.varint()?,   // flags
             (2, 0) => name_id = pb.varint()?, // name (name id in table)
             (4, 2) => {
@@ -728,7 +740,61 @@ fn parse_function(body: &[u8]) -> Option<ParsedFunction> {
         type_params,
         return_body,
         receiver_body,
+        annotation_bodies,
     })
+}
+
+/// The `@kotlin.jvm.JvmName("...")` value from a function's decoded annotation bodies, if present. The
+/// `@JvmName` annotation is `Annotation { id = <kotlin/jvm/JvmName class id>, argument = [{ value =
+/// Value { stringValue = <string id> } }] }`. Returns the resolved string. Any other annotation (or a
+/// field-12 body that isn't an `Annotation`) yields `None`, so the caller safely keeps the Kotlin name.
+fn annotation_jvm_name(bodies: &[Vec<u8>], records: &[Rec], d2: &[String]) -> Option<String> {
+    for body in bodies {
+        let mut pb = Pb { b: body, i: 0 };
+        let mut id: Option<u64> = None;
+        let mut string_arg: Option<u64> = None;
+        while !pb.at_end() {
+            let tag = pb.varint()?;
+            match (tag >> 3, tag & 7) {
+                (1, 0) => id = pb.varint(), // Annotation.id (class id)
+                (2, 2) => {
+                    // Annotation.argument → Argument { value = 2: Value { stringValue = 5 } }.
+                    let n = pb.varint()? as usize;
+                    let arg = pb.bytes(n)?;
+                    let mut ap = Pb { b: arg, i: 0 };
+                    while !ap.at_end() {
+                        let at = ap.varint()?;
+                        match (at >> 3, at & 7) {
+                            (2, 2) => {
+                                let vn = ap.varint()? as usize;
+                                let vb = ap.bytes(vn)?;
+                                let mut vp = Pb { b: vb, i: 0 };
+                                while !vp.at_end() {
+                                    let vt = vp.varint()?;
+                                    match (vt >> 3, vt & 7) {
+                                        (5, 0) => string_arg = vp.varint(), // Value.stringValue
+                                        (_, w) => vp.skip(w)?,
+                                    }
+                                }
+                            }
+                            (_, w) => ap.skip(w)?,
+                        }
+                    }
+                }
+                (_, w) => pb.skip(w)?,
+            }
+        }
+        let is_jvm_name = id
+            .and_then(|i| resolve_class_name(records, d2, i as usize))
+            .as_deref()
+            == Some("kotlin/jvm/JvmName");
+        if is_jvm_name {
+            if let Some(s) = string_arg.and_then(|s| resolve_string(records, d2, s as usize)) {
+                return Some(s);
+            }
+        }
+    }
+    None
 }
 
 /// Whether a `Type` message is nullable (`Type.nullable = 3`, a varint bool). The JVM signature erases
@@ -781,32 +847,35 @@ fn build_generic_sig(
         // A MEMBER: the declaring class parameterized by its own type parameters, so unifying it with the
         // actual receiver binds `T` exactly like an extension. `None` for a top-level function.
         class_receiver.map(|(internal, ctps)| {
-            GSig::Class(
-                intern(internal),
-                ctps.iter().map(|(_, n)| GSig::Var(intern(n))).collect(),
+            Ty::obj_args(
+                internal,
+                &ctps
+                    .iter()
+                    .map(|(_, n)| Ty::ty_param(n, Ty::obj("kotlin/Any")))
+                    .collect::<Vec<_>>(),
             )
         })
     };
-    let params: Vec<GSig> = pf
+    let params: Vec<Ty> = pf
         .value_params
         .iter()
         .map(|vp| {
             // A `vararg elem: T` param's LOGICAL type is `Array<T>` (the JVM descriptor's array-ness); its
-            // element type is `varargElementType`, so wrap it in `Arr` to match the JVM `Signature` shape.
+            // element type is `varargElementType`, so wrap it in `Array` to match the JVM `Signature` shape.
             let decoded = if let Some(elem) = &vp.vararg_elem_body {
-                parse_type_gsig(elem, records, d2, &tparams).map(|e| GSig::Arr(Box::new(e)))
+                parse_type_gsig(elem, records, d2, &tparams).map(Ty::array)
             } else {
                 parse_type_gsig(&vp.type_body, records, d2, &tparams)
             };
             // An unresolvable param erases to a fresh unbound var (→ `Any` downstream).
-            decoded.unwrap_or(GSig::Var(intern("\u{0}")))
+            decoded.unwrap_or_else(|| Ty::ty_param("\u{0}", Ty::obj("kotlin/Any")))
         })
         .collect();
     let ret = pf
         .return_body
         .as_ref()
         .and_then(|rb| parse_type_gsig(rb, records, d2, &tparams))
-        .unwrap_or(GSig::Class(intern("kotlin/Any"), vec![]));
+        .unwrap_or_else(|| Ty::obj("kotlin/Any"));
     Some(GenericSig {
         formals,
         receiver,
@@ -914,7 +983,7 @@ fn decode_functions(ci: &ClassInfo, fn_field: u64) -> Vec<MetaFn> {
                     };
                     // The `JvmMethodSignature` name/desc are plain string-table entries — resolve them as
                     // kotlinc's `getString` does (predefined/d2 + substring/replace), NOT as class names.
-                    let (jvm_name, mut jvm_desc) = match pf.jvm_sig {
+                    let (mut jvm_name, mut jvm_desc) = match pf.jvm_sig {
                         Some((nid, did)) => (
                             resolve_string(&records, d2, nid as usize)
                                 .unwrap_or_else(|| kotlin_name.clone()),
@@ -922,6 +991,14 @@ fn decode_functions(ci: &ClassInfo, fn_field: u64) -> Vec<MetaFn> {
                         ),
                         None => (kotlin_name.clone(), None),
                     };
+                    // A `@kotlin.jvm.JvmName("...")` annotation is the AUTHORITATIVE bytecode name (kotlinc
+                    // uses it for the emitted method) — e.g. each `@OverloadResolutionByLambdaReturnType`
+                    // `sumOf` overload carries `@JvmName("sumOfInt")`/`@JvmName("sumOfLong")`. The
+                    // `method_signature` extension may omit it, so read it from the annotation directly.
+                    // Absent → the Kotlin name stands.
+                    if let Some(n) = annotation_jvm_name(&pf.annotation_bodies, &records, d2) {
+                        jvm_name = n;
+                    }
                     // Metadata omits the JVM descriptor for a function whose signature isn't `@JvmName`-
                     // mangled (it would be computed from proto types). The bytecode is the fallback: if
                     // exactly one method of this JVM name exists, take its descriptor — covers `inline`
@@ -1979,7 +2056,11 @@ pub fn read_kotlin_module(bytes: &[u8]) -> Vec<(String, Vec<String>)> {
         b: &bytes[20..],
         i: 0,
     };
-    let mut out = Vec::new();
+    // Two carriers matter: the `PackageParts` messages (field 1) and the module-level `jvm_package_name`
+    // table (field 3) — the `@JvmPackageName` relocation targets that a `PackageParts` references by
+    // index. Collect both, then parse each `PackageParts` against the table.
+    let mut parts: Vec<&[u8]> = Vec::new();
+    let mut jvm_pkgs: Vec<String> = Vec::new();
     while !pb.at_end() {
         let Some(tag) = pb.varint() else { break };
         match (tag >> 3, tag & 7) {
@@ -1988,9 +2069,14 @@ pub fn read_kotlin_module(bytes: &[u8]) -> Vec<(String, Vec<String>)> {
                 let Some(msg) = pb.bytes(n as usize) else {
                     break;
                 };
-                if let Some(pp) = parse_package_parts(msg) {
-                    out.push(pp);
-                }
+                parts.push(msg);
+            }
+            (3, 2) => {
+                let Some(n) = pb.varint() else { break };
+                let Some(msg) = pb.bytes(n as usize) else {
+                    break;
+                };
+                jvm_pkgs.push(String::from_utf8_lossy(msg).replace('.', "/"));
             }
             (_, w) => {
                 if pb.skip(w).is_none() {
@@ -1999,14 +2085,25 @@ pub fn read_kotlin_module(bytes: &[u8]) -> Vec<(String, Vec<String>)> {
             }
         }
     }
-    out
+    parts
+        .into_iter()
+        .filter_map(|msg| parse_package_parts(msg, &jvm_pkgs))
+        .collect()
 }
 
-/// Decode one `PackageParts` message → slashed package + full facade internal names.
-fn parse_package_parts(body: &[u8]) -> Option<(String, Vec<String>)> {
+/// Decode one `PackageParts` message → slashed DECLARED package + full facade internal names. A facade
+/// whose class was relocated by `@JvmPackageName` (`kotlin.collections`'s `UArraysKt` emitted into
+/// `kotlin/collections/unsigned/`) is still cataloged under its DECLARED package (`@JvmPackageName` is an
+/// emit directive, invisible to name resolution) but its internal name uses the JVM location so its
+/// `@Metadata` reads from the right class. Fields: `package_fq_name = 1`, `short_class_name = 2`,
+/// `class_with_jvm_package_name_short_name = 5`, `class_with_jvm_package_name_package_id = 6` (packed
+/// indices into the module `jvm_package_name` table; a list shorter than field 5 repeats its last entry).
+fn parse_package_parts(body: &[u8], jvm_pkgs: &[String]) -> Option<(String, Vec<String>)> {
     let mut pb = Pb { b: body, i: 0 };
     let mut pkg: Option<String> = None;
-    let mut facades: Vec<String> = Vec::new();
+    let mut parts: Vec<String> = Vec::new();
+    let mut jvm_shorts: Vec<String> = Vec::new();
+    let mut jvm_ids: Vec<usize> = Vec::new();
     while !pb.at_end() {
         let tag = pb.varint()?;
         match (tag >> 3, tag & 7) {
@@ -2016,22 +2113,43 @@ fn parse_package_parts(body: &[u8]) -> Option<(String, Vec<String>)> {
             }
             (2, 2) => {
                 let n = pb.varint()? as usize;
-                facades.push(std::str::from_utf8(pb.bytes(n)?).ok()?.to_string());
+                parts.push(std::str::from_utf8(pb.bytes(n)?).ok()?.to_string());
+            }
+            (5, 2) => {
+                let n = pb.varint()? as usize;
+                jvm_shorts.push(std::str::from_utf8(pb.bytes(n)?).ok()?.to_string());
+            }
+            (6, 2) => {
+                let n = pb.varint()? as usize;
+                let mut packed = Pb {
+                    b: pb.bytes(n)?,
+                    i: 0,
+                };
+                while !packed.at_end() {
+                    jvm_ids.push(packed.varint()? as usize);
+                }
             }
             (_, w) => pb.skip(w)?,
         }
     }
     let pkg = pkg?;
-    let facades = facades
-        .into_iter()
-        .map(|f| {
-            if pkg.is_empty() {
-                f
-            } else {
-                format!("{pkg}/{f}")
-            }
-        })
-        .collect();
+    let join = |p: &str, f: &str| {
+        if p.is_empty() {
+            f.to_string()
+        } else {
+            format!("{p}/{f}")
+        }
+    };
+    let mut facades: Vec<String> = parts.iter().map(|f| join(&pkg, f)).collect();
+    for (k, short) in jvm_shorts.iter().enumerate() {
+        // The class is relocated to `jvm_pkgs[id]`; an id list shorter than the shorts repeats its last
+        // entry (kotlinc's encoding). No id at all → treat as the declared package.
+        let idx = jvm_ids.get(k).or_else(|| jvm_ids.last()).copied();
+        let loc = idx
+            .and_then(|i| jvm_pkgs.get(i))
+            .map_or(pkg.as_str(), |s| s.as_str());
+        facades.push(join(loc, short));
+    }
     Some((pkg, facades))
 }
 
