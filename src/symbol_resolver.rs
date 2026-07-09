@@ -2288,7 +2288,7 @@ fn best_by_args<'a>(
     // stricter so an exact call still prefers its precise overload.
     let fits = |p: &Ty, a: &Ty| {
         *p == *a
-            || fun_arg_matches(p, a)
+            || fun_arg_matches(lib, p, a)
             || arg_assignable(lib, p, a)
             || ref_subtype_fits(lib, p, a)
             // A function-shaped argument that IS-A `FunctionN` by supertype (a `KProperty1` fits a
@@ -2304,7 +2304,7 @@ fn best_by_args<'a>(
             cands.iter().find(|(_, lp)| {
                 lp.len() == args.len()
                     && lp.iter().zip(args).all(|(p, a)| {
-                        p == a || *p == Ty::obj("kotlin/Any") || fun_arg_matches(p, a)
+                        p == a || *p == Ty::obj("kotlin/Any") || fun_arg_matches(lib, p, a)
                     })
             })
         })
@@ -2333,11 +2333,17 @@ fn best_by_args<'a>(
                     return false;
                 };
                 let prefix = args.len() - 1;
+                // Every omitted MIDDLE param must be optional. Prefer the per-parameter `param_defaults`
+                // metadata; when it is absent (a classpath callable whose @Metadata didn't align, so the
+                // vector is empty), fall back to the `required` count — the prefix already covers every
+                // required parameter, so the middle ones are all defaulted (mirrors the prefix arm above).
+                let mid_optional = (prefix..last)
+                    .all(|i| o.call_sig.param_defaults.get(i).copied().unwrap_or(false))
+                    || o.call_sig.required <= prefix;
                 prefix <= last
-                    && fun_arg_matches(&lp[last], args.last().unwrap())
-                    && (prefix..last)
-                        .all(|i| o.call_sig.param_defaults.get(i).copied().unwrap_or(false))
-                    && lp[..prefix]
+                    && fun_arg_matches(lib, &lp[last], args.last().unwrap())
+                    && mid_optional
+                    && lp[..prefix.min(lp.len())]
                         .iter()
                         .zip(&args[..prefix])
                         .all(|(p, a)| fits(p, a))
@@ -2350,7 +2356,7 @@ fn best_by_args<'a>(
 /// be a decoded `Ty::Fun` (whose return/parameter types differ from the lambda's — the body adapts) or an
 /// erased `kotlin/jvm/functions/FunctionN` object; neither pairs with the argument under plain equality or
 /// `Any` widening, so arity alone drives the match.
-fn fun_arg_matches(param: &Ty, arg: &Ty) -> bool {
+fn fun_arg_matches(lib: &dyn CompilerPlatform, param: &Ty, arg: &Ty) -> bool {
     let Some(arg_arity) = arg.fun_arity() else {
         return false;
     };
@@ -2364,7 +2370,7 @@ fn fun_arg_matches(param: &Ty, arg: &Ty) -> bool {
             .and_then(|p| p.strip_prefix("kotlin/jvm/functions/Function"))
             .and_then(|d| d.parse::<u8>().ok())
             == Some(arg_arity);
-    arity_ok && fun_return_compatible(param, *arg)
+    arity_ok && fun_return_compatible(lib, param, *arg)
 }
 
 /// A function-typed argument fits a function-typed parameter's RETURN. A parameter `(T) -> R` with a
@@ -2373,7 +2379,7 @@ fn fun_arg_matches(param: &Ty, arg: &Ty) -> bool {
 /// in the selector's return) is resolved: the lambda's return is just another parameter of the check. A
 /// type-variable / erased-`Any` parameter return (an ordinary generic HOF `(T) -> R`), or an unresolved
 /// lambda body, stays permissive so normal HOFs keep matching.
-fn fun_return_compatible(param: Ty, arg: Ty) -> bool {
+fn fun_return_compatible(lib: &dyn CompilerPlatform, param: Ty, arg: Ty) -> bool {
     let (Some(pr), Some(ar)) = (param.fun_ret(), arg.fun_ret()) else {
         return true;
     };
@@ -2385,7 +2391,22 @@ fn fun_return_compatible(param: Ty, arg: Ty) -> bool {
     if matches!(ar, Ty::Error) {
         return true;
     }
-    pr.non_null() == ar.non_null()
+    if pr.non_null() == ar.non_null() {
+        return true;
+    }
+    // A CONCRETE REFERENCE return is covariant: a lambda whose body returns a SUBTYPE (`String`) fits a
+    // `(T) -> CharSequence` transform parameter (`joinToString`). Primitive returns stay INVARIANT — the
+    // `@OverloadResolutionByLambdaReturnType` families (`sumOf { Int } / { Double }`) differ only by their
+    // exact primitive return and must not cross-match.
+    if let (Some(p), Some(a)) = (
+        pr.non_null().kotlin_class_internal(),
+        ar.non_null().kotlin_class_internal(),
+    ) {
+        if pr.is_reference() && ar.is_reference() {
+            return is_classpath_subtype(lib, a, p, 0);
+        }
+    }
+    false
 }
 
 /// Whether `arg` is assignable to `param` allowing a reference SUBTYPE (`arg`'s classpath supertype

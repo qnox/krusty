@@ -8265,9 +8265,11 @@ impl<'a> Checker<'a> {
         }
         // A stdlib/library EXTENSION on the receiver (`String.reversed()`, `String.uppercase()`):
         // resolved receiver-aware so the right overload is selected (`CharSequence.reversed`, not the
-        // `Iterable.reversed` that a receiver-blind fallthrough would pick). Mirrors the qualified
-        // `recv.name(args)` extension typing.
-        if let Some(ret) = self.library_extension_return(name, rt, arg_tys, &[]) {
+        // `Iterable.reversed` that a receiver-blind fallthrough would pick). RECORD the resolved callable
+        // (keyed by the call `ExprId`) — not just its return type — so the lowerer emits it through the
+        // ordinary extension path instead of bailing (`lower_ext_call_on` reads `resolved_extension`).
+        // Mirrors the qualified `recv.name(args)` extension typing + recording.
+        if let Some(ret) = self.record_library_extension_call(Some(call), name, rt, arg_tys, &[]) {
             return Some(ret);
         }
         if let Some(ret) = self.library_extension_inline_return(name, rt, arg_tys) {
@@ -8502,17 +8504,6 @@ impl<'a> Checker<'a> {
     ) -> Option<crate::libraries::LibraryCallable> {
         self.resolver()
             .resolve_extension_callable(name, receiver, arg_tys, type_args)
-    }
-
-    fn library_extension_return(
-        &self,
-        name: &str,
-        receiver: Ty,
-        arg_tys: &[Ty],
-        type_args: &[Ty],
-    ) -> Option<Ty> {
-        self.library_extension_callable(name, receiver, arg_tys, type_args)
-            .map(|c| c.ret)
     }
 
     fn library_extension_inline_return(
