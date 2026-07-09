@@ -1694,6 +1694,17 @@ impl SymbolSource for JvmLibraries {
                 if params.is_empty() {
                     continue;
                 }
+                // The SOURCE value-parameter names + default flags (from `@Metadata`), so a call with
+                // out-of-order NAMED arguments to a classpath extension (`"s".tag(count = 7, name = "hi")`)
+                // reorders through the same `param_names` a member/top-level call uses. The physical count
+                // is the SOURCE value arity plus the receiver — `mf.value_params` already excludes the
+                // synthetic descriptor tail (a suspend `Continuation`, a Compose mask), which `params.len()`
+                // would wrongly include; `metadata_extension` peels the leading receiver back off.
+                let call_sig = crate::libraries::CallSig::metadata_extension(
+                    mf.value_params.len() + 1,
+                    mf.value_params.iter().map(|p| p.name.clone()).collect(),
+                    mf.value_params.iter().map(|p| p.has_default).collect(),
+                );
                 let ret_class = mf.ret_class.map(kotlin_name_to_ty);
                 let ret = match ret_class {
                     Some(t) if mf.ret_nullable && t.is_jvm_scalar() => Ty::nullable(t),
@@ -1733,12 +1744,19 @@ impl SymbolSource for JvmLibraries {
                 };
                 overloads.push(FunctionInfo {
                     ret: ReturnInfo::new(mf.ret_nullable, ret_class),
-                    visibility: crate::libraries::Visibility::from_public(mf.is_public),
+                    // Public if EITHER the metadata OR the bytecode method is public: a value-class inline
+                    // extension is metadata-public but bytecode-private (resolved, then spliced), while some
+                    // metadata (a user library's top-level extension) under-reports visibility though the
+                    // emitted `invokestatic` target is plainly public. Either sense makes it callable.
+                    visibility: crate::libraries::Visibility::from_public(
+                        mf.is_public || bytecode_public,
+                    ),
                     generic_sig,
                     flags: FnFlags {
                         inline,
                         suspend: mf.is_suspend,
                     },
+                    call_sig,
                     ..FunctionInfo::plain(FnKind::Extension, Some(receiver), callable)
                 });
             }
