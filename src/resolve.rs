@@ -10857,9 +10857,6 @@ impl<'a> Checker<'a> {
                         self.expr(a)
                     })
                     .collect();
-                if fname == "println" {
-                    return Ty::Unit; // builtin: accepts one value of any type (v0)
-                }
                 if self.lookup(&fname).is_none() {
                     // The array creators are compiler intrinsics keyed on the resolved stdlib symbol; a
                     // user-defined function of the same name shadows them (as in kotlinc), so only treat
