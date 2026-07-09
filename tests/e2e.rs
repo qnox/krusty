@@ -370,6 +370,8 @@ mod labeled_this_e2e;
 mod lambda_e2e;
 #[path = "lateinit_local_e2e.rs"]
 mod lateinit_local_e2e;
+#[path = "list_fold_e2e.rs"]
+mod list_fold_e2e;
 #[path = "literal_escapes_coverage_e2e.rs"]
 mod literal_escapes_coverage_e2e;
 #[path = "local_capture_coverage_e2e.rs"]

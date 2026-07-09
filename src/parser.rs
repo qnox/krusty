@@ -2899,19 +2899,25 @@ impl<'a> Parser<'a> {
             let mut targs = Vec::new();
             let arg = if name == "Array" && self.at(TokenKind::Lt) {
                 self.bump(); // '<'
-                self.skip_variance(); // `out`/`in`
-                                      // Star projection `Array<*>` — erase to Object.
+                let in_projection = self.skip_variance(); // `out`/`in`
+                let any_nullable = || TypeRef {
+                    name: "Any".to_string(),
+                    nullable: true,
+                    arg: None,
+                    targs: Vec::new(),
+                    span,
+                    fun_params: Vec::new(),
+                    fun_has_receiver: false,
+                    fun_suspend: false,
+                };
+                // `Array<*>` and `Array<in X>` (contravariant) READ as `Any?` — the element erases to
+                // Object so a value that is a WIDER array than `X` (`Array<in Array<String>> = x` holding
+                // `Object[][]`) frames correctly. `Array<out X>` keeps `X`.
                 let elem = if self.eat(TokenKind::Star) {
-                    TypeRef {
-                        name: "Any".to_string(),
-                        nullable: true,
-                        arg: None,
-                        targs: Vec::new(),
-                        span,
-                        fun_params: Vec::new(),
-                        fun_has_receiver: false,
-                        fun_suspend: false,
-                    }
+                    any_nullable()
+                } else if in_projection {
+                    let _ = self.parse_type(); // consume + discard `X`
+                    any_nullable()
                 } else {
                     self.parse_type()
                 };
@@ -2993,12 +2999,17 @@ impl<'a> Parser<'a> {
     }
 
     /// Skip a leading `out`/`in` use-site variance modifier inside a type-argument list (`Array<in T>`,
-    /// `List<out T>`). Variance is JVM-erased, so the projection is dropped and the bare type kept.
-    /// `out` is a soft keyword (`Ident`); `in` is the real keyword `KwIn`.
-    fn skip_variance(&mut self) {
-        if self.at(TokenKind::KwIn) || (self.at(TokenKind::Ident) && self.text() == "out") {
+    /// `List<out T>`). Variance is JVM-erased for descriptors. `out` is a soft keyword (`Ident`); `in` is
+    /// the real keyword `KwIn`. Returns `true` for an `in` (CONTRAVARIANT) projection.
+    fn skip_variance(&mut self) -> bool {
+        if self.at(TokenKind::KwIn) {
+            self.bump();
+            return true;
+        }
+        if self.at(TokenKind::Ident) && self.text() == "out" {
             self.bump();
         }
+        false
     }
 
     /// Parse a generic type-argument list `< (variance? type | *),+ >` via the real grammar
@@ -3011,7 +3022,7 @@ impl<'a> Parser<'a> {
         }
         self.skip_newlines();
         while !self.at(TokenKind::Gt) && !self.at(TokenKind::Eof) {
-            self.skip_variance(); // `out`/`in`
+            let _ = self.skip_variance(); // `out`/`in` (general type args are JVM-erased anyway)
             if self.eat(TokenKind::Star) {
                 // Star projection `<*>` — erased to `Any?`.
                 let span = self.tok().span;

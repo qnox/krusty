@@ -54,8 +54,7 @@ fn meta_param_ty(name: Option<&str>) -> Ty {
             return Ty::fun(vec![Ty::obj("kotlin/Any"); n], Ty::obj("kotlin/Any"));
         }
     }
-    // Core carries `Array<T>` (`Ty::Array`), never the JVM-metadata array spellings (`kotlin/IntArray`,
-    // `kotlin/Array`). A primitive-array class fixes its element (`kotlin/IntArray` → `Array<Int>`); a
+    // A primitive-array class fixes its element (`kotlin/IntArray` → `Array<Int>`); a
     // generic `Array<T>` erases its element here (the class name alone doesn't carry it — arrays align
     // element-agnostically). This keeps the resolver/checker platform-neutral.
     if n == "kotlin/Array" {
@@ -89,19 +88,21 @@ fn ty_compat(meta: &Ty, desc: &Ty) -> bool {
     // A type-parameter / `Any` metadata type erases to `Object`, which accepts any reference (a generic
     // param spelled `T` records as `kotlin/Any`, so this is how it matches a concrete descriptor position).
     // Conversely, when the DESCRIPTOR is `Object` (a type variable, or a value class whose underlying is
-    // `Any`) a concrete metadata object CLASS matches it — but NOT an array or a function type (`Ty::Array`
-    // / `Ty::Fun`), which never erase to a plain `Object` descriptor. Both are LOOSE matches: the caller
+    // `Any`) a concrete metadata object CLASS matches it — but NOT an array (`is_array`) or a function
+    // type (`Ty::Fun`), which never erase to a plain `Object` descriptor. Both are LOOSE matches: the caller
     // prefers an overload whose params match EXACTLY (equal descriptors), so `plusAssign(element: T)` /
     // `plusAssign(elements: Iterable)` bind their own descriptors rather than one swallowing both.
     let erased =
         |t: &Ty| matches!(t, Ty::Obj(n, _) if *n == "kotlin/Any" || *n == "java/lang/Object");
-    if (erased(meta) && desc.is_reference()) || (erased(desc) && matches!(meta, Ty::Obj(_, _))) {
+    if (erased(meta) && desc.is_reference())
+        || (erased(desc) && matches!(meta, Ty::Obj(_, _)) && !meta.is_array())
+    {
         return true;
     }
     // A `vararg`/array metadata param erases its element (`Array<T>` → `Array<Any>`), while the descriptor
     // has the concrete array (`[Lkotlin/Pair;`) — match array against array element-agnostically so a
     // vararg overload aligns rather than losing to an empty sibling.
-    matches!(meta, Ty::Array(_)) && matches!(desc, Ty::Array(_))
+    meta.is_array() && desc.is_array()
 }
 
 enum Entry {
@@ -1705,23 +1706,52 @@ impl Classpath {
         jvm_name: &str,
         recv_desc: Option<&str>,
         ret_desc: Option<&str>,
+        value_param_descs: Option<&[String]>,
     ) -> Option<ExtCandidate> {
-        let cands: Vec<ExtCandidate> = self
+        // The full expected parameter descriptor (receiver + value params), when both are known: it
+        // disambiguates overloads that share the receiver AND return but differ by value param
+        // (`appendLine(StringBuilder)` vs `appendLine(StringBuilder, int)`) — matching by receiver alone
+        // silently collapses them to the first (no-arg) one.
+        let want_params: Option<String> =
+            value_param_descs.and_then(|vps| recv_desc.map(|rd| format!("{rd}{}", vps.concat())));
+        // The parameter section of `c`'s descriptor (between the parens).
+        let params_of = |c: &ExtCandidate| -> Option<String> {
+            c.descriptor
+                .split_once('(')
+                .and_then(|(_, r)| r.split_once(')'))
+                .map(|(p, _)| p.to_string())
+        };
+        let by_recv = |c: &ExtCandidate| match recv_desc {
+            None => true,
+            Some(rd) => {
+                descriptor_parts(&c.descriptor)
+                    .and_then(|(fp, _)| fp)
+                    .as_deref()
+                    == Some(rd)
+            }
+        };
+        let named: Vec<ExtCandidate> = self
             .facade_statics(root)
             .into_iter()
-            .filter(|c| {
-                c.name == jvm_name
-                    && match recv_desc {
-                        None => true,
-                        Some(rd) => {
-                            descriptor_parts(&c.descriptor)
-                                .and_then(|(fp, _)| fp)
-                                .as_deref()
-                                == Some(rd)
-                        }
-                    }
-            })
+            .filter(|c| c.name == jvm_name)
             .collect();
+        // Prefer the FULL parameter match (receiver + value params) — it disambiguates same-receiver
+        // overloads that differ by value param. Fall back to receiver-only when the full descriptor is not
+        // known or matches nothing (e.g. a function-typed value param whose erased form isn't rebuilt here),
+        // so a scope fn like `apply` still resolves to its real (`@InlineOnly`, private) method.
+        let full: Vec<ExtCandidate> = match &want_params {
+            Some(wp) => named
+                .iter()
+                .filter(|c| params_of(c).as_deref() == Some(wp.as_str()))
+                .cloned()
+                .collect(),
+            None => Vec::new(),
+        };
+        let cands: Vec<ExtCandidate> = if full.is_empty() {
+            named.into_iter().filter(|c| by_recv(c)).collect()
+        } else {
+            full
+        };
         let ret_of = |c: &ExtCandidate| c.descriptor.rsplit_once(')').map(|(_, r)| r.to_string());
         // A concrete expected return picks the exact overload (`maxOrNull(Iterable)Double`); a type-var
         // return (none given) prefers the generic-bound overload (`…Comparable`/`…Object`) over the numeric
@@ -2996,20 +3026,27 @@ mod fq_tests {
             "maxOrNull",
             Some("Ljava/lang/Iterable;"),
             Some("Ljava/lang/Double;"),
+            None,
         );
         assert_eq!(
             d.map(|c| c.descriptor).as_deref(),
             Some("(Ljava/lang/Iterable;)Ljava/lang/Double;")
         );
         // A type-variable return (None) prefers the generic-bound (`Comparable`) overload.
-        let g = cp.facade_method(facade, "maxOrNull", Some("Ljava/lang/Iterable;"), None);
+        let g = cp.facade_method(
+            facade,
+            "maxOrNull",
+            Some("Ljava/lang/Iterable;"),
+            None,
+            None,
+        );
         assert_eq!(
             g.map(|c| c.descriptor).as_deref(),
             Some("(Ljava/lang/Iterable;)Ljava/lang/Comparable;")
         );
         // A name with no method on the facade chain is absent.
         assert!(cp
-            .facade_method(facade, "definitelyNotAMethodXyz", None, None)
+            .facade_method(facade, "definitelyNotAMethodXyz", None, None, None)
             .is_none());
     }
 

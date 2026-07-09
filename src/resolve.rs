@@ -191,7 +191,7 @@ pub struct ClassSig {
 
 /// The un-erased declared shape of a generic higher-order method, retained so a call site can
 /// substitute the receiver's type arguments and infer the method's own type parameters (mirrors the
-/// `GSig` unify/substitute machinery, but built from the source `TypeRef`s of a user-declared method).
+/// signature-`Ty` unify/substitute machinery, but built from the source `TypeRef`s of a user-declared method).
 /// `TypeRef` is self-contained (owned, not arena-indexed), so cloning it here stays file-independent.
 #[derive(Clone, Debug)]
 pub struct GenericMethod {
@@ -447,9 +447,15 @@ fn erased_type_key(t: Ty) -> ErasedTypeKey {
         Ty::UInt => Ty::Int,
         Ty::ULong => Ty::Long,
         Ty::String => Ty::obj("kotlin/String"),
+        Ty::Obj("kotlin/Array", args) => {
+            let e = args
+                .first()
+                .copied()
+                .unwrap_or_else(|| Ty::obj("kotlin/Any"));
+            Ty::obj_args("kotlin/Array", &[erased_key_ty(erased_type_key(e))])
+        }
         Ty::Obj(n, _) => Ty::Obj(n, &[]),
         Ty::Null | Ty::Nothing | Ty::Error => Ty::obj("kotlin/Any"),
-        Ty::Array(elem) => Ty::array(erased_key_ty(erased_type_key(*elem))),
         Ty::Fun(s) => return ErasedTypeKey::Function(s.params.len() + usize::from(s.suspend)),
         Ty::Nullable(inner) => match *inner {
             Ty::UInt => Ty::obj("kotlin/UInt"),
@@ -3514,21 +3520,88 @@ pub struct TypeInfo {
     /// to drive the bytecode splicer's reified specialization. Recorded only where an explicit `<…>` is
     /// present on a call.
     pub resolved_call_type_args: HashMap<ExprId, Vec<Ty>>,
-    /// Classpath instance-member calls the checker already resolved, keyed by the `Expr::Call`
-    /// `ExprId`. The lowerer reads the resolved member here instead of re-running `symbol_resolver`,
-    /// so a source call is resolved exactly once and the two passes cannot select different
-    /// overloads. Absent for calls the checker did not resolve through the library member path
-    /// (module members, synthesized operator calls) — the lowerer falls back to resolving those.
-    pub resolved_members: HashMap<ExprId, crate::symbol_resolver::ResolvedMember>,
-    /// Receiver-less top-level library calls the checker already resolved, keyed by the `Expr::Call`
-    /// `ExprId`. Same purpose as [`Self::resolved_members`] for the top-level call path: the lowerer
-    /// reuses the callable instead of re-running `resolve_top_level_callable`. Absent for a call the
-    /// checker resolved through a different path (a local/module/FQ call); the lowerer falls back.
-    pub resolved_top_level: HashMap<ExprId, crate::libraries::LibraryCallable>,
-    /// `@JvmStatic`/companion `object` member calls (`Base58Uuid.of(x)`) the checker resolved, keyed
-    /// by the `Expr::Call` `ExprId`. Kept separate from [`Self::resolved_members`] because these emit
-    /// as a STATIC call, not a virtual instance call — a member-call lowering must never read one.
-    pub resolved_companions: HashMap<ExprId, crate::libraries::LibraryMember>,
+    /// Calls the checker already resolved, keyed by the `Expr::Call` (or member-read) `ExprId`. The
+    /// lowerer reads the resolved target here instead of re-running `symbol_resolver`, so a source call
+    /// is resolved exactly once and the two passes cannot select different overloads. Absent for calls
+    /// the checker resolved through a path the lowerer reconstructs itself (module members, synthesized
+    /// operator calls) — the lowerer falls back to resolving those. See [`ResolvedCall`] for the target
+    /// kinds and the typed accessors ([`Self::resolved_member`], [`Self::resolved_top_level`], …).
+    pub resolved_calls: HashMap<ExprId, ResolvedCall>,
+    /// Extension callables the checker resolved for a SYNTHESIZED call that has no source-call `ExprId` —
+    /// a destructuring `componentN`, a `for`-loop `iterator`, a `+=` `plusAssign` — keyed by the receiver
+    /// expression's `ExprId` (the destructured value / iterable / assignment target) and the operator
+    /// name. The lowerer reads the callable here instead of re-resolving; it carries `inline`, so the
+    /// backend splices when needed.
+    pub synthetic_ext_calls: HashMap<(ExprId, String), crate::libraries::LibraryCallable>,
+}
+
+/// A call target the checker resolved, stashed for the lowerer keyed by `ExprId`. One entry per call —
+/// the variant selects how it emits, so a member lowering that reads a `Companion` (static) entry, or a
+/// top-level lowering that reads a `Member` (virtual) entry, simply doesn't match and falls back.
+#[derive(Clone, Debug)]
+pub enum ResolvedCall {
+    /// A classpath instance-member call → `invokevirtual`/`invokeinterface`.
+    Member(crate::symbol_resolver::ResolvedMember),
+    /// A receiver-less top-level library call → `invokestatic` on the facade.
+    TopLevel(crate::libraries::LibraryCallable),
+    /// A `@JvmStatic`/companion `object` member (`Base58Uuid.of(x)`) → STATIC call, never virtual.
+    Companion(crate::libraries::LibraryMember),
+    /// A library EXTENSION call `recv.name(args)` → `invokestatic facade.name(recv, args)`. The checker
+    /// is the sole resolver: the lowerer READS this callable and emits it (never re-resolving).
+    Extension(crate::libraries::LibraryCallable),
+    /// An INSTANCE MEMBER selected by lambda-return overload resolution (`recv.run2 { … }`). The lowerer
+    /// has no resolution path for it (it is selected by the lambda's return type, not by normal member
+    /// lookup), so the checker resolves and records it and the lowerer only READS it — emits
+    /// `invokevirtual`. Distinct from [`Self::Member`] because it carries a raw `LibraryCallable`.
+    LambdaReturnMember(crate::libraries::LibraryCallable),
+}
+
+impl TypeInfo {
+    /// The resolved classpath instance member at call `e`, if the checker recorded one.
+    pub fn resolved_member(&self, e: ExprId) -> Option<&crate::symbol_resolver::ResolvedMember> {
+        match self.resolved_calls.get(&e) {
+            Some(ResolvedCall::Member(m)) => Some(m),
+            _ => None,
+        }
+    }
+    /// The resolved receiver-less top-level library callable at call `e`, if any.
+    pub fn resolved_top_level(&self, e: ExprId) -> Option<&crate::libraries::LibraryCallable> {
+        match self.resolved_calls.get(&e) {
+            Some(ResolvedCall::TopLevel(c)) => Some(c),
+            _ => None,
+        }
+    }
+    /// The resolved companion/`@JvmStatic` member at call `e`, if any.
+    pub fn resolved_companion(&self, e: ExprId) -> Option<&crate::libraries::LibraryMember> {
+        match self.resolved_calls.get(&e) {
+            Some(ResolvedCall::Companion(m)) => Some(m),
+            _ => None,
+        }
+    }
+    /// The resolved library EXTENSION callable at call `e` — the checker's sole resolution, read by the
+    /// lowerer's extension-emit path (which never resolves).
+    pub fn resolved_extension(&self, e: ExprId) -> Option<&crate::libraries::LibraryCallable> {
+        match self.resolved_calls.get(&e) {
+            Some(ResolvedCall::Extension(c)) => Some(c),
+            _ => None,
+        }
+    }
+    /// The resolved lambda-return-selected INSTANCE MEMBER callable at call `e` (emits `invokevirtual`).
+    pub fn resolved_lambda_member(&self, e: ExprId) -> Option<&crate::libraries::LibraryCallable> {
+        match self.resolved_calls.get(&e) {
+            Some(ResolvedCall::LambdaReturnMember(c)) => Some(c),
+            _ => None,
+        }
+    }
+    /// The extension callable the checker resolved for a SYNTHESIZED operator (`componentN`/`iterator`/
+    /// `plusAssign`) on the receiver expression `recv`, if any.
+    pub fn synthetic_ext(
+        &self,
+        recv: ExprId,
+        name: &str,
+    ) -> Option<&crate::libraries::LibraryCallable> {
+        self.synthetic_ext_calls.get(&(recv, name.to_string()))
+    }
 }
 
 /// How to inline a receiver-lambda scope-function call (see [`InlineCall::ReceiverLambda`]).
@@ -3674,10 +3747,13 @@ fn is_nothing_ty(t: Ty) -> bool {
     }
 }
 
-fn make_checker<'a>(file: &'a File, syms: &'a SymbolTable, diags: &'a mut DiagSink) -> Checker<'a> {
+/// The packages in scope for an unqualified TOP-LEVEL / extension function call in `file`: the leveled
+/// import packages (same-package, star, explicit, defaults) plus each explicit import's package. Used to
+/// scope BOTH the checker and the lowerer so the two resolve a `@JvmName`-mangled library family (e.g.
+/// `sumOf` → `sumOfInt`) identically — an unscoped lowerer walk misses it and bails.
+pub(crate) fn function_scope_packages(file: &File, syms: &SymbolTable) -> Vec<String> {
     let imports = import_map(file);
     let import_levels = import_levels(file, syms.libraries.platform_default_import_packages());
-    // Top-level function scope: the leveled import packages plus each explicit import's package.
     let mut fn_scope: Vec<String> = import_levels.iter().flatten().cloned().collect();
     for fq in imports.values() {
         if let Some((pkg, _)) = fq.rsplit_once('/') {
@@ -3686,6 +3762,13 @@ fn make_checker<'a>(file: &'a File, syms: &'a SymbolTable, diags: &'a mut DiagSi
             }
         }
     }
+    fn_scope
+}
+
+fn make_checker<'a>(file: &'a File, syms: &'a SymbolTable, diags: &'a mut DiagSink) -> Checker<'a> {
+    let imports = import_map(file);
+    let import_levels = import_levels(file, syms.libraries.platform_default_import_packages());
+    let fn_scope = function_scope_packages(file, syms);
     Checker {
         file,
         syms,
@@ -3711,9 +3794,8 @@ fn make_checker<'a>(file: &'a File, syms: &'a SymbolTable, diags: &'a mut DiagSi
         stmt_lowers: HashMap::new(),
         local_decl_types: HashMap::new(),
         resolved_call_type_args: HashMap::new(),
-        resolved_members: HashMap::new(),
-        resolved_top_level: HashMap::new(),
-        resolved_companions: HashMap::new(),
+        resolved_calls: HashMap::new(),
+        synthetic_ext_calls: HashMap::new(),
         fn_reassigned: std::collections::HashSet::new(),
         expr_depth: 0,
         allow_lambda_mutation: false,
@@ -4416,9 +4498,8 @@ pub fn check_file(file: &File, syms: &mut SymbolTable, diags: &mut DiagSink) -> 
         stmt_lowers,
         local_decl_types,
         resolved_call_type_args,
-        resolved_members,
-        resolved_top_level,
-        resolved_companions,
+        resolved_calls,
+        synthetic_ext_calls,
         ..
     } = c;
     for ((name, params), ret) in inferred_fun_rets {
@@ -4450,9 +4531,8 @@ pub fn check_file(file: &File, syms: &mut SymbolTable, diags: &mut DiagSink) -> 
         stmt_lowers,
         local_decl_types,
         resolved_call_type_args,
-        resolved_members,
-        resolved_top_level,
-        resolved_companions,
+        resolved_calls,
+        synthetic_ext_calls,
     }
 }
 
@@ -4506,15 +4586,11 @@ struct Checker<'a> {
     stmt_lowers: HashMap<StmtId, StmtLowering>,
     local_decl_types: HashMap<StmtId, Ty>,
     resolved_call_type_args: HashMap<ExprId, Vec<Ty>>,
-    /// Classpath instance-member calls resolved during checking, keyed by the `Expr::Call` `ExprId`
-    /// (moved into [`TypeInfo::resolved_members`] so the lowerer reads them instead of re-resolving).
-    resolved_members: HashMap<ExprId, crate::symbol_resolver::ResolvedMember>,
-    /// Receiver-less top-level library calls resolved during checking, keyed by the `Expr::Call`
-    /// `ExprId` (moved into [`TypeInfo::resolved_top_level`] for the lowerer to reuse).
-    resolved_top_level: HashMap<ExprId, crate::libraries::LibraryCallable>,
-    /// Companion/`@JvmStatic` object member calls resolved during checking, keyed by the `Expr::Call`
-    /// `ExprId` (moved into [`TypeInfo::resolved_companions`] for the lowerer to reuse).
-    resolved_companions: HashMap<ExprId, crate::libraries::LibraryMember>,
+    /// Calls resolved during checking, keyed by the `Expr::Call` `ExprId` (moved into
+    /// [`TypeInfo::resolved_calls`] so the lowerer reads them instead of re-resolving). See
+    /// [`ResolvedCall`] for the variants.
+    resolved_calls: HashMap<ExprId, ResolvedCall>,
+    synthetic_ext_calls: HashMap<(ExprId, String), crate::libraries::LibraryCallable>,
     /// Names reassigned anywhere in the function body currently being checked (including inside its
     /// closures). A captured `var` is boxed only if it's in here — kotlinc treats a captured-but-never-
     /// reassigned `var` as effectively final (passed by value).
@@ -5367,7 +5443,7 @@ impl<'a> Checker<'a> {
         if let Expr::Binary { op, lhs, rhs } = self.file.expr(cond).clone() {
             if matches!(op, BinOp::Ne | BinOp::Eq) {
                 let narrows_then = matches!(op, BinOp::Ne); // `!= null` narrows in the then-branch
-                if narrows_then == !for_else {
+                if narrows_then != for_else {
                     let name = match (self.file.expr(lhs).clone(), self.file.expr(rhs).clone()) {
                         (Expr::Name(n), Expr::NullLit) | (Expr::NullLit, Expr::Name(n)) => Some(n),
                         _ => None,
@@ -6012,8 +6088,8 @@ impl<'a> Checker<'a> {
         // An erased generic reference array (`Array<Any>`, e.g. `emptyArray<T>()` → `Object[]`) is
         // assignable to any specific reference array — `Array` is invariant, but the erased value
         // really is the target type at runtime, so kotlinc inserts a `checkcast` at the use site.
-        if let (Ty::Array(ae), Ty::Array(ee)) = (actual, expected) {
-            if *ae == Ty::obj("kotlin/Any") && ee.is_reference() {
+        if let (Some(ae), Some(ee)) = (actual.array_elem(), expected.array_elem()) {
+            if ae == Ty::obj("kotlin/Any") && ee.is_reference() {
                 return;
             }
         }
@@ -6127,10 +6203,10 @@ impl<'a> Checker<'a> {
     /// (`Integer[]` is-a `Object[]`), and a `*`/`out` projection erases the expected element to `Any?`.
     /// Returns `false` for non-array types (the caller's other rules decide those).
     fn array_covariant_assignable(&self, expected: Ty, actual: Ty) -> bool {
-        let (Ty::Array(e), Ty::Array(a)) = (expected, actual) else {
+        let (Some(e), Some(a)) = (expected.array_elem(), actual.array_elem()) else {
             return false;
         };
-        self.elem_covariant_assignable(*e, *a)
+        self.elem_covariant_assignable(e, a)
     }
 
     /// Element-level covariance for [`array_covariant_assignable`]: equal types, nested arrays, an `Any`/
@@ -6139,8 +6215,8 @@ impl<'a> Checker<'a> {
         if expected == actual {
             return true;
         }
-        if let (Ty::Array(e), Ty::Array(a)) = (expected, actual) {
-            return self.elem_covariant_assignable(*e, *a);
+        if let (Some(e), Some(a)) = (expected.array_elem(), actual.array_elem()) {
+            return self.elem_covariant_assignable(e, a);
         }
         // A star projection (`*`) or `in`/`out` variance erases the element to `Any?` on whichever side
         // it appears; either way the array assignment is JVM-sound (reference-array covariance), so a
@@ -6725,12 +6801,17 @@ impl<'a> Checker<'a> {
                                     &arg_tys,
                                 )
                                 .map(|m| m.ret)
-                                .or_else(|| self.library_extension_return(&name, rt, &arg_tys, &[]))
+                                // A stdlib extension reached by `?.` on a `String` — resolve AND RECORD it
+                                // (keyed by the safe-call `ExprId`) for the lowerer, admitting `@InlineOnly`.
                                 .or_else(|| {
                                     inline_arg_supported
                                         .then(|| {
-                                            self.library_extension_inline_return(
-                                                &name, rt, &arg_tys,
+                                            self.record_library_extension_call(
+                                                Some(e),
+                                                &name,
+                                                rt.non_null(),
+                                                &arg_tys,
+                                                &[],
                                             )
                                         })
                                         .flatten()
@@ -6752,14 +6833,19 @@ impl<'a> Checker<'a> {
                                         )
                                         .map(|m| m.ret)
                                     })
-                                    .or_else(|| {
-                                        self.library_extension_return(&name, rt, &arg_tys, &[])
-                                    })
+                                    // A stdlib/classpath EXTENSION reached by `?.` (`c?.takeIf { … }`):
+                                    // resolve AND RECORD the callable keyed by the safe-call `ExprId`, so the
+                                    // lowerer's `lower_ext_call_on(e)` reads it instead of re-resolving. One
+                                    // resolution admits `@InlineOnly` (`takeIf`) — no separate inline path.
                                     .or_else(|| {
                                         inline_arg_supported
                                             .then(|| {
-                                                self.library_extension_inline_return(
-                                                    &name, rt, &arg_tys,
+                                                self.record_library_extension_call(
+                                                    Some(e),
+                                                    &name,
+                                                    rt.non_null(),
+                                                    &arg_tys,
+                                                    &[],
                                                 )
                                             })
                                             .flatten()
@@ -7096,7 +7182,7 @@ impl<'a> Checker<'a> {
                     if let Some(fname) = op_name {
                         if rt != Ty::Error {
                             if let Some(ret) =
-                                self.record_library_extension_call(fname, lt, &[rt], &[])
+                                self.record_library_extension_call(Some(e), fname, lt, &[rt], &[])
                             {
                                 return self.set(e, ret);
                             }
@@ -7929,26 +8015,17 @@ impl<'a> Checker<'a> {
             let elem = lam.fun_ret().unwrap_or_else(|| Ty::obj("kotlin/Any"));
             // A nested-array element (`Array(n) { DoubleArray(m) }`) trips the loop-fill's
             // StackMapTable interaction with surrounding loops — skip rather than VerifyError.
-            if matches!(elem, Ty::Array(_)) {
+            if elem.is_array() {
                 self.diags.error(
                     span,
                     "krusty: Array(n) {…} with an array element is not supported".to_string(),
                 );
                 return Some(Ty::Error);
             }
-            // `Array(n) { … }` is the reference `Array<T>`, distinct from a primitive array. A reference
-            // element keeps the existing `Ty::Array` reference representation; scalar and value-class
-            // elements are the logical `Array<T>` (`Obj("kotlin/Array", [T])`) — NOT boxed here, so
-            // element reads type as `T`. The backend owns the physical boxed/value-class layout.
-            return Some(
-                if elem.boxed_ref().is_some()
-                    || self.syms.libraries.value_underlying(elem).is_some()
-                {
-                    Ty::obj_args("kotlin/Array", &[elem])
-                } else {
-                    Ty::array(elem)
-                },
-            );
+            // `Array(n) { … }` is always the reference `Array<T>` (`Obj("kotlin/Array", [T])`), distinct
+            // from a primitive array. The element stays LOGICAL `T` (a primitive `Int` reads as `Int`,
+            // not a boxed wrapper); the backend owns the physical boxed/value-class array layout.
+            return Some(Ty::obj_args("kotlin/Array", &[elem]));
         }
         None
     }
@@ -8076,7 +8153,7 @@ impl<'a> Checker<'a> {
                 arg_tys,
             ) {
                 let ret = m.ret;
-                self.resolved_members.insert(call, m);
+                self.resolved_calls.insert(call, ResolvedCall::Member(m));
                 return Some(ret);
             }
         }
@@ -8102,7 +8179,7 @@ impl<'a> Checker<'a> {
                 arg_tys,
             ) {
                 let ret = m.ret;
-                self.resolved_members.insert(call, m);
+                self.resolved_calls.insert(call, ResolvedCall::Member(m));
                 return Some(ret);
             }
         }
@@ -8148,7 +8225,7 @@ impl<'a> Checker<'a> {
                 arg_tys,
             ) {
                 let ret = m.ret;
-                self.resolved_members.insert(call, m);
+                self.resolved_calls.insert(call, ResolvedCall::Member(m));
                 return Some(ret);
             }
             if let Some(internal) = rt.obj_internal() {
@@ -8363,6 +8440,7 @@ impl<'a> Checker<'a> {
     /// `FunctionSet`/`ResolvedCall`.
     fn record_library_extension_call(
         &mut self,
+        call: Option<ExprId>,
         name: &str,
         receiver: Ty,
         arg_tys: &[Ty],
@@ -8375,10 +8453,31 @@ impl<'a> Checker<'a> {
         let c = self.library_extension_callable(name, receiver, arg_tys, type_args)?;
         crate::trace_compiler!(
             "resolve",
-            "record_library_extension_call {name} -> ret={:?}",
-            c.ret
+            "record_library_extension_call {name} -> ret={:?} owner={} jvm={} desc={}",
+            c.ret,
+            c.owner,
+            c.name,
+            c.descriptor
         );
+        // The checker is the sole resolver: record the resolved extension callable so the lowerer emits
+        // it directly without re-resolving. Keyed by the call `ExprId`; `None` for a synthesized operator
+        // call (`a + b`) whose lowering is not an extension-emit read.
+        if let Some(call) = call {
+            self.resolved_calls
+                .insert(call, ResolvedCall::Extension(c.clone()));
+        }
         Some(c.ret)
+    }
+
+    /// Resolve and record the extension callable for a SYNTHESIZED operator (`componentN`/`iterator`/
+    /// `plusAssign`) on `recv_ty`, keyed by the receiver expression `recv_expr` + operator name, so the
+    /// lowerer reads it instead of re-resolving. No-op when no such extension exists (the construct
+    /// resolves through a member / user path the lowerer reconstructs from `syms`).
+    fn record_synthetic_ext(&mut self, recv_expr: ExprId, name: &str, recv_ty: Ty, arg_tys: &[Ty]) {
+        if let Some(c) = self.library_extension_callable(name, recv_ty, arg_tys, &[]) {
+            self.synthetic_ext_calls
+                .insert((recv_expr, name.to_string()), c);
+        }
     }
 
     fn library_extension_callable(
@@ -8733,7 +8832,7 @@ impl<'a> Checker<'a> {
             return Ty::Int; // `c.code` — the Char's UTF-16 code unit as an `Int`.
         }
         if name == "size" && rt.array_elem().is_some() {
-            // `arr.size` — covers both `Ty::Array` and a boxed `Array<T>` (`Obj("kotlin/Array", [T])`).
+            // `arr.size` — covers primitive arrays and a boxed `Array<T>` (`array_elem` sees both).
             return Ty::Int;
         }
         // Property read on a class value: `p.prop` (own or inherited).
@@ -8794,7 +8893,7 @@ impl<'a> Checker<'a> {
             // ExprId; `lower_member_read_on` reads the same map — see [`TypeInfo::resolved_members`]).
             let ret = m.ret;
             if let Some(me) = mexpr {
-                self.resolved_members.insert(me, m);
+                self.resolved_calls.insert(me, ResolvedCall::Member(m));
             }
             return ret;
         }
@@ -9056,7 +9155,10 @@ impl<'a> Checker<'a> {
                                             );
                                         }
                                     }
-                                    return c.ret;
+                                    // Record for the lowerer (sole resolver): a FQ top-level call.
+                                    let ret = c.ret;
+                                    self.resolved_calls.insert(call, ResolvedCall::TopLevel(c));
+                                    return ret;
                                 }
                             }
                             // A FQ call with a SYNTACTIC trailing lambda where the preceding parameters
@@ -9786,7 +9888,7 @@ impl<'a> Checker<'a> {
                         &arg_tys,
                     ) {
                         let ret = m.ret;
-                        self.resolved_members.insert(call, m);
+                        self.resolved_calls.insert(call, ResolvedCall::Member(m));
                         return ret;
                     }
                     match (name.as_str(), arg_tys.as_slice()) {
@@ -9817,7 +9919,7 @@ impl<'a> Checker<'a> {
                     // Record the resolved member so the lowerer emits it directly rather than
                     // re-resolving the same call (see [`TypeInfo::resolved_members`]).
                     let ret = m.ret;
-                    self.resolved_members.insert(call, m);
+                    self.resolved_calls.insert(call, ResolvedCall::Member(m));
                     return ret;
                 }
                 // Instance method call on a class value: `p.method(args)` (own or inherited).
@@ -10081,6 +10183,13 @@ impl<'a> Checker<'a> {
                     "resolve",
                     "EXT-SECTION name={name} rt={rt:?} call_targs={call_targs:?}"
                 );
+                // A lambda-bearing call (`x.forEach { … }`, `x.map { … }`, …) may be lowered by inlining
+                // an iteration over the receiver; record the receiver's `iterator` EXTENSION (if any, e.g.
+                // `Map`) keyed by the receiver expr so the lowerer reads the capability instead of
+                // re-resolving. Gated structurally on a function argument — no method-name list.
+                if arg_tys.iter().any(|t| matches!(t, Ty::Fun(_))) {
+                    self.record_synthetic_ext(receiver, "iterator", rt, &[]);
+                }
                 // Stash the RESOLVED explicit type arguments so the lowerer can specialize a `<reified T>`
                 // classpath extension's spliced body (imports/classpath types resolve here, not there).
                 if !call_targs.is_empty() {
@@ -10110,9 +10219,13 @@ impl<'a> Checker<'a> {
                             if let Some(sel) = slots.into_iter().collect::<Option<Vec<ExprId>>>() {
                                 let tys: Vec<Ty> =
                                     sel.iter().map(|a| self.expr_types[a.0 as usize]).collect();
-                                if let Some(ret) =
-                                    self.record_library_extension_call(&name, rt, &tys, &call_targs)
-                                {
+                                if let Some(ret) = self.record_library_extension_call(
+                                    Some(call),
+                                    &name,
+                                    rt,
+                                    &tys,
+                                    &call_targs,
+                                ) {
                                     return ret;
                                 }
                             }
@@ -10120,7 +10233,7 @@ impl<'a> Checker<'a> {
                     }
                 }
                 if let Some(ret) =
-                    self.record_library_extension_call(&name, rt, &arg_tys, &call_targs)
+                    self.record_library_extension_call(Some(call), &name, rt, &arg_tys, &call_targs)
                 {
                     return ret;
                 }
@@ -10145,15 +10258,20 @@ impl<'a> Checker<'a> {
                             }
                         })
                         .collect();
-                    if let Some(ret) =
-                        self.record_library_extension_call(&name, rt, &widened, &call_targs)
-                    {
+                    if let Some(ret) = self.record_library_extension_call(
+                        Some(call),
+                        &name,
+                        rt,
+                        &widened,
+                        &call_targs,
+                    ) {
                         return ret;
                     }
                 }
                 // A call selected by lambda RETURN type (`recv.sumOf { it * 2 }: Int`): the `@JvmName`
-                // overload matching the lambda's return is resolved from `@Metadata`; the result is that
-                // return type. (Spliced in lowering — no `ext_call` recorded.)
+                // overload matching the lambda's return is resolved from `@Metadata`. Record the resolved
+                // callable (+ member-vs-extension) so the lowerer emits it directly — its UNSCOPED resolver
+                // cannot re-derive the mangled JVM method name.
                 if let Some(lam_ret) = arg_tys.iter().find_map(|t| {
                     if let Ty::Fun(s) = t {
                         Some(s.ret)
@@ -10161,11 +10279,20 @@ impl<'a> Checker<'a> {
                         None
                     }
                 }) {
-                    if let Some((c, _)) = self
+                    if let Some((c, is_member)) = self
                         .resolver()
                         .resolve_lambda_return_overload(rt, &name, lam_ret, &arg_tys)
                     {
-                        return c.ret;
+                        let ret = c.ret;
+                        // An instance member has no other lowerer resolution path (records as a member);
+                        // an extension flows through the general extension-emit branch (records as one).
+                        let resolved = if is_member {
+                            ResolvedCall::LambdaReturnMember(c)
+                        } else {
+                            ResolvedCall::Extension(c)
+                        };
+                        self.resolved_calls.insert(call, resolved);
+                        return ret;
                     }
                 }
                 // Explicit `f.invoke(args)` on a function VALUE — the same invoke convention as `f(args)`.
@@ -10176,27 +10303,9 @@ impl<'a> Checker<'a> {
                         return ret;
                     }
                 }
-                // A non-public (`@InlineOnly`) extension the backend SPLICES (no callable method to call):
-                // a lambda-bearing scope fn (`takeIf`/`takeUnless`/…), recovering the receiver-bound return.
-                if args.len() == 1 && matches!(self.file.expr(args[0]), Expr::Lambda { .. }) {
-                    if let Some(c) = self
-                        .resolver()
-                        .resolve_extension_inline_callable(&name, rt, &arg_tys)
-                    {
-                        return c.ret;
-                    }
-                }
-                // A non-public (`@InlineOnly`) extension is legal when the provider/backend has selected
-                // an inline body; lowering emits an inline static call so the backend splices it instead
-                // of invoking the private package-part method.
-                if let Some(c) = self
-                    .resolver()
-                    .resolve_extension_inline_callable(&name, rt, &arg_tys)
-                {
-                    if c.inline.can_inline() {
-                        return c.ret;
-                    }
-                }
+                // (`@InlineOnly` extensions — scope fns `takeIf`/`let`/… — are resolved and recorded by
+                // `record_library_extension_call` above: one extension resolution admits inline, and the
+                // lowerer splices via the callable's `inline` flag. No separate inline path here.)
                 // User-defined extension function in this file (invokestatic on the file facade), resolved
                 // through the current module as a `SymbolSource`. The exact-receiver overload is rung 0;
                 // its `callable.params` prepend the receiver and `callable.descriptor` is the full static
@@ -10329,7 +10438,7 @@ impl<'a> Checker<'a> {
                     }
                 }
                 // `a.contentEquals(b)` / `a.contentHashCode()` / `a.isEmpty()` on arrays.
-                if let Ty::Array(_) = rt {
+                if rt.is_array() {
                     match (name.as_str(), arg_tys.len()) {
                         ("contentEquals", 1) => return Ty::Boolean,
                         ("contentHashCode", 0) => return Ty::Int,
@@ -10389,7 +10498,7 @@ impl<'a> Checker<'a> {
                         // Record the resolved static member so the lowerer emits it without
                         // re-resolving (see [`TypeInfo::resolved_companions`]).
                         let ret = m.ret;
-                        self.resolved_companions.insert(call, m);
+                        self.resolved_calls.insert(call, ResolvedCall::Companion(m));
                         return ret;
                     }
                 }
@@ -11265,7 +11374,8 @@ impl<'a> Checker<'a> {
                     {
                         // Record the resolved callable so the lowerer emits it without re-resolving
                         // (see [`TypeInfo::resolved_top_level`]).
-                        self.resolved_top_level.insert(call, c.clone());
+                        self.resolved_calls
+                            .insert(call, ResolvedCall::TopLevel(c.clone()));
                         let last_is_array =
                             c.params.last().is_some_and(|p| p.array_elem().is_some());
                         let vararg = last_is_array
@@ -11522,12 +11632,15 @@ impl<'a> Checker<'a> {
         // read-only `List` it does NOT resolve, so this returns false and `coll += x` lowers as
         // `coll = coll.plus(x)` (reassignment). No mutability predicate — the candidate's Kotlin
         // receiver type decides, like every other operator overload.
+        if rt != Ty::Error && matches!(recv, Ty::Obj(..)) {
+            // Record the (inline) `plusAssign` extension callable keyed by the target expr for the lowerer.
+            self.record_synthetic_ext(lhs, aname, recv, &[rt]);
+        }
         if rt != Ty::Error
             && matches!(recv, Ty::Obj(..))
             && self
-                .resolver()
-                .resolve_extension_inline_callable(aname, recv, &[rt])
-                .is_some()
+                .synthetic_ext_calls
+                .contains_key(&(lhs, aname.to_string()))
         {
             self.stmt_lowers.insert(s, StmtLowering::PlusAssign);
             return true;
@@ -11634,6 +11747,9 @@ impl<'a> Checker<'a> {
                         );
                     }
                     let comp = format!("component{}", idx + 1);
+                    // Record the (possibly `@InlineOnly`) `componentN` EXTENSION callable keyed by the
+                    // initializer expr + name, so the lowerer reads it instead of re-resolving.
+                    self.record_synthetic_ext(init, &comp, it, &[]);
                     // A user class's `componentN` (data class), else a library member (`Pair.component1`,
                     // `Map.Entry.component1`) — with the receiver's type arguments substituted into the
                     // result (`Pair<Int, String>.component1()` → `Int`).
@@ -12015,7 +12131,7 @@ impl<'a> Checker<'a> {
                 label,
             } => {
                 let it = self.expr(iterable);
-                // An array element type covers both `Ty::Array` and a boxed `Array<T>`
+                // An array element type covers primitive arrays and a boxed `Array<T>`
                 // (`Obj("kotlin/Array", [T])`) — iterate either as an array.
                 let elem = if let Some(e) = it.array_elem() {
                     e
@@ -12041,7 +12157,9 @@ impl<'a> Checker<'a> {
                                 // The `iterator` operator is a member (handled above) OR an extension —
                                 // public (an `Iterable`-shaped receiver) or `@InlineOnly` (`Map<K,V>
                                 // .iterator()` → `Iterator<Map.Entry>`). The inline-admitting resolver
-                                // covers both.
+                                // covers both. Record the extension callable (keyed by the iterable expr)
+                                // for the lowerer.
+                                self.record_synthetic_ext(iterable, "iterator", it, &[]);
                                 match self.library_extension_inline_return("iterator", it, &[]) {
                                     Some(ret) => ret
                                         .type_args()

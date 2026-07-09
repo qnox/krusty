@@ -92,6 +92,10 @@ fn primitive_array_descriptor(internal: &str) -> Option<&'static str> {
         "kotlin/CharArray" => "[C",
         "kotlin/FloatArray" => "[F",
         "kotlin/DoubleArray" => "[D",
+        // The unsigned specialized arrays are `inline class`es over the signed primitive array, so they
+        // erase to the same JVM descriptor (`UIntArray` = `[I`); only their `@Metadata` element differs.
+        "kotlin/UIntArray" => "[I",
+        "kotlin/ULongArray" => "[J",
         _ => return None,
     })
 }
@@ -128,7 +132,6 @@ pub fn type_descriptor(ty: Ty) -> String {
         }
         Ty::Obj(n, _) => obj_desc(n),
         Ty::Null | Ty::Nothing | Ty::Error => obj_desc("kotlin/Any"),
-        Ty::Array(elem) => format!("[{}", type_descriptor(*elem)),
         Ty::Fun(s) => format!(
             "Lkotlin/jvm/functions/Function{};",
             s.params.len() + usize::from(s.suspend)

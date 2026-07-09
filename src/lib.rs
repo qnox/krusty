@@ -10,6 +10,7 @@
 #[cfg(feature = "dhat-heap")]
 pub use dhat;
 
+pub mod assignable;
 pub mod ast;
 pub mod backend;
 pub mod cli;

@@ -264,6 +264,10 @@ pub struct ClassWriter {
     fields: Vec<FieldInfo>,
     methods: Vec<MethodInfo>,
     class_attributes: Vec<(u16, Vec<u8>)>, // (name_index, raw bytes)
+    /// Encoded `annotation` structures (type_index + element_value_pairs, WITHOUT the outer count) for the
+    /// class's single `RuntimeVisibleAnnotations` attribute — `@Metadata` and user annotations both append
+    /// here so `finish` writes ONE attribute (two would be invalid per JVMS §4.7.16).
+    runtime_annotations: Vec<Vec<u8>>,
     /// `BootstrapMethods` entries: `(method_handle_cp_index, static_argument_cp_indices)`.
     /// The index of an entry here is its `bootstrap_method_attr_index` (referenced by InvokeDynamic).
     bootstrap_methods: Vec<(u16, Vec<u16>)>,
@@ -284,6 +288,7 @@ impl ClassWriter {
             fields: Vec::new(),
             methods: Vec::new(),
             class_attributes: Vec::new(),
+            runtime_annotations: Vec::new(),
             bootstrap_methods: Vec::new(),
             internal_name: internal_name.to_string(),
         }
@@ -378,8 +383,9 @@ impl ClassWriter {
         let n_d1 = self.cp.utf8("d1");
         let n_d2 = self.cp.utf8("d2");
 
+        // One `annotation` structure (type_index + element_value_pairs) — appended to the shared list so
+        // `finish` writes a single `RuntimeVisibleAnnotations` attribute even alongside user annotations.
         let mut body = Vec::new();
-        u2(&mut body, 1); // num_annotations
         u2(&mut body, anno_type);
         u2(&mut body, 5); // element_value_pairs: mv, k, xi, d1, d2
         u2(&mut body, n_mv);
@@ -392,9 +398,7 @@ impl ClassWriter {
         self.ev_str_array(&mut body, d1);
         u2(&mut body, n_d2);
         self.ev_str_array(&mut body, d2);
-
-        let name = self.cp.utf8("RuntimeVisibleAnnotations");
-        self.class_attributes.push((name, body));
+        self.runtime_annotations.push(body);
     }
 
     fn ev_int(&mut self, out: &mut Vec<u8>, v: i32) {
@@ -419,6 +423,102 @@ impl ClassWriter {
         u2(out, ss.len() as u16);
         for s in ss {
             self.ev_str(out, s);
+        }
+    }
+
+    /// Encode one `element_value` (JVMS §4.7.16.1) for a resolved annotation argument.
+    fn ev_value(&mut self, out: &mut Vec<u8>, v: &crate::ir::AnnoValue) {
+        use crate::ir::{AnnoValue, IrConst};
+        match v {
+            AnnoValue::Const(c) => match c {
+                IrConst::Boolean(b) => {
+                    out.push(b'Z');
+                    let i = self.cp.integer(*b as i32);
+                    u2(out, i);
+                }
+                IrConst::Byte(x) => {
+                    out.push(b'B');
+                    let i = self.cp.integer(*x as i32);
+                    u2(out, i);
+                }
+                IrConst::Short(x) => {
+                    out.push(b'S');
+                    let i = self.cp.integer(*x as i32);
+                    u2(out, i);
+                }
+                IrConst::Char(x) => {
+                    out.push(b'C');
+                    let i = self.cp.integer(*x as i32);
+                    u2(out, i);
+                }
+                IrConst::Int(x) => {
+                    out.push(b'I');
+                    let i = self.cp.integer(*x);
+                    u2(out, i);
+                }
+                IrConst::Long(x) => {
+                    out.push(b'J');
+                    let i = self.cp.long(*x);
+                    u2(out, i);
+                }
+                IrConst::Float(x) => {
+                    out.push(b'F');
+                    let i = self.cp.float(*x);
+                    u2(out, i);
+                }
+                IrConst::Double(x) => {
+                    out.push(b'D');
+                    let i = self.cp.double(*x);
+                    u2(out, i);
+                }
+                IrConst::String(s) => self.ev_str(out, s),
+                IrConst::Null => self.ev_str(out, ""),
+            },
+            AnnoValue::Enum(ty, name) => {
+                out.push(b'e');
+                let ti = self.cp.utf8(&format!("L{ty};"));
+                u2(out, ti);
+                let ni = self.cp.utf8(name);
+                u2(out, ni);
+            }
+            AnnoValue::Class(internal) => {
+                out.push(b'c');
+                let ci = self.cp.utf8(&format!("L{internal};"));
+                u2(out, ci);
+            }
+            AnnoValue::Annotation(a) => {
+                out.push(b'@');
+                self.ev_annotation(out, a);
+            }
+            AnnoValue::Array(items) => {
+                out.push(b'[');
+                u2(out, items.len() as u16);
+                for it in items {
+                    self.ev_value(out, it);
+                }
+            }
+        }
+    }
+
+    /// Encode an `annotation` structure: the type descriptor index + its `element_value_pairs`.
+    fn ev_annotation(&mut self, out: &mut Vec<u8>, a: &crate::ir::AppliedAnnotation) {
+        let ti = self.cp.utf8(&format!("L{};", a.internal));
+        u2(out, ti);
+        u2(out, a.values.len() as u16);
+        for (name, v) in &a.values {
+            let ni = self.cp.utf8(name);
+            u2(out, ni);
+            self.ev_value(out, v);
+        }
+    }
+
+    /// Queue the applied annotations for the class's `RuntimeVisibleAnnotations` (JVMS §4.7.16). They join
+    /// any `@Metadata` in the shared list; `finish` writes exactly ONE attribute.
+    pub fn set_runtime_annotations(&mut self, anns: &[crate::ir::AppliedAnnotation]) {
+        for a in anns {
+            let mut body = Vec::new();
+            self.ev_annotation(&mut body, a);
+            self.runtime_annotations.push(body);
         }
     }
 
@@ -543,6 +643,16 @@ impl ClassWriter {
                 for &a in args {
                     u2(&mut body, a);
                 }
+            }
+            self.class_attributes.push((name, body));
+        }
+        // ONE `RuntimeVisibleAnnotations` attribute for all queued annotations (`@Metadata` + user ones).
+        if !self.runtime_annotations.is_empty() {
+            let name = self.cp.utf8("RuntimeVisibleAnnotations");
+            let mut body = Vec::new();
+            u2(&mut body, self.runtime_annotations.len() as u16);
+            for a in &self.runtime_annotations {
+                body.extend_from_slice(a);
             }
             self.class_attributes.push((name, body));
         }

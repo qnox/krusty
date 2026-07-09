@@ -681,6 +681,38 @@ pub struct IrClass {
     /// `<init>` comes from `secondary_ctors` (a `Super`-delegating one carries the init body). `true`
     /// for every other class (including synthesized/enum/object).
     pub has_primary_ctor: bool,
+    /// RUNTIME-retained annotations applied to this class (`@Anno(...) class TTT`), emitted into the
+    /// class's `RuntimeVisibleAnnotations` attribute. Empty for a class with none.
+    pub applied_annotations: Vec<AppliedAnnotation>,
+    /// For an `annotation class`: `true` when its Kotlin retention is RUNTIME (the default) — the emitter
+    /// then writes a `@java.lang.annotation.Retention(RUNTIME)` meta-annotation on the annotation interface
+    /// so the JVM keeps the annotation's uses visible to reflection.
+    pub runtime_retained: bool,
+}
+
+/// A resolved JVM annotation value (`element_value`, JVMS §4.7.16.1) — an annotation argument folded to
+/// the constant the class file encodes.
+#[derive(Clone, Debug)]
+pub enum AnnoValue {
+    /// A primitive/`String` constant (encoded by tag `B`/`C`/`D`/`F`/`I`/`J`/`S`/`Z`/`s`).
+    Const(IrConst),
+    /// An enum constant `(enum_type_internal, const_name)` — tag `e`.
+    Enum(String, String),
+    /// A class literal `T::class` `(type_internal)` — tag `c` (its type descriptor).
+    Class(String),
+    /// A nested annotation instance `A(...)` — tag `@`.
+    Annotation(AppliedAnnotation),
+    /// An array `[…]` — tag `[`.
+    Array(Vec<AnnoValue>),
+}
+
+/// An applied annotation (`@Anno(...)`) to encode into a `RuntimeVisibleAnnotations` attribute.
+#[derive(Clone, Debug)]
+pub struct AppliedAnnotation {
+    /// The annotation type's internal name (`Anno`).
+    pub internal: String,
+    /// `element_value_pairs`: `(element_name, value)` in declaration order.
+    pub values: Vec<(String, AnnoValue)>,
 }
 
 /// How a function-reference subclass's `invoke` dispatches to its target.
@@ -734,6 +766,10 @@ pub struct FuncRef {
     /// `Some(value_class_internal)` means the physical target returns the value-class underlying and the
     /// function-reference `invoke` must box it back before returning Object.
     pub box_ret: Option<String>,
+    /// `StaticBound` only: `Some(value_class_internal)` when the CAPTURED receiver is a value class
+    /// (`Z(42)::ext`). The receiver is stored boxed as `Object`; the emitter `checkcast`s it to the box
+    /// class then `unbox-impl`s it to the underlying before the mangled `invokestatic ext-<hash>(under)`.
+    pub staticbound_recv_unbox: Option<String>,
 }
 
 /// A synthesized property-reference class's metadata (`Type::prop` → `Type$prop$N`): the referenced
@@ -1359,6 +1395,8 @@ mod tests {
             companion_class: None,
             secondary_ctors: Vec::new(),
             has_primary_ctor: true,
+            applied_annotations: Vec::new(),
+            runtime_retained: false,
         }
     }
 

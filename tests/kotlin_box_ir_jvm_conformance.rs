@@ -247,7 +247,15 @@ fn compile_source(
             return None;
         }
     };
-    if !krusty::jvm::value_classes::lower_value_classes(&mut ir) {
+    if !{
+        let vc_module = krusty::module_symbols::ModuleSymbols::new(&syms);
+        let vc_resolver = krusty::symbol_resolver::SymbolResolver::new_scoped_with_module(
+            &*syms.libraries,
+            &vc_module,
+            &[],
+        );
+        krusty::jvm::value_classes::lower_value_classes(&mut ir, &vc_resolver)
+    } {
         T_EMIT.fetch_add(t4.elapsed().as_nanos() as u64, Ordering::Relaxed);
         return None; // value-class shape not yet lowered — skip, don't miscompile
     }
@@ -456,7 +464,15 @@ fn compile_blocks(
         }
         let facade = file_class_name(&blocks[i].0, file.package.as_deref());
         let mut ir = lower_file(file, &info, &syms)?;
-        if !krusty::jvm::value_classes::lower_value_classes(&mut ir) {
+        if !{
+            let vc_module = krusty::module_symbols::ModuleSymbols::new(&syms);
+            let vc_resolver = krusty::symbol_resolver::SymbolResolver::new_scoped_with_module(
+                &*syms.libraries,
+                &vc_module,
+                &[],
+            );
+            krusty::jvm::value_classes::lower_value_classes(&mut ir, &vc_resolver)
+        } {
             return None;
         }
         if !krusty::jvm::suspend::lower_suspend(&mut ir, &facade) {

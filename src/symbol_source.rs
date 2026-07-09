@@ -32,6 +32,14 @@ pub trait SymbolSource {
         None
     }
 
+    /// Whether `internal` names a `@JvmInline value`/inline class — the value-class-ness attribute of the
+    /// class SYMBOL, queried by name. THE authority the value-class pass and resolver consult, rather than
+    /// a side "value-class set". Derived from the symbol's `value_underlying` shape.
+    fn is_value(&self, internal: &str) -> bool {
+        self.resolve_type(internal)
+            .is_some_and(|t| t.value_underlying.is_some())
+    }
+
     /// Resolve a fully-qualified name to its namespace record (classifier + callables) — THE FQN query
     /// this source answers. The resolver forms candidate FQNs from the file's import scope and unions the
     /// results across candidates + sources; this returns just what THIS source has at `fqn`. `receiver`
@@ -152,8 +160,7 @@ impl SymbolSource for CompositeSource<'_> {
 mod tests {
     use super::*;
     use crate::libraries::{
-        FnKind, FunctionInfo, GSig, LibraryCallable, LibraryType, PropKind, PropertyInfo,
-        Visibility,
+        FnKind, FunctionInfo, LibraryCallable, LibraryType, PropKind, PropertyInfo, Visibility,
     };
     use crate::types::Ty;
 
@@ -191,7 +198,7 @@ mod tests {
                         kind: PropKind::TopLevel,
                         receiver: None,
                         formals: Vec::new(),
-                        ty: GSig::Prim(Ty::Int),
+                        ty: Ty::Int,
                         getter: callable(&self.owner, name),
                         setter: None,
                         is_const: false,
