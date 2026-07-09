@@ -1436,11 +1436,29 @@ impl SymbolSource for JvmLibraries {
             // `kotlin/collections/Iterable` applies to a `java/util/Set` receiver (`entries.first()`). Add
             // each Kotlin equivalent as a supertype so the source-type receiver walk bridges the
             // java.util ↔ kotlin.collections platform mapping instead of dead-ending in the JDK hierarchy.
-            let mapped: Vec<String> = std::iter::once(internal)
+            // The read-only Kotlin face of every JVM collection interface in the hierarchy — an extension on
+            // `kotlin/collections/Iterable`/`List`/… applies to a `java/util/*` receiver.
+            let mut mapped: Vec<String> = std::iter::once(internal)
                 .chain(supertypes.iter().map(String::as_str))
                 .filter_map(super::jvm_class_map::jvm_collection_to_kotlin)
                 .map(str::to_string)
                 .collect();
+            // The MUTABLE face — but ONLY for a CONCRETE class (`java/util/ArrayList`, `HashMap`), never for
+            // the JVM collection INTERFACES: `java/util/List` is the shared realization of BOTH the read-only
+            // `kotlin/collections/List` and its mutable sibling, so tagging the interface mutable would make a
+            // read-only `List` (which reaches `java/util/List` in its supertypes) spuriously satisfy a
+            // `MutableCollection.plusAssign`. A concrete class is genuinely mutable, so its `MutableList`/
+            // `MutableSet`/`MutableMap` face is sound (derived from the java.util interface it implements).
+            if !ci.is_interface() {
+                for m in std::iter::once(internal)
+                    .chain(supertypes.iter().map(String::as_str))
+                    .filter_map(super::jvm_class_map::jvm_collection_to_kotlin_mutable)
+                {
+                    if !mapped.iter().any(|x| x == m) {
+                        mapped.push(m.to_string());
+                    }
+                }
+            }
             for k in mapped {
                 if !supertypes.iter().any(|existing| existing == &k) {
                     supertypes.push(k);
