@@ -7120,6 +7120,12 @@ impl<'a> Lower<'a> {
             dispatch_receiver: None,
             args: vec![recv, lam],
         });
+        // Record the declared source receiver so the value-class pass keeps a REFERENCE-underlying
+        // value-class receiver (`Result.getOrElse`) unboxed: the spliced `-impl` body reads it as the raw
+        // underlying, so boxing it to the `Object` receiver parameter (which the descriptor otherwise
+        // implies) would feed the body a boxed `kotlin.Result` and mis-`checkcast` it (CCE). The other
+        // extension-lowering paths record this; the inline-lambda path must too.
+        self.record_ext_source_receiver(call, c.source_receiver);
         // The inline fn's erased return is `Object` (a generic `R`); coerce the spliced result to the
         // logical return type (`5.let { it+1 }: Int` unboxes `Integer`→`int`), as a normal call would.
         Some(self.coerce_to_static(call, logical, physical))
