@@ -9839,6 +9839,48 @@ impl<'a> Lower<'a> {
         }))
     }
 
+    /// `println(x)` / `print(x)` (and the no-arg `println()`) — the `kotlin.io` console intrinsics. Their
+    /// `ConsoleKt` realization is a PRIVATE `@InlineOnly` method (no callable `invokestatic` target), so
+    /// kotlinc splices `System.out.println(x)`; krusty emits the same directly: `getstatic
+    /// java/lang/System.out:PrintStream`, then an `invokevirtual` of the matching `PrintStream` overload
+    /// (the resolved callable's descriptor names the parameter shape — `Object`/`int`/`char[]`/…, each a
+    /// real `PrintStream.println`/`print` overload). Returns `None` for any other callable.
+    fn lower_println(
+        &mut self,
+        callable: &crate::libraries::LibraryCallable,
+        args: &[AstExprId],
+    ) -> Option<u32> {
+        if !matches!(callable.name.as_str(), "println" | "print")
+            || !callable.owner.contains("ConsoleKt")
+        {
+            return None;
+        }
+        let out = self.ir.add_expr(IrExpr::ExternalStaticField {
+            owner: "java/lang/System".to_string(),
+            name: "out".to_string(),
+            descriptor: "Ljava/io/PrintStream;".to_string(),
+        });
+        let mut a = Vec::new();
+        for (i, &arg) in args.iter().enumerate() {
+            let pty = callable
+                .params
+                .get(i)
+                .copied()
+                .unwrap_or_else(|| Ty::obj("kotlin/Any"));
+            a.push(self.lower_arg(arg, &ty_to_ir(pty))?);
+        }
+        Some(self.ir.add_expr(IrExpr::Call {
+            callee: Callee::Virtual {
+                owner: "java/io/PrintStream".to_string(),
+                name: callable.name.clone(),
+                descriptor: callable.descriptor.clone(),
+                interface: false,
+            },
+            dispatch_receiver: Some(out),
+            args: a,
+        }))
+    }
+
     /// `a == b` / `a != b` where BOTH operands are nullable boxed numbers (`Double?`, `Int?`, … — e.g.
     /// smart-cast from `Any?`). Kotlin compares them by VALUE with numeric promotion and IEEE-754
     /// semantics, not by `equals` (which is type-specific: `Integer.equals(Double)` is always false).
@@ -16804,6 +16846,9 @@ impl<'a> Lower<'a> {
                         if let Some(intrinsic) = self.lower_assert(&c, &args) {
                             return Some(intrinsic);
                         }
+                        if let Some(intrinsic) = self.lower_println(&c, &args) {
+                            return Some(intrinsic);
+                        }
                         // Is the callee a `suspend fun`? Read the flag the CHECKER recorded on the resolved
                         // callable (it flows uniformly from the AST for a module/sibling-file fn and from
                         // `@Metadata` for a classpath one). A suspend call is recorded by `ExprId` so the
@@ -19802,7 +19847,16 @@ fn ir_type_is_object(t: &Ty) -> bool {
 /// constructor can accept the args before falling back to a secondary (`IC("abc")`: a `String` is NOT
 /// assignable to the primary's `List<T>` param, but IS to the secondary's erased `T`).
 fn ir_arg_assignable(arg: &Ty, param: &Ty) -> bool {
-    arg == param || (ir_type_is_object(param) && ir_type_is_reference(arg))
+    arg == param
+        || (ir_type_is_object(param) && ir_type_is_reference(arg))
+        // Same erased CLASS with differing type arguments — the IR carries no generic detail, so a
+        // `List<String>` argument fits a `List<T>` primary-ctor field (`ICs(listOf("x","y"))` picks the
+        // primary `constructor-impl(List)`, not the secondary `(T)` that would re-wrap it). The precise
+        // type-argument check already happened in the checker; here only the erased class must agree.
+        || matches!(
+            (arg.non_null().obj_internal(), param.non_null().obj_internal()),
+            (Some(a), Some(p)) if a == p
+        )
 }
 
 /// Whether `e` declares a local `val`/`var` (a `Stmt::Local`/`Destructure`), not descending into a
