@@ -9221,7 +9221,12 @@ impl<'a> Checker<'a> {
                                                 "fully-qualified trailing-lambda call {pkg}.{name} -> {}",
                                                 c.owner
                                             );
-                                            return c.ret;
+                                            // Record the resolved callable so the lowerer emits it (the
+                                            // non-trailing-lambda FQ path above records the same way).
+                                            let ret = c.ret;
+                                            self.resolved_calls
+                                                .insert(call, ResolvedCall::TopLevel(c));
+                                            return ret;
                                         }
                                     }
                                 }
