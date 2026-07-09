@@ -5030,6 +5030,19 @@ impl<'a> Checker<'a> {
             );
             return Ty::Error;
         }
+        // A NULLABLE value/inline class reference (`Result<T>?`) keeps its `?`, even though ordinary
+        // reference nullability is dropped: a value class has a distinct boxed-vs-unboxed representation
+        // (like a primitive), and downstream (the shared-cell holder, the box/unbox pass) distinguishes
+        // the boxed nullable form ONLY by the `?` (see `ref_elem_ir` / `nullable_is_boxed`). Without this a
+        // `var res: Result<T>?` would type as non-null `Result` → the pass reads it unboxed → `res!!` skips
+        // the `unbox-impl` a `getOrThrow()`/member access needs.
+        if r.nullable && !base.is_nullable() {
+            if let Ty::Obj(internal, _) = base {
+                if self.resolver().is_value(internal) {
+                    return Ty::nullable(base);
+                }
+            }
+        }
         base
     }
 

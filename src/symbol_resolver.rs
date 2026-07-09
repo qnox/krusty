@@ -269,6 +269,40 @@ fn ranked_extension_overloads(fs: &FunctionSet, allow_must_inline: bool) -> Vec<
     out
 }
 
+/// Extension overloads of a receiver-filtered set, ordered most-specific-first by the SOURCE receiver rank
+/// (the same `source_receiver_rank` the overload selector uses) rather than the provider's baked
+/// `receiver_rank`. The provider ranks a primitive-array family by enumeration order — every `IntArray`/
+/// `CharArray`/… overload ties at the array rung — so `IntArray.any`'s block parameter would tie with
+/// `CharArray.any`'s and the wrong one (`(Char)->…`) could win. Ranking by the actual receiver drops the
+/// non-applicable siblings (a `CharArray` extension does not apply to an `IntArray`) and keeps only the
+/// exact match at rung 0.
+fn ranked_extension_overloads_by_recv<'a>(
+    src: &dyn SymbolSource,
+    receiver: Ty,
+    fs: &'a FunctionSet,
+    allow_must_inline: bool,
+) -> Vec<&'a FunctionInfo> {
+    let mut out: Vec<(u32, &FunctionInfo)> = fs
+        .overloads
+        .iter()
+        .filter(|o| {
+            o.kind == FnKind::Extension
+                && (o.public() || (allow_must_inline && o.flags.inline.must_inline()))
+        })
+        .filter_map(|o| {
+            // The legacy `functions()` provider labels every candidate with the QUERIED receiver, not its
+            // own declared one — so `o.receiver` can't tell `IntArray.any` from `CharArray.any`. Rank by the
+            // real declared receiver on the parsed generic signature; a candidate with no signature is
+            // dropped (both callers gate on `generic_sig` anyway). This drops the non-applicable
+            // primitive-array siblings that `o.receiver` would falsely tie at rung 0.
+            let decl = o.generic_sig.as_ref().and_then(|g| g.receiver)?;
+            source_receiver_rank(src, receiver, decl).map(|r| (r, o))
+        })
+        .collect();
+    out.sort_by_key(|(r, _)| *r);
+    out.into_iter().map(|(_, o)| o).collect()
+}
+
 /// Map each provided argument to a logical parameter index. Identity when the counts match; else, for a
 /// call that omits leading defaulted parameters before a TRAILING lambda (`runBlocking { … }`), leading
 /// args → leading params and the trailing lambda → the LAST parameter.
@@ -1291,7 +1325,8 @@ impl<'a> SymbolResolver<'a> {
     ) -> Option<Vec<Vec<Ty>>> {
         let fs = self.src.functions(name, Some(receiver));
         for allow_must_inline in [false, true] {
-            for o in ranked_extension_overloads(&fs, allow_must_inline) {
+            for o in ranked_extension_overloads_by_recv(&self.src, receiver, &fs, allow_must_inline)
+            {
                 let Some(gsig) = o.generic_sig.as_ref() else {
                     continue;
                 };
@@ -1329,7 +1364,8 @@ impl<'a> SymbolResolver<'a> {
     ) -> Option<Vec<Option<Ty>>> {
         let fs = self.src.functions(name, Some(receiver));
         for allow_must_inline in [false, true] {
-            for o in ranked_extension_overloads(&fs, allow_must_inline) {
+            for o in ranked_extension_overloads_by_recv(&self.src, receiver, &fs, allow_must_inline)
+            {
                 let Some(gsig) = o.generic_sig.as_ref() else {
                     continue;
                 };
