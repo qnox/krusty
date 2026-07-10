@@ -86,7 +86,10 @@ fn unresolved_supertype() {
 
 #[test]
 fn unresolved_label_reference() {
-    let d = diags("fun box(): Int { return foo@ 1 }");
+    // A `break@label`/`continue@label` naming a label with no enclosing labeled loop is rejected, as
+    // kotlinc does. (A label *definition* on an expression — `foo@ 1` — is valid Kotlin and accepted;
+    // only a dangling label *reference* is an error.)
+    let d = diags("fun box() { break@foo }");
     assert_rejected(&d, "unresolved label reference");
 }
 
