@@ -2927,18 +2927,43 @@ fn infer_lit_ty_p(
     // same classpath/stdlib resolution the full checker uses. Returns a type only when every applicable
     // overload AGREES on the return type (no arg-based overload selection here); otherwise `None`, so the
     // caller falls back to `Error` (skip) rather than guess. NO stdlib symbol names are hardcoded.
-    fn resolved_ret(src: &dyn CompilerPlatform, name: &str, receiver: Option<Ty>) -> Option<Ty> {
-        let fs = src.functions(name, receiver);
+    fn resolved_ret(
+        resolver: &crate::symbol_resolver::SymbolResolver,
+        name: &str,
+        receiver: Option<Ty>,
+    ) -> Option<Ty> {
+        let rets: Vec<Ty> = match receiver {
+            Some(recv) => resolver
+                .instance_members(recv, name)
+                .into_iter()
+                .map(|m| m.ret)
+                .chain(
+                    resolver
+                        .receiver_extensions(recv, name)
+                        .into_iter()
+                        .map(|o| o.callable.ret),
+                )
+                .collect(),
+            None => resolver
+                .top_level_function_set(name)
+                .overloads
+                .into_iter()
+                .filter(|o| o.kind == crate::libraries::FnKind::TopLevel)
+                .map(|o| o.callable.ret)
+                .collect(),
+        };
         let mut ret: Option<Ty> = None;
-        for o in &fs.overloads {
+        for r in rets {
             match ret {
-                None => ret = Some(o.callable.ret),
-                Some(r) if r == o.callable.ret => {}
+                None => ret = Some(r),
+                Some(p) if p == r => {}
                 Some(_) => return None, // overloads disagree on return type — needs arg selection
             }
         }
         ret
     }
+    let scope = function_scope_packages_with(file, src.platform_default_import_packages());
+    let resolver = crate::symbol_resolver::SymbolResolver::new_scoped(src, &scope);
     match file.expr(e) {
         Expr::IntLit(_) => Ty::Int,
         Expr::LongLit(_) => Ty::Long,
@@ -3019,14 +3044,14 @@ fn infer_lit_ty_p(
                         return Ty::obj(internal);
                     }
                     // A top-level library/stdlib function — federated resolution (no hardcoded names).
-                    if let Some(t) = resolved_ret(src, n, None) {
+                    if let Some(t) = resolved_ret(&resolver, n, None) {
                         return t;
                     }
                     // A member of a classpath OBJECT imported unqualified (`import Obj.member`; the
                     // top-level `val logger = logger {}` idiom): resolve the member's return on the
                     // object's singleton type — mirroring the checker's `object_member_import`.
                     if let Some(internal) = object_member_import_sig(file, n, src) {
-                        if let Some(t) = resolved_ret(src, n, Some(Ty::obj(&internal))) {
+                        if let Some(t) = resolved_ret(&resolver, n, Some(Ty::obj(&internal))) {
                             return t;
                         }
                     }
@@ -3041,9 +3066,7 @@ fn infer_lit_ty_p(
                         .map(|a| infer_lit_ty_p(file, *a, class_names, fun_rets, props, src))
                         .collect();
                     if !arg_tys.contains(&Ty::Error) {
-                        if let Some(c) = crate::symbol_resolver::SymbolResolver::new(src)
-                            .resolve_top_level_callable(n, &arg_tys, &[])
-                        {
+                        if let Some(c) = resolver.resolve_top_level_callable(n, &arg_tys, &[]) {
                             return c.ret;
                         }
                     }
@@ -3067,14 +3090,15 @@ fn infer_lit_ty_p(
                         }
                         // Everything else (`s.uppercase()`, library members/extensions): federated
                         // classpath/stdlib resolution — no hardcoded symbol names.
-                        if let Some(t) = resolved_ret(src, name, Some(recv_ty)) {
+                        if let Some(t) = resolved_ret(&resolver, name, Some(recv_ty)) {
                             return t;
                         }
                         // A USER receiver type (a module class — not in the library source, so the call
                         // above found nothing) can still call an `Any`-inherited member (`toString`,
                         // `hashCode`, `equals`): resolve it on `kotlin/Any`, the universal supertype the
                         // source DOES carry. Still real classpath resolution — no member name hardcoded.
-                        if let Some(t) = resolved_ret(src, name, Some(Ty::obj("kotlin/Any"))) {
+                        if let Some(t) = resolved_ret(&resolver, name, Some(Ty::obj("kotlin/Any")))
+                        {
                             return t;
                         }
                     }
@@ -3134,8 +3158,8 @@ fn infer_lit_ty_p(
             receiver: None,
             name,
         } if name != "class" => {
-            let tl: Vec<_> = src
-                .functions(name, None)
+            let tl: Vec<_> = resolver
+                .top_level_function_set(name)
                 .overloads
                 .into_iter()
                 .filter(|o| o.kind == crate::libraries::FnKind::TopLevel)
@@ -3752,8 +3776,14 @@ fn is_nothing_ty(t: Ty) -> bool {
 /// scope BOTH the checker and the lowerer so the two resolve a `@JvmName`-mangled library family (e.g.
 /// `sumOf` → `sumOfInt`) identically — an unscoped lowerer walk misses it and bails.
 pub(crate) fn function_scope_packages(file: &File, syms: &SymbolTable) -> Vec<String> {
+    function_scope_packages_with(file, syms.libraries.platform_default_import_packages())
+}
+
+/// [`function_scope_packages`] against a platform's default-import list directly — for contexts that hold
+/// a `&dyn CompilerPlatform` (the pre-check property-type prepass) but no full `SymbolTable`.
+pub(crate) fn function_scope_packages_with(file: &File, platform_defaults: &[&str]) -> Vec<String> {
     let imports = import_map(file);
-    let import_levels = import_levels(file, syms.libraries.platform_default_import_packages());
+    let import_levels = import_levels(file, platform_defaults);
     let mut fn_scope: Vec<String> = import_levels.iter().flatten().cloned().collect();
     for fq in imports.values() {
         if let Some((pkg, _)) = fq.rsplit_once('/') {
@@ -4685,12 +4715,12 @@ impl<'a> Checker<'a> {
             ),
             _ => {
                 // A member `operator fun invoke` (user class or a classpath/library type) → `Operator`.
-                let member = crate::module_symbols::ModuleSymbols::new(self.syms)
-                    .functions(CALLABLE_INVOKE_OPERATOR, Some(receiver_ty))
-                    .overloads
+                let member = self
+                    .resolver()
+                    .instance_members(receiver_ty, CALLABLE_INVOKE_OPERATOR)
                     .into_iter()
-                    .find(|o| o.kind == crate::libraries::FnKind::Member)
-                    .map(|o| (o.callable.params, o.callable.ret))
+                    .next()
+                    .map(|m| (m.params, m.ret))
                     .or_else(|| {
                         crate::symbol_resolver::resolve_instance_member(
                             &*self.syms.libraries,
@@ -4705,13 +4735,12 @@ impl<'a> Checker<'a> {
                 } else {
                     // An `operator fun Recv.invoke(...)` EXTENSION (`"a"(12)`): logical params are the
                     // extension's own (`callable.params[0]` is the receiver). Lowered as a static call.
-                    let fi = crate::module_symbols::ModuleSymbols::new(self.syms)
-                        .functions(CALLABLE_INVOKE_OPERATOR, Some(receiver_ty))
-                        .overloads
+                    let fi = self
+                        .resolver()
+                        .receiver_extensions(receiver_ty, CALLABLE_INVOKE_OPERATOR)
                         .into_iter()
                         .find(|o| {
-                            o.kind == crate::libraries::FnKind::Extension
-                                && o.receiver_rank == 0
+                            o.receiver_rank == 0
                                 // Select by arity (`callable.params[0]` is the receiver) so an
                                 // overloaded `invoke()` / `invoke(Int)` picks the right one.
                                 && o.callable.params.len() == arg_tys.len() + 1
@@ -6829,12 +6858,14 @@ impl<'a> Checker<'a> {
                                 })
                                 .unwrap_or(Ty::Error)
                             } else if let Ty::Obj(internal, _) = rt {
+                                // A MODULE (user) class member only; a classpath / inherited-classpath
+                                // member falls through to the classpath selectors below (which pick by
+                                // argument fit and record the call for emit).
                                 crate::module_symbols::ModuleSymbols::new(self.syms)
-                                    .functions(&name, Some(rt))
-                                    .overloads
+                                    .instance_members(rt, &name)
                                     .into_iter()
-                                    .find(|o| o.kind == crate::libraries::FnKind::Member)
-                                    .map(|fi| fi.callable.ret)
+                                    .next()
+                                    .map(|m| m.ret)
                                     .or_else(|| {
                                         crate::symbol_resolver::resolve_instance(
                                             &*self.syms.libraries,
@@ -6873,14 +6904,10 @@ impl<'a> Checker<'a> {
                 // resolve it here on the non-null receiver. The lowerer emits the static extension call.
                 let result = if result == Ty::Error {
                     let arg_tys = args.as_deref().map_or_else(Vec::new, |a| self.arg_tys(a));
-                    crate::module_symbols::ModuleSymbols::new(self.syms)
-                        .functions(&name, Some(rt.non_null()))
-                        .overloads
+                    self.resolver()
+                        .receiver_extensions(rt.non_null(), &name)
                         .into_iter()
-                        .find(|o| {
-                            o.kind == crate::libraries::FnKind::Extension
-                                && o.callable.params.len() == arg_tys.len() + 1
-                        })
+                        .find(|o| o.callable.params.len() == arg_tys.len() + 1)
                         .map(|fi| fi.callable.ret)
                         .unwrap_or(Ty::Error)
                 } else {
@@ -7093,14 +7120,11 @@ impl<'a> Checker<'a> {
                 if lt != Ty::Error && rt != Ty::Error && !lt.is_reference() {
                     let op_name = op.arith_operator_name();
                     if let Some(fname) = op_name {
-                        if let Some(fi) = crate::module_symbols::ModuleSymbols::new(self.syms)
-                            .functions(fname, Some(lt))
-                            .overloads
+                        if let Some(fi) = self
+                            .resolver()
+                            .receiver_extensions(lt, fname)
                             .into_iter()
-                            .find(|o| {
-                                o.kind == crate::libraries::FnKind::Extension
-                                    && o.receiver_rank == 0
-                            })
+                            .find(|o| o.receiver_rank == 0)
                         {
                             // logical params (receiver is `callable.params[0]`) — operators take one arg.
                             // Only apply the extension when the RIGHT operand actually matches its
@@ -8211,21 +8235,23 @@ impl<'a> Checker<'a> {
                 }
             }
         }
+        // A MODULE (user-declared) class member, resolved by arity through the module source only. An
+        // INHERITED classpath member must NOT bind here (it would arity-bind ignoring argument fit and
+        // record nothing for the lowerer) — it falls through to `resolve_instance_member` below.
         if let Ty::Obj(_, _) = rt {
             let module_member = crate::module_symbols::ModuleSymbols::new(self.syms)
-                .functions(name, Some(rt))
-                .overloads
+                .instance_members(rt, name)
                 .into_iter()
-                .find(|o| o.kind == crate::libraries::FnKind::Member);
+                .next();
             if let Some(fi) = module_member {
-                let params = fi.callable.params.clone();
+                let params = fi.params.clone();
                 if params.len() == arg_tys.len() {
                     for (i, (p, a)) in params.iter().zip(arg_tys).enumerate() {
                         self.expect_assignable(*p, *a, self.span(args[i]), "argument");
                     }
                     return Some(
                         self.inferred_member_ret(rt, name, &params)
-                            .unwrap_or(fi.callable.ret),
+                            .unwrap_or(fi.ret),
                     );
                 }
             }
@@ -9053,41 +9079,22 @@ impl<'a> Checker<'a> {
                     // A method with default parameters (e.g. data-class `copy`) — `required < params` —
                     // queried through the module source.
                     let rt = self.expr(*receiver);
-                    let module_overloads = crate::module_symbols::ModuleSymbols::new(self.syms)
-                        .functions(name, Some(rt))
-                        .overloads;
                     // A member with recorded parameter names supports named arguments: one with defaults
                     // (`required < params`, e.g. data-class `copy`) maps labels + fills omitted slots; one
                     // with all-required parameters (a plain method) reorders the labelled arguments onto
-                    // positions (the lowerer evaluates the receiver + args in source order).
-                    let module_member = matches!(rt, Ty::Obj(_, _))
-                        && module_overloads
-                            .iter()
-                            .find(|o| o.kind == crate::libraries::FnKind::Member)
-                            .map_or(false, |fi| !fi.call_sig.param_names.is_empty());
-                    // A user-module EXTENSION with named parameters (`"s".foo(b = …, a = …)`).
-                    let module_ext = module_overloads.iter().any(|o| {
-                        o.kind == crate::libraries::FnKind::Extension
-                            && !o.call_sig.param_names.is_empty()
-                    });
-                    // A CLASSPATH instance MEMBER or EXTENSION whose `@Metadata` records parameter names
-                    // (`g.greet(b = …, a = …)` / `"s".tag(b = …, a = …)` against a jar/dependency function).
-                    // An extension receiver may be any type (`String`/primitive), not only `Ty::Obj`.
-                    module_member
-                        || module_ext
-                        || self
-                            .syms
-                            .libraries
-                            .functions(name, Some(rt))
-                            .overloads
-                            .iter()
-                            .any(|o| {
-                                matches!(
-                                    o.kind,
-                                    crate::libraries::FnKind::Member
-                                        | crate::libraries::FnKind::Extension
-                                ) && !o.call_sig.param_names.is_empty()
-                            })
+                    // positions (the lowerer evaluates the receiver + args in source order). Members and
+                    // extensions (module + classpath) both resolve through the federated resolver.
+                    let member_named = self
+                        .resolver()
+                        .instance_members(rt, name)
+                        .iter()
+                        .any(|m| !m.call_sig.param_names.is_empty());
+                    let ext_named = self
+                        .resolver()
+                        .receiver_extensions(rt, name)
+                        .iter()
+                        .any(|o| !o.call_sig.param_names.is_empty());
+                    member_named || ext_named
                 }
                 _ => false,
             };
@@ -9661,14 +9668,14 @@ impl<'a> Checker<'a> {
                 let rt = self.expr(receiver);
                 // For a class method with function-type parameters, type lambda arguments against the
                 // method's `lambda_param_types` (so `it` resolves), mirroring the free-function path.
-                let method_sig: Option<crate::libraries::FunctionInfo> = match rt {
-                    Ty::Obj(_, _) => crate::module_symbols::ModuleSymbols::new(self.syms)
-                        .functions(&name, Some(rt))
-                        .overloads
+                // A MODULE (user-declared) class method only: a classpath receiver leaves this `None` so
+                // the extension lambda-param path below runs (else a Java member such as
+                // `Iterable.forEach(Consumer)` would suppress the Kotlin `forEach` extension).
+                let method_sig: Option<crate::libraries::LibraryMember> =
+                    crate::module_symbols::ModuleSymbols::new(self.syms)
+                        .instance_members(rt, &name)
                         .into_iter()
-                        .find(|o| o.kind == crate::libraries::FnKind::Member),
-                    _ => None,
-                };
+                        .next();
                 // A generic higher-order member (`box.map { it.length }` where `box: Box<String>`):
                 // substitute the receiver's type arguments into the lambda parameter types (so `it`
                 // types as `String`/`Int`, not the erased `Any`) and remember the plan to infer the
@@ -9745,13 +9752,11 @@ impl<'a> Checker<'a> {
                     let has_lam = |lpt: &[Vec<Ty>]| lpt.iter().any(|v| !v.is_empty());
                     // Exact-receiver user extension (module source rung 0): its lambda parameter types
                     // come straight off the call shape.
-                    if let Some(fi) = crate::module_symbols::ModuleSymbols::new(self.syms)
-                        .functions(&name, Some(rt))
-                        .overloads
+                    if let Some(fi) = self
+                        .resolver()
+                        .receiver_extensions(rt, &name)
                         .into_iter()
-                        .find(|o| {
-                            o.kind == crate::libraries::FnKind::Extension && o.receiver_rank == 0
-                        })
+                        .find(|o| o.receiver_rank == 0)
                     {
                         if has_lam(&fi.call_sig.lambda_param_types) {
                             return Some(fi.call_sig.lambda_param_types);
@@ -9759,13 +9764,11 @@ impl<'a> Checker<'a> {
                     }
                     // Generic receiver (rung 1, the `Any` key): the decl's receiver type param → `rt` in
                     // the lambda param types (the type-param→receiver mapping stays AST-based).
-                    let fi = crate::module_symbols::ModuleSymbols::new(self.syms)
-                        .functions(&name, Some(rt))
-                        .overloads
+                    let fi = self
+                        .resolver()
+                        .receiver_extensions(rt, &name)
                         .into_iter()
-                        .find(|o| {
-                            o.kind == crate::libraries::FnKind::Extension && o.receiver_rank == 1
-                        })?;
+                        .find(|o| o.receiver_rank == 1)?;
                     if !has_lam(&fi.call_sig.lambda_param_types) {
                         return None;
                     }
@@ -9944,12 +9947,12 @@ impl<'a> Checker<'a> {
                     // (`ModuleSymbols`); its DFS member walk matches `lookup_method`, so the first Member
                     // overload is the same one hand-rolled lookup would pick. Collected owned so the
                     // borrow of `syms` ends before the mutating type-checks below.
-                    let members: Vec<_> = crate::module_symbols::ModuleSymbols::new(self.syms)
-                        .functions(&name, Some(rt))
-                        .overloads
-                        .into_iter()
-                        .filter(|o| o.kind == crate::libraries::FnKind::Member)
-                        .collect();
+                    // MODULE (user) class members only: a classpath receiver already resolved through
+                    // `resolve_instance_member` above (by argument fit); querying the federated members here
+                    // would arity-bind a Java member (`Iterable.forEach(Consumer)`) and reject the Kotlin
+                    // lambda, shadowing the extension the classpath selectors pick.
+                    let members = crate::module_symbols::ModuleSymbols::new(self.syms)
+                        .instance_members(rt, &name);
                     // The first Member overload is the most-derived override (for dispatch/return). For an
                     // OMITTED-argument call, the default may be declared on a SUPERTYPE (an interface
                     // method's default isn't redeclared on the override) — prefer an overload that records
@@ -9957,12 +9960,12 @@ impl<'a> Checker<'a> {
                     let short = arg_names.is_some()
                         || members
                             .first()
-                            .is_some_and(|o| arg_tys.len() != o.callable.params.len());
+                            .is_some_and(|o| arg_tys.len() != o.params.len());
                     let module_member = if short {
                         members
                             .iter()
                             .find(|o| {
-                                o.call_sig.required < o.callable.params.len()
+                                o.call_sig.required < o.params.len()
                                     && !o.call_sig.param_names.is_empty()
                             })
                             .or_else(|| members.first())
@@ -9971,7 +9974,7 @@ impl<'a> Checker<'a> {
                         members.first().cloned()
                     };
                     if let Some(fi) = module_member {
-                        let params = fi.callable.params.clone();
+                        let params = fi.params.clone();
                         let cs = &fi.call_sig;
                         // Named or omitted arguments: map each argument onto its parameter position via the
                         // parameter names (honouring `required`), then type-check against THAT parameter —
@@ -10028,7 +10031,7 @@ impl<'a> Checker<'a> {
                         }
                         return self
                             .inferred_member_ret(rt, &name, &params)
-                            .unwrap_or(fi.callable.ret);
+                            .unwrap_or(fi.ret);
                     }
                     // A CLASSPATH instance member called with NAMED arguments: reorder the labels onto
                     // parameter positions via the member's `@Metadata` names, then check each against its
@@ -10038,17 +10041,12 @@ impl<'a> Checker<'a> {
                         .filter(|ns| ns.iter().any(Option::is_some))
                     {
                         if let Some(fi) = self
-                            .syms
-                            .libraries
-                            .functions(&name, Some(rt))
-                            .overloads
+                            .resolver()
+                            .instance_members(rt, &name)
                             .into_iter()
-                            .find(|o| {
-                                o.kind == crate::libraries::FnKind::Member
-                                    && !o.call_sig.param_names.is_empty()
-                            })
+                            .find(|m| !m.call_sig.param_names.is_empty())
                         {
-                            let params = fi.callable.params.clone();
+                            let params = fi.params.clone();
                             let pn = &fi.call_sig.param_names;
                             // Honour the member's per-parameter DEFAULT flags (a data-class `copy` defaults
                             // every parameter to the receiver's property), so a named call may OMIT one —
@@ -10079,7 +10077,7 @@ impl<'a> Checker<'a> {
                                     self.diags.error(span, format!("call to '{name}': {msg}"))
                                 }
                             }
-                            return fi.callable.ret;
+                            return fi.ret;
                         }
                     }
                     // A classpath Java object: resolve the instance method via the `.class` reader.
@@ -10133,13 +10131,11 @@ impl<'a> Checker<'a> {
                 {
                     // A user `infix`/`operator` extension with this name shadows the builtin for the
                     // *infix* form (`a rem b`) while the dot form (`a.rem(b)`) keeps the builtin.
-                    let user_ext = crate::module_symbols::ModuleSymbols::new(self.syms)
-                        .functions(&name, Some(rt))
-                        .overloads
+                    let user_ext = self
+                        .resolver()
+                        .receiver_extensions(rt, &name)
                         .iter()
-                        .any(|o| {
-                            o.kind == crate::libraries::FnKind::Extension && o.receiver_rank == 0
-                        });
+                        .any(|o| o.receiver_rank == 0);
                     let infix_user_ext = self.file.infix_calls.contains(&call.0) && user_ext;
                     if !infix_user_ext && rt.is_numeric() {
                         // Binary arithmetic methods: `a.plus(b)` ≡ `a + b` (same numeric promotion).
@@ -10318,13 +10314,11 @@ impl<'a> Checker<'a> {
                 // its `callable.params` prepend the receiver and `callable.descriptor` is the full static
                 // `(recv + params)ret` the emitter wants.
                 {
-                    let module_ext = crate::module_symbols::ModuleSymbols::new(self.syms)
-                        .functions(&name, Some(rt))
-                        .overloads
+                    let module_ext = self
+                        .resolver()
+                        .receiver_extensions(rt, &name)
                         .into_iter()
-                        .find(|o| {
-                            o.kind == crate::libraries::FnKind::Extension && o.receiver_rank == 0
-                        });
+                        .find(|o| o.receiver_rank == 0);
                     if let Some(fi) = module_ext {
                         // Logical params (the receiver is `callable.params[0]`; the rest are the args).
                         let logical: Vec<Ty> = fi.callable.params[1..].to_vec();
@@ -10381,13 +10375,11 @@ impl<'a> Checker<'a> {
                 if erased_type_key(rt) != erased_type_key(Ty::obj("kotlin/Any")) {
                     // The generic-receiver extension keys under the `Any` descriptor — rung 1 in the
                     // module source's extension lookup (rung 0 is the exact receiver, handled above).
-                    let module_ext = crate::module_symbols::ModuleSymbols::new(self.syms)
-                        .functions(&name, Some(rt))
-                        .overloads
+                    let module_ext = self
+                        .resolver()
+                        .receiver_extensions(rt, &name)
                         .into_iter()
-                        .find(|o| {
-                            o.kind == crate::libraries::FnKind::Extension && o.receiver_rank == 1
-                        });
+                        .find(|o| o.receiver_rank == 1);
                     if let Some(fi) = module_ext {
                         let logical: Vec<Ty> = fi.callable.params[1..].to_vec();
                         if logical.len() == arg_tys.len() {
@@ -11136,11 +11128,10 @@ impl<'a> Checker<'a> {
                         // `inner_of` (a LEXICAL scope, not the type hierarchy) so it stays on `lookup_method`.
                         let resolved: Option<(Vec<Ty>, Ty)> =
                             crate::module_symbols::ModuleSymbols::new(self.syms)
-                                .functions(&fname, Some(Ty::obj(internal)))
-                                .overloads
+                                .instance_members(Ty::obj(internal), &fname)
                                 .into_iter()
-                                .find(|o| o.kind == crate::libraries::FnKind::Member)
-                                .map(|fi| (fi.callable.params.clone(), fi.callable.ret))
+                                .next()
+                                .map(|m| (m.params, m.ret))
                                 .or_else(|| {
                                     self.syms
                                         .class_by_internal(internal)
@@ -11636,23 +11627,21 @@ impl<'a> Checker<'a> {
         if recv == Ty::Error {
             return false;
         }
-        // Parameter type of the user operator, if one exists (member first, then extension) — through
-        // the module source. A member's `params` are just `[arg]`; an extension's are `[recv, arg]`.
-        let fs = crate::module_symbols::ModuleSymbols::new(self.syms).functions(aname, Some(recv));
-        let param = fs
-            .overloads
-            .iter()
-            .find(|o| o.kind == crate::libraries::FnKind::Member && o.callable.params.len() == 1)
-            .map(|o| o.callable.params[0])
+        // Parameter type of a USER operator, if one exists (member first, then extension) — through the
+        // MODULE source ONLY. A classpath `+=` (e.g. `MutableCollection.plusAssign`) must NOT bind here: it
+        // keeps its inline-splice lowering via `record_synthetic_ext` below. A module member's `params` are
+        // `[arg]`; a module extension's `Signature.params` are the value params `[arg]` (receiver is the key).
+        let param = crate::module_symbols::ModuleSymbols::new(self.syms)
+            .instance_members(recv, aname)
+            .into_iter()
+            .find(|m| m.params.len() == 1)
+            .map(|m| m.params[0])
             .or_else(|| {
-                fs.overloads
-                    .iter()
-                    .find(|o| {
-                        o.kind == crate::libraries::FnKind::Extension
-                            && o.receiver_rank == 0
-                            && o.callable.params.len() == 2
-                    })
-                    .map(|o| o.callable.params[1])
+                self.syms
+                    .ext_funs
+                    .get(&(recv.erased_recv(), aname.to_string()))
+                    .filter(|sig| sig.params.len() == 1)
+                    .map(|sig| sig.params[0])
             });
         let rt = self.expr(rhs);
         if let Some(param) = param {
@@ -11811,15 +11800,10 @@ impl<'a> Checker<'a> {
                         .or_else(|| self.library_extension_inline_return(&comp, it, &[]))
                         // A USER-defined `operator fun Recv.componentN()` extension (same module).
                         .or_else(|| {
-                            crate::module_symbols::ModuleSymbols::new(self.syms)
-                                .functions(&comp, Some(it))
-                                .overloads
+                            self.resolver()
+                                .receiver_extensions(it, &comp)
                                 .into_iter()
-                                .find(|o| {
-                                    o.kind == crate::libraries::FnKind::Extension
-                                        && o.receiver_rank == 0
-                                        && o.callable.params.len() == 1
-                                })
+                                .find(|o| o.receiver_rank == 0 && o.callable.params.len() == 1)
                                 .map(|o| o.callable.ret)
                         })
                         // An indexable type (`List`): `componentN` is the inline `get(N-1)` — use the

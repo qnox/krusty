@@ -42,6 +42,45 @@ impl<'a> ModuleSymbols<'a> {
         self.syms.funs.contains_key(name)
     }
 
+    /// Instance members named `name` on `rt`, collected over the MODULE (user-declared) hierarchy only —
+    /// DFS self → interfaces → super, stopping at a classpath supertype (which the module source does not
+    /// own). This is the module analog the checker uses where a user-declared method must be found but an
+    /// INHERITED classpath member must fall through to the classpath resolver (which records the call for
+    /// emit). Federating the classpath here would arity-bind a Java member (`Iterable.forEach(Consumer)`)
+    /// over the Kotlin extension, or bind an inherited classpath member the lowerer can't emit.
+    pub fn instance_members(&self, rt: Ty, name: &str) -> Vec<LibraryMember> {
+        let mut out = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        if let Some(i) = rt.non_null().obj_internal() {
+            self.collect_member_libs(i, name, &mut out, &mut seen);
+        }
+        out
+    }
+
+    fn collect_member_libs(
+        &self,
+        internal: &str,
+        name: &str,
+        out: &mut Vec<LibraryMember>,
+        seen: &mut std::collections::HashSet<String>,
+    ) {
+        if !seen.insert(internal.to_string()) {
+            return;
+        }
+        let Some(c) = self.class_by_internal(internal) else {
+            return; // a classpath supertype — not owned by the module source
+        };
+        if let Some(sig) = c.methods.get(name) {
+            out.push(lib_member(name, sig));
+        }
+        for i in &c.interfaces {
+            self.collect_member_libs(i, name, out, seen);
+        }
+        if let Some(s) = &c.super_internal {
+            self.collect_member_libs(s, name, out, seen);
+        }
+    }
+
     /// Select the top-level overload of `name` matching `arg_tys` (Kotlin overload resolution via
     /// [`crate::resolve::pick_overload`]) and return it as a [`FunctionInfo`]. The source owns the
     /// selection, so callers need not touch `syms.funs` or re-run the picker themselves.
@@ -89,6 +128,23 @@ impl<'a> ModuleSymbols<'a> {
             self.collect_members(s, name, out, seen, rung);
         }
     }
+}
+
+/// A user [`Signature`] as a [`LibraryMember`] — the module-source shape of a class method. Carries the
+/// source call-shape (`call_sig`) so a named / omitted-default member call resolves through the type seam.
+fn lib_member(name: &str, sig: &Signature) -> LibraryMember {
+    let mut m = LibraryMember::new(name.to_string(), sig.params.clone(), sig.ret, String::new());
+    m.suspend = sig.is_suspend;
+    m.inline = crate::libraries::InlineKind::from_flags(sig.is_inline, false);
+    m.call_sig = CallSig::source(
+        sig.param_names.clone(),
+        sig.param_defaults.clone(),
+        sig.lambda_param_types.clone(),
+        sig.lambda_recv.clone(),
+        sig.required,
+        sig.vararg,
+    );
+    m
 }
 
 /// Build a top-level / extension `FunctionInfo` from a user [`Signature`]. `receiver` is `Some` for an
@@ -252,11 +308,12 @@ impl SymbolSource for ModuleSymbols<'_> {
 
     fn resolve_type(&self, internal: &str) -> Option<LibraryType> {
         let c = self.class_by_internal(internal)?;
-        let member = |name: &str, sig: &Signature| {
-            LibraryMember::new(name.to_string(), sig.params.clone(), sig.ret, String::new())
-        };
-        let members = c.methods.iter().map(|(n, s)| member(n, s)).collect();
-        let companion = c.static_methods.iter().map(|(n, s)| member(n, s)).collect();
+        let members = c.methods.iter().map(|(n, s)| lib_member(n, s)).collect();
+        let companion = c
+            .static_methods
+            .iter()
+            .map(|(n, s)| lib_member(n, s))
+            .collect();
         // The primary constructor (+ secondaries) as `<init>` members returning Unit.
         let mut constructors = vec![LibraryMember::new(
             "<init>".to_string(),

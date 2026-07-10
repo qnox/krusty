@@ -1272,6 +1272,8 @@ impl Classpath {
                         suspend: false,
                         // Builtin (`.kotlin_builtins`) members are all public API.
                         visibility: crate::libraries::Visibility::Public,
+                        // Builtin members carry no source parameter-name metadata.
+                        call_sig: crate::libraries::CallSig::default(),
                     }
                 })
             })

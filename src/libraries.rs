@@ -69,6 +69,11 @@ pub struct LibraryMember {
     /// is surfaced (not dropped) so a subclass can reach an inherited classpath member; the emit is
     /// identical to a public one. `Public` by default.
     pub visibility: Visibility,
+    /// Source call-shape (parameter names + default flags + `required`, lambda parameter types) — the same
+    /// facts `CallSig` carries for functions. Lets a resolver member query drive a NAMED-argument member
+    /// call and lambda-parameter typing without the removed receiver-indexed `functions()` seam. Default
+    /// (empty) for a provider that records no source parameter metadata.
+    pub call_sig: CallSig,
 }
 
 /// Platform-provided accessor used by counted range/progression loop lowering. The name and descriptor
@@ -356,6 +361,7 @@ impl LibraryMember {
             inline: InlineKind::None,
             suspend: false,
             visibility: Visibility::Public,
+            call_sig: CallSig::default(),
         }
     }
 }
@@ -484,7 +490,7 @@ pub enum FnKind {
 /// emit `descriptor` drops. Parallel to the LOGICAL parameter list (the receiver is NOT included, even
 /// for an extension whose `callable.params` prepends it). Empty/zero `Default` means "not provided by
 /// this source"; the federated consumer falls back as it did before the consolidation.
-#[derive(Clone, Default)]
+#[derive(Clone, Default, Debug)]
 pub struct CallSig {
     /// Parameter names, parallel to the logical params — maps named arguments (`f(x = 1)`) to positions.
     pub param_names: Vec<String>,

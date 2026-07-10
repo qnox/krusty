@@ -105,6 +105,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
         afile: file,
         info,
         syms,
+        fn_scope: crate::resolve::function_scope_packages(file, syms),
         ir: IrFile {
             package: file.package.clone(),
             ..Default::default()
@@ -3834,6 +3835,10 @@ pub(crate) struct Lower<'a> {
     afile: &'a ast::File,
     info: &'a TypeInfo,
     syms: &'a SymbolTable,
+    /// The import-scoped package list for unqualified top-level/extension resolution — the same scope
+    /// the checker uses, so the lowerer resolves `@JvmName`-mangled library families identically. Built
+    /// once at construction; a scoped [`SymbolResolver`] is the ONE seam for library callable lookup.
+    fn_scope: Vec<String>,
     ir: IrFile,
     /// Top-level function ids keyed by (name, parameter types) so overloads (same name,
     /// different params) each map to their own compiled method.
@@ -3982,6 +3987,12 @@ pub(crate) struct Lower<'a> {
 impl<'a> Lower<'a> {
     fn arg_tys(&self, args: &[AstExprId]) -> Vec<Ty> {
         args.iter().map(|&a| self.info.ty(a)).collect()
+    }
+
+    /// The import-scoped [`SymbolResolver`] — the ONE seam the lowerer uses to look up library callables
+    /// (top-level, extension, member) instead of the raw receiver-indexed `functions()` query.
+    fn resolver(&self) -> crate::symbol_resolver::SymbolResolver<'_> {
+        crate::symbol_resolver::SymbolResolver::new_scoped(&*self.syms.libraries, &self.fn_scope)
     }
 
     fn scalar_value_repr(&self, ty: Ty) -> Option<Ty> {
@@ -7842,9 +7853,8 @@ impl<'a> Lower<'a> {
         // The single classpath top-level overload with recorded parameter names (federated library set —
         // a classpath function is not a module function, so `ModuleSymbols` wouldn't surface it).
         let sets: Vec<Vec<String>> = self
-            .syms
-            .libraries
-            .functions(fname, None)
+            .resolver()
+            .top_level_function_set(fname)
             .overloads
             .into_iter()
             .filter(|o| {
@@ -7870,18 +7880,17 @@ impl<'a> Lower<'a> {
         args: &[AstExprId],
     ) -> Option<Vec<AstExprId>> {
         let sets: Vec<Vec<String>> = self
-            .syms
-            .libraries
-            .functions(name, Some(rt))
-            .overloads
+            .resolver()
+            .instance_members(rt, name)
             .into_iter()
-            .filter(|o| {
-                matches!(
-                    o.kind,
-                    crate::libraries::FnKind::Member | crate::libraries::FnKind::Extension
-                ) && !o.call_sig.param_names.is_empty()
-            })
-            .map(|o| o.call_sig.param_names)
+            .map(|m| m.call_sig.param_names)
+            .chain(
+                self.resolver()
+                    .receiver_extensions(rt, name)
+                    .into_iter()
+                    .map(|o| o.call_sig.param_names),
+            )
+            .filter(|names| !names.is_empty())
             .collect();
         let [param_names] = sets.as_slice() else {
             return None;
@@ -10239,24 +10248,18 @@ impl<'a> Lower<'a> {
             self.afile.call_arg_names.contains_key(&call.0)
         );
         let fi = self
-            .syms
-            .libraries
-            .functions(name, Some(rt))
-            .overloads
+            .resolver()
+            .instance_members(rt, name)
             .into_iter()
-            .find(|o| {
-                o.kind == crate::libraries::FnKind::Member
-                    && o.call_sig.required < o.callable.params.len()
-                    && !o.call_sig.param_names.is_empty()
-            })?;
+            .find(|m| m.call_sig.required < m.params.len() && !m.call_sig.param_names.is_empty())?;
         let cs = fi.call_sig;
         // The `@Metadata`/synthetic key on the JVM name: a value-class-param-MANGLED member (`copy` →
         // `copy-<hash>`, with `copy-<hash>$default`) is looked up by its physical name.
-        let phys = fi.callable.name.clone();
+        let phys = fi.physical_name.clone().unwrap_or_else(|| fi.name.clone());
         // The member's LOGICAL return (e.g. `Int`) — a `suspend` `$default` descriptor erases its return to
         // `Object`, so record the logical type for the coroutine pass to unbox the suspension result by (a
         // hoisted `if (s.list() == 5)` else compares the erased `Object` against an int → VerifyError).
-        let logical_ret = fi.callable.ret;
+        let logical_ret = fi.ret;
         let arg_names = self.afile.call_arg_names.get(&call.0).cloned();
         // Only this path when an argument is actually OMITTED (else the plain member call is emitted).
         if arg_names.is_none() && args.len() == cs.param_names.len() {
@@ -14312,9 +14315,8 @@ impl<'a> Lower<'a> {
                 // constructor reference — fall through to the function-reference paths below.
                 let names_a_function = self.fun_ids.iter().any(|((n, _), _)| n == &name)
                     || self
-                        .syms
-                        .libraries
-                        .functions(&name, None)
+                        .resolver()
+                        .top_level_function_set(&name)
                         .overloads
                         .iter()
                         .any(|o| o.kind == crate::libraries::FnKind::TopLevel);
@@ -14413,9 +14415,8 @@ impl<'a> Lower<'a> {
                 // A CLASSPATH top-level function reference (`::greet` from a jar/dependency module): the
                 // sole `TopLevel` overload's `invoke` does `invokestatic <classpath-facade>.greet(args)`.
                 let tl: Vec<_> = self
-                    .syms
-                    .libraries
-                    .functions(&name, None)
+                    .resolver()
+                    .top_level_function_set(&name)
                     .overloads
                     .into_iter()
                     .filter(|o| o.kind == crate::libraries::FnKind::TopLevel)
