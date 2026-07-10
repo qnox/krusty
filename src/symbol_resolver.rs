@@ -255,20 +255,6 @@ pub(crate) fn arg_fits(p: &Ty, a: &Ty) -> bool {
         || matches!((p, a), (Ty::Obj(pi, _), Ty::Obj(ai, _)) if pi == ai)
 }
 
-fn ranked_extension_overloads(fs: &FunctionSet, allow_must_inline: bool) -> Vec<&FunctionInfo> {
-    let mut out: Vec<&FunctionInfo> = fs
-        .overloads
-        .iter()
-        .filter(|o| {
-            o.kind == FnKind::Extension
-                && o.receiver_rank != u32::MAX
-                && (o.public() || (allow_must_inline && o.flags.inline.must_inline()))
-        })
-        .collect();
-    out.sort_by_key(|o| o.receiver_rank);
-    out
-}
-
 /// Extension overloads of a receiver-filtered set, ordered most-specific-first by the SOURCE receiver rank
 /// (the same `source_receiver_rank` the overload selector uses) rather than the provider's baked
 /// `receiver_rank`. The provider ranks a primitive-array family by enumeration order — every `IntArray`/
@@ -775,7 +761,7 @@ impl<'a> SymbolResolver<'a> {
         // `$$forInline` variant is what kotlinc splices); calling `$default` threads the `Continuation`
         // through the ordinary suspend machinery instead of splicing a suspend body. Splice (MUST-INLINE)
         // only when there is NO `$default` synthetic — a genuine `@InlineOnly` callee with no call target.
-        if let Some(c) = self.default_synthetic_callable(name, receiver, args) {
+        if let Some(c) = self.default_synthetic_callable(name, o, args) {
             crate::trace_compiler!(
                 "resolve",
                 "extension defaulted ($default) {name} recv={receiver:?} args={args:?} -> {}.{}{} ret={ret_ty:?}",
@@ -859,21 +845,35 @@ impl<'a> SymbolResolver<'a> {
         callable_with_return(c, ret_ty2, false)
     }
 
-    /// Find the `name$default` synthetic callable applicable to a defaulted extension call — the emit-shaped
-    /// callable (receiver at `params[0]`, all real params present) the backend fills with placeholders.
+    /// Find the `name$default` synthetic callable for a defaulted extension call — the emit-shaped callable
+    /// (receiver at `params[0]`, all real params present) the backend fills with placeholders.
     fn default_synthetic_callable(
         &self,
         name: &str,
-        receiver: Ty,
+        base: &FunctionInfo,
         args: &[Ty],
     ) -> Option<LibraryCallable> {
-        let fs = self
-            .lib
-            .functions(&format!("{name}$default"), Some(receiver));
         let trailing_lambda = args.last().is_some_and(|a| matches!(a, Ty::Fun(_)));
-        for o in ranked_extension_overloads(&fs, false) {
+        // The `name$default` synthetic is a JVM static on a facade, reachable only through the static-method
+        // index (NOT `resolve_type`, which reads a class's members not a facade's statics). Surface it via
+        // the scope-pruned `top_level_function_set`, which truncates the trailing `(int mask, Object marker)`
+        // so the emit shape is `[receiver, real…]`. Matching is by the base overload's leading RECEIVER
+        // parameter (`params[0]`), NOT owner: a value-class receiver (`UIntArray`) erases its `$default` to
+        // the UNDERLYING array facade (`ArraysKt.copyInto$default([I…)`, receiver `[I`) — the same erased
+        // shape the base carries — so the plain-array `$default` binds and the value-class emit pass is not
+        // engaged, exactly as the removed receiver-indexed `functions(…, Some(recv))` lookup resolved it.
+        let fs = self
+            .top_level_function_set(&format!("{name}$default"))
+            .overloads;
+        for o in &fs {
+            if !o.public() && !o.flags.inline.must_inline() {
+                continue;
+            }
             let params = &o.callable.params;
             if params.is_empty() {
+                continue;
+            }
+            if base.callable.params.first() != params.first() {
                 continue;
             }
             let real_count = params.len() - 1;
@@ -1847,10 +1847,9 @@ fn property_getter_via_query(
     property: &str,
 ) -> Option<ResolvedMember> {
     let getter = lib
-        .properties(property, Some(recv))
+        .property_members(recv, property)
         .overloads
         .into_iter()
-        .filter(|p| p.kind == PropKind::Member)
         .min_by_key(|p| p.receiver_rank)
         .map(|p| p.getter.name)?;
     // A value-class-typed property's getter is `@JvmName`-mangled (`getId-<hash>`) and erases its return
@@ -1908,10 +1907,9 @@ pub fn resolve_property_setter(
     property: &str,
 ) -> Option<LibraryCallable> {
     let setter = lib
-        .properties(property, Some(recv))
+        .property_members(recv, property)
         .overloads
         .into_iter()
-        .filter(|p| p.kind == PropKind::Member)
         .min_by_key(|p| p.receiver_rank)
         .and_then(|p| p.setter)?;
     if setter.name.contains('-') {
@@ -2119,17 +2117,25 @@ fn select_overload(
     // in-scope packages (scope-pruned, tree-driven), so an unqualified extension binds only when its
     // facade's package is imported. No import scope → the legacy whole-classpath `functions()` fallback
     // (removed once every consumer is scoped — task A). MEMBERS are always visible on their type.
-    let fs = match (kind, ext.fn_scope) {
-        (FnKind::Extension, Some(scope)) => FunctionSet {
-            overloads: resolve_symbols_in_scope(lib, name, scope)
-                .into_iter()
-                .flat_map(|(_, r)| match r.callables {
-                    crate::libraries::Callables::Functions(f) => f.overloads,
-                    _ => Vec::new(),
-                })
-                .collect(),
+    let fs = match kind {
+        // A MEMBER's return can be RECEIVER-COUPLED (`Repo<Cfg>.byId(): Cfg`, a suspend `Continuation<T>`
+        // bound from the receiver's type argument) — recovery the receiver-agnostic `resolve_type` cannot
+        // do — so member candidates come from the platform's receiver-aware member query. EXTENSIONS come
+        // from the scope-pruned `resolve_symbols` seam (empty when there is no import scope).
+        FnKind::Member => lib.member_overloads(recv, name),
+        FnKind::Extension => match ext.fn_scope {
+            Some(scope) => FunctionSet {
+                overloads: resolve_symbols_in_scope(lib, name, scope)
+                    .into_iter()
+                    .flat_map(|(_, r)| match r.callables {
+                        crate::libraries::Callables::Functions(f) => f.overloads,
+                        _ => Vec::new(),
+                    })
+                    .collect(),
+            },
+            None => FunctionSet::default(),
         },
-        _ => lib.functions(name, Some(recv)),
+        FnKind::TopLevel => FunctionSet::default(),
     };
     // Candidates from the scoped query are IN-SCOPE by construction: each came from a `resolve_symbols`
     // over an imported package, so its declared package is in scope even when `@JvmPackageName` relocated
@@ -2486,8 +2492,8 @@ mod tests {
     }
 
     impl SymbolSource for FakeSource {
-        fn functions(&self, name: &str, receiver: Option<Ty>) -> FunctionSet {
-            if receiver == self.receiver && name == self.name {
+        fn member_overloads(&self, recv: Ty, name: &str) -> FunctionSet {
+            if self.receiver == Some(recv) && name == self.name {
                 FunctionSet {
                     overloads: vec![self.info.clone()],
                 }

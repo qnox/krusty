@@ -274,60 +274,16 @@ impl SymbolSource for ModuleSymbols<'_> {
         }
     }
 
-    fn functions(&self, name: &str, receiver: Option<Ty>) -> FunctionSet {
+    fn member_overloads(&self, recv: Ty, name: &str) -> FunctionSet {
+        // Instance members of the receiver's user type (own + inherited), in DEPTH-FIRST pre-order
+        // (self → interfaces → super) — exactly the checker's `lookup_method` walk, so `overloads[0]` is
+        // the same member hand-rolled lookup picks. Each carries its visit rung in `receiver_rank`. The
+        // module's top-level/extension callables are surfaced by `resolve_symbols`, not here.
         let mut overloads = Vec::new();
-        match receiver {
-            None => {
-                // Top-level functions: every overload of `name`.
-                if let Some(sigs) = self.syms.funs.get(name) {
-                    let owner = self.facade_of(name).unwrap_or_default();
-                    let origin = Origin::Module {
-                        facade: owner.clone(),
-                    };
-                    for sig in sigs {
-                        overloads.push(fn_info(
-                            FnKind::TopLevel,
-                            sig,
-                            None,
-                            owner.clone(),
-                            name,
-                            0,
-                            origin.clone(),
-                        ));
-                    }
-                }
-            }
-            Some(recv) => {
-                // Instance members of the receiver's user type (own + inherited), in DEPTH-FIRST
-                // pre-order (self → interfaces → super) — exactly the checker's `lookup_method` walk, so
-                // `overloads[0]` is the same member that hand-rolled lookup picks. Each carries its visit
-                // rung in `receiver_rank`.
-                if let Ty::Obj(internal, _) = recv {
-                    let mut seen = std::collections::HashSet::new();
-                    let mut rung: u32 = 0;
-                    self.collect_members(internal, name, &mut overloads, &mut seen, &mut rung);
-                }
-                // Extension functions, keyed by erased receiver: the exact receiver (rung 0), then the
-                // generic `Any` key (rung 1) for a type-variable-receiver extension — matching the
-                // checker's exact-then-generic extension lookup.
-                let exact = recv.erased_recv();
-                let any = Ty::obj("kotlin/Any");
-                for (rank, key) in [exact, any].into_iter().enumerate() {
-                    if let Some(sig) = self.syms.ext_funs.get(&(key, name.to_string())) {
-                        overloads.push(fn_info(
-                            FnKind::Extension,
-                            sig,
-                            Some(recv),
-                            String::new(),
-                            name,
-                            rank as u32,
-                            Origin::Module {
-                                facade: String::new(),
-                            },
-                        ));
-                    }
-                }
-            }
+        if let Ty::Obj(internal, _) = recv {
+            let mut seen = std::collections::HashSet::new();
+            let mut rung: u32 = 0;
+            self.collect_members(internal, name, &mut overloads, &mut seen, &mut rung);
         }
         FunctionSet { overloads }
     }
@@ -448,9 +404,9 @@ mod tests {
         st.funs
             .insert("twice".into(), vec![sig(vec![Ty::Int], Ty::Int)]);
         let m = ModuleSymbols::new(&st);
-        let fs = m.functions("twice", None);
-        assert_eq!(fs.overloads.len(), 1);
-        let o = &fs.overloads[0];
+        let fs = m.module_top_level("twice");
+        assert_eq!(fs.len(), 1);
+        let o = &fs[0];
         assert_eq!(o.kind, FnKind::TopLevel);
         assert_eq!(o.callable.params, vec![Ty::Int]);
         assert_eq!(o.callable.ret, Ty::Int);
@@ -467,7 +423,7 @@ mod tests {
         s.vararg = false;
         st.funs.insert("f".into(), vec![s]);
         let m = ModuleSymbols::new(&st);
-        let cs = &m.functions("f", None).overloads[0].call_sig;
+        let cs = &m.module_top_level("f")[0].call_sig;
         assert_eq!(cs.required, 1);
         assert_eq!(cs.param_defaults, vec![false, true]);
         assert_eq!(cs.param_names, vec!["a".to_string(), "b".to_string()]);
@@ -482,7 +438,7 @@ mod tests {
             vec![sig(vec![Ty::Int], Ty::Int), sig(vec![Ty::String], Ty::Int)],
         );
         let m = ModuleSymbols::new(&st);
-        assert_eq!(m.functions("f", None).overloads.len(), 2);
+        assert_eq!(m.module_top_level("f").len(), 2);
     }
 
     #[test]
@@ -491,7 +447,7 @@ mod tests {
         st.funs.insert("helper".into(), vec![sig(vec![], Ty::Unit)]);
         st.fn_facades.insert("helper".into(), "pkg/AKt".into());
         let m = ModuleSymbols::new(&st);
-        let o = &m.functions("helper", None).overloads[0];
+        let o = &m.module_top_level("helper")[0];
         assert_eq!(o.callable.owner, "pkg/AKt");
         assert_eq!(
             o.callable.origin,
@@ -514,13 +470,13 @@ mod tests {
         let m = ModuleSymbols::new(&st);
 
         // `own` is on Sub itself (rung 0).
-        let own = m.functions("own", Some(Ty::obj("demo/Sub")));
+        let own = m.member_overloads(Ty::obj("demo/Sub"), "own");
         assert_eq!(own.overloads.len(), 1);
         assert_eq!(own.overloads[0].kind, FnKind::Member);
         assert_eq!(own.overloads[0].receiver_rank, 0);
 
         // `greet` is inherited from Base (rung 1).
-        let greet = m.functions("greet", Some(Ty::obj("demo/Sub")));
+        let greet = m.member_overloads(Ty::obj("demo/Sub"), "greet");
         assert_eq!(greet.overloads.len(), 1);
         assert_eq!(greet.overloads[0].receiver_rank, 1);
         assert_eq!(greet.overloads[0].callable.owner, "demo/Base");
@@ -535,9 +491,13 @@ mod tests {
             sig(vec![Ty::Int], recv),
         );
         let m = ModuleSymbols::new(&st);
-        let fs = m.functions("shifted", Some(recv));
-        assert_eq!(fs.overloads.len(), 1);
-        let o = &fs.overloads[0];
+        // A module extension is surfaced through the `resolve_symbols` fqn seam (receiver as an attribute).
+        let fs = match m.resolve_symbols("shifted").callables {
+            crate::libraries::Callables::Functions(f) => f.overloads,
+            _ => Vec::new(),
+        };
+        assert_eq!(fs.len(), 1);
+        let o = &fs[0];
         assert_eq!(o.kind, FnKind::Extension);
         // receiver prepended → params = [Point, Int]
         assert_eq!(o.callable.params, vec![recv, Ty::Int]);

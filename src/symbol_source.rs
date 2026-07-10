@@ -17,10 +17,13 @@ use crate::types::Ty;
 /// A provider of declarations — a module's AST or a compiled library. The arg-independent metadata
 /// surface that federates across sources; arg-dependent selection/binding lives above (the resolver).
 pub trait SymbolSource {
-    /// ALL overloads of function `name` applicable to a call — members + extensions (`receiver = Some`)
-    /// or top-level functions (`receiver = None`) — in ONE query, each tagged with its `FnKind` and
-    /// carrying full metadata (inline/`@InlineOnly`, return nullability, receiver rung). Empty by default.
-    fn functions(&self, _name: &str, _receiver: Option<Ty>) -> FunctionSet {
+    /// The instance-member overloads named `name` applicable on receiver `recv` (own + inherited), each an
+    /// [`crate::libraries::FunctionInfo`] tagged with its receiver-MRO rung. UNLIKE the extension/top-level
+    /// namespace (`resolve_symbols`, receiver-AGNOSTIC by fqn), a member is inherently RECEIVER-COUPLED: its
+    /// return can bind to the receiver's type arguments (`Repo<Cfg>.byId(): Cfg`, a suspend `Continuation<T>`
+    /// recovered from the receiver) — a decode only the platform that knows the receiver's shape can do. So
+    /// members are their own receiver-parameterized query through the TYPE, not the fqn seam. Empty default.
+    fn member_overloads(&self, _recv: Ty, _name: &str) -> FunctionSet {
         FunctionSet::default()
     }
 
@@ -49,12 +52,11 @@ pub trait SymbolSource {
         ResolvedSymbols::default()
     }
 
-    /// ALL declarations of PROPERTY `name` applicable to an access — members + extensions
-    /// (`receiver = Some`) or top-level properties (`receiver = None`) — in ONE query, symmetric to
-    /// [`Self::functions`]. Each carries its [`crate::libraries::PropKind`], type, accessors, and
-    /// visibility. Empty by default (a source with no such property). This is the seam that replaces
-    /// resolving a property by guessing its physical getter name and routing it through `functions`.
-    fn properties(&self, _name: &str, _receiver: Option<Ty>) -> PropertySet {
+    /// The MEMBER-property declarations named `name` on receiver `recv` (own + inherited), each with its
+    /// [`crate::libraries::PropKind`], type, accessors, and visibility — symmetric to [`Self::member_overloads`]
+    /// and RECEIVER-COUPLED for the same reason (a member property is a shape of the type). Extension/top-level
+    /// properties are surfaced by [`Self::resolve_symbols`]. Empty by default (a source with no such property).
+    fn property_members(&self, _recv: Ty, _name: &str) -> PropertySet {
         PropertySet::default()
     }
 
@@ -90,14 +92,14 @@ impl<'a> CompositeSource<'a> {
 }
 
 impl SymbolSource for CompositeSource<'_> {
-    fn functions(&self, name: &str, receiver: Option<Ty>) -> FunctionSet {
+    fn member_overloads(&self, recv: Ty, name: &str) -> FunctionSet {
         // Concatenate in precedence order — each `FunctionInfo` already carries its source's origin, and
         // selection is done per-source (ranks are not comparable across sources), so order is enough.
         FunctionSet {
             overloads: self
                 .children
                 .iter()
-                .flat_map(|c| c.functions(name, receiver).overloads)
+                .flat_map(|c| c.member_overloads(recv, name).overloads)
                 .collect(),
         }
     }
@@ -143,14 +145,14 @@ impl SymbolSource for CompositeSource<'_> {
             .any(|c| c.class_is_extensible(internal))
     }
 
-    fn properties(&self, name: &str, receiver: Option<Ty>) -> PropertySet {
-        // Concatenate in precedence order, exactly like `functions` — selection (receiver rank) stays
-        // per-source, so order is enough.
+    fn property_members(&self, recv: Ty, name: &str) -> PropertySet {
+        // Concatenate in precedence order, exactly like `member_overloads` — selection (receiver rank)
+        // stays per-source, so order is enough.
         PropertySet {
             overloads: self
                 .children
                 .iter()
-                .flat_map(|c| c.properties(name, receiver).overloads)
+                .flat_map(|c| c.property_members(recv, name).overloads)
                 .collect(),
         }
     }
@@ -176,11 +178,13 @@ mod tests {
     }
 
     impl SymbolSource for FakeSource {
-        fn functions(&self, name: &str, receiver: Option<Ty>) -> FunctionSet {
-            if receiver.is_none() && self.fn_name.as_deref() == Some(name) {
+        fn member_overloads(&self, _recv: Ty, name: &str) -> FunctionSet {
+            // A source provides ONE member overload of its chosen name, owner-stamped so federation order
+            // is observable.
+            if self.fn_name.as_deref() == Some(name) {
                 FunctionSet {
                     overloads: vec![FunctionInfo::plain(
-                        FnKind::TopLevel,
+                        FnKind::Member,
                         None,
                         callable(&self.owner, name),
                     )],
@@ -189,13 +193,13 @@ mod tests {
                 FunctionSet::default()
             }
         }
-        fn properties(&self, name: &str, receiver: Option<Ty>) -> PropertySet {
-            // A source provides ONE top-level property whose name matches its `fn_name` (reused as the
-            // property name), owner-stamped so federation order is observable.
-            if receiver.is_none() && self.fn_name.as_deref() == Some(name) {
+        fn property_members(&self, _recv: Ty, name: &str) -> PropertySet {
+            // A source provides ONE member property whose name matches its `fn_name`, owner-stamped so
+            // federation order is observable.
+            if self.fn_name.as_deref() == Some(name) {
                 PropertySet {
                     overloads: vec![PropertyInfo {
-                        kind: PropKind::TopLevel,
+                        kind: PropKind::Member,
                         receiver: None,
                         formals: Vec::new(),
                         ty: Ty::Int,
@@ -260,7 +264,7 @@ mod tests {
         let m = module();
         let l = library();
         let c = CompositeSource::new(vec![&m as &dyn SymbolSource, &l]);
-        let fs = c.functions("greet", None);
+        let fs = c.member_overloads(Ty::obj("R"), "greet");
         // Both contribute; the module's (first) overload comes first.
         assert_eq!(fs.overloads.len(), 2);
         assert_eq!(fs.overloads[0].callable.owner, "module");
@@ -272,7 +276,10 @@ mod tests {
         let m = module();
         let l = library();
         let c = CompositeSource::new(vec![&m as &dyn SymbolSource, &l]);
-        assert!(c.functions("absent", None).overloads.is_empty());
+        assert!(c
+            .member_overloads(Ty::obj("R"), "absent")
+            .overloads
+            .is_empty());
     }
 
     #[test]
@@ -282,7 +289,7 @@ mod tests {
         let m = module();
         let l = library();
         let c = CompositeSource::new(vec![&m as &dyn SymbolSource, &l]);
-        let ps = c.properties("greet", None);
+        let ps = c.property_members(Ty::obj("R"), "greet");
         assert_eq!(ps.overloads.len(), 2);
         assert_eq!(ps.overloads[0].owner, "module");
         assert_eq!(ps.overloads[1].owner, "library");
@@ -293,10 +300,13 @@ mod tests {
         let m = module();
         let l = library();
         let c = CompositeSource::new(vec![&m as &dyn SymbolSource, &l]);
-        assert!(c.properties("absent", None).overloads.is_empty());
+        assert!(c
+            .property_members(Ty::obj("R"), "absent")
+            .overloads
+            .is_empty());
         // A receiver-scoped query also finds nothing here (the fakes only provide top-level props).
         assert!(c
-            .properties("greet", Some(Ty::obj("X")))
+            .property_members(Ty::obj("X"), "absent")
             .overloads
             .is_empty());
     }
@@ -332,7 +342,7 @@ mod tests {
         let l = library();
         let outer = CompositeSource::new(vec![&inner as &dyn SymbolSource, &l]);
         // Nesting works: the inner composite's module overload is found, library appends after.
-        let fs = outer.functions("greet", None);
+        let fs = outer.member_overloads(Ty::obj("R"), "greet");
         assert_eq!(fs.overloads.len(), 2);
         assert_eq!(fs.overloads[0].callable.owner, "module");
     }
@@ -343,7 +353,7 @@ mod tests {
         let l = library();
         let mut c = CompositeSource::new(vec![&m as &dyn SymbolSource]);
         c.push(&l);
-        let fs = c.functions("greet", None);
+        let fs = c.member_overloads(Ty::obj("R"), "greet");
         assert_eq!(fs.overloads.len(), 2);
         // The pushed library is consulted last.
         assert_eq!(fs.overloads[1].callable.owner, "library");
@@ -352,7 +362,10 @@ mod tests {
     #[test]
     fn empty_composite_has_no_functions_and_no_types() {
         let c = CompositeSource::default();
-        assert!(c.functions("anything", None).overloads.is_empty());
+        assert!(c
+            .member_overloads(Ty::obj("R"), "anything")
+            .overloads
+            .is_empty());
         assert!(c.resolve_type("anything").is_none());
     }
 }

@@ -126,15 +126,20 @@ fn kotlin_test_assert_fails_with_default_is_inline_only_callable() {
     cp_paths.push(jdk);
     let cp = std::rc::Rc::new(krusty::jvm::classpath::Classpath::new(cp_paths));
     let platform = krusty::jvm::jvm_libraries::JvmLibraries::new(cp);
-    let fs = platform.functions("assertFailsWith$default", None);
-    let overload = fs
-        .overloads
+    let overloads = match platform
+        .resolve_symbols("kotlin/test/assertFailsWith$default")
+        .callables
+    {
+        krusty::libraries::Callables::Functions(f) => f.overloads,
+        _ => Vec::new(),
+    };
+    let overload = overloads
         .iter()
         .find(|o| o.callable.params.len() == 2)
         .unwrap_or_else(|| {
             panic!(
                 "expected assertFailsWith$default overload, got {} overload(s)",
-                fs.overloads.len()
+                overloads.len()
             )
         });
     assert!(
