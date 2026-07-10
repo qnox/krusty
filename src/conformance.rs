@@ -61,7 +61,11 @@ pub fn needs_unmodeled_compiler_flag(src: &str) -> bool {
         // only as plain constructions, so this feature's expected `box()` is unsound to run.
         "+ValueClassesSecondaryConstructorWithBody",
     ];
-    const UNMODELED_DIRECTIVES: &[&str] = &["KJS_WITH_FULL_RUNTIME"];
+    // `PROPERTY_LAZY_INITIALIZATION` makes file/top-level properties initialize LAZILY (on first
+    // access) with getter-triggered ordering; krusty initializes them eagerly in `<clinit>`, so a test
+    // whose expected `box()` depends on the lazy order/accessor shape is unsound to run.
+    const UNMODELED_DIRECTIVES: &[&str] =
+        &["KJS_WITH_FULL_RUNTIME", "PROPERTY_LAZY_INITIALIZATION"];
     const UNMODELED_SOURCE_MARKERS: &[&str] = &["ExperimentalTypeInference"];
 
     fn line_contains_any(src: &str, prefix: &str, needles: &[&str]) -> bool {

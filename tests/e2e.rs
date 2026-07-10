@@ -462,6 +462,8 @@ mod operator_index_e2e;
 mod overloaded_inferred_return_e2e;
 #[path = "pair_triple_e2e.rs"]
 mod pair_triple_e2e;
+#[path = "paren_condition_newline_e2e.rs"]
+mod paren_condition_newline_e2e;
 #[path = "parser_errors_coverage_e2e.rs"]
 mod parser_errors_coverage_e2e;
 #[path = "plugins_e2e.rs"]

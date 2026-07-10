@@ -5086,7 +5086,10 @@ impl<'a> Parser<'a> {
         let start = self.tok().span;
         self.bump(); // 'if'
         self.expect(TokenKind::LParen, "'('");
+        // The condition may start (and end) on a fresh line: `if(\n  a && b\n)`. Skip newlines around it.
+        self.skip_newlines();
         let cond = self.parse_expr();
+        self.skip_newlines();
         self.expect(TokenKind::RParen, "')'");
         self.skip_newlines();
         let then_branch = self.parse_branch();
@@ -5302,6 +5305,8 @@ impl<'a> Parser<'a> {
                      // in a block holding the `val` so every downstream path (smart-casts, `is` arms) sees a local.
         let mut subject_var: Option<(StmtId, ExprId)> = None;
         let subject = if self.eat(TokenKind::LParen) {
+            // The subject (or subject-variable binding) may start on a fresh line: `when(\n  val v = e\n)`.
+            self.skip_newlines();
             if self.at(TokenKind::KwVal) || self.at(TokenKind::KwVar) {
                 let vstart = self.tok().span;
                 let is_var = self.at(TokenKind::KwVar);
@@ -5314,6 +5319,7 @@ impl<'a> Parser<'a> {
                 };
                 self.expect(TokenKind::Eq, "'='");
                 let init = self.parse_expr();
+                self.skip_newlines();
                 self.expect(TokenKind::RParen, "')'");
                 let sp = Span::new(vstart.lo, self.file.expr_spans[init.0 as usize].hi);
                 let stmt = self.file.add_stmt(
@@ -5330,6 +5336,7 @@ impl<'a> Parser<'a> {
                 Some(nm)
             } else {
                 let e = self.parse_expr();
+                self.skip_newlines();
                 self.expect(TokenKind::RParen, "')'");
                 Some(e)
             }
