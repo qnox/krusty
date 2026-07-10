@@ -28,7 +28,7 @@ fn member_property_getter_and_setter_from_metadata() {
     let lib = JvmLibraries::new(cp.clone());
 
     // `val label` — a getter, no setter; the getter name comes from metadata, not a `get`+cap guess.
-    let props = lib.properties("label", Some(Ty::obj("Holder")));
+    let props = lib.property_members(Ty::obj("Holder"), "label");
     let label = props
         .overloads
         .iter()
@@ -38,7 +38,7 @@ fn member_property_getter_and_setter_from_metadata() {
     assert!(label.setter.is_none(), "a `val` exposes no setter");
 
     // `var count` — both accessors present.
-    let props = lib.properties("count", Some(Ty::obj("Holder")));
+    let props = lib.property_members(Ty::obj("Holder"), "count");
     let count = props
         .overloads
         .iter()
@@ -53,15 +53,18 @@ fn member_property_getter_and_setter_from_metadata() {
 
     // An absent name yields nothing.
     assert!(lib
-        .properties("nope", Some(Ty::obj("Holder")))
+        .property_members(Ty::obj("Holder"), "nope")
         .overloads
         .is_empty());
 
-    // `val Holder.tag` — an EXTENSION property. Its getter (a static `getTag(Holder)` on the facade) is
-    // returned by the query, tagged with the extension receiver, from the facade's Package metadata.
-    let props = lib.properties("tag", Some(Ty::obj("Holder")));
+    // `val Holder.tag` — an EXTENSION property. Extension/top-level declarations are surfaced by the
+    // receiver-AGNOSTIC `resolve_symbols` fqn seam (member properties by `property_members`); its getter
+    // (a static `getTag(Holder)` on the facade) carries the extension receiver from the Package metadata.
+    let props = match lib.resolve_symbols("tag").callables {
+        krusty::libraries::Callables::Properties(p) => p.overloads,
+        _ => Vec::new(),
+    };
     let tag = props
-        .overloads
         .iter()
         .find(|p| p.kind == krusty::libraries::PropKind::Extension)
         .expect("extension property tag resolved from @Metadata");

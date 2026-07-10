@@ -14,7 +14,7 @@ use crate::libraries::{
     PlatformField, PlatformRangeCtor, PropKind, PropertyInfo, PropertySet, RangeConstruction,
     ReturnInfo, RuntimeCtor, RuntimeOp, TargetRuntime, Visibility,
 };
-use crate::symbol_resolver::{arg_fits, ty_subst, ty_subst_all, unify_ty};
+use crate::symbol_resolver::{arg_fits, ty_subst, ty_subst_all};
 use crate::symbol_source::SymbolSource;
 use crate::types::{intern, Ty};
 
@@ -331,46 +331,6 @@ impl JvmLibraries {
                 step: Some((Self::range_accessor("getStep", "()J"), Ty::Long)),
             },
             _ => return None,
-        })
-    }
-
-    /// The erased JVM descriptor of a classpath value class's underlying (`kotlin/UInt` → `"I"`,
-    /// `kotlin/Result` → `"Ljava/lang/Object;"`), or `None` if `internal` is not a value class. Its
-    /// mangled extensions are indexed under this descriptor.
-    fn value_class_underlying_desc(&self, internal: &str) -> Option<String> {
-        let ic = self
-            .cp
-            .find(internal)
-            .and_then(|ci| metadata::class_inline(&ci))?;
-        Some(type_descriptor(
-            ic.underlying_class
-                .as_deref()
-                .map(kotlin_name_to_ty)
-                .unwrap_or_else(|| Ty::obj("kotlin/Any")),
-        ))
-    }
-
-    fn metadata_receivers_allow(&self, owner: &str, name: &str, receiver: Ty) -> bool {
-        let recvs = self.cp.metadata_receiver_types(owner, name);
-        if recvs.is_empty() {
-            return true;
-        }
-        let receiver_name = match receiver {
-            Ty::Obj(i, _) if self.cp.is_kotlin_collection(i) => {
-                return !recvs.iter().any(|r| self.cp.is_kotlin_collection(r))
-                    || recvs
-                        .iter()
-                        .filter(|r| self.cp.is_kotlin_collection(r))
-                        .any(|r| self.cp.kotlin_subtype(i, r));
-            }
-            _ => receiver
-                .kotlin_class_internal()
-                .filter(|i| self.value_class_underlying_desc(i).is_some()),
-        };
-        receiver_name.is_none_or(|actual| {
-            recvs
-                .iter()
-                .any(|r| r == actual || self.cp.kotlin_subtype(actual, r))
         })
     }
 
@@ -848,26 +808,6 @@ fn ty_simple_name(t: Ty) -> Option<&'static str> {
         .map(|i| i.rsplit('/').next().unwrap_or(i))
 }
 
-/// The canonical element type of a `@JvmName`-mangled reduction extension's RECEIVER — its first
-/// generic parameter's sole type argument (`sumOfInt(Iterable<Integer>): int` → `Int`), canonicalized
-/// (`java/lang/Integer`/`kotlin/Int` → `Ty::Int`). Used to pick the element-appropriate overload of
-/// `sum`/`average`/… among the per-element methods that share a Kotlin source name. `None` if the
-/// signature's receiver isn't a single-type-argument container.
-fn gsig_receiver_element(gsig: &GenericSig) -> Option<Ty> {
-    match *gsig.params.first()? {
-        Ty::Obj(_, args) => {
-            // Unbox a boxed-primitive wrapper (`java/lang/Integer`/`kotlin/Int` → `Int`) so the element
-            // compares equal to the receiver's primitive element; a reference element stays its class.
-            let elem = gsig_unbox_wrapper(*args.first()?);
-            Some(crate::symbol_resolver::ty_subst(
-                elem,
-                &std::collections::HashMap::new(),
-            ))
-        }
-        _ => None,
-    }
-}
-
 /// A member's return type recovered from its generic signature ONLY when it is fully CONCRETE (carries
 /// type arguments, none of which is a free type variable) — `all(): List<Item>` → `List<Item>`. This lets
 /// a member of a NON-generic receiver still carry its return's type arguments (which `member_return`
@@ -1248,14 +1188,10 @@ fn class_implements(cp: &Classpath, internal: &str, target: &str) -> bool {
 }
 
 impl SymbolSource for JvmLibraries {
-    fn properties(&self, name: &str, receiver: Option<Ty>) -> PropertySet {
-        // Member properties of the receiver's type + its supertypes, most-derived first (rung 0). A
-        // top-level property (`receiver = None`) is a later slice. Each carries the REAL getter/setter
-        // from `@Metadata`'s `JvmPropertySignature`, so the caller emits the accessor by name rather than
-        // guessing `getX`.
-        let Some(recv) = receiver else {
-            return PropertySet::default();
-        };
+    fn property_members(&self, recv: Ty, name: &str) -> PropertySet {
+        // Member properties of the receiver's type + its supertypes, most-derived first (rung 0). Each
+        // carries the REAL getter/setter from `@Metadata`'s `JvmPropertySignature`, so the caller emits the
+        // accessor by name rather than guessing `getX`. Extension properties are surfaced by `resolve_symbols`.
         let Some(internal) = recv.kotlin_class_internal().map(str::to_string) else {
             return PropertySet::default();
         };
@@ -1321,64 +1257,6 @@ impl SymbolSource for JvmLibraries {
                 queue.extend(t.supertypes);
             }
             rung += 1;
-        }
-        // Extension properties on the receiver (and its supertypes). A facade's `Package` metadata
-        // declares them WITH a receiver type; the getter is a static `getFoo(Recv)` on the facade, which
-        // the extension index (keyed by a static method's first-parameter receiver) points at. Rung =
-        // receiver-MRO position, mirroring extension functions.
-        for (rank, recv_desc) in supertype_descriptors(&self.cp, recv)
-            .into_iter()
-            .enumerate()
-        {
-            for owner in self.cp.find_extension_owners(&recv_desc) {
-                let Some(fci) = self.cp.find(&owner) else {
-                    continue;
-                };
-                for mp in metadata::package_properties(&fci) {
-                    if mp.name != name {
-                        continue;
-                    }
-                    // Must be an EXTENSION property whose declared receiver is EXACTLY this rung's type —
-                    // the facade may declare same-named extensions on several receivers.
-                    let Some(rc) = &mp.receiver_class else {
-                        continue;
-                    };
-                    if format!("L{};", to_jvm_internal(rc)) != recv_desc {
-                        continue;
-                    }
-                    let (Some(getter_name), Some(getter_desc)) = (mp.getter_name, mp.getter_desc)
-                    else {
-                        continue;
-                    };
-                    let ret_ty = mp
-                        .ret_class
-                        .as_deref()
-                        .map_or(Ty::obj("kotlin/Any"), Ty::obj);
-                    let ty = Ty::obj(mp.ret_class.as_deref().unwrap_or("kotlin/Any"));
-                    // The static getter's signature leads with the receiver (`getFoo(Recv)`).
-                    let (params, physical_ret) = parse_method_desc(&getter_desc);
-                    let getter = LibraryCallable::library(
-                        owner.clone(),
-                        getter_name,
-                        params,
-                        ret_ty,
-                        physical_ret,
-                        getter_desc,
-                    );
-                    overloads.push(PropertyInfo {
-                        kind: PropKind::Extension,
-                        receiver: Some(Ty::obj(mp.receiver_class.as_deref().unwrap_or_default())),
-                        formals: Vec::new(),
-                        ty,
-                        getter,
-                        setter: None,
-                        is_const: mp.is_const,
-                        visibility: mp.visibility,
-                        owner: owner.clone(),
-                        receiver_rank: rank as u32,
-                    });
-                }
-            }
         }
         PropertySet { overloads }
     }
@@ -1487,6 +1365,9 @@ impl SymbolSource for JvmLibraries {
                     Visibility::Protected
                 };
                 member.signature = m.signature.clone();
+                // The member's parsed generic signature — carries type-variable binding facts so a caller can
+                // infer a generic return from the receiver's type arguments (`Repo<Config>.load(): Config`).
+                member.generic_sig = m.signature.as_deref().and_then(parse_method_gsig);
                 member.suspend = self.cp.is_suspend_method(internal, &m.name);
                 // A `suspend` member's descriptor erases its return to `Object` (the CPS convention). Recover
                 // the LOGICAL return from `@Metadata` (`Int`, not `Object`) so a caller unboxes the suspension
@@ -1510,6 +1391,11 @@ impl SymbolSource for JvmLibraries {
                             member.ret_nullable = f.ret_nullable;
                         }
                     }
+                    // The EMIT descriptor is the LOGICAL (continuation-stripped) form — the coroutine pass
+                    // re-threads the CPS `Continuation` at the call. `params` stay RAW (they carry the
+                    // continuation), which the member consumers that count physical params rely on; only the
+                    // arg-matching `member_overloads` converter drops the trailing continuation value param.
+                    member.descriptor = strip_continuation_param(&member.descriptor);
                 }
                 if is_map && member.name == "put" {
                     member.ret_nullable = true;
@@ -2016,630 +1902,196 @@ impl SymbolSource for JvmLibraries {
         .clone()
     }
 
-    fn functions(&self, name: &str, receiver: Option<Ty>) -> FunctionSet {
-        let key = (name.to_string(), receiver);
-        if let Some(cached) = self.cp.cached_functions(&key) {
-            return cached;
-        }
+    fn member_overloads(&self, receiver: Ty, name: &str) -> FunctionSet {
+        // Instance members of the receiver's type (own + inherited), BREADTH-FIRST (a subtype's
+        // override before a supertype's), each tagged with its visit rung in `receiver_rank`. The
+        // return is recovered receiver-COUPLED (a generic/`suspend` `Continuation<T>` bound from the
+        // receiver's type argument) — the reason members are their own receiver-parameterized query.
         let mut overloads = Vec::new();
-        if let Some(receiver) = receiver {
-            // Plain extensions of `name` on the receiver (and supertypes) — `uppercase`, `map`, `let`, … —
-            // with their inline/`@InlineOnly` flags and return nullability decoded once. The enumeration
-            // index is the receiver-MRO rung (`receiver_rank`) the arg-binding selector orders candidates by.
-            for (rank, recv_desc) in supertype_descriptors(&self.cp, receiver)
-                .into_iter()
-                .enumerate()
-            {
-                for c in self.cp.find_extensions(&recv_desc, name) {
-                    let generic_sig = c.signature.as_deref().and_then(parse_method_gsig);
-                    // The static-method index also surfaces a TOP-LEVEL function whose first parameter
-                    // happens to match this receiver's type (`repeat(times: Int, …)` reached under an `Int`
-                    // receiver). Its `@Metadata` says it is NOT an extension, so it must not bind here as
-                    // `Int.repeat` (which would mis-shape the call and break emit). Reject by metadata truth;
-                    // a candidate with no metadata (a Java method) is trusted as before.
-                    if self
-                        .cp
-                        .meta_functions(&c.owner)
-                        .iter()
-                        .find(|m| m.jvm_name == c.name && m.kotlin_name == name)
-                        .is_some_and(|m| !m.is_extension)
-                    {
-                        continue;
-                    }
-                    // Metadata-primary visibility for a value-class extension. An `inline` extension on a
-                    // value class (`Result.getOrThrow`) is PRIVATE in bytecode but PUBLIC per @Metadata —
-                    // kotlinc resolves it, then inlines (no legal `invokestatic`). ONLY consider a
-                    // bytecode-private candidate here (the public ones already resolve unchanged); among
-                    // those, accept only the metadata-public `inline` extension whose @Metadata receiver is
-                    // EXACTLY this value class (the candidate was found at the erased Object/underlying
-                    // rung, so an unrelated receiver must not bind it). `must_inline` stays on the bytecode
-                    // visibility (no callable `invokestatic` → must splice).
-                    let mut public = c.public;
-                    if !c.public {
-                        let value_recv_match = self
-                            .cp
-                            .meta_functions(&c.owner)
-                            .iter()
-                            .find(|m| m.jvm_name == c.name && m.kotlin_name == name)
-                            .filter(|m| m.is_public && m.is_inline)
-                            .and_then(|m| m.receiver_class)
-                            .is_some_and(|rc| {
-                                receiver.obj_internal() == Some(rc)
-                                    && self
-                                        .cp
-                                        .find(rc)
-                                        .is_some_and(|ci| metadata::class_inline(&ci).is_some())
-                            });
-                        if value_recv_match {
-                            public = true;
-                        }
-                    }
-                    // A non-public candidate matched via erased `Object` must have a type-variable
-                    // receiver (`T.let`/`takeIf`). Concrete value-class receivers such as `Result.map`
-                    // also erase to `Object`, but must not become candidates for unrelated receivers like
-                    // `List.map`; value-class-specific mangled lookup below handles the real receiver.
-                    if !public
-                        && recv_desc == "Ljava/lang/Object;"
-                        && !generic_sig.as_ref().is_some_and(|gsig| {
-                            gsig.params.first().is_some_and(|p| p.is_ty_param())
-                        })
-                    {
-                        continue;
-                    }
-                    // Metadata keeps receiver identities that the JVM descriptor erases (value-class
-                    // underlying descriptors and read-only vs mutable collections). Reject descriptor
-                    // matches whose recorded source receivers exclude the actual receiver.
-                    if !self.metadata_receivers_allow(&c.owner, &c.name, receiver) {
-                        continue;
-                    }
-                    let (mut params, pret) = parse_method_desc_with_field_params(&c.descriptor);
-                    let is_default = c.name.ends_with("$default");
-                    let meta_name = c.name.strip_suffix("$default").unwrap_or(&c.name);
-                    // Suspend-ness is on the SOURCE function's `@Metadata`, keyed by the un-mangled name — a
-                    // `$default` synthetic is not itself in metadata, so detect via `meta_name`.
-                    let suspend = self.cp.is_suspend_method(&c.owner, meta_name);
-                    if is_default && params.len() >= 2 {
-                        params.truncate(params.len() - 2);
-                    }
-                    // The CPS `Continuation` is emit-only, never part of the signature `@Metadata` records.
-                    // For a `$default` synthetic it sits before the mask/marker, so it survived the truncation
-                    // above — drop it so the logical params ARE the source signature (the emit `descriptor`
-                    // keeps the physical CPS form, and the coroutine pass re-inserts the continuation value).
-                    if suspend
-                        && params.last().and_then(|p| p.obj_internal())
-                            == Some("kotlin/coroutines/Continuation")
-                    {
-                        params.pop();
-                    }
-                    let meta = self
-                        .cp
-                        .metadata_call_facts(&c.owner, meta_name, &params, &pret, true);
-                    let inline =
-                        self.cp
-                            .is_inline_callable(&c.owner, &c.name, &c.descriptor, &params);
-                    let ret_metadata = meta.ret;
-                    // Logical return, recovered RECEIVER-substituted (arg-independent): `<T> T.takeIf(…): T?`
-                    // → `receiver`. A type var the receiver doesn't bind (`fold`'s `R`) stays as the erased
-                    // physical type — arg-binding selection in `SymbolResolver` refines that.
-                    let ret = generic_sig
-                        .as_ref()
-                        .map(|gsig| {
-                            let mut binds = std::collections::HashMap::new();
-                            if let Some(recv_sig) = gsig.params.first() {
-                                unify_ty(*recv_sig, receiver, &mut binds);
-                            }
-                            ty_subst(gsig.ret, &binds)
-                        })
-                        .unwrap_or(pret);
-                    let ret = if ret_metadata.nullable && ret.is_jvm_scalar() {
-                        Ty::nullable(ret)
-                    } else {
-                        ret
-                    };
-                    let ret = match ret_metadata.class {
-                        Some(meta) if self.value_underlying(meta).is_some() => match meta {
-                            Ty::Obj(class, _) => Ty::obj_args(class, ret.type_args()),
-                            _ => meta,
-                        },
-                        _ => ret,
-                    };
-                    let call_sig = meta.call_sig;
-                    let inline_kind = InlineKind::from_flags(inline, inline && !c.public);
-                    // The extension's DECLARED receiver source type: `None` for a type-variable receiver
-                    // (`fun <T> T.foo` — erases to `Object`, no value-class identity), else the concrete
-                    // receiver (`fun Result<T>.getOrThrow` → `kotlin/Result`). The value-class pass uses it
-                    // to unbox a boxed receiver only for a genuine value-class-declared extension.
-                    let source_receiver = match generic_sig.as_ref().and_then(|g| g.params.first())
-                    {
-                        Some(p) if p.is_ty_param() => None,
-                        _ => Some(receiver),
-                    };
-                    let callable = LibraryCallable {
-                        inline: inline_kind,
-                        suspend,
-                        default_call: is_default,
-                        signature: c.signature.clone(),
-                        source_receiver,
-                        ..LibraryCallable::library(
-                            c.owner.clone(),
-                            c.name.clone(),
-                            params,
-                            ret,
-                            pret,
-                            c.descriptor.clone(),
-                        )
-                    };
-                    overloads.push(FunctionInfo {
-                        ret: ret_metadata,
-                        visibility: Visibility::from_public(public),
-                        receiver_rank: rank as u32,
-                        overload_rank: descriptor_narrowing(&c.descriptor) as u32,
-                        // Metadata-primary signature — the receiver is an ATTRIBUTE, not `params[0]`.
-                        generic_sig: self.callable_generic_sig(
-                            &c.owner,
-                            &c.name,
-                            &c.descriptor,
-                            c.signature.as_deref(),
-                            true,
-                        ),
-                        call_sig,
-                        flags: FnFlags {
-                            inline: inline_kind,
-                            suspend,
-                        },
-                        ..FunctionInfo::plain(FnKind::Extension, Some(receiver), callable)
-                    });
+        if let Some(internal) = receiver.kotlin_class_internal() {
+            let mut seen = std::collections::HashSet::new();
+            let mut queue = std::collections::VecDeque::new();
+            queue.push_back(internal.to_string());
+            let mut rung: u32 = 0;
+            while let Some(cn) = queue.pop_front() {
+                if !seen.insert(cn.clone()) {
+                    continue;
                 }
-            }
-            // `@JvmName`-mangled REDUCTION extensions selected by the receiver's ELEMENT type:
-            // `List<Int>.sum()` is the bytecode method `sumOfInt(Iterable<Integer>): int` (Kotlin source
-            // name `sum`, `@JvmName` `sumOfInt`). The source name is not a JVM method, so the plain
-            // `find_extensions(name)` above misses it; map `name` → each mangled `jvm_name` via `@Metadata`,
-            // then bind ONLY the candidate whose generic-signature receiver ELEMENT equals the actual
-            // receiver's element — that element match is the disambiguator among the per-element overloads
-            // (`sumOfInt`/`sumOfLong`/…), so an unrelated mangled extension never over-matches.
-            if let Some(jname) = receiver
-                .type_args()
-                .first()
-                .copied()
-                .or_else(|| receiver.array_elem())
-                .and_then(ty_simple_name)
-                // The `@JvmName` follows kotlinc's `<name>Of<Element>` convention (`sum`→`sumOfInt`,
-                // `average`→`averageOfInt`) — the same naming the `sumOf`-by-lambda-return path derives.
-                .map(|simple| format!("{name}Of{simple}"))
-                .filter(|jname| *jname != name)
-            {
-                let want_elem = receiver
-                    .type_args()
-                    .first()
-                    .copied()
-                    .or_else(|| receiver.array_elem());
-                for recv_desc in supertype_descriptors(&self.cp, receiver) {
-                    for c in self.cp.find_extensions(&recv_desc, &jname) {
-                        let generic_sig = c.signature.as_deref().and_then(parse_method_gsig);
-                        // Bind only the element-appropriate reduction.
-                        if want_elem.is_some_and(|elem| {
-                            generic_sig.as_ref().and_then(gsig_receiver_element) != Some(elem)
-                        }) {
-                            continue;
-                        }
-                        // A no-argument reduction only: the extension descriptor carries just the RECEIVER
-                        // (`sum(Iterable): R` → one param). A same-named lambda overload
-                        // (`sumOf(Iterable, Function1): R`) has an extra parameter; skip it here.
-                        let (params, pret) = parse_method_desc(&c.descriptor);
-                        if params.len() != 1 {
-                            continue;
-                        }
+                let Some(t) = self.resolve_type(&cn) else {
+                    continue;
+                };
+                for m in &t.members {
+                    if m.name == name
+                        || matches!(
+                            (m.name.as_str(), name),
+                            ("keySet", "keys") | ("entrySet", "entries")
+                        )
+                    {
                         crate::trace_compiler!(
                             "resolve",
-                            "reduction {name} -> {} on {recv_desc} ret={pret:?}",
-                            c.name
+                            "member walk {cn}.{} (rung {rung}) desc={} sig={:?}",
+                            m.name,
+                            m.descriptor,
+                            m.signature
                         );
-                        overloads.push(FunctionInfo {
-                            overload_rank: descriptor_narrowing(&c.descriptor) as u32,
-                            // `c.name` is the emit-mangled JVM name (`sumOfInt`); metadata is keyed by the
-                            // LOGICAL name (`sum`). The per-element overloads differ only by RETURN, which
-                            // the signature match disambiguates (full-descriptor alignment). The metadata
-                            // form carries the receiver as an ATTRIBUTE, never `params[0]`.
-                            generic_sig: self.callable_generic_sig(
-                                &c.owner,
-                                name,
-                                &c.descriptor,
-                                c.signature.as_deref(),
-                                true,
-                            ),
-                            ..FunctionInfo::plain(
-                                FnKind::Extension,
-                                Some(receiver),
-                                LibraryCallable {
-                                    signature: c.signature.clone(),
-                                    ..LibraryCallable::library(
-                                        c.owner.clone(),
-                                        c.name.clone(),
-                                        params,
-                                        pret,
-                                        pret,
-                                        c.descriptor.clone(),
-                                    )
-                                },
+                        let generic_sig = m.signature.as_deref().and_then(parse_method_gsig);
+                        // A `suspend fun` member's physical method appends a `Continuation` parameter
+                        // and erases its return to `Object`; present the LOGICAL signature (drop the
+                        // continuation, recover the real return from the `Continuation<T>` type
+                        // argument in the generic signature) so a normal call resolves. The coroutine
+                        // pass re-derives the CPS form for the emit.
+                        let suspend = self.cp.is_suspend_method(&cn, &m.name);
+                        let params: Vec<Ty> = if suspend {
+                            m.params
+                                .split_last()
+                                .map(|(_, rest)| rest.to_vec())
+                                .unwrap_or_default()
+                        } else {
+                            m.params.clone()
+                        };
+                        let descriptor = if suspend {
+                            strip_continuation_param(&m.descriptor)
+                        } else {
+                            m.descriptor.clone()
+                        };
+                        // Member metadata is keyed by the physical JVM name for value-class-param
+                        // mangled members (`copy` → `copy-<hash>`), and by the source/JVM name for
+                        // ordinary members.
+                        let meta_name = m.physical_name.as_deref().unwrap_or(&m.name);
+                        let member_facts =
+                            self.cp
+                                .metadata_member_call_facts(&cn, meta_name, params.len());
+                        // A `suspend` member's return facts are erased twice (to `Object`, then via the
+                        // `Continuation<T>` type argument), so recover nullability and exact source
+                        // classifier from the same class `@Metadata` member record.
+                        let member_ret_metadata = suspend.then_some(member_facts.ret);
+                        let suspend_ret_nullable =
+                            suspend && member_ret_metadata.is_some_and(|m| m.nullable);
+                        let ret = if suspend {
+                            // A generic `suspend` member returns a type parameter (`byId(): T`) via
+                            // `Continuation<T>`; bind `T` to the receiver's concrete argument
+                            // (`Repo<Cfg>` → `T = Cfg`) so the return isn't erased to `Any`.
+                            let recv_binds = self.receiver_type_bindings(receiver, &cn);
+                            let base = generic_sig
+                                .as_ref()
+                                .and_then(|g| suspend_return_from_gsig(g, &recv_binds))
+                                .unwrap_or(m.ret);
+                            // `suspend_return_from_gsig` canonicalized a collection return to its
+                            // READ-ONLY Kotlin form (the JVM signature erases read-only vs mutable).
+                            // Recover the EXACT source form (`List` vs `MutableList`, …) from the
+                            // member's `@Metadata` return classifier — which preserves it — keeping the
+                            // gsig's (already-canonicalized) type arguments, so `.add(…)` on a declared
+                            // `MutableList` return still resolves.
+                            let base = match (base, member_ret_metadata.and_then(|m| m.class)) {
+                                // Override the outer name ONLY when the metadata classifier is the SAME
+                                // JVM collection as the gsig-recovered base — i.e. its read-only/mutable
+                                // sibling (`List`/`MutableList` both erase to `java/util/List`). This
+                                // guarantees the same collection family and arity, so keeping the gsig's
+                                // type arguments is sound; a divergent classifier (stale metadata) is
+                                // ignored rather than forming an arity-mismatched type.
+                                (Ty::Obj(base_name, args), Some(Ty::Obj(meta_cls, _)))
+                                    if meta_cls.starts_with("kotlin/collections/")
+                                        && super::jvm_class_map::to_jvm_internal(meta_cls)
+                                            == super::jvm_class_map::to_jvm_internal(base_name) =>
+                                {
+                                    Ty::obj_args(meta_cls, args)
+                                }
+                                (Ty::Obj(base_name, args), Some(Ty::Obj(_, _))) => {
+                                    Ty::obj_args(base_name, args)
+                                }
+                                (b, _) => b,
+                            };
+                            crate::trace_compiler!(
+                                "suspend",
+                                "suspend return {cn}.{}: gsig={:?} base={:?} nullable={}",
+                                m.name,
+                                generic_sig,
+                                base,
+                                suspend_ret_nullable
+                            );
+                            // The `Continuation<T>` generic argument carries a PRIMITIVE return
+                            // BOXED (generics erase primitives to their wrapper); unbox it to the
+                            // source Kotlin primitive (`java/lang/Long` → `Ty::Long`) so
+                            // `val n: Long = r.count()` type-checks. Nullability is applied by
+                            // `ret_nullable` below (which mirrors the non-suspend member path).
+                            base.obj_internal()
+                                .and_then(super::jvm_class_map::wrapper_to_kotlin_prim)
+                                .map(kotlin_name_to_ty)
+                                .unwrap_or(base)
+                        } else {
+                            let recovered = self
+                                .member_return(receiver, &m.name, &m.params)
+                                .or_else(|| generic_sig.as_ref().and_then(concrete_generic_ret));
+                            crate::trace_compiler!(
+                                "resolve",
+                                "member return {}.{}: recovered={:?} erased={:?} (gsig={})",
+                                receiver.name(),
+                                m.name,
+                                recovered,
+                                m.ret,
+                                generic_sig.is_some()
+                            );
+                            recovered.unwrap_or(m.ret)
+                        };
+                        let call_sig = member_facts.call_sig;
+                        // A generic-return builtin member (`Map.get(K): V?`) resolves to the erased
+                        // classpath method (`java/util/Map.get` → `Object`), which carries no Kotlin
+                        // nullability. Recover the source `V?` from the builtin `@Metadata`. Applied
+                        // only for a PRIMITIVE return (a nullable primitive is a distinct BOXED type,
+                        // so `m[k] ?: d` must null-check before unboxing); a nullable REFERENCE already
+                        // null-checks regardless, and keeps its plain erased `Ty` (see below).
+                        // `cn` may already be the front-end `kotlin/collections/…` name or the erased
+                        // JVM form (`java/util/Map`, when the member is found on a classpath supertype);
+                        // map both to the builtin whose `@Metadata` declares the nullability.
+                        let builtin_cn = super::jvm_class_map::jvm_collection_to_kotlin(&cn)
+                            .or_else(|| {
+                                super::jvm_class_map::jvm_to_kotlin_builtin_with_members(&cn)
+                            })
+                            .unwrap_or(cn.as_str());
+                        let builtin_ret_nullable = !ret.is_reference()
+                            && self.cp.builtin_member_ret_nullable(
+                                builtin_cn,
+                                &m.name,
+                                params.len(),
+                            );
+                        let callable = LibraryCallable {
+                            inline: m.inline,
+                            suspend,
+                            signature: m.signature.clone(),
+                            ..LibraryCallable::library(
+                                m.owner.clone().unwrap_or_else(|| cn.clone()),
+                                m.physical_name.clone().unwrap_or_else(|| m.name.clone()),
+                                params,
+                                ret,
+                                m.physical_ret,
+                                descriptor,
                             )
+                        };
+                        overloads.push(FunctionInfo {
+                            ret: ReturnInfo::new(
+                                m.ret_nullable
+                                    || builtin_ret_nullable
+                                    || (suspend_ret_nullable && !ret.is_reference()),
+                                None,
+                            ),
+                            visibility: m.visibility,
+                            receiver_rank: rung,
+                            overload_rank: descriptor_narrowing(&m.descriptor) as u32,
+                            generic_sig,
+                            call_sig,
+                            flags: FnFlags {
+                                inline: m.inline,
+                                suspend,
+                            },
+                            ..FunctionInfo::plain(FnKind::Member, Some(receiver), callable)
                         });
                     }
                 }
+                queue.extend(t.supertypes);
+                rung += 1;
             }
-            // Metadata-mangled extensions on a value-class receiver. An extension on a value class
-            // (`UInt.coerceAtMost`) has a `@JvmName`-MANGLED bytecode name (`coerceAtMost-5PvTz6A`) indexed
-            // under the receiver's ERASED underlying descriptor, so the literal-name `find_extensions` above
-            // misses it. kotlinc resolves it from `@Metadata`: the Kotlin name + extension receiver class.
-            // For a value-class receiver only (bounding the blast radius), map `name` → the mangled method
-            // via `meta_functions` (the facade-merged `@Metadata` decode), then load the real candidate by
-            // that JVM name.
-            if let Some((recv_internal, recv_desc)) = receiver
-                .kotlin_class_internal()
-                .and_then(|i| self.value_class_underlying_desc(i).map(|d| (i, d)))
-            {
-                for owner in self.cp.find_extension_owners(&recv_desc) {
-                    // `meta_functions` shares the facade-merged decode — for a multifile FACADE
-                    // the functions live in the PART classes named in its `@Metadata` `d1`
-                    // (`URangesKt` → `URangesKt___URangesKt`), already merged there.
-                    let metafns = self.cp.meta_functions(&owner);
-                    for mf in metafns.iter() {
-                        // Only a metadata-mangled (jvm_name != kotlin name) public extension whose
-                        // `@Metadata` receiver IS this value class.
-                        if mf.kotlin_name != name
-                            || mf.jvm_name == name
-                            || !mf.is_public
-                            || mf.receiver_class != Some(recv_internal)
-                        {
-                            continue;
-                        }
-                        for c in self.cp.find_extensions(&recv_desc, &mf.jvm_name) {
-                            let (params, pret) = parse_method_desc(&c.descriptor);
-                            let ret_metadata = metadata_return_info(mf.ret_class, mf.ret_nullable);
-                            let ret = ret_metadata.class.unwrap_or(pret);
-                            let inline_kind =
-                                InlineKind::from_flags(mf.is_inline, mf.is_inline && !c.public);
-                            overloads.push(FunctionInfo {
-                                ret: ret_metadata,
-                                // The value class is the most-specific receiver rung.
-                                overload_rank: descriptor_narrowing(&c.descriptor) as u32,
-                                generic_sig: self.callable_generic_sig(
-                                    &c.owner,
-                                    &c.name,
-                                    &c.descriptor,
-                                    c.signature.as_deref(),
-                                    true,
-                                ),
-                                flags: FnFlags {
-                                    inline: inline_kind,
-                                    suspend: mf.is_suspend,
-                                },
-                                ..FunctionInfo::plain(
-                                    FnKind::Extension,
-                                    Some(receiver),
-                                    LibraryCallable {
-                                        inline: inline_kind,
-                                        suspend: mf.is_suspend,
-                                        signature: c.signature.clone(),
-                                        // This path binds only extensions whose `@Metadata` receiver IS
-                                        // this value class, so the declared receiver is the value class.
-                                        source_receiver: Some(receiver),
-                                        ..LibraryCallable::library(
-                                            c.owner.clone(),
-                                            c.name.clone(),
-                                            params,
-                                            ret,
-                                            pret,
-                                            c.descriptor.clone(),
-                                        )
-                                    },
-                                )
-                            });
-                        }
-                    }
-                }
-            }
-            // A metadata-mangled extension whose mangling comes from a value-class PARAMETER (not the
-            // receiver): `inline fun <reified T> Reg.getFor(id: Id): T` compiles to the `@JvmName`-mangled
-            // `getFor-<hash>(Reg, String)` (the value-class `Id` param mangles the name and erases to its
-            // underlying). The receiver `Reg` is a PLAIN class, so the value-class-RECEIVER handler above
-            // doesn't apply, and the literal-name `find_extensions(name)` misses the mangled bytecode name.
-            // Map `name` → the mangled `jvm_name` via `@Metadata` (extension receiver == this receiver) and
-            // expose it with LOGICAL (value-class) parameter types so a value-class argument matches; the
-            // value-classes pass unboxes it at the erased call. Bounded to a genuine value-class-param mangle.
-            if let Some(recv_internal) = receiver.kotlin_class_internal() {
-                for (rank, recv_desc) in supertype_descriptors(&self.cp, receiver)
-                    .into_iter()
-                    .enumerate()
-                {
-                    for owner in self.cp.find_extension_owners(&recv_desc) {
-                        for mf in self.cp.meta_functions(&owner).iter() {
-                            if mf.kotlin_name != name
-                                || mf.jvm_name == name
-                                || !mf.is_public
-                                || mf.receiver_class != Some(recv_internal)
-                            {
-                                continue;
-                            }
-                            // Only when a value-class PARAMETER caused the mangling — else leave other
-                            // `@JvmName` manglings to their own handlers.
-                            let logical_params: Vec<Ty> = mf
-                                .value_params
-                                .iter()
-                                .map(|vp| {
-                                    vp.ty
-                                        .as_deref()
-                                        .map(kotlin_name_to_ty)
-                                        .unwrap_or(Ty::obj("kotlin/Any"))
-                                })
-                                .collect();
-                            if !logical_params
-                                .iter()
-                                .any(|p| self.value_underlying(*p).is_some())
-                            {
-                                continue;
-                            }
-                            for c in self.cp.find_extensions(&recv_desc, &mf.jvm_name) {
-                                let (phys_params, pret) = parse_method_desc(&c.descriptor);
-                                if phys_params.len() != logical_params.len() + 1 {
-                                    continue;
-                                }
-                                let mut params = vec![phys_params[0]];
-                                params.extend(logical_params.iter().copied());
-                                let ret_metadata =
-                                    metadata_return_info(mf.ret_class, mf.ret_nullable);
-                                let ret = ret_metadata.class.unwrap_or(pret);
-                                crate::trace_compiler!(
-                                    "resolve",
-                                    "value-class-param ext {name} -> {}.{} on {recv_desc} params={params:?} inline={}",
-                                    c.owner,
-                                    c.name,
-                                    mf.is_inline
-                                );
-                                let inline_kind =
-                                    InlineKind::from_flags(mf.is_inline, mf.is_inline);
-                                overloads.push(FunctionInfo {
-                                    ret: ret_metadata,
-                                    receiver_rank: rank as u32,
-                                    overload_rank: descriptor_narrowing(&c.descriptor) as u32,
-                                    // `c.name` is the value-class-param-mangled JVM name (`getFor-<hash>`);
-                                    // metadata is keyed by the LOGICAL name (`getFor`), so look it up by that
-                                    // to recover the reified return `T` (bound from the explicit type arg).
-                                    generic_sig: self.callable_generic_sig(
-                                        &c.owner,
-                                        name,
-                                        &c.descriptor,
-                                        c.signature.as_deref(),
-                                        true,
-                                    ),
-                                    flags: FnFlags {
-                                        // An inline extension MUST be inlined — `must_inline` makes the
-                                        // lowerer splice it or SKIP (never `invokestatic`; falling back to a
-                                        // call to an inline function's body is never correct, and a reified
-                                        // one has only a throwing stub).
-                                        inline: inline_kind,
-                                        suspend: mf.is_suspend,
-                                    },
-                                    ..FunctionInfo::plain(
-                                        FnKind::Extension,
-                                        Some(receiver),
-                                        LibraryCallable {
-                                            inline: inline_kind,
-                                            suspend: mf.is_suspend,
-                                            signature: c.signature.clone(),
-                                            ..LibraryCallable::library(
-                                                c.owner.clone(),
-                                                c.name.clone(),
-                                                params,
-                                                ret,
-                                                pret,
-                                                c.descriptor.clone(),
-                                            )
-                                        },
-                                    )
-                                });
-                            }
-                        }
-                    }
-                }
-            }
-            // Member functions of the receiver's type (own + inherited) — "functions inside types". A member
-            // wins over an extension; the caller uses `FnKind::Member` for that precedence. The inherited-
-            // member walk is BREADTH-FIRST (a subtype's override before a supertype's), and each member
-            // carries its visit rung in `receiver_rank` so an arg-binding consumer (`resolve_instance`) can
-            // pick the closest type's overload — the same most-derived-first precedence the BFS gives.
-            if let Some(internal) = receiver.kotlin_class_internal() {
-                let mut seen = std::collections::HashSet::new();
-                let mut queue = std::collections::VecDeque::new();
-                queue.push_back(internal.to_string());
-                let mut rung: u32 = 0;
-                while let Some(cn) = queue.pop_front() {
-                    if !seen.insert(cn.clone()) {
-                        continue;
-                    }
-                    let Some(t) = self.resolve_type(&cn) else {
-                        continue;
-                    };
-                    for m in &t.members {
-                        if m.name == name
-                            || matches!(
-                                (m.name.as_str(), name),
-                                ("keySet", "keys") | ("entrySet", "entries")
-                            )
-                        {
-                            crate::trace_compiler!(
-                                "resolve",
-                                "member walk {cn}.{} (rung {rung}) desc={} sig={:?}",
-                                m.name,
-                                m.descriptor,
-                                m.signature
-                            );
-                            let generic_sig = m.signature.as_deref().and_then(parse_method_gsig);
-                            // A `suspend fun` member's physical method appends a `Continuation` parameter
-                            // and erases its return to `Object`; present the LOGICAL signature (drop the
-                            // continuation, recover the real return from the `Continuation<T>` type
-                            // argument in the generic signature) so a normal call resolves. The coroutine
-                            // pass re-derives the CPS form for the emit.
-                            let suspend = self.cp.is_suspend_method(&cn, &m.name);
-                            let params: Vec<Ty> = if suspend {
-                                m.params
-                                    .split_last()
-                                    .map(|(_, rest)| rest.to_vec())
-                                    .unwrap_or_default()
-                            } else {
-                                m.params.clone()
-                            };
-                            let descriptor = if suspend {
-                                strip_continuation_param(&m.descriptor)
-                            } else {
-                                m.descriptor.clone()
-                            };
-                            // Member metadata is keyed by the physical JVM name for value-class-param
-                            // mangled members (`copy` → `copy-<hash>`), and by the source/JVM name for
-                            // ordinary members.
-                            let meta_name = m.physical_name.as_deref().unwrap_or(&m.name);
-                            let member_facts =
-                                self.cp
-                                    .metadata_member_call_facts(&cn, meta_name, params.len());
-                            // A `suspend` member's return facts are erased twice (to `Object`, then via the
-                            // `Continuation<T>` type argument), so recover nullability and exact source
-                            // classifier from the same class `@Metadata` member record.
-                            let member_ret_metadata = suspend.then_some(member_facts.ret);
-                            let suspend_ret_nullable =
-                                suspend && member_ret_metadata.is_some_and(|m| m.nullable);
-                            let ret = if suspend {
-                                // A generic `suspend` member returns a type parameter (`byId(): T`) via
-                                // `Continuation<T>`; bind `T` to the receiver's concrete argument
-                                // (`Repo<Cfg>` → `T = Cfg`) so the return isn't erased to `Any`.
-                                let recv_binds = self.receiver_type_bindings(receiver, &cn);
-                                let base = generic_sig
-                                    .as_ref()
-                                    .and_then(|g| suspend_return_from_gsig(g, &recv_binds))
-                                    .unwrap_or(m.ret);
-                                // `suspend_return_from_gsig` canonicalized a collection return to its
-                                // READ-ONLY Kotlin form (the JVM signature erases read-only vs mutable).
-                                // Recover the EXACT source form (`List` vs `MutableList`, …) from the
-                                // member's `@Metadata` return classifier — which preserves it — keeping the
-                                // gsig's (already-canonicalized) type arguments, so `.add(…)` on a declared
-                                // `MutableList` return still resolves.
-                                let base = match (base, member_ret_metadata.and_then(|m| m.class)) {
-                                    // Override the outer name ONLY when the metadata classifier is the SAME
-                                    // JVM collection as the gsig-recovered base — i.e. its read-only/mutable
-                                    // sibling (`List`/`MutableList` both erase to `java/util/List`). This
-                                    // guarantees the same collection family and arity, so keeping the gsig's
-                                    // type arguments is sound; a divergent classifier (stale metadata) is
-                                    // ignored rather than forming an arity-mismatched type.
-                                    (Ty::Obj(base_name, args), Some(Ty::Obj(meta_cls, _)))
-                                        if meta_cls.starts_with("kotlin/collections/")
-                                            && super::jvm_class_map::to_jvm_internal(meta_cls)
-                                                == super::jvm_class_map::to_jvm_internal(
-                                                    base_name,
-                                                ) =>
-                                    {
-                                        Ty::obj_args(meta_cls, args)
-                                    }
-                                    (Ty::Obj(base_name, args), Some(Ty::Obj(_, _))) => {
-                                        Ty::obj_args(base_name, args)
-                                    }
-                                    (b, _) => b,
-                                };
-                                crate::trace_compiler!(
-                                    "suspend",
-                                    "suspend return {cn}.{}: gsig={:?} base={:?} nullable={}",
-                                    m.name,
-                                    generic_sig,
-                                    base,
-                                    suspend_ret_nullable
-                                );
-                                // The `Continuation<T>` generic argument carries a PRIMITIVE return
-                                // BOXED (generics erase primitives to their wrapper); unbox it to the
-                                // source Kotlin primitive (`java/lang/Long` → `Ty::Long`) so
-                                // `val n: Long = r.count()` type-checks. Nullability is applied by
-                                // `ret_nullable` below (which mirrors the non-suspend member path).
-                                base.obj_internal()
-                                    .and_then(super::jvm_class_map::wrapper_to_kotlin_prim)
-                                    .map(kotlin_name_to_ty)
-                                    .unwrap_or(base)
-                            } else {
-                                let recovered =
-                                    self.member_return(receiver, &m.name, &m.params).or_else(
-                                        || generic_sig.as_ref().and_then(concrete_generic_ret),
-                                    );
-                                crate::trace_compiler!(
-                                    "resolve",
-                                    "member return {}.{}: recovered={:?} erased={:?} (gsig={})",
-                                    receiver.name(),
-                                    m.name,
-                                    recovered,
-                                    m.ret,
-                                    generic_sig.is_some()
-                                );
-                                recovered.unwrap_or(m.ret)
-                            };
-                            let call_sig = member_facts.call_sig;
-                            // A generic-return builtin member (`Map.get(K): V?`) resolves to the erased
-                            // classpath method (`java/util/Map.get` → `Object`), which carries no Kotlin
-                            // nullability. Recover the source `V?` from the builtin `@Metadata`. Applied
-                            // only for a PRIMITIVE return (a nullable primitive is a distinct BOXED type,
-                            // so `m[k] ?: d` must null-check before unboxing); a nullable REFERENCE already
-                            // null-checks regardless, and keeps its plain erased `Ty` (see below).
-                            // `cn` may already be the front-end `kotlin/collections/…` name or the erased
-                            // JVM form (`java/util/Map`, when the member is found on a classpath supertype);
-                            // map both to the builtin whose `@Metadata` declares the nullability.
-                            let builtin_cn = super::jvm_class_map::jvm_collection_to_kotlin(&cn)
-                                .or_else(|| {
-                                    super::jvm_class_map::jvm_to_kotlin_builtin_with_members(&cn)
-                                })
-                                .unwrap_or(cn.as_str());
-                            let builtin_ret_nullable = !ret.is_reference()
-                                && self.cp.builtin_member_ret_nullable(
-                                    builtin_cn,
-                                    &m.name,
-                                    params.len(),
-                                );
-                            let callable = LibraryCallable {
-                                inline: m.inline,
-                                suspend,
-                                signature: m.signature.clone(),
-                                ..LibraryCallable::library(
-                                    m.owner.clone().unwrap_or_else(|| cn.clone()),
-                                    m.physical_name.clone().unwrap_or_else(|| m.name.clone()),
-                                    params,
-                                    ret,
-                                    m.physical_ret,
-                                    descriptor,
-                                )
-                            };
-                            overloads.push(FunctionInfo {
-                                ret: ReturnInfo::new(
-                                    m.ret_nullable
-                                        || builtin_ret_nullable
-                                        || (suspend_ret_nullable && !ret.is_reference()),
-                                    None,
-                                ),
-                                visibility: m.visibility,
-                                receiver_rank: rung,
-                                overload_rank: descriptor_narrowing(&m.descriptor) as u32,
-                                generic_sig,
-                                call_sig,
-                                flags: FnFlags {
-                                    inline: m.inline,
-                                    suspend,
-                                },
-                                ..FunctionInfo::plain(FnKind::Member, Some(receiver), callable)
-                            });
-                        }
-                    }
-                    queue.extend(t.supertypes);
-                    rung += 1;
-                }
-            }
-        } else {
-            overloads = self.top_level_overloads(name);
         }
-        let set = FunctionSet { overloads };
-        self.cp.cache_functions(key, set.clone());
-        set
+        FunctionSet { overloads }
     }
 }
 
