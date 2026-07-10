@@ -4437,6 +4437,25 @@ impl<'a> Parser<'a> {
                 .file
                 .add_expr(Expr::Return { value, label }, Span::new(start.lo, end.hi));
         }
+        // Labeled expression prefix: `label@ <expr>` (`l1@ "s"`, `x@ (1L + 2)`, `l@ { … }`). A label
+        // names the following expression as a target for a non-local `return@label`/`break@label`; on a
+        // plain expression it is a semantic no-op. Detected as `Ident` immediately followed by `@` — the
+        // keyword-labels (`break@`, `continue@`, `return@`) are consumed by their handlers above, so any
+        // `Ident @` reaching here is an expression label. Consume it and parse the labeled expression
+        // (recurse so stacked labels `a@ b@ e` and a following unary/primary all flow through normally).
+        // `this`/`super` are also `Ident`s but `this@Outer`/`super@Base` is a labeled RECEIVER, not a
+        // labeled expression — leave those for `parse_primary` to bind the `@label` to the receiver.
+        if self.at(TokenKind::Ident)
+            && !matches!(self.text(), "this" | "super")
+            && self
+                .t
+                .get(self.i + 1)
+                .is_some_and(|t| t.kind == TokenKind::At)
+        {
+            self.bump(); // label name
+            self.bump(); // '@'
+            return self.parse_prefix();
+        }
         let unop = match self.kind() {
             TokenKind::Minus => Some(UnOp::Neg),
             TokenKind::Not => Some(UnOp::Not),

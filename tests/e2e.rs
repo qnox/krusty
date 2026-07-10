@@ -364,6 +364,8 @@ mod js_backend_coverage_e2e;
 mod js_backend_e2e;
 #[path = "ksp_provision_e2e.rs"]
 mod ksp_provision_e2e;
+#[path = "labeled_expression_e2e.rs"]
+mod labeled_expression_e2e;
 #[path = "labeled_this_e2e.rs"]
 mod labeled_this_e2e;
 #[path = "lambda_e2e.rs"]
