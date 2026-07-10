@@ -6761,13 +6761,11 @@ impl<'a> Checker<'a> {
                 // User-defined extension on a non-nullable primitive receiver: safe call is a no-op
                 // (primitives can never be null), so emit as a direct static call.
                 if !rt.is_reference() {
-                    if let Some(fi) = crate::module_symbols::ModuleSymbols::new(self.syms)
-                        .functions(&name, Some(rt))
-                        .overloads
+                    if let Some(fi) = self
+                        .resolver()
+                        .receiver_extensions(rt, &name)
                         .into_iter()
-                        .find(|o| {
-                            o.kind == crate::libraries::FnKind::Extension && o.receiver_rank == 0
-                        })
+                        .find(|o| o.receiver_rank == 0)
                     {
                         let logical: Vec<Ty> = fi.callable.params[1..].to_vec();
                         let arg_tys = args.as_deref().map_or_else(Vec::new, |a| self.arg_tys(a));

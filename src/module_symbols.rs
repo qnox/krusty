@@ -155,12 +155,32 @@ impl SymbolSource for ModuleSymbols<'_> {
         let (pkg, name) = fqn.rsplit_once('/').unwrap_or(("", fqn));
         let facade = self.facade_of(name).unwrap_or_default();
         let fac_pkg = facade.rsplit_once('/').map_or("", |(p, _)| p);
-        let overloads =
+        let mut overloads =
             if self.syms.funs.contains_key(name) && (facade.is_empty() || fac_pkg == pkg) {
                 self.functions(name, None).overloads
             } else {
                 Vec::new()
             };
+        // Module EXTENSIONS of `name`, receiver as an ATTRIBUTE (fqn resolution is receiver-agnostic; the
+        // resolver's `receiver_extensions` filters by receiver applicability). Keyed by erased receiver in
+        // `ext_funs` — the exact-receiver key is rung 0, the universal `Any` key rung 1.
+        let any = Ty::obj("kotlin/Any");
+        for ((recv, en), sig) in &self.syms.ext_funs {
+            if en == name {
+                let rank = if *recv == any { 1 } else { 0 };
+                overloads.push(fn_info(
+                    FnKind::Extension,
+                    sig,
+                    Some(*recv),
+                    String::new(),
+                    name,
+                    rank,
+                    Origin::Module {
+                        facade: String::new(),
+                    },
+                ));
+            }
+        }
         let callables = if overloads.is_empty() {
             Callables::None
         } else {
