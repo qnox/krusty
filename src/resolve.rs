@@ -10756,12 +10756,15 @@ impl<'a> Checker<'a> {
                                 let prev = self.allow_lambda_mutation;
                                 self.allow_lambda_mutation =
                                     self.resolver().toplevel_is_inline(&fname) && !materialized;
-                                // A RECEIVER function-type param: bind `pts[i][0]` (the Signature-derived
-                                // receiver) as the lambda's `this`; the rest are value params.
-                                let t = if recv_i.is_some() {
+                                // A RECEIVER function-type param: bind the receiver as the lambda's `this`;
+                                // the rest are value params. Prefer the @Metadata receiver (`recv_i`,
+                                // deterministic — `MutableList` for `buildList`) over `pts[i][0]`, whose
+                                // JVM-`Signature` decode is order-dependent (flakily `java/util/List`, on which
+                                // a `MutableList` extension like `removeLastOrNull` fails to resolve).
+                                let t = if let Some(recv) = recv_i {
                                     self.check_lambda_with_receiver_labeled(
                                         a,
-                                        pts[i][0],
+                                        recv,
                                         &pts[i][1..],
                                         call_fn_name.as_deref(),
                                     )
