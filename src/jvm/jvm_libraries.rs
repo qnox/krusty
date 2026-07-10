@@ -1320,6 +1320,30 @@ impl SymbolSource for JvmLibraries {
             // method's nullability. It applies to ANY `Map` subtype (`HashMap`, `TreeMap`, …), since a call
             // resolves the member on the concrete class, not on `Map` itself.
             let is_map = class_implements(&self.cp, internal, "java/util/Map");
+            // The class's `@Metadata` function records — carry each member's SOURCE parameter names and
+            // default flags, which the erased JVM descriptor loses. Populate every member's `call_sig` from
+            // its record so a named-argument / omitted-`$default` member call resolves through the ONE
+            // `resolve_type` member seam (the `instance_members` query), not a separate `functions()` walk.
+            let meta_fns = metadata::class_functions(&ci);
+            let member_call_sig =
+                |member: &LibraryMember, jvm_name: &str| -> crate::libraries::CallSig {
+                    let value_arity = if member.suspend && !member.params.is_empty() {
+                        member.params.len() - 1
+                    } else {
+                        member.params.len()
+                    };
+                    meta_fns
+                        .iter()
+                        .find(|f| f.jvm_name == jvm_name && f.value_params.len() == value_arity)
+                        .map(|f| {
+                            crate::libraries::CallSig::metadata_member(
+                                value_arity,
+                                f.value_params.iter().map(|p| p.name.clone()).collect(),
+                                f.value_params.iter().map(|p| p.has_default).collect(),
+                            )
+                        })
+                        .unwrap_or_default()
+                };
             for m in &ci.methods {
                 // Public members are callable from anywhere; a `protected` member is surfaced too so a
                 // subclass can reach it through the supertype walk (a compiling program only reaches it
@@ -1338,6 +1362,29 @@ impl SymbolSource for JvmLibraries {
                 };
                 member.signature = m.signature.clone();
                 member.suspend = self.cp.is_suspend_method(internal, &m.name);
+                // A `suspend` member's descriptor erases its return to `Object` (the CPS convention). Recover
+                // the LOGICAL return from `@Metadata` (`Int`, not `Object`) so a caller unboxes the suspension
+                // result — keeping the erased type as `physical_ret` for the emitter.
+                if member.suspend {
+                    let value_arity = member.params.len().saturating_sub(1);
+                    if let Some(f) = meta_fns
+                        .iter()
+                        .find(|f| f.jvm_name == m.name && f.value_params.len() == value_arity)
+                    {
+                        member.physical_ret = member.ret;
+                        let logical = metadata_return_info(f.ret_class, f.ret_nullable)
+                            .apply(member.physical_ret);
+                        // krusty erases REFERENCE nullability in `Ty` (`String?` is modeled as `String`);
+                        // `ret_nullable` tracks only PRIMITIVE nullability (a boxed suspension result). So a
+                        // reference return keeps its plain non-null type; only a primitive carries the flag.
+                        if logical.non_null().is_reference() {
+                            member.ret = logical.non_null();
+                        } else {
+                            member.ret = logical;
+                            member.ret_nullable = f.ret_nullable;
+                        }
+                    }
+                }
                 if is_map && member.name == "put" {
                     member.ret_nullable = true;
                 }
@@ -1348,8 +1395,10 @@ impl SymbolSource for JvmLibraries {
                     constructors.push(member);
                 } else if m.is_static() {
                     // A Kotlin companion member compiles to a JVM static on the class.
+                    member.call_sig = member_call_sig(&member, &m.name);
                     companion.push(member);
                 } else {
+                    member.call_sig = member_call_sig(&member, &m.name);
                     members.push(member);
                 }
             }
@@ -1396,6 +1445,11 @@ impl SymbolSource for JvmLibraries {
                 member.physical_ret = physical_ret;
                 member.ret_nullable = mf.ret_nullable;
                 member.suspend = mf.is_suspend;
+                member.call_sig = crate::libraries::CallSig::metadata_member(
+                    mf.value_params.len(),
+                    mf.value_params.iter().map(|p| p.name.clone()).collect(),
+                    mf.value_params.iter().map(|p| p.has_default).collect(),
+                );
                 crate::trace_compiler!(
                     "resolve",
                     "mangled member {}.{} jvm={} logical_params={:?}",

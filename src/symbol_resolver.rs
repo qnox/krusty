@@ -447,6 +447,36 @@ impl<'a> SymbolResolver<'a> {
         }
     }
 
+    /// Instance members named `name` on `recv` (own + inherited), collected over the type's supertype
+    /// closure through `resolve_type` — breadth-first from the receiver, so the FIRST entry is the most
+    /// derived (an override before the supertype it overrides). Replaces the removed receiver-indexed
+    /// `functions(name, Some(recv)).filter(Member)`: members are a shape of the TYPE, so they resolve
+    /// through `resolve_type`, not a callable query.
+    pub fn instance_members(&self, recv: Ty, name: &str) -> Vec<crate::libraries::LibraryMember> {
+        let mut out = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        let mut queue = std::collections::VecDeque::new();
+        if let Some(i) = recv.non_null().obj_internal() {
+            queue.push_back(i.to_string());
+        }
+        while let Some(internal) = queue.pop_front() {
+            if !seen.insert(internal.clone()) {
+                continue;
+            }
+            if let Some(t) = self.src.resolve_type(&internal) {
+                for m in &t.members {
+                    if m.name == name {
+                        out.push(m.clone());
+                    }
+                }
+                for s in t.supertypes {
+                    queue.push_back(s);
+                }
+            }
+        }
+        out
+    }
+
     /// Whether `name` has an `inline` extension overload on `receiver`.
     pub fn extension_is_inline(&self, receiver: Ty, name: &str) -> bool {
         self.receiver_extensions(receiver, name)
@@ -696,6 +726,12 @@ impl<'a> SymbolResolver<'a> {
                 fn_scope: self.fn_scope,
             },
         )?;
+        // A same-module extension is emitted through the module-native path (the lowerer's `ext_fun_ids`
+        // / IR inliner), NOT as a resolved LIBRARY callable — its facade is the file being compiled, which
+        // has no emit owner here. Only a classpath extension yields a library callable for the emit seam.
+        if matches!(o.callable.origin, Origin::Module { .. }) {
+            return None;
+        }
         self.build_extension_callable(name, receiver, args, type_args, &o)
     }
 
@@ -719,6 +755,11 @@ impl<'a> SymbolResolver<'a> {
                 fn_scope: self.fn_scope,
             },
         )?;
+        // Same-module extensions emit through the module path, not the library callable seam (see
+        // [`Self::resolve_extension_callable`]).
+        if matches!(o.callable.origin, Origin::Module { .. }) {
+            return None;
+        }
         self.build_extension_callable(name, receiver, args, &[], &o)
     }
 
@@ -1142,6 +1183,10 @@ impl<'a> SymbolResolver<'a> {
             .into_iter()
             .find(|o| {
                 matches!(o.kind, FnKind::Extension | FnKind::Member)
+                    // A same-module callable emits through the module path, not this @JvmName-mangled
+                    // (`@OverloadResolutionByLambdaReturnType`) classpath-family selector — its facade is
+                    // the file being compiled, so it carries no emit owner here.
+                    && !matches!(o.callable.origin, Origin::Module { .. })
                     && o.callable.ret == lambda_ret
                     // Scoped candidates include every same-named overload (e.g. `Array<Int>.sumOf` as
                     // well as `Iterable<Int>.sumOf`); an extension must match THIS receiver, else a
