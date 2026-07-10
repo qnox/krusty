@@ -55,7 +55,12 @@ pub fn applies(src: &str) -> bool {
 /// that option, so running it against krusty's default semantics is unsound.
 pub fn needs_unmodeled_compiler_flag(src: &str) -> bool {
     const UNMODELED_FREE_ARGS: &[&str] = &["genericSafeCasts"];
-    const UNMODELED_LANGUAGE_FLAGS: &[&str] = &["+UnrestrictedBuilderInference"];
+    const UNMODELED_LANGUAGE_FLAGS: &[&str] = &[
+        "+UnrestrictedBuilderInference",
+        // A value class with a secondary constructor that has a body — krusty models value classes
+        // only as plain constructions, so this feature's expected `box()` is unsound to run.
+        "+ValueClassesSecondaryConstructorWithBody",
+    ];
     const UNMODELED_DIRECTIVES: &[&str] = &["KJS_WITH_FULL_RUNTIME"];
     const UNMODELED_SOURCE_MARKERS: &[&str] = &["ExperimentalTypeInference"];
 

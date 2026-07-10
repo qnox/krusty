@@ -5481,7 +5481,19 @@ impl<'a> Lower<'a> {
         } else {
             self.cur_class.take()
         };
+        // An ANONYMOUS FUNCTION's body owns its `return`: a bare `return e` is a LOCAL return from this
+        // closure method, not a non-local return of the enclosing fn. Lower its body with `cur_ret_ty`
+        // set to the closure's own return type so `return` coerces to and `areturn`s that type.
+        let is_anon_fun = self.afile.anon_fun_lambdas.contains(&e.0);
+        let saved_ret_ty = if is_anon_fun {
+            Some(std::mem::replace(&mut self.cur_ret_ty, sig.ret))
+        } else {
+            None
+        };
         let ve = self.expr(body);
+        if let Some(rt) = saved_ret_ty {
+            self.cur_ret_ty = rt;
+        }
         self.cur_class = saved_cur_class;
         self.cur_method_returns_unit_ref = saved_unit_ref;
         self.scope = saved_scope;
@@ -5565,7 +5577,10 @@ impl<'a> Lower<'a> {
         // the enclosing fn's return type, not the lambda's). Mark the impl method inline-only so the backend
         // skips it (an invalid, dead method); the splice uses `inline_body`. A LABELED `return@x` is a LOCAL
         // return from the lambda (a normal `return` in the closure method), so it stays emittable.
-        if body_has_bare_return(self.afile, body) {
+        // An anonymous function is exempt: its bare `return` was already lowered as this closure
+        // method's OWN return (`cur_ret_ty` above), so the method is a valid, emittable closure — not a
+        // splice-only body.
+        if !is_anon_fun && body_has_bare_return(self.afile, body) {
             self.ir.inline_only_fns.insert(fid);
         }
         // A lambda inside a class member captures the enclosing `this` and reads its (private) members,

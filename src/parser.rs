@@ -3290,6 +3290,78 @@ impl<'a> Parser<'a> {
         lam
     }
 
+    /// Anonymous function expression: `fun (params): T = expr` / `fun (params): T { … }`. Desugars to a
+    /// lambda (`Expr::Lambda`) carrying each parameter's declared type in the `lambda_param_types`
+    /// side-table, so the value types even without an expected function type. An expression body
+    /// (`= expr`) becomes a `Block` whose only value is that expression; a block body reuses the normal
+    /// statement parser, so a `return` inside returns from the anonymous function (it lowers to the
+    /// lambda's own `invoke`). The receiver form `fun R.(…)` — where the body's `this` is the receiver —
+    /// is not desugared yet; it's rejected so the file skips rather than misparsing.
+    fn parse_anon_fun(&mut self) -> ExprId {
+        let start = self.tok().span;
+        self.bump(); // 'fun'
+        if !self.at(TokenKind::LParen) {
+            self.diags.error(
+                start,
+                "krusty: an anonymous function with a receiver is not supported",
+            );
+        }
+        self.expect(TokenKind::LParen, "'('");
+        let mut params: Vec<String> = Vec::new();
+        let mut param_types: Vec<Option<TypeRef>> = Vec::new();
+        self.skip_newlines();
+        while !self.at(TokenKind::RParen) && !self.at(TokenKind::Eof) {
+            // `_` marks an unused parameter; keep the name so the arity is preserved.
+            let name = self.ident_or_error("parameter name");
+            let ty = if self.eat(TokenKind::Colon) {
+                Some(self.parse_type())
+            } else {
+                None
+            };
+            params.push(name);
+            param_types.push(ty);
+            self.skip_newlines();
+            if !self.eat(TokenKind::Comma) {
+                break;
+            }
+            self.skip_newlines();
+        }
+        self.expect(TokenKind::RParen, "')'");
+        // An explicit return type (`: T`) drives the desugared lambda's function type — recorded below
+        // once the lambda ExprId exists. A block body ending in `return` has body type `Nothing`, so the
+        // checker relies on this annotation rather than the (diverging) body value.
+        let ret_ty = if self.eat(TokenKind::Colon) {
+            Some(self.parse_type())
+        } else {
+            None
+        };
+        let body = if self.eat(TokenKind::Eq) {
+            let e = self.parse_expr();
+            let sp = self.file.expr_spans[e.0 as usize];
+            self.file.add_expr(
+                Expr::Block {
+                    stmts: Vec::new(),
+                    trailing: Some(e),
+                },
+                sp,
+            )
+        } else {
+            self.parse_block_expr()
+        };
+        let end = self.file.expr_spans[body.0 as usize];
+        let lam = self
+            .file
+            .add_expr(Expr::Lambda { params, body }, Span::new(start.lo, end.hi));
+        if param_types.iter().any(|t| t.is_some()) {
+            self.file.lambda_param_types.insert(lam.0, param_types);
+        }
+        self.file.anon_fun_lambdas.insert(lam.0);
+        if let Some(rt) = ret_ty {
+            self.file.anon_fun_ret.insert(lam.0, rt);
+        }
+        lam
+    }
+
     fn parse_block_expr(&mut self) -> ExprId {
         let start = self.tok().span;
         self.expect(TokenKind::LBrace, "'{'");
@@ -4976,6 +5048,11 @@ impl<'a> Parser<'a> {
             TokenKind::KwIf => self.parse_if(),
             TokenKind::KwWhen => self.parse_when(),
             TokenKind::LBrace => self.parse_lambda(),
+            // Anonymous function expression: `fun (params): T = expr` / `fun (params): T { … }`. It
+            // desugars to a lambda carrying explicit parameter types; a bare `return` in the block body
+            // returns from the anonymous function, exactly as it does from a lambda compiled to its own
+            // `invoke`. The receiver form `fun R.(…)` is not desugared here yet.
+            TokenKind::KwFun => self.parse_anon_fun(),
             // `::name` — top-level callable reference / class literal without a receiver.
             TokenKind::ColonColon => {
                 self.bump(); // '::'
