@@ -6431,7 +6431,16 @@ impl<'a> Checker<'a> {
                             .unwrap_or_else(|| Ty::obj("kotlin/Any"))
                     })
                     .collect();
-                Ty::fun(fun_params, bret)
+                // An anonymous function's declared return type (`fun (…): T`) IS the function type's
+                // return — a block body ending in `return` yields body type `Nothing`, which would
+                // otherwise erase the result. Fall back to the body type when unannotated.
+                let ret = self
+                    .file
+                    .anon_fun_ret
+                    .get(&e.0)
+                    .map(|r| self.resolve_ty(r))
+                    .unwrap_or(bret);
+                Ty::fun(fun_params, ret)
             }
             Expr::Index { array, index } => {
                 let at = self.expr(array);
@@ -8218,6 +8227,14 @@ impl<'a> Checker<'a> {
         args: &[ExprId],
     ) -> Option<Ty> {
         if let ("toString", []) = (name, arg_tys) {
+            // A function value's `toString()` is Kotlin's `(T) -> T` form, not the JVM default — reject.
+            if matches!(rt, Ty::Fun(_)) {
+                self.diags.error(
+                    self.span(call),
+                    "krusty: toString() on a function value is not supported".to_string(),
+                );
+                return Some(Ty::Error);
+            }
             return Some(Ty::String);
         }
         if rt == Ty::String {
@@ -9902,6 +9919,15 @@ impl<'a> Checker<'a> {
                     return Ty::Error;
                 }
                 if let ("toString", []) = (name.as_str(), arg_tys.as_slice()) {
+                    // A function value's `toString()` is Kotlin's structured `(T) -> T` form, not the
+                    // JVM default — krusty can't reproduce it, so reject rather than emit the wrong text.
+                    if matches!(rt, Ty::Fun(_)) {
+                        self.diags.error(
+                            self.span(call),
+                            "krusty: toString() on a function value is not supported".to_string(),
+                        );
+                        return Ty::Error;
+                    }
                     return Ty::String; // intrinsic on any type
                 }
                 if rt == Ty::String {

@@ -790,6 +790,15 @@ pub struct File {
     /// checker type a *bare-value* lambda (`val f = { x: Int -> x*2 }`) from its own declared types
     /// when no expected function type drives them.
     pub lambda_param_types: std::collections::HashMap<u32, Vec<Option<TypeRef>>>,
+    /// `ExprId.0` of each lambda that originated from an ANONYMOUS FUNCTION expression
+    /// (`fun (x: Int): Int = …`). Unlike a plain lambda, a bare `return` inside an anonymous function is
+    /// a LOCAL return (from the anonymous function itself), so the lowerer must compile its body's
+    /// `return` as the closure method's own return rather than a non-local return of the enclosing fn.
+    pub anon_fun_lambdas: std::collections::HashSet<u32>,
+    /// Declared return type of an anonymous function (`fun (…): T = …`), keyed by the desugared
+    /// lambda's `ExprId.0`. A block body that ends in `return` has body type `Nothing`, so the checker
+    /// must take the function's type from this annotation, not from the (diverging) body value.
+    pub anon_fun_ret: std::collections::HashMap<u32, TypeRef>,
     /// `typealias Name = Target` — maps alias simple name → target simple name.
     /// Generic type aliases are stored with the raw target name (type args erased).
     pub type_aliases: Vec<(String, String)>,
