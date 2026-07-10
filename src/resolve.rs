@@ -3792,6 +3792,20 @@ pub(crate) fn function_scope_packages_with(file: &File, platform_defaults: &[&st
             }
         }
     }
+    // A FULLY-QUALIFIED call written inline without an import (`kotlinx.coroutines.runBlocking { … }`)
+    // names its package in the source but never imports it. Add the dotted receiver of every `a.b.c.foo`
+    // chain as a candidate package so the scoped `resolve_symbols` seam finds such a callee — the same
+    // packages the checker's FQ-call path (`qualified_path`) resolves against. Over-adding a non-package
+    // prefix is inert (no `resolve_symbols` hit); this needs no classpath knowledge to decide the boundary.
+    for i in 0..file.expr_spans.len() {
+        if let Expr::Member { receiver, .. } = file.expr(ExprId(i as u32)) {
+            if let Some(pkg) = qualified_path(file, *receiver) {
+                if pkg.contains('/') && !fn_scope.contains(&pkg) {
+                    fn_scope.push(pkg);
+                }
+            }
+        }
+    }
     fn_scope
 }
 

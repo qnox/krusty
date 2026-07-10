@@ -52,6 +52,132 @@ pub struct JvmLibraries {
 }
 
 impl JvmLibraries {
+    /// The TOP-LEVEL (receiver-less) function overloads of `name` — `listOf`/`run`/`println`/…
+    /// each with its inline/`@InlineOnly` flags and logical (continuation-stripped) suspend
+    /// signature. The building block `resolve_symbols` uses so a top-level name resolves through
+    /// the ONE fqn seam without the removed receiver-indexed `functions()` query. `find_top_level`
+    /// also surfaces an extension's compiled form; each is classified honestly by its metadata
+    /// receiver, so a caller filters by `FnKind` as needed.
+    fn top_level_overloads(&self, name: &str) -> Vec<FunctionInfo> {
+        let mut overloads = Vec::new();
+        // Top-level (receiver-less) functions of this name — `listOf`, `run`, `println`, … — each with
+        // its inline/`@InlineOnly` flags in one place.
+        for c in self.cp.find_top_level(name) {
+            let is_default = c.name.ends_with("$default");
+            let meta_name = c.name.strip_suffix("$default").unwrap_or(&c.name);
+            // Suspend-ness lives on the SOURCE function's `@Metadata`; a `$default` synthetic is not in
+            // metadata, so detect it via the stripped `meta_name` — otherwise a suspend function's
+            // `withLock$default` keeps its `Continuation` param and no normal call shape resolves.
+            let suspend = self.cp.is_suspend_method(&c.owner, meta_name);
+            // A `suspend fun`'s physical method appends a `Continuation` parameter and erases the
+            // return to `Object`; present the LOGICAL signature (drop the continuation) so a normal
+            // call resolves. The coroutine pass re-derives the CPS form for the emitted call.
+            let descriptor = if suspend {
+                strip_continuation_param(&c.descriptor)
+            } else {
+                c.descriptor.clone()
+            };
+            let (mut params, physical_ret) = parse_method_desc_with_field_params(&descriptor);
+            if is_default && params.len() >= 2 {
+                params.truncate(params.len() - 2);
+            }
+            // The CPS `Continuation` is emit-only — never part of the function signature `@Metadata`
+            // records. For a non-`$default` suspend method it is trailing and already gone (stripped
+            // from `descriptor` above); a `$default` synthetic spells it before the mask/marker, so it
+            // survived into the logical params. Drop it here so the params ARE the source signature and
+            // align against metadata; the emit `descriptor` keeps the physical CPS form.
+            if suspend
+                && params.last().and_then(|p| p.obj_internal())
+                    == Some("kotlin/coroutines/Continuation")
+            {
+                params.pop();
+            }
+            // Drop any SYNTHETIC trailing params the JVM descriptor appends beyond the `@Metadata`
+            // SOURCE signature — a `@Composable` method's trailing `(Composer, int)` (a `suspend`
+            // Continuation is already removed above). `@Metadata` records only the source
+            // `value_parameter`s, so its count bounds the source params; keep the descriptor's
+            // leading params (their exact types — an extension receiver, a vararg array) and
+            // truncate the trailing synthetics. A normal function's metadata count equals the
+            // descriptor's param count, so this is a no-op for it (no regression).
+            let meta =
+                self.cp
+                    .metadata_call_facts(&c.owner, meta_name, &params, &physical_ret, false);
+            if let Some(keep) = meta.kept_params {
+                if keep < params.len() {
+                    params.truncate(keep);
+                }
+            }
+            let inline_desc = if is_default {
+                method_descriptor(&params, physical_ret)
+            } else {
+                c.descriptor.clone()
+            };
+            let inline = self
+                .cp
+                .is_inline_callable(&c.owner, meta_name, &inline_desc, &params);
+            let call_sig = meta.call_sig;
+            let ret_metadata = meta.ret;
+            let ret = if suspend {
+                match ret_metadata.class {
+                    Some(ty) if ty.is_jvm_scalar() && ret_metadata.nullable => {
+                        super::jvm_class_map::wrapper_internal(ty)
+                            .map(Ty::obj)
+                            .unwrap_or(ty)
+                    }
+                    Some(ty) => ty,
+                    None => physical_ret,
+                }
+            } else {
+                physical_ret
+            };
+            let inline_kind = InlineKind::from_flags(inline, inline && !c.public);
+            let callable = LibraryCallable {
+                inline: inline_kind,
+                suspend,
+                default_call: is_default,
+                signature: c.signature.clone(),
+                ..LibraryCallable::library(
+                    c.owner.clone(),
+                    c.name.clone(),
+                    params,
+                    ret,
+                    physical_ret,
+                    descriptor,
+                )
+            };
+            // The static-method index (`find_top_level`) also surfaces an EXTENSION's compiled form
+            // (`T.run` → `run(receiver, block)`); classify by the metadata signature's receiver so it is
+            // an `Extension`, not a receiver-less `TopLevel`. Extension resolution reaches it through the
+            // by-receiver query; keeping the kind honest is what lets the top-level queries ignore it
+            // without per-call-site receiver checks.
+            let generic_sig = self.callable_generic_sig(
+                &c.owner,
+                &c.name,
+                &c.descriptor,
+                c.signature.as_deref(),
+                false,
+            );
+            let kind = if generic_sig.as_ref().is_some_and(|g| g.receiver.is_some()) {
+                FnKind::Extension
+            } else {
+                FnKind::TopLevel
+            };
+            overloads.push(FunctionInfo {
+                ret: ret_metadata,
+                visibility: Visibility::from_public(c.public),
+                overload_rank: descriptor_narrowing(&c.descriptor) as u32,
+                generic_sig,
+                call_sig,
+                flags: FnFlags {
+                    inline: inline_kind,
+                    suspend,
+                },
+                ..FunctionInfo::plain(kind, None, callable)
+            });
+        }
+        overloads
+    }
+
     pub fn new(cp: std::rc::Rc<Classpath>) -> JvmLibraries {
         JvmLibraries { cp }
     }
@@ -1641,8 +1767,7 @@ impl SymbolSource for JvmLibraries {
         // a malformed shape for extension selection. Take only genuine `TopLevel` here; extensions come
         // from the receiver-carrying tree loop below, so the namespace has ONE clean source per kind.
         let mut overloads: Vec<_> = self
-            .functions(name, None)
-            .overloads
+            .top_level_overloads(name)
             .into_iter()
             .filter(|o| {
                 o.kind == FnKind::TopLevel
@@ -2510,121 +2635,7 @@ impl SymbolSource for JvmLibraries {
                 }
             }
         } else {
-            // Top-level (receiver-less) functions of this name — `listOf`, `run`, `println`, … — each with
-            // its inline/`@InlineOnly` flags in one place.
-            for c in self.cp.find_top_level(name) {
-                let is_default = c.name.ends_with("$default");
-                let meta_name = c.name.strip_suffix("$default").unwrap_or(&c.name);
-                // Suspend-ness lives on the SOURCE function's `@Metadata`; a `$default` synthetic is not in
-                // metadata, so detect it via the stripped `meta_name` — otherwise a suspend function's
-                // `withLock$default` keeps its `Continuation` param and no normal call shape resolves.
-                let suspend = self.cp.is_suspend_method(&c.owner, meta_name);
-                // A `suspend fun`'s physical method appends a `Continuation` parameter and erases the
-                // return to `Object`; present the LOGICAL signature (drop the continuation) so a normal
-                // call resolves. The coroutine pass re-derives the CPS form for the emitted call.
-                let descriptor = if suspend {
-                    strip_continuation_param(&c.descriptor)
-                } else {
-                    c.descriptor.clone()
-                };
-                let (mut params, physical_ret) = parse_method_desc_with_field_params(&descriptor);
-                if is_default && params.len() >= 2 {
-                    params.truncate(params.len() - 2);
-                }
-                // The CPS `Continuation` is emit-only — never part of the function signature `@Metadata`
-                // records. For a non-`$default` suspend method it is trailing and already gone (stripped
-                // from `descriptor` above); a `$default` synthetic spells it before the mask/marker, so it
-                // survived into the logical params. Drop it here so the params ARE the source signature and
-                // align against metadata; the emit `descriptor` keeps the physical CPS form.
-                if suspend
-                    && params.last().and_then(|p| p.obj_internal())
-                        == Some("kotlin/coroutines/Continuation")
-                {
-                    params.pop();
-                }
-                // Drop any SYNTHETIC trailing params the JVM descriptor appends beyond the `@Metadata`
-                // SOURCE signature — a `@Composable` method's trailing `(Composer, int)` (a `suspend`
-                // Continuation is already removed above). `@Metadata` records only the source
-                // `value_parameter`s, so its count bounds the source params; keep the descriptor's
-                // leading params (their exact types — an extension receiver, a vararg array) and
-                // truncate the trailing synthetics. A normal function's metadata count equals the
-                // descriptor's param count, so this is a no-op for it (no regression).
-                let meta =
-                    self.cp
-                        .metadata_call_facts(&c.owner, meta_name, &params, &physical_ret, false);
-                if let Some(keep) = meta.kept_params {
-                    if keep < params.len() {
-                        params.truncate(keep);
-                    }
-                }
-                let inline_desc = if is_default {
-                    method_descriptor(&params, physical_ret)
-                } else {
-                    c.descriptor.clone()
-                };
-                let inline = self
-                    .cp
-                    .is_inline_callable(&c.owner, meta_name, &inline_desc, &params);
-                let call_sig = meta.call_sig;
-                let ret_metadata = meta.ret;
-                let ret = if suspend {
-                    match ret_metadata.class {
-                        Some(ty) if ty.is_jvm_scalar() && ret_metadata.nullable => {
-                            super::jvm_class_map::wrapper_internal(ty)
-                                .map(Ty::obj)
-                                .unwrap_or(ty)
-                        }
-                        Some(ty) => ty,
-                        None => physical_ret,
-                    }
-                } else {
-                    physical_ret
-                };
-                let inline_kind = InlineKind::from_flags(inline, inline && !c.public);
-                let callable = LibraryCallable {
-                    inline: inline_kind,
-                    suspend,
-                    default_call: is_default,
-                    signature: c.signature.clone(),
-                    ..LibraryCallable::library(
-                        c.owner.clone(),
-                        c.name.clone(),
-                        params,
-                        ret,
-                        physical_ret,
-                        descriptor,
-                    )
-                };
-                // The static-method index (`find_top_level`) also surfaces an EXTENSION's compiled form
-                // (`T.run` → `run(receiver, block)`); classify by the metadata signature's receiver so it is
-                // an `Extension`, not a receiver-less `TopLevel`. Extension resolution reaches it through the
-                // by-receiver query; keeping the kind honest is what lets the top-level queries ignore it
-                // without per-call-site receiver checks.
-                let generic_sig = self.callable_generic_sig(
-                    &c.owner,
-                    &c.name,
-                    &c.descriptor,
-                    c.signature.as_deref(),
-                    false,
-                );
-                let kind = if generic_sig.as_ref().is_some_and(|g| g.receiver.is_some()) {
-                    FnKind::Extension
-                } else {
-                    FnKind::TopLevel
-                };
-                overloads.push(FunctionInfo {
-                    ret: ret_metadata,
-                    visibility: Visibility::from_public(c.public),
-                    overload_rank: descriptor_narrowing(&c.descriptor) as u32,
-                    generic_sig,
-                    call_sig,
-                    flags: FnFlags {
-                        inline: inline_kind,
-                        suspend,
-                    },
-                    ..FunctionInfo::plain(kind, None, callable)
-                });
-            }
+            overloads = self.top_level_overloads(name);
         }
         let set = FunctionSet { overloads };
         self.cp.cache_functions(key, set.clone());

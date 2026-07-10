@@ -428,23 +428,14 @@ impl<'a> SymbolResolver<'a> {
                     .and_then(|dr| source_receiver_rank(&self.src, recv, dr))
                     .is_some()
         };
-        if self.fn_scope.is_some() {
-            self.symbols_in_scope(name)
-                .into_iter()
-                .flat_map(|(_, r)| match r.callables {
-                    crate::libraries::Callables::Functions(f) => f.overloads,
-                    _ => Vec::new(),
-                })
-                .filter(|o| applies(o))
-                .collect()
-        } else {
-            self.lib
-                .functions(name, Some(recv))
-                .overloads
-                .into_iter()
-                .filter(|o| o.kind == FnKind::Extension)
-                .collect()
-        }
+        self.symbols_in_scope(name)
+            .into_iter()
+            .flat_map(|(_, r)| match r.callables {
+                crate::libraries::Callables::Functions(f) => f.overloads,
+                _ => Vec::new(),
+            })
+            .filter(|o| applies(o))
+            .collect()
     }
 
     /// Instance members named `name` on `recv` (own + inherited), collected over the type's supertype
@@ -485,28 +476,18 @@ impl<'a> SymbolResolver<'a> {
     }
 
     /// All TOP-LEVEL (and same-facade extension) function overloads of `name`, resolved through the ONE
-    /// `resolve_symbols` seam over this resolver's import scope. Falls back to the legacy whole-classpath
-    /// `functions()` query ONLY when there is no import scope — the last `functions()` users are being
-    /// migrated here (task A), after which the fallback and `functions()` itself are deleted. Callers filter
-    /// by [`FnKind`] as they need (`TopLevel` for a plain call, etc.).
+    /// `resolve_symbols` seam over this resolver's import scope (empty when there is no scope). Callers
+    /// filter by [`FnKind`] as they need (`TopLevel` for a plain call, etc.).
     pub(crate) fn top_level_function_set(&self, name: &str) -> FunctionSet {
         FunctionSet {
-            overloads: if self.fn_scope.is_some() {
-                self.symbols_in_scope(name)
-                    .into_iter()
-                    .flat_map(|(_, r)| match r.callables {
-                        crate::libraries::Callables::Functions(f) => f.overloads,
-                        _ => Vec::new(),
-                    })
-                    .collect()
-            } else {
-                self.lib
-                    .functions(name, None)
-                    .overloads
-                    .into_iter()
-                    .filter(|o| fn_in_scope(o, self.fn_scope))
-                    .collect()
-            },
+            overloads: self
+                .symbols_in_scope(name)
+                .into_iter()
+                .flat_map(|(_, r)| match r.callables {
+                    crate::libraries::Callables::Functions(f) => f.overloads,
+                    _ => Vec::new(),
+                })
+                .collect(),
         }
     }
 
@@ -1033,7 +1014,7 @@ impl<'a> SymbolResolver<'a> {
         args: &[Ty],
         type_args: &[Ty],
     ) -> Option<LibraryCallable> {
-        let fsd = self.src.functions(&format!("{name}$default"), None);
+        let fsd = self.top_level_function_set(&format!("{name}$default"));
         for o in fsd.overloads.iter().filter(|o| o.kind == FnKind::TopLevel) {
             let c = &o.callable;
             if !o.public() && !o.flags.inline.must_inline() {
@@ -1177,7 +1158,7 @@ impl<'a> SymbolResolver<'a> {
                     _ => Vec::new(),
                 })
                 .collect(),
-            None => self.lib.functions(name, Some(receiver)).overloads,
+            None => Vec::new(),
         };
         candidates
             .into_iter()
@@ -1229,7 +1210,7 @@ impl<'a> SymbolResolver<'a> {
                     _ => Vec::new(),
                 })
                 .collect(),
-            None => self.lib.functions(name, Some(receiver)).overloads,
+            None => Vec::new(),
         };
         candidates
             .iter()
@@ -1263,7 +1244,7 @@ impl<'a> SymbolResolver<'a> {
         // Lambda-SHAPE info for a name the caller already validated resolves (via import scope OR an
         // explicit FQ package). UNSCOPED over the federated source so a fully-qualified, unimported callee
         // (`kotlinx.coroutines.runBlocking { … }`) still yields its lambda parameter types.
-        let fs = self.src.functions(name, None);
+        let fs = self.top_level_function_set(name);
         // The default-omitted trailing-lambda alignment (`runBlocking { … }`) applies ONLY when NO overload
         // of this name matches the provided argument count exactly. A name WITH an exact-arity overload
         // (`run { … }`) always uses that overload's own parameter positions — never an alignment against a
@@ -1313,7 +1294,7 @@ impl<'a> SymbolResolver<'a> {
     ) -> Option<Vec<Option<Ty>>> {
         // Unscoped over the federated source, like `top_level_lambda_param_types` — an FQ unimported callee
         // must still yield receivers.
-        let fs = self.src.functions(name, None);
+        let fs = self.top_level_function_set(name);
         // Same rule as `top_level_lambda_param_types`: only fall back to the default-omitted trailing-lambda
         // alignment (`runBlocking { … }` binds `this: CoroutineScope`) when NO overload matches the argument
         // count exactly, so an exact-arity call never mis-binds a receiver from a wider overload.
@@ -1347,8 +1328,7 @@ impl<'a> SymbolResolver<'a> {
         arg_tys: &[Option<Ty>],
     ) -> Option<Vec<bool>> {
         // Unscoped over the federated source — lambda-shape must cover an FQ unimported callee.
-        self.src
-            .functions(name, None)
+        self.top_level_function_set(name)
             .overloads
             .iter()
             .filter(|o| o.kind == FnKind::TopLevel)
@@ -1368,7 +1348,9 @@ impl<'a> SymbolResolver<'a> {
         name: &str,
         arg_tys: &[Option<Ty>],
     ) -> Option<Vec<Vec<Ty>>> {
-        let fs = self.src.functions(name, Some(receiver));
+        let fs = FunctionSet {
+            overloads: self.receiver_extensions(receiver, name),
+        };
         for allow_must_inline in [false, true] {
             for o in ranked_extension_overloads_by_recv(&self.src, receiver, &fs, allow_must_inline)
             {
@@ -1407,7 +1389,9 @@ impl<'a> SymbolResolver<'a> {
         name: &str,
         arg_tys: &[Option<Ty>],
     ) -> Option<Vec<Option<Ty>>> {
-        let fs = self.src.functions(name, Some(receiver));
+        let fs = FunctionSet {
+            overloads: self.receiver_extensions(receiver, name),
+        };
         for allow_must_inline in [false, true] {
             for o in ranked_extension_overloads_by_recv(&self.src, receiver, &fs, allow_must_inline)
             {
@@ -2512,6 +2496,20 @@ mod tests {
             }
         }
 
+        fn resolve_symbols(&self, fqn: &str) -> crate::libraries::ResolvedSymbols {
+            // The fake's name is package-less, so a scoped resolver queries it as the bare fqn.
+            if fqn == self.name {
+                crate::libraries::ResolvedSymbols {
+                    classifier: None,
+                    callables: crate::libraries::Callables::Functions(FunctionSet {
+                        overloads: vec![self.info.clone()],
+                    }),
+                }
+            } else {
+                crate::libraries::ResolvedSymbols::default()
+            }
+        }
+
         fn resolve_type(&self, internal: &str) -> Option<crate::libraries::LibraryType> {
             matches!(internal, "kotlin/UInt" | "demo/Box").then(|| crate::libraries::LibraryType {
                 is_public: true,
@@ -2643,7 +2641,8 @@ mod tests {
             receiver: None,
             info: top_level_default_uint_info(),
         };
-        let resolver = SymbolResolver::new(&source);
+        let scope = vec![String::new()];
+        let resolver = SymbolResolver::new_scoped(&source, &scope);
         let call = resolver
             .resolve_top_level_callable("make", &[], &[])
             .expect("default callable should resolve");
@@ -2659,7 +2658,8 @@ mod tests {
             receiver: None,
             info: top_level_nullable_string_info(),
         };
-        let resolver = SymbolResolver::new(&source);
+        let scope = vec![String::new()];
+        let resolver = SymbolResolver::new_scoped(&source, &scope);
         let call = resolver
             .resolve_top_level_callable("maybe", &[], &[])
             .expect("nullable callable should resolve");
@@ -2674,7 +2674,8 @@ mod tests {
             receiver: Some(Ty::String),
             info: extension_nullable_string_info(),
         };
-        let resolver = SymbolResolver::new(&source);
+        let scope = vec![String::new()];
+        let resolver = SymbolResolver::new_scoped(&source, &scope);
         let call = resolver
             .resolve_extension_callable("maybeSuffix", Ty::String, &[], &[])
             .expect("nullable extension callable should resolve");

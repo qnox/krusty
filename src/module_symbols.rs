@@ -86,7 +86,33 @@ impl<'a> ModuleSymbols<'a> {
     /// selection, so callers need not touch `syms.funs` or re-run the picker themselves.
     pub fn resolve_top_level(&self, name: &str, arg_tys: &[Ty]) -> Option<FunctionInfo> {
         let i = crate::resolve::pick_overload(self.syms.funs.get(name)?, arg_tys)?;
-        self.functions(name, None).overloads.into_iter().nth(i)
+        self.module_top_level(name).into_iter().nth(i)
+    }
+
+    /// The module's TOP-LEVEL function overloads of `name` as [`FunctionInfo`]s — every `fun name(...)`
+    /// declared at file scope, each stamped with its declaring facade [`Origin::Module`]. The building
+    /// block `resolve_symbols`/`resolve_top_level` share, so the source answers a name WITHOUT the removed
+    /// receiver-indexed `functions()` seam.
+    fn module_top_level(&self, name: &str) -> Vec<FunctionInfo> {
+        let mut overloads = Vec::new();
+        if let Some(sigs) = self.syms.funs.get(name) {
+            let owner = self.facade_of(name).unwrap_or_default();
+            let origin = Origin::Module {
+                facade: owner.clone(),
+            };
+            for sig in sigs {
+                overloads.push(fn_info(
+                    FnKind::TopLevel,
+                    sig,
+                    None,
+                    owner.clone(),
+                    name,
+                    0,
+                    origin.clone(),
+                ));
+            }
+        }
+        overloads
     }
 
     /// Collect members named `name` over the user hierarchy in DEPTH-FIRST pre-order (self, then each
@@ -213,7 +239,7 @@ impl SymbolSource for ModuleSymbols<'_> {
         let fac_pkg = facade.rsplit_once('/').map_or("", |(p, _)| p);
         let mut overloads =
             if self.syms.funs.contains_key(name) && (facade.is_empty() || fac_pkg == pkg) {
-                self.functions(name, None).overloads
+                self.module_top_level(name)
             } else {
                 Vec::new()
             };
