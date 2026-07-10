@@ -226,6 +226,8 @@ mod duplicate_enum_entry_check_e2e;
 mod duplicate_param_check_e2e;
 #[path = "enum_class_signature_e2e.rs"]
 mod enum_class_signature_e2e;
+#[path = "enum_ctor_default_arg_e2e.rs"]
+mod enum_ctor_default_arg_e2e;
 #[path = "enum_entries_e2e.rs"]
 mod enum_entries_e2e;
 #[path = "enum_entry_property_e2e.rs"]

@@ -1427,12 +1427,20 @@ impl<'a> Parser<'a> {
                 let pname = self.ident_or_error("parameter name");
                 self.expect(TokenKind::Colon, "':'");
                 let ty = self.parse_type();
+                // A default value (`enum class C(val x: Int = 1)`) — same as a regular class ctor param;
+                // each enum entry that omits the argument gets it at its construction site.
+                let default = if self.eat(TokenKind::Eq) {
+                    self.skip_newlines();
+                    Some(self.parse_expr())
+                } else {
+                    None
+                };
                 props.push(PropParam {
                     name: pname,
                     ty,
                     is_var,
                     is_property,
-                    default: None,
+                    default,
                     annotations: Vec::new(),
                     annotation_args: Vec::new(),
                 });

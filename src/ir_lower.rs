@@ -2855,17 +2855,34 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                         .iter()
                         .map(|f| f.ty.clone())
                         .collect();
+                    // Constructor-parameter defaults, aligned to `field_tys` (which are the PROPERTY
+                    // params, in order). Filtering to property params keeps the index in step with the
+                    // fields even if a non-property ctor param is interleaved.
+                    let prop_defaults: Vec<Option<AstExprId>> = c
+                        .props
+                        .iter()
+                        .filter(|p| p.is_property)
+                        .map(|p| p.default)
+                        .collect();
                     for (ei, entry) in c.enum_entries.iter().enumerate() {
                         lo.scope.clear();
                         lo.next_value = 0;
                         lo.cur_class = None;
                         let mut lowered = Vec::new();
-                        for (arg, ft) in entry.args.iter().zip(&field_tys) {
+                        for (i, ft) in field_tys.iter().enumerate() {
+                            // Use the entry's explicit argument, or fall back to the constructor
+                            // parameter's default (`enum class C(val x: Int = 1) { E }`): every entry
+                            // that omits a trailing argument constructs with the declared default.
+                            let arg = entry
+                                .args
+                                .get(i)
+                                .copied()
+                                .or_else(|| prop_defaults.get(i).copied().flatten())?;
                             // Branchy entry args (`X(1 == 1)`) are handled by the `<clinit>` spill.
-                            lowered.push(lo.lower_arg(*arg, ft)?);
+                            lowered.push(lo.lower_arg(arg, ft)?);
                         }
-                        // Reject an entry whose arg count doesn't match the ctor (default args etc.).
-                        if lowered.len() != ctor_count {
+                        // Reject an entry with MORE args than the ctor has parameters.
+                        if entry.args.len() > ctor_count {
                             return None;
                         }
                         lo.ir.classes[class_id as usize].enum_entries[ei].args = lowered;
