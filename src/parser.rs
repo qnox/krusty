@@ -1463,6 +1463,9 @@ impl<'a> Parser<'a> {
         };
         let mut entries: Vec<AstEnumEntry> = Vec::new();
         let mut methods = Vec::new();
+        // Enum body member properties (`enum class C { A; val x = … }`) and their initializer order.
+        let mut body_props: Vec<PropDecl> = Vec::new();
+        let mut init_order: Vec<ClassInit> = Vec::new();
         self.skip_newlines();
         if self.eat(TokenKind::LBrace) {
             self.skip_newlines();
@@ -1580,6 +1583,19 @@ impl<'a> Parser<'a> {
                         f.visibility = visibility_of(&emods);
                         methods.push(f);
                     }
+                    // A body member property (`enum class C { A; val x = … }`): a field + accessor on
+                    // the enum class, initialized in declaration order in the primary constructor.
+                    TokenKind::KwVal | TokenKind::KwVar => {
+                        let mut p = self.parse_top_property_c(
+                            emods.iter().any(|m| m == "lateinit"),
+                            true,
+                            emods.iter().any(|m| m == "const"),
+                            false,
+                        );
+                        p.visibility = visibility_of(&emods);
+                        init_order.push(ClassInit::PropInit(body_props.len()));
+                        body_props.push(p);
+                    }
                     // Nested type declarations and secondary constructors in an enum body: parse
                     // them through the real grammar (no token-skipping) and discard — krusty doesn't
                     // emit them, so a reference fails to resolve and the file is cleanly skipped.
@@ -1640,8 +1656,8 @@ impl<'a> Parser<'a> {
             companion_base: None,
             companion_base_args: Vec::new(),
             companion_supertypes: Vec::new(),
-            body_props: Vec::new(),
-            init_order: Vec::new(),
+            body_props,
+            init_order,
             is_data: false,
             is_value: false,
             kind: ClassKind::Enum,
