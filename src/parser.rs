@@ -3528,13 +3528,29 @@ impl<'a> Parser<'a> {
                 if let Some(close) = close {
                     self.bump();
                     let mut entries = Vec::new();
+                    // NAME-BASED destructuring (`+NameBasedDestructuring`): an entry `newName = sourceProp`
+                    // binds `newName` to the receiver's `sourceProp` property (not `componentN`). Parallel
+                    // to `entries`; `None` for a positional entry.
+                    let mut source_props: Vec<Option<String>> = Vec::new();
                     loop {
                         let n = self.ident_or_error("variable name");
                         // A per-entry type annotation (`val (a: Int, b) = …`) is tolerated, ignored.
                         if self.eat(TokenKind::Colon) {
                             let _ = self.parse_type();
                         }
+                        // `newName = sourceProp` — the by-name renaming form. This `=` is inside the
+                        // destructuring parens/brackets, distinct from the initializer `=` after `)`.
+                        let source = if self.name_based_destructuring && self.eat(TokenKind::Eq) {
+                            let src = self.ident_or_error("property name");
+                            if self.eat(TokenKind::Colon) {
+                                let _ = self.parse_type();
+                            }
+                            Some(src)
+                        } else {
+                            None
+                        };
                         entries.push((n, is_var));
+                        source_props.push(source);
                         if !self.eat(TokenKind::Comma) {
                             break;
                         }
@@ -3553,7 +3569,13 @@ impl<'a> Parser<'a> {
                     self.expect(TokenKind::Eq, "'='");
                     self.skip_newlines();
                     let init = self.parse_expr();
-                    return self.finish_stmt(Stmt::Destructure { entries, init }, start);
+                    let stmt = self.finish_stmt(Stmt::Destructure { entries, init }, start);
+                    if source_props.iter().any(|s| s.is_some()) {
+                        self.file
+                            .destructure_source_props
+                            .insert(stmt.0, source_props);
+                    }
+                    return stmt;
                 }
                 let name = self.ident_or_error("variable name");
                 let ty = if self.eat(TokenKind::Colon) {
