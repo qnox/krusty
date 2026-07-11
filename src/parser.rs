@@ -2381,10 +2381,25 @@ impl<'a> Parser<'a> {
                         )
                 });
                 if self.eat(TokenKind::LParen) {
-                    // constructor call → base class
+                    // constructor call → base class. Arguments may be NAMED (`Base(name = …, addr = …)`);
+                    // the per-arg name is recorded so the checker/lowerer reorder to the base ctor order.
                     self.skip_newlines();
                     let mut args = Vec::new();
+                    let mut arg_names: Vec<Option<String>> = Vec::new();
                     while !self.at(TokenKind::RParen) && !self.at(TokenKind::Eof) {
+                        let named = self.at(TokenKind::Ident)
+                            && self
+                                .t
+                                .get(self.i + 1)
+                                .is_some_and(|t| t.kind == TokenKind::Eq);
+                        if named {
+                            arg_names.push(Some(self.text().to_string()));
+                            self.bump(); // name
+                            self.bump(); // '='
+                            self.skip_newlines();
+                        } else {
+                            arg_names.push(None);
+                        }
                         args.push(self.parse_expr());
                         self.skip_newlines();
                         if !self.eat(TokenKind::Comma) {
@@ -2394,6 +2409,11 @@ impl<'a> Parser<'a> {
                     }
                     self.expect(TokenKind::RParen, "')'");
                     base = Some(effective.clone());
+                    if arg_names.iter().any(|n| n.is_some()) {
+                        if let Some(first) = args.first() {
+                            self.file.base_arg_names.insert(first.0, arg_names);
+                        }
+                    }
                     base_args = args;
                 } else if !effective.is_empty() {
                     ifaces.push(TypeRef {
