@@ -230,6 +230,8 @@ mod enum_class_signature_e2e;
 mod enum_ctor_default_arg_e2e;
 #[path = "enum_entries_e2e.rs"]
 mod enum_entries_e2e;
+#[path = "enum_entry_named_arg_e2e.rs"]
+mod enum_entry_named_arg_e2e;
 #[path = "enum_entry_property_e2e.rs"]
 mod enum_entry_property_e2e;
 #[path = "enum_generic_interface_e2e.rs"]

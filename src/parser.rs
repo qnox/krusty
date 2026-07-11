@@ -1469,11 +1469,27 @@ impl<'a> Parser<'a> {
             while self.at(TokenKind::Ident) {
                 let entry_name = self.text().to_string();
                 self.bump();
-                // Optional constructor arguments: `RED(0xFF0000)`.
+                // Optional constructor arguments: `RED(0xFF0000)`, incl. named `RED(rgb = 0xFF0000)`.
                 let mut args = Vec::new();
+                let mut arg_names: Vec<Option<String>> = Vec::new();
                 if self.eat(TokenKind::LParen) {
                     self.skip_newlines();
                     while !self.at(TokenKind::RParen) && !self.at(TokenKind::Eof) {
+                        // A named argument `name = value` — the identifier is followed by `=` (but not
+                        // `==`). Capture the name so the lowering can reorder to constructor order.
+                        let named = self.at(TokenKind::Ident)
+                            && self
+                                .t
+                                .get(self.i + 1)
+                                .is_some_and(|t| t.kind == TokenKind::Eq);
+                        if named {
+                            arg_names.push(Some(self.text().to_string()));
+                            self.bump(); // name
+                            self.bump(); // '='
+                            self.skip_newlines();
+                        } else {
+                            arg_names.push(None);
+                        }
                         args.push(self.parse_expr());
                         self.skip_newlines();
                         if !self.eat(TokenKind::Comma) {
@@ -1530,6 +1546,7 @@ impl<'a> Parser<'a> {
                 entries.push(AstEnumEntry {
                     name: entry_name,
                     args,
+                    arg_names,
                     methods: body,
                     props: bprops,
                 });
