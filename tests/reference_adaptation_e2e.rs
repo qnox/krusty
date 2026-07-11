@@ -59,3 +59,13 @@ fn adapt_coercion_primitive_discard() {
         fun box(): String { call(::foo); return if (n == 7) \"OK\" else \"Fail\" }\n";
     assert_eq!(run(SRC).expect("primitive discard"), "OK");
 }
+
+// Base support: a plain call to a function with a trailing vararg AND a defaulted fixed parameter,
+// omitting the vararg (empty). Previously rejected ("expects at least 1 arg") / not lowered.
+#[test]
+fn default_and_empty_vararg_call() {
+    const SRC: &str =
+        "fun foo(s: String = \"K\", vararg t: String): String = s + t.size.toString()\n\
+        fun box(): String = if (foo() == \"K0\" && foo(\"A\") == \"A0\") \"OK\" else \"Fail\"\n";
+    assert_eq!(run(SRC).expect("default + empty vararg"), "OK");
+}

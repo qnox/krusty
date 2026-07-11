@@ -11458,17 +11458,30 @@ impl<'a> Checker<'a> {
                         ret_ty = r;
                     }
                     if cs.vararg {
-                        let fixed = params.len() - 1;
-                        if arg_tys.len() < fixed {
+                        // The `vararg` is always the LAST parameter (`n_fixed` = its index). The minimum
+                        // positional argument count is the number of LEADING non-default fixed parameters
+                        // — a defaulted fixed parameter (or the vararg) may be omitted. A caller supplies
+                        // fixed parameters first, then vararg elements.
+                        let n_fixed = params.len() - 1;
+                        let min_args = (0..n_fixed)
+                            .take_while(|&i| !cs.param_defaults.get(i).copied().unwrap_or(false))
+                            .count();
+                        // Any omitted fixed parameter must be defaulted (a middle non-default hole can't be
+                        // filled positionally by later arguments).
+                        let omitted_ok = arg_tys.len() >= n_fixed
+                            || (arg_tys.len()..n_fixed)
+                                .all(|i| cs.param_defaults.get(i).copied().unwrap_or(false));
+                        if arg_tys.len() < min_args || !omitted_ok {
                             self.diags.error(
                                 span,
                                 format!(
-                                    "function '{fname}' expects at least {fixed} args, got {}",
+                                    "function '{fname}' expects at least {min_args} args, got {}",
                                     arg_tys.len()
                                 ),
                             );
                         } else {
-                            for i in 0..fixed {
+                            let provided_fixed = arg_tys.len().min(n_fixed);
+                            for i in 0..provided_fixed {
                                 self.expect_assignable(
                                     params[i],
                                     arg_tys[i],
@@ -11476,8 +11489,8 @@ impl<'a> Checker<'a> {
                                     "argument",
                                 );
                             }
-                            let elem = params[fixed].array_elem().unwrap_or(Ty::Error);
-                            for i in fixed..arg_tys.len() {
+                            let elem = params[n_fixed].array_elem().unwrap_or(Ty::Error);
+                            for i in n_fixed..arg_tys.len() {
                                 self.expect_assignable(
                                     elem,
                                     arg_tys[i],
