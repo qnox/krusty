@@ -3654,6 +3654,17 @@ pub enum InlineCall {
 pub enum ExprLowering {
     /// A call or function reference resolved to a local function declaration.
     LocalFunction { stmt_id: StmtId },
+    /// An ADAPTED same-file top-level function reference (`::foo` passed where a shorter function type is
+    /// expected, `foo` having trailing DEFAULT parameters). Lowering synthesizes an adapter of the
+    /// expected arity that calls `foo`'s `$default` stub filling the omitted defaults. `target_params` is
+    /// `foo`'s full parameter list (locates its IR function), `adapted_params`/`ret` are the expected
+    /// function type's parameters/return (the adapter's own signature).
+    AdaptedRef {
+        name: String,
+        target_params: Vec<Ty>,
+        adapted_params: Vec<Ty>,
+        ret: Ty,
+    },
     /// A call whose selected lowering is an inline/custom emit form rather than the normal function-call
     /// path: value-class companion calls (`Result.success`) or receiver-lambda scope calls.
     InlineCall(InlineCall),
@@ -6348,6 +6359,49 @@ impl<'a> Checker<'a> {
                 _ => partial[i].unwrap_or_else(|| self.expr(x)),
             })
             .collect()
+    }
+
+    /// Try to ADAPT a same-file top-level function reference `::name` to an expected function type `exp`
+    /// that has FEWER parameters — the dropped trailing parameters must all have defaults, and the
+    /// retained parameters + return must match exactly. Records the adaptation (the lowerer synthesizes
+    /// an adapter calling `name`'s `$default` stub) and returns the expected function type. `None` when no
+    /// clean adaptation applies (the caller then types the reference normally). vararg/`suspend`
+    /// conversion and non-trailing defaults are out of scope (later slices) — a sound skip.
+    fn try_adapt_toplevel_ref(
+        &mut self,
+        ref_expr: ExprId,
+        name: &str,
+        exp: &crate::types::FnSig,
+    ) -> Option<Ty> {
+        if exp.suspend {
+            return None;
+        }
+        let sig = self
+            .syms
+            .funs
+            .get(name)
+            .and_then(|v| (v.len() == 1).then(|| v[0].clone()))?;
+        let (n, m) = (exp.params.len(), sig.params.len());
+        if sig.vararg || sig.is_suspend || n >= m || n < sig.required {
+            return None;
+        }
+        // Every dropped trailing parameter must be defaulted; the retained prefix + return must match.
+        if !sig.param_defaults.is_empty() && !sig.param_defaults[n..m].iter().all(|&d| d) {
+            return None;
+        }
+        if sig.params[..n] != exp.params[..] || sig.ret != exp.ret {
+            return None;
+        }
+        self.expr_lowers.insert(
+            ref_expr,
+            ExprLowering::AdaptedRef {
+                name: name.to_string(),
+                target_params: sig.params.clone(),
+                adapted_params: exp.params.clone(),
+                ret: exp.ret,
+            },
+        );
+        Some(Ty::fun(exp.params.clone(), exp.ret))
     }
 
     fn expr_inner(&mut self, e: ExprId) -> Ty {
@@ -10952,6 +11006,21 @@ impl<'a> Checker<'a> {
                             return *t;
                         }
                         if let Some(ref sig) = known_sig {
+                            // An ADAPTED function reference argument: `::foo` (a same-file top-level
+                            // function with trailing defaults) passed to a function-typed parameter of
+                            // SMALLER arity. Type it as the expected function type and record the
+                            // adaptation (the lowerer synthesizes an arity-matching adapter).
+                            if let Some(&Ty::Fun(exp)) = sig.params.get(i) {
+                                if let Expr::CallableRef {
+                                    receiver: None,
+                                    name,
+                                } = self.file.expr(a).clone()
+                                {
+                                    if let Some(t) = self.try_adapt_toplevel_ref(a, &name, exp) {
+                                        return t;
+                                    }
+                                }
+                            }
                             // A lambda argument to a function-typed parameter. For an `inline fun` the lambda
                             // is inlined into the caller, so it may capture a mutable local (like the stdlib
                             // `repeat`/`forEach`). This also covers zero-parameter lambdas (`() -> Unit`),
