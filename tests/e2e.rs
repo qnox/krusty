@@ -578,6 +578,8 @@ mod toplevel_property_ref_e2e;
 mod trailing_lambda_default_e2e;
 #[path = "trailing_lambda_named_args_e2e.rs"]
 mod trailing_lambda_named_args_e2e;
+#[path = "trim_indent_e2e.rs"]
+mod trim_indent_e2e;
 #[path = "try_catch_e2e.rs"]
 mod try_catch_e2e;
 #[path = "type_param_vararg_check_e2e.rs"]
