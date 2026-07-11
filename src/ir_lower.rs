@@ -13783,6 +13783,14 @@ impl<'a> Lower<'a> {
                 {
                     return None;
                 }
+                // A `break`/`continue` INSIDE the `finally` that escapes it (out to an enclosing loop)
+                // isn't modeled either — the jump leaves the `finally` mid-run. Skip rather than emit
+                // bytecode the verifier rejects.
+                if let Some(f) = finally {
+                    if finally_has_escaping_break_continue(self.afile, f) {
+                        return None;
+                    }
+                }
                 // A `finally` that declares locals is inlined on several exit paths (normal, each `return`,
                 // the exception catch-all); the duplicated locals' slots clash across copies (a verify
                 // error) — skip rather than miscompile.
@@ -17337,6 +17345,19 @@ impl<'a> Lower<'a> {
                 }
                 // Instance method call `recv.m(args)`, or a stdlib intrinsic method.
                 Expr::Member { receiver, name } => {
+                    // `"""…""".trimIndent()` / `.trimMargin()` on a compile-time-constant string receiver:
+                    // fold the stdlib transform to a string constant (kotlinc special-cases a constant
+                    // receiver too). A non-constant receiver falls through and is skipped.
+                    if args.is_empty() && matches!(name.as_str(), "trimIndent" | "trimMargin") {
+                        if let Some(s) = const_string_value(self.afile, receiver) {
+                            let folded = if name == "trimIndent" {
+                                trim_indent(&s)
+                            } else {
+                                trim_margin(&s, "|")
+                            };
+                            return Some(self.ir.add_expr(IrExpr::Const(IrConst::String(folded))));
+                        }
+                    }
                     // A FULLY-QUALIFIED top-level FUNCTION call `a.b.helper(args)` (the checker typed it):
                     // the receiver is a package path, `helper` a top-level fn of that package — emit the
                     // static call to its facade. `None` falls through to normal member-call handling.
@@ -18752,6 +18773,50 @@ fn const_string_value(file: &ast::File, e: AstExprId) -> Option<String> {
     const_string_value_d(file, e, 0)
 }
 
+/// `String.trimIndent()`: split into lines, drop the common minimal indentation of the non-blank
+/// lines from every line, and omit a blank FIRST or LAST line — matching `kotlin.text.trimIndent`.
+fn trim_indent(s: &str) -> String {
+    let lines: Vec<&str> = s.split('\n').collect();
+    let min_indent = lines
+        .iter()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| l.len() - l.trim_start().len())
+        .min()
+        .unwrap_or(0);
+    let last = lines.len().saturating_sub(1);
+    let mut out: Vec<String> = Vec::new();
+    for (i, line) in lines.iter().enumerate() {
+        if (i == 0 || i == last) && line.trim().is_empty() {
+            continue;
+        }
+        // A blank line may be shorter than `min_indent`; only cut what is there.
+        let cut = min_indent.min(line.len());
+        out.push(line[cut..].to_string());
+    }
+    out.join("\n")
+}
+
+/// `String.trimMargin(prefix)`: for each line, remove leading whitespace up to and including the
+/// first `prefix`; a line without the prefix is left unchanged. A blank FIRST or LAST line is
+/// omitted — matching `kotlin.text.trimMargin`.
+fn trim_margin(s: &str, margin: &str) -> String {
+    let lines: Vec<&str> = s.split('\n').collect();
+    let last = lines.len().saturating_sub(1);
+    let mut out: Vec<String> = Vec::new();
+    for (i, line) in lines.iter().enumerate() {
+        if (i == 0 || i == last) && line.trim().is_empty() {
+            continue;
+        }
+        let trimmed = line.trim_start();
+        if let Some(rest) = trimmed.strip_prefix(margin) {
+            out.push(rest.to_string());
+        } else {
+            out.push(line.to_string());
+        }
+    }
+    out.join("\n")
+}
+
 /// `depth` bounds the recursion through `const val` references so a cyclic chain
 /// (`const val a = b; const val b = a`) terminates with `None` instead of overflowing the stack.
 fn const_string_value_d(file: &ast::File, e: AstExprId, depth: u32) -> Option<String> {
@@ -19935,6 +20000,36 @@ fn body_declares_local(file: &ast::File, e: AstExprId) -> bool {
 /// lowerer handles `return` itself (inlining enclosing `finally`s) and only `break`/`continue` must bail.
 fn body_has_break_continue(file: &ast::File, e: AstExprId) -> bool {
     body_has_exit(file, e, false)
+}
+
+/// Whether `e` (a `finally` body) contains a `break`/`continue` that escapes the `finally` — an
+/// UNLABELED jump not enclosed by a loop within the body, or ANY LABELED jump (which may target a
+/// loop outside the `finally`). Running a `finally` while transferring such a jump out isn't modeled,
+/// so the enclosing `try` is skipped rather than miscompiled (a `break` out of a `finally` otherwise
+/// leaves the operand stack / locals in a state the verifier rejects).
+fn finally_has_escaping_break_continue(file: &ast::File, e: AstExprId) -> bool {
+    fn ex(file: &ast::File, e: AstExprId, ld: u32) -> bool {
+        match file.expr(e) {
+            Expr::Lambda { .. } | Expr::CallableRef { .. } => false,
+            _ => file.any_child_expr(e, &mut |c| ex(file, c, ld), &mut |s| st(file, s, ld)),
+        }
+    }
+    fn st(file: &ast::File, s: crate::ast::StmtId, ld: u32) -> bool {
+        match file.stmt(s) {
+            // A labeled jump can target a loop OUTSIDE the finally regardless of nesting depth.
+            Stmt::Break(Some(_)) | Stmt::Continue(Some(_)) => true,
+            Stmt::Break(None) | Stmt::Continue(None) => ld == 0,
+            Stmt::Expr(e)
+            | Stmt::Local { init: e, .. }
+            | Stmt::Assign { value: e, .. }
+            | Stmt::Destructure { init: e, .. } => ex(file, *e, ld),
+            Stmt::While { cond, body, .. } => ex(file, *cond, ld) || ex(file, *body, ld + 1),
+            Stmt::DoWhile { body, cond, .. } => ex(file, *body, ld + 1) || ex(file, *cond, ld),
+            Stmt::For { body, .. } | Stmt::ForEach { body, .. } => ex(file, *body, ld + 1),
+            _ => false,
+        }
+    }
+    ex(file, e, 0)
 }
 
 fn body_has_exit(file: &ast::File, e: AstExprId, with_return: bool) -> bool {
