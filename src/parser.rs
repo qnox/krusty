@@ -38,6 +38,7 @@ pub fn parse_with_features(
     p.parse_file();
     p.file.assert_always_enabled = features.has("AssertionsAlwaysEnable");
     p.file.assert_always_disabled = features.has("AssertionsAlwaysDisable");
+    scope_local_classes(&mut p.file);
     hoist_local_classes(&mut p.file);
     fixup_parenless_base_classes(&mut p.file);
     rewrite_anon_captures(&mut p.file);
@@ -445,6 +446,177 @@ fn rewrite_anon_captures(file: &mut File) {
 /// body as a no-op. A local class that captures outer locals is checked with no enclosing scope, so its
 /// outer references fail to resolve and the file cleanly skips (never miscompiles). Two same-named local
 /// classes (or a clash with a top-level name) become a "conflicting declarations" skip — also sound.
+/// Give each LOCAL class a globally-unique name so same-named local classes in DIFFERENT functions do
+/// not collide once hoisted to top-level declarations (`fun f() { class A … }; fun g() { class A … }`
+/// registered `A` twice → the second shadowed the first, mis-resolving the first's construction). For
+/// each function/method body, a local class whose name is unique within that body is renamed and its
+/// construction references (`Expr::Name`) in that body are rewritten to match; a name USED as a type
+/// annotation that isn't rewritten then resolves to nothing (the file skips — never a miscompile).
+fn scope_local_classes(file: &mut File) {
+    use crate::ast::{Decl, Expr, FunBody, Stmt};
+    // Every function/method body root, with the enclosing declaration's parameter names (a param that
+    // shadows a local class name makes the syntactic `Name` rewrite unsafe).
+    let mut roots: Vec<(ExprId, Vec<String>)> = Vec::new();
+    let push_body = |b: &FunBody, params: Vec<String>, roots: &mut Vec<(ExprId, Vec<String>)>| {
+        if let FunBody::Expr(e) | FunBody::Block(e) = b {
+            roots.push((*e, params));
+        }
+    };
+    // Top-level declaration names: a local class sharing a top-level name can't be safely rewritten (an
+    // un-rewritten reference would resolve to the top-level declaration → miscompile).
+    let mut top_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for d in &file.decl_arena {
+        match d {
+            Decl::Fun(f) => {
+                top_names.insert(f.name.clone());
+                push_body(
+                    &f.body,
+                    f.params.iter().map(|p| p.name.clone()).collect(),
+                    &mut roots,
+                );
+            }
+            Decl::Class(c) => {
+                top_names.insert(c.name.clone());
+                for m in c.methods.iter().chain(&c.companion_methods) {
+                    push_body(
+                        &m.body,
+                        m.params.iter().map(|p| p.name.clone()).collect(),
+                        &mut roots,
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+    // File-wide local-class name counts: a name declared in only ONE body has no collision and is left
+    // untouched (so its type-annotation references keep resolving). Only a name declared more than once
+    // (across bodies) collides — those were already rejected ("conflicting declarations"), so renaming
+    // them is safe: a construction-only use now compiles, a type-annotation use still skips.
+    let mut body_subtrees: Vec<(Vec<String>, Vec<ExprId>, Vec<StmtId>)> = Vec::new();
+    let mut file_counts: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    for (root, params) in roots {
+        let mut exprs: Vec<ExprId> = Vec::new();
+        let mut stmts: Vec<StmtId> = Vec::new();
+        collect_subtree(file, root, &mut exprs, &mut stmts);
+        for &s in &stmts {
+            if let Stmt::LocalClass(c) = file.stmt(s) {
+                *file_counts.entry(c.name.clone()).or_default() += 1;
+            }
+        }
+        body_subtrees.push((params, exprs, stmts));
+    }
+    let mut counter = 0u32;
+    for (params, exprs, stmts) in &body_subtrees {
+        // Names BOUND in this body (a local `val`/`var`, a `Stmt::LocalFun`/lambda parameter, or an
+        // enclosing parameter) shadow a local class of the same name — rewriting `Name` for such a name
+        // would clobber the shadowing binding's reads, so those names are excluded from renaming.
+        let mut bound: std::collections::HashSet<String> = params.iter().cloned().collect();
+        for &s in stmts {
+            match file.stmt(s) {
+                Stmt::Local { name, .. }
+                | Stmt::LocalLateinit { name, .. }
+                | Stmt::LocalDelegate { name, .. }
+                | Stmt::For { name, .. }
+                | Stmt::ForEach { name, .. } => {
+                    bound.insert(name.clone());
+                }
+                Stmt::Destructure { entries, .. } => {
+                    bound.extend(entries.iter().map(|(n, _)| n.clone()));
+                }
+                Stmt::LocalFun(f) => {
+                    bound.extend(f.params.iter().map(|p| p.name.clone()));
+                }
+                _ => {}
+            }
+        }
+        for &e in exprs {
+            match file.expr(e) {
+                Expr::Lambda { params, .. } => bound.extend(params.iter().cloned()),
+                Expr::Try { catches, .. } => bound.extend(catches.iter().map(|c| c.name.clone())),
+                _ => {}
+            }
+        }
+        // Per-body local-class name → the declaring stmt(s). Only a COLLIDING name (file-wide > 1) that
+        // is declared exactly ONCE in this body, is not a top-level name, and is not shadowed by a bound
+        // name is renamable (any other case is left to skip — never a miscompile).
+        let mut here: std::collections::HashMap<String, Vec<StmtId>> =
+            std::collections::HashMap::new();
+        for &s in stmts {
+            if let Stmt::LocalClass(c) = file.stmt(s) {
+                here.entry(c.name.clone()).or_default().push(s);
+            }
+        }
+        let mut rename: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+        for (name, decls) in &here {
+            if file_counts.get(name).copied().unwrap_or(0) > 1
+                && decls.len() == 1
+                && !top_names.contains(name)
+                && !bound.contains(name)
+            {
+                let new = format!("{name}$loc${counter}");
+                counter += 1;
+                if let Stmt::LocalClass(c) = &mut file.stmt_arena[decls[0].0 as usize] {
+                    c.name = new.clone();
+                }
+                rename.insert(name.clone(), new);
+            }
+        }
+        if rename.is_empty() {
+            continue;
+        }
+        for &e in exprs {
+            if let Expr::Name(n) = &file.expr_arena[e.0 as usize] {
+                if let Some(new) = rename.get(n) {
+                    let new = new.clone();
+                    file.expr_arena[e.0 as usize] = Expr::Name(new);
+                }
+            }
+        }
+    }
+}
+
+/// Collect every `ExprId`/`StmtId` reachable from `root` (used by `scope_local_classes`). A worklist
+/// (not recursion) so the two `any_child_expr` closures push to SEPARATE vectors — no borrow conflict.
+fn collect_subtree(file: &File, root: ExprId, exprs: &mut Vec<ExprId>, stmts: &mut Vec<StmtId>) {
+    let mut we: Vec<ExprId> = vec![root];
+    let mut ws: Vec<StmtId> = Vec::new();
+    loop {
+        if let Some(e) = we.pop() {
+            exprs.push(e);
+            file.any_child_expr(
+                e,
+                &mut |c| {
+                    we.push(c);
+                    false
+                },
+                &mut |s| {
+                    ws.push(s);
+                    false
+                },
+            );
+        } else if let Some(s) = ws.pop() {
+            stmts.push(s);
+            file.any_child_stmt(s, &mut |c| {
+                we.push(c);
+                false
+            });
+            // `any_child_stmt` does not descend into a local class's own member bodies — add them so a
+            // construction reference INSIDE a local class method is rewritten too.
+            if let crate::ast::Stmt::LocalClass(c) = file.stmt(s) {
+                for m in c.methods.iter().chain(&c.companion_methods) {
+                    if let FunBody::Expr(e) | FunBody::Block(e) = m.body {
+                        we.push(e);
+                    }
+                }
+            }
+        } else {
+            break;
+        }
+    }
+}
+
 fn hoist_local_classes(file: &mut File) {
     use crate::ast::{Decl, Stmt};
     let hoisted: Vec<crate::ast::ClassDecl> = file
