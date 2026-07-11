@@ -1683,9 +1683,15 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                         Some(d) => is_const_literal(file, d),
                         None => true,
                     });
+                // A trailing `vararg` is allowed for a TOP-LEVEL function (no receiver): the vararg
+                // parameter carries no default (`$default` passes its array through), so its omitted-arg
+                // call routes through the stub with an empty array for the vararg slot. An extension's
+                // receiver-offset vararg is left out (a later slice).
+                let vararg_ok = !f.params.iter().any(|p| p.is_vararg)
+                    || (f.receiver.is_none() && f.params.last().is_some_and(|p| p.is_vararg));
                 if const_ok
                     && f.params.iter().any(|p| p.default.is_some())
-                    && !f.params.iter().any(|p| p.is_vararg)
+                    && vararg_ok
                     && f.params.len() <= 31
                 {
                     let ir_params = lo.ir.functions[fid as usize].params.clone();
@@ -7785,6 +7791,7 @@ impl<'a> Lower<'a> {
         param_meta: &[(String, Option<AstExprId>)],
         args: &[AstExprId],
         ir_params: &[Ty],
+        vararg: bool,
     ) -> Option<u32> {
         let n = ir_params.len();
         if args.len() > n || param_meta.len() != n {
@@ -7828,9 +7835,16 @@ impl<'a> Lower<'a> {
                 }
             }
         }
-        // Every omitted slot must have a default (else `$default` can't fill it).
+        // The trailing `vararg` slot is filled with an EMPTY array (not via `$default`); only the
+        // OMITTED case is modeled here — a provided vararg element would need array collection (a later
+        // slice), so bail if the vararg slot received an argument.
+        if vararg && slot[n - 1].is_some() {
+            return None;
+        }
+        // Every omitted slot must have a default so `$default` can fill it — except the trailing `vararg`
+        // (filled with an empty array below).
         for (k, s) in slot.iter().enumerate() {
-            if s.is_none() && param_meta[k].1.is_none() {
+            if s.is_none() && param_meta[k].1.is_none() && !(vararg && k == n - 1) {
                 return None;
             }
         }
@@ -7860,6 +7874,15 @@ impl<'a> Lower<'a> {
         for (k, item) in slot_temp.iter().enumerate() {
             match item {
                 Some(tmp) => a.push(self.ir.add_expr(IrExpr::GetValue(*tmp))),
+                // The omitted trailing `vararg` slot gets an EMPTY array and NO mask bit (a vararg is
+                // passed through by `$default`, not filled from the mask).
+                None if vararg && k == n - 1 => {
+                    let zero = self.ir.add_expr(IrExpr::Const(IrConst::Int(0)));
+                    a.push(self.ir.add_expr(IrExpr::NewArray {
+                        array_type: ir_params[k],
+                        size: zero,
+                    }));
+                }
                 None => {
                     mask |= 1i32 << k;
                     a.push(self.zero_placeholder(ir_params[k]));
@@ -17154,7 +17177,22 @@ impl<'a> Lower<'a> {
                             let params = self.ir.functions[fid as usize].params.clone();
                             let fixed = params.len() - 1;
                             if args.len() < fixed {
-                                return None;
+                                // Fewer than the fixed parameters were supplied — a trailing fixed
+                                // parameter (a DEFAULT) is omitted along with the vararg. Route through the
+                                // `$default` stub (which fills the defaults and takes an empty vararg
+                                // array), rather than the plain vararg-packing path below.
+                                let meta: Vec<(String, Option<AstExprId>)> = self
+                                    .top_fun_decl(&fname)
+                                    .map(|f| {
+                                        f.params
+                                            .iter()
+                                            .map(|p| (p.name.clone(), p.default))
+                                            .collect()
+                                    })
+                                    .unwrap_or_default();
+                                return self.lower_toplevel_default_call(
+                                    e, fid, &meta, &args, &params, true,
+                                );
                             }
                             let elem_ty = fi.callable.params[fixed].array_elem()?;
                             let elem_ir = ty_to_ir(elem_ty);
@@ -17230,7 +17268,18 @@ impl<'a> Lower<'a> {
                             });
                             self.wrap_arg_prelude(call, prelude)
                         } else {
-                            self.lower_toplevel_default_call(e, fid, &meta, &args, &params)?
+                            // `fi.call_sig.vararg` is the authoritative vararg flag (a vararg callee was
+                            // already fully handled and returned in the vararg block above, so this is
+                            // reliably `false` here — but read the resolved flag, never a fallible AST
+                            // re-lookup, so a vararg slot can never be filled as a scalar).
+                            self.lower_toplevel_default_call(
+                                e,
+                                fid,
+                                &meta,
+                                &args,
+                                &params,
+                                fi.call_sig.vararg,
+                            )?
                         };
                         let ret = self.ir.functions[fid as usize].ret.clone();
                         // Whether the callee's DECLARED return is a bare type parameter (`fun <T> f(): T`)
