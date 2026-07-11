@@ -5222,7 +5222,17 @@ impl<'a> Parser<'a> {
         // optional else (may be on the next line)
         let save = self.i;
         self.skip_newlines();
-        let else_branch = if self.eat(TokenKind::KwElse) {
+        // An `if` used as a `when`-branch body without its own else (`when { x -> if (c) a; else -> b }`)
+        // must NOT swallow the `when`'s `else` entry: an `else` immediately followed by `->` is a when
+        // entry, not this `if`'s else (a real if-else branch never begins with `->`).
+        let else_is_when_entry = self.at(TokenKind::KwElse) && {
+            let mut j = self.i + 1;
+            while self.t.get(j).is_some_and(|t| t.kind == TokenKind::Newline) {
+                j += 1;
+            }
+            self.t.get(j).is_some_and(|t| t.kind == TokenKind::Arrow)
+        };
+        let else_branch = if !else_is_when_entry && self.eat(TokenKind::KwElse) {
             self.skip_newlines();
             Some(self.parse_branch())
         } else {
