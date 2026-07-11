@@ -2306,7 +2306,25 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     // and miscompile (KT-3684). Bail those; SAM-style anon objects over interfaces or
                     // no-argument classes are unaffected.
                     if internal.contains("$anon$") && sup_params > 0 {
-                        return None;
+                        let capture_free = c.methods.is_empty()
+                            && c.body_props.is_empty()
+                            && c.init_order.is_empty()
+                            && c.base_args.iter().all(|&a| {
+                                matches!(
+                                    file.expr(a),
+                                    Expr::IntLit(_)
+                                        | Expr::LongLit(_)
+                                        | Expr::DoubleLit(_)
+                                        | Expr::FloatLit(_)
+                                        | Expr::BoolLit(_)
+                                        | Expr::CharLit(_)
+                                        | Expr::StringLit(_)
+                                        | Expr::NullLit
+                                )
+                            });
+                        if !capture_free {
+                            return None;
+                        }
                     }
                 }
                 // `: A()` where every base param has a default — fill the base ctor's default-value exprs
