@@ -2210,10 +2210,14 @@ fn emit_enum_class(
         "Lkotlin/enums/EnumEntries;",
     );
 
-    // Private constructor: `(Ljava/lang/String;I<user>)V` → `super(name, ordinal)` + store user fields.
+    // Private constructor `(Ljava/lang/String;I<user params>)V` → `super(name, ordinal)` then store the
+    // property params / run the body-property initializers. The user params are ALL primary-ctor params
+    // (from `ctor_args`) — a `val`/`var` param backs a field, a plain param is an argument only (in scope
+    // for a body-property initializer), so `all_param_tys` can be wider than the `n_params` fields.
+    let all_param_tys = class_ctor_jvm_tys(c);
     let ctor_params: Vec<Ty> = [Ty::String, Ty::Int]
         .into_iter()
-        .chain(user_tys.iter().copied())
+        .chain(all_param_tys.iter().copied())
         .collect();
     let ctor_desc = method_descriptor(&ctor_params, Ty::Unit);
     let ctor_words: u16 = ctor_params.iter().map(|t| slot_words(*t)).sum();
@@ -2224,15 +2228,11 @@ fn emit_enum_class(
     let super_init = cw.methodref("java/lang/Enum", "<init>", "(Ljava/lang/String;I)V");
     ctor.invokespecial(super_init, 2, 0);
     let mut max_locals = 1 + ctor_words;
-    // When the enum declares body member properties, the lowered `init_body` carries BOTH the
-    // primary-constructor param→field stores AND the body-property initializers (it set
-    // `explicit_param_stores`). Emit it through the standard IR emitter, mapping the ctor's value ids
-    // onto the enum's slot layout — `this` at 0, then the user params at slots 3+ (after the synthetic
-    // `name`/`ordinal`). Otherwise (a plain enum with no body properties) hand-store the param fields.
-    // `init_body` is always present for an enum with body fields (each body property has an
-    // initializer, so `init_order` is non-empty and `has_primary_ctor` is hardcoded true for enums).
-    // The `else` still hand-stores the params so a plain enum — and any unexpected missing-`init_body`
-    // case — keeps its constructor sound.
+    // When body-property initializers exist, the lowered `init_body` carries BOTH the property-param→
+    // field stores AND the body inits (it set `explicit_param_stores`). Emit it through the standard IR
+    // emitter, mapping value ids onto the enum's slot layout — `this` at 0, then EVERY user param at
+    // slots 3+ (after the synthetic `name`/`ordinal`), in declaration order. Otherwise hand-store just
+    // the property-param fields (a plain param has no field), reading each at its own slot.
     if let Some(init_body) = c.init_body.filter(|_| c.fields.len() > n_params) {
         let mut e = Emitter {
             ir,
@@ -2248,7 +2248,7 @@ fn emit_enum_class(
         };
         e.slots.insert(0, (0, Ty::obj(&c.fq_name)));
         let mut s = 3u16;
-        for (i, t) in user_tys.iter().enumerate() {
+        for (i, t) in all_param_tys.iter().enumerate() {
             e.slots.insert(i as u32 + 1, (s, *t));
             s += slot_words(*t);
         }
@@ -2256,12 +2256,16 @@ fn emit_enum_class(
         max_locals = max_locals.max(e.next_slot);
     } else {
         let mut slot = 3u16;
-        for (f, t) in c.fields[..n_params].iter().zip(&user_tys) {
-            let name = &f.name;
-            ctor.aload(0);
-            load(*t, slot, &mut ctor);
-            let fref = cw.fieldref(&fq, name, &type_descriptor(*t));
-            ctor.putfield(fref, slot_words(*t) as i32);
+        let mut field_i = 0usize;
+        for (a, t) in c.ctor_args.iter().zip(&all_param_tys) {
+            if a.is_field {
+                let name = &c.fields[field_i].name;
+                ctor.aload(0);
+                load(*t, slot, &mut ctor);
+                let fref = cw.fieldref(&fq, name, &type_descriptor(*t));
+                ctor.putfield(fref, slot_words(*t) as i32);
+                field_i += 1;
+            }
             slot += slot_words(*t);
         }
     }
@@ -2279,7 +2283,7 @@ fn emit_enum_class(
     // params leak into the disassembly (a per-enum divergence from kotlinc).
     let ctor_sig = {
         let mut s = String::from("(");
-        for t in &user_tys {
+        for t in &all_param_tys {
             s.push_str(&type_descriptor(*t));
         }
         s.push_str(")V");

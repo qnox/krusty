@@ -2850,19 +2850,17 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                         }
                     }
                     let class_id = lo.classes[&internal].id;
-                    let ctor_count = lo.ir.classes[class_id as usize].ctor_param_count as usize;
-                    let field_tys: Vec<Ty> = lo.ir.classes[class_id as usize].fields[..ctor_count]
-                        .iter()
-                        .map(|f| f.ty.clone())
-                        .collect();
-                    // Constructor property params (name + default), aligned to `field_tys` (the PROPERTY
-                    // params, in order). Filtering to property params keeps the index in step with the
-                    // fields even if a non-property ctor param is interleaved. Names drive named-argument
-                    // reordering; defaults fill omitted arguments.
-                    let prop_params: Vec<(&str, Option<AstExprId>, bool)> = c
+                    // ALL primary-constructor parameters (property AND plain) define the enum
+                    // constructor's user parameters, in declaration order — a plain param is a ctor
+                    // argument (in scope for a body-property initializer), not a field. Each entry
+                    // supplies one lowered value per parameter.
+                    let param_tys: Vec<Ty> =
+                        c.props.iter().map(|p| lo.field_ty(file, &p.ty)).collect();
+                    // (name, default, is_vararg) per parameter — names drive named-argument reordering,
+                    // defaults fill omitted arguments, and an omitted `vararg` constructs an empty array.
+                    let param_meta: Vec<(&str, Option<AstExprId>, bool)> = c
                         .props
                         .iter()
-                        .filter(|p| p.is_property)
                         .map(|p| (p.name.as_str(), p.default, p.is_vararg))
                         .collect();
                     for (ei, entry) in c.enum_entries.iter().enumerate() {
@@ -2870,15 +2868,15 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                         lo.next_value = 0;
                         lo.cur_class = None;
                         // Resolve the entry's (possibly named / reordered / omitted) arguments to one
-                        // expression per property field. A named argument goes to its matching parameter
-                        // position; positional arguments fill in declaration order; the rest take their
-                        // declared default. Any argument that can't be placed (unknown name, duplicate,
-                        // over-arity) bails the whole file rather than miscompiling.
-                        let mut positional: Vec<Option<AstExprId>> = vec![None; field_tys.len()];
+                        // expression per constructor parameter. A named argument goes to its matching
+                        // parameter position; positional arguments fill in declaration order; the rest take
+                        // their declared default. Any argument that can't be placed (unknown name,
+                        // duplicate, over-arity) bails the whole file rather than miscompiling.
+                        let mut positional: Vec<Option<AstExprId>> = vec![None; param_tys.len()];
                         let mut next_pos = 0usize;
                         for (j, &a) in entry.args.iter().enumerate() {
                             let idx = match entry.arg_names.get(j).and_then(|n| n.as_ref()) {
-                                Some(name) => prop_params.iter().position(|(pn, ..)| pn == name)?,
+                                Some(name) => param_meta.iter().position(|(pn, ..)| pn == name)?,
                                 None => {
                                     let p = next_pos;
                                     next_pos += 1;
@@ -2891,15 +2889,15 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                             positional[idx] = Some(a);
                         }
                         let mut lowered = Vec::new();
-                        for (i, ft) in field_tys.iter().enumerate() {
+                        for (i, ft) in param_tys.iter().enumerate() {
                             // The placed argument, or the parameter's declared default. An omitted
                             // `vararg` parameter constructs an empty array of its element type.
-                            match positional[i].or_else(|| prop_params.get(i).and_then(|p| p.1)) {
+                            match positional[i].or_else(|| param_meta.get(i).and_then(|p| p.1)) {
                                 Some(arg) => {
                                     // Branchy entry args (`X(1 == 1)`) handled by the `<clinit>` spill.
                                     lowered.push(lo.lower_arg(arg, ft)?);
                                 }
-                                None if prop_params.get(i).is_some_and(|p| p.2) => {
+                                None if param_meta.get(i).is_some_and(|p| p.2) => {
                                     let zero = lo.ir.add_expr(IrExpr::Const(IrConst::Int(0)));
                                     lowered.push(lo.ir.add_expr(IrExpr::NewArray {
                                         array_type: ty_to_ir(*ft),
@@ -2977,7 +2975,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                             superclass: internal.clone(),
                             super_args: vec![],
                             enum_entries: vec![],
-                            enum_entry_of: Some(field_tys.clone()),
+                            enum_entry_of: Some(param_tys.clone()),
                             prop_ref: None,
                             func_ref: None,
                             bridges: vec![],
@@ -3626,8 +3624,9 @@ fn is_simple_enum(c: &ast::ClassDecl) -> bool {
         && c.companion_methods.is_empty() && c.companion_props.is_empty()
         && c.secondary_ctors.is_empty()
         // An enum may implement interfaces (`enum class E : I`) — supertypes are interfaces only (an enum
-        // can't extend a class); the lowering resolves them as interfaces or bails.
-        && c.props.iter().all(|p| p.is_property)
+        // can't extend a class); the lowering resolves them as interfaces or bails. A plain (non-property)
+        // primary-ctor param is allowed: it is a constructor argument (in scope for body-property
+        // initializers), emitted from `ctor_args`, not a field.
         // A body property must be a plain backing field with an initializer — a computed/abstract/
         // delegated body property on an enum isn't emitted yet, so skip those. A plain `val x = …` is
         // emitted as a backing field initialized in the enum constructor (see `emit_enum_class`).

@@ -13,3 +13,9 @@ fn enum_vararg_val_empty() {
         fun box(): String = if (E.A.xs.size == 0) \"OK\" else \"fail\"\n";
     assert_eq!(run(SRC).expect("enum vararg empty"), "OK");
 }
+
+#[test]
+fn enum_plain_vararg_param_body_prop() {
+    const SRC: &str = "enum class Test(vararg xs: Int) {\n    OK;\n    val values = xs\n}\nfun box(): String = if (Test.OK.values.size == 0) \"OK\" else \"fail\"\n";
+    assert_eq!(run(SRC).expect("enum plain vararg"), "OK");
+}
