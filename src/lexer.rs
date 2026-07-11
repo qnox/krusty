@@ -481,7 +481,10 @@ impl<'a> Lexer<'a> {
                     });
                     let mut depth = 1;
                     loop {
-                        let t = self.lex_one();
+                        // `next_token` (not `lex_one`) so a NESTED string template inside this `${…}`
+                        // — which `string_template` expands by queueing its tokens onto `self.pending`
+                        // — is consumed in order here; `lex_one` would skip the queued inner tokens.
+                        let t = self.next_token();
                         if t.kind == TokenKind::Eof {
                             break;
                         }
