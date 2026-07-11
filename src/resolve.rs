@@ -9508,15 +9508,42 @@ impl<'a> Checker<'a> {
                         }
                     }
                 }
-                // `super.method(args)` — dispatch to the base class's method (non-virtual).
-                if matches!(self.file.expr(receiver), Expr::Name(r) if r == "super") {
+                // `super.method(args)` / `super<T>.method(args)` — dispatch to a supertype's method
+                // (non-virtual). A `super<T>` qualifier (encoded on the name) selects that supertype.
+                let super_qual: Option<Option<String>> = match self.file.expr(receiver) {
+                    Expr::Name(r) if r.starts_with("super") => {
+                        // The optional `<T>` type qualifier (a `@label` may follow it, ignored here).
+                        let ty = r
+                            .strip_prefix("super<")
+                            .and_then(|s| s.split('>').next())
+                            .map(|s| s.to_string());
+                        Some(ty)
+                    }
+                    _ => None,
+                };
+                if let Some(super_ty) = super_qual {
+                    // A LABELED super (`super@A.f()`) selects an ENCLOSING class's supertype — not
+                    // modeled; reject so the file skips rather than dispatching to the wrong receiver.
+                    if matches!(self.file.expr(receiver), Expr::Name(r) if r.contains('@')) {
+                        self.diags.error(
+                            span,
+                            format!("krusty: labeled super '{name}' is not supported"),
+                        );
+                        return Ty::Error;
+                    }
                     let arg_tys = self.arg_tys(args);
+                    // A `super<T>` qualifier matches a supertype by its simple name.
+                    let matches_qual = |internal: &str| {
+                        super_ty
+                            .as_deref()
+                            .is_none_or(|t| internal.rsplit('/').next() == Some(t) || internal == t)
+                    };
                     if let Some(Ty::Obj(internal, _)) = self.this_ty {
                         let sup = self
                             .syms
                             .class_by_internal(internal)
                             .and_then(|c| c.super_internal.clone());
-                        if let Some(sup) = sup {
+                        if let Some(sup) = sup.filter(|s| matches_qual(s)) {
                             // A user base-class method.
                             if let Some(sig) = self.syms.method_of(&sup, &name) {
                                 for (i, (p, a)) in sig.params.iter().zip(&arg_tys).enumerate() {
@@ -9534,10 +9561,10 @@ impl<'a> Checker<'a> {
                                 return m.ret;
                             }
                         }
-                        // `super.foo()` to an INTERFACE DEFAULT method: a class `C : I` with `super.foo()`
-                        // dispatches to `I`'s default `foo`. Resolve across the class's superinterfaces —
-                        // but only when EXACTLY ONE provides the method (matching the lowerer): more than
-                        // one needs the explicit `super<T>.foo()` qualifier krusty doesn't resolve.
+                        // An INTERFACE DEFAULT method: a class `C : I` with `super.foo()` dispatches to
+                        // `I`'s default. Resolve across the superinterfaces matching the `super<T>`
+                        // qualifier — with none, EXACTLY ONE must provide the method (matching the
+                        // lowerer); more than one needs the explicit `super<T>.foo()` krusty now honors.
                         let ifaces: Vec<String> = self
                             .syms
                             .class_by_internal(internal)
@@ -9545,6 +9572,7 @@ impl<'a> Checker<'a> {
                             .unwrap_or_default();
                         let matches: Vec<Signature> = ifaces
                             .iter()
+                            .filter(|iface| matches_qual(iface))
                             .filter_map(|iface| self.syms.method_of(iface, &name))
                             .collect();
                         if let [sig] = matches.as_slice() {

@@ -5144,12 +5144,22 @@ impl<'a> Parser<'a> {
                 self.parse_anon_object(span)
             }
             TokenKind::Ident => {
-                let n = self.text().to_string();
+                let mut n = self.text().to_string();
                 self.bump();
+                // A TYPED super (`super<Base>.foo()`): the `<Base>` type qualifier selects WHICH
+                // supertype's method to dispatch to. Encode it on the name (`super<Base>`) so the
+                // checker/lowerer pick that interface's default; may be followed by a `@label`.
+                if n == "super" && self.at(TokenKind::Lt) {
+                    self.bump(); // '<'
+                    let ty = self.parse_qualified_name();
+                    let simple = ty.rsplit('.').next().unwrap_or(&ty).to_string();
+                    self.expect(TokenKind::Gt, "'>'");
+                    n = format!("super<{simple}>");
+                }
                 // A LABELED `this`/`super` (`this@Outer`, `super@Base`): the `@label` qualifies which
                 // enclosing receiver / supertype it denotes. Capture it on the name (`this@Outer`) so the
                 // checker/lowerer can resolve the label; a bare `this`/`super` stays unchanged.
-                if (n == "this" || n == "super")
+                if (n == "this" || n.starts_with("super"))
                     && self.at(TokenKind::At)
                     && self
                         .t

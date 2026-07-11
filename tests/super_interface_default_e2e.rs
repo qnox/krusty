@@ -22,3 +22,14 @@ fn super_call_to_interface_default() {
         }\n";
     assert_eq!(run(SRC).expect("super to interface default"), "OK");
 }
+
+#[test]
+fn typed_super_selects_interface() {
+    const SRC: &str = "interface T1 { fun foo() = \"O\" }\n\
+        interface T2 { fun foo() = \"K\" }\n\
+        class A : T1, T2 {\n\
+        \x20 override fun foo() = super<T1>.foo() + super<T2>.foo()\n\
+        }\n\
+        fun box(): String = if (A().foo() == \"OK\") \"OK\" else \"fail: \" + A().foo()\n";
+    assert_eq!(run(SRC).expect("typed super"), "OK");
+}
