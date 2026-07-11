@@ -8593,7 +8593,14 @@ impl<'a> Lower<'a> {
         for k in 0..n {
             a.push(self.ir.add_expr(IrExpr::GetValue(k as u32)));
         }
-        let dcall = if vararg_tail {
+        let dcall = if n == m {
+            // No dropped parameters (a pure return coercion): a plain full-arity call.
+            self.ir.add_expr(IrExpr::Call {
+                callee: Callee::Local(fid),
+                dispatch_receiver: None,
+                args: a,
+            })
+        } else if vararg_tail {
             // A single dropped trailing `vararg`: pass an EMPTY array of its element type and call the
             // target directly (no `$default`). `target_params[m-1]` is the vararg's ARRAY type.
             let zero = self.ir.add_expr(IrExpr::Const(IrConst::Int(0)));
@@ -8625,15 +8632,35 @@ impl<'a> Lower<'a> {
                 args: a,
             })
         };
-        let ret_e = self.ir.add_expr(IrExpr::Return(Some(dcall)));
-        let body = self.ir.add_expr(IrExpr::Block {
-            stmts: vec![ret_e],
-            value: None,
-        });
+        // A `Unit`-returning invoke (a coercion, or the target itself returns `Unit`) yields the `Unit`
+        // SINGLETON — a `kotlin/Unit` object, not `void` — to match the `FunctionN.invoke` SAM: run the
+        // call as a statement (its value, if any, discarded) and return `Unit.INSTANCE`. Otherwise return
+        // the call's result directly. `coerce_unit` ⇒ `ret == Unit`; a target that already returns `Unit`
+        // takes the same singleton path.
+        let unit_return = ret == Ty::Unit;
+        let body = if unit_return {
+            let unit = self.ir.add_expr(IrExpr::UnitInstance);
+            let ret_e = self.ir.add_expr(IrExpr::Return(Some(unit)));
+            self.ir.add_expr(IrExpr::Block {
+                stmts: vec![dcall, ret_e],
+                value: None,
+            })
+        } else {
+            let ret_e = self.ir.add_expr(IrExpr::Return(Some(dcall)));
+            self.ir.add_expr(IrExpr::Block {
+                stmts: vec![ret_e],
+                value: None,
+            })
+        };
+        let adapter_ret = if unit_return {
+            ty_to_ir(Ty::obj("kotlin/Unit"))
+        } else {
+            ty_to_ir(ret)
+        };
         let adapter_fid = self.ir.add_fun(IrFunction {
             name: format!("{}$adapt${}", self.cur_fn_name, e.0),
             params: adapted_params.iter().map(|t| ty_to_ir(*t)).collect(),
-            ret: ty_to_ir(ret),
+            ret: adapter_ret,
             body: Some(body),
             is_static: true,
             dispatch_receiver: None,
@@ -14650,6 +14677,7 @@ impl<'a> Lower<'a> {
                     adapted_params,
                     ret,
                     vararg_tail,
+                    coerce_unit: _,
                 }) = self.info.expr_lowers.get(&e).cloned()
                 {
                     return self.lower_adapted_ref(

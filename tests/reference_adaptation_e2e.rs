@@ -17,6 +17,20 @@ fn adapt_trailing_default_argument() {
     assert_eq!(run(SRC).expect("adapt trailing default"), "OK");
 }
 
+// Coercion to `Unit`: a reference to a value-returning function passed where `() -> Unit` /
+// `(T) -> Unit` is expected — the adapter calls the target and discards its result.
+#[test]
+fn adapt_coercion_to_unit() {
+    const SRC: &str = "var log = \"\"\n\
+        fun foo(x: String): String { log += x; return x }\n\
+        fun call(f: (String) -> Unit, x: String) { f(x) }\n\
+        fun box(): String {\n\
+        \x20 call(::foo, \"OK\")\n\
+        \x20 return log\n\
+        }\n";
+    assert_eq!(run(SRC).expect("adapt coercion to Unit"), "OK");
+}
+
 // A trailing `vararg` is dropped: the adapter passes an empty array.
 #[test]
 fn adapt_trailing_empty_vararg() {
@@ -25,4 +39,23 @@ fn adapt_trailing_empty_vararg() {
         fun call(f: (String) -> String, x: String): String = f(x)\n\
         fun box(): String = call(::foo, \"O\")\n";
     assert_eq!(run(SRC).expect("adapt trailing vararg"), "OK");
+}
+
+// Discarding a WIDE (2-slot) result (Long) in the coercion adapter's statement position.
+#[test]
+fn adapt_coercion_wide_discard() {
+    const SRC: &str = "var n = 0L\n\
+        fun foo(x: Long): Long { n = x; return x }\n\
+        fun call(f: (Long) -> Unit) { f(9L) }\n\
+        fun box(): String { call(::foo); return if (n == 9L) \"OK\" else \"Fail\" }\n";
+    assert_eq!(run(SRC).expect("wide discard"), "OK");
+}
+
+#[test]
+fn adapt_coercion_primitive_discard() {
+    const SRC: &str = "var n = 0\n\
+        fun foo(x: Int): Boolean { n = x; return true }\n\
+        fun call(f: (Int) -> Unit) { f(7) }\n\
+        fun box(): String { call(::foo); return if (n == 7) \"OK\" else \"Fail\" }\n";
+    assert_eq!(run(SRC).expect("primitive discard"), "OK");
 }

@@ -3667,6 +3667,10 @@ pub enum ExprLowering {
         /// The single dropped parameter is a trailing `vararg` filled with an EMPTY array (a plain call
         /// to the target), rather than trailing DEFAULTS filled via the `$default` stub.
         vararg_tail: bool,
+        /// The expected function type returns `Unit` but the target returns a value — the adapter calls
+        /// the target, DISCARDS the result, and returns `Unit` (kotlin's coercion-to-`Unit` for a
+        /// reference in a `() -> Unit` position).
+        coerce_unit: bool,
     },
     /// A call whose selected lowering is an inline/custom emit form rather than the normal function-call
     /// path: value-class companion calls (`Result.success`) or receiver-lambda scope calls.
@@ -6385,18 +6389,26 @@ impl<'a> Checker<'a> {
             .get(name)
             .and_then(|v| (v.len() == 1).then(|| v[0].clone()))?;
         let (n, m) = (exp.params.len(), sig.params.len());
-        if sig.is_suspend || n >= m {
+        if sig.is_suspend || n > m {
             return None;
         }
-        // The retained prefix parameters and the return type must match the expected function type.
-        if sig.params[..n] != exp.params[..] || sig.ret != exp.ret {
+        // The retained prefix parameters must match; the return matches EXACTLY or coerces to `Unit`
+        // (the expected type discards a value result).
+        let coerce_unit = exp.ret == Ty::Unit && sig.ret != Ty::Unit;
+        if sig.params[..n] != exp.params[..] || (sig.ret != exp.ret && !coerce_unit) {
             return None;
         }
-        // Two adaptation shapes for the dropped tail `sig.params[n..m]`:
+        // Adaptation must actually CHANGE something — otherwise the reference types normally.
+        if n == m && !coerce_unit {
+            return None;
+        }
+        // Parameter-drop shape for the dropped tail `sig.params[n..m]` (empty when `n == m`):
         // - a single trailing `vararg` (`n == m-1`): the adapter passes an empty array (plain call);
-        // - all trailing DEFAULTS: the adapter routes through the `$default` stub.
+        // - all trailing DEFAULTS with NO vararg: the adapter routes through the `$default` stub.
+        // A vararg MIXED with dropped defaults is out of scope: krusty does not support omitting both a
+        // default and a vararg even in a plain call, so adapting it would build on an unsupported base.
         let vararg_tail = sig.vararg && n == m - 1;
-        if !vararg_tail {
+        if n < m && !vararg_tail {
             if sig.vararg || n < sig.required {
                 return None;
             }
@@ -6412,6 +6424,7 @@ impl<'a> Checker<'a> {
                 adapted_params: exp.params.clone(),
                 ret: exp.ret,
                 vararg_tail,
+                coerce_unit,
             },
         );
         Some(Ty::fun(exp.params.clone(), exp.ret))
