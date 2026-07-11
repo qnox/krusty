@@ -17526,9 +17526,28 @@ impl<'a> Lower<'a> {
                     // class's method (the receiver's own override is skipped). The base is the current
                     // class's superclass; the method's signature comes from the super (a user class via
                     // `method_of`, else a classpath class via `resolve_instance`).
-                    if matches!(self.afile.expr(receiver), Expr::Name(rn) if rn == "super") {
+                    let super_qual: Option<Option<String>> = match self.afile.expr(receiver) {
+                        Expr::Name(rn) if rn.starts_with("super") => Some(
+                            rn.strip_prefix("super<")
+                                .and_then(|s| s.split('>').next())
+                                .map(|s| s.to_string()),
+                        ),
+                        _ => None,
+                    };
+                    if let Some(super_ty) = super_qual {
+                        // A LABELED super (`super@A.f()`, `super<K>@A.f()`) selects an ENCLOSING class's
+                        // supertype (inner classes) — the enclosing-scope dispatch isn't modeled, so skip.
+                        if matches!(self.afile.expr(receiver), Expr::Name(rn) if rn.contains('@')) {
+                            return None;
+                        }
                         let cur = self.cur_class.clone()?;
                         let cur_id = self.classes.get(&cur)?.id as usize;
+                        // A `super<T>` qualifier matches a supertype by its simple name.
+                        let matches_qual = |internal: &str| {
+                            super_ty.as_deref().is_none_or(|t| {
+                                internal.rsplit('/').next() == Some(t) || internal == t
+                            })
+                        };
                         // A `super.f()` inside a `@JvmInline value class` calls through the unboxed
                         // receiver, which invokespecial can't target — not modeled (value classes are
                         // handled by the dedicated pass); skip rather than emit a verify error.
@@ -17546,7 +17565,10 @@ impl<'a> Lower<'a> {
                         // default `f`, or a diamond `class C : AbstractBase(), Iface` where `Base.f` is
                         // abstract). Emit `invokespecial <owner>.f` — on the class or on the interface.
                         let superclass_target = match &sup_opt {
-                            Some(sup) if !self.class_method_is_abstract(sup, &name) => {
+                            Some(sup)
+                                if matches_qual(sup)
+                                    && !self.class_method_is_abstract(sup, &name) =>
+                            {
                                 if let Some(sig) = self.syms.method_of(sup, &name) {
                                     Some((
                                         sup.clone(),
@@ -17577,12 +17599,11 @@ impl<'a> Lower<'a> {
                                 // With MORE than one, `super.f()` is ambiguous and needs the explicit
                                 // `super<T>.f()` type qualifier (which krusty doesn't yet resolve) — bail
                                 // rather than pick one arbitrarily and miscompile.
-                                let default_ifaces: Vec<String> = self
-                                    .ir
-                                    .classes
-                                    .get(cur_id)?
-                                    .interfaces
+                                let cand_ifaces: Vec<String> =
+                                    self.ir.classes.get(cur_id)?.interfaces.clone();
+                                let default_ifaces: Vec<String> = cand_ifaces
                                     .iter()
+                                    .filter(|itf| matches_qual(itf))
                                     .filter(|itf| self.iface_method_is_default(itf, &name))
                                     .cloned()
                                     .collect();
