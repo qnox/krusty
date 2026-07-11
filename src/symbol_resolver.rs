@@ -1829,6 +1829,54 @@ pub fn resolve_instance_ref(
     Some(o.member_with_return(ret))
 }
 
+/// A bound PROPERTY reference on a library receiver (`"kotlin"::length`), fully resolved to what the
+/// backend emits: the getter's owner + physical name + the property type. Every classification and
+/// emittability decision is made HERE — the checker and lowerer just consume this, never re-deriving
+/// value-class-ness, interface-ness, or property-vs-function from the platform themselves.
+pub struct BoundPropertyRef {
+    pub owner: String,
+    pub getter_name: String,
+    pub prop_ty: Ty,
+}
+
+/// Resolve a bound property reference on `recv` (`"kotlin"::length`) to its emittable getter descriptor,
+/// or `None` when it is not a plainly-emittable read of a property:
+/// - `name` must be a PROPERTY, not a zero-arg method (`iterator()::next`) — both otherwise resolve to a
+///   readable zero-arg member, so this consults the authoritative property classifier.
+/// - a NULLABLE / type-parameter / bare-`Any` receiver may be null and would NPE at `get()`;
+/// - the getter must dispatch with a plain `invokevirtual`: a concrete non-interface, non-value-class
+///   owner and an unmangled getter (a value-class-typed property's `getX-<hash>` lives on an erased owner).
+pub fn resolve_property_ref(
+    lib: &dyn CompilerPlatform,
+    recv: Ty,
+    name: &str,
+) -> Option<BoundPropertyRef> {
+    if matches!(recv, Ty::TyParam(..) | Ty::Nullable(..))
+        || recv.kotlin_class_internal() == Some(crate::types::wk::any())
+    {
+        return None;
+    }
+    if !lib.member_is_property(recv, name) {
+        return None;
+    }
+    let m = resolve_property_member(lib, recv, name)?;
+    if m.suspend {
+        return None;
+    }
+    let owner = m.member.owner?;
+    if m.member.name.contains('-')
+        || lib.is_value(&owner)
+        || lib.resolve_type(&owner).is_some_and(|t| t.is_interface())
+    {
+        return None;
+    }
+    Some(BoundPropertyRef {
+        owner,
+        getter_name: m.member.name,
+        prop_ty: m.ret,
+    })
+}
+
 #[derive(Clone, Debug)]
 pub struct ResolvedMember {
     pub member: LibraryMember,
