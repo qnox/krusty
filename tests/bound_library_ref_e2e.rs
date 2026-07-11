@@ -29,3 +29,16 @@ fn bound_string_length_prop_ref() {
         }\n";
     assert_eq!(run(SRC).expect("bound string::length prop ref"), "OK");
 }
+
+// A bound PROPERTY reference on an ARBITRARY-EXPRESSION receiver of a USER class (`A(..)::p`): the
+// receiver expression is evaluated once and captured, then `get()` reads the property. Bound METHOD
+// refs on such a receiver already worked; the property form did not.
+#[test]
+fn bound_user_prop_ref_expr_receiver() {
+    const SRC: &str = "class A(val p: String)\n\
+        fun box(): String {\n\
+        \x20 val f = A(\"OK\")::p\n\
+        \x20 return f.get()\n\
+        }\n";
+    assert_eq!(run(SRC).expect("bound user prop ref, expr receiver"), "OK");
+}
