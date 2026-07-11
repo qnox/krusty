@@ -8476,8 +8476,9 @@ impl<'a> Lower<'a> {
     /// Lower a BOUND property reference on a LIBRARY-type receiver (`"kotlin"::length`) to a bound
     /// `PropertyReference0Impl` subclass whose `get()` dispatches the resolved classpath getter
     /// (`String.length()I`) on the captured receiver. The user-property `lower_prop_ref` needs an IR
-    /// class + a `Name` receiver, so a library owner / arbitrary-expression receiver lands here. Returns
-    /// `None` (clean skip) for a mutable/interface-owner/value-class property or a null-risky receiver.
+    /// class + a `Name` receiver, so a library owner / arbitrary-expression receiver lands here.
+    /// `resolve_property_ref` makes every property-vs-method / null-safety / emittability decision and
+    /// returns `None` for anything not a plainly-emittable read — the lowerer just emits its descriptor.
     fn lower_bound_library_prop_ref(
         &mut self,
         _e: AstExprId,
@@ -8492,37 +8493,11 @@ impl<'a> Lower<'a> {
         {
             return None;
         }
-        // Same null-risky-receiver guard as the method-ref path: a captured null would NPE at `get()`.
-        if matches!(rty, Ty::TyParam(..) | Ty::Nullable(..))
-            || rty.kotlin_class_internal() == Some(crate::types::wk::any())
-        {
-            return None;
-        }
-        // Only an AUTHORITATIVE metadata property (not a zero-arg method the getter-guessing fallback
-        // would match) is a property reference — keep in lock-step with the checker's gate.
-        if !self.syms.libraries.member_is_property(rty, name) {
-            return None;
-        }
-        let m = crate::symbol_resolver::resolve_property_member(&*self.syms.libraries, rty, name)?;
-        if m.suspend {
-            return None;
-        }
-        let owner = m.member.owner.clone()?;
-        // The getter is emitted as an `invokevirtual` on the owner (kept in lock-step with the checker's
-        // gate): an INTERFACE owner needs `invokeinterface`; a VALUE-CLASS owner is erased to its
-        // underlying (no such class to dispatch on); a MANGLED getter (`getX-<hash>`) is a value-class-typed
-        // property whose accessor lives on an erased owner. Any of these → skip rather than miscompile.
-        let owner_is_value_class = self
-            .syms
-            .class_by_internal(&owner)
-            .is_some_and(|cs| cs.value_field.is_some());
-        if self.library_type_is_interface(&owner)
-            || owner_is_value_class
-            || m.member.name.contains('-')
-        {
-            return None;
-        }
-        let prop_ty = ty_to_ir(m.ret);
+        // The resolver fully decides property-vs-method, null-safety, and emittability and hands back the
+        // getter's owner/name + the property type — the lowerer just emits it.
+        let p = crate::symbol_resolver::resolve_property_ref(&*self.syms.libraries, rty, name)?;
+        let owner = p.owner;
+        let prop_ty = ty_to_ir(p.prop_ty);
         let cap = self.expr(recv)?;
         let synth_fq = class_internal(
             self.afile,
@@ -8558,7 +8533,7 @@ impl<'a> Lower<'a> {
             prop_ref: Some(crate::ir::PropRef {
                 owner_internal: owner,
                 prop_name: name.to_string(),
-                getter_name: m.member.name.clone(),
+                getter_name: p.getter_name,
                 prop_ty,
                 bound: true,
                 static_dispatch: false,
