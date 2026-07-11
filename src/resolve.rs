@@ -7801,6 +7801,23 @@ impl<'a> Checker<'a> {
                                 return self.set(e, Ty::fun(sig.params.clone(), sig.ret));
                             }
                         }
+                        // Bound property reference on an arbitrary-expression USER-class receiver
+                        // (`A(..)::p`): the receiver is evaluated once and captured; the ref is a
+                        // `KProperty0`. Only a `val` is typed — the lowerer models a read-only bound
+                        // reference; a `var` (mutable reference) isn't lowered, so don't type it. (The
+                        // `obj::p` Name form is handled above; a bound METHOD ref on such a receiver is
+                        // handled by the member-method path in the lowerer.)
+                        let immutable_prop = self.syms.class_by_internal(internal).and_then(|c| {
+                            c.props
+                                .iter()
+                                .find(|(n, _, _)| *n == name)
+                                .map(|(_, _, v)| *v)
+                        }) == Some(false);
+                        if immutable_prop {
+                            if let Some(ty) = self.property_ref_ty(0, false) {
+                                return self.set(e, ty);
+                            }
+                        }
                     }
                     if let Some(sig) = self
                         .syms

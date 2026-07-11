@@ -8380,15 +8380,28 @@ impl<'a> Lower<'a> {
     /// Lower a property reference to a synthesized `PropertyReference*Impl`. The checker types the
     /// expression as its callable shape; this JVM lowering pass chooses the reflection runtime class.
     fn lower_prop_ref(&mut self, _e: AstExprId, recv: AstExprId, name: &str) -> Option<u32> {
-        let Expr::Name(rn) = self.afile.expr(recv).clone() else {
-            return None;
-        };
-        // Bound: the receiver is an in-scope value; its type gives the owner. Unbound: `rn` names the
-        // class, and the generated reference takes the receiver as its invoke/get argument.
-        let (owner, recv_val) = if let Some((v, ty)) = self.lookup(&rn) {
-            (ty.obj_internal()?.to_string(), Some(v))
-        } else {
-            (class_internal(self.afile, &rn), None)
+        // BOUND: the receiver is a value evaluated once and captured — an in-scope `Name`
+        // (`obj::p`) or an arbitrary expression (`A(..)::p`, receiver evaluated exactly once).
+        // UNBOUND: `Type::p` — the `Name` is a class, and the reference takes the receiver as its
+        // `get` argument. `capture` holds the captured-receiver expression for the bound forms.
+        let (owner, capture): (String, Option<u32>) = match self.afile.expr(recv).clone() {
+            Expr::Name(rn) => match self.lookup(&rn) {
+                Some((v, ty)) => (
+                    ty.obj_internal()?.to_string(),
+                    Some(self.ir.add_expr(IrExpr::GetValue(v))),
+                ),
+                None => (class_internal(self.afile, &rn), None),
+            },
+            _ => {
+                // Only a USER-class receiver is handled here; a library receiver is left to
+                // `lower_bound_library_prop_ref` (checked BEFORE capturing, so the receiver expression
+                // isn't evaluated twice).
+                let owner = self.info.ty(recv).obj_internal()?.to_string();
+                if !self.classes.contains_key(&owner) {
+                    return None;
+                }
+                (owner, Some(self.expr(recv)?))
+            }
         };
         let owner_id = self.classes.get(&owner)?.id;
         let (prop_ty, is_var) = {
@@ -8401,7 +8414,7 @@ impl<'a> Lower<'a> {
         if is_var {
             return None;
         }
-        let bound = recv_val.is_some();
+        let bound = capture.is_some();
         let synth_fq = class_internal(
             self.afile,
             &format!("{}$propref${}${}", self.cur_fn_name, name, self.lambda_seq),
@@ -8456,9 +8469,8 @@ impl<'a> Lower<'a> {
             applied_annotations: Vec::new(),
             runtime_retained: false,
         });
-        if let Some(v) = recv_val {
+        if let Some(recv_e) = capture {
             // `new <Synth>(receiver)` — the captured receiver is the constructor's `Object` argument.
-            let recv_e = self.ir.add_expr(IrExpr::GetValue(v));
             Some(self.ir.add_expr(IrExpr::New {
                 class: synth_id,
                 args: vec![recv_e],
