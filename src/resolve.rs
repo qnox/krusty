@@ -11815,6 +11815,7 @@ impl<'a> Checker<'a> {
                 // declares `component1..N` (e.g. a krusty `data class`). Anything else is rejected,
                 // never miscompiled.
                 let internal = it.obj_internal();
+                let source_props = self.file.destructure_source_props.get(&s.0).cloned();
                 for (idx, (name, is_var)) in entries.iter().enumerate() {
                     if name == "_" {
                         continue;
@@ -11824,6 +11825,28 @@ impl<'a> Checker<'a> {
                             span,
                             format!("krusty: conflicting local declaration '{name}'"),
                         );
+                    }
+                    // NAME-BASED entry (`val (newName = sourceProp) = src`): bind to the receiver's
+                    // `sourceProp` property (a member read), not `componentN`.
+                    if let Some(prop) = source_props
+                        .as_ref()
+                        .and_then(|sp| sp.get(idx))
+                        .and_then(|o| o.as_ref())
+                    {
+                        let pty = internal.and_then(|i| self.lookup_prop(i, prop).map(|(t, _)| t));
+                        match pty {
+                            Some(t) => self.declare(name, t, *is_var),
+                            None => {
+                                self.diags.error(
+                                    span,
+                                    format!(
+                                        "krusty: unresolved property '{prop}' in destructuring"
+                                    ),
+                                );
+                                self.declare(name, Ty::Error, *is_var);
+                            }
+                        }
+                        continue;
                     }
                     let comp = format!("component{}", idx + 1);
                     // Record the (possibly `@InlineOnly`) `componentN` EXTENSION callable keyed by the

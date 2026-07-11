@@ -5132,7 +5132,8 @@ impl<'a> Lower<'a> {
     /// component locals live in the enclosing scope (a nested `Block` would scope them away at emit).
     fn append_stmt(&mut self, s: crate::ast::StmtId, out: &mut Vec<u32>) -> Option<()> {
         if let Stmt::Destructure { entries, init } = self.afile.stmt(s).clone() {
-            return self.lower_destructure(&entries, init, out);
+            let sp = self.afile.destructure_source_props.get(&s.0).cloned();
+            return self.lower_destructure(&entries, init, sp.as_deref(), out);
         }
         out.push(self.stmt(s)?);
         Some(())
@@ -5221,6 +5222,7 @@ impl<'a> Lower<'a> {
         &mut self,
         entries: &[(String, bool)],
         init: AstExprId,
+        source_props: Option<&[Option<String>]>,
         out: &mut Vec<u32>,
     ) -> Option<()> {
         let it_ty = self.info.ty(init);
@@ -5236,8 +5238,25 @@ impl<'a> Lower<'a> {
             if name == "_" {
                 continue;
             }
-            let comp = format!("component{}", idx + 1);
             let recv = self.ir.add_expr(IrExpr::GetValue(tmp));
+            // NAME-BASED entry (`val (newName = sourceProp) = src`): read the receiver's `sourceProp`
+            // property via its getter (`getSourceProp`) instead of `componentN`.
+            if let Some(prop) = source_props
+                .and_then(|sp| sp.get(idx))
+                .and_then(|o| o.as_ref())
+            {
+                let getter = property_getter_name(prop);
+                let (class, index, _, ret) = self.resolve_method(&internal, &getter)?;
+                let call = self.ir.add_expr(IrExpr::MethodCall {
+                    class,
+                    index,
+                    receiver: recv,
+                    args: vec![],
+                });
+                self.bind_destructure_component(name, call, ret, out)?;
+                continue;
+            }
+            let comp = format!("component{}", idx + 1);
             let (call, log_ty) = if let Some((class, index, _, _)) =
                 self.resolve_method(&internal, &comp)
             {
@@ -5351,31 +5370,42 @@ impl<'a> Lower<'a> {
                     m.ret,
                 )
             };
-            // A `var` component captured AND written by a closure is boxed into a `Ref$XxxRef`, exactly
-            // like a plain mutable local (see the `Stmt::Local` path) — without this the closure mutates
-            // a private copy and the outer read misses it (e.g. `var [a,b]=A(); { a=3 }()`).
-            if self.shared_cell_vars.contains(name) {
-                let elem_ty = self.shared_cell_elem_ty(log_ty);
-                let elem = ref_elem_ir(elem_ty);
-                let holder = self.fresh_value();
-                let holder_ty = self.mutable_local_ref_type(elem_ty)?;
-                self.scope.push((name.clone(), holder, holder_ty));
-                self.boxed_elem.insert(name.clone(), elem_ty);
-                let new_ref = self.ir.add_expr(IrExpr::RefNew { elem, init: call });
-                out.push(self.ir.add_expr(IrExpr::Variable {
-                    index: holder,
-                    ty: ty_to_ir(holder_ty),
-                    init: Some(new_ref),
-                }));
-            } else {
-                let v = self.fresh_value();
-                self.scope.push((name.clone(), v, log_ty));
-                out.push(self.ir.add_expr(IrExpr::Variable {
-                    index: v,
-                    ty: ty_to_ir(log_ty),
-                    init: Some(call),
-                }));
-            }
+            self.bind_destructure_component(name, call, log_ty, out)?;
+        }
+        Some(())
+    }
+
+    /// Bind one destructured component `name` to its (already-lowered) initializer value `call` of
+    /// logical type `log_ty`, pushing the local into `out`/scope. A `var` captured+written by a closure
+    /// is boxed into a `Ref$XxxRef`, exactly like a plain mutable local, so the closure's write is seen.
+    fn bind_destructure_component(
+        &mut self,
+        name: &str,
+        call: u32,
+        log_ty: Ty,
+        out: &mut Vec<u32>,
+    ) -> Option<()> {
+        if self.shared_cell_vars.contains(name) {
+            let elem_ty = self.shared_cell_elem_ty(log_ty);
+            let elem = ref_elem_ir(elem_ty);
+            let holder = self.fresh_value();
+            let holder_ty = self.mutable_local_ref_type(elem_ty)?;
+            self.scope.push((name.to_string(), holder, holder_ty));
+            self.boxed_elem.insert(name.to_string(), elem_ty);
+            let new_ref = self.ir.add_expr(IrExpr::RefNew { elem, init: call });
+            out.push(self.ir.add_expr(IrExpr::Variable {
+                index: holder,
+                ty: ty_to_ir(holder_ty),
+                init: Some(new_ref),
+            }));
+        } else {
+            let v = self.fresh_value();
+            self.scope.push((name.to_string(), v, log_ty));
+            out.push(self.ir.add_expr(IrExpr::Variable {
+                index: v,
+                ty: ty_to_ir(log_ty),
+                init: Some(call),
+            }));
         }
         Some(())
     }
@@ -11864,7 +11894,8 @@ impl<'a> Lower<'a> {
                 // A direct `stmt()` call wraps the bindings in a Block; the block builders use
                 // `append_stmt` instead so the component locals live in the enclosing scope.
                 let mut out = Vec::new();
-                self.lower_destructure(&entries, init, &mut out)?;
+                let sp = self.afile.destructure_source_props.get(&s.0).cloned();
+                self.lower_destructure(&entries, init, sp.as_deref(), &mut out)?;
                 Some(self.ir.add_expr(IrExpr::Block {
                     stmts: out,
                     value: None,

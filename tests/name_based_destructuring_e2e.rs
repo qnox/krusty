@@ -70,3 +70,35 @@ fn name_based_destructuring_rejected_without_flag() {
         );
     }
 }
+
+// --- Short-form name-based renaming (`val (a = prop) = src`) → a by-name property read. ---
+
+fn run_stdlib(src: &str) -> Option<String> {
+    common::compile_and_run_with_stdlib(src, "Main")
+}
+
+#[test]
+fn name_based_rename() {
+    const SRC: &str =
+        "// LANGUAGE: +NameBasedDestructuring, +EnableNameBasedDestructuringShortForm\n\
+        data class P(val first: Int, val second: String)\n\
+        fun box(): String {\n\
+        \x20 val src = P(1, \"OK\")\n\
+        \x20 val (number = first, text = second) = src\n\
+        \x20 return if (number == 1 && text == \"OK\") \"OK\" else \"fail\"\n\
+        }\n";
+    assert_eq!(run_stdlib(SRC).expect("name-based rename"), "OK");
+}
+
+#[test]
+fn name_based_reorder() {
+    const SRC: &str =
+        "// LANGUAGE: +NameBasedDestructuring, +EnableNameBasedDestructuringShortForm\n\
+        data class P(val a: Int, val b: Int)\n\
+        fun box(): String {\n\
+        \x20 val src = P(1, 2)\n\
+        \x20 val (y = b, x = a) = src\n\
+        \x20 return if (x == 1 && y == 2) \"OK\" else \"fail\"\n\
+        }\n";
+    assert_eq!(run_stdlib(SRC).expect("name-based reorder"), "OK");
+}

@@ -801,6 +801,11 @@ pub struct File {
     /// a LOCAL return (from the anonymous function itself), so the lowerer must compile its body's
     /// `return` as the closure method's own return rather than a non-local return of the enclosing fn.
     pub anon_fun_lambdas: std::collections::HashSet<u32>,
+    /// NAME-BASED destructuring: for a `Stmt::Destructure` whose entries bind by property NAME
+    /// (`val (number = pCProp, text = pCVarProp) = src`), maps the statement's id to the source
+    /// property each entry reads (parallel to `entries`); `None` for a positional (`componentN`) entry.
+    /// Absent ⇒ the whole destructuring is positional.
+    pub destructure_source_props: std::collections::HashMap<u32, Vec<Option<String>>>,
     /// Declared return type of an anonymous function (`fun (…): T = …`), keyed by the desugared
     /// lambda's `ExprId.0`. A block body that ends in `return` has body type `Nothing`, so the checker
     /// must take the function's type from this annotation, not from the (diverging) body value.
