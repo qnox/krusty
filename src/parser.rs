@@ -5858,8 +5858,31 @@ impl<'a> Parser<'a> {
     /// A branch/body of `if`/`when`/`for`: a block, or a single statement. A bare expression keeps
     /// its value (exposed as the wrapping block's trailing value); a real statement (`return`,
     /// assignment, `s += i`, …) yields a Unit-valued block.
+    /// At a `{`, whether it opens a LAMBDA (a top-level `->` precedes the matching `}`) rather than a
+    /// block. Used to disambiguate a lambda branch body from a statement block.
+    fn at_lambda_brace(&self) -> bool {
+        let mut j = self.i + 1;
+        let mut depth = 0i32;
+        loop {
+            match self.t.get(j).map(|t| t.kind) {
+                None => return false,
+                Some(TokenKind::Arrow) if depth == 0 => return true,
+                Some(TokenKind::RBrace) if depth == 0 => return false,
+                Some(TokenKind::LParen | TokenKind::LBracket | TokenKind::LBrace) => depth += 1,
+                Some(TokenKind::RParen | TokenKind::RBracket | TokenKind::RBrace) => depth -= 1,
+                _ => {}
+            }
+            j += 1;
+        }
+    }
+
     fn parse_branch(&mut self) -> ExprId {
         if self.at(TokenKind::LBrace) {
+            // A branch body `{ … }` is a BLOCK — unless it is a LAMBDA (`when (x) { … -> { _ -> body } }`
+            // returning a function type), detected by a top-level `->` before the closing `}`.
+            if self.at_lambda_brace() {
+                return self.parse_lambda();
+            }
             return self.parse_block_expr();
         }
         let start = self.tok().span;
