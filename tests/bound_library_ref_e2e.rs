@@ -17,3 +17,15 @@ fn bound_string_get_ref() {
         }\n";
     assert_eq!(run(SRC).expect("bound string::get ref"), "OK");
 }
+
+// A bound PROPERTY reference on a library receiver (`"kotlin"::length`) lowers to a
+// `PropertyReference0Impl` whose `get()` dispatches the classpath getter (`String.length()`), even
+// though a same-named method exists — the metadata classifies `length` as a property.
+#[test]
+fn bound_string_length_prop_ref() {
+    const SRC: &str = "fun box(): String {\n\
+        \x20 val f = \"kotlin\"::length\n\
+        \x20 return if (f.get() == 6) \"OK\" else \"Fail: ${f.get()}\"\n\
+        }\n";
+    assert_eq!(run(SRC).expect("bound string::length prop ref"), "OK");
+}

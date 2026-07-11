@@ -7824,6 +7824,39 @@ impl<'a> Checker<'a> {
                     let concrete = !matches!(rty, Ty::TyParam(..) | Ty::Nullable(..))
                         && rty.kotlin_class_internal() != Some(crate::types::wk::any());
                     if concrete && rty.kotlin_class_internal().is_some() {
+                        // A bound PROPERTY reference (`"kotlin"::length`) takes precedence over a
+                        // same-named method: `@Metadata` classifies `length` a property, and the ref is a
+                        // `KProperty0<T>` whose `get()` yields the value. Type it as the property-reference
+                        // type so `.get()`/`.name` resolve, not as a plain function. Gate on the
+                        // AUTHORITATIVE property set — a bare zero-arg METHOD (`iterator()::next`) is not a
+                        // property, and `resolve_property_member`'s getter-guessing fallback would misfire.
+                        if self.syms.libraries.member_is_property(rty, &name) {
+                            if let Some(m) = crate::symbol_resolver::resolve_property_member(
+                                &*self.syms.libraries,
+                                rty,
+                                &name,
+                            ) {
+                                // Only a plainly-emittable getter is modeled (kept in lock-step with the
+                                // lowerer's `lower_bound_library_prop_ref`): the owner must be a concrete
+                                // class (an interface getter needs `invokeinterface`), NOT a value class,
+                                // and the getter name must be unmangled (a value-class-typed property has a
+                                // `getX-<hash>` accessor on an erased owner). Otherwise fall through.
+                                let emittable = m.member.owner.as_deref().is_some_and(|owner| {
+                                    !m.member.name.contains('-')
+                                        && !self
+                                            .syms
+                                            .libraries
+                                            .resolve_type(owner)
+                                            .is_some_and(|t| t.is_interface())
+                                        && !self.resolver().is_value(owner)
+                                });
+                                if !m.suspend && emittable {
+                                    if let Some(ty) = self.property_ref_ty(0, false) {
+                                        return self.set(e, ty);
+                                    }
+                                }
+                            }
+                        }
                         if let Some(m) = crate::symbol_resolver::resolve_instance_ref(
                             &*self.syms.libraries,
                             rty,

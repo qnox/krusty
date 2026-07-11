@@ -1301,6 +1301,16 @@ impl Classpath {
         })
     }
 
+    /// Whether the Kotlin builtin `internal` declares `name` as a PROPERTY (not a function) in its
+    /// `.kotlin_builtins` fragment (`CharSequence.length`, `Collection.size`). Distinguishes a property
+    /// reference (`s::length` → `KProperty0`) from a zero-arg method reference (`it::next` → function).
+    pub fn builtin_member_is_property(&self, internal: &str, name: &str) -> bool {
+        let path = Self::builtins_path_for(internal);
+        self.builtins_file(&path)
+            .get(internal)
+            .is_some_and(|c| c.members.iter().any(|m| m.name == name && m.is_property))
+    }
+
     /// Direct supertypes declared in `.kotlin_builtins` for a Kotlin builtin class.
     pub fn builtin_supertypes(&self, internal: &str) -> Vec<String> {
         let path = Self::builtins_path_for(internal);
