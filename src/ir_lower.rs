@@ -1107,25 +1107,25 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     super_internal,
                 },
             );
-            // A `companion object`'s `const val`s become `public static final` + `ConstantValue` fields
-            // on the OUTER class (kotlinc's layout) — emitted as owned statics here, read as `getstatic
-            // C.X`. (`companion_props_lowerable` guarantees they are all plain const at the gate.)
+            // A `companion object`'s `val`s become static fields on the OUTER class (kotlinc's layout),
+            // read as `getstatic C.X` — a `const val` as a `public static final` + `ConstantValue`, a
+            // non-const `val` initialized in the outer class's `<clinit>` (see `emit_class`).
             for cp in &c.companion_props {
-                if !cp.is_const {
-                    continue;
-                }
                 let cty = body_prop_ty(file, info, cp);
                 lo.cur_class = None;
                 lo.scope.clear();
                 lo.next_value = 0;
                 if let (Some(initx), false) = (cp.init, cty == Ty::Error) {
                     if let Some(init) = lo.lower_arg(initx, &ty_to_ir(cty)) {
+                        // A `const val` becomes a `ConstantValue` static; a plain non-const companion
+                        // `val` becomes a static field initialized in the outer class's `<clinit>`. Both
+                        // are read as `getstatic C.X` (registered in `companion_consts`).
                         lo.ir.statics.push(crate::ir::IrStatic {
                             name: cp.name.clone(),
                             ty: ty_to_ir(cty),
                             init,
                             is_var: false,
-                            is_const: true,
+                            is_const: cp.is_const,
                             owner: Some(internal.clone()),
                             custom_accessor: false,
                         });
@@ -3562,9 +3562,11 @@ fn ast_literal_const(file: &ast::File, e: AstExprId, ty: Ty) -> Option<crate::ir
 /// compile-time initializer (no getter/setter/delegate). Such a const becomes a `public static final` +
 /// `ConstantValue` field on the OUTER class (kotlinc's layout). An empty list is trivially lowerable.
 fn companion_props_lowerable(c: &ast::ClassDecl) -> bool {
+    // A plain companion `val` with an initializer and no custom accessor/delegate — emitted as a static
+    // field on the OUTER class (a `const val` as a `ConstantValue`, a non-const `val` initialized in the
+    // outer class's `<clinit>`), read as `getstatic C.X`.
     c.companion_props.iter().all(|p| {
-        p.is_const
-            && !p.is_var
+        !p.is_var
             && p.init.is_some()
             && p.getter.is_none()
             && p.setter.is_none()
@@ -3584,10 +3586,9 @@ fn is_simple_class(c: &ast::ClassDecl) -> bool {
     // concrete methods normally. A `@JvmInline value class` is structurally a single-field class; its
     // unboxed-support members are synthesized (see `synth_value_members`). Use-site unboxing isn't done
     // yet, so the resolver still rejects value-class *files* — admission here is for member synthesis.
-    // A `companion object` with only methods is supported (synthesized `C$Companion` class). A companion
-    // `const val` (compile-time literal) is supported too — emitted as a `public static final` +
-    // `ConstantValue` field on the OUTER class (kotlinc's layout). A NON-const companion property (needs
-    // the `access$getX$cp` accessor + `Companion.getX()`) is not yet modeled.
+    // A `companion object` with methods is supported (synthesized `C$Companion` class). A companion
+    // `val` (const or non-const, plain backing field) is too — emitted as a static field on the OUTER
+    // class (`ConstantValue` for a const, `<clinit>`-initialized otherwise). See `companion_props_lowerable`.
     !c.is_object() && !c.is_enum() && !c.is_interface() && companion_props_lowerable(c)
         // Secondary constructors: in a class WITH a primary ctor each must delegate to it (`this(…)`);
         // a class with NO primary ctor admits `this(…)` (to a sibling), `super(…)`, or implicit

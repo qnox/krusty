@@ -162,6 +162,8 @@ mod collection_special_member_stub_e2e;
 mod companion_const_e2e;
 #[path = "companion_e2e.rs"]
 mod companion_e2e;
+#[path = "companion_non_const_prop_e2e.rs"]
+mod companion_non_const_prop_e2e;
 #[path = "companion_supertype_e2e.rs"]
 mod companion_supertype_e2e;
 #[path = "compare_to_zero_branch_e2e.rs"]
