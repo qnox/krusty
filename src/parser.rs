@@ -3235,7 +3235,7 @@ impl<'a> Parser<'a> {
         // `val (a, b) = <synthetic>` is prepended to the body — reusing the `Stmt::Destructure`
         // machinery. Collected here, spliced after the body statements are parsed.
         // (synthetic param name, destructured entries `(name, is_var)`, span) per `(a, b)` param.
-        type LambdaDestructure = (String, Vec<(String, bool)>, Span);
+        type LambdaDestructure = (String, Vec<(String, bool)>, Vec<Option<String>>, Span);
         let mut destructures: Vec<LambdaDestructure> = Vec::new();
         let params = if has_params {
             let mut ps = Vec::new();
@@ -3245,13 +3245,27 @@ impl<'a> Parser<'a> {
                     let sp = self.tok().span;
                     self.bump();
                     let mut entries = Vec::new();
+                    let mut source_props: Vec<Option<String>> = Vec::new();
                     loop {
                         let n = self.ident_or_error("variable name");
                         // A per-entry type annotation (`(a: Int, b) ->`) is tolerated, ignored.
                         if self.eat(TokenKind::Colon) {
                             let _ = self.parse_type();
                         }
+                        // By-name entry (`(a = prop) ->`) or short-form (`(a, b) ->` binds by own name).
+                        let source = if self.name_based_destructuring && self.eat(TokenKind::Eq) {
+                            let src = self.ident_or_error("property name");
+                            if self.eat(TokenKind::Colon) {
+                                let _ = self.parse_type();
+                            }
+                            Some(src)
+                        } else if self.short_form_destructuring {
+                            Some(n.clone())
+                        } else {
+                            None
+                        };
                         entries.push((n, false)); // destructured lambda params are `val`
+                        source_props.push(source);
                         if !self.eat(TokenKind::Comma) {
                             break;
                         }
@@ -3267,7 +3281,7 @@ impl<'a> Parser<'a> {
                     let synth = format!("$dstr{}", destructures.len());
                     ps.push(synth.clone());
                     param_types.push(None);
-                    destructures.push((synth, entries, sp));
+                    destructures.push((synth, entries, source_props, sp));
                 } else if self.name_based_destructuring && self.at(TokenKind::LBracket) {
                     // The short-form bracket destructuring `{ [a, b] -> … }` (NameBasedDestructuring) —
                     // identical to the `(a, b)` form, just with `[ ]`.
@@ -3294,7 +3308,9 @@ impl<'a> Parser<'a> {
                     let synth = format!("$dstr{}", destructures.len());
                     ps.push(synth.clone());
                     param_types.push(None);
-                    destructures.push((synth, entries, sp));
+                    // The `[a, b]` bracket form is positional (`componentN`), never by-name.
+                    let source_props = vec![None; entries.len()];
+                    destructures.push((synth, entries, source_props, sp));
                 } else if self.at(TokenKind::Ident) {
                     ps.push(self.text().to_string());
                     self.bump();
@@ -3326,9 +3342,12 @@ impl<'a> Parser<'a> {
         }
         // Prepend `val (a, b) = <synthetic-param>` for each destructured parameter (reversed so the
         // first parameter's binding ends up first).
-        for (synth, entries, sp) in destructures.into_iter().rev() {
+        for (synth, entries, source_props, sp) in destructures.into_iter().rev() {
             let init = self.file.add_expr(Expr::Name(synth), sp);
             let d = self.file.add_stmt(Stmt::Destructure { entries, init }, sp);
+            if source_props.iter().any(|s| s.is_some()) {
+                self.file.destructure_source_props.insert(d.0, source_props);
+            }
             stmts.insert(0, d);
         }
         let end = self.tok().span;
