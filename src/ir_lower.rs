@@ -3617,9 +3617,11 @@ fn is_simple_enum(c: &ast::ClassDecl) -> bool {
         // An enum may implement interfaces (`enum class E : I`) — supertypes are interfaces only (an enum
         // can't extend a class); the lowering resolves them as interfaces or bails.
         && c.props.iter().all(|p| p.is_property)
-        // A body property must be a plain backing field — an `abstract val` (entry-overridden property)
-        // isn't modeled yet.
-        && c.body_props.iter().all(|p| is_plain_body_prop(p) && !p.is_abstract)
+        // Enum-class body member properties (`enum class E { A; val x = … }`) now parse into the AST,
+        // but the hand-assembled enum constructor does not yet run their initializers nor does the enum
+        // emitter declare their backing fields — so an enum WITH body properties is skipped (never
+        // miscompiled) until that emission lands.
+        && c.body_props.is_empty()
         && c.methods.iter().all(|m| m.receiver.is_none())
         // Entry-body overrides: concrete, non-extension methods only.
         && c.enum_entries.iter().all(|e| e.methods.iter().all(|m| m.receiver.is_none() && !matches!(m.body, FunBody::None)))
