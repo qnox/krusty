@@ -1977,7 +1977,13 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 }
                 // An interface's abstract methods have no body; its DEFAULT methods (with a body) are
                 // lowered like instance methods (fall through to the normal method-body loop below).
-                if c.is_interface() && c.methods.iter().all(|m| matches!(m.body, FunBody::None)) {
+                // An interface with only abstract methods has no bodies to lower here — but a companion
+                // (its method bodies lowered on the `C$Companion` class below) still needs processing.
+                if c.is_interface()
+                    && c.methods.iter().all(|m| matches!(m.body, FunBody::None))
+                    && c.companion_methods.is_empty()
+                    && c.companion_props.is_empty()
+                {
                     continue;
                 }
                 for m in &c.methods {
@@ -3765,9 +3771,9 @@ fn is_simple_object(c: &ast::ClassDecl) -> bool {
 /// `DefaultImpls` class), no properties (abstract property getters not modeled), no companion.
 fn is_simple_interface(c: &ast::ClassDecl) -> bool {
     c.is_interface()
-        // A companion is supported when it is PROPERTIES ONLY (no methods/base/supertype) and those
-        // props are lowerable — emitted as static fields on the interface (see `emit_interface_class`).
-        && c.companion_methods.is_empty()
+        // A companion is supported when it has no base/supertype and its props are lowerable — its
+        // methods become a synthesized `C$Companion` class and its props static fields on the interface
+        // (see `emit_interface_class`).
         && c.companion_base.is_none()
         && c.companion_supertypes.is_empty()
         && companion_props_lowerable(c)
