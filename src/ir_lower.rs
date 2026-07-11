@@ -8598,6 +8598,7 @@ impl<'a> Lower<'a> {
     /// placeholder + mask bit per dropped default, and the `null` marker — then wrap it in the same
     /// `Lambda`/metafactory closure a plain `::foo` produces. `None` (skip) if the `$default` stub isn't
     /// available for `foo`.
+    #[allow(clippy::too_many_arguments)]
     fn lower_adapted_ref(
         &mut self,
         e: AstExprId,
@@ -8606,6 +8607,7 @@ impl<'a> Lower<'a> {
         adapted_params: &[Ty],
         ret: Ty,
         vararg_tail: bool,
+        target_vararg: bool,
     ) -> Option<u32> {
         let (n, m) = (adapted_params.len(), target_params.len());
         let fid = *self
@@ -8644,8 +8646,18 @@ impl<'a> Lower<'a> {
             }
             let mut mask: i32 = 0;
             for (k, &pt) in target_params.iter().enumerate().skip(n) {
-                mask |= 1i32 << k;
-                a.push(self.zero_placeholder(pt));
+                if k == m - 1 && target_vararg {
+                    // The dropped trailing vararg gets an EMPTY array and NO mask bit (passed through by
+                    // `$default`, not filled from the mask).
+                    let zero = self.ir.add_expr(IrExpr::Const(IrConst::Int(0)));
+                    a.push(self.ir.add_expr(IrExpr::NewArray {
+                        array_type: ty_to_ir(pt),
+                        size: zero,
+                    }));
+                } else {
+                    mask |= 1i32 << k;
+                    a.push(self.zero_placeholder(pt));
+                }
             }
             a.push(self.ir.add_expr(IrExpr::Const(IrConst::Int(mask))));
             a.push(self.ir.add_expr(IrExpr::Const(IrConst::Null)));
@@ -14700,6 +14712,7 @@ impl<'a> Lower<'a> {
                     adapted_params,
                     ret,
                     vararg_tail,
+                    target_vararg,
                     coerce_unit: _,
                 }) = self.info.expr_lowers.get(&e).cloned()
                 {
@@ -14710,6 +14723,7 @@ impl<'a> Lower<'a> {
                         &adapted_params,
                         ret,
                         vararg_tail,
+                        target_vararg,
                     );
                 }
                 // A class literal (the checker recorded bound-vs-unbound). UNBOUND `T::class` → a `Class`

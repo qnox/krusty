@@ -69,3 +69,16 @@ fn default_and_empty_vararg_call() {
         fun box(): String = if (foo() == \"K0\" && foo(\"A\") == \"A0\") \"OK\" else \"Fail\"\n";
     assert_eq!(run(SRC).expect("default + empty vararg"), "OK");
 }
+
+// Combined: drop a trailing default AND a trailing vararg, coercing to Unit. Now supported because the
+// base $default stub for a vararg function is emitted.
+#[test]
+fn adapt_default_and_vararg_to_unit() {
+    const SRC: &str = "var log = \"\"\n\
+        fun foo(s: String = \"K\", vararg t: String): Boolean {\n\
+        \x20 log += s; log += t.size.toString(); return true\n\
+        }\n\
+        fun bar(f: () -> Unit) { f() }\n\
+        fun box(): String { bar(::foo); return if (log == \"K0\") \"OK\" else \"Fail: $log\" }\n";
+    assert_eq!(run(SRC).expect("adapt default+vararg to Unit"), "OK");
+}
