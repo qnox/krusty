@@ -2178,6 +2178,11 @@ fn emit_interface_class(
             cw.add_field(0x0019, &s.name, &desc);
         }
     }
+    // A `companion object` with methods: a `public static final Companion` field of the synthesized
+    // `C$Companion` type, constructed in the interface's `<clinit>` (alongside any non-const statics).
+    if let Some(comp_fq) = &c.companion_class {
+        cw.add_field(0x0019, "Companion", &format!("L{comp_fq};"));
+    }
     let clinit_statics: Vec<&crate::ir::IrStatic> = ir
         .statics
         .iter()
@@ -2186,7 +2191,7 @@ fn emit_interface_class(
                 && !(s.is_const && const_value_idx_peek(ir, s.init))
         })
         .collect();
-    if !clinit_statics.is_empty() {
+    if c.companion_class.is_some() || !clinit_statics.is_empty() {
         let mut e = Emitter {
             ir,
             cw: &mut cw,
@@ -2200,6 +2205,16 @@ fn emit_interface_class(
             loop_stack: Vec::new(),
         };
         let mut clinit = CodeBuilder::new(0);
+        if let Some(comp_fq) = &c.companion_class {
+            let comp_desc = format!("L{comp_fq};");
+            let ci = e.cw.class_ref(comp_fq);
+            clinit.new_obj(ci);
+            clinit.dup();
+            let init = e.cw.methodref(comp_fq, "<init>", "()V");
+            clinit.invokespecial(init, 0, 0);
+            let fref = e.cw.fieldref(&c.fq_name, "Companion", &comp_desc);
+            clinit.putstatic(fref, 1);
+        }
         for s in &clinit_statics {
             e.emit_value(s.init, &mut clinit);
             let jt = ir_ty_to_jvm(&s.ty);

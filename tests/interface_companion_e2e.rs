@@ -22,3 +22,24 @@ fn interface_companion_non_const_val() {
         fun box(): String = C.FOO\n";
     assert_eq!(run(SRC).expect("interface companion non-const"), "OK");
 }
+
+#[test]
+fn interface_companion_method() {
+    const SRC: &str = "interface C {\n\
+        \x20 companion object { fun make(): String = \"OK\" }\n\
+        }\n\
+        fun box(): String = C.make()\n";
+    assert_eq!(run(SRC).expect("interface companion method"), "OK");
+}
+
+#[test]
+fn interface_companion_method_and_prop() {
+    const SRC: &str = "interface C {\n\
+        \x20 companion object {\n\
+        \x20   val P: String = \"O\" + \"K\"\n\
+        \x20   fun make(): String = \"OK\"\n\
+        \x20 }\n\
+        }\n\
+        fun box(): String = if (C.P == \"OK\" && C.make() == \"OK\") \"OK\" else \"fail\"\n";
+    assert_eq!(run(SRC).expect("interface companion method+prop"), "OK");
+}
