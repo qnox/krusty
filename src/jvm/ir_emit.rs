@@ -1439,12 +1439,16 @@ fn emit_func_ref_class(c: &crate::ir::IrClass, facade: &str) -> Vec<u8> {
             let m = cw.methodref(call_owner, &fr.call_name, &call_desc);
             inv.invokestatic(m, call_arg_words, ret_words);
         }
+        // A bound reference to a mapped-builtin member (`"KOTLIN"::get`) invokes the same PHYSICAL JVM
+        // method a direct call would (`String.get` → `charAt`) — apply the backend's name mapping here too.
         _ if fr.call_interface => {
-            let m = cw.interface_methodref(call_owner, &fr.call_name, &call_desc);
+            let vn = mapped_builtin_virtual_name(call_owner, &fr.call_name);
+            let m = cw.interface_methodref(call_owner, vn, &call_desc);
             inv.invokeinterface(m, call_arg_words, ret_words);
         }
         _ => {
-            let m = cw.methodref(call_owner, &fr.call_name, &call_desc);
+            let vn = mapped_builtin_virtual_name(call_owner, &fr.call_name);
+            let m = cw.methodref(call_owner, vn, &call_desc);
             inv.invokevirtual(m, call_arg_words, ret_words);
         }
     }
@@ -3486,14 +3490,16 @@ impl<'a> Emitter<'a> {
                 let m = self.cw.methodref(&call_owner, &fr.call_name, &call_desc);
                 scratch.invokestatic(m, call_arg_words, ret_words);
             }
+            // A bound mapped-builtin member ref invokes the same physical JVM method a direct call would
+            // (`String.get` → `charAt`) — apply the backend's name mapping (see the free-function twin).
             _ if fr.call_interface => {
-                let m = self
-                    .cw
-                    .interface_methodref(&call_owner, &fr.call_name, &call_desc);
+                let vn = mapped_builtin_virtual_name(&call_owner, &fr.call_name);
+                let m = self.cw.interface_methodref(&call_owner, vn, &call_desc);
                 scratch.invokeinterface(m, call_arg_words, ret_words);
             }
             _ => {
-                let m = self.cw.methodref(&call_owner, &fr.call_name, &call_desc);
+                let vn = mapped_builtin_virtual_name(&call_owner, &fr.call_name);
+                let m = self.cw.methodref(&call_owner, vn, &call_desc);
                 scratch.invokevirtual(m, call_arg_words, ret_words);
             }
         }

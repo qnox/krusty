@@ -7812,6 +7812,28 @@ impl<'a> Checker<'a> {
                             return self.set(e, Ty::fun(sig.params.clone(), sig.ret));
                         }
                     }
+                    // Bound member on a LIBRARY-type receiver (`"KOTLIN"::get`): resolve the classpath
+                    // instance method and type as (member-args) -> ret, receiver bound. A `suspend` or
+                    // `Nothing`-returning member isn't modeled as a plain function value → skip.
+                    // A NULLABLE, type-parameter, or bare erased-`Any` receiver may be `null` at runtime,
+                    // and kotlinc routes `t::toString`/`hashCode`/`equals` on such a receiver through a
+                    // null-safe intrinsic (`null::toString` yields "null"); a plain `invokevirtual` on the
+                    // captured null would NPE. Only a non-null CONCRETE receiver is safe for the
+                    // direct-dispatch bound ref. Kept in lock-step with the same guard in the lowerer's
+                    // `lower_bound_expr_ref`, so the checker never types a ref the lowerer will skip.
+                    let concrete = !matches!(rty, Ty::TyParam(..) | Ty::Nullable(..))
+                        && rty.kotlin_class_internal() != Some(crate::types::wk::any());
+                    if concrete && rty.kotlin_class_internal().is_some() {
+                        if let Some(m) = crate::symbol_resolver::resolve_instance_ref(
+                            &*self.syms.libraries,
+                            rty,
+                            &name,
+                        ) {
+                            if !m.suspend && m.ret != Ty::Nothing {
+                                return self.set(e, Ty::fun(m.params.clone(), m.ret));
+                            }
+                        }
+                    }
                 }
                 self.diags.error(
                     self.span(e),

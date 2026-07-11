@@ -1789,6 +1789,46 @@ pub fn resolve_instance(
     })
 }
 
+/// Resolve a library instance member for a BOUND callable reference (`"KOTLIN"::get`) — where there are
+/// no call arguments to drive overload resolution. Returns the UNIQUE fixed-arity (non-vararg, no
+/// defaults) overload of `name` on `internal`, or `None` when the member is absent, varargs/defaulted, or
+/// AMBIGUOUS (overloaded) — kotlinc resolves the latter from the expected function type, which a bare
+/// reference lacks here, so bailing to a clean skip is correct.
+pub fn resolve_instance_ref(
+    lib: &dyn CompilerPlatform,
+    recv: Ty,
+    name: &str,
+) -> Option<LibraryMember> {
+    // A vararg or a member with a DEFAULTED parameter has no single fixed arity a bare reference can pin
+    // down (kotlinc resolves those from the expected function type) → skip. `param_defaults` is the
+    // authoritative per-parameter default flag: empty for a builtin member (no source metadata, and
+    // builtin operators carry no defaults), populated for a source member (a `true` marks a default).
+    let mut fixed = lib
+        .member_overloads(recv, name)
+        .overloads
+        .into_iter()
+        .filter(|o| {
+            o.callable.vararg_elem.is_none() && !o.call_sig.param_defaults.iter().any(|&d| d)
+        });
+    let o = fixed.next()?;
+    // Distinct SIGNATURES are genuinely ambiguous (kotlinc needs an expected function type); duplicate
+    // facts for the same signature (a member surfaced by two sources) are not — dedup on the shape.
+    if fixed.any(|other| {
+        other.callable.params != o.callable.params || other.callable.ret != o.callable.ret
+    }) {
+        return None;
+    }
+    // A member inherited from `java/lang/Object` (`toString`/`equals`/`hashCode`) is the one set kotlinc
+    // null-guards for a nullable/type-parameter receiver (`null::toString` yields "null"); a direct
+    // `invokevirtual` on a captured null would NPE. The erased receiver (an unbounded `T`) reads as a
+    // non-null `Any` here, so the receiver-type guard cannot catch it — reject on the resolved OWNER.
+    if o.callable.owner.as_str() == crate::types::wk::java_object() {
+        return None;
+    }
+    let ret = o.ret.apply(o.callable.ret);
+    Some(o.member_with_return(ret))
+}
+
 #[derive(Clone, Debug)]
 pub struct ResolvedMember {
     pub member: LibraryMember,
