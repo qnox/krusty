@@ -806,6 +806,11 @@ pub struct File {
     /// property each entry reads (parallel to `entries`); `None` for a positional (`componentN`) entry.
     /// Absent ⇒ the whole destructuring is positional.
     pub destructure_source_props: std::collections::HashMap<u32, Vec<Option<String>>>,
+    /// NAMED super-constructor arguments (`class D : Base(name = …, addr = …)`): the per-argument name
+    /// (parallel to the class's `base_args`; `None` for a positional arg), keyed by the FIRST base
+    /// argument's `ExprId.0`. The checker/lowerer reorder the base args to the base constructor's
+    /// parameter order before use. Absent ⇒ all base args are positional.
+    pub base_arg_names: std::collections::HashMap<u32, Vec<Option<String>>>,
     /// Declared return type of an anonymous function (`fun (…): T = …`), keyed by the desugared
     /// lambda's `ExprId.0`. A block body that ends in `return` has body type `Nothing`, so the checker
     /// must take the function's type from this annotation, not from the (diverging) body value.

@@ -2343,7 +2343,10 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 }
                 // Base-class constructor arguments (`: A(args)`), evaluated with the primary-ctor
                 // params in scope (`this`=0, params 1..N), coerced to the super's parameter types.
-                if !c.base_args.is_empty() {
+                // Reorder NAMED super-constructor arguments (`: Base(name = …, addr = …)`) to the base
+                // constructor's parameter order; positional args are unchanged. `None` bails the file.
+                let base_args = reordered_base_args(file, c)?;
+                if !base_args.is_empty() {
                     let class_id = lo.classes[&internal].id;
                     lo.scope.clear();
                     lo.next_value = 0;
@@ -2388,9 +2391,9 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     // defaults) — which krusty doesn't resolve — so bail rather than emit a `<init>` call
                     // whose stack shape won't verify. A branchy super argument (`Base("O" + if(…))`) emits
                     // merge frames in the pre-`super()` region the flat ctor emitter can't reconcile — bail.
-                    if c.base_args.len() != super_field_tys.len()
-                        || c.base_args.iter().any(|&a| body_contains_branch(file, a))
-                        || c.base_args.iter().zip(&super_field_tys).any(|(&a, ft)| {
+                    if base_args.len() != super_field_tys.len()
+                        || base_args.iter().any(|&a| body_contains_branch(file, a))
+                        || base_args.iter().zip(&super_field_tys).any(|(&a, ft)| {
                             let at = info.ty(a);
                             // Exact IR-type match is fine; a reference arg into a reference param (erased
                             // generic / `Any`) is fine; anything else (e.g. an `Int` arg into a `String`
@@ -2403,7 +2406,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                         return None;
                     }
                     let mut sargs = Vec::new();
-                    for (a, ft) in c.base_args.iter().zip(&super_field_tys) {
+                    for (a, ft) in base_args.iter().zip(&super_field_tys) {
                         sargs.push(lo.lower_arg(*a, ft)?);
                     }
                     lo.ir.classes[class_id as usize].super_args = sargs;
@@ -3565,6 +3568,73 @@ fn ast_literal_const(file: &ast::File, e: AstExprId, ty: Ty) -> Option<crate::ir
 /// Whether a class's `companion object` properties are all lowerable: each a `const val` with a plain
 /// compile-time initializer (no getter/setter/delegate). Such a const becomes a `public static final` +
 /// `ConstantValue` field on the OUTER class (kotlinc's layout). An empty list is trivially lowerable.
+/// The class's super-constructor arguments reordered to the base constructor's parameter order. When
+/// no argument is named (the common case), returns `base_args` unchanged. A named argument goes to its
+/// matching base parameter position; positional args fill in order. Returns `None` (bail the file) on
+/// an unknown name, a duplicate, or over-arity, or when the base class / its params aren't found.
+fn reordered_base_args(file: &ast::File, c: &ast::ClassDecl) -> Option<Vec<AstExprId>> {
+    let base_args = &c.base_args;
+    let names = match base_args
+        .first()
+        .and_then(|a| file.base_arg_names.get(&a.0))
+    {
+        Some(n) => n,
+        None => return Some(base_args.clone()),
+    };
+    let base_name = c.base_class.as_deref()?;
+    let base_simple = base_name.rsplit('/').next().unwrap_or(base_name);
+    let base = file.decls.iter().find_map(|&d| match file.decl(d) {
+        ast::Decl::Class(bc) if bc.name == base_simple => Some(bc),
+        _ => None,
+    })?;
+    let params: Vec<&str> = base
+        .props
+        .iter()
+        .filter(|p| p.is_property)
+        .map(|p| p.name.as_str())
+        .collect();
+    let mut positional: Vec<Option<AstExprId>> = vec![None; params.len()];
+    let mut next_pos = 0usize;
+    for (i, &a) in base_args.iter().enumerate() {
+        let idx = match names.get(i).and_then(|n| n.as_ref()) {
+            Some(nm) => params.iter().position(|p| p == nm)?,
+            None => {
+                let p = next_pos;
+                next_pos += 1;
+                p
+            }
+        };
+        if idx >= positional.len() || positional[idx].is_some() {
+            return None;
+        }
+        positional[idx] = Some(a);
+    }
+    let reordered: Vec<AstExprId> = positional.into_iter().collect::<Option<Vec<_>>>()?;
+    // The super arguments are lowered (and thus EVALUATED) in the returned order. Kotlin evaluates them
+    // in SOURCE order regardless of the parameter order. When the reordering changes the order AND any
+    // argument is not a compile-time LITERAL, evaluating in the reordered order could observably differ
+    // (a `Base(k = f(), o = g())` eval-order test, or a bare name that is a getter with side effects) —
+    // bail rather than miscompile. Literals are the only shape provably side-effect-free without types.
+    if reordered != *base_args
+        && base_args.iter().any(|&a| {
+            !matches!(
+                file.expr(a),
+                Expr::IntLit(_)
+                    | Expr::LongLit(_)
+                    | Expr::DoubleLit(_)
+                    | Expr::FloatLit(_)
+                    | Expr::BoolLit(_)
+                    | Expr::CharLit(_)
+                    | Expr::StringLit(_)
+                    | Expr::NullLit
+            )
+        })
+    {
+        return None;
+    }
+    Some(reordered)
+}
+
 fn companion_props_lowerable(c: &ast::ClassDecl) -> bool {
     // A plain companion `val` with an initializer and no custom accessor/delegate — emitted as a static
     // field on the OUTER class (a `const val` as a `ConstantValue`, a non-const `val` initialized in the
