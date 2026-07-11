@@ -3664,6 +3664,9 @@ pub enum ExprLowering {
         target_params: Vec<Ty>,
         adapted_params: Vec<Ty>,
         ret: Ty,
+        /// The single dropped parameter is a trailing `vararg` filled with an EMPTY array (a plain call
+        /// to the target), rather than trailing DEFAULTS filled via the `$default` stub.
+        vararg_tail: bool,
     },
     /// A call whose selected lowering is an inline/custom emit form rather than the normal function-call
     /// path: value-class companion calls (`Result.success`) or receiver-lambda scope calls.
@@ -6382,15 +6385,24 @@ impl<'a> Checker<'a> {
             .get(name)
             .and_then(|v| (v.len() == 1).then(|| v[0].clone()))?;
         let (n, m) = (exp.params.len(), sig.params.len());
-        if sig.vararg || sig.is_suspend || n >= m || n < sig.required {
+        if sig.is_suspend || n >= m {
             return None;
         }
-        // Every dropped trailing parameter must be defaulted; the retained prefix + return must match.
-        if !sig.param_defaults.is_empty() && !sig.param_defaults[n..m].iter().all(|&d| d) {
-            return None;
-        }
+        // The retained prefix parameters and the return type must match the expected function type.
         if sig.params[..n] != exp.params[..] || sig.ret != exp.ret {
             return None;
+        }
+        // Two adaptation shapes for the dropped tail `sig.params[n..m]`:
+        // - a single trailing `vararg` (`n == m-1`): the adapter passes an empty array (plain call);
+        // - all trailing DEFAULTS: the adapter routes through the `$default` stub.
+        let vararg_tail = sig.vararg && n == m - 1;
+        if !vararg_tail {
+            if sig.vararg || n < sig.required {
+                return None;
+            }
+            if !sig.param_defaults.is_empty() && !sig.param_defaults[n..m].iter().all(|&d| d) {
+                return None;
+            }
         }
         self.expr_lowers.insert(
             ref_expr,
@@ -6399,6 +6411,7 @@ impl<'a> Checker<'a> {
                 target_params: sig.params.clone(),
                 adapted_params: exp.params.clone(),
                 ret: exp.ret,
+                vararg_tail,
             },
         );
         Some(Ty::fun(exp.params.clone(), exp.ret))

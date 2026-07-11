@@ -8582,32 +8582,49 @@ impl<'a> Lower<'a> {
         target_params: &[Ty],
         adapted_params: &[Ty],
         ret: Ty,
+        vararg_tail: bool,
     ) -> Option<u32> {
         let (n, m) = (adapted_params.len(), target_params.len());
         let fid = *self
             .fun_ids
             .get(&(name.to_string(), target_params.to_vec()))?;
-        if !crate::ir::toplevel_default_stub_safe(&self.ir, fid) {
-            return None;
-        }
-        // `foo$default(p0..p_{N-1}, <placeholder>…, mask, null)`: the adapter's own N params fill the
-        // retained slots; each dropped slot gets a zero placeholder and its mask bit; the marker is null.
+        // The adapter's own N params fill the retained slots (`GetValue(0..N-1)`).
         let mut a: Vec<u32> = Vec::with_capacity(m + 2);
         for k in 0..n {
             a.push(self.ir.add_expr(IrExpr::GetValue(k as u32)));
         }
-        let mut mask: i32 = 0;
-        for (k, &pt) in target_params.iter().enumerate().skip(n) {
-            mask |= 1i32 << k;
-            a.push(self.zero_placeholder(pt));
-        }
-        a.push(self.ir.add_expr(IrExpr::Const(IrConst::Int(mask))));
-        a.push(self.ir.add_expr(IrExpr::Const(IrConst::Null)));
-        let dcall = self.ir.add_expr(IrExpr::Call {
-            callee: Callee::LocalDefault(fid),
-            dispatch_receiver: None,
-            args: a,
-        });
+        let dcall = if vararg_tail {
+            // A single dropped trailing `vararg`: pass an EMPTY array of its element type and call the
+            // target directly (no `$default`). `target_params[m-1]` is the vararg's ARRAY type.
+            let zero = self.ir.add_expr(IrExpr::Const(IrConst::Int(0)));
+            a.push(self.ir.add_expr(IrExpr::NewArray {
+                array_type: ty_to_ir(target_params[m - 1]),
+                size: zero,
+            }));
+            self.ir.add_expr(IrExpr::Call {
+                callee: Callee::Local(fid),
+                dispatch_receiver: None,
+                args: a,
+            })
+        } else {
+            // Trailing DEFAULTS: `foo$default(retained…, <placeholder>…, mask, null)` — each dropped slot
+            // gets a zero placeholder and its mask bit; the marker is null.
+            if !crate::ir::toplevel_default_stub_safe(&self.ir, fid) {
+                return None;
+            }
+            let mut mask: i32 = 0;
+            for (k, &pt) in target_params.iter().enumerate().skip(n) {
+                mask |= 1i32 << k;
+                a.push(self.zero_placeholder(pt));
+            }
+            a.push(self.ir.add_expr(IrExpr::Const(IrConst::Int(mask))));
+            a.push(self.ir.add_expr(IrExpr::Const(IrConst::Null)));
+            self.ir.add_expr(IrExpr::Call {
+                callee: Callee::LocalDefault(fid),
+                dispatch_receiver: None,
+                args: a,
+            })
+        };
         let ret_e = self.ir.add_expr(IrExpr::Return(Some(dcall)));
         let body = self.ir.add_expr(IrExpr::Block {
             stmts: vec![ret_e],
@@ -14632,9 +14649,17 @@ impl<'a> Lower<'a> {
                     target_params,
                     adapted_params,
                     ret,
+                    vararg_tail,
                 }) = self.info.expr_lowers.get(&e).cloned()
                 {
-                    return self.lower_adapted_ref(e, &tname, &target_params, &adapted_params, ret);
+                    return self.lower_adapted_ref(
+                        e,
+                        &tname,
+                        &target_params,
+                        &adapted_params,
+                        ret,
+                        vararg_tail,
+                    );
                 }
                 // A class literal (the checker recorded bound-vs-unbound). UNBOUND `T::class` → a `Class`
                 // constant; BOUND `expr::class` → `expr.getClass()` (evaluated once).

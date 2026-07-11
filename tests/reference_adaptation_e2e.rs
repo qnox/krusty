@@ -16,3 +16,13 @@ fn adapt_trailing_default_argument() {
         fun box(): String = call(::foo, \"O\")\n";
     assert_eq!(run(SRC).expect("adapt trailing default"), "OK");
 }
+
+// A trailing `vararg` is dropped: the adapter passes an empty array.
+#[test]
+fn adapt_trailing_empty_vararg() {
+    const SRC: &str = "fun foo(x: String, vararg y: String): String =\n\
+        \x20 if (y.isEmpty()) x + \"K\" else \"Fail\"\n\
+        fun call(f: (String) -> String, x: String): String = f(x)\n\
+        fun box(): String = call(::foo, \"O\")\n";
+    assert_eq!(run(SRC).expect("adapt trailing vararg"), "OK");
+}
