@@ -2163,6 +2163,54 @@ fn emit_interface_class(
             emit_default_stub(ir, fid, &c.fq_name, facade, &mut cw, defaults, bodies, true);
         }
     }
+    // A companion `val` on the interface is a `public static final` field ON THE INTERFACE (interface
+    // fields are implicitly static final): a `const val` as a `ConstantValue`, a non-const `val`
+    // initialized in the interface's `<clinit>`. Read as `getstatic C.X`.
+    for s in ir
+        .statics
+        .iter()
+        .filter(|s| s.owner.as_deref() == Some(c.fq_name.as_str()))
+    {
+        let desc = ir_type_desc(&s.ty);
+        if let Some(cv) = const_value_idx(ir, s.init, &mut cw) {
+            cw.add_field_const(0x0019, &s.name, &desc, cv); // PUBLIC | STATIC | FINAL
+        } else {
+            cw.add_field(0x0019, &s.name, &desc);
+        }
+    }
+    let clinit_statics: Vec<&crate::ir::IrStatic> = ir
+        .statics
+        .iter()
+        .filter(|s| {
+            s.owner.as_deref() == Some(c.fq_name.as_str())
+                && !(s.is_const && const_value_idx_peek(ir, s.init))
+        })
+        .collect();
+    if !clinit_statics.is_empty() {
+        let mut e = Emitter {
+            ir,
+            cw: &mut cw,
+            bodies,
+            owner: c.fq_name.clone(),
+            facade: facade.to_string(),
+            slots: HashMap::new(),
+            var_types: collect_var_types(ir),
+            next_slot: 0,
+            ret: Ty::Unit,
+            loop_stack: Vec::new(),
+        };
+        let mut clinit = CodeBuilder::new(0);
+        for s in &clinit_statics {
+            e.emit_value(s.init, &mut clinit);
+            let jt = ir_ty_to_jvm(&s.ty);
+            let fref = e.cw.fieldref(&c.fq_name, &s.name, &type_descriptor(jt));
+            clinit.putstatic(fref, slot_words(jt) as i32);
+        }
+        clinit.ret_void();
+        clinit.ensure_locals(e.next_slot);
+        clinit.link();
+        e.cw.add_method(0x0008, "<clinit>", "()V", &clinit);
+    }
     if let Some(m) = class_meta {
         cw.set_kotlin_metadata(m.k, &m.mv, m.xi, &m.d1, &m.d2);
     }

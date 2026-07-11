@@ -2166,7 +2166,7 @@ impl<'a> Parser<'a> {
                     // `companion object [Name] { fun…; val… }` — members become static on this class.
                     TokenKind::Ident
                         if self.text() == "companion"
-                            && self.t.get(self.i + 1).map_or(false, |t| {
+                            && self.t.get(self.i + 1).is_some_and(|t| {
                                 t.kind == TokenKind::Ident && t.text(self.src) == "object"
                             }) =>
                     {
@@ -2469,6 +2469,11 @@ impl<'a> Parser<'a> {
         let (supertypes, _base, _base_args, _, _) = self.parse_supertypes();
         let mut methods = Vec::new();
         let mut body_props: Vec<PropDecl> = Vec::new();
+        let mut companion_methods: Vec<FunDecl> = Vec::new();
+        let mut companion_props: Vec<PropDecl> = Vec::new();
+        let mut companion_base: Option<String> = None;
+        let mut companion_base_args: Vec<ExprId> = Vec::new();
+        let mut companion_supertypes: Vec<String> = Vec::new();
         self.skip_newlines();
         if self.at(TokenKind::LBrace) {
             self.bump();
@@ -2526,6 +2531,21 @@ impl<'a> Parser<'a> {
                             self.bump();
                         }
                     }
+                    // `interface I { companion object { … } }` — same as a class companion.
+                    TokenKind::Ident
+                        if self.text() == "companion"
+                            && self.t.get(self.i + 1).is_some_and(|t| {
+                                t.kind == TokenKind::Ident && t.text(self.src) == "object"
+                            }) =>
+                    {
+                        self.parse_companion(
+                            &mut companion_methods,
+                            &mut companion_props,
+                            &mut companion_base,
+                            &mut companion_base_args,
+                            &mut companion_supertypes,
+                        );
+                    }
                     _ => {
                         self.diags.error(self.tok().span, "v0: interface bodies support abstract 'fun' and 'val'/'var' declarations");
                         self.bump();
@@ -2544,11 +2564,11 @@ impl<'a> Parser<'a> {
             type_param_bounds: Vec::new(),
             props: Vec::new(),
             methods,
-            companion_methods: Vec::new(),
-            companion_props: Vec::new(),
-            companion_base: None,
-            companion_base_args: Vec::new(),
-            companion_supertypes: Vec::new(),
+            companion_methods,
+            companion_props,
+            companion_base,
+            companion_base_args,
+            companion_supertypes,
             body_props,
             init_order: Vec::new(),
             is_data: false,
