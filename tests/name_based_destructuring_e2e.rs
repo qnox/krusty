@@ -102,3 +102,33 @@ fn name_based_reorder() {
         }\n";
     assert_eq!(run_stdlib(SRC).expect("name-based reorder"), "OK");
 }
+
+#[test]
+fn name_based_for_loop() {
+    const SRC: &str =
+        "// LANGUAGE: +NameBasedDestructuring, +EnableNameBasedDestructuringShortForm\n\
+        data class P(val a: Int, val b: Int)\n\
+        fun box(): String {\n\
+        \x20 var sum = 0\n\
+        \x20 for ((y = b, x = a) in listOf(P(1, 2), P(3, 4))) {\n\
+        \x20   sum += x * 10 + y\n\
+        \x20 }\n\
+        \x20 return if (sum == 12 + 34) \"OK\" else \"fail: \" + sum\n\
+        }\n";
+    assert_eq!(run_stdlib(SRC).expect("name-based for loop"), "OK");
+}
+
+#[test]
+fn name_based_for_withindex_library() {
+    // A LIBRARY receiver (`IndexedValue` from `withIndex()`) read by property name.
+    const SRC: &str =
+        "// LANGUAGE: +NameBasedDestructuring, +EnableNameBasedDestructuringShortForm\n\
+        fun box(): String {\n\
+        \x20 val s = StringBuilder()\n\
+        \x20 for ((i = index, v = value) in listOf(\"a\", \"b\").withIndex()) {\n\
+        \x20   s.append(\"\" + i + v)\n\
+        \x20 }\n\
+        \x20 return if (s.toString() == \"0a1b\") \"OK\" else \"fail: \" + s\n\
+        }\n";
+    assert_eq!(run_stdlib(SRC).expect("name-based withIndex"), "OK");
+}
