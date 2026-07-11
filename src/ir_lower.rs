@@ -8569,6 +8569,68 @@ impl<'a> Lower<'a> {
         }))
     }
 
+    /// Lower an ADAPTED top-level function reference (`::foo` where `foo` has trailing default parameters,
+    /// passed where a shorter function type is expected). Synthesize a static adapter of the expected
+    /// arity whose body calls `foo`'s `$default` stub — filling the retained parameters, a zero
+    /// placeholder + mask bit per dropped default, and the `null` marker — then wrap it in the same
+    /// `Lambda`/metafactory closure a plain `::foo` produces. `None` (skip) if the `$default` stub isn't
+    /// available for `foo`.
+    fn lower_adapted_ref(
+        &mut self,
+        e: AstExprId,
+        name: &str,
+        target_params: &[Ty],
+        adapted_params: &[Ty],
+        ret: Ty,
+    ) -> Option<u32> {
+        let (n, m) = (adapted_params.len(), target_params.len());
+        let fid = *self
+            .fun_ids
+            .get(&(name.to_string(), target_params.to_vec()))?;
+        if !crate::ir::toplevel_default_stub_safe(&self.ir, fid) {
+            return None;
+        }
+        // `foo$default(p0..p_{N-1}, <placeholder>…, mask, null)`: the adapter's own N params fill the
+        // retained slots; each dropped slot gets a zero placeholder and its mask bit; the marker is null.
+        let mut a: Vec<u32> = Vec::with_capacity(m + 2);
+        for k in 0..n {
+            a.push(self.ir.add_expr(IrExpr::GetValue(k as u32)));
+        }
+        let mut mask: i32 = 0;
+        for (k, &pt) in target_params.iter().enumerate().skip(n) {
+            mask |= 1i32 << k;
+            a.push(self.zero_placeholder(pt));
+        }
+        a.push(self.ir.add_expr(IrExpr::Const(IrConst::Int(mask))));
+        a.push(self.ir.add_expr(IrExpr::Const(IrConst::Null)));
+        let dcall = self.ir.add_expr(IrExpr::Call {
+            callee: Callee::LocalDefault(fid),
+            dispatch_receiver: None,
+            args: a,
+        });
+        let ret_e = self.ir.add_expr(IrExpr::Return(Some(dcall)));
+        let body = self.ir.add_expr(IrExpr::Block {
+            stmts: vec![ret_e],
+            value: None,
+        });
+        let adapter_fid = self.ir.add_fun(IrFunction {
+            name: format!("{}$adapt${}", self.cur_fn_name, e.0),
+            params: adapted_params.iter().map(|t| ty_to_ir(*t)).collect(),
+            ret: ty_to_ir(ret),
+            body: Some(body),
+            is_static: true,
+            dispatch_receiver: None,
+            param_checks: Vec::new(),
+        });
+        Some(self.ir.add_expr(IrExpr::Lambda {
+            impl_fn: adapter_fid,
+            arity: n as u8,
+            captures: vec![],
+            sam: None,
+            inline_body: None,
+        }))
+    }
+
     /// Lower a top-level property reference `::foo` to a `(Mutable)PropertyReference0Impl` singleton.
     /// The property is backed by a static getter (`getFoo`) — and a setter (`setFoo`) for a `var` — on
     /// the file facade, so the synthesized `get`/`set` dispatch via `invokestatic`. `owner_internal` is
@@ -14562,6 +14624,18 @@ impl<'a> Lower<'a> {
             // `LambdaMetafactory` machinery as a lambda, but the impl method handle points directly at
             // the referenced function (no synthesized body). Bound/object/constructor references bail.
             Expr::CallableRef { receiver, name } => {
+                // An ADAPTED same-file top-level function reference (`::foo` with trailing defaults passed
+                // where a shorter function type is expected): synthesize an arity-matching adapter that
+                // calls `foo`'s `$default` stub.
+                if let Some(ExprLowering::AdaptedRef {
+                    name: tname,
+                    target_params,
+                    adapted_params,
+                    ret,
+                }) = self.info.expr_lowers.get(&e).cloned()
+                {
+                    return self.lower_adapted_ref(e, &tname, &target_params, &adapted_params, ret);
+                }
                 // A class literal (the checker recorded bound-vs-unbound). UNBOUND `T::class` → a `Class`
                 // constant; BOUND `expr::class` → `expr.getClass()` (evaluated once).
                 if name == "class" {
