@@ -28,6 +28,7 @@ pub fn parse_with_features(
         file: File::default(),
         diags,
         name_based_destructuring: features.has("NameBasedDestructuring"),
+        short_form_destructuring: features.has("EnableNameBasedDestructuringShortForm"),
         no_trailing_lambda: false,
         lexical_type_params: Vec::new(),
         lexical_type_param_bounds: Vec::new(),
@@ -514,6 +515,10 @@ struct Parser<'a> {
     diags: &'a mut DiagSink,
     /// `NameBasedDestructuring` language feature: allow square-bracket destructuring (`[a, b]`).
     name_based_destructuring: bool,
+    /// `+EnableNameBasedDestructuringShortForm`: a plain paren entry `(a, b)` binds each variable to
+    /// the RECEIVER PROPERTY of the same name (not `componentN`). An explicit `(a = prop)` still
+    /// renames. Bracket `[a, b]` stays positional.
+    short_form_destructuring: bool,
     /// When set, `parse_postfix` does NOT attach a trailing `{ … }` to a call as a lambda argument —
     /// used where a following `{` belongs to an enclosing construct (a `: I by Impl()` delegate, whose
     /// `{` opens the class body, not a lambda on the delegate call).
@@ -3540,12 +3545,16 @@ impl<'a> Parser<'a> {
                         }
                         // `newName = sourceProp` — the by-name renaming form. This `=` is inside the
                         // destructuring parens/brackets, distinct from the initializer `=` after `)`.
+                        // Under `+EnableNameBasedDestructuringShortForm`, a plain PAREN entry `(a, b)`
+                        // binds each variable to the receiver property of the SAME name.
                         let source = if self.name_based_destructuring && self.eat(TokenKind::Eq) {
                             let src = self.ident_or_error("property name");
                             if self.eat(TokenKind::Colon) {
                                 let _ = self.parse_type();
                             }
                             Some(src)
+                        } else if self.short_form_destructuring && close == TokenKind::RParen {
+                            Some(n.clone())
                         } else {
                             None
                         };
@@ -3842,15 +3851,29 @@ impl<'a> Parser<'a> {
         } else {
             None
         };
-        let destructure: Option<Vec<(String, bool)>> = if let Some(close) = close {
+        let destructure: Option<DestructureEntries> = if let Some(close) = close {
             self.bump();
             let mut entries = Vec::new();
+            // Parallel by-name source properties (`for ((a = prop) in …)`); `None` for a positional entry.
+            let mut source_props: Vec<Option<String>> = Vec::new();
             loop {
                 let n = self.ident_or_error("variable name");
                 if self.eat(TokenKind::Colon) {
                     let _ = self.parse_type();
                 }
+                let source = if self.name_based_destructuring && self.eat(TokenKind::Eq) {
+                    let src = self.ident_or_error("property name");
+                    if self.eat(TokenKind::Colon) {
+                        let _ = self.parse_type();
+                    }
+                    Some(src)
+                } else if self.short_form_destructuring && close == TokenKind::RParen {
+                    Some(n.clone())
+                } else {
+                    None
+                };
                 entries.push((n, false));
+                source_props.push(source);
                 if !self.eat(TokenKind::Comma) {
                     break;
                 }
@@ -3866,7 +3889,7 @@ impl<'a> Parser<'a> {
                     "']'"
                 },
             );
-            Some(entries)
+            Some((entries, source_props))
         } else {
             None
         };
@@ -4177,10 +4200,10 @@ impl<'a> Parser<'a> {
     fn desugar_destructure_body(
         &mut self,
         temp: &str,
-        destructure: Option<Vec<(String, bool)>>,
+        destructure: Option<DestructureEntries>,
         body: ExprId,
     ) -> ExprId {
-        let Some(entries) = destructure else {
+        let Some((entries, source_props)) = destructure else {
             return body;
         };
         let sp = self.file.expr_spans[body.0 as usize];
@@ -4192,6 +4215,11 @@ impl<'a> Parser<'a> {
             },
             sp,
         );
+        if source_props.iter().any(|s| s.is_some()) {
+            self.file
+                .destructure_source_props
+                .insert(dstmt.0, source_props);
+        }
         match self.file.expr(body).clone() {
             Expr::Block { stmts, trailing } => {
                 let mut s2 = vec![dstmt];
@@ -5618,6 +5646,10 @@ fn visibility_of(mods: &[String]) -> crate::types::Visibility {
 /// which would alter parsing/semantics and must remain unsupported. `sealed` is included: it maps
 /// cleanly onto an abstract, open class (see the top-level dispatch), so ignoring its
 /// exhaustiveness aspect never miscompiles.
+/// A parenthesised/bracketed destructuring's variable entries `(name, is_var)` paired with each
+/// entry's optional by-name source property (parallel; `None` = positional `componentN`).
+type DestructureEntries = (Vec<(String, bool)>, Vec<Option<String>>);
+
 /// The array type a `vararg` primary-constructor parameter is exposed as: a primitive element
 /// (`vararg xs: Int`) becomes the unboxed `IntArray`/`LongArray`/… ; any other element becomes the
 /// boxed `Array<elem>`. Matches how a `vararg` function parameter is arrayified.

@@ -11833,7 +11833,20 @@ impl<'a> Checker<'a> {
                         .and_then(|sp| sp.get(idx))
                         .and_then(|o| o.as_ref())
                     {
-                        let pty = internal.and_then(|i| self.lookup_prop(i, prop).map(|(t, _)| t));
+                        // The source property's type: a USER-class field (`lookup_prop`), else a library
+                        // member read through its getter (`IndexedValue.value` → `getValue()`).
+                        let getter = crate::jvm::names::property_getter_name(prop);
+                        let pty = internal
+                            .and_then(|i| self.lookup_prop(i, prop).map(|(t, _)| t))
+                            .or_else(|| {
+                                crate::symbol_resolver::resolve_instance_member(
+                                    &*self.syms.libraries,
+                                    it,
+                                    &getter,
+                                    &[],
+                                )
+                                .map(|m| m.ret)
+                            });
                         match pty {
                             Some(t) => self.declare(name, t, *is_var),
                             None => {

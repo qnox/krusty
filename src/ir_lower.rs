@@ -5246,14 +5246,43 @@ impl<'a> Lower<'a> {
                 .and_then(|o| o.as_ref())
             {
                 let getter = property_getter_name(prop);
-                let (class, index, _, ret) = self.resolve_method(&internal, &getter)?;
-                let call = self.ir.add_expr(IrExpr::MethodCall {
-                    class,
-                    index,
-                    receiver: recv,
-                    args: vec![],
-                });
-                self.bind_destructure_component(name, call, ret, out)?;
+                let (call, log_ty) =
+                    if let Some((class, index, _, ret)) = self.resolve_method(&internal, &getter) {
+                        // A user-class property getter (data class field).
+                        (
+                            self.ir.add_expr(IrExpr::MethodCall {
+                                class,
+                                index,
+                                receiver: recv,
+                                args: vec![],
+                            }),
+                            ret,
+                        )
+                    } else {
+                        // A library member read through its getter (`IndexedValue.value` → `getValue()`).
+                        let m = crate::symbol_resolver::resolve_instance_member(
+                            &*self.syms.libraries,
+                            it_ty,
+                            &getter,
+                            &[],
+                        )?;
+                        let is_iface = self.library_type_is_interface(&internal);
+                        let c = self.ir.add_expr(IrExpr::Call {
+                            callee: Callee::Virtual {
+                                owner: internal.clone(),
+                                name: getter.clone(),
+                                descriptor: m.member.descriptor.clone(),
+                                interface: is_iface,
+                            },
+                            dispatch_receiver: Some(recv),
+                            args: vec![],
+                        });
+                        (
+                            self.coerce_to_static(c, m.ret, m.member.physical_ret),
+                            m.ret,
+                        )
+                    };
+                self.bind_destructure_component(name, call, log_ty, out)?;
                 continue;
             }
             let comp = format!("component{}", idx + 1);
