@@ -8473,6 +8473,115 @@ impl<'a> Lower<'a> {
         }
     }
 
+    /// Lower a BOUND property reference on a LIBRARY-type receiver (`"kotlin"::length`) to a bound
+    /// `PropertyReference0Impl` subclass whose `get()` dispatches the resolved classpath getter
+    /// (`String.length()I`) on the captured receiver. The user-property `lower_prop_ref` needs an IR
+    /// class + a `Name` receiver, so a library owner / arbitrary-expression receiver lands here. Returns
+    /// `None` (clean skip) for a mutable/interface-owner/value-class property or a null-risky receiver.
+    fn lower_bound_library_prop_ref(
+        &mut self,
+        _e: AstExprId,
+        recv: AstExprId,
+        name: &str,
+    ) -> Option<u32> {
+        let rty = self.info.ty(recv);
+        // A user-class receiver is handled by `lower_prop_ref`; only a library receiver falls here.
+        if rty
+            .obj_internal()
+            .is_some_and(|i| self.classes.contains_key(i))
+        {
+            return None;
+        }
+        // Same null-risky-receiver guard as the method-ref path: a captured null would NPE at `get()`.
+        if matches!(rty, Ty::TyParam(..) | Ty::Nullable(..))
+            || rty.kotlin_class_internal() == Some(crate::types::wk::any())
+        {
+            return None;
+        }
+        // Only an AUTHORITATIVE metadata property (not a zero-arg method the getter-guessing fallback
+        // would match) is a property reference — keep in lock-step with the checker's gate.
+        if !self.syms.libraries.member_is_property(rty, name) {
+            return None;
+        }
+        let m = crate::symbol_resolver::resolve_property_member(&*self.syms.libraries, rty, name)?;
+        if m.suspend {
+            return None;
+        }
+        let owner = m.member.owner.clone()?;
+        // The getter is emitted as an `invokevirtual` on the owner (kept in lock-step with the checker's
+        // gate): an INTERFACE owner needs `invokeinterface`; a VALUE-CLASS owner is erased to its
+        // underlying (no such class to dispatch on); a MANGLED getter (`getX-<hash>`) is a value-class-typed
+        // property whose accessor lives on an erased owner. Any of these → skip rather than miscompile.
+        let owner_is_value_class = self
+            .syms
+            .class_by_internal(&owner)
+            .is_some_and(|cs| cs.value_field.is_some());
+        if self.library_type_is_interface(&owner)
+            || owner_is_value_class
+            || m.member.name.contains('-')
+        {
+            return None;
+        }
+        let prop_ty = ty_to_ir(m.ret);
+        let cap = self.expr(recv)?;
+        let synth_fq = class_internal(
+            self.afile,
+            &format!("{}$propref${}${}", self.cur_fn_name, name, self.lambda_seq),
+        );
+        self.lambda_seq += 1;
+        let superclass = self.property_reference_impl(0, false)?.internal;
+        let synth_id = self.ir.add_class(IrClass {
+            fq_name: synth_fq,
+            serial_names: Vec::new(),
+            custom_serializer: None,
+            field_serializers: Vec::new(),
+            contextual_fields: Vec::new(),
+            is_value: false,
+            type_param_bounds: vec![],
+            type_params: Vec::new(),
+            supertypes: vec![],
+            fields: vec![],
+            ctor_param_count: 0,
+            ctor_args: vec![],
+            init_body: None,
+            explicit_param_stores: false,
+            methods: vec![],
+            is_interface: false,
+            is_annotation: false,
+            annotation_impl_of: None,
+            is_sealed: false,
+            is_abstract: false,
+            superclass,
+            super_args: vec![],
+            enum_entries: vec![],
+            enum_entry_of: None,
+            prop_ref: Some(crate::ir::PropRef {
+                owner_internal: owner,
+                prop_name: name.to_string(),
+                getter_name: m.member.name.clone(),
+                prop_ty,
+                bound: true,
+                static_dispatch: false,
+                mutable: false,
+            }),
+            func_ref: None,
+            bridges: vec![],
+            interfaces: vec![],
+            is_object: false,
+            is_companion: false,
+            companion_class: None,
+            secondary_ctors: vec![],
+            has_primary_ctor: true,
+            applied_annotations: Vec::new(),
+            runtime_retained: false,
+        });
+        Some(self.ir.add_expr(IrExpr::New {
+            class: synth_id,
+            args: vec![cap],
+            ctor_params: Some(vec![ty_to_ir(Ty::obj("kotlin/Any"))]),
+        }))
+    }
+
     /// Lower a top-level property reference `::foo` to a `(Mutable)PropertyReference0Impl` singleton.
     /// The property is backed by a static getter (`getFoo`) — and a setter (`setFoo`) for a `var` — on
     /// the file facade, so the synthesized `get`/`set` dispatch via `invokestatic`. `owner_internal` is
@@ -14523,6 +14632,13 @@ impl<'a> Lower<'a> {
                 if let Some(recv) = receiver {
                     if let Some(pr) = self.lower_prop_ref(e, recv, &name) {
                         return Some(pr);
+                    }
+                    // A bound property ref on a LIBRARY receiver (`"kotlin"::length`) — its type is a
+                    // `KProperty0`, not `Ty::Fun`, so it must lower before the function-ref fallthrough.
+                    if !matches!(self.info.ty(e), Ty::Fun(_)) {
+                        if let Some(pr) = self.lower_bound_library_prop_ref(e, recv, &name) {
+                            return Some(pr);
+                        }
                     }
                 }
                 // An unqualified `::m` inside a class binds to the enclosing receiver (`this::m`) — a

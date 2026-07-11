@@ -1261,6 +1261,30 @@ impl SymbolSource for JvmLibraries {
         PropertySet { overloads }
     }
 
+    fn member_is_property(&self, recv: Ty, name: &str) -> bool {
+        // A classpath `@Metadata` property (walks supertypes) — authoritative for Kotlin `.class` types.
+        if !self.property_members(recv, name).overloads.is_empty() {
+            return true;
+        }
+        // A Kotlin BUILTIN property (`CharSequence.length`, `Collection.size`) lives in `.kotlin_builtins`,
+        // not `.class` metadata, and is often declared on a SUPERtype — walk the builtin supertype closure.
+        let Some(internal) = recv.kotlin_class_internal() else {
+            return false;
+        };
+        let mut queue = vec![internal.to_string()];
+        let mut seen = std::collections::HashSet::new();
+        while let Some(cn) = queue.pop() {
+            if !seen.insert(cn.clone()) {
+                continue;
+            }
+            if self.cp.builtin_member_is_property(&cn, name) {
+                return true;
+            }
+            queue.extend(self.cp.builtin_supertypes(&cn));
+        }
+        false
+    }
+
     fn class_is_extensible(&self, internal: &str) -> bool {
         // Only a real, concrete (non-final, non-abstract) non-interface `.class` is a safe superclass to
         // emit a `super(…)` to. A mapped/builtin type (no own `.class`) or a final/abstract/interface

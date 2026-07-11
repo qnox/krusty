@@ -60,6 +60,14 @@ pub trait SymbolSource {
         PropertySet::default()
     }
 
+    /// Whether `name` on `recv` (its type + supertype closure) is declared a PROPERTY rather than a
+    /// function — the authoritative classifier a callable reference needs to choose a `KProperty`
+    /// (`s::length`) over a zero-arg method reference (`it::next`). Both may otherwise resolve to a
+    /// zero-arg readable member, so the getter-guessing resolver cannot tell them apart. Default `false`.
+    fn member_is_property(&self, _recv: Ty, _name: &str) -> bool {
+        false
+    }
+
     /// Whether `internal` names a plain class this source can be used as a SUPERCLASS of an emitted
     /// user class: a concrete (non-`final`, non-`abstract`) non-interface class that actually exists.
     /// A `final` base can't be inherited, an `abstract` base needs abstract-method/bridge synthesis the
@@ -155,6 +163,12 @@ impl SymbolSource for CompositeSource<'_> {
                 .flat_map(|c| c.property_members(recv, name).overloads)
                 .collect(),
         }
+    }
+
+    fn member_is_property(&self, recv: Ty, name: &str) -> bool {
+        self.children
+            .iter()
+            .any(|c| c.member_is_property(recv, name))
     }
 }
 
