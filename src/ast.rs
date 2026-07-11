@@ -504,6 +504,9 @@ pub struct AstEnumEntry {
     pub name: String,
     /// Constructor arguments (`RED(0xFF0000)` → the two arg expr ids); empty for `RED` with no args.
     pub args: Vec<ExprId>,
+    /// Per-argument name for a NAMED argument (`RED(rgb = 0xFF0000)`), parallel to `args`; `None` for
+    /// a positional argument. Lets the lowering reorder named/omitted arguments to constructor order.
+    pub arg_names: Vec<Option<String>>,
     /// Per-entry class-body method overrides (`RED { override fun m() = … }`) — the anonymous subclass
     /// kotlinc emits as `Enum$RED`. Empty when the entry has no body.
     pub methods: Vec<FunDecl>,

@@ -2855,35 +2855,48 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                         .iter()
                         .map(|f| f.ty.clone())
                         .collect();
-                    // Constructor-parameter defaults, aligned to `field_tys` (which are the PROPERTY
+                    // Constructor property params (name + default), aligned to `field_tys` (the PROPERTY
                     // params, in order). Filtering to property params keeps the index in step with the
-                    // fields even if a non-property ctor param is interleaved.
-                    let prop_defaults: Vec<Option<AstExprId>> = c
+                    // fields even if a non-property ctor param is interleaved. Names drive named-argument
+                    // reordering; defaults fill omitted arguments.
+                    let prop_params: Vec<(&str, Option<AstExprId>)> = c
                         .props
                         .iter()
                         .filter(|p| p.is_property)
-                        .map(|p| p.default)
+                        .map(|p| (p.name.as_str(), p.default))
                         .collect();
                     for (ei, entry) in c.enum_entries.iter().enumerate() {
                         lo.scope.clear();
                         lo.next_value = 0;
                         lo.cur_class = None;
+                        // Resolve the entry's (possibly named / reordered / omitted) arguments to one
+                        // expression per property field. A named argument goes to its matching parameter
+                        // position; positional arguments fill in declaration order; the rest take their
+                        // declared default. Any argument that can't be placed (unknown name, duplicate,
+                        // over-arity) bails the whole file rather than miscompiling.
+                        let mut positional: Vec<Option<AstExprId>> = vec![None; field_tys.len()];
+                        let mut next_pos = 0usize;
+                        for (j, &a) in entry.args.iter().enumerate() {
+                            let idx = match entry.arg_names.get(j).and_then(|n| n.as_ref()) {
+                                Some(name) => prop_params.iter().position(|(pn, _)| pn == name)?,
+                                None => {
+                                    let p = next_pos;
+                                    next_pos += 1;
+                                    p
+                                }
+                            };
+                            if idx >= positional.len() || positional[idx].is_some() {
+                                return None;
+                            }
+                            positional[idx] = Some(a);
+                        }
                         let mut lowered = Vec::new();
                         for (i, ft) in field_tys.iter().enumerate() {
-                            // Use the entry's explicit argument, or fall back to the constructor
-                            // parameter's default (`enum class C(val x: Int = 1) { E }`): every entry
-                            // that omits a trailing argument constructs with the declared default.
-                            let arg = entry
-                                .args
-                                .get(i)
-                                .copied()
-                                .or_else(|| prop_defaults.get(i).copied().flatten())?;
+                            // The placed argument, or the parameter's declared default.
+                            let arg =
+                                positional[i].or_else(|| prop_params.get(i).and_then(|p| p.1))?;
                             // Branchy entry args (`X(1 == 1)`) are handled by the `<clinit>` spill.
                             lowered.push(lo.lower_arg(arg, ft)?);
-                        }
-                        // Reject an entry with MORE args than the ctor has parameters.
-                        if entry.args.len() > ctor_count {
-                            return None;
                         }
                         lo.ir.classes[class_id as usize].enum_entries[ei].args = lowered;
                     }

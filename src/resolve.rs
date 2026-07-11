@@ -4383,14 +4383,27 @@ pub fn check_file(file: &File, syms: &mut SymbolTable, diags: &mut DiagSink) -> 
                 if cl.is_enum() {
                     let ctor_tys: Vec<Ty> = cl.props.iter().map(|p| c.resolve_ty(&p.ty)).collect();
                     for entry in &cl.enum_entries {
-                        for (a, expected_ty) in entry.args.iter().zip(&ctor_tys) {
+                        // A NAMED argument (`C(b = "b")`) is checked against the type of the parameter it
+                        // names, not the one at its textual position; positional arguments keep order.
+                        let mut next_pos = 0usize;
+                        for (j, a) in entry.args.iter().enumerate() {
+                            let idx = match entry.arg_names.get(j).and_then(|n| n.as_ref()) {
+                                Some(name) => cl.props.iter().position(|p| &p.name == name),
+                                None => {
+                                    let p = next_pos;
+                                    next_pos += 1;
+                                    Some(p)
+                                }
+                            };
                             let at = c.expr(*a);
-                            c.expect_assignable(
-                                *expected_ty,
-                                at,
-                                c.span(*a),
-                                "enum entry argument",
-                            );
+                            if let Some(expected_ty) = idx.and_then(|i| ctor_tys.get(i)) {
+                                c.expect_assignable(
+                                    *expected_ty,
+                                    at,
+                                    c.span(*a),
+                                    "enum entry argument",
+                                );
+                            }
                         }
                     }
                 }
