@@ -416,6 +416,7 @@ fn rewrite_anon_captures(file: &mut File) {
                 c.props.push(PropParam {
                     name,
                     ty,
+                    is_vararg: false,
                     is_var: false,
                     is_property: true,
                     default: None,
@@ -1418,7 +1419,8 @@ impl<'a> Parser<'a> {
         if self.eat(TokenKind::LParen) {
             self.skip_newlines();
             while !self.at(TokenKind::RParen) && !self.at(TokenKind::Eof) {
-                self.skip_decl_prefix();
+                let epmods = self.skip_decl_prefix();
+                let is_vararg = epmods.iter().any(|m| m == "vararg");
                 let is_property = self.at(TokenKind::KwVal) || self.at(TokenKind::KwVar);
                 let is_var = self.at(TokenKind::KwVar);
                 if is_property {
@@ -1427,6 +1429,11 @@ impl<'a> Parser<'a> {
                 let pname = self.ident_or_error("parameter name");
                 self.expect(TokenKind::Colon, "':'");
                 let ty = self.parse_type();
+                let ty = if is_vararg {
+                    vararg_array_typeref(ty)
+                } else {
+                    ty
+                };
                 // A default value (`enum class C(val x: Int = 1)`) — same as a regular class ctor param;
                 // each enum entry that omits the argument gets it at its construction site.
                 let default = if self.eat(TokenKind::Eq) {
@@ -1438,6 +1445,7 @@ impl<'a> Parser<'a> {
                 props.push(PropParam {
                     name: pname,
                     ty,
+                    is_vararg,
                     is_var,
                     is_property,
                     default,
@@ -2026,15 +2034,17 @@ impl<'a> Parser<'a> {
             while !self.at(TokenKind::RParen) && !self.at(TokenKind::Eof) {
                 let mut pannos = Vec::new();
                 let mut pannos_args = Vec::new();
+                let mut cpmods = Vec::new();
                 if self.at(TokenKind::At)
                     || (self.at(TokenKind::Ident)
                         && is_modifier(self.text())
                         && self.text() != "value")
                 {
-                    self.skip_decl_prefix(); // `private val x`, `@Anno val y`, ...
+                    cpmods = self.skip_decl_prefix(); // `private val x`, `@Anno val y`, `vararg xs`
                     pannos = self.take_pending_annotations();
                     pannos_args = self.take_pending_annotation_args();
                 }
+                let is_vararg = cpmods.iter().any(|m| m == "vararg");
                 let (is_property, is_var) = match self.kind() {
                     TokenKind::KwVal => {
                         self.bump();
@@ -2049,6 +2059,11 @@ impl<'a> Parser<'a> {
                 let pname = self.ident_or_error("parameter name");
                 self.expect(TokenKind::Colon, "':'");
                 let ty = self.parse_type();
+                let ty = if is_vararg {
+                    vararg_array_typeref(ty)
+                } else {
+                    ty
+                };
                 let default = if self.eat(TokenKind::Eq) {
                     self.skip_newlines();
                     Some(self.parse_expr())
@@ -2058,6 +2073,7 @@ impl<'a> Parser<'a> {
                 props.push(PropParam {
                     name: pname,
                     ty,
+                    is_vararg,
                     is_var,
                     is_property,
                     default,
@@ -5580,6 +5596,50 @@ fn visibility_of(mods: &[String]) -> crate::types::Visibility {
 /// which would alter parsing/semantics and must remain unsupported. `sealed` is included: it maps
 /// cleanly onto an abstract, open class (see the top-level dispatch), so ignoring its
 /// exhaustiveness aspect never miscompiles.
+/// The array type a `vararg` primary-constructor parameter is exposed as: a primitive element
+/// (`vararg xs: Int`) becomes the unboxed `IntArray`/`LongArray`/… ; any other element becomes the
+/// boxed `Array<elem>`. Matches how a `vararg` function parameter is arrayified.
+fn vararg_array_typeref(elem: TypeRef) -> TypeRef {
+    let prim = !elem.nullable
+        && matches!(
+            elem.name.as_str(),
+            "Int"
+                | "Long"
+                | "Short"
+                | "Byte"
+                | "Char"
+                | "Boolean"
+                | "Double"
+                | "Float"
+                | "UInt"
+                | "ULong"
+        );
+    let span = elem.span;
+    if prim {
+        TypeRef {
+            name: format!("{}Array", elem.name),
+            nullable: false,
+            arg: None,
+            targs: Vec::new(),
+            span,
+            fun_params: Vec::new(),
+            fun_has_receiver: false,
+            fun_suspend: false,
+        }
+    } else {
+        TypeRef {
+            name: "Array".to_string(),
+            nullable: false,
+            arg: Some(Box::new(elem)),
+            targs: Vec::new(),
+            span,
+            fun_params: Vec::new(),
+            fun_has_receiver: false,
+            fun_suspend: false,
+        }
+    }
+}
+
 fn is_modifier(text: &str) -> bool {
     // NOTE: `external` is deliberately excluded — ignoring it (no native body) would *miscompile*
     // rather than skip. `tailrec` IS recognized: the lowerer rewrites the tail self-calls into a loop

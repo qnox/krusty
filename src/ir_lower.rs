@@ -2859,11 +2859,11 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     // params, in order). Filtering to property params keeps the index in step with the
                     // fields even if a non-property ctor param is interleaved. Names drive named-argument
                     // reordering; defaults fill omitted arguments.
-                    let prop_params: Vec<(&str, Option<AstExprId>)> = c
+                    let prop_params: Vec<(&str, Option<AstExprId>, bool)> = c
                         .props
                         .iter()
                         .filter(|p| p.is_property)
-                        .map(|p| (p.name.as_str(), p.default))
+                        .map(|p| (p.name.as_str(), p.default, p.is_vararg))
                         .collect();
                     for (ei, entry) in c.enum_entries.iter().enumerate() {
                         lo.scope.clear();
@@ -2878,7 +2878,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                         let mut next_pos = 0usize;
                         for (j, &a) in entry.args.iter().enumerate() {
                             let idx = match entry.arg_names.get(j).and_then(|n| n.as_ref()) {
-                                Some(name) => prop_params.iter().position(|(pn, _)| pn == name)?,
+                                Some(name) => prop_params.iter().position(|(pn, ..)| pn == name)?,
                                 None => {
                                     let p = next_pos;
                                     next_pos += 1;
@@ -2892,11 +2892,22 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                         }
                         let mut lowered = Vec::new();
                         for (i, ft) in field_tys.iter().enumerate() {
-                            // The placed argument, or the parameter's declared default.
-                            let arg =
-                                positional[i].or_else(|| prop_params.get(i).and_then(|p| p.1))?;
-                            // Branchy entry args (`X(1 == 1)`) are handled by the `<clinit>` spill.
-                            lowered.push(lo.lower_arg(arg, ft)?);
+                            // The placed argument, or the parameter's declared default. An omitted
+                            // `vararg` parameter constructs an empty array of its element type.
+                            match positional[i].or_else(|| prop_params.get(i).and_then(|p| p.1)) {
+                                Some(arg) => {
+                                    // Branchy entry args (`X(1 == 1)`) handled by the `<clinit>` spill.
+                                    lowered.push(lo.lower_arg(arg, ft)?);
+                                }
+                                None if prop_params.get(i).is_some_and(|p| p.2) => {
+                                    let zero = lo.ir.add_expr(IrExpr::Const(IrConst::Int(0)));
+                                    lowered.push(lo.ir.add_expr(IrExpr::NewArray {
+                                        array_type: ty_to_ir(*ft),
+                                        size: zero,
+                                    }));
+                                }
+                                None => return None,
+                            }
                         }
                         lo.ir.classes[class_id as usize].enum_entries[ei].args = lowered;
                     }

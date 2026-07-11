@@ -479,6 +479,9 @@ pub struct FunDecl {
 pub struct PropParam {
     pub name: String,
     pub ty: TypeRef,
+    /// `true` for a `vararg` primary-constructor parameter — its declared element type `ty` is exposed
+    /// as `Array<ty>` (a backing field/property of the array type); callers pack trailing arguments.
+    pub is_vararg: bool,
     pub is_var: bool,
     /// `true` for a `val`/`var` parameter (a property → backing field + accessor); `false` for a
     /// plain constructor parameter (in scope for `init`/body-property initializers, but not a field).
