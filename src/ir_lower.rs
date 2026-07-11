@@ -17528,55 +17528,75 @@ impl<'a> Lower<'a> {
                     // `method_of`, else a classpath class via `resolve_instance`).
                     if matches!(self.afile.expr(receiver), Expr::Name(rn) if rn == "super") {
                         let cur = self.cur_class.clone()?;
-                        let sup = self
+                        let cur_id = self.classes.get(&cur)?.id as usize;
+                        // A `super.f()` inside a `@JvmInline value class` calls through the unboxed
+                        // receiver, which invokespecial can't target — not modeled (value classes are
+                        // handled by the dedicated pass); skip rather than emit a verify error.
+                        if self.ir.classes.get(cur_id).is_some_and(|c| c.is_value) {
+                            return None;
+                        }
+                        let sup_opt = self
                             .classes
                             .get(&cur)
-                            .and_then(|ci| ci.super_internal.clone())?;
+                            .and_then(|ci| ci.super_internal.clone());
                         let this = self.ir.add_expr(IrExpr::GetValue(0));
                         let arg_tys = self.arg_tys(&args);
-                        // The concrete `super.f()` target: the SUPERCLASS's method — unless that method is
-                        // ABSTRACT (a diamond `class C : AbstractBase(), Iface` where `Base.f` is abstract and
-                        // `Iface.f` is a default). Then dispatch to the concrete superinterface DEFAULT via
-                        // `invokespecial` on the interface (else `invokespecial AbstractBase.f` → AME).
-                        let (owner, interface, params, descriptor) = if !self
-                            .class_method_is_abstract(&sup, &name)
-                        {
-                            let (params, descriptor) =
-                                if let Some(sig) = self.syms.method_of(&sup, &name) {
-                                    (
+                        // The concrete `super.f()` target: the SUPERCLASS's method when it exists and is
+                        // concrete; otherwise a superinterface DEFAULT (`class C : I` with an interface
+                        // default `f`, or a diamond `class C : AbstractBase(), Iface` where `Base.f` is
+                        // abstract). Emit `invokespecial <owner>.f` — on the class or on the interface.
+                        let superclass_target = match &sup_opt {
+                            Some(sup) if !self.class_method_is_abstract(sup, &name) => {
+                                if let Some(sig) = self.syms.method_of(sup, &name) {
+                                    Some((
+                                        sup.clone(),
+                                        false,
                                         sig.params.clone(),
                                         self.syms
                                             .libraries
                                             .method_descriptor(&sig.params, sig.ret)?,
-                                    )
-                                } else if let Some(m) = crate::symbol_resolver::resolve_instance(
-                                    &*self.syms.libraries,
-                                    &sup,
-                                    &name,
-                                    &arg_tys,
-                                ) {
-                                    (m.params.clone(), m.descriptor.clone())
+                                    ))
                                 } else {
+                                    crate::symbol_resolver::resolve_instance(
+                                        &*self.syms.libraries,
+                                        sup,
+                                        &name,
+                                        &arg_tys,
+                                    )
+                                    .map(|m| {
+                                        (sup.clone(), false, m.params.clone(), m.descriptor.clone())
+                                    })
+                                }
+                            }
+                            _ => None,
+                        };
+                        let (owner, interface, params, descriptor) = match superclass_target {
+                            Some(t) => t,
+                            None => {
+                                // A concrete interface DEFAULT for `name` among the class's interfaces.
+                                // With MORE than one, `super.f()` is ambiguous and needs the explicit
+                                // `super<T>.f()` type qualifier (which krusty doesn't yet resolve) — bail
+                                // rather than pick one arbitrarily and miscompile.
+                                let default_ifaces: Vec<String> = self
+                                    .ir
+                                    .classes
+                                    .get(cur_id)?
+                                    .interfaces
+                                    .iter()
+                                    .filter(|itf| self.iface_method_is_default(itf, &name))
+                                    .cloned()
+                                    .collect();
+                                let [iface] = default_ifaces.as_slice() else {
                                     return None;
                                 };
-                            (sup.clone(), false, params, descriptor)
-                        } else {
-                            // Find a concrete interface DEFAULT for `name` among the current class's
-                            // interfaces (transitively). Emit `invokespecial <iface>.name`.
-                            let iface = self
-                                .ir
-                                .classes
-                                .get(self.classes.get(&cur)?.id as usize)?
-                                .interfaces
-                                .iter()
-                                .find(|itf| self.iface_method_is_default(itf, &name))
-                                .cloned()?;
-                            let sig = self.syms.method_of(&iface, &name)?;
-                            let descriptor = self
-                                .syms
-                                .libraries
-                                .method_descriptor(&sig.params, sig.ret)?;
-                            (iface, true, sig.params.clone(), descriptor)
+                                let iface = iface.clone();
+                                let sig = self.syms.method_of(&iface, &name)?;
+                                let descriptor = self
+                                    .syms
+                                    .libraries
+                                    .method_descriptor(&sig.params, sig.ret)?;
+                                (iface, true, sig.params.clone(), descriptor)
+                            }
                         };
                         if params.len() != args.len() {
                             return None;

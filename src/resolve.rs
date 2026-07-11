@@ -9534,6 +9534,25 @@ impl<'a> Checker<'a> {
                                 return m.ret;
                             }
                         }
+                        // `super.foo()` to an INTERFACE DEFAULT method: a class `C : I` with `super.foo()`
+                        // dispatches to `I`'s default `foo`. Resolve across the class's superinterfaces —
+                        // but only when EXACTLY ONE provides the method (matching the lowerer): more than
+                        // one needs the explicit `super<T>.foo()` qualifier krusty doesn't resolve.
+                        let ifaces: Vec<String> = self
+                            .syms
+                            .class_by_internal(internal)
+                            .map(|c| c.interfaces.clone())
+                            .unwrap_or_default();
+                        let matches: Vec<Signature> = ifaces
+                            .iter()
+                            .filter_map(|iface| self.syms.method_of(iface, &name))
+                            .collect();
+                        if let [sig] = matches.as_slice() {
+                            for (i, (p, a)) in sig.params.iter().zip(&arg_tys).enumerate() {
+                                self.expect_assignable(*p, *a, self.span(args[i]), "argument");
+                            }
+                            return sig.ret;
+                        }
                     }
                     self.diags
                         .error(span, format!("krusty: unresolved super method '{name}'"));
