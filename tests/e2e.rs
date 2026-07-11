@@ -28,6 +28,8 @@ mod backing_field_accessor_e2e;
 mod backtick_identifier_e2e;
 #[path = "bound_expr_ref_e2e.rs"]
 mod bound_expr_ref_e2e;
+#[path = "bound_library_ref_e2e.rs"]
+mod bound_library_ref_e2e;
 #[path = "bounded_type_param_e2e.rs"]
 mod bounded_type_param_e2e;
 #[path = "boxed_array_construction_e2e.rs"]

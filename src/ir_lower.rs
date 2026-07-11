@@ -8819,9 +8819,57 @@ impl<'a> Lower<'a> {
                 inline_body: None,
             }));
         }
+        // Bound member reference on a LIBRARY-type receiver (`"KOTLIN"::get`): the invoke dispatches the
+        // resolved classpath instance method (`java/lang/String.charAt(I)C`) on the captured receiver — a
+        // `VirtualBound` `FunctionReferenceImpl` (real reference equality). No IR impl is synthesized; the
+        // physical target's owner/name/interface come straight from the resolved member. Applies when the
+        // receiver is NOT a user IR class (a builtin/primitive/library type, or an `Obj` with no user
+        // method of this name) — those go through the synthesized-impl path below.
+        let user_method = rty
+            .obj_internal()
+            .filter(|internal| self.resolve_method(internal, name).is_some())
+            .map(|s| s.to_string());
+        if user_method.is_none() {
+            // A null-risky receiver (type parameter / nullable / bare erased `Any`) may be `null`;
+            // kotlinc null-guards `toString`/`equals`/`hashCode` on those (`null::toString` → "null"),
+            // so a direct `invokevirtual` on the captured null would NPE. Skip → clean file skip. This is
+            // the SAME predicate the checker applies (kept in lock-step); enforced here too because a
+            // `t::toString` (Name receiver) reaches this path only after `lower_method_ref` bails on the
+            // erased `kotlin/Any` receiver, and `resolve_instance_ref`'s Object-owner reject is a further
+            // backstop for members inherited from `Any`.
+            if matches!(rty, Ty::TyParam(..) | Ty::Nullable(..))
+                || rty.kotlin_class_internal() == Some(crate::types::wk::any())
+            {
+                return None;
+            }
+            let m = crate::symbol_resolver::resolve_instance_ref(&*self.syms.libraries, rty, name)?;
+            if m.suspend {
+                return None;
+            }
+            let owner = m.owner.clone()?;
+            let call_interface = self.library_type_is_interface(&owner);
+            let cap = self.expr(recv)?;
+            let param_tys = tys_to_ir(params);
+            return self.make_func_ref(
+                e.0,
+                true,
+                params.len() as u8,
+                owner.clone(),
+                m.name.clone(),
+                0,
+                crate::ir::FrDispatch::VirtualBound,
+                owner,
+                m.physical_name.clone().unwrap_or(m.name),
+                call_interface,
+                param_tys,
+                ty_to_ir(ret),
+                Some(cap),
+                None,
+            );
+        }
         // Bound member reference on a user-class receiver: synthesize `(recv, args…) -> recv.name(args…)`
-        // and capture the receiver. (Library-type members aren't IR classes → `resolve_method` fails.)
-        let internal = rty.obj_internal()?.to_string();
+        // and capture the receiver.
+        let internal = user_method.expect("user method internal");
         let (class_id, index, target_fid, _ret) = self.resolve_method(&internal, name)?;
         // The synthesized impl lives in a SEPARATE reference class; a private target would be an illegal
         // `invokespecial` from there. Target the public `access$name` accessor instead (an ordinary
