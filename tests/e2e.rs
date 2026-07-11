@@ -618,6 +618,8 @@ mod value_class_map_key_e2e;
 mod var_extension_property_e2e;
 #[path = "vararg_e2e.rs"]
 mod vararg_e2e;
+#[path = "when_branch_if_no_else_e2e.rs"]
+mod when_branch_if_no_else_e2e;
 #[path = "when_multiple_else_check_e2e.rs"]
 mod when_multiple_else_check_e2e;
 #[path = "when_nothing_arm_e2e.rs"]
