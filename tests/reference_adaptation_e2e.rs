@@ -82,3 +82,23 @@ fn adapt_default_and_vararg_to_unit() {
         fun box(): String { bar(::foo); return if (log == \"K0\") \"OK\" else \"Fail: $log\" }\n";
     assert_eq!(run(SRC).expect("adapt default+vararg to Unit"), "OK");
 }
+
+// Vararg COLLECTION: a reference to `of(vararg args)` adapted to a fixed-arity function type — the
+// extra parameters are collected into the vararg array.
+#[test]
+fn adapt_vararg_collection() {
+    const SRC: &str =
+        "fun of(vararg args: Any): String = args[0].toString() + args[1].toString()\n\
+        fun foo(b: (Any, Any) -> String): String = b(\"O\", \"K\")\n\
+        fun box(): String = foo(::of)\n";
+    assert_eq!(run(SRC).expect("vararg collection"), "OK");
+}
+
+// Vararg collection with PRIMITIVE collected arguments: each is boxed into the Object[] vararg.
+#[test]
+fn adapt_vararg_collection_primitive() {
+    const SRC: &str = "fun of(vararg args: Any): Int = (args[0] as Int) + (args[1] as Int)\n\
+        fun foo(b: (Int, Int) -> Int): Int = b(3, 4)\n\
+        fun box(): String = if (foo(::of) == 7) \"OK\" else \"Fail\"\n";
+    assert_eq!(run(SRC).expect("vararg collection primitive"), "OK");
+}

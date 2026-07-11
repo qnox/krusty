@@ -3654,6 +3654,18 @@ pub enum InlineCall {
 pub enum ExprLowering {
     /// A call or function reference resolved to a local function declaration.
     LocalFunction { stmt_id: StmtId },
+    /// A function reference `::of` whose target has a trailing `vararg` (and no fixed defaults), adapted
+    /// to a function type of LARGER arity: the expected function type's extra parameters (beyond the
+    /// `fixed` leading fixed parameters) are COLLECTED into the vararg array. `target_params` is `of`'s
+    /// full parameter list (fixed… + the vararg array), `adapted_params`/`ret` are the expected function
+    /// type's parameters/return, `fixed` is the count of leading fixed parameters.
+    AdaptedVarargCollect {
+        name: String,
+        target_params: Vec<Ty>,
+        adapted_params: Vec<Ty>,
+        ret: Ty,
+        fixed: usize,
+    },
     /// An ADAPTED same-file top-level function reference (`::foo` passed where a shorter function type is
     /// expected, `foo` having trailing DEFAULT parameters). Lowering synthesizes an adapter of the
     /// expected arity that calls `foo`'s `$default` stub filling the omitted defaults. `target_params` is
@@ -6392,6 +6404,38 @@ impl<'a> Checker<'a> {
             .get(name)
             .and_then(|v| (v.len() == 1).then(|| v[0].clone()))?;
         let (n, m) = (exp.params.len(), sig.params.len());
+        // VARARG COLLECTION: `::of` where `of`'s last parameter is a `vararg` (and the leading fixed
+        // parameters have no defaults) adapted to a function type with MORE parameters than fixed — the
+        // extra expected parameters are collected into the vararg array. `fixed` = m-1 leading parameters.
+        if sig.vararg && !sig.is_suspend {
+            let fixed = m - 1;
+            let coerce_unit = exp.ret == Ty::Unit && sig.ret != Ty::Unit;
+            let fixed_ok = (0..fixed).all(|i| sig.param_defaults.get(i) != Some(&true))
+                && sig.params.get(..fixed) == exp.params.get(..fixed);
+            // Only when there is at least one COLLECTED argument (n > fixed) — an exactly-fixed count is
+            // the empty-vararg drop handled by the `vararg_tail` path below.
+            if n > fixed && fixed_ok && (sig.ret == exp.ret || coerce_unit) {
+                if let Some(elem) = sig.params[fixed].array_elem() {
+                    // Each collected argument must fit the vararg element (an `Any` element accepts any).
+                    let elem_ok = exp.params[fixed..]
+                        .iter()
+                        .all(|&p| elem == Ty::obj("kotlin/Any") || p == elem);
+                    if elem_ok {
+                        self.expr_lowers.insert(
+                            ref_expr,
+                            ExprLowering::AdaptedVarargCollect {
+                                name: name.to_string(),
+                                target_params: sig.params.clone(),
+                                adapted_params: exp.params.clone(),
+                                ret: exp.ret,
+                                fixed,
+                            },
+                        );
+                        return Some(Ty::fun(exp.params.clone(), exp.ret));
+                    }
+                }
+            }
+        }
         if sig.is_suspend || n > m {
             return None;
         }

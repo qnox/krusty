@@ -8598,6 +8598,87 @@ impl<'a> Lower<'a> {
     /// placeholder + mask bit per dropped default, and the `null` marker — then wrap it in the same
     /// `Lambda`/metafactory closure a plain `::foo` produces. `None` (skip) if the `$default` stub isn't
     /// available for `foo`.
+    /// Lower a VARARG-COLLECTION adapted reference (`::of` where `of(fixed…, vararg x)` is passed where a
+    /// larger-arity function type is expected): a static adapter whose extra parameters (beyond `fixed`)
+    /// are packed into the vararg array and passed to a plain call of the target.
+    fn lower_adapted_vararg_collect(
+        &mut self,
+        e: AstExprId,
+        name: &str,
+        target_params: &[Ty],
+        adapted_params: &[Ty],
+        ret: Ty,
+        fixed: usize,
+    ) -> Option<u32> {
+        let n = adapted_params.len();
+        let fid = *self
+            .fun_ids
+            .get(&(name.to_string(), target_params.to_vec()))?;
+        let mut a: Vec<u32> = Vec::with_capacity(fixed + 1);
+        for k in 0..fixed {
+            a.push(self.ir.add_expr(IrExpr::GetValue(k as u32)));
+        }
+        // The vararg's ARRAY type is the target's last parameter; each collected argument is coerced to
+        // its element type (boxing a primitive into an `Object[]`).
+        let arr_ty = target_params[target_params.len() - 1];
+        let elem_ir = ty_to_ir(arr_ty.array_elem().unwrap_or(Ty::obj("kotlin/Any")));
+        let mut elements = Vec::with_capacity(n - fixed);
+        for k in fixed..n {
+            let v = self.ir.add_expr(IrExpr::GetValue(k as u32));
+            elements.push(self.ir.add_expr(IrExpr::TypeOp {
+                op: IrTypeOp::ImplicitCoercion,
+                arg: v,
+                type_operand: elem_ir,
+            }));
+        }
+        let arr = self.ir.add_expr(IrExpr::Vararg {
+            array_type: ty_to_ir(arr_ty),
+            elements,
+        });
+        a.push(arr);
+        let call = self.ir.add_expr(IrExpr::Call {
+            callee: Callee::Local(fid),
+            dispatch_receiver: None,
+            args: a,
+        });
+        let unit_return = ret == Ty::Unit;
+        let body = if unit_return {
+            let unit = self.ir.add_expr(IrExpr::UnitInstance);
+            let ret_e = self.ir.add_expr(IrExpr::Return(Some(unit)));
+            self.ir.add_expr(IrExpr::Block {
+                stmts: vec![call, ret_e],
+                value: None,
+            })
+        } else {
+            let ret_e = self.ir.add_expr(IrExpr::Return(Some(call)));
+            self.ir.add_expr(IrExpr::Block {
+                stmts: vec![ret_e],
+                value: None,
+            })
+        };
+        let adapter_ret = if unit_return {
+            ty_to_ir(Ty::obj("kotlin/Unit"))
+        } else {
+            ty_to_ir(ret)
+        };
+        let adapter_fid = self.ir.add_fun(IrFunction {
+            name: format!("{}$adaptvc${}", self.cur_fn_name, e.0),
+            params: adapted_params.iter().map(|t| ty_to_ir(*t)).collect(),
+            ret: adapter_ret,
+            body: Some(body),
+            is_static: true,
+            dispatch_receiver: None,
+            param_checks: Vec::new(),
+        });
+        Some(self.ir.add_expr(IrExpr::Lambda {
+            impl_fn: adapter_fid,
+            arity: n as u8,
+            captures: vec![],
+            sam: None,
+            inline_body: None,
+        }))
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn lower_adapted_ref(
         &mut self,
@@ -14703,6 +14784,26 @@ impl<'a> Lower<'a> {
             // `LambdaMetafactory` machinery as a lambda, but the impl method handle points directly at
             // the referenced function (no synthesized body). Bound/object/constructor references bail.
             Expr::CallableRef { receiver, name } => {
+                // A VARARG-COLLECTION adapted reference (`::of` where `of(vararg x)` is passed where a
+                // larger-arity function type is expected): the adapter collects its extra parameters into
+                // the vararg array.
+                if let Some(ExprLowering::AdaptedVarargCollect {
+                    name: tname,
+                    target_params,
+                    adapted_params,
+                    ret,
+                    fixed,
+                }) = self.info.expr_lowers.get(&e).cloned()
+                {
+                    return self.lower_adapted_vararg_collect(
+                        e,
+                        &tname,
+                        &target_params,
+                        &adapted_params,
+                        ret,
+                        fixed,
+                    );
+                }
                 // An ADAPTED same-file top-level function reference (`::foo` with trailing defaults passed
                 // where a shorter function type is expected): synthesize an arity-matching adapter that
                 // calls `foo`'s `$default` stub.
