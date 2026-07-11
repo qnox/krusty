@@ -132,3 +132,16 @@ fn name_based_for_withindex_library() {
         }\n";
     assert_eq!(run_stdlib(SRC).expect("name-based withIndex"), "OK");
 }
+
+#[test]
+fn name_based_lambda_shortform() {
+    // Short-form paren lambda param under the flag binds each var by its own property name.
+    const SRC: &str =
+        "// LANGUAGE: +NameBasedDestructuring, +EnableNameBasedDestructuringShortForm\n\
+        data class P(val a: Int, val b: Int)\n\
+        fun box(): String {\n\
+        \x20 val f: (P) -> Int = { (b, a) -> a * 10 + b }\n\
+        \x20 return if (f(P(1, 2)) == 12) \"OK\" else \"fail\"\n\
+        }\n";
+    assert_eq!(run_stdlib(SRC).expect("name-based lambda"), "OK");
+}
