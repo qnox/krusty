@@ -3667,6 +3667,9 @@ pub enum ExprLowering {
         /// The single dropped parameter is a trailing `vararg` filled with an EMPTY array (a plain call
         /// to the target), rather than trailing DEFAULTS filled via the `$default` stub.
         vararg_tail: bool,
+        /// The target function's last parameter is a `vararg`. In the `$default` path (dropped defaults
+        /// ending in the vararg), the dropped vararg slot gets an empty array and NO mask bit.
+        target_vararg: bool,
         /// The expected function type returns `Unit` but the target returns a value — the adapter calls
         /// the target, DISCARDS the result, and returns `Unit` (kotlin's coercion-to-`Unit` for a
         /// reference in a `() -> Unit` position).
@@ -6402,17 +6405,16 @@ impl<'a> Checker<'a> {
         if n == m && !coerce_unit {
             return None;
         }
-        // Parameter-drop shape for the dropped tail `sig.params[n..m]` (empty when `n == m`):
-        // - a single trailing `vararg` (`n == m-1`): the adapter passes an empty array (plain call);
-        // - all trailing DEFAULTS with NO vararg: the adapter routes through the `$default` stub.
-        // A vararg MIXED with dropped defaults is out of scope: krusty does not support omitting both a
-        // default and a vararg even in a plain call, so adapting it would build on an unsupported base.
+        // Parameter-drop shape for the dropped tail `sig.params[n..m]` (empty when `n == m`). Each dropped
+        // parameter must be fillable WITHOUT an argument: a DEFAULT (filled by the `$default` stub) or the
+        // function's single trailing `vararg` (filled with an empty array). A `vararg` as the ONLY dropped
+        // parameter (`vararg_tail`) is a plain call; a vararg preceded by dropped defaults routes through
+        // `$default` with an empty array for the vararg slot.
         let vararg_tail = sig.vararg && n == m - 1;
         if n < m && !vararg_tail {
-            if sig.vararg || n < sig.required {
-                return None;
-            }
-            if !sig.param_defaults.is_empty() && !sig.param_defaults[n..m].iter().all(|&d| d) {
+            let droppable =
+                |k: usize| sig.param_defaults.get(k) == Some(&true) || (k == m - 1 && sig.vararg);
+            if sig.param_defaults.is_empty() || !(n..m).all(droppable) {
                 return None;
             }
         }
@@ -6424,6 +6426,7 @@ impl<'a> Checker<'a> {
                 adapted_params: exp.params.clone(),
                 ret: exp.ret,
                 vararg_tail,
+                target_vararg: sig.vararg,
                 coerce_unit,
             },
         );
