@@ -2187,6 +2187,12 @@ fn emit_enum_class(
     for (f, t) in c.fields[..n_params].iter().zip(&user_tys) {
         cw.add_field(0x0001, &f.name, &type_descriptor(*t));
     }
+    // Body member-property backing fields (`enum class E { A; val x = … }`) — public, like the primary
+    // fields above, so the IR's direct cross-class reads resolve; initialized in the constructor via
+    // `init_body`.
+    for (f, t) in c.fields[n_params..].iter().zip(&field_tys[n_params..]) {
+        cw.add_field(0x0001, &f.name, &type_descriptor(*t));
+    }
     // One static-final constant per entry, plus the private `$VALUES` array.
     for entry in &c.enum_entries {
         cw.add_field(0x0001 | 0x0008 | 0x0010 | ACC_ENUM, &entry.name, &self_desc);
@@ -2217,17 +2223,50 @@ fn emit_enum_class(
     load(Ty::Int, 2, &mut ctor);
     let super_init = cw.methodref("java/lang/Enum", "<init>", "(Ljava/lang/String;I)V");
     ctor.invokespecial(super_init, 2, 0);
-    let mut slot = 3u16;
-    for (f, t) in c.fields[..n_params].iter().zip(&user_tys) {
-        let name = &f.name;
-        ctor.aload(0);
-        load(*t, slot, &mut ctor);
-        let fref = cw.fieldref(&fq, name, &type_descriptor(*t));
-        ctor.putfield(fref, slot_words(*t) as i32);
-        slot += slot_words(*t);
+    let mut max_locals = 1 + ctor_words;
+    // When the enum declares body member properties, the lowered `init_body` carries BOTH the
+    // primary-constructor param→field stores AND the body-property initializers (it set
+    // `explicit_param_stores`). Emit it through the standard IR emitter, mapping the ctor's value ids
+    // onto the enum's slot layout — `this` at 0, then the user params at slots 3+ (after the synthetic
+    // `name`/`ordinal`). Otherwise (a plain enum with no body properties) hand-store the param fields.
+    // `init_body` is always present for an enum with body fields (each body property has an
+    // initializer, so `init_order` is non-empty and `has_primary_ctor` is hardcoded true for enums).
+    // The `else` still hand-stores the params so a plain enum — and any unexpected missing-`init_body`
+    // case — keeps its constructor sound.
+    if let Some(init_body) = c.init_body.filter(|_| c.fields.len() > n_params) {
+        let mut e = Emitter {
+            ir,
+            cw: &mut cw,
+            bodies,
+            owner: c.fq_name.clone(),
+            facade: facade.to_string(),
+            slots: HashMap::new(),
+            var_types: collect_var_types(ir),
+            next_slot: 1 + ctor_words,
+            ret: Ty::Unit,
+            loop_stack: Vec::new(),
+        };
+        e.slots.insert(0, (0, Ty::obj(&c.fq_name)));
+        let mut s = 3u16;
+        for (i, t) in user_tys.iter().enumerate() {
+            e.slots.insert(i as u32 + 1, (s, *t));
+            s += slot_words(*t);
+        }
+        e.emit(init_body, &mut ctor);
+        max_locals = max_locals.max(e.next_slot);
+    } else {
+        let mut slot = 3u16;
+        for (f, t) in c.fields[..n_params].iter().zip(&user_tys) {
+            let name = &f.name;
+            ctor.aload(0);
+            load(*t, slot, &mut ctor);
+            let fref = cw.fieldref(&fq, name, &type_descriptor(*t));
+            ctor.putfield(fref, slot_words(*t) as i32);
+            slot += slot_words(*t);
+        }
     }
     ctor.ret_void();
-    ctor.ensure_locals(1 + ctor_words);
+    ctor.ensure_locals(max_locals);
     ctor.link();
     // A plain enum's constructor is `private` (matching kotlinc — javap then hides the synthetic
     // `(String,int)` params in its display). A subclassed enum's ctor must be reachable from its entry
