@@ -1115,24 +1115,28 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 lo.cur_class = None;
                 lo.scope.clear();
                 lo.next_value = 0;
-                if let (Some(initx), false) = (cp.init, cty == Ty::Error) {
-                    if let Some(init) = lo.lower_arg(initx, &ty_to_ir(cty)) {
-                        // A `const val` becomes a `ConstantValue` static; a plain non-const companion
-                        // `val` becomes a static field initialized in the outer class's `<clinit>`. Both
-                        // are read as `getstatic C.X` (registered in `companion_consts`).
-                        lo.ir.statics.push(crate::ir::IrStatic {
-                            name: cp.name.clone(),
-                            ty: ty_to_ir(cty),
-                            init,
-                            is_var: false,
-                            is_const: cp.is_const,
-                            owner: Some(internal.clone()),
-                            custom_accessor: false,
-                        });
-                        lo.companion_consts
-                            .insert((internal.clone(), cp.name.clone()), cty);
-                    }
+                // `companion_props_lowerable` admitted this companion, so its initializer MUST lower —
+                // if it doesn't (or its type is `Error`), bail the whole file rather than silently drop
+                // the static field (which would leave a dangling `C.X` read → NoSuchFieldError).
+                let initx = cp.init?;
+                if cty == Ty::Error {
+                    return None;
                 }
+                let init = lo.lower_arg(initx, &ty_to_ir(cty))?;
+                // A `const val` becomes a `ConstantValue` static; a plain non-const companion `val`
+                // becomes a static field initialized in the outer class's `<clinit>`. Both are read as
+                // `getstatic C.X` (registered in `companion_consts`).
+                lo.ir.statics.push(crate::ir::IrStatic {
+                    name: cp.name.clone(),
+                    ty: ty_to_ir(cty),
+                    init,
+                    is_var: false,
+                    is_const: cp.is_const,
+                    owner: Some(internal.clone()),
+                    custom_accessor: false,
+                });
+                lo.companion_consts
+                    .insert((internal.clone(), cp.name.clone()), cty);
             }
             // An `object`'s own `const val`s become `public static final` + `ConstantValue` fields on the
             // object class (kotlinc's layout) — reads inline the literal (`object_const_lits`), exactly as
@@ -3673,7 +3677,12 @@ fn is_simple_object(c: &ast::ClassDecl) -> bool {
 /// `DefaultImpls` class), no properties (abstract property getters not modeled), no companion.
 fn is_simple_interface(c: &ast::ClassDecl) -> bool {
     c.is_interface()
-        && c.companion_methods.is_empty() && c.companion_props.is_empty()
+        // A companion is supported when it is PROPERTIES ONLY (no methods/base/supertype) and those
+        // props are lowerable — emitted as static fields on the interface (see `emit_interface_class`).
+        && c.companion_methods.is_empty()
+        && c.companion_base.is_none()
+        && c.companion_supertypes.is_empty()
+        && companion_props_lowerable(c)
         && c.props.is_empty()
         // Abstract properties (`val x: T`, no initializer/getter) become abstract `getX()`/`setX()`;
         // a property with an initializer or custom getter (an interface can't have a backing field)
