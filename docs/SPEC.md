@@ -416,6 +416,24 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   not `top` — emitting a `top` there is a `VerifyError: Bad type on operand stack`. Only user-defined
   member targets are resolved; safe calls on stdlib receivers (`s?.substring(1)`) need the external-call
   path and are skipped (`tests/safe_call_e2e.rs`).
+- **Safe call whose scope block diverges — `x?.let { return … }` / `x?.run { throw … }` / `x?.also { … }`
+  / `x?.apply { … }`.** A scope function whose lambda body is a non-local `return` (or `throw`) has block
+  value type `Nothing`, so the whole safe call is `Nothing?` — `null` when the receiver is null, else
+  control leaves via the return/throw and never comes back. For the body-returning scope fns (`let`/`run`)
+  the checker types the safe call as `Ty::nullable(Ty::Nothing)` (parallel to the `Unit?` case for a `Unit`
+  block), a reference type so it is not rejected as a "non-reference result". The receiver-returning scope
+  fns (`also`/`apply`) keep the receiver's (reference) type, so their divergence is invisible to the result
+  type — the lowerer detects it from the block-body type instead. In BOTH cases the lowerer must not model
+  the non-null arm as a value-producing `when` branch: a diverging arm yields no value, and merging it with
+  the `null` arm leaves a `top` on the stack (`VerifyError`). Instead it emits the divergent member as a
+  guarded statement — `{ val t = a; if (t != null) { <member> }; null }` — and yields `null` unconditionally
+  (only observed when `t` was null); the `also`/`apply` inliner additionally drops its unreachable
+  "read the receiver back" tail. This is keyed on the `Nothing` result/block type, not on the scope-function
+  name (the divergence guard is gated only on the call being one of the four scope fns, which run the body
+  exactly once — a collection HOF like `forEach` may run it zero times and is excluded), and reproduces with
+  a plain nullable receiver (no higher-order call involved). The value form (`val r = c?.let { return … }`)
+  types `r` as `Nothing?`, which flows into any reference target. (Only the SAFE-call `?.` form is handled;
+  a non-safe qualified `b.also { return … }` remains unsupported.) (`tests/qq1_safecall_diverging_scope_block_e2e.rs`).
 - Lambdas `{ a, b -> … }`: a function type `(A,…) -> R` is the JVM interface
   `kotlin/jvm/functions/Function{arity}`. A non-capturing lambda compiles to `invokedynamic` bound by
   `LambdaMetafactory.metafactory` to a synthesized `private static` method `<enclosing>$lambda$<n>`
