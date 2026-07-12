@@ -124,6 +124,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
         cur_class: None,
         cur_field: None,
         field_accessor_props: std::collections::HashSet::new(),
+        field_accessor_var_props: std::collections::HashSet::new(),
         cur_fn_name: String::new(),
         cur_fn_suspend: false,
         cur_tparams: Vec::new(),
@@ -394,6 +395,10 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
             for p in c.body_props.iter().filter(|p| is_field_accessor_prop(p)) {
                 lo.field_accessor_props
                     .insert((internal.clone(), p.name.clone()));
+                if p.is_var {
+                    lo.field_accessor_var_props
+                        .insert((internal.clone(), p.name.clone()));
+                }
             }
             // Guard each delegated member property: only the simple shape is modeled — a concrete
             // (non-value-class, no `provideDelegate`) delegate whose `getValue` return type matches the
@@ -4016,6 +4021,9 @@ fn is_computed_prop(p: &ast::PropDecl) -> bool {
         && p.init.is_none()
         && p.getter.is_some()
         && p.setter.is_none()
+        // A getter that reads `field` has a REAL backing field (assigned in a constructor), so it is
+        // NOT a computed (field-less) property.
+        && !p.getter_reads_field
     // The type may be inferred from the getter body (`val xx get() = x`) — no explicit annotation needed.
 }
 
@@ -4036,7 +4044,9 @@ fn is_backing_field_prop(p: &ast::PropDecl) -> bool {
 /// default field read/write.
 fn is_field_accessor_prop(p: &ast::PropDecl) -> bool {
     is_backing_field_prop(p)
-        && p.init.is_some()
+        // A backing field exists with an initializer, OR when a getter reads `field` (the field is
+        // then assigned in a constructor instead of at the declaration).
+        && (p.init.is_some() || p.getter_reads_field)
         && (p.getter.is_some() || p.setter.as_ref().is_some_and(|s| s.body.is_some()))
 }
 
@@ -4116,6 +4126,10 @@ pub(crate) struct Lower<'a> {
     /// direct field — so `resolve_field` declines it (the `field` keyword reaches the field via
     /// `cur_field` instead).
     field_accessor_props: std::collections::HashSet<(String, String)>,
+    /// The subset of [`Self::field_accessor_props`] that are `var`s — their WRITE routes through the
+    /// custom `setX`. A `val` custom-accessor property (no setter) is NOT here: it is assigned once
+    /// in a constructor by writing its backing field directly.
+    field_accessor_var_props: std::collections::HashSet<(String, String)>,
     /// Name of the enclosing function/method being lowered — used to name synthesized lambda impl
     /// methods `<enclosing>$lambda$<n>` (matching kotlinc).
     cur_fn_name: String,
@@ -12669,9 +12683,11 @@ impl<'a> Lower<'a> {
                 // class member first). Requires `this` in scope (a class member, not a top-level function).
                 let own_field = self.lookup("this").and_then(|(this_v, _)| {
                     self.cur_class.as_ref().and_then(|c| {
-                        // A custom-accessor property writes through `setX`, never the raw field.
+                        // A `var` custom-accessor property writes through `setX`, never the raw field.
+                        // A `val` custom-accessor (no setter) is assigned once in a constructor by
+                        // writing its backing field directly, so it is NOT excluded here.
                         if self
-                            .field_accessor_props
+                            .field_accessor_var_props
                             .contains(&(c.clone(), name.clone()))
                         {
                             return None;
