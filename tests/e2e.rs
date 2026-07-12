@@ -486,6 +486,8 @@ mod object_member_ref_import_e2e;
 mod object_method_ref_e2e;
 #[path = "object_value_inference_e2e.rs"]
 mod object_value_inference_e2e;
+#[path = "operator_inc_dec_e2e.rs"]
+mod operator_inc_dec_e2e;
 #[path = "operator_index_e2e.rs"]
 mod operator_index_e2e;
 #[path = "overloaded_inferred_return_e2e.rs"]

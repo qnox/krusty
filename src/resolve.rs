@@ -6886,9 +6886,10 @@ impl<'a> Checker<'a> {
                     Ty::Error
                 }
             }
-            Expr::IncDec { target, .. } => {
-                // `target++`/`++target` as a value: only a simple mutable numeric/Char variable (the
-                // built-in `inc`/`dec`); the result type is the variable's type.
+            Expr::IncDec { target, dec, .. } => {
+                // `target++`/`++target` as a value: a simple mutable numeric/Char variable (the built-in
+                // `inc`/`dec`), or a variable whose type has a user `inc`/`dec` operator. The result type
+                // is the variable's type.
                 let tt = self.expr(target);
                 if let Expr::Name(name) = self.file.expr(target).clone() {
                     match self
@@ -6901,7 +6902,9 @@ impl<'a> Checker<'a> {
                                 self.diags
                                     .error(self.span(e), "'val' cannot be reassigned.".to_string());
                             }
-                            if !tt.is_numeric_or_char() {
+                            if !tt.is_numeric_or_char()
+                                && self.inc_dec_operator_ret(tt, dec).is_none()
+                            {
                                 self.diags.error(
                                     self.span(e),
                                     "krusty: '++'/'--' is only supported on a numeric variable"
@@ -11997,6 +12000,25 @@ impl<'a> Checker<'a> {
 
     /// A compound assignment `target op= rhs` (parser-desugared to `target = target op rhs`, so `value`
     /// is `Binary { op, lhs: <target read>, rhs }`) is an in-place operator call — legal even on a `val`
+    /// The return type of a user `inc`/`dec` operator (member first, then extension) on a receiver of
+    /// type `ty`, if one exists — used to type an overloaded `x++`/`x--` on a non-numeric variable. A
+    /// no-arg member/extension `inc`()/`dec`() only.
+    fn inc_dec_operator_ret(&self, ty: Ty, dec: bool) -> Option<Ty> {
+        let name = if dec { "dec" } else { "inc" };
+        if let Some(m) = crate::module_symbols::ModuleSymbols::new(self.syms)
+            .instance_members(ty, name)
+            .into_iter()
+            .find(|m| m.params.is_empty())
+        {
+            return Some(m.ret);
+        }
+        self.syms
+            .ext_funs
+            .get(&(ty.erased_recv(), name.to_string()))
+            .filter(|sig| sig.params.is_empty())
+            .map(|sig| sig.ret)
+    }
+
     /// — when `target`'s type has a USER-defined `op`Assign operator (member, or extension). Detect that,
     /// type-check the argument, and mark the statement for the lowerer (which emits `target.opAssign(rhs)`).
     /// Returns true if handled (the caller must then skip the ordinary reassignment checks). Restricted to
@@ -12255,10 +12277,10 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
-            Stmt::IncDec { name, .. } => {
-                // `inc`/`dec` are overloadable operators; krusty only models the built-in numeric
-                // ones. The target must be a mutable numeric variable — a non-numeric type would
-                // need a user `inc`/`dec` operator krusty doesn't support (reject, never miscompile).
+            Stmt::IncDec { name, dec } => {
+                // `inc`/`dec` are overloadable operators: the built-in numeric ones, or a user
+                // `inc`/`dec` operator on the variable's type. Anything else is rejected (never
+                // miscompiled).
                 let span = self.file.stmt_spans[s.0 as usize];
                 let inherited = || {
                     if let Some(Ty::Obj(internal, _)) = self.this_ty {
@@ -12278,7 +12300,8 @@ impl<'a> Checker<'a> {
                             self.diags
                                 .error(span, "'val' cannot be reassigned.".to_string());
                         }
-                        if !ty.is_numeric_or_char() {
+                        if !ty.is_numeric_or_char() && self.inc_dec_operator_ret(ty, dec).is_none()
+                        {
                             self.diags.error(
                                 span,
                                 "krusty: '++'/'--' is only supported on a numeric variable"
