@@ -37,16 +37,12 @@ fn is_ieee_fp(fq: &str) -> bool {
     matches!(fq, "kotlin/Float" | "kotlin/Double")
 }
 
-thread_local! {
-    /// `(class-index, method-index)` → value-class field type for value-class-FIELD getters of the file
-    /// being lowered (see the population in [`lower_value_classes`]). Read by [`repr`] so a `MethodCall` to
-    /// such a getter reprs as the field's representation — an unboxed underlying — without threading the map
-    /// through every `repr`/`is_boxed_vc` recursion. Keyed on the getter's IDENTITY (owning class + method
-    /// slot), not its name, so a coincidentally-named boxing override does not collide. Populated once per
-    /// `lower_value_classes` call.
-    static FIELD_GETTERS: std::cell::RefCell<HashMap<(u32, u32), Ty>> =
-        std::cell::RefCell::new(HashMap::new());
-}
+/// `(class-index, method-index)` → value-class field type for value-class-FIELD getters of the file
+/// being lowered (built once in [`lower_value_classes`], carried in [`ReprCtx`] and threaded to [`repr`]/
+/// [`is_boxed_vc`]). A `MethodCall` to such a getter reprs as the field's representation — an unboxed
+/// underlying. Keyed on the getter's IDENTITY (owning class + method slot), not its name, so a
+/// coincidentally-named boxing override does not collide.
+type FieldGetters = HashMap<(u32, u32), Ty>;
 
 /// Lower all `@JvmInline value class` usage in `ir` to the JVM's unboxed representation: erase the
 /// value-class type to its single field's type, rewrite construction/sole-property access, and insert
@@ -237,9 +233,8 @@ pub fn lower_value_classes(
     // underlying) — UNLIKE a boxed value-class member read or a BOXING override getter (whose body isn't a
     // plain field read). `repr` consults this so a redundant `Cast` over such a getter strips and the sole-
     // field access is identity, keyed on the getter IDENTITY rather than the ambiguous static type.
-    FIELD_GETTERS.with(|g| {
-        let mut m = g.borrow_mut();
-        m.clear();
+    let field_getters: FieldGetters = {
+        let mut m = FieldGetters::new();
         for (ci, c) in ir.classes.iter().enumerate() {
             // getter-name → (field-index, value-class field type) for value-class-typed fields.
             let getters: HashMap<String, (u32, Ty)> = c
@@ -273,7 +268,8 @@ pub fn lower_value_classes(
                 }
             }
         }
-    });
+        m
+    };
 
     // Per-class id metadata (parallel to ir.classes).
     let is_vc: Vec<bool> = ir.classes.iter().map(|c| c.is_value).collect();
@@ -1058,6 +1054,7 @@ pub fn lower_value_classes(
             slots,
             under: &under,
             logical: &ir.logical_types,
+            field_getters: &field_getters,
         };
         let boxed_this = body.2;
         let i = id as usize;
@@ -1169,6 +1166,7 @@ pub fn lower_value_classes(
                 &orig_fields,
                 &orig_rets,
                 slots,
+                &field_getters,
                 boxed_this,
             )),
             None => None,
@@ -1234,6 +1232,7 @@ pub fn lower_value_classes(
             slots,
             under: &under,
             logical: &ir.logical_types,
+            field_getters: &field_getters,
         };
         let mut reach = HashSet::new();
         collect_reachable(&ir.exprs, root, &mut reach);
@@ -1860,6 +1859,7 @@ pub fn lower_value_classes(
                         &orig_rets,
                         &orig_fields,
                         &slot_types[fid],
+                        &field_getters,
                     );
                 }
             }
@@ -1906,6 +1906,7 @@ pub fn lower_value_classes(
                 &orig_rets,
                 &orig_fields,
                 &slot_types[impl_fn as usize],
+                &field_getters,
             );
         } else {
             // A lambda returning `Any`/an interface (not a value class itself) still boxes a value-class tail.
@@ -2038,6 +2039,7 @@ struct ReprCtx<'a> {
     slots: &'a HashMap<u32, Ty>,
     under: &'a HashMap<String, Ty>,
     logical: &'a HashMap<u32, Ty>,
+    field_getters: &'a FieldGetters,
 }
 
 impl ReprCtx<'_> {
@@ -2049,6 +2051,7 @@ impl ReprCtx<'_> {
             self.slots,
             self.under,
             self.logical,
+            self.field_getters,
             id,
         )
     }
@@ -2172,6 +2175,7 @@ fn target(t: &Ty, under: &HashMap<String, Ty>) -> Target {
 }
 
 /// The representation of the value the expr at `id` produces (after the construction/property rewrite).
+#[allow(clippy::too_many_arguments)]
 fn repr(
     exprs: &[IrExpr],
     rets: &[Ty],
@@ -2179,6 +2183,7 @@ fn repr(
     slots: &HashMap<u32, Ty>,
     under: &HashMap<String, Ty>,
     logical: &HashMap<u32, Ty>,
+    field_getters: &FieldGetters,
     id: ExprId,
 ) -> Repr {
     match &exprs[id as usize] {
@@ -2192,12 +2197,12 @@ fn repr(
             .map_or(Repr::NotVc, |t| repr_of_ty(t, under)),
         // A value-class-FIELD getter (`Test.getS()` for `val s: S<T>`) reprs as the field's representation
         // — the UNBOXED underlying. Keyed on the getter's IDENTITY (owning class + method slot, via
-        // `FIELD_GETTERS`), so it is distinguished from a boxing OVERRIDE getter, which is not in the map and
+        // `field_getters`), so it is distinguished from a boxing OVERRIDE getter, which is not in the map and
         // keeps its own erased repr. The read is a resolved `MethodCall`, not a `Call { Virtual }`.
         IrExpr::MethodCall { class, index, .. }
-            if FIELD_GETTERS.with(|g| g.borrow().contains_key(&(*class, *index))) =>
+            if field_getters.contains_key(&(*class, *index)) =>
         {
-            FIELD_GETTERS.with(|g| repr_of_ty(&g.borrow()[&(*class, *index)], under))
+            repr_of_ty(&field_getters[&(*class, *index)], under)
         }
         IrExpr::Call {
             callee: Callee::Static { owner, name, .. },
@@ -2234,7 +2239,16 @@ fn repr(
             .is_some_and(|fq| under.contains_key(fq)) =>
         {
             let fq_name = type_operand.non_null().obj_internal().unwrap();
-            match repr(exprs, rets, fields, slots, under, logical, *arg) {
+            match repr(
+                exprs,
+                rets,
+                fields,
+                slots,
+                under,
+                logical,
+                field_getters,
+                *arg,
+            ) {
                 Repr::Unboxed(x) if x == fq_name => Repr::Unboxed(x),
                 // A cast to a NULLABLE value class over a NON-NULL REFERENCE underlying (`Str?` = `String?`,
                 // `nullable_is_boxed == false`) yields the UNBOXED underlying, not a boxed `X` — matching
@@ -2254,22 +2268,47 @@ fn repr(
             type_operand,
             ..
         } => repr_of_ty(type_operand, under),
-        IrExpr::NotNullAssert { operand } => {
-            repr(exprs, rets, fields, slots, under, logical, *operand)
-        }
+        IrExpr::NotNullAssert { operand } => repr(
+            exprs,
+            rets,
+            fields,
+            slots,
+            under,
+            logical,
+            field_getters,
+            *operand,
+        ),
         // Reading a captured mutable local through its `Ref` holder: its representation is that of the
         // boxed element type (`var res: Result<T>?` → a boxed `Result`).
         IrExpr::RefGet { elem, .. } => repr_of_ty(elem, under),
-        IrExpr::Block { value: Some(v), .. } => {
-            repr(exprs, rets, fields, slots, under, logical, *v)
-        }
+        IrExpr::Block { value: Some(v), .. } => repr(
+            exprs,
+            rets,
+            fields,
+            slots,
+            under,
+            logical,
+            field_getters,
+            *v,
+        ),
         // A `when`/safe-call selects one of its branch values (`s?.foo()` → `when { s!=null -> foo(s);
         // else -> null }`): its representation is a value-producing branch's — the FIRST branch that is a
         // value class, so a boxed value-class result flowing out of a `?.` is recognized (the `null`
         // default branch is `NotVc` and skipped).
         IrExpr::When { branches } => branches
             .iter()
-            .map(|(_, v)| repr(exprs, rets, fields, slots, under, logical, *v))
+            .map(|(_, v)| {
+                repr(
+                    exprs,
+                    rets,
+                    fields,
+                    slots,
+                    under,
+                    logical,
+                    field_getters,
+                    *v,
+                )
+            })
             .find(|r| !matches!(r, Repr::NotVc))
             .unwrap_or(Repr::NotVc),
         // A function value's `invoke` returns its declared type through the `FunctionN` `Object` slot — a
@@ -2353,6 +2392,7 @@ fn prop_access(
     fields: &[Vec<Ty>],
     rets: &[Ty],
     slots: &HashMap<u32, Ty>,
+    field_getters: &FieldGetters,
     boxed_this: Option<u32>,
 ) -> IrExpr {
     let u = under.get(x).map(|t| erase(t, under)).unwrap_or(Ty::Error);
@@ -2370,6 +2410,7 @@ fn prop_access(
             slots,
             under,
             &ir.logical_types,
+            field_getters,
             receiver,
             x,
         ) {
@@ -2405,6 +2446,7 @@ fn is_boxed_vc(
     slots: &HashMap<u32, Ty>,
     under: &HashMap<String, Ty>,
     logical: &HashMap<u32, Ty>,
+    field_getters: &FieldGetters,
     id: ExprId,
     x: &str,
 ) -> bool {
@@ -2454,16 +2496,36 @@ fn is_boxed_vc(
             type_operand,
         } => {
             is_x(type_operand)
-                && !matches!(repr(exprs, rets, fields, slots, under, logical, *arg), Repr::Unboxed(ref c) if c == x)
+                && !matches!(repr(exprs, rets, fields, slots, under, logical, field_getters, *arg), Repr::Unboxed(ref c) if c == x)
         }
         IrExpr::NotNullAssert { operand } => is_boxed_vc(
-            exprs, funcs, fields, rets, slots, under, logical, *operand, x,
+            exprs,
+            funcs,
+            fields,
+            rets,
+            slots,
+            under,
+            logical,
+            field_getters,
+            *operand,
+            x,
         ),
         // A `when` whose non-null branch yields a boxed `x` (a nullable safe-call: `box-impl` vs `null`) is
         // a boxed `x`.
-        IrExpr::When { branches } => branches
-            .iter()
-            .any(|(_, r)| is_boxed_vc(exprs, funcs, fields, rets, slots, under, logical, *r, x)),
+        IrExpr::When { branches } => branches.iter().any(|(_, r)| {
+            is_boxed_vc(
+                exprs,
+                funcs,
+                fields,
+                rets,
+                slots,
+                under,
+                logical,
+                field_getters,
+                *r,
+                x,
+            )
+        }),
         // A sole-field access of a value class whose underlying is itself a BOXED value class
         // (`ZN(val z: Z1?)`) reads as `ImplicitCoercion(ZN.unbox-impl(): LZ1;)` — transparently a boxed
         // `Z1`. Recurse into the coerced value so a further `.x` on it `unbox-impl`s.
@@ -2471,10 +2533,30 @@ fn is_boxed_vc(
             op: crate::ir::IrTypeOp::ImplicitCoercion,
             arg,
             ..
-        } => is_boxed_vc(exprs, funcs, fields, rets, slots, under, logical, *arg, x),
-        IrExpr::Block { value: Some(v), .. } => {
-            is_boxed_vc(exprs, funcs, fields, rets, slots, under, logical, *v, x)
-        }
+        } => is_boxed_vc(
+            exprs,
+            funcs,
+            fields,
+            rets,
+            slots,
+            under,
+            logical,
+            field_getters,
+            *arg,
+            x,
+        ),
+        IrExpr::Block { value: Some(v), .. } => is_boxed_vc(
+            exprs,
+            funcs,
+            fields,
+            rets,
+            slots,
+            under,
+            logical,
+            field_getters,
+            *v,
+            x,
+        ),
         _ => false,
     }
 }
@@ -2508,6 +2590,7 @@ fn is_unboxed_vc(exprs: &[IrExpr], id: ExprId, x: &str) -> bool {
 /// `when`/block tails so each branch is boxed (a `null` branch is left alone).
 /// At a function's return tail (recursing `return`/block tails), `unbox-impl` a BOXED value-class value so
 /// it matches the function's erased (underlying) return type — `fun f(): Z = a?.foo()!!` returns the box.
+#[allow(clippy::too_many_arguments)]
 fn unbox_tail(
     ir: &mut IrFile,
     id: ExprId,
@@ -2516,15 +2599,16 @@ fn unbox_tail(
     rets: &[Ty],
     fields: &[Vec<Ty>],
     slots: &HashMap<u32, Ty>,
+    field_getters: &FieldGetters,
 ) {
     match &ir.exprs[id as usize] {
         IrExpr::Return(Some(v)) | IrExpr::Block { value: Some(v), .. } => {
             let v = *v;
-            unbox_tail(ir, v, x, under, rets, fields, slots);
+            unbox_tail(ir, v, x, under, rets, fields, slots, field_getters);
         }
         IrExpr::Block { value: None, stmts } => {
             if let Some(&last) = stmts.last() {
-                unbox_tail(ir, last, x, under, rets, fields, slots);
+                unbox_tail(ir, last, x, under, rets, fields, slots, field_getters);
             }
         }
         _ => {
@@ -2536,6 +2620,7 @@ fn unbox_tail(
                 slots,
                 under,
                 &ir.logical_types,
+                field_getters,
                 id,
                 x,
             ) {
@@ -2589,26 +2674,27 @@ fn box_ref_tail(
     rets: &[Ty],
     fields: &[Vec<Ty>],
     slots: &HashMap<u32, Ty>,
+    field_getters: &FieldGetters,
 ) {
     match &ir.exprs[id as usize] {
         IrExpr::When { branches } => {
             let rs: Vec<ExprId> = branches.iter().map(|(_, r)| *r).collect();
             for r in rs {
-                box_ref_tail(ir, r, x, under, rets, fields, slots);
+                box_ref_tail(ir, r, x, under, rets, fields, slots, field_getters);
             }
         }
         IrExpr::Block { value: Some(v), .. } => {
             let v = *v;
-            box_ref_tail(ir, v, x, under, rets, fields, slots);
+            box_ref_tail(ir, v, x, under, rets, fields, slots, field_getters);
         }
         IrExpr::Block { value: None, stmts } => {
             if let Some(&last) = stmts.last() {
-                box_ref_tail(ir, last, x, under, rets, fields, slots);
+                box_ref_tail(ir, last, x, under, rets, fields, slots, field_getters);
             }
         }
         IrExpr::Return(Some(v)) => {
             let v = *v;
-            box_ref_tail(ir, v, x, under, rets, fields, slots);
+            box_ref_tail(ir, v, x, under, rets, fields, slots, field_getters);
         }
         _ => {
             // Already a boxed `X` (a `box-impl` result, a call/slot typed `X`, a `?.`-`when` box) → leave it;
@@ -2621,6 +2707,7 @@ fn box_ref_tail(
                 slots,
                 under,
                 &ir.logical_types,
+                field_getters,
                 id,
                 x,
             ) {
