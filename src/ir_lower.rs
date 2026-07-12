@@ -11658,7 +11658,12 @@ impl<'a> Lower<'a> {
         self.scope.truncate(depth);
         self.cur_class = saved_cur;
         let body_val = body_val?;
-        Some(if returns_receiver {
+        // A receiver-returning scope fn (`also`/`apply`) whose body DIVERGES (non-local `return`/`throw`,
+        // body typed `Nothing`): the trailing "read the receiver back" is unreachable. Emitting it leaves
+        // dead code after the divergence (a stray value load with no stackmap frame → `VerifyError`), so
+        // drop it and let the divergent body be the block value — identical to the non-receiver form.
+        let body_diverges = self.info.ty(body) == Ty::Nothing;
+        Some(if returns_receiver && !body_diverges {
             let recv_read = self.ir.add_expr(IrExpr::GetValue(p_slot));
             self.ir.add_expr(IrExpr::Block {
                 stmts: vec![var_p, body_val],
@@ -14839,6 +14844,20 @@ impl<'a> Lower<'a> {
             } => {
                 let rty = self.info.ty(receiver);
                 let result_ty = self.info.ty(e);
+                // Does the single lambda argument's body DIVERGE (non-local `return`/`throw`, typed
+                // `Nothing`)? Only meaningful once we know the call is a scope fn that runs the body EXACTLY
+                // once (`let`/`also`/`run`/`apply` — see `from_scope_fn` below): for those, a diverging body
+                // means the non-null arm produces no value. It is NOT sufficient for a collection HOF
+                // (`forEach`/`map`) that may run the body zero times on an empty receiver, so this is gated
+                // by `from_scope_fn` at the guard, never used alone.
+                let lambda_body_diverges = args
+                    .as_ref()
+                    .filter(|a| a.len() == 1)
+                    .and_then(|a| match self.afile.expr(a[0]) {
+                        Expr::Lambda { body, .. } => Some(*body),
+                        _ => None,
+                    })
+                    .is_some_and(|body| self.info.ty(body) == Ty::Nothing);
                 // A statically-`null` receiver (`null?.toString()`): the receiver is always null, so the
                 // member is never invoked and the whole safe call is `null`. Run the receiver for any side
                 // effects (a bare `null` literal has none), then yield `null`.
@@ -14911,8 +14930,14 @@ impl<'a> Lower<'a> {
                 // A safe-call scope function (`s?.let { it… }`, `s?.run { … }`): inline it with the
                 // non-null receiver `recv2`; the surrounding null-check + nullable-wrap below make the
                 // whole `s?.…` yield `null` when `s` is null.
+                // `from_scope_fn`: the member came from the scope-fn inliner (`let`/`also`/`run`/`apply`,
+                // which run the body EXACTLY once). Only then does a diverging lambda body imply the whole
+                // non-null arm diverges — the gate that keeps a collection HOF (`forEach`) out of the
+                // divergence guard below.
+                let mut from_scope_fn = false;
                 let member = if let Some(m) = self.lower_safe_scope_member(recv2, rty, &name, &args)
                 {
+                    from_scope_fn = true;
                     m
                 } else {
                     match args {
@@ -15039,6 +15064,24 @@ impl<'a> Lower<'a> {
                 } else {
                     member
                 };
+                // A safe call whose non-null arm DIVERGES — either the member/block value is `Nothing?`
+                // (`x?.let { return … }`, `x?.run { throw … }`, or a member returning `Nothing`) or a
+                // receiver-returning scope block diverges (`x?.also { return … }`, `x?.apply { throw … }`).
+                // A diverging arm produces no value, so modelling it as a value-producing `when` branch would
+                // merge a valueless branch with the `null` branch and leave a `Top` on the operand stack
+                // (VerifyError). Instead guard the divergent member as a plain statement — `if (recv != null)
+                // { member }` — and yield `null` unconditionally; the `null` is only ever observed when the
+                // receiver was null (else control left via the `return`/`throw`).
+                if result_ty.non_null().is_nothing_like() || (from_scope_fn && lambda_body_diverges) {
+                    let guard = self.ir.add_expr(IrExpr::When {
+                        branches: vec![(Some(cond), member)],
+                    });
+                    let nullv = self.ir.add_expr(IrExpr::Const(IrConst::Null));
+                    return Some(self.ir.add_expr(IrExpr::Block {
+                        stmts: vec![var, guard],
+                        value: Some(nullv),
+                    }));
+                }
                 let nullb = self.ir.add_expr(IrExpr::Const(IrConst::Null));
                 let when = self.ir.add_expr(IrExpr::When {
                     branches: vec![(Some(cond), member), (None, nullb)],
