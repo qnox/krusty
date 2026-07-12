@@ -4212,7 +4212,10 @@ pub fn check_file(file: &File, syms: &mut SymbolTable, diags: &mut DiagSink) -> 
                     .body_props
                     .iter()
                     .filter(|bp| {
-                        !bp.is_var && bp.init.is_none() && bp.getter.is_none() && bp.ty.is_some()
+                        !bp.is_var
+                            && bp.init.is_none()
+                            && (bp.getter.is_none() || bp.getter_reads_field)
+                            && bp.ty.is_some()
                     })
                     .map(|bp| bp.name.as_str())
                     .collect();
@@ -4308,7 +4311,10 @@ pub fn check_file(file: &File, syms: &mut SymbolTable, diags: &mut DiagSink) -> 
                     .body_props
                     .iter()
                     .filter(|bp| {
-                        !bp.is_var && bp.init.is_none() && bp.getter.is_none() && bp.ty.is_some()
+                        !bp.is_var
+                            && bp.init.is_none()
+                            && (bp.getter.is_none() || bp.getter_reads_field)
+                            && bp.ty.is_some()
                     })
                     .map(|bp| bp.name.as_str())
                     .collect();

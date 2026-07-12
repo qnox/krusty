@@ -1447,6 +1447,13 @@ impl<'a> Parser<'a> {
             );
         }
         let end = self.t[self.i.saturating_sub(1)].span;
+        let getter_reads_field = getter
+            .as_ref()
+            .and_then(|g| match g {
+                FunBody::Expr(e) | FunBody::Block(e) => Some(*e),
+                FunBody::None => None,
+            })
+            .is_some_and(|e| self.expr_reads_field(e));
         PropDecl {
             name,
             visibility: Visibility::Public,
@@ -1456,12 +1463,25 @@ impl<'a> Parser<'a> {
             init,
             is_lateinit,
             getter,
+            getter_reads_field,
             setter,
             is_const,
             is_abstract,
             delegate,
             span: Span::new(start.lo, end.hi),
         }
+    }
+
+    /// Whether the expression tree at `e` reads the property backing field — a bare `field`
+    /// identifier. Used to detect that a custom getter (`get() = field + …`) has a backing field.
+    fn expr_reads_field(&self, e: ExprId) -> bool {
+        if let Expr::Name(n) = self.file.expr(e) {
+            if n == "field" {
+                return true;
+            }
+        }
+        self.file
+            .any_child_expr(e, &mut |c| self.expr_reads_field(c), &mut |_| false)
     }
 
     /// Consume an accessor's `()`. Returns `Some(())` on success. `require` controls whether a
