@@ -576,6 +576,8 @@ mod string_concat_append_overload_e2e;
 mod super_default_args_e2e;
 #[path = "super_interface_default_e2e.rs"]
 mod super_interface_default_e2e;
+#[path = "super_to_base_secondary_ctor_e2e.rs"]
+mod super_to_base_secondary_ctor_e2e;
 #[path = "suspend_collection_hof_e2e.rs"]
 mod suspend_collection_hof_e2e;
 #[path = "suspend_default_param_e2e.rs"]

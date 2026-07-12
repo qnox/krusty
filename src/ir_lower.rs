@@ -2840,12 +2840,30 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                                 if c.has_primary_ctor {
                                     return None; // a secondary in a primary class must delegate via this(…)
                                 }
-                                (
-                                    CtorDelegateTarget::Super,
-                                    args.clone(),
-                                    super_param_tys.clone(),
-                                    true,
-                                )
+                                // Resolve the base `<init>` this `super(...)` targets by argument arity:
+                                // the base primary, or a base SECONDARY constructor (a base with no
+                                // primary). `super_param_tys` (the base primary) still covers the common
+                                // single-candidate case; multiple candidates disambiguate by arity.
+                                let cands = lo.super_ctor_candidate_tys(&internal);
+                                let target = match cands.len() {
+                                    // Object base / untracked base — no candidate signatures.
+                                    0 => super_param_tys.clone(),
+                                    // Exactly one base `<init>` (a primary, or a base with a single
+                                    // secondary and no primary) — that is the target.
+                                    1 => cands[0].clone(),
+                                    // Several base `<init>`s — disambiguate by argument arity.
+                                    _ => {
+                                        let same: Vec<&Vec<Ty>> = cands
+                                            .iter()
+                                            .filter(|p| p.len() == args.len())
+                                            .collect();
+                                        if same.len() != 1 {
+                                            return None; // no unique base ctor of this arity
+                                        }
+                                        same[0].clone()
+                                    }
+                                };
+                                (CtorDelegateTarget::Super, args.clone(), target, true)
                             }
                             ast::CtorDelegation::None => {
                                 if c.has_primary_ctor {
@@ -4444,6 +4462,34 @@ impl<'a> Lower<'a> {
                 }
             })
             .unwrap_or_default()
+    }
+
+    /// Candidate base-`<init>` signatures a `super(...)` may target: the base's primary constructor
+    /// (when it has one) plus every base SECONDARY constructor (a base with no primary constructor
+    /// exposes only these). The caller matches the `super(...)` argument arity against these to pick
+    /// the base `<init>` to call.
+    fn super_ctor_candidate_tys(&self, internal: &str) -> Vec<Vec<Ty>> {
+        let Some(sid) = self.classes[internal]
+            .super_internal
+            .clone()
+            .and_then(|s| self.classes.get(&s).map(|sup| sup.id))
+        else {
+            return Vec::new();
+        };
+        let sup = &self.ir.classes[sid as usize];
+        let mut out = Vec::new();
+        if sup.has_primary_ctor {
+            out.push(if sup.ctor_args.is_empty() {
+                let n = sup.ctor_param_count as usize;
+                sup.fields[..n].iter().map(|f| f.ty.clone()).collect()
+            } else {
+                sup.ctor_args.iter().map(|a| a.ty).collect()
+            });
+        }
+        for sc in &sup.secondary_ctors {
+            out.push(sc.params.clone());
+        }
+        out
     }
 
     /// Lower a class's body-property initializers + `init {}` blocks (source order) into IR effect
