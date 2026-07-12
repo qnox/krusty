@@ -1229,27 +1229,19 @@ impl Classpath {
                             crate::jvm::jvm_class_map::jvm_mapped_builtin_is_interface(&owner)
                         })
                         .unwrap_or(false);
+                    // The READ direction of the property-accessor mapping (the WRITE direction is the
+                    // bridge synthesis in `names::collection_property_stub_name`, reused here): a special
+                    // `JavaToKotlinClassMap` collection stub (`keys` → `keySet`), the `CharSequence.length`
+                    // plain method, else the JavaBean getter (`is`-prefix kept, otherwise `get<Name>`).
                     let member_name = if m.is_property {
-                        match m.name.as_str() {
-                            // Kotlin/JVM mapped builtins whose property accessor is a plain Java method.
-                            "length" | "size" | "values" => m.name.clone(),
-                            "keys" => "keySet".to_string(),
-                            "entries" => "entrySet".to_string(),
-                            n if n.starts_with("is")
-                                && n.as_bytes().get(2).is_some_and(|b| b.is_ascii_uppercase()) =>
-                            {
-                                n.to_string()
-                            }
-                            n => {
-                                let mut c = n.chars();
-                                format!(
-                                    "get{}{}",
-                                    c.next()
-                                        .map(|f| f.to_uppercase().to_string())
-                                        .unwrap_or_default(),
-                                    c.as_str()
-                                )
-                            }
+                        if let Some(stub) =
+                            crate::jvm::names::collection_property_stub_name(&m.name)
+                        {
+                            stub.to_string()
+                        } else if m.name == "length" {
+                            m.name.clone()
+                        } else {
+                            crate::jvm::names::property_getter_name(&m.name)
                         }
                     } else {
                         m.name.clone()
