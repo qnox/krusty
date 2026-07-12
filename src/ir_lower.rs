@@ -4293,6 +4293,31 @@ impl<'a> Lower<'a> {
         })
     }
 
+    /// Build a call to a user `inc`/`dec` MEMBER operator on a variable (`x.inc()`), given the
+    /// variable's IR slot and type — used to desugar an overloaded `x++`/`x--` to `x = x.inc()`.
+    /// `None` when the type has no such member operator (numeric, or an extension operator).
+    fn lower_member_inc_dec(&mut self, var_slot: u32, ty: Ty, dec: bool) -> Option<ExprId> {
+        if ty.is_numeric_or_char() {
+            return None;
+        }
+        // A value class's `inc`/`dec` is realized by the value_classes pass over its unboxed form —
+        // a plain member call here would VerifyError. Bail (the file skips) — value-class logic stays
+        // in value_classes.rs (rule 4).
+        if self.value_class_underlying(ty).is_some() {
+            return None;
+        }
+        let internal = ty.obj_internal()?.to_string();
+        let op = if dec { "dec" } else { "inc" };
+        let (class, index, _, _) = self.resolve_method(&internal, op)?;
+        let recv = self.ir.add_expr(IrExpr::GetValue(var_slot));
+        Some(self.ir.add_expr(IrExpr::MethodCall {
+            class,
+            index,
+            receiver: recv,
+            args: vec![],
+        }))
+    }
+
     fn implicit_coercion(&mut self, arg: u32, ty: Ty) -> u32 {
         self.ir.add_expr(IrExpr::TypeOp {
             op: IrTypeOp::ImplicitCoercion,
@@ -12890,6 +12915,13 @@ impl<'a> Lower<'a> {
                     });
                 }
                 let (v, ty) = self.lookup(&name)?;
+                // A user `inc`/`dec` operator on a non-numeric variable → `x = x.inc()`.
+                if let Some(call) = self.lower_member_inc_dec(v, ty, dec) {
+                    return Some(self.ir.add_expr(IrExpr::SetValue {
+                        var: v,
+                        value: call,
+                    }));
+                }
                 let one = self.scalar_one_const(ty)?;
                 let op = if dec { IrBinOp::Sub } else { IrBinOp::Add };
                 let cur = self.ir.add_expr(IrExpr::GetValue(v));
@@ -16786,6 +16818,40 @@ impl<'a> Lower<'a> {
                     }));
                 }
                 let (v, ty) = self.lookup(&name)?;
+                // A user `inc`/`dec` operator on a non-numeric variable → `x = x.inc()` yielding the
+                // new value (prefix) or the captured old value (postfix).
+                if !ty.is_numeric_or_char() {
+                    if prefix {
+                        let call = self.lower_member_inc_dec(v, ty, dec)?;
+                        let set = self.ir.add_expr(IrExpr::SetValue {
+                            var: v,
+                            value: call,
+                        });
+                        let value = self.ir.add_expr(IrExpr::GetValue(v));
+                        return Some(self.ir.add_expr(IrExpr::Block {
+                            stmts: vec![set],
+                            value: Some(value),
+                        }));
+                    }
+                    // Postfix: capture the old value before updating.
+                    let tmp = self.fresh_value();
+                    let old = self.ir.add_expr(IrExpr::GetValue(v));
+                    let var_decl = self.ir.add_expr(IrExpr::Variable {
+                        index: tmp,
+                        ty: ty_to_ir(ty),
+                        init: Some(old),
+                    });
+                    let call = self.lower_member_inc_dec(v, ty, dec)?;
+                    let set = self.ir.add_expr(IrExpr::SetValue {
+                        var: v,
+                        value: call,
+                    });
+                    let value = self.ir.add_expr(IrExpr::GetValue(tmp));
+                    return Some(self.ir.add_expr(IrExpr::Block {
+                        stmts: vec![var_decl, set],
+                        value: Some(value),
+                    }));
+                }
                 let op = if dec { IrBinOp::Sub } else { IrBinOp::Add };
                 if ty.int_arithmetic_repr() != ty {
                     // `Byte`/`Short`/`Char` narrow on update (wrap in their own width). No temp slot (a
