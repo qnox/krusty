@@ -632,6 +632,8 @@ mod unsigned_ext_e2e;
 mod unsigned_toplevel_e2e;
 #[path = "use_site_variance_e2e.rs"]
 mod use_site_variance_e2e;
+#[path = "val_backing_field_getter_e2e.rs"]
+mod val_backing_field_getter_e2e;
 #[path = "value_class_classpath_ctor_e2e.rs"]
 mod value_class_classpath_ctor_e2e;
 #[path = "value_class_e2e.rs"]
