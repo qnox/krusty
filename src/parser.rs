@@ -3459,6 +3459,14 @@ impl<'a> Parser<'a> {
                     let mut entries = Vec::new();
                     let mut source_props: Vec<Option<String>> = Vec::new();
                     loop {
+                        // Full form (`{ (val a, val b) -> … }`): each component carries its own
+                        // `val`/`var` and binds by property name. Keyword-less short form is positional
+                        // unless the short-form flag is on.
+                        let is_var = self.at(TokenKind::KwVar);
+                        let had_kw = is_var || self.at(TokenKind::KwVal);
+                        if had_kw {
+                            self.bump();
+                        }
                         let n = self.ident_or_error("variable name");
                         // A per-entry type annotation (`(a: Int, b) ->`) is tolerated, ignored.
                         if self.eat(TokenKind::Colon) {
@@ -3471,12 +3479,12 @@ impl<'a> Parser<'a> {
                                 let _ = self.parse_type();
                             }
                             Some(src)
-                        } else if self.short_form_destructuring {
+                        } else if self.short_form_destructuring || had_kw {
                             Some(n.clone())
                         } else {
                             None
                         };
-                        entries.push((n, false)); // destructured lambda params are `val`
+                        entries.push((n, is_var));
                         source_props.push(source);
                         if !self.eat(TokenKind::Comma) {
                             break;
@@ -3501,11 +3509,17 @@ impl<'a> Parser<'a> {
                     self.bump();
                     let mut entries = Vec::new();
                     loop {
+                        // Full-form bracket (`{ [val a, val b] -> … }`) — component keyword optional,
+                        // positional either way.
+                        let is_var = self.at(TokenKind::KwVar);
+                        if is_var || self.at(TokenKind::KwVal) {
+                            self.bump();
+                        }
                         let n = self.ident_or_error("variable name");
                         if self.eat(TokenKind::Colon) {
                             let _ = self.parse_type();
                         }
-                        entries.push((n, false));
+                        entries.push((n, is_var));
                         if !self.eat(TokenKind::Comma) {
                             break;
                         }
@@ -3698,6 +3712,91 @@ impl<'a> Parser<'a> {
     /// Desugar `name++`/`name--`/`++name`/`--name` (statement) to `name = name ± 1`.
     fn parse_incdec(&mut self, name: String, dec: bool, start: Span) -> StmtId {
         self.finish_stmt(Stmt::IncDec { name, dec }, start)
+    }
+
+    /// A full-form destructuring statement starts with `(` (name-based) or `[` (positional, only
+    /// under `+NameBasedDestructuring`) IMMEDIATELY followed by a `val`/`var` keyword — the marker
+    /// that distinguishes it from a parenthesized-expression statement.
+    fn at_full_form_destructure(&self) -> bool {
+        // Full-form destructuring is part of the `NameBasedDestructuring` feature — without it,
+        // `(val a, …)` at statement position stays a (rejected) expression, matching kotlinc.
+        if !self.name_based_destructuring {
+            return false;
+        }
+        let opener = self.at(TokenKind::LParen) || self.at(TokenKind::LBracket);
+        opener
+            && self
+                .t
+                .get(self.i + 1)
+                .is_some_and(|t| matches!(t.kind, TokenKind::KwVal | TokenKind::KwVar))
+    }
+
+    /// Parse a full-form destructuring declaration: `(val a, val b) = e` / `[var a, var b] = e`,
+    /// where each component carries its own `val`/`var` (and optional `: T` / `= sourceProp`). The
+    /// paren form binds each component BY PROPERTY NAME (name-based); the bracket form is positional
+    /// (`componentN`). Reuses `Stmt::Destructure` + the `destructure_source_props` side-table.
+    fn parse_full_form_destructure(&mut self, start: Span) -> StmtId {
+        let close = if self.at(TokenKind::LParen) {
+            TokenKind::RParen
+        } else {
+            TokenKind::RBracket
+        };
+        self.bump(); // '(' or '['
+        let mut entries: Vec<(String, bool)> = Vec::new();
+        let mut source_props: Vec<Option<String>> = Vec::new();
+        loop {
+            // Each component declares its own mutability.
+            let is_var = self.at(TokenKind::KwVar);
+            if is_var || self.at(TokenKind::KwVal) {
+                self.bump();
+            } else {
+                self.diags
+                    .error(self.tok().span, "expected 'val' or 'var'".to_string());
+            }
+            let name = self.ident_or_error("variable name");
+            if self.eat(TokenKind::Colon) {
+                let _ = self.parse_type();
+            }
+            // `val newName = sourceProp` — bind `newName` from the receiver's `sourceProp` property.
+            // A plain paren component `val a` binds by its OWN name; a bracket component is positional.
+            let source = if self.eat(TokenKind::Eq) {
+                let src = self.ident_or_error("property name");
+                if self.eat(TokenKind::Colon) {
+                    let _ = self.parse_type();
+                }
+                Some(src)
+            } else if close == TokenKind::RParen {
+                Some(name.clone())
+            } else {
+                None
+            };
+            entries.push((name, is_var));
+            source_props.push(source);
+            if !self.eat(TokenKind::Comma) {
+                break;
+            }
+            if self.at(close) {
+                break;
+            } // trailing comma
+        }
+        self.expect(
+            close,
+            if close == TokenKind::RParen {
+                "')'"
+            } else {
+                "']'"
+            },
+        );
+        self.expect(TokenKind::Eq, "'='");
+        self.skip_newlines();
+        let init = self.parse_expr();
+        let stmt = self.finish_stmt(Stmt::Destructure { entries, init }, start);
+        if source_props.iter().any(|s| s.is_some()) {
+            self.file
+                .destructure_source_props
+                .insert(stmt.0, source_props);
+        }
+        stmt
     }
 
     fn parse_stmt(&mut self) -> StmtId {
@@ -3960,6 +4059,12 @@ impl<'a> Parser<'a> {
                 d.modality = modality_of(is_open, is_abstract, false);
                 self.finish_stmt(Stmt::LocalClass(d), start)
             }
+            // Full-form destructuring (`+NameBasedDestructuring`): `(val a, val b) = e` /
+            // `[val a, val b] = e`, where each component carries its OWN `val`/`var` (unlike the
+            // leading-keyword short form `val (a, b) = e`). Paren form is name-based (binds by
+            // property name); bracket form is positional (`componentN`). Disambiguated from a plain
+            // parenthesized-expression statement by the `val`/`var` right after the opener.
+            _ if self.at_full_form_destructure() => self.parse_full_form_destructure(start),
             _ => {
                 let e = self.parse_expr();
                 // Increment/decrement *statement* (`target++` / `++target`): `parse_prefix`/
@@ -4088,6 +4193,14 @@ impl<'a> Parser<'a> {
             // Parallel by-name source properties (`for ((a = prop) in …)`); `None` for a positional entry.
             let mut source_props: Vec<Option<String>> = Vec::new();
             loop {
+                // Full form (`for ([val a, val b] in …)`): each component carries its own
+                // `val`/`var`. A full-form PAREN component binds by property name; the classic
+                // keyword-less short form stays positional (unless the short-form flag is on).
+                let is_var = self.at(TokenKind::KwVar);
+                let had_kw = is_var || self.at(TokenKind::KwVal);
+                if had_kw {
+                    self.bump();
+                }
                 let n = self.ident_or_error("variable name");
                 if self.eat(TokenKind::Colon) {
                     let _ = self.parse_type();
@@ -4098,12 +4211,12 @@ impl<'a> Parser<'a> {
                         let _ = self.parse_type();
                     }
                     Some(src)
-                } else if self.short_form_destructuring && close == TokenKind::RParen {
+                } else if close == TokenKind::RParen && (self.short_form_destructuring || had_kw) {
                     Some(n.clone())
                 } else {
                     None
                 };
-                entries.push((n, false));
+                entries.push((n, is_var));
                 source_props.push(source);
                 if !self.eat(TokenKind::Comma) {
                     break;
