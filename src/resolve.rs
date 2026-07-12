@@ -6190,11 +6190,15 @@ impl<'a> Checker<'a> {
         // enforced by lowering (`!!`/`?.`), not here. A nullable PRIMITIVE (`Int?`) is NOT stripped: it
         // boxes to a wrapper, a real representation difference the dedicated `nullable_primitive` rule
         // below (and the emit coercion site) must keep distinct from the bare primitive.
-        // Only in a RETURN position (an expression body / getter): a body like `= x as? A` yields a
-        // nullable reference assignable to the declared non-null-erased return. Elsewhere keep the strict
+        // Only in a RETURN position (an expression body, a getter, or a `return <expr>` statement in a
+        // block body): a body like `= x as? A` — or `return xs.firstOrNull { … }` — yields a nullable
+        // reference assignable to the declared non-null-erased return. `resolve_ty` erases reference
+        // nullability from the declared return (`C?` → `C`), so a block-body `return` of a genuinely
+        // nullable expression (`C?`) must compare non-null forms exactly as the expression-body path does;
+        // otherwise the two spellings of the same return position diverge. Elsewhere keep the strict
         // comparison so a genuinely distinct nullable assignment isn't silently accepted.
         let (expected, actual) =
-            if matches!(ctx, "function body" | "getter body" | "local function body") {
+            if matches!(ctx, "function body" | "getter body" | "local function body" | "return") {
                 (
                     self.strip_nullable_ref(expected),
                     self.strip_nullable_ref(actual),

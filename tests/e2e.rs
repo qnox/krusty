@@ -82,6 +82,8 @@ mod build840_mm1_safe_call_lambda_ext_e2e;
 mod build840_nn1_suspend_inline_withlock_e2e;
 #[path = "build1017_oo1_vcparam_result_takeif_e2e.rs"]
 mod build1017_oo1_vcparam_result_takeif_e2e;
+#[path = "build1018_pp1_suspend_block_firstornull_e2e.rs"]
+mod build1018_pp1_suspend_block_firstornull_e2e;
 #[path = "builtin_intrinsics_coverage_e2e.rs"]
 mod builtin_intrinsics_coverage_e2e;
 #[path = "bytecode_parity_e2e.rs"]
