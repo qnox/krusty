@@ -256,6 +256,34 @@ pub trait TargetRuntime {
         None
     }
 
+    /// Resolve a built-in type's SIMPLE name (`List`, `Map`, `Comparable`) to its front-end internal
+    /// name, when the local type-reference resolver has no classpath/import context. The platform owns
+    /// this because built-in identity (and the read-only/mutable collection split) is target-defined.
+    /// `None` for a name that is not a platform built-in.
+    fn builtin_type_internal(&self, _simple_name: &str) -> Option<String> {
+        None
+    }
+
+    /// Whether a supertype (given by its front-end internal name) is a platform collection interface
+    /// whose element-access members a concrete class must bridge to. Drives collection accessor-bridge
+    /// synthesis; `false` on targets without such mapped interfaces.
+    fn is_collection_interface(&self, _supertype_internal: &str) -> bool {
+        false
+    }
+
+    /// The physical accessor a mapped collection interface expects for a Kotlin collection PROPERTY
+    /// (`size` → `size`, `keys` → `keySet`). `None` when the property needs no distinct accessor bridge.
+    fn collection_property_accessor(&self, _property: &str) -> Option<String> {
+        None
+    }
+
+    /// The reified type-parameter formal NAMES a platform generic signature declares, in order — used to
+    /// bind an inline function's reified formals to resolved type arguments. Empty when the platform has
+    /// no such signature encoding or the signature declares none.
+    fn signature_formal_names(&self, _signature: &str) -> Vec<String> {
+        Vec::new()
+    }
+
     /// Runtime superclass used for synthesized function references on this platform.
     fn function_reference_impl_type(&self) -> Option<Ty> {
         None
