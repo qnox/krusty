@@ -768,17 +768,34 @@ fn emit_class(
                 // `super(…)` targets the base `<init>`, whose signature is read LIVE from the base
                 // class's (post-transform) ctor — mirrors the primary path, so any IR→IR pass that
                 // rewrote the base ctor's parameter types (e.g. value-class erasure) is reflected here.
+                // A base with no primary constructor exposes only SECONDARY `<init>`s; pick the one
+                // whose parameter count matches this `super(...)`'s arguments (the lowering already
+                // validated a unique match).
                 CtorDelegateTarget::Super => {
                     let owner =
                         crate::jvm::jvm_class_map::to_jvm_internal(&c.superclass).to_string();
                     let tys: Vec<Ty> = if owner == "java/lang/Object" {
                         Vec::new()
+                    } else if let Some(base) =
+                        ir.classes.iter().find(|sc| sc.fq_name == c.superclass)
+                    {
+                        let argc = sc.delegate_args.len();
+                        let mut cands: Vec<Vec<Ty>> = Vec::new();
+                        if base.has_primary_ctor {
+                            cands.push(class_ctor_jvm_tys(base));
+                        }
+                        for bsc in &base.secondary_ctors {
+                            cands.push(jvm_tys(&bsc.params));
+                        }
+                        let unique: Vec<&Vec<Ty>> =
+                            cands.iter().filter(|p| p.len() == argc).collect();
+                        if unique.len() == 1 {
+                            unique[0].clone()
+                        } else {
+                            class_ctor_jvm_tys(base)
+                        }
                     } else {
-                        ir.classes
-                            .iter()
-                            .find(|sc| sc.fq_name == c.superclass)
-                            .map(class_ctor_jvm_tys)
-                            .unwrap_or_default()
+                        Vec::new()
                     };
                     (owner, tys)
                 }
