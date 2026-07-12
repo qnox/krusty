@@ -1896,7 +1896,9 @@ impl SymbolSource for JvmLibraries {
                 };
                 props.push(PropertyInfo {
                     kind: PropKind::Extension,
-                    receiver: Some(Ty::obj(mp.receiver_class.as_deref().unwrap_or_default())),
+                    receiver: Some(Ty::obj(
+                        mp.receiver_class.as_deref().unwrap_or("kotlin/Any"),
+                    )),
                     formals: Vec::new(),
                     ty: Ty::obj(mp.ret_class.as_deref().unwrap_or("kotlin/Any")),
                     getter,
