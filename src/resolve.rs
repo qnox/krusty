@@ -6190,11 +6190,15 @@ impl<'a> Checker<'a> {
         // enforced by lowering (`!!`/`?.`), not here. A nullable PRIMITIVE (`Int?`) is NOT stripped: it
         // boxes to a wrapper, a real representation difference the dedicated `nullable_primitive` rule
         // below (and the emit coercion site) must keep distinct from the bare primitive.
-        // Only in a RETURN position (an expression body / getter): a body like `= x as? A` yields a
-        // nullable reference assignable to the declared non-null-erased return. Elsewhere keep the strict
+        // Only in a RETURN position (an expression body, a getter, or a `return <expr>` statement in a
+        // block body): a body like `= x as? A` — or `return xs.firstOrNull { … }` — yields a nullable
+        // reference assignable to the declared non-null-erased return. `resolve_ty` erases reference
+        // nullability from the declared return (`C?` → `C`), so a block-body `return` of a genuinely
+        // nullable expression (`C?`) must compare non-null forms exactly as the expression-body path does;
+        // otherwise the two spellings of the same return position diverge. Elsewhere keep the strict
         // comparison so a genuinely distinct nullable assignment isn't silently accepted.
         let (expected, actual) =
-            if matches!(ctx, "function body" | "getter body" | "local function body") {
+            if matches!(ctx, "function body" | "getter body" | "local function body" | "return") {
                 (
                     self.strip_nullable_ref(expected),
                     self.strip_nullable_ref(actual),
@@ -7021,7 +7025,13 @@ impl<'a> Checker<'a> {
                             // ("member … on Any"). `?.let`/`?.run`/… already route through
                             // `safe_scope_call_result`; this covers `takeIf`/`takeUnless`/any other lambda
                             // extension reached by `?.`.
-                            let arg_tys = self.ext_arg_tys(rt.non_null(), &name, a);
+                            // After `?.` the receiver is non-null, so resolve the member/extension against
+                            // the NON-NULL receiver type. Matching `rt` directly missed a nullable object
+                            // receiver (`Tok?` — e.g. the correctly-recovered nullable return of a classpath
+                            // call), dropping to the naive `arg_tys` fallback below that re-typed the lambda's
+                            // `it` as `Any`. `recv` restores parity with the non-safe call path.
+                            let recv = rt.non_null();
+                            let arg_tys = self.ext_arg_tys(recv, &name, a);
                             let inline_arg_supported = !a
                                 .iter()
                                 .any(|x| matches!(self.file.expr(*x), Expr::CallableRef { .. }));
@@ -7029,10 +7039,10 @@ impl<'a> Checker<'a> {
                                 Ty::String
                             } else if let ("hashCode", []) = (name.as_str(), arg_tys.as_slice()) {
                                 Ty::Int // Int (not a reference), so safe-call rejection fires below
-                            } else if rt == Ty::String {
+                            } else if recv == Ty::String {
                                 crate::symbol_resolver::resolve_instance_member(
                                     &*self.syms.libraries,
-                                    rt,
+                                    recv,
                                     &name,
                                     &arg_tys,
                                 )
@@ -7053,12 +7063,12 @@ impl<'a> Checker<'a> {
                                         .flatten()
                                 })
                                 .unwrap_or(Ty::Error)
-                            } else if let Ty::Obj(internal, _) = rt {
+                            } else if let Ty::Obj(internal, _) = recv {
                                 // A MODULE (user) class member only; a classpath / inherited-classpath
                                 // member falls through to the classpath selectors below (which pick by
                                 // argument fit and record the call for emit).
                                 crate::module_symbols::ModuleSymbols::new(self.syms)
-                                    .instance_members(rt, &name)
+                                    .instance_members(recv, &name)
                                     .into_iter()
                                     .next()
                                     .map(|m| m.ret)
