@@ -141,9 +141,15 @@ fn nested_try_with_finally() {
 
 #[test]
 fn range_over_doubles() {
-    // A `..` range is only supported for Int/Long/Char operands.
+    // Floating-point `..` ranges are now supported (they build a `ClosedFloatingPointRange` via
+    // `RangesKt.rangeTo`), so this must type-check clean — no diagnostic. Guards the range-support
+    // feature against regressing back to a rejection.
     let d = diags("fun box(): Int { val r = 1.0..2.0; return 0 }");
-    assert_rejected(&d, "range over Doubles");
+    let real: Vec<&String> = d.iter().filter(|m| !m.is_empty()).collect();
+    assert!(
+        real.is_empty() || d.iter().any(|m| m.contains("<skip")),
+        "expected float range to type-check clean, got: {real:?}"
+    );
 }
 
 #[test]

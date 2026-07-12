@@ -588,6 +588,9 @@ impl Ty {
             (Ty::Char, Ty::Char) => Ty::obj("kotlin/ranges/CharRange"),
             (Ty::UInt, Ty::UInt) => Ty::obj("kotlin/ranges/UIntRange"),
             (Ty::ULong, Ty::ULong) => Ty::obj("kotlin/ranges/ULongRange"),
+            (Ty::Double, Ty::Double) | (Ty::Float, Ty::Float) => {
+                Ty::obj("kotlin/ranges/ClosedFloatingPointRange")
+            }
             (l, r) if l.is_int_range_operand() && r.is_int_range_operand() => {
                 Ty::obj("kotlin/ranges/IntRange")
             }

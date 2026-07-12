@@ -119,6 +119,7 @@ pub struct RangeConstruction {
     pub result: Ty,
     pub through: PlatformRangeCtor,
     pub until: Option<LibraryCallable>,
+    pub through_static: Option<LibraryCallable>,
 }
 
 /// Platform-owned range constructor tokens. `trailing_nulls` covers synthetic marker arguments such as
