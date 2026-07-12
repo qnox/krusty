@@ -26,14 +26,6 @@ use crate::resolve::{
 };
 use crate::types::Ty;
 
-thread_local! {
-    /// The DECLARED element type for the immediately-following array-creating call, set by a NESTED-array
-    /// local's initializer (`val x: Array<Array<*>> = arrayOf(arrayOf(1))`) so the OUTER array is built
-    /// over the declared (wider) element `Array<*>` = `Object[]` — able to hold a later `arrayOf("OK")`.
-    /// Consumed take-once by [`Lower::synth_array_elem`] (the inner `arrayOf(1)` keeps its own element).
-    static EXPECTED_ARRAY_ELEM: std::cell::Cell<Option<Ty>> = const { std::cell::Cell::new(None) };
-}
-
 // --- Lower-bail diagnostics ----------------------------------------------------------------------
 // `lower_file` returns `None` (silently skips a file) for any construct outside the IR subset. That is
 // correct for the compiler, but opaque for the box-corpus `survey` — the roadmap of what to grow next.
@@ -121,6 +113,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
         statics: HashMap::new(),
         scope: Vec::new(),
         next_value: 0,
+        expected_array_elem: std::cell::Cell::new(None),
         cur_class: None,
         cur_field: None,
         field_accessor_props: std::collections::HashSet::new(),
@@ -4187,6 +4180,12 @@ pub(crate) struct Lower<'a> {
     statics: HashMap<String, (u32, Ty)>,
     scope: Vec<(String, u32, Ty)>,
     next_value: u32,
+    /// The DECLARED element type for the immediately-following array-creating call, set by a NESTED-array
+    /// local's initializer (`val x: Array<Array<*>> = arrayOf(arrayOf(1))`) so the OUTER array is built
+    /// over the declared (wider) element `Array<*>` = `Object[]` — able to hold a later `arrayOf("OK")`.
+    /// Consumed take-once by [`Lower::synth_array_elem`] (the inner `arrayOf(1)` keeps its own element). A
+    /// `Cell` so the take-once read works through `&self`; save/restore guards a nested-array initializer.
+    expected_array_elem: std::cell::Cell<Option<Ty>>,
     cur_class: Option<String>,
     /// When lowering a property's custom accessor body (`get()`/`set()`), the property's backing field
     /// `(class_id, field_index, field_ir_type)` — so the `field` keyword reads/writes it. `None`
@@ -4766,8 +4765,8 @@ impl<'a> Lower<'a> {
     /// not the erased `Object[]`); falls back to the checker-inferred `Array<T>` element otherwise.
     pub(crate) fn synth_array_elem(&self, call: AstExprId) -> Option<Ty> {
         // A nested-array local's outermost array creation uses the DECLARED (wider) element — see
-        // `EXPECTED_ARRAY_ELEM`. Take-once, so only the outermost creation consumes it.
-        if let Some(t) = EXPECTED_ARRAY_ELEM.with(|c| c.take()) {
+        // `expected_array_elem`. Take-once, so only the outermost creation consumes it.
+        if let Some(t) = self.expected_array_elem.take() {
             return Some(t);
         }
         if let Some(t) = self
@@ -12670,11 +12669,11 @@ impl<'a> Lower<'a> {
                     .filter(|e| e.non_null().obj_internal() == Some("kotlin/Array"));
                 // SAVE-RESTORE (not set-then-clear): a nested-array local INSIDE the initializer (`… = run
                 // { val y: Array<Array<Int>> = …; arrayOf(y) }`) must not clobber this one's expected element.
-                let prev_expected = EXPECTED_ARRAY_ELEM.with(|c| c.replace(nested_array_elem));
+                let prev_expected = self.expected_array_elem.replace(nested_array_elem);
                 // Coerce the initializer to the declared type (a generic-erased `Object` flowing into a
                 // typed `val` gets the `checkcast` kotlinc inserts).
                 let it = self.lower_arg(init, &ty_to_ir(kty))?;
-                EXPECTED_ARRAY_ELEM.with(|c| c.set(prev_expected));
+                self.expected_array_elem.set(prev_expected);
                 let v = self.fresh_value();
                 self.scope.push((name.clone(), v, kty));
                 // A nullable-declared local (`val v: X? = null`) carries its nullability into the IrType —
