@@ -4740,14 +4740,33 @@ impl<'a> Lower<'a> {
         if delegate_getvalue_uses_property(self.afile, &delegate_internal) {
             return None;
         }
-        let gv = self.syms.method_of(&delegate_internal, "getValue")?;
+        // `getValue` is a MEMBER operator on the delegate, or a classpath EXTENSION operator
+        // (`operator fun Lazy<T>.getValue(...)` in `LazyKt`, `@InlineOnly` → `this.value`). The member
+        // emits `delegate.getValue(thisRef, prop)`; the extension emits a static
+        // `getValue(delegate, thisRef, prop)` (spliced when `@InlineOnly`).
+        let (gv_owner, gv_desc, gv_ret, gv_inline, gv_is_ext) =
+            if let Some(gv) = self.syms.method_of(&delegate_internal, "getValue") {
+                let desc = self.syms.libraries.method_descriptor(&gv.params, gv.ret)?;
+                (
+                    delegate_internal.clone(),
+                    desc,
+                    gv.ret,
+                    InlineKind::None,
+                    false,
+                )
+            } else {
+                let c = self.resolver().resolve_extension_callable(
+                    "getValue",
+                    delegate_ty,
+                    &[Ty::obj("kotlin/Any"), Ty::obj("kotlin/reflect/KProperty")],
+                    &[],
+                )?;
+                (c.owner, c.descriptor, c.ret, c.inline, true)
+            };
         let prop_ty =
             p.ty.as_ref()
                 .map(|r| ty_of(self.afile, r))
-                .unwrap_or(gv.ret);
-
-        // getValue descriptor `(thisRef, KProperty)ret` from the resolved signature.
-        let gv_desc = self.syms.libraries.method_descriptor(&gv.params, gv.ret)?;
+                .unwrap_or(gv_ret);
 
         // x$delegate: Del — init = lowered delegate expression.
         let delegate_ir = ty_to_ir(delegate_ty);
@@ -4792,25 +4811,39 @@ impl<'a> Lower<'a> {
             custom_accessor: false,
         });
 
-        // getX(): return x$delegate.getValue(null, x$kprop).
+        // getX(): a member → `x$delegate.getValue(null, x$kprop)`; an extension → the static
+        // `getValue(x$delegate, null, x$kprop)`.
         let get_d = self.ir.add_expr(IrExpr::GetStatic(idx_d));
         let null_a = self.ir.add_expr(IrExpr::Const(IrConst::Null));
         let get_p = self.ir.add_expr(IrExpr::GetStatic(idx_p));
-        let is_iface = self
-            .syms
-            .class_by_internal(&delegate_internal)
-            .map(|c| c.is_interface)
-            .unwrap_or(false);
-        let call = self.ir.add_expr(IrExpr::Call {
-            callee: crate::ir::Callee::Virtual {
-                owner: delegate_internal,
-                name: "getValue".to_string(),
-                descriptor: gv_desc,
-                interface: is_iface,
-            },
-            dispatch_receiver: Some(get_d),
-            args: vec![null_a, get_p],
-        });
+        let call = if gv_is_ext {
+            self.ir.add_expr(IrExpr::Call {
+                callee: crate::ir::Callee::Static {
+                    owner: gv_owner,
+                    name: "getValue".to_string(),
+                    descriptor: gv_desc,
+                    inline: gv_inline,
+                },
+                dispatch_receiver: None,
+                args: vec![get_d, null_a, get_p],
+            })
+        } else {
+            let is_iface = self
+                .syms
+                .class_by_internal(&delegate_internal)
+                .map(|c| c.is_interface)
+                .unwrap_or(false);
+            self.ir.add_expr(IrExpr::Call {
+                callee: crate::ir::Callee::Virtual {
+                    owner: gv_owner,
+                    name: "getValue".to_string(),
+                    descriptor: gv_desc,
+                    interface: is_iface,
+                },
+                dispatch_receiver: Some(get_d),
+                args: vec![null_a, get_p],
+            })
+        };
         let ret = self.ir.add_expr(IrExpr::Return(Some(call)));
         let body = self.ir.add_expr(IrExpr::Block {
             stmts: vec![ret],
