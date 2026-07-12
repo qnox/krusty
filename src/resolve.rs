@@ -993,14 +993,17 @@ pub fn collect_signatures_with_cp(
     let mut class_names = ClassNames::new(std::rc::Rc::new(HashMap::new()));
     // A user-declared top-level class *shadows* any classpath/JDK type of the same simple name
     // (legal Kotlin — the JDK one would need an explicit import). Only a duplicate among the
-    // user's own declarations is a conflict, so track which names the user has defined.
+    // user's own declarations is a conflict, so track which names the user has defined. The dedup
+    // key is the package-qualified *internal* name, not the simple name: two classes sharing a
+    // simple name in different packages (e.g. a test's root-package `EmptyContinuation` and the
+    // injected `helpers.EmptyContinuation`) are distinct declarations, not a conflict.
     let mut user_defined: std::collections::HashSet<String> = std::collections::HashSet::new();
     for (i, file) in files.iter().enumerate() {
         diags.set_file(i as u32);
         for &d in &file.decls {
             if let Decl::Class(c) = file.decl(d) {
                 let internal = class_internal(file, &c.name);
-                if !user_defined.insert(c.name.clone()) {
+                if !user_defined.insert(internal.clone()) {
                     diags.error(c.span, format!("conflicting declarations: {}", c.name));
                 }
                 class_names.insert(c.name.clone(), internal);
@@ -1136,6 +1139,11 @@ pub fn collect_signatures_with_cp(
 
     // Pass 2: resolve signatures/properties against the now-complete type universe.
     let mut table = SymbolTable::default();
+    // Same-name top-level functions are kept as overloads; a real "conflicting declarations" clash
+    // is a same-*package* same-erasure duplicate. Keyed by (package, name, erased params) so a
+    // cross-package homonym (a star-imported function shadowed by a local one) is not a conflict.
+    let mut seen_fun_keys: std::collections::HashSet<(String, String, Vec<ErasedTypeKey>)> =
+        std::collections::HashSet::new();
     for (i, file) in files.iter().enumerate() {
         diags.set_file(i as u32);
         for &d in &file.decls {
@@ -1322,14 +1330,15 @@ pub fn collect_signatures_with_cp(
                         }
                     } else {
                         // Overloading: keep ALL same-name functions, keyed by name. Only an exact
-                        // erased-parameter duplicate is a real conflict; use a Kotlin-level erasure key
-                        // here instead of formatting JVM descriptors in the checker.
+                        // erased-parameter duplicate *in the same package* is a real conflict — a
+                        // same-name/same-erasure function from another package (e.g. a star-imported
+                        // `helpers.runBlocking` shadowed by a local top-level `runBlocking`) is a
+                        // distinct declaration, not a clash. Use a Kotlin-level erasure key here
+                        // instead of formatting JVM descriptors in the checker.
                         let key = erased_params_semantic_key(&sig);
+                        let pkg = file.package.clone().unwrap_or_default();
                         let overloads = table.funs.entry(f.name.clone()).or_default();
-                        if overloads
-                            .iter()
-                            .any(|s| erased_params_semantic_key(s) == key)
-                        {
+                        if !seen_fun_keys.insert((pkg, f.name.clone(), key)) {
                             diags.error(f.span, format!("conflicting declarations: {}", f.name));
                         } else {
                             overloads.push(sig);
@@ -12879,6 +12888,55 @@ mod tests {
     fn ok(src: &str) {
         let (errs, _) = check(src);
         assert!(errs.is_empty(), "unexpected errors: {errs:?}");
+    }
+
+    fn parse_file(src: &str, d: &mut DiagSink) -> File {
+        let toks = lex(src, d);
+        parse(src, &toks, d)
+    }
+
+    #[test]
+    fn same_simple_name_in_different_packages_is_not_a_conflict() {
+        // Two files declaring a class (and a top-level function) of the same simple name in
+        // DIFFERENT packages are distinct declarations, not a "conflicting declarations" clash —
+        // exactly the shape produced when the coroutine-helper source (`package helpers`) is
+        // injected alongside a box test that redeclares `EmptyContinuation` / `runBlocking` in the
+        // root package. The dedup keys are package-qualified, so this collects without error.
+        let mut d = DiagSink::new();
+        let a = parse_file("class EmptyContinuation\nfun runBlocking() {}", &mut d);
+        let b = parse_file(
+            "package helpers\nclass EmptyContinuation\nfun runBlocking() {}",
+            &mut d,
+        );
+        let files = vec![a, b];
+        let _ = collect_signatures(&files, &mut d);
+        let errs: Vec<String> = d.diags.iter().map(|x| x.msg.clone()).collect();
+        assert!(
+            errs.is_empty(),
+            "cross-package homonyms wrongly flagged: {errs:?}"
+        );
+    }
+
+    #[test]
+    fn same_package_duplicate_class_and_fun_still_conflicts() {
+        // The guard stays sound: a genuine same-package duplicate (same internal name / same erased
+        // signature) is still reported.
+        let mut d = DiagSink::new();
+        let a = parse_file("class Dup\nfun f() {}", &mut d);
+        let b = parse_file("class Dup\nfun f() {}", &mut d);
+        let files = vec![a, b];
+        let _ = collect_signatures(&files, &mut d);
+        let errs: Vec<String> = d.diags.iter().map(|x| x.msg.clone()).collect();
+        assert!(
+            errs.iter()
+                .any(|e| e.contains("conflicting declarations: Dup")),
+            "expected class conflict, got {errs:?}"
+        );
+        assert!(
+            errs.iter()
+                .any(|e| e.contains("conflicting declarations: f")),
+            "expected fun conflict, got {errs:?}"
+        );
     }
     #[test]
     fn subclass_resolves_generic_base_property_type() {
