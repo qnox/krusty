@@ -26,6 +26,8 @@ mod backend_rejection_coverage_e2e;
 mod backing_field_accessor_e2e;
 #[path = "backtick_identifier_e2e.rs"]
 mod backtick_identifier_e2e;
+#[path = "bare_accessor_and_setter_bridge_e2e.rs"]
+mod bare_accessor_and_setter_bridge_e2e;
 #[path = "bound_expr_ref_e2e.rs"]
 mod bound_expr_ref_e2e;
 #[path = "bound_library_ref_e2e.rs"]

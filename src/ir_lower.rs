@@ -1839,8 +1839,8 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                         let Some(sc) = lo.syms.class_by_internal(&sup) else {
                             continue;
                         };
-                        for (pname, sty, _) in sc.props.clone() {
-                            if let Some((own_ty, _)) = lo.syms.prop_of(&internal, &pname) {
+                        for (pname, sty, base_is_var) in sc.props.clone() {
+                            if let Some((own_ty, own_is_var)) = lo.syms.prop_of(&internal, &pname) {
                                 let sty_desc = lo.syms.libraries.type_descriptor(sty)?;
                                 let own_desc = lo.syms.libraries.type_descriptor(own_ty)?;
                                 if sty_desc != own_desc {
@@ -1862,6 +1862,30 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                                                 unbox_params: Vec::new(),
                                             },
                                         );
+                                    }
+                                    // A `var` override also needs a `setX(erased)` bridge delegating to
+                                    // the concrete `setX(own)` — else a write through the supertype
+                                    // reference resolves to the missing erased setter (silent no-op).
+                                    if base_is_var && own_is_var {
+                                        let sname = property_setter_name(&pname);
+                                        let has_setter = lo.ir.classes[cid as usize]
+                                            .bridges
+                                            .iter()
+                                            .any(|b| b.name == sname && b.erased_params.len() == 1);
+                                        if !has_setter {
+                                            lo.ir.classes[cid as usize].bridges.push(
+                                                crate::ir::Bridge {
+                                                    name: sname,
+                                                    erased_params: vec![ty_to_ir(sty)],
+                                                    erased_ret: ty_to_ir(Ty::Unit),
+                                                    concrete_params: vec![ty_to_ir(own_ty)],
+                                                    concrete_ret: ty_to_ir(Ty::Unit),
+                                                    target_name: None,
+                                                    box_ret: None,
+                                                    unbox_params: Vec::new(),
+                                                },
+                                            );
+                                        }
                                     }
                                 }
                             }
