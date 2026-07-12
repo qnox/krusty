@@ -7021,7 +7021,13 @@ impl<'a> Checker<'a> {
                             // ("member … on Any"). `?.let`/`?.run`/… already route through
                             // `safe_scope_call_result`; this covers `takeIf`/`takeUnless`/any other lambda
                             // extension reached by `?.`.
-                            let arg_tys = self.ext_arg_tys(rt.non_null(), &name, a);
+                            // After `?.` the receiver is non-null, so resolve the member/extension against
+                            // the NON-NULL receiver type. Matching `rt` directly missed a nullable object
+                            // receiver (`Tok?` — e.g. the correctly-recovered nullable return of a classpath
+                            // call), dropping to the naive `arg_tys` fallback below that re-typed the lambda's
+                            // `it` as `Any`. `recv` restores parity with the non-safe call path.
+                            let recv = rt.non_null();
+                            let arg_tys = self.ext_arg_tys(recv, &name, a);
                             let inline_arg_supported = !a
                                 .iter()
                                 .any(|x| matches!(self.file.expr(*x), Expr::CallableRef { .. }));
@@ -7029,10 +7035,10 @@ impl<'a> Checker<'a> {
                                 Ty::String
                             } else if let ("hashCode", []) = (name.as_str(), arg_tys.as_slice()) {
                                 Ty::Int // Int (not a reference), so safe-call rejection fires below
-                            } else if rt == Ty::String {
+                            } else if recv == Ty::String {
                                 crate::symbol_resolver::resolve_instance_member(
                                     &*self.syms.libraries,
-                                    rt,
+                                    recv,
                                     &name,
                                     &arg_tys,
                                 )
@@ -7053,12 +7059,12 @@ impl<'a> Checker<'a> {
                                         .flatten()
                                 })
                                 .unwrap_or(Ty::Error)
-                            } else if let Ty::Obj(internal, _) = rt {
+                            } else if let Ty::Obj(internal, _) = recv {
                                 // A MODULE (user) class member only; a classpath / inherited-classpath
                                 // member falls through to the classpath selectors below (which pick by
                                 // argument fit and record the call for emit).
                                 crate::module_symbols::ModuleSymbols::new(self.syms)
-                                    .instance_members(rt, &name)
+                                    .instance_members(recv, &name)
                                     .into_iter()
                                     .next()
                                     .map(|m| m.ret)
