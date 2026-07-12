@@ -23,6 +23,20 @@ use crate::libraries::InlineKind;
 use crate::types::Ty;
 use std::collections::{HashMap, HashSet};
 
+/// The two stdlib value classes whose underlying is JVM-native unsigned (no synthesized `-impl` members —
+/// their box/unbox lives on the classpath). Both erase to a signed primitive, so they contribute nothing
+/// to the erasure map and are skipped when probing referenced classes.
+fn is_native_unsigned(fq: &str) -> bool {
+    matches!(fq, "kotlin/UInt" | "kotlin/ULong")
+}
+
+/// Whether an underlying fq name is an IEEE floating-point type. A value class over `Float`/`Double`
+/// compares by IEEE TOTAL ORDER (`NaN == NaN`, `0.0 != -0.0`) via `{Float,Double}.compare`, NOT a raw
+/// `fcmp`/`dcmp` — matching kotlinc's `equals-impl0`.
+fn is_ieee_fp(fq: &str) -> bool {
+    matches!(fq, "kotlin/Float" | "kotlin/Double")
+}
+
 thread_local! {
     /// `(class-index, method-index)` → value-class field type for value-class-FIELD getters of the file
     /// being lowered (see the population in [`lower_value_classes`]). Read by [`repr`] so a `MethodCall` to
@@ -163,9 +177,8 @@ pub fn lower_value_classes(
     // in the lowerer — the lowerer carries no value-class knowledge. Every referenced class name in the IR
     // is probed; a classpath value class contributes its `value_underlying`.
     let mut under = under;
-    let native_unsigned = |fq: &str| matches!(fq, "kotlin/UInt" | "kotlin/ULong");
     for fq in referenced_class_names(ir) {
-        if under.contains_key(&fq) || native_unsigned(&fq) {
+        if under.contains_key(&fq) || is_native_unsigned(&fq) {
             continue;
         }
         if crate::types::prim_array_element(&fq).is_some() {
@@ -1408,7 +1421,7 @@ pub fn lower_value_classes(
                         // would miss the total-order case and leave a raw `fcmp`/`dcmp` in place.
                         let total_order = matches!(
                             under.get(&x).map(|u| erase(u, &under)).and_then(|u| u.non_null().kotlin_class_internal()),
-                            Some(fq_name) if fq_name == "kotlin/Float" || fq_name == "kotlin/Double"
+                            Some(fq_name) if is_ieee_fp(fq_name)
                         );
                         // "Same value class, same representation" — both UNBOXED. If the other side is
                         // BOXED (a nullable-`X` over a primitive, say), box this one too so both compare
@@ -2967,7 +2980,7 @@ fn synth_value_members(
                 dispatch_receiver: None,
                 args: vec![a, b],
             })
-        } else if final_fq == "kotlin/Float" || final_fq == "kotlin/Double" {
+        } else if is_ieee_fp(&final_fq) {
             // A `Float`/`Double` underlying compares by IEEE TOTAL ORDER (`NaN == NaN`, `0.0 != -0.0`) —
             // exactly `java/lang/Float.compare(a, b) == 0`, NOT a raw `fcmp`/`dcmp` (which gives the
             // opposite for `NaN` and `±0.0`). Matches kotlinc's value-class `equals-impl0`.
@@ -3168,7 +3181,7 @@ fn field_hash_ir(ir: &mut IrFile, v: ExprId, fq: &str) -> ExprId {
 
 /// `a != b` for an underlying fq name (float/double → total-order `compare != 0`; else `PrimitiveBinOp`).
 fn field_ne_ir(ir: &mut IrFile, a: ExprId, b: ExprId, fq: &str) -> ExprId {
-    if fq == "kotlin/Double" || fq == "kotlin/Float" {
+    if is_ieee_fp(fq) {
         let (owner, desc) = if fq == "kotlin/Double" {
             ("java/lang/Double", "(DD)I")
         } else {
