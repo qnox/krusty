@@ -24,6 +24,24 @@ fn member_inc_local_all_forms() {
 }
 
 #[test]
+fn member_inc_on_field_and_index_statement() {
+    // `obj.x++` / `arr[i]++` (statement position) desugar to `... = ....inc()`, so a user `inc`
+    // operator works on a member/index target too.
+    const SRC: &str = "class N(val i: Int) { operator fun inc(): N = N(i + 1) }\n\
+        class Box(var ref: N)\n\
+        fun box(): String {\n\
+        \x20 val b = Box(N(5))\n\
+        \x20 b.ref++\n\
+        \x20 b.ref++\n\
+        \x20 val a = arrayOf(N(1))\n\
+        \x20 a[0]++\n\
+        \x20 return if (b.ref.i == 7 && a[0].i == 2) \"OK\" else \"fail ${b.ref.i} ${a[0].i}\"\n\
+        }\n\
+        fun main() { println(box()) }\n";
+    assert_eq!(run(SRC).expect("member/index inc"), "OK");
+}
+
+#[test]
 fn member_dec_local() {
     const SRC: &str = "class N(val i: Int) { operator fun dec(): N = N(i - 1) }\n\
         fun box(): String {\n\
