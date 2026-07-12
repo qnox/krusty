@@ -6193,15 +6193,17 @@ impl<'a> Checker<'a> {
         // nullable expression (`C?`) must compare non-null forms exactly as the expression-body path does;
         // otherwise the two spellings of the same return position diverge. Elsewhere keep the strict
         // comparison so a genuinely distinct nullable assignment isn't silently accepted.
-        let (expected, actual) =
-            if matches!(ctx, "function body" | "getter body" | "local function body" | "return") {
-                (
-                    self.strip_nullable_ref(expected),
-                    self.strip_nullable_ref(actual),
-                )
-            } else {
-                (expected, actual)
-            };
+        let (expected, actual) = if matches!(
+            ctx,
+            "function body" | "getter body" | "local function body" | "return"
+        ) {
+            (
+                self.strip_nullable_ref(expected),
+                self.strip_nullable_ref(actual),
+            )
+        } else {
+            (expected, actual)
+        };
         // An erased generic reference array (`Array<Any>`, e.g. `emptyArray<T>()` → `Object[]`) is
         // assignable to any specific reference array — `Array` is invariant, but the erased value
         // really is the target type at runtime, so kotlinc inserts a `checkcast` at the use site.
