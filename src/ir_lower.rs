@@ -16486,7 +16486,14 @@ impl<'a> Lower<'a> {
                     let lb = this.ir.add_expr(IrExpr::GetValue(b));
                     this.compare_ordered(elem, op, la, lb)
                 };
-                let cond = if negated {
+                // The De Morgan dual (`value < lo || value > hi`) of `!in` is only valid when the
+                // element order is total. For IEEE floating point it is NOT: `!(x <= NaN)` is `true`
+                // but `x > NaN` is `false` (all NaN comparisons are false), so distributing the
+                // negation flips membership for NaN bounds/values. For float/double, compute the plain
+                // `in` chain and boolean-negate it (matching kotlinc, which negates `contains`);
+                // integral/char/unsigned ranges keep the cheaper De Morgan form.
+                let float_elem = matches!(elem, Ty::Double | Ty::Float);
+                let cond = if negated && !float_elem {
                     // value < lo  ||  value (> | >=) hi
                     let c1 = cmp(self, IrBinOp::Lt, vv, lo)?;
                     let c2 = cmp(
@@ -16509,11 +16516,22 @@ impl<'a> Lower<'a> {
                         vv,
                         hi,
                     )?;
-                    self.ir.add_expr(IrExpr::PrimitiveBinOp {
+                    let in_chain = self.ir.add_expr(IrExpr::PrimitiveBinOp {
                         op: IrBinOp::And,
                         lhs: c1,
                         rhs: c2,
-                    })
+                    });
+                    if negated {
+                        // float `!in`: negate the boolean `in` result (`in == false`).
+                        let f = self.ir.add_expr(IrExpr::Const(IrConst::Boolean(false)));
+                        self.ir.add_expr(IrExpr::PrimitiveBinOp {
+                            op: IrBinOp::Eq,
+                            lhs: in_chain,
+                            rhs: f,
+                        })
+                    } else {
+                        in_chain
+                    }
                 };
                 self.ir.add_expr(IrExpr::Block {
                     stmts: vec![var_s, var_e, var_v],
@@ -16529,15 +16547,28 @@ impl<'a> Lower<'a> {
                 let hi_v = self.lower_arg(hi, &ty_to_ir(range.elem))?;
                 match kind {
                     RangeKind::Through => {
-                        let mut args = vec![lo_v, hi_v];
-                        for _ in 0..range.through.trailing_nulls {
-                            args.push(self.ir.add_expr(IrExpr::Const(IrConst::Null)));
+                        if let Some(c) = range.through_static {
+                            self.ir.add_expr(IrExpr::Call {
+                                callee: Callee::Static {
+                                    owner: c.owner,
+                                    name: c.name,
+                                    descriptor: c.descriptor,
+                                    inline: c.inline,
+                                },
+                                dispatch_receiver: None,
+                                args: vec![lo_v, hi_v],
+                            })
+                        } else {
+                            let mut args = vec![lo_v, hi_v];
+                            for _ in 0..range.through.trailing_nulls {
+                                args.push(self.ir.add_expr(IrExpr::Const(IrConst::Null)));
+                            }
+                            self.ir.add_expr(IrExpr::NewExternal {
+                                internal: range.through.internal,
+                                ctor_desc: range.through.ctor_desc,
+                                args,
+                            })
                         }
-                        self.ir.add_expr(IrExpr::NewExternal {
-                            internal: range.through.internal,
-                            ctor_desc: range.through.ctor_desc,
-                            args,
-                        })
                     }
                     RangeKind::Until => {
                         let c = range.until?;

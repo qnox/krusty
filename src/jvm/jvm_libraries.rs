@@ -2333,6 +2333,8 @@ impl crate::libraries::TargetRuntime for JvmLibraries {
             (Ty::Char, Ty::Char) => ("kotlin/ranges/CharRange", Ty::Char, 0),
             (Ty::UInt, Ty::UInt) => ("kotlin/ranges/UIntRange", Ty::UInt, 1),
             (Ty::ULong, Ty::ULong) => ("kotlin/ranges/ULongRange", Ty::ULong, 1),
+            (Ty::Double, Ty::Double) => ("kotlin/ranges/ClosedDoubleRange", Ty::Double, 0),
+            (Ty::Float, Ty::Float) => ("kotlin/ranges/ClosedFloatRange", Ty::Float, 0),
             (l, r) if l.is_int_range_operand() && r.is_int_range_operand() => {
                 ("kotlin/ranges/IntRange", Ty::Int, 0)
             }
@@ -2353,6 +2355,7 @@ impl crate::libraries::TargetRuntime for JvmLibraries {
             trailing_nulls,
         };
         let until = match elem {
+            Ty::Double | Ty::Float => None,
             Ty::UInt => Some(LibraryCallable::library(
                 "kotlin/ranges/URangesKt",
                 "until-J1ME1BU",
@@ -2379,11 +2382,29 @@ impl crate::libraries::TargetRuntime for JvmLibraries {
             )),
             _ => None,
         };
+        let (result, through_static) = match elem {
+            Ty::Double | Ty::Float => {
+                let iface = "kotlin/ranges/ClosedFloatingPointRange";
+                (
+                    Ty::obj(iface),
+                    Some(LibraryCallable::library(
+                        "kotlin/ranges/RangesKt",
+                        "rangeTo",
+                        vec![elem, elem],
+                        Ty::obj(iface),
+                        Ty::obj(iface),
+                        format!("({prim}{prim})L{iface};"),
+                    )),
+                )
+            }
+            _ => (Ty::obj(internal), None),
+        };
         Some(RangeConstruction {
             elem,
-            result: Ty::obj(internal),
+            result,
             through,
             until,
+            through_static,
         })
     }
 
