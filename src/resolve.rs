@@ -6176,6 +6176,13 @@ impl<'a> Checker<'a> {
         if actual == Ty::Nothing {
             return;
         }
+        // `Nothing?` — the type of a diverging safe call (`x?.let { return … }`: `null` when the receiver
+        // is null, else never). It is `Nothing` widened nullable, so it flows into any reference target
+        // (krusty erases reference nullability), exactly like the `null` literal below — but not a
+        // primitive.
+        if actual.non_null() == Ty::Nothing && expected.is_reference() {
+            return;
+        }
         // `null` is assignable to any reference type (krusty is permissive about nullability).
         if actual == Ty::Null && expected.is_reference() {
             return;
@@ -7126,6 +7133,18 @@ impl<'a> Checker<'a> {
                         // is `Unit?` — `null` when the receiver is null, else `Unit`. The lowerer runs the
                         // member for effect and yields `Unit.INSTANCE`/`null` (both references).
                         return self.set(e, Ty::Unit);
+                    }
+                    if result == Ty::Nothing {
+                        // A safe call whose member/block VALUE is `Nothing` — a value-yielding scope block
+                        // that diverges (`x?.let { return … }` / `x?.run { throw … }`) or a member returning
+                        // `Nothing` (`x?.fail()`). The whole safe call is `Nothing?` — `null` when the
+                        // receiver is null, else control never comes back. That is a nullable (reference)
+                        // type, so the lowerer's null-merge stays well-typed; this mirrors kotlinc, which
+                        // types `x?.let { return … }` as `Nothing?`. Keyed on the `Nothing` result TYPE, not
+                        // on a function name — a plain `C?` receiver hits it too. (A receiver-returning scope
+                        // fn — `also`/`apply` — keeps the receiver type here even when its block diverges; the
+                        // lowerer detects that block-body divergence and applies the same guarded lowering.)
+                        return self.set(e, Ty::nullable(Ty::Nothing));
                     }
                     if let Some(nb) = result.nullable_boxed() {
                         return self.set(e, nb);
