@@ -1294,7 +1294,21 @@ pub fn collect_signatures_with_cp(
                                     | "setValue"
                                     | "provideDelegate"
                             );
-                        if recv_ref.nullable && recv_ty.is_reference() && is_operator {
+                        // The recursion hazard applies to a receiver whose non-null type has a BUILTIN
+                        // (or classpath) operator of this name — `String?.plus`, `Int?.inc`: the body's
+                        // same-operator call on the non-null value routes back to the extension. A class
+                        // declared IN THIS MODULE has no builtin operator, so a nullable-receiver
+                        // operator extension on it (`operator fun MyClass?.inc()`) is the sole
+                        // resolution and safe. (Checked via `file.decls`, NOT `class_names` — the latter
+                        // also names default-imported builtins like `String`.)
+                        let module_declared_recv = file.decls.iter().any(|&d| {
+                            matches!(file.decl(d), crate::ast::Decl::Class(c) if c.name == recv_ref.name)
+                        });
+                        if recv_ref.nullable
+                            && recv_ty.is_reference()
+                            && is_operator
+                            && !module_declared_recv
+                        {
                             diags.error(f.span, "krusty: an operator extension on a nullable reference receiver is not supported".to_string());
                         } else if table
                             .ext_funs

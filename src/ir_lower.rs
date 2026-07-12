@@ -4306,16 +4306,33 @@ impl<'a> Lower<'a> {
         if self.value_class_underlying(ty).is_some() {
             return None;
         }
-        let internal = ty.obj_internal()?.to_string();
         let op = if dec { "dec" } else { "inc" };
-        let (class, index, _, _) = self.resolve_method(&internal, op)?;
-        let recv = self.ir.add_expr(IrExpr::GetValue(var_slot));
-        Some(self.ir.add_expr(IrExpr::MethodCall {
-            class,
-            index,
-            receiver: recv,
-            args: vec![],
-        }))
+        // Member operator on the (non-null) receiver type.
+        if let Some(internal) = ty.obj_internal().map(|s| s.to_string()) {
+            if let Some((class, index, _, _)) = self.resolve_method(&internal, op) {
+                let recv = self.ir.add_expr(IrExpr::GetValue(var_slot));
+                return Some(self.ir.add_expr(IrExpr::MethodCall {
+                    class,
+                    index,
+                    receiver: recv,
+                    args: vec![],
+                }));
+            }
+        }
+        // Top-level extension operator (`operator fun T?.inc()`). Only for a REFERENCE receiver — a
+        // nullable-primitive extension (`Int?.inc`) boxes wrong here and risks the recursion the
+        // checker guards, so leave those to skip.
+        if ty.erased_recv().is_reference() {
+            if let Some(&fid) = self.ext_fun_ids.get(&(ty.erased_recv(), op.to_string())) {
+                let recv = self.ir.add_expr(IrExpr::GetValue(var_slot));
+                return Some(self.ir.add_expr(IrExpr::Call {
+                    callee: Callee::Local(fid),
+                    dispatch_receiver: None,
+                    args: vec![recv],
+                }));
+            }
+        }
+        None
     }
 
     fn implicit_coercion(&mut self, arg: u32, ty: Ty) -> u32 {

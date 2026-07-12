@@ -42,6 +42,21 @@ fn member_inc_on_field_and_index_statement() {
 }
 
 #[test]
+fn extension_inc_on_nullable_user_class() {
+    // A nullable-receiver operator EXTENSION on a MODULE-declared class (`operator fun C?.inc()`) is
+    // safe (no builtin collision) and drives `x++` via a static extension call.
+    const SRC: &str = "class C(val n: Int)\n\
+        operator fun C?.inc(): C? = C((this?.n ?: 0) + 1)\n\
+        fun box(): String {\n\
+        \x20 var c: C? = C(5)\n\
+        \x20 val old = c++\n\
+        \x20 return if (old!!.n == 5 && c!!.n == 6) \"OK\" else \"fail\"\n\
+        }\n\
+        fun main() { println(box()) }\n";
+    assert_eq!(run(SRC).expect("extension inc"), "OK");
+}
+
+#[test]
 fn member_dec_local() {
     const SRC: &str = "class N(val i: Int) { operator fun dec(): N = N(i - 1) }\n\
         fun box(): String {\n\
