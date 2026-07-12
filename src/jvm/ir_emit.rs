@@ -27,10 +27,6 @@ thread_local! {
     /// it sets the flag and `emit_all` drops the whole file (returns `None`), so the file is skipped,
     /// never miscompiled. A compiler must never crash on its own IR.
     static EMIT_BAIL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    /// The `ExprId` of the value expression currently being emitted (set by `emit_value`). The Static
-    /// inline-splice path reads it to look up `IrFile::reified_call_subst` for a `<reified T>` classpath
-    /// extension — `emit_value_node` matches on `&IrExpr` and doesn't otherwise carry the node's id.
-    static CUR_EXPR: std::cell::Cell<u32> = const { std::cell::Cell::new(u32::MAX) };
 }
 
 pub fn inline_bail_reason() -> Option<String> {
@@ -3589,11 +3585,10 @@ impl<'a> Emitter<'a> {
     /// means the caller must report an inline backend gap rather than silently treating this as an
     /// ordinary call-resolution fallback.
     /// The reified type substitution (type-parameter name → JVM internal name) for the value expression
-    /// currently being emitted (`CUR_EXPR`), from [`IrFile::reified_call_subst`]. Empty for a call that
-    /// isn't a `<reified T>` classpath-extension splice — the common case. Fed to `splice_unified` so a
+    /// `e` being emitted, from [`IrFile::reified_call_subst`]. Empty for a call that isn't a
+    /// `<reified T>` classpath-extension splice — the common case. Fed to `splice_unified` so a
     /// `reifiedOperationMarker`/`T::class` in the spliced body specializes to the concrete type.
-    fn reified_type_map(&self) -> HashMap<String, String> {
-        let e = CUR_EXPR.with(|c| c.get());
+    fn reified_type_map(&self, e: u32) -> HashMap<String, String> {
         self.ir
             .reified_call_subst
             .get(&e)
@@ -3987,7 +3982,7 @@ impl<'a> Emitter<'a> {
     }
 
     fn emit_discarding_node(&mut self, e: u32, node: &IrExpr, code: &mut CodeBuilder) {
-        self.emit_value_node(node, code);
+        self.emit_value_node(e, node, code);
         // A `Nothing`-returning call leaves a physical `Void` and must terminate the path (it would
         // otherwise fall through with a stray value); the throw replaces the discard.
         if self.terminate_if_nothing_call(node, code) {
@@ -3998,8 +3993,7 @@ impl<'a> Emitter<'a> {
 
     fn emit_value(&mut self, e: u32, code: &mut CodeBuilder) {
         let node = self.ir.expr(e).clone();
-        CUR_EXPR.with(|c| c.set(e));
-        self.emit_value_node(&node, code);
+        self.emit_value_node(e, &node, code);
         self.terminate_if_nothing_call(&node, code);
     }
 
@@ -4084,7 +4078,7 @@ impl<'a> Emitter<'a> {
         }
     }
 
-    fn emit_value_node(&mut self, node: &IrExpr, code: &mut CodeBuilder) {
+    fn emit_value_node(&mut self, e: u32, node: &IrExpr, code: &mut CodeBuilder) {
         match node {
             // `break`/`continue` are `Nothing`-typed: in value position (e.g. `x ?: break`) they diverge
             // — emit the jump and push nothing; the consuming branch is dead past this point.
@@ -4402,7 +4396,7 @@ impl<'a> Emitter<'a> {
                                 descriptor: &descriptor,
                                 splice_desc: &splice_desc,
                             };
-                            let reified = self.reified_type_map();
+                            let reified = self.reified_type_map(e);
                             self.try_inline_static_as(target, &all, code, true, &reified)
                         } else {
                             let has_lambda_arg = args.iter().any(|&a| {
@@ -4416,7 +4410,7 @@ impl<'a> Emitter<'a> {
                                 descriptor: &descriptor,
                                 splice_desc: &descriptor,
                             };
-                            let reified = self.reified_type_map();
+                            let reified = self.reified_type_map(e);
                             self.try_inline_static_as(
                                 target,
                                 &args,
