@@ -47,6 +47,41 @@ fn bracket_full_form_is_positional() {
 }
 
 #[test]
+fn bracket_full_form_in_for_loop() {
+    const SRC: &str = "// LANGUAGE: +NameBasedDestructuring\n\
+        data class Tuple(val first: String, val second: Int)\n\
+        fun box(): String {\n\
+        \x20 val x = Tuple(\"OK\", 1)\n\
+        \x20 for ([val a, val b] in arrayOf(x)) {\n\
+        \x20   if (a != \"OK\" || b != 1) return \"FAIL\"\n\
+        \x20 }\n\
+        \x20 for ([val b, val a] in arrayOf(x)) {\n\
+        \x20   if (b != \"OK\" || a != 1) return \"FAIL r\"\n\
+        \x20 }\n\
+        \x20 return \"OK\"\n\
+        }\n\
+        fun main() { println(box()) }\n";
+    assert_eq!(run(SRC).expect("for-loop full form"), "OK");
+}
+
+#[test]
+fn bracket_full_form_in_lambda_via_local_fun() {
+    // A destructured lambda passed to a LOCAL function must still get its parameter type from the
+    // local function's function-typed parameter (so `component1`/`component2` resolve).
+    const SRC: &str = "// LANGUAGE: +NameBasedDestructuring\n\
+        data class Tuple(val first: String, val second: Int)\n\
+        fun box(): String {\n\
+        \x20 val x = Tuple(\"OK\", 1)\n\
+        \x20 fun foo(f: (Tuple) -> Boolean) = f(x)\n\
+        \x20 val r = foo { [val a, val b] -> a == \"OK\" && b == 1 } &&\n\
+        \x20         foo { [val b, val a] -> b == \"OK\" && a == 1 }\n\
+        \x20 return if (r) \"OK\" else \"FAIL\"\n\
+        }\n\
+        fun main() { println(box()) }\n";
+    assert_eq!(run(SRC).expect("lambda full form via local fun"), "OK");
+}
+
+#[test]
 fn full_form_rejected_without_feature() {
     // Without `+NameBasedDestructuring`, `(val a, val b) = e` is not valid Kotlin — krusty must
     // reject it (compile fails), matching a drop-in kotlinc.

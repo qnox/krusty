@@ -10863,8 +10863,8 @@ impl<'a> Checker<'a> {
                 }
                 // Local function call — resolved before top-level funs and constructors.
                 if let Some((stmt_id, sig)) = self.lookup_local_fun(&fname) {
-                    let arg_tys = self.arg_tys(args);
-                    if arg_tys.len() != sig.params.len() {
+                    if args.len() != sig.params.len() {
+                        let arg_tys = self.arg_tys(args); // still record types for lowering
                         self.diags.error(
                             span,
                             format!(
@@ -10874,8 +10874,21 @@ impl<'a> Checker<'a> {
                             ),
                         );
                     } else {
-                        for (i, (p, a)) in sig.params.iter().zip(&arg_tys).enumerate() {
-                            self.expect_assignable(*p, *a, self.span(args[i]), "argument");
+                        // Type each argument against the declared parameter. A LAMBDA argument passed
+                        // to a function-typed parameter must be checked WITH that parameter's block
+                        // parameter types (`check_lambda_with_types`) — exactly as a top-level call
+                        // does — so a destructured / `it` lambda parameter gets its real type instead
+                        // of the erased `Any`. Other arguments type normally.
+                        for (i, p) in sig.params.iter().enumerate() {
+                            let a = args[i];
+                            let aty = match p {
+                                Ty::Fun(fs) if matches!(self.file.expr(a), Expr::Lambda { .. }) => {
+                                    let pts = fs.params.clone();
+                                    self.check_lambda_with_types(a, &pts)
+                                }
+                                _ => self.expr(a),
+                            };
+                            self.expect_assignable(*p, aty, self.span(a), "argument");
                         }
                     }
                     let ret = sig.ret;
