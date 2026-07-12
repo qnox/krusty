@@ -6389,7 +6389,16 @@ impl<'a> Emitter<'a> {
             let tslot = self.next_slot;
             self.next_slot += 1;
             store(thr_ty, tslot, code);
+            // The caught exception is LIVE in `tslot` across the whole inlined `finally` (it is re-raised
+            // after it). Register it so any StackMapTable frame recorded WHILE emitting the finally —
+            // e.g. a `finally` that itself contains a `try`/`catch` — lists `tslot` as an initialized
+            // local; otherwise the trailing `aload tslot; athrow` reads a slot the verifier sees as `top`.
+            // Keyed by the slot number (unique, and disjoint from small value indices) so nested catch-all
+            // handlers each register their own live exception.
+            let thr_key = 4_000_000 + tslot as u32;
+            self.slots.insert(thr_key, (tslot, thr_ty));
             self.emit(f, code);
+            self.slots.remove(&thr_key);
             // Re-raise the caught exception after the `finally` — unless the `finally` itself transfers
             // control (`finally { return … }` / `finally { throw … }`), in which case the rethrow is
             // unreachable and emitting it would leave a dead instruction without a stackmap frame.
