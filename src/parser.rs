@@ -5745,15 +5745,34 @@ impl<'a> Parser<'a> {
     /// statement starting at `start`). A simple `Name` uses the `IncDec` node (overloadable-operator
     /// aware); `obj.x` / `arr[i]` desugar to `target = target ± 1` (the old value is discarded in
     /// statement position). `dec` selects subtraction.
+    /// Build `receiver.inc()` / `receiver.dec()` — the desugar of `receiver++`/`receiver--` for a
+    /// member/index target (works for the built-in numeric operators and a user `inc`/`dec`).
+    fn build_inc_dec_call(&mut self, receiver: ExprId, op_name: &str, span: Span) -> ExprId {
+        let callee = self.file.add_expr(
+            Expr::Member {
+                receiver,
+                name: op_name.to_string(),
+            },
+            span,
+        );
+        self.file.add_expr(
+            Expr::Call {
+                callee,
+                args: Vec::new(),
+            },
+            span,
+        )
+    }
+
     fn incdec_target(&mut self, e: ExprId, dec: bool, op_span: Span, start: Span) -> StmtId {
-        let op = if dec { BinOp::Sub } else { BinOp::Add };
-        // The desugar `target = target ± 1` re-evaluates `target`, so its receiver/index must be
+        // The desugar `target = target.inc()` re-evaluates `target`, so its receiver/index must be
         // side-effect-free (a pure access path). For a complex receiver (`f().x++`) kotlinc evaluates
         // it exactly once — not yet modeled — so bail (skip the file) rather than double-evaluate.
+        // `.inc()`/`.dec()` covers both the built-in numeric operators and a user `inc`/`dec` operator.
+        let op_name = if dec { "dec" } else { "inc" };
         match self.file.expr(e).clone() {
             Expr::Name(n) => self.parse_incdec(n, dec, start),
             Expr::Member { receiver, name } if self.is_pure_path(receiver) => {
-                let one = self.file.add_expr(Expr::IntLit(1), op_span);
                 let lhs = self.file.add_expr(
                     Expr::Member {
                         receiver,
@@ -5761,9 +5780,7 @@ impl<'a> Parser<'a> {
                     },
                     op_span,
                 );
-                let value = self
-                    .file
-                    .add_expr(Expr::Binary { op, lhs, rhs: one }, op_span);
+                let value = self.build_inc_dec_call(lhs, op_name, op_span);
                 self.finish_stmt(
                     Stmt::AssignMember {
                         receiver,
@@ -5776,11 +5793,8 @@ impl<'a> Parser<'a> {
             Expr::Index { array, index }
                 if self.is_pure_path(array) && self.is_pure_path(index) =>
             {
-                let one = self.file.add_expr(Expr::IntLit(1), op_span);
                 let lhs = self.file.add_expr(Expr::Index { array, index }, op_span);
-                let value = self
-                    .file
-                    .add_expr(Expr::Binary { op, lhs, rhs: one }, op_span);
+                let value = self.build_inc_dec_call(lhs, op_name, op_span);
                 self.finish_stmt(
                     Stmt::AssignIndex {
                         array,
