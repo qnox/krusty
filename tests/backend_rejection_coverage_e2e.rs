@@ -86,15 +86,17 @@ fn delegated_property_observable_rejected() {
 }
 
 #[test]
-fn delegated_property_lazy_rejected() {
-    assert!(rejects(
+fn delegated_property_lazy_accepted() {
+    // `by lazy` now resolves its `getValue` through the classpath extension seam (LazyKt) — accepted.
+    assert!(!rejects(
         "class C { val x: Int by lazy { 5 } }\nfun main() { println(C().x) }\n"
     ));
 }
 
 #[test]
-fn delegated_property_map_rejected() {
-    assert!(rejects(
+fn delegated_property_map_accepted() {
+    // `by map` resolves `Map.getValue` (a classpath extension in MapsKt) — accepted.
+    assert!(!rejects(
         "class C(m: Map<String, Any?>) { val name: String by m }\n\
          fun main() { println(C(mapOf(\"name\" to \"a\")).name) }\n"
     ));

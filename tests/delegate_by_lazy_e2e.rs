@@ -19,3 +19,21 @@ fn top_level_val_by_lazy() {
         fun main() { println(box()) }\n";
     assert_eq!(run(SRC).expect("by lazy"), "OK");
 }
+
+#[test]
+fn member_val_by_lazy() {
+    // A CLASS-MEMBER delegated property `class C { val x by lazy { … } }` — same classpath extension
+    // getValue, emitted as the static `getValue(this.x$delegate, this, prop)`.
+    const SRC: &str = "val computed = StringBuilder()\n\
+        class C {\n\
+        \x20 val x: String by lazy { computed.append(\"c\"); \"OK\" }\n\
+        }\n\
+        fun box(): String {\n\
+        \x20 val c = C()\n\
+        \x20 val a = c.x\n\
+        \x20 val b = c.x\n\
+        \x20 return if (a == \"OK\" && b == \"OK\" && computed.toString() == \"c\") \"OK\" else \"fail\"\n\
+        }\n\
+        fun main() { println(box()) }\n";
+    assert_eq!(run(SRC).expect("member by lazy"), "OK");
+}
