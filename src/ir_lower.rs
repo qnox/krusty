@@ -15051,9 +15051,7 @@ impl<'a> Lower<'a> {
                 // call — always `null` at runtime (`Nothing` has no non-null value) — so the elvis takes the
                 // rhs; evaluate the lhs first for its side effects (its non-null branch, a `Void` used as the
                 // result type, would otherwise break the merge frame).
-                let lty_is_nothing = lty == Ty::Nothing
-                    || matches!(lty.non_null(), Ty::Obj(n, _)
-                        if crate::jvm::jvm_class_map::to_jvm_internal(n) == "java/lang/Void");
+                let lty_is_nothing = lty.non_null().is_nothing_like();
                 if lty_is_nothing {
                     if self.expr_diverges(lhs) {
                         return self.expr(lhs);
@@ -17247,14 +17245,9 @@ impl<'a> Lower<'a> {
                 // pushes nothing at the merge — it's exempt from the "mixes Unit with a value" bail. The
                 // checker represents `Nothing` as the bottom variant for `throw`/`return` but as the mapped
                 // object (whose JVM erasure is `java/lang/Void`) for a declared `fun … : Nothing` result.
-                // Use the SAME `Void`-mapping test the emitter's `norm_nothing` uses, so the lowerer and
-                // emitter agree on which arms diverge (the emitter terminates them via
+                // Both shapes are diverging arms (the emitter terminates them via
                 // `KotlinNothingValueException`).
-                let is_diverging_arm = |t: &Ty| -> bool {
-                    *t == Ty::Nothing
-                        || matches!(t, Ty::Obj(n, _)
-                            if crate::jvm::jvm_class_map::to_jvm_internal(n) == "java/lang/Void")
-                };
+                let is_diverging_arm = |t: &Ty| -> bool { t.is_nothing_like() };
                 let any_unit = body_tys.iter().any(|t| *t == Ty::Unit);
                 if any_unit
                     && !body_tys

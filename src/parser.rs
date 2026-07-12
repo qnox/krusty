@@ -761,6 +761,15 @@ impl<'a> Parser<'a> {
     fn at(&self, k: TokenKind) -> bool {
         self.kind() == k
     }
+    /// At the start of a named argument `name = value`: an identifier followed by a single `=` (NOT
+    /// `==`, which the lexer produces as one `EqEq` token and which begins an equality expression).
+    fn at_named_arg(&self) -> bool {
+        self.at(TokenKind::Ident)
+            && self
+                .t
+                .get(self.i + 1)
+                .is_some_and(|t| t.kind == TokenKind::Eq)
+    }
     fn bump(&mut self) -> Token {
         let t = self.t[self.i];
         if self.i + 1 < self.t.len() {
@@ -1269,12 +1278,7 @@ impl<'a> Parser<'a> {
         self.skip_newlines();
         while !self.at(TokenKind::RParen) && !self.at(TokenKind::Eof) {
             // optional named argument `name = value`
-            if self.at(TokenKind::Ident)
-                && self
-                    .t
-                    .get(self.i + 1)
-                    .map_or(false, |t| t.kind == TokenKind::Eq)
-            {
+            if self.at_named_arg() {
                 self.bump(); // name
                 self.bump(); // '='
             }
@@ -1714,11 +1718,7 @@ impl<'a> Parser<'a> {
                     while !self.at(TokenKind::RParen) && !self.at(TokenKind::Eof) {
                         // A named argument `name = value` — the identifier is followed by `=` (but not
                         // `==`). Capture the name so the lowering can reorder to constructor order.
-                        let named = self.at(TokenKind::Ident)
-                            && self
-                                .t
-                                .get(self.i + 1)
-                                .is_some_and(|t| t.kind == TokenKind::Eq);
+                        let named = self.at_named_arg();
                         if named {
                             arg_names.push(Some(self.text().to_string()));
                             self.bump(); // name
@@ -2608,11 +2608,7 @@ impl<'a> Parser<'a> {
                     let mut args = Vec::new();
                     let mut arg_names: Vec<Option<String>> = Vec::new();
                     while !self.at(TokenKind::RParen) && !self.at(TokenKind::Eof) {
-                        let named = self.at(TokenKind::Ident)
-                            && self
-                                .t
-                                .get(self.i + 1)
-                                .is_some_and(|t| t.kind == TokenKind::Eq);
+                        let named = self.at_named_arg();
                         if named {
                             arg_names.push(Some(self.text().to_string()));
                             self.bump(); // name
@@ -5265,12 +5261,7 @@ impl<'a> Parser<'a> {
                     while !self.at(TokenKind::RParen) && !self.at(TokenKind::Eof) {
                         // Named argument `name = expr` — `name` is an identifier followed by a single
                         // `=` (not `==`, which begins an equality expression).
-                        if self.at(TokenKind::Ident)
-                            && self
-                                .t
-                                .get(self.i + 1)
-                                .map_or(false, |t| t.kind == TokenKind::Eq)
-                        {
+                        if self.at_named_arg() {
                             let n = self.text().to_string();
                             self.bump(); // name
                             self.bump(); // '='
