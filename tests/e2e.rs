@@ -316,6 +316,8 @@ mod fq_toplevel_call_e2e;
 mod front_end_errors_e2e;
 #[path = "front_end_errors_more_e2e.rs"]
 mod front_end_errors_more_e2e;
+#[path = "full_form_destructuring_e2e.rs"]
+mod full_form_destructuring_e2e;
 #[path = "generic_base_member_type_e2e.rs"]
 mod generic_base_member_type_e2e;
 #[path = "generic_delegate_e2e.rs"]
