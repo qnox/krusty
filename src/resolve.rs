@@ -6670,13 +6670,14 @@ impl<'a> Checker<'a> {
                     || expr_has_finally(self.file, body)
                     || catches.iter().any(|c| expr_has_finally(self.file, c.body))
                     || finally.map_or(false, |f| expr_has_finally(self.file, f));
-                // A nested try + finally only mis-emits when the inlined finally is re-entered: either a
-                // finally that diverges (its `throw`/`return` on a return path re-enters the enclosing
-                // handler → the finally runs twice) or a `catch` in the nest (the catch's exception path
-                // re-runs the inlined finally). Plain nested try + non-diverging finally with no catch
-                // emits correctly, so allow it; reject only the re-entrant shapes.
+                // A nested try + finally only mis-emits when the inlined finally is re-entered on a RETURN
+                // path: a `return` inlines the finally into the protected body, so a finally that then
+                // diverges (its own `throw`/`return`) re-enters the enclosing handler and runs twice, and a
+                // finally that CONTAINS a `try` likewise only breaks when a `return` crosses it (without a
+                // `return`, the finally emits once per exit and the catch-all's live-exception slot is now
+                // tracked in the frames — see `emit_try`). With no `return`, both shapes emit correctly.
                 let reentrant = expr_try_finally_has_return(self.file, e)
-                    || expr_has_finally_with_try(self.file, e);
+                    || (expr_has_finally_with_try(self.file, e) && expr_has_return(self.file, e));
                 if nested && any_finally && reentrant {
                     self.diags.error(
                         self.span(e),

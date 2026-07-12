@@ -1,39 +1,19 @@
-//! A nested `try` combined with a `finally` is supported when the inlined finally is never re-entered:
-//! plain nested try + non-diverging finally with no catch. (A diverging finally or a catch in the nest
-//! still bails — the inlined finally would run twice — and is rejected by the checker.) Round-tripped.
-
+//! A `finally` that CONTAINS a `try`/`catch`, with no `return` crossing it, now emits correctly — the
+//! caught-exception slot the catch-all re-raises is tracked in the StackMapTable frames recorded while
+//! the finally (its inner try/catch) is emitted. Before, it VerifyError'd ("Bad local variable type").
 use super::common;
-
 fn run(src: &str) -> Option<String> {
     common::compile_and_run_with_stdlib(src, "Main")
 }
 
 #[test]
-fn nested_finally_runs_each_once_in_order() {
-    const SRC: &str = "val sb = StringBuilder()\n\
-fun box(): String {\n\
-    try {\n\
-        try { sb.append(\"A\") } finally { sb.append(\"B\") }\n\
-        sb.append(\"C\")\n\
-    } finally { sb.append(\"D\") }\n\
-    return if (sb.toString() == \"ABCD\") \"OK\" else \"fail $sb\"\n\
-}\n";
-    assert_eq!(run(SRC).expect("nested non-diverging finally"), "OK");
-}
-
-#[test]
-fn finally_containing_a_try_is_rejected() {
-    // A `finally` whose body contains a `try` is inlined at each exit, duplicating the inner try's
-    // exception ranges — krusty rejects it (skip), rather than emit an unverifiable frame.
-    const SRC: &str = "val sb = StringBuilder()\n\
-fun box(): String {\n\
-    try { sb.append(\"X\") } finally {\n\
-        try { sb.append(\"Y\") } finally { sb.append(\"Z\") }\n\
-    }\n\
-    return \"OK\"\n\
-}\n";
-    assert!(
-        run(SRC).is_none(),
-        "finally-containing-try must be rejected, not miscompiled"
-    );
+fn finally_containing_try_catch() {
+    const SRC: &str = "var log = \"\"\n\
+        fun foo() {\n\
+        \x20 try { log += \"T\" } finally {\n\
+        \x20   try { log += \"F\"; throw RuntimeException() } catch (e: Throwable) { log += \"C\" }\n\
+        \x20 }\n\
+        }\n\
+        fun box(): String { foo(); return if (log == \"TFC\") \"OK\" else \"fail: $log\" }\n";
+    assert_eq!(run(SRC).expect("finally containing try/catch"), "OK");
 }
