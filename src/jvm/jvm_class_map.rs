@@ -263,19 +263,10 @@ pub fn to_jvm_internal(internal: &str) -> &str {
     // The FRONT END keeps the Kotlin identity (own hierarchy/members, read-only vs mutable); only here, at
     // the JVM boundary, does it erase. ONE-WAY — the inverse `to_kotlin_internal` uses the bidirectional
     // `TYPE_MAP` (`Any`/`String` only), so a raw `java/util/List` never maps ambiguously back.
+    // Covers the top-level Kotlin mapped built-ins too (`kotlin/CharSequence` → `java/lang/CharSequence`,
+    // `kotlin/Number`, `kotlin/Enum`, …), since they are keyed by their full internal name here.
     if let Some(j) = kotlin_builtin_to_jvm(internal) {
         return j;
-    }
-    // Emit-only erasure of the TOP-LEVEL Kotlin mapped built-ins to their JVM class (`kotlin/CharSequence`
-    // → `java/lang/CharSequence`, `kotlin/Comparable`/`kotlin/Number`/`kotlin/Enum`, …), mirroring
-    // `JavaToKotlinClassMap`'s `addTopLevel`. Only a leaf `kotlin/<Name>` (no subpackage) qualifies, so a
-    // real stdlib class (`kotlin/Pair`, `kotlin/collections/*`) is untouched.
-    if let Some(simple) = internal.strip_prefix("kotlin/") {
-        if !simple.contains('/') {
-            if let Some(j) = kotlin_builtin_to_jvm(simple) {
-                return j;
-            }
-        }
     }
     TYPE_MAP
         .iter()
