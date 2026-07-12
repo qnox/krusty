@@ -3654,6 +3654,10 @@ pub enum InlineCall {
 pub enum ExprLowering {
     /// A call or function reference resolved to a local function declaration.
     LocalFunction { stmt_id: StmtId },
+    /// An unqualified function reference `::foo` where `foo` is imported from a SAME-FILE `object`
+    /// (`import Host.foo`) — a BOUND reference to that object's singleton member, lowered exactly like
+    /// `Host::foo` (capture `Host.INSTANCE`, invoke the member).
+    ImportedObjectMemberRef { internal: String },
     /// A function reference `::of` whose target has a trailing `vararg` (and no fixed defaults), adapted
     /// to a function type of LARGER arity: the expected function type's extra parameters (beyond the
     /// `fixed` leading fixed parameters) are COLLECTED into the vararg array. `target_params` is `of`'s
@@ -3665,6 +3669,9 @@ pub enum ExprLowering {
         adapted_params: Vec<Ty>,
         ret: Ty,
         fixed: usize,
+        /// `Some(internal)` when the target is a member of a same-file `object` (`import Host.foo`) — the
+        /// adapter invokes it on `Host.INSTANCE` instead of as a top-level static.
+        object_internal: Option<String>,
     },
     /// An ADAPTED same-file top-level function reference (`::foo` passed where a shorter function type is
     /// expected, `foo` having trailing DEFAULT parameters). Lowering synthesizes an adapter of the
@@ -6398,11 +6405,22 @@ impl<'a> Checker<'a> {
         if exp.suspend {
             return None;
         }
-        let sig = self
+        // The target is a same-file top-level function, or a member imported from a same-file `object`
+        // (`import Host.foo`) — the latter recorded so the adapter invokes it on `Host.INSTANCE`.
+        let (sig, object_internal) = if let Some(sig) = self
             .syms
             .funs
             .get(name)
-            .and_then(|v| (v.len() == 1).then(|| v[0].clone()))?;
+            .and_then(|v| (v.len() == 1).then(|| v[0].clone()))
+        {
+            (sig, None)
+        } else if !self.module_declares(name) {
+            let internal = self.object_member_import(name)?;
+            let sig = self.syms.method_of(&internal, name)?;
+            (sig, Some(internal))
+        } else {
+            return None;
+        };
         let (n, m) = (exp.params.len(), sig.params.len());
         // VARARG COLLECTION: `::of` where `of`'s last parameter is a `vararg` (and the leading fixed
         // parameters have no defaults) adapted to a function type with MORE parameters than fixed — the
@@ -6429,6 +6447,7 @@ impl<'a> Checker<'a> {
                                 adapted_params: exp.params.clone(),
                                 ret: exp.ret,
                                 fixed,
+                                object_internal,
                             },
                         );
                         return Some(Ty::fun(exp.params.clone(), exp.ret));
@@ -6436,7 +6455,9 @@ impl<'a> Checker<'a> {
                 }
             }
         }
-        if sig.is_suspend || n > m {
+        // Only the vararg-collection shape is modeled for an object-member target; the `$default`/drop
+        // shapes below are top-level-only.
+        if object_internal.is_some() || sig.is_suspend || n > m {
             return None;
         }
         // The retained prefix parameters must match; the return matches EXACTLY or coerces to `Unit`
@@ -7776,6 +7797,22 @@ impl<'a> Checker<'a> {
                     {
                         if !sig.vararg && sig.params.len() == sig.required {
                             return self.set(e, Ty::fun(sig.params.clone(), sig.ret));
+                        }
+                    }
+                    // `::foo` where `foo` is imported from a SAME-FILE `object` (`import Host.foo`) — a
+                    // bound reference to the singleton member, lowered like `Host::foo`. Only when the
+                    // module does not declare `foo` itself (a local declaration shadows the import).
+                    if !self.module_declares(&name) {
+                        if let Some(internal) = self.object_member_import(&name) {
+                            if let Some(sig) = self.syms.method_of(&internal, &name) {
+                                if !sig.vararg && sig.params.len() == sig.required {
+                                    self.expr_lowers.insert(
+                                        e,
+                                        ExprLowering::ImportedObjectMemberRef { internal },
+                                    );
+                                    return self.set(e, Ty::fun(sig.params.clone(), sig.ret));
+                                }
+                            }
                         }
                     }
                     // A CLASSPATH top-level function reference (`::greet` from a jar/dependency module) —

@@ -8631,6 +8631,7 @@ impl<'a> Lower<'a> {
     /// Lower a VARARG-COLLECTION adapted reference (`::of` where `of(fixed…, vararg x)` is passed where a
     /// larger-arity function type is expected): a static adapter whose extra parameters (beyond `fixed`)
     /// are packed into the vararg array and passed to a plain call of the target.
+    #[allow(clippy::too_many_arguments)]
     fn lower_adapted_vararg_collect(
         &mut self,
         e: AstExprId,
@@ -8639,23 +8640,17 @@ impl<'a> Lower<'a> {
         adapted_params: &[Ty],
         ret: Ty,
         fixed: usize,
+        object_internal: Option<&str>,
     ) -> Option<u32> {
         let n = adapted_params.len();
-        let fid = *self
-            .fun_ids
-            .get(&(name.to_string(), target_params.to_vec()))?;
-        let mut a: Vec<u32> = Vec::with_capacity(fixed + 1);
-        for k in 0..fixed {
-            a.push(self.ir.add_expr(IrExpr::GetValue(k as u32)));
-        }
         // The vararg's ARRAY type is the target's last parameter; each collected argument is coerced to
         // its element type (boxing a primitive into an `Object[]`).
         let arr_ty = target_params[target_params.len() - 1];
         let elem_ir = ty_to_ir(arr_ty.array_elem().unwrap_or(Ty::obj("kotlin/Any")));
-        let mut elements = Vec::with_capacity(n - fixed);
+        let mut collected = Vec::with_capacity(n - fixed);
         for k in fixed..n {
             let v = self.ir.add_expr(IrExpr::GetValue(k as u32));
-            elements.push(self.ir.add_expr(IrExpr::TypeOp {
+            collected.push(self.ir.add_expr(IrExpr::TypeOp {
                 op: IrTypeOp::ImplicitCoercion,
                 arg: v,
                 type_operand: elem_ir,
@@ -8663,14 +8658,41 @@ impl<'a> Lower<'a> {
         }
         let arr = self.ir.add_expr(IrExpr::Vararg {
             array_type: ty_to_ir(arr_ty),
-            elements,
+            elements: collected,
         });
-        a.push(arr);
-        let call = self.ir.add_expr(IrExpr::Call {
-            callee: Callee::Local(fid),
-            dispatch_receiver: None,
-            args: a,
-        });
+        let call = if let Some(internal) = object_internal {
+            // A member of a same-file `object`: dispatch on its `INSTANCE` singleton.
+            let cid = self.classes.get(internal)?.id;
+            let (class_id, index, _fid, _) = self.resolve_method(internal, name)?;
+            let recv = self.ir.add_expr(IrExpr::StaticInstance {
+                owner: cid,
+                ty: cid,
+                field: "INSTANCE",
+            });
+            let mut a: Vec<Option<u32>> = (0..fixed as u32)
+                .map(|k| Some(self.ir.add_expr(IrExpr::GetValue(k))))
+                .collect();
+            a.push(Some(arr));
+            self.ir.add_expr(IrExpr::MethodCall {
+                class: class_id,
+                index,
+                receiver: recv,
+                args: a,
+            })
+        } else {
+            let fid = *self
+                .fun_ids
+                .get(&(name.to_string(), target_params.to_vec()))?;
+            let mut a: Vec<u32> = (0..fixed as u32)
+                .map(|k| self.ir.add_expr(IrExpr::GetValue(k)))
+                .collect();
+            a.push(arr);
+            self.ir.add_expr(IrExpr::Call {
+                callee: Callee::Local(fid),
+                dispatch_receiver: None,
+                args: a,
+            })
+        };
         let unit_return = ret == Ty::Unit;
         let body = if unit_return {
             let unit = self.ir.add_expr(IrExpr::UnitInstance);
@@ -9053,6 +9075,51 @@ impl<'a> Lower<'a> {
             param_tys,
             ty_to_ir(ret),
             capture,
+            None,
+        )
+    }
+
+    /// Lower `::foo` where `foo` is imported from a SAME-FILE `object` (`import Host.foo`) — a bound
+    /// reference to the singleton member: capture `Host.INSTANCE` and emit a `VirtualBound`
+    /// `FunctionReferenceImpl` invoking the member, exactly as `Host::foo` lowers.
+    fn lower_imported_object_ref(
+        &mut self,
+        e: AstExprId,
+        internal: &str,
+        name: &str,
+        params: &[Ty],
+        ret: Ty,
+    ) -> Option<u32> {
+        if ret == Ty::Nothing {
+            return None;
+        }
+        let cid = self.classes.get(internal)?.id;
+        let inst = self.ir.add_expr(IrExpr::StaticInstance {
+            owner: cid,
+            ty: cid,
+            field: "INSTANCE",
+        });
+        let (_, _, target_fid, _) = self.resolve_method(internal, name)?;
+        let call_name = if self.ir.private_methods.contains(&target_fid) {
+            self.ensure_private_accessor(internal, name)?
+        } else {
+            name.to_string()
+        };
+        let param_tys = tys_to_ir(params);
+        self.make_func_ref(
+            e.0,
+            true,
+            params.len() as u8,
+            internal.to_string(),
+            name.to_string(),
+            0,
+            crate::ir::FrDispatch::VirtualBound,
+            internal.to_string(),
+            call_name,
+            false,
+            param_tys,
+            ty_to_ir(ret),
+            Some(inst),
             None,
         )
     }
@@ -14814,6 +14881,20 @@ impl<'a> Lower<'a> {
             // `LambdaMetafactory` machinery as a lambda, but the impl method handle points directly at
             // the referenced function (no synthesized body). Bound/object/constructor references bail.
             Expr::CallableRef { receiver, name } => {
+                // `::foo` imported from a same-file `object` → a bound reference to the singleton member.
+                if let Some(ExprLowering::ImportedObjectMemberRef { internal }) =
+                    self.info.expr_lowers.get(&e).cloned()
+                {
+                    if let Ty::Fun(sig) = self.info.ty(e) {
+                        return self.lower_imported_object_ref(
+                            e,
+                            &internal,
+                            &name,
+                            &sig.params,
+                            sig.ret,
+                        );
+                    }
+                }
                 // A VARARG-COLLECTION adapted reference (`::of` where `of(vararg x)` is passed where a
                 // larger-arity function type is expected): the adapter collects its extra parameters into
                 // the vararg array.
@@ -14823,6 +14904,7 @@ impl<'a> Lower<'a> {
                     adapted_params,
                     ret,
                     fixed,
+                    object_internal,
                 }) = self.info.expr_lowers.get(&e).cloned()
                 {
                     return self.lower_adapted_vararg_collect(
@@ -14832,6 +14914,7 @@ impl<'a> Lower<'a> {
                         &adapted_params,
                         ret,
                         fixed,
+                        object_internal.as_deref(),
                     );
                 }
                 // An ADAPTED same-file top-level function reference (`::foo` with trailing defaults passed
