@@ -2262,6 +2262,26 @@ impl crate::libraries::TargetRuntime for JvmLibraries {
         Some(method_descriptor(params, ret))
     }
 
+    fn builtin_type_internal(&self, simple_name: &str) -> Option<String> {
+        // Collection built-ins keep their `kotlin/collections/…` identity (read-only vs mutable);
+        // normalize any JVM spelling the mapping returns back to the Kotlin identity so the core IR
+        // stays in Kotlin names (the emitter re-maps at its boundary).
+        let internal = crate::jvm::jvm_class_map::kotlin_builtin_to_internal(simple_name)?;
+        Some(crate::jvm::jvm_class_map::to_kotlin_internal(internal).to_string())
+    }
+
+    fn is_collection_interface(&self, supertype_internal: &str) -> bool {
+        crate::jvm::jvm_class_map::to_jvm_internal(supertype_internal).starts_with("java/util/")
+    }
+
+    fn collection_property_accessor(&self, property: &str) -> Option<String> {
+        crate::jvm::names::collection_property_stub_name(property).map(str::to_string)
+    }
+
+    fn signature_formal_names(&self, signature: &str) -> Vec<String> {
+        signature_formals(signature)
+    }
+
     fn function_reference_impl_type(&self) -> Option<Ty> {
         Some(Ty::obj("kotlin/jvm/internal/FunctionReferenceImpl"))
     }

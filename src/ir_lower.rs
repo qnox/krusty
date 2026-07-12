@@ -160,10 +160,9 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
             if c.is_object() {
                 let internal = class_internal(file, &c.name);
                 for p in c.body_props.iter().filter(|p| p.is_const) {
-                    if let Some(lit) = p
-                        .init
-                        .and_then(|i| ast_literal_const(file, i, body_prop_ty(file, info, p)))
-                    {
+                    if let Some(lit) = p.init.and_then(|i| {
+                        ast_literal_const(file, i, body_prop_ty(file, info, p, &*syms.libraries))
+                    }) {
                         lo.object_const_lits
                             .insert((internal.clone(), p.name.clone()), lit);
                     }
@@ -460,10 +459,12 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 .enumerate()
                 .filter(|(_, (_, d, _))| !ctor_prop_names.contains(d.as_str()))
                 .filter_map(|(i, (_, d, _))| {
-                    c.props
-                        .iter()
-                        .find(|p| &p.name == d)
-                        .map(|p| (format!("$$delegate_{i}"), ty_of(file, &p.ty)))
+                    c.props.iter().find(|p| &p.name == d).map(|p| {
+                        (
+                            format!("$$delegate_{i}"),
+                            ty_of(file, &p.ty, &*syms.libraries),
+                        )
+                    })
                 })
                 .collect();
             // Interface delegation to an EXPRESSION (`: I by Impl()`): a synthesized `$$delegate_e<j>`
@@ -632,7 +633,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                             let targs: Vec<Ty> =
                                 p.ty.targs
                                     .iter()
-                                    .map(|a| field_ty_with_args(file, a))
+                                    .map(|a| field_ty_with_args(file, a, &*syms.libraries))
                                     .collect();
                             let base = Ty::obj_args(fq_name, &targs);
                             if ir.is_nullable() {
@@ -676,7 +677,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     .type_param_bounds
                     .iter()
                     .map(|(n, tr)| {
-                        let bt = ty_to_ir(ty_of(file, tr));
+                        let bt = ty_to_ir(ty_of(file, tr, &*syms.libraries));
                         (n.clone(), if tr.nullable { mark_nullable(bt) } else { bt })
                     })
                     .collect(),
@@ -705,7 +706,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                         let is_type_param = c.type_params.contains(&p.ty.name);
                         let check = if !p.ty.nullable
                             && !is_type_param
-                            && ty_of(file, &p.ty).is_reference()
+                            && ty_of(file, &p.ty, &*syms.libraries).is_reference()
                         {
                             Some(p.name.clone())
                         } else {
@@ -878,7 +879,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
             }
             // Computed body properties → `getX()` instance methods (no backing field).
             for p in c.body_props.iter().filter(|p| is_computed_prop(p)) {
-                let ty = body_prop_ty(file, info, p);
+                let ty = body_prop_ty(file, info, p, &*syms.libraries);
                 let gname = property_getter_name(&p.name);
                 let mi = method_fids.len() as u32;
                 let fid = lo.ir.add_fun(IrFunction {
@@ -946,9 +947,9 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 {
                     let ty =
                         p.ty.as_ref()
-                            .map(|r| ty_of(file, r))
+                            .map(|r| ty_of(file, r, &*syms.libraries))
                             .unwrap_or_else(|| Ty::obj("kotlin/Any"));
-                    let ir_ty = body_prop_ir_ty(file, info, p);
+                    let ir_ty = body_prop_ir_ty(file, info, p, &*syms.libraries);
                     let gname = property_getter_name(&p.name);
                     if !methods.contains_key(&gname) {
                         let mi = method_fids.len() as u32;
@@ -1116,7 +1117,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
             // read as `getstatic C.X` — a `const val` as a `public static final` + `ConstantValue`, a
             // non-const `val` initialized in the outer class's `<clinit>` (see `emit_class`).
             for cp in &c.companion_props {
-                let cty = body_prop_ty(file, info, cp);
+                let cty = body_prop_ty(file, info, cp, &*syms.libraries);
                 lo.cur_class = None;
                 lo.scope.clear();
                 lo.next_value = 0;
@@ -1148,7 +1149,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
             // kotlinc inlines a const, so the field is present for binary compatibility but never fetched.
             if c.is_object() {
                 for bp in c.body_props.iter().filter(|p| p.is_const) {
-                    let cty = body_prop_ty(file, info, bp);
+                    let cty = body_prop_ty(file, info, bp, &*syms.libraries);
                     lo.cur_class = None;
                     lo.scope.clear();
                     lo.next_value = 0;
@@ -1400,7 +1401,11 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 let sig = if sigs.len() == 1 {
                     &sigs[0]
                 } else {
-                    let want: Vec<Ty> = f.params.iter().map(|p| ty_of(file, &p.ty)).collect();
+                    let want: Vec<Ty> = f
+                        .params
+                        .iter()
+                        .map(|p| ty_of(file, &p.ty, &*syms.libraries))
+                        .collect();
                     sigs.iter().find(|s| s.params == want)?
                 };
                 let params: Vec<Ty> = sig
@@ -1496,7 +1501,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     return None;
                 }
                 let ty = if let Some(tref) = p.ty.as_ref() {
-                    ty_of(file, tref)
+                    ty_of(file, tref, &*syms.libraries)
                 } else {
                     let delegate_ty = info.ty(p.delegate?);
                     let internal = delegate_ty.obj_internal()?;
@@ -1538,9 +1543,9 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 if p.is_var && !has_set_body {
                     return None;
                 }
-                let recv_ty = ty_of(file, recv_ref);
+                let recv_ty = ty_of(file, recv_ref, &*syms.libraries);
                 let recv_key = recv_ty.erased_recv();
-                let pty_ir = body_prop_ir_ty(file, info, p);
+                let pty_ir = body_prop_ir_ty(file, info, p, &*syms.libraries);
                 let gfid = lo.ir.add_fun(IrFunction {
                     name: property_getter_name(&p.name),
                     params: vec![ty_to_ir(recv_ty)],
@@ -1565,8 +1570,8 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 }
                 continue;
             }
-            let ty = body_prop_ty(file, info, p);
-            let ir_ty = body_prop_ir_ty(file, info, p);
+            let ty = body_prop_ty(file, info, p, &*syms.libraries);
+            let ir_ty = body_prop_ir_ty(file, info, p, &*syms.libraries);
             if is_computed_prop(p) {
                 // A computed property: a `getX()` accessor (static on the facade), no backing field.
                 let fid = lo.ir.add_fun(IrFunction {
@@ -1641,6 +1646,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     &f.type_params,
                     &f.type_param_bounds,
                     &f.non_null_type_params,
+                    &*syms.libraries,
                 );
                 lo.lambda_seq = 0;
                 let (fid, sig) = if let Some(recv_ref) = &f.receiver {
@@ -1656,7 +1662,11 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     let sig = if sigs.len() == 1 {
                         &sigs[0]
                     } else {
-                        let want: Vec<Ty> = f.params.iter().map(|p| ty_of(file, &p.ty)).collect();
+                        let want: Vec<Ty> = f
+                            .params
+                            .iter()
+                            .map(|p| ty_of(file, &p.ty, &*syms.libraries))
+                            .collect();
                         sigs.iter().find(|s| s.params == want)?
                     };
                     let fid = *lo.fun_ids.get(&(f.name.clone(), sig.params.clone()))?;
@@ -1899,16 +1909,19 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 // stays unimplemented and a call through the interface throws `AbstractMethodError`. The
                 // interface members are on the classpath (empty `props`), so scan the class's OWN overrides.
                 if !c.is_interface()
-                    && lo.syms.supertype_internals(&internal).iter().any(|s| {
-                        crate::jvm::jvm_class_map::to_jvm_internal(s).starts_with("java/util/")
-                    })
+                    && lo
+                        .syms
+                        .supertype_internals(&internal)
+                        .iter()
+                        .any(|s| lo.syms.libraries.is_collection_interface(s))
                 {
                     let cid = lo.classes[&internal].id;
                     for p in &c.body_props {
-                        let Some(stub) = crate::jvm::names::collection_property_stub_name(&p.name)
+                        let Some(stub) = lo.syms.libraries.collection_property_accessor(&p.name)
                         else {
                             continue;
                         };
+                        let stub = stub.as_str();
                         let Some((own_ty, _)) = lo.syms.prop_of(&internal, &p.name) else {
                             continue;
                         };
@@ -2046,8 +2059,9 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                         &m.type_params,
                         &m.type_param_bounds,
                         &m.non_null_type_params,
+                        &*syms.libraries,
                     );
-                    for ct in class_tparams(file, c) {
+                    for ct in class_tparams(file, c, &*syms.libraries) {
                         if !lo.cur_tparams.iter().any(|(n, _, _)| *n == ct.0) {
                             lo.cur_tparams.push(ct);
                         }
@@ -2102,7 +2116,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     lo.next_value = 0;
                     lo.cur_class = Some(internal.clone());
                     lo.cur_fn_name = gname;
-                    lo.cur_tparams = class_tparams(file, c);
+                    lo.cur_tparams = class_tparams(file, c, &*syms.libraries);
                     lo.lambda_seq = 0;
                     let this_v = lo.fresh_value();
                     lo.scope
@@ -2131,7 +2145,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                         lo.cur_class = Some(internal.clone());
                         lo.cur_field = Some((class_id, fidx, fty_ir.clone()));
                         lo.cur_fn_name = gname;
-                        lo.cur_tparams = class_tparams(file, c);
+                        lo.cur_tparams = class_tparams(file, c, &*syms.libraries);
                         lo.lambda_seq = 0;
                         let this_v = lo.fresh_value();
                         lo.scope
@@ -2146,13 +2160,13 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                         {
                             let sname = property_setter_name(&p.name);
                             let (_, fid, _) = lo.classes[&internal].methods[&sname];
-                            let pty = body_prop_ty(file, info, p);
+                            let pty = body_prop_ty(file, info, p, &*syms.libraries);
                             lo.scope.clear();
                             lo.next_value = 0;
                             lo.cur_class = Some(internal.clone());
                             lo.cur_field = Some((class_id, fidx, fty_ir.clone()));
                             lo.cur_fn_name = sname;
-                            lo.cur_tparams = class_tparams(file, c);
+                            lo.cur_tparams = class_tparams(file, c, &*syms.libraries);
                             lo.lambda_seq = 0;
                             let this_v = lo.fresh_value();
                             lo.scope
@@ -2443,7 +2457,8 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     // — a plain parameter is an argument the initializer / `super(…)` can read.
                     for p in c.props.iter() {
                         let v = lo.fresh_value();
-                        lo.scope.push((p.name.clone(), v, ty_of(file, &p.ty)));
+                        lo.scope
+                            .push((p.name.clone(), v, ty_of(file, &p.ty, &*syms.libraries)));
                     }
                     let super_field_tys: Vec<Ty> = lo.classes[&internal]
                         .super_internal
@@ -2515,7 +2530,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     lo.cur_class = Some(internal.clone());
                     // Property initializers run here (`var s: T = x as T`), so class type params are
                     // in scope as `as T` cast targets.
-                    lo.cur_tparams = class_tparams(file, c);
+                    lo.cur_tparams = class_tparams(file, c, &*syms.libraries);
                     let this_v = lo.fresh_value();
                     lo.scope
                         .push(("this".to_string(), this_v, Ty::obj(&internal)));
@@ -2531,7 +2546,8 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     // ALL ctor params (property and plain) in scope as values, declaration order.
                     for p in c.props.iter() {
                         let v = lo.fresh_value();
-                        lo.scope.push((p.name.clone(), v, ty_of(file, &p.ty)));
+                        lo.scope
+                            .push((p.name.clone(), v, ty_of(file, &p.ty, &*syms.libraries)));
                     }
                     let mut stmts = Vec::new();
                     // Desugar the primary-constructor `val`/`var` sugar: store the inner `this$0` and each
@@ -2751,7 +2767,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                         .map(|sc| {
                             sc.params
                                 .iter()
-                                .map(|p| ty_to_ir(ty_of(file, &p.ty)))
+                                .map(|p| ty_to_ir(ty_of(file, &p.ty, &*syms.libraries)))
                                 .collect()
                         })
                         .collect();
@@ -2761,7 +2777,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                         lo.scope.clear();
                         lo.next_value = 0;
                         lo.cur_class = Some(internal.clone());
-                        lo.cur_tparams = class_tparams(file, c);
+                        lo.cur_tparams = class_tparams(file, c, &*syms.libraries);
                         let this_v = lo.fresh_value();
                         lo.scope
                             .push(("this".to_string(), this_v, Ty::obj(&internal)));
@@ -2773,7 +2789,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                             return None;
                         }
                         for p in &sc.params {
-                            let pty = ty_of(file, &p.ty);
+                            let pty = ty_of(file, &p.ty, &*syms.libraries);
                             let v = lo.fresh_value();
                             lo.scope.push((p.name.clone(), v, pty));
                             param_irs.push(ty_to_ir(pty));
@@ -3101,7 +3117,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                                 return None;
                             }
                             let ty = match &p.ty {
-                                Some(r) => ty_of(lo.afile, r),
+                                Some(r) => ty_of(lo.afile, r, &*syms.libraries),
                                 None => lo.info.ty(p.init.unwrap()),
                             };
                             if ty == Ty::Error {
@@ -3277,16 +3293,16 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 lo.cur_class = None;
                 if let Some(recv_ref) = &p.receiver {
                     // Extension property getter: lower `get() = …` with `this` = receiver (param 0).
-                    let recv_ty = ty_of(file, recv_ref);
+                    let recv_ty = ty_of(file, recv_ref, &*syms.libraries);
                     let recv_key = recv_ty.erased_recv();
-                    let pty = body_prop_ty(file, info, p);
+                    let pty = body_prop_ty(file, info, p, &*syms.libraries);
                     let gfid = *lo.ext_prop_get_ids.get(&(recv_key, p.name.clone()))?;
                     lo.cur_fn_name = property_getter_name(&p.name);
                     lo.lambda_seq = 0;
                     let this_v = lo.fresh_value();
                     lo.scope.push(("this".to_string(), this_v, recv_ty));
                     let body = p.getter.clone().unwrap();
-                    let pty_ir = body_prop_ir_ty(file, info, p);
+                    let pty_ir = body_prop_ir_ty(file, info, p, &*syms.libraries);
                     lo.lower_body(&body, &pty_ir, gfid)?;
                     // `var` extension property setter: `set(v) { … }` with `this` = receiver (param 0),
                     // the value parameter `v` (param 1).
@@ -3311,7 +3327,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     // runs in `<clinit>`), then lower the custom `getX`/`setX` bodies with `field` bound
                     // to that static (`cur_static_field`). The trivial accessor is suppressed in emit
                     // (`custom_accessor`); reads/writes route through `computed_props`/`computed_setters`.
-                    let ir_ty = body_prop_ir_ty(file, info, p);
+                    let ir_ty = body_prop_ir_ty(file, info, p, &*syms.libraries);
                     let init = lo.lower_arg(p.init.unwrap(), &ir_ty)?;
                     let sidx = lo.ir.statics.len() as u32;
                     lo.ir.statics.push(crate::ir::IrStatic {
@@ -3348,7 +3364,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                         lo.next_value = 0;
                         lo.cur_fn_name = property_setter_name(&p.name);
                         lo.lambda_seq = 0;
-                        let pty = body_prop_ty(file, info, p);
+                        let pty = body_prop_ty(file, info, p, &*syms.libraries);
                         let custom = p.setter.as_ref().filter(|s| s.body.is_some()).cloned();
                         let pname = ast::setter_param_or_value(
                             custom.as_ref().and_then(|s| s.param.as_ref()),
@@ -3379,11 +3395,11 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     // A computed property: lower its custom getter into the `getX()` body.
                     lo.cur_fn_name = property_getter_name(&p.name);
                     lo.lambda_seq = 0;
-                    let ret_ty = body_prop_ir_ty(file, info, p);
+                    let ret_ty = body_prop_ir_ty(file, info, p, &*syms.libraries);
                     let body = p.getter.clone().unwrap();
                     lo.lower_body(&body, &ret_ty, fid)?;
                 } else {
-                    let ir_ty = body_prop_ir_ty(file, info, p);
+                    let ir_ty = body_prop_ir_ty(file, info, p, &*syms.libraries);
                     let init = lo.lower_arg(p.init.unwrap(), &ir_ty)?;
                     lo.ir.statics.push(crate::ir::IrStatic {
                         name: p.name.clone(),
@@ -3561,13 +3577,14 @@ fn collect_tparams(
     names: &[String],
     bounds: &[(String, ast::TypeRef)],
     non_null: &std::collections::HashSet<String>,
+    plat: &dyn CompilerPlatform,
 ) -> Vec<(String, Ty, bool)> {
     names
         .iter()
         .map(|name| {
             let bound_ref = bounds.iter().find(|(n, _)| n == name).map(|(_, tr)| tr);
             let bound = bound_ref
-                .map(|tr| ty_to_ir(ty_of(file, tr)))
+                .map(|tr| ty_to_ir(ty_of(file, tr, plat)))
                 .unwrap_or(Ty::nullable(Ty::obj("kotlin/Any")));
             let non_null = non_null.contains(name) || bound_ref.is_some_and(|tr| !tr.nullable);
             (name.clone(), bound, non_null)
@@ -3578,7 +3595,11 @@ fn collect_tparams(
 /// Class-level type parameters (`class C<T : B>`) as cast targets, so an `x as T` in a member body or
 /// property initializer erases to its bound (`Object` for an unbounded `T`) exactly like kotlinc —
 /// rather than falling through to `ty_ref` (which rejects a bare `T`) and bailing the whole file.
-fn class_tparams(file: &ast::File, c: &ast::ClassDecl) -> Vec<(String, Ty, bool)> {
+fn class_tparams(
+    file: &ast::File,
+    c: &ast::ClassDecl,
+    plat: &dyn CompilerPlatform,
+) -> Vec<(String, Ty, bool)> {
     // A value/inline class's generic underlying (`value class Foo<T : String>(val x: T)`) has a
     // box/unbox erasure krusty doesn't model — an `as T` there must keep bailing (skip the file),
     // not lower to a checkcast against the bound (which would store the wrong runtime type).
@@ -3590,6 +3611,7 @@ fn class_tparams(file: &ast::File, c: &ast::ClassDecl) -> Vec<(String, Ty, bool)
         &c.type_params,
         &c.type_param_bounds,
         &std::collections::HashSet::new(),
+        plat,
     )
 }
 
@@ -4019,9 +4041,14 @@ fn is_lateinit_prop(p: &ast::PropDecl) -> bool {
 /// immutable (no setter). Compiled to a `getX()` accessor; reads call it.
 /// The `Ty` of a body property: its explicit annotation, else inferred from the getter body (a computed
 /// `val xx get() = x`) or the initializer.
-fn body_prop_ty(file: &ast::File, info: &TypeInfo, p: &ast::PropDecl) -> Ty {
+fn body_prop_ty(
+    file: &ast::File,
+    info: &TypeInfo,
+    p: &ast::PropDecl,
+    plat: &dyn CompilerPlatform,
+) -> Ty {
     if let Some(r) = p.ty.as_ref() {
-        let base = ty_of(file, r);
+        let base = ty_of(file, r, plat);
         // `ty_of` resolves only file-local types + built-ins; a CLASSPATH type (`ArrayList<Int>`) erases to
         // `kotlin/Any`. When the declared annotation is NOT `Any` yet erased to it, recover the concrete
         // type the checker resolved the initializer/getter against (which IS this annotation, classpath-
@@ -4044,8 +4071,13 @@ fn body_prop_ty(file: &ast::File, info: &TypeInfo, p: &ast::PropDecl) -> Ty {
     }
 }
 
-fn body_prop_ir_ty(file: &ast::File, info: &TypeInfo, p: &ast::PropDecl) -> Ty {
-    let ir = ty_to_ir(body_prop_ty(file, info, p));
+fn body_prop_ir_ty(
+    file: &ast::File,
+    info: &TypeInfo,
+    p: &ast::PropDecl,
+    plat: &dyn CompilerPlatform,
+) -> Ty {
+    let ir = ty_to_ir(body_prop_ty(file, info, p, plat));
     if p.ty.as_ref().is_some_and(|r| r.nullable) {
         mark_nullable(ir)
     } else {
@@ -4796,7 +4828,7 @@ impl<'a> Lower<'a> {
             self.delegate_getvalue_info(delegate_ty, &delegate_internal)?;
         let prop_ty =
             p.ty.as_ref()
-                .map(|r| ty_of(self.afile, r))
+                .map(|r| ty_of(self.afile, r, &*self.syms.libraries))
                 .unwrap_or(gv_ret);
 
         // x$delegate: Del — init = lowered delegate expression.
@@ -5567,7 +5599,7 @@ impl<'a> Lower<'a> {
         if decl.params.len() != 1 || !decl.params[0].is_vararg {
             return None;
         }
-        let elem = ty_of(self.afile, &decl.params[0].ty);
+        let elem = ty_of(self.afile, &decl.params[0].ty, &*self.syms.libraries);
         // A primitive element uses the matching platform array-copy overload and needs no checkcast
         // (the result is already the exact array type). Unsigned `UInt`/`ULong` varargs are a value-class
         // array with a different copy path — leave those (skip) rather than miscompile.
@@ -11290,7 +11322,7 @@ impl<'a> Lower<'a> {
         let formals = c
             .signature
             .as_deref()
-            .map(crate::jvm::jvm_libraries::signature_formals)
+            .map(|s| self.syms.libraries.signature_formal_names(s))
             .unwrap_or_default();
         // The type ARGUMENTS come pre-resolved from the checker (`resolved_call_type_args`) — the checker
         // resolves imports/classpath types the lowerer's local `ty_ref` can't (a wildcard-imported class).
@@ -11674,7 +11706,7 @@ impl<'a> Lower<'a> {
     /// classpath-aware [`ty_ref`] when `ty_of` erases a CLASSPATH reference type to `Any` (it doesn't
     /// consult imports). Keeps the field decl, constructor parameter and getter agreeing on the real type.
     fn field_ty(&self, file: &ast::File, r: &ast::TypeRef) -> Ty {
-        let base = ty_of(file, r);
+        let base = ty_of(file, r, &*self.syms.libraries);
         // A property of type `Unit` holds the `kotlin/Unit` singleton (its value), so its field, ctor
         // parameter, and getter return are the `kotlin/Unit` REFERENCE — not the 0-word `Ty::Unit` whose
         // descriptor `V` is illegal for a field/parameter. (Only a `Unit` *return position* erases to void.)
@@ -11702,7 +11734,7 @@ impl<'a> Lower<'a> {
     /// `kotlinx...SerialDescriptor` — `ty_of` yields `Error`/`Any` since it doesn't consult imports). The
     /// registration and body-lowering of the extension must agree with the checker's receiver descriptor.
     fn ext_receiver_ty(&self, file: &ast::File, r: &ast::TypeRef) -> Ty {
-        let base = ty_of(file, r);
+        let base = ty_of(file, r, &*self.syms.libraries);
         if base == Ty::Error || base == Ty::obj("kotlin/Any") {
             let nn = ast::TypeRef {
                 nullable: false,
@@ -12545,7 +12577,7 @@ impl<'a> Lower<'a> {
                 let kty = match ty.as_ref() {
                     // A declared function type (`val f: (C) -> Int`): use the annotation's `Ty::Fun`.
                     Some(r) if !r.fun_params.is_empty() || r.name == "<fun>" => {
-                        ty_of(self.afile, r)
+                        ty_of(self.afile, r, &*self.syms.libraries)
                     }
                     // A nullable primitive (`Char?`) is `Nullable(prim)`, a reference slot (consistent
                     // with the checker), else a boxed value is stored raw.
@@ -12586,7 +12618,7 @@ impl<'a> Lower<'a> {
                     Some(r)
                         if r.name == "Array" || Ty::primitive_array_element(&r.name).is_some() =>
                     {
-                        ty_of(self.afile, r)
+                        ty_of(self.afile, r, &*self.syms.libraries)
                     }
                     // A library reference type (`Throwable?`, `List<Int>`): use the declared reference
                     // type, not the initializer's. A `null` initializer is `Ty::Null`, which would type
@@ -12713,7 +12745,10 @@ impl<'a> Lower<'a> {
                     return None;
                 }
                 let gv = self.syms.method_of(&delegate_internal, "getValue")?;
-                let prop_ty = ty.as_ref().map(|r| ty_of(self.afile, r)).unwrap_or(gv.ret);
+                let prop_ty = ty
+                    .as_ref()
+                    .map(|r| ty_of(self.afile, r, &*self.syms.libraries))
+                    .unwrap_or(gv.ret);
                 if gv.ret != prop_ty || prop_ty.obj_internal().is_some_and(is_value_cls) {
                     return None;
                 }
@@ -13797,7 +13832,7 @@ impl<'a> Lower<'a> {
                 let t = if f.type_params.iter().any(|tp| tp == &r.name) {
                     self.recv_ty(ra)
                 } else {
-                    ty_of(self.afile, r)
+                    ty_of(self.afile, r, &*self.syms.libraries)
                 };
                 if t == Ty::Error {
                     return None;
@@ -13850,8 +13885,15 @@ impl<'a> Lower<'a> {
             {
                 (s.params.clone(), s.ret)
             } else {
-                let ps = f.params.iter().map(|p| ty_of(self.afile, &p.ty)).collect();
-                let r = f.ret.as_ref().map_or(Ty::Unit, |t| ty_of(self.afile, t));
+                let ps = f
+                    .params
+                    .iter()
+                    .map(|p| ty_of(self.afile, &p.ty, &*self.syms.libraries))
+                    .collect();
+                let r = f
+                    .ret
+                    .as_ref()
+                    .map_or(Ty::Unit, |t| ty_of(self.afile, t, &*self.syms.libraries));
                 (ps, r)
             }
         } else {
@@ -13859,7 +13901,11 @@ impl<'a> Lower<'a> {
             let s = if sigs.len() == 1 {
                 sigs[0].clone()
             } else {
-                let want: Vec<Ty> = f.params.iter().map(|p| ty_of(self.afile, &p.ty)).collect();
+                let want: Vec<Ty> = f
+                    .params
+                    .iter()
+                    .map(|p| ty_of(self.afile, &p.ty, &*self.syms.libraries))
+                    .collect();
                 sigs.iter().find(|s| s.params == want)?.clone()
             };
             (s.params.clone(), s.ret)
@@ -14114,7 +14160,7 @@ impl<'a> Lower<'a> {
                             tbinds
                                 .get(fp.name.as_str())
                                 .copied()
-                                .unwrap_or_else(|| ty_of(self.afile, fp))
+                                .unwrap_or_else(|| ty_of(self.afile, fp, &*self.syms.libraries))
                         })
                         .collect();
                     let lam_param_tys = if lam_param_tys.len() == fnsig.params.len() {
@@ -17761,7 +17807,7 @@ impl<'a> Lower<'a> {
                                     .call_type_args
                                     .get(&e.0)
                                     .and_then(|ts| ts.first())
-                                    .map(|r| ty_of(self.afile, r))
+                                    .map(|r| ty_of(self.afile, r, &*self.syms.libraries))
                                     .filter(|t| self.has_scalar_value_repr(*t))
                             } else {
                                 None
@@ -18264,7 +18310,11 @@ impl<'a> Lower<'a> {
                             .afile
                             .call_type_args
                             .get(&e.0)
-                            .map(|ts| ts.iter().map(|r| ty_of(self.afile, r)).collect())
+                            .map(|ts| {
+                                ts.iter()
+                                    .map(|r| ty_of(self.afile, r, &*self.syms.libraries))
+                                    .collect()
+                            })
                             .unwrap_or_default();
                         let no_named = self
                             .afile
@@ -18951,7 +19001,7 @@ impl<'a> Lower<'a> {
                                 if f.name == name && f.is_inline
                                 && f.receiver.as_ref().is_some_and(|r|
                                     f.type_params.iter().any(|tp| tp == &r.name)
-                                    || ty_of(self.afile, r).erased_recv() == recv_key))
+                                    || ty_of(self.afile, r, &*self.syms.libraries).erased_recv() == recv_key))
                         });
                         if is_inline_ext {
                             if let Some(r) =
@@ -20926,7 +20976,7 @@ fn type_param_bounds_ir(
             Some((_, b)) if !b.targs.is_empty() || b.arg.is_some() => return None,
             // A simple reference bound (`T : I`, `T : CharSequence`) → resolve to its class type; the
             // JVM backend (`jvm_bound_descriptor`) emits it as `L<internal>;` (kotlinc does the same).
-            Some((_, b)) => match ty_to_ir(ty_of(file, b)) {
+            Some((_, b)) => match ty_to_ir(ty_of(file, b, libraries)) {
                 t @ Ty::Obj(_, _) => t,
                 _ => return None,
             },
@@ -20953,8 +21003,8 @@ fn ref_uses_tparam(r: &ast::TypeRef, tps: &[String]) -> bool {
 /// the outer and inner element types). `ty_of`/`ty_to_ir` erase a general `Obj`'s args; this rebuilds them
 /// recursively from the source `TypeRef` so the serialization extension can derive a nested element
 /// serializer (`ListSerializer(ListSerializer(StringSerializer))`). Additive metadata on the type only.
-fn field_ty_with_args(file: &ast::File, tr: &ast::TypeRef) -> Ty {
-    let base = ty_to_ir(ty_of(file, tr));
+fn field_ty_with_args(file: &ast::File, tr: &ast::TypeRef, plat: &dyn CompilerPlatform) -> Ty {
+    let base = ty_to_ir(ty_of(file, tr, plat));
     // Rebuild the non-null type with recursively-preserved type arguments, then re-apply the source `?`
     // from the `TypeRef` (`ty_of` strips it from a reference type) — so a nullable element `String?` keeps
     // its nullability, which the element serializer needs for a `.nullable` wrapper.
@@ -20963,7 +21013,7 @@ fn field_ty_with_args(file: &ast::File, tr: &ast::TypeRef) -> Ty {
             let targs: Vec<Ty> = tr
                 .targs
                 .iter()
-                .map(|a| field_ty_with_args(file, a))
+                .map(|a| field_ty_with_args(file, a, plat))
                 .collect();
             Ty::obj_args(fq, &targs)
         }
@@ -20976,9 +21026,9 @@ fn field_ty_with_args(file: &ast::File, tr: &ast::TypeRef) -> Ty {
     }
 }
 
-fn ty_of(file: &ast::File, r: &ast::TypeRef) -> Ty {
+fn ty_of(file: &ast::File, r: &ast::TypeRef, plat: &dyn CompilerPlatform) -> Ty {
     // Function type, builtin scalar, or primitive array — the leaf shared by every type resolver.
-    if let Some(t) = crate::resolve::typeref_leaf(r, &mut |x| ty_of(file, x)) {
+    if let Some(t) = crate::resolve::typeref_leaf(r, &mut |x| ty_of(file, x, plat)) {
         // A nullable primitive is `Nullable(prim)`, a reference slot consistent with the checker —
         // otherwise a boxed value would be stored in a primitive field and unboxed wrong.
         if r.nullable && !t.is_reference() {
@@ -20990,7 +21040,7 @@ fn ty_of(file: &ast::File, r: &ast::TypeRef) -> Ty {
         let elem = r
             .arg
             .as_ref()
-            .map(|a| ty_of(file, a))
+            .map(|a| ty_of(file, a, plat))
             .unwrap_or_else(|| Ty::obj("kotlin/Any"));
         if elem.is_reference() {
             return Ty::array(elem);
@@ -21006,12 +21056,11 @@ fn ty_of(file: &ast::File, r: &ast::TypeRef) -> Ty {
         .any(|&d| matches!(file.decl(d), Decl::Class(c) if c.name == r.name));
     if is_class {
         Ty::obj(&class_internal(file, &r.name))
-    } else if let Some(internal) = crate::jvm::jvm_class_map::kotlin_builtin_to_internal(&r.name) {
+    } else if let Some(internal) = plat.builtin_type_internal(&r.name) {
         // A built-in collection/reference type resolves to its FRONT-END Kotlin name — a collection keeps
-        // `kotlin/collections/{List,MutableList,…}` (read-only vs mutable; emit erases to `java/util/List`).
-        // Normalize any JVM spelling the mapping returns back to the Kotlin identity (`java/lang/Object`
-        // → `kotlin/Any`); the backend re-maps at the emit boundary, so core stays in Kotlin names.
-        Ty::obj(crate::jvm::jvm_class_map::to_kotlin_internal(internal))
+        // `kotlin/collections/{List,MutableList,…}` (read-only vs mutable; the platform erases both to the
+        // single JVM interface at the emit boundary), so the core IR stays in Kotlin names.
+        Ty::obj(&internal)
     } else {
         Ty::obj("kotlin/Any")
     }

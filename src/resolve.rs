@@ -3818,11 +3818,7 @@ struct Local {
 }
 
 fn is_nothing_ty(t: Ty) -> bool {
-    match t {
-        Ty::Nothing => true,
-        Ty::Obj(n, _) => crate::jvm::jvm_class_map::to_jvm_internal(n) == "java/lang/Void",
-        _ => false,
-    }
+    t.is_nothing_like()
 }
 
 /// The packages in scope for an unqualified TOP-LEVEL / extension function call in `file`: the leveled
@@ -12213,16 +12209,15 @@ impl<'a> Checker<'a> {
                         .and_then(|o| o.as_ref())
                     {
                         // The source property's type: a USER-class field (`lookup_prop`), else a library
-                        // member read through its getter (`IndexedValue.value` → `getValue()`).
-                        let getter = crate::jvm::names::property_getter_name(prop);
+                        // member property (`IndexedValue.value`) resolved through the platform's property
+                        // seam — which knows its own getter naming/`@JvmName` mangling.
                         let pty = internal
                             .and_then(|i| self.lookup_prop(i, prop).map(|(t, _)| t))
                             .or_else(|| {
-                                crate::symbol_resolver::resolve_instance_member(
+                                crate::symbol_resolver::resolve_property_member(
                                     &*self.syms.libraries,
                                     it,
-                                    &getter,
-                                    &[],
+                                    prop,
                                 )
                                 .map(|m| m.ret)
                             });
