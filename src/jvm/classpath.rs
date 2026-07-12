@@ -78,6 +78,11 @@ fn meta_param_ty(name: Option<&str>) -> Ty {
 /// names must match (so a `Function0` source param anchors to a `Function0` descriptor param and won't
 /// be confused with an `Any`/`Object` one).
 fn ty_compat(meta: &Ty, desc: &Ty) -> bool {
+    // Fast path: identical `Ty`s trivially share a descriptor — skip the two `String` allocations
+    // `type_descriptor` would make on the common exact-match case (this is a hot overload-matching loop).
+    if meta == desc {
+        return true;
+    }
     // A metadata type keeps its Kotlin name (`kotlin/collections/Iterable`, `kotlin/IntArray`, a type
     // parameter's bound); the descriptor carries the mapped JVM type (`java/lang/Iterable`, `[I`, the
     // erased bound). They denote the SAME JVM parameter when their erased descriptors are equal — computed
