@@ -44,6 +44,10 @@ mod break_continue_e2e;
 mod break_continue_expr_e2e;
 #[path = "break_continue_in_branch_e2e.rs"]
 mod break_continue_in_branch_e2e;
+#[path = "build1017_oo1_vcparam_result_takeif_e2e.rs"]
+mod build1017_oo1_vcparam_result_takeif_e2e;
+#[path = "build1018_pp1_suspend_block_firstornull_e2e.rs"]
+mod build1018_pp1_suspend_block_firstornull_e2e;
 #[path = "build688_cc1_bb1_e2e.rs"]
 mod build688_cc1_bb1_e2e;
 #[path = "build688_ff1_suspend_hof_e2e.rs"]
@@ -80,10 +84,6 @@ mod build840_kk1_inline_hof_enclosing_member_e2e;
 mod build840_mm1_safe_call_lambda_ext_e2e;
 #[path = "build840_nn1_suspend_inline_withlock_e2e.rs"]
 mod build840_nn1_suspend_inline_withlock_e2e;
-#[path = "build1017_oo1_vcparam_result_takeif_e2e.rs"]
-mod build1017_oo1_vcparam_result_takeif_e2e;
-#[path = "build1018_pp1_suspend_block_firstornull_e2e.rs"]
-mod build1018_pp1_suspend_block_firstornull_e2e;
 #[path = "builtin_intrinsics_coverage_e2e.rs"]
 mod builtin_intrinsics_coverage_e2e;
 #[path = "bytecode_parity_e2e.rs"]
