@@ -9218,6 +9218,15 @@ impl<'a> Checker<'a> {
         if member != name {
             return None;
         }
+        // A SAME-FILE object with a member of this name — dispatch on its singleton exactly like a
+        // classpath object (`getstatic Obj.INSTANCE; invoke`).
+        if self.syms.objects.contains(owner_path) {
+            if let Some(cls) = self.syms.classes.get(owner_path) {
+                if cls.methods.contains_key(name) {
+                    return Some(cls.internal.clone());
+                }
+            }
+        }
         let owner = self.nested_internal(owner_path)?;
         self.syms
             .libraries
@@ -11780,6 +11789,30 @@ impl<'a> Checker<'a> {
                 // `getstatic Obj.INSTANCE; invokevirtual`. Args (including a trailing lambda) were typed
                 // above, so `resolve_instance_member` selects the overload.
                 if let Some(internal) = self.object_member_import(&fname) {
+                    // A SAME-FILE object member resolves through the module (`method_of`), not the
+                    // classpath — the same singleton dispatch (`ObjectMemberCall`) lowers it. A local
+                    // declaration of the same name SHADOWS the import (Kotlin), so only bind the import
+                    // when the module does not declare `fname` itself.
+                    if !self.module_declares(&fname) {
+                        if let Some(sig) = self.syms.method_of(&internal, &fname) {
+                            if !sig.vararg
+                                && sig.params.len() == sig.required
+                                && args.len() == sig.params.len()
+                            {
+                                for (i, &a) in args.iter().enumerate() {
+                                    self.expect_assignable(
+                                        sig.params[i],
+                                        arg_tys[i],
+                                        self.span(a),
+                                        "argument",
+                                    );
+                                }
+                                self.expr_lowers
+                                    .insert(call, ExprLowering::ObjectMemberCall { internal });
+                                return sig.ret;
+                            }
+                        }
+                    }
                     if let Some(m) = crate::symbol_resolver::resolve_instance_member(
                         &*self.syms.libraries,
                         Ty::obj(&internal),

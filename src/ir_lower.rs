@@ -4250,6 +4250,36 @@ impl<'a> Lower<'a> {
         args: &[AstExprId],
         call_expr: AstExprId,
     ) -> Option<u32> {
+        // A SAME-FILE object: read its `INSTANCE` singleton and invoke the member on it — the same shape
+        // a qualified `Obj.m(args)` lowers to. (The classpath path below needs a library type.)
+        if let Some(cid) = self
+            .classes
+            .get(&internal)
+            .map(|ci| ci.id)
+            .filter(|&cid| self.ir.classes[cid as usize].is_object)
+        {
+            let (class_id, index, fid, ret) = self.resolve_method(&internal, name)?;
+            let params = self.ir.functions[fid as usize].params.clone();
+            if params.len() != args.len() {
+                return None;
+            }
+            let recv = self.ir.add_expr(IrExpr::StaticInstance {
+                owner: cid,
+                ty: cid,
+                field: "INSTANCE",
+            });
+            let mut a: Vec<Option<u32>> = Vec::with_capacity(args.len());
+            for (&arg, pt) in args.iter().zip(&params) {
+                a.push(Some(self.lower_arg(arg, pt)?));
+            }
+            let mc = self.ir.add_expr(IrExpr::MethodCall {
+                class: class_id,
+                index,
+                receiver: recv,
+                args: a,
+            });
+            return Some(self.coerce_generic_read(mc, call_expr, ret));
+        }
         let m = crate::symbol_resolver::resolve_instance(
             &*self.syms.libraries,
             &internal,
