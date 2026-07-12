@@ -474,6 +474,8 @@ mod object_default_ctor_arg_e2e;
 mod object_extends_class_e2e;
 #[path = "object_member_import_e2e.rs"]
 mod object_member_import_e2e;
+#[path = "object_member_ref_import_e2e.rs"]
+mod object_member_ref_import_e2e;
 #[path = "object_method_ref_e2e.rs"]
 mod object_method_ref_e2e;
 #[path = "object_value_inference_e2e.rs"]
