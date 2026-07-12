@@ -1073,11 +1073,15 @@ impl CodeBuilder {
     }
     fn load(&mut self, base: u8, idx: u16, words: i32) {
         // Slots 0-3 use the compact single-byte form (`iload_0`..`aload_3` = 0x1a + (base-0x15)*4 +
-        // idx), matching kotlinc; higher slots use the generic `<op> <u1 index>` form (v0: <256 locals).
+        // idx), matching kotlinc; slots 4-255 use the generic `<op> <u1 index>` form; slots >= 256
+        // don't fit one byte and need a `wide` (0xc4) prefix + u2 index (else the index truncates,
+        // aliasing a low slot — a VerifyError).
         if idx <= 3 {
             self.op(0x1a + (base - 0x15) * 4 + idx as u8, words);
-        } else {
+        } else if idx <= 0xff {
             self.op_u1(base, idx as u8, words);
+        } else {
+            self.op_wide(base, idx, words);
         }
     }
 
@@ -1098,13 +1102,25 @@ impl CodeBuilder {
     }
     fn store(&mut self, base: u8, idx: u16, words: i32) {
         // Slots 0-3 use the compact single-byte form (`istore_0`..`astore_3` = 0x3b + (base-0x36)*4 +
-        // idx), matching kotlinc; higher slots use the generic `<op> <u1 index>` form.
+        // idx), matching kotlinc; slots 4-255 use the generic `<op> <u1 index>` form; slots >= 256
+        // need a `wide` (0xc4) prefix + u2 index (else `idx as u8` truncates to a low live slot).
         if idx <= 3 {
             self.op(0x3b + (base - 0x36) * 4 + idx as u8, -words);
-        } else {
+        } else if idx <= 0xff {
             self.op_u1(base, idx as u8, -words);
+        } else {
+            self.op_wide(base, idx, -words);
         }
         self.ensure_locals(idx + words as u16);
+    }
+
+    /// `wide <op> <u2 index>` (JVMS §6.5 `wide`): the `wide`-prefixed form of a local load/store for a
+    /// slot index that doesn't fit one byte (>= 256).
+    fn op_wide(&mut self, op: u8, idx: u16, stack_delta: i32) {
+        self.bytes.push(0xc4);
+        self.bytes.push(op);
+        self.bytes.extend_from_slice(&idx.to_be_bytes());
+        self.adjust(stack_delta);
     }
 
     // int constants
@@ -1260,11 +1276,19 @@ impl CodeBuilder {
     pub fn d2f(&mut self) {
         self.op(0x90, -1);
     }
-    /// `iinc index, const` — increment a local int in place (no stack effect).
+    /// `iinc index, const` — increment a local int in place (no stack effect). A slot index >= 256
+    /// needs the `wide` (0xc4) form (`wide iinc <u2 index> <s2 const>`).
     pub fn iinc(&mut self, idx: u16, delta: i8) {
-        self.bytes.push(0x84);
-        self.bytes.push(idx as u8);
-        self.bytes.push(delta as u8);
+        if idx <= 0xff {
+            self.bytes.push(0x84);
+            self.bytes.push(idx as u8);
+            self.bytes.push(delta as u8);
+        } else {
+            self.bytes.push(0xc4);
+            self.bytes.push(0x84);
+            self.bytes.extend_from_slice(&idx.to_be_bytes());
+            self.bytes.extend_from_slice(&(delta as i16).to_be_bytes());
+        }
         self.ensure_locals(idx + 1);
     }
     pub fn i2b(&mut self) {
@@ -1496,6 +1520,32 @@ mod tests {
         let after = cp.utf8("next");
         // long consumed 2 slots (indices 1,2), so next utf8 is index 3
         assert_eq!(after, 3);
+    }
+
+    #[test]
+    fn local_index_over_255_uses_wide_prefix() {
+        // A local slot >= 256 doesn't fit a one-byte operand: the JVM requires a `wide` (0xc4)
+        // prefix + u2 index. Without it the index truncates (`256 as u8` == 0), silently
+        // aliasing slot 0 and corrupting a live local (VerifyError "Bad local variable type").
+        let mut code = CodeBuilder::new(300);
+        let start = code.bytes.len();
+        code.astore(256);
+        // wide astore 256: 0xc4, 0x3a, 0x01, 0x00
+        assert_eq!(&code.bytes[start..], &[0xc4, 0x3a, 0x01, 0x00]);
+
+        let start = code.bytes.len();
+        code.aload(256);
+        assert_eq!(&code.bytes[start..], &[0xc4, 0x19, 0x01, 0x00]);
+
+        // Slots that still fit a byte keep the compact single-byte form.
+        let start = code.bytes.len();
+        code.astore(255);
+        assert_eq!(&code.bytes[start..], &[0x3a, 0xff]);
+
+        // `iinc` on a wide slot also needs the prefix (0xc4, 0x84, u2 index, s2 const).
+        let start = code.bytes.len();
+        code.iinc(300, 1);
+        assert_eq!(&code.bytes[start..], &[0xc4, 0x84, 0x01, 0x2c, 0x00, 0x01]);
     }
 
     #[test]
