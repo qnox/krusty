@@ -1385,12 +1385,14 @@ impl<'a> Parser<'a> {
         // (optionally preceded by a visibility modifier) — anything else ends the property.
         let mut getter: Option<FunBody> = None;
         let mut setter: Option<PropAccessor> = None;
+        // A bare `get`/`set` (default accessor with no body) was seen — the property then has a real
+        // backing field and MUST be initialized (a bare accessor is not an abstract declaration).
+        let mut saw_bare_accessor = false;
         loop {
             let save = self.i;
             self.skip_newlines();
             // Optional visibility modifier on the accessor (`private set`, …).
             let mut is_private = false;
-            let vis_save = self.i;
             if self.at(TokenKind::Ident)
                 && matches!(self.text(), "private" | "protected" | "internal" | "public")
             {
@@ -1404,12 +1406,23 @@ impl<'a> Parser<'a> {
             }
             let is_get = self.text() == "get";
             self.bump(); // 'get' / 'set'
-            if is_get && self.eat_accessor_parens(true).is_none() {
-                self.i = vis_save;
-                break;
-            }
             if is_get {
-                getter = Some(self.parse_accessor_body());
+                // A custom getter is `get() = expr` / `get() { … }`. A bare `get` or a `get()` with
+                // no body is the (redundant) explicit DEFAULT getter — consume its optional `()` and
+                // leave `getter` unset (the property keeps its default field accessor).
+                let had_parens = self.eat_accessor_parens(false).is_some();
+                if self.at(TokenKind::Eq) || self.at(TokenKind::LBrace) {
+                    getter = Some(self.parse_accessor_body());
+                } else if had_parens {
+                    // `get()` with parens but no body is invalid (a bare `get` — no parens — is the
+                    // default accessor).
+                    self.diags.error(
+                        self.tok().span,
+                        "expected '=' or '{' for a property getter".to_string(),
+                    );
+                } else {
+                    saw_bare_accessor = true;
+                }
                 let _ = is_private; // getter visibility not modeled (rare); ignored
             } else {
                 // setter: optional `(param)` then optional body; `private set` has neither.
@@ -1422,6 +1435,9 @@ impl<'a> Parser<'a> {
                 } else {
                     None // default-bodied setter (e.g. `private set`)
                 };
+                if body.is_none() {
+                    saw_bare_accessor = true;
+                }
                 setter = Some(PropAccessor {
                     param,
                     body,
@@ -1444,6 +1460,19 @@ impl<'a> Parser<'a> {
             self.diags.error(
                 start,
                 "krusty: a property without an initializer must be 'lateinit'",
+            );
+        }
+        // A bare `get`/`set` (default accessor, no body) means the property has a real backing field,
+        // so it is NOT an abstract declaration and MUST be initialized.
+        if saw_bare_accessor
+            && init.is_none()
+            && delegate.is_none()
+            && !is_lateinit
+            && receiver.is_none()
+        {
+            self.diags.error(
+                start,
+                "krusty: a property with a default accessor must be initialized".to_string(),
             );
         }
         let end = self.t[self.i.saturating_sub(1)].span;
