@@ -2713,7 +2713,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                         .collect();
                     let super_param_tys = lo.super_ctor_param_tys(&internal);
                     let mut secs = Vec::new();
-                    for sc in &c.secondary_ctors {
+                    for (sc_idx, sc) in c.secondary_ctors.iter().enumerate() {
                         lo.scope.clear();
                         lo.next_value = 0;
                         lo.cur_class = Some(internal.clone());
@@ -2741,27 +2741,36 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                             Vec<Ty>,
                             bool,
                         ) = match &sc.delegation {
-                            ast::CtorDelegation::This(args) => {
+                            // A value class's secondary ctors are re-shaped by the `value_classes` IR
+                            // pass, which reads this `target_params`. Keep the EXACT prior resolution
+                            // for value classes (primary target when there's a primary ctor, else the
+                            // unique same-arity sibling) so the pass is unaffected — value-class logic
+                            // stays in `value_classes.rs` (rule 4). The primary-vs-sibling unification
+                            // below is for plain classes only.
+                            ast::CtorDelegation::This(args) if c.is_value => {
                                 let target = if c.has_primary_ctor {
                                     primary_param_tys.clone()
                                 } else {
-                                    // Pick the sibling secondary ctor this `this(…)` targets: prefer the
-                                    // one whose parameter types accept the arguments, else the unique
-                                    // same-arity ctor. (Ambiguity type-matching can't resolve bails.)
                                     let arg_irs = tys_to_ir(&lo.arg_tys(args));
-                                    let typed = sec_param_tys.iter().find(|p| {
-                                        p.len() == arg_irs.len()
+                                    // Exclude self — a `this(…)` never delegates to its own ctor.
+                                    let typed = sec_param_tys.iter().enumerate().find(|(j, p)| {
+                                        *j != sc_idx
+                                            && p.len() == arg_irs.len()
                                             && arg_irs
                                                 .iter()
                                                 .zip(p.iter())
                                                 .all(|(a, pp)| ir_arg_assignable(a, pp))
                                     });
                                     match typed {
-                                        Some(p) => p.clone(),
+                                        Some((_, p)) => p.clone(),
                                         None => {
                                             let same: Vec<&Vec<Ty>> = sec_param_tys
                                                 .iter()
-                                                .filter(|p| p.len() == args.len())
+                                                .enumerate()
+                                                .filter(|(j, p)| {
+                                                    *j != sc_idx && p.len() == args.len()
+                                                })
+                                                .map(|(_, p)| p)
                                                 .collect();
                                             if same.len() != 1 {
                                                 return None;
@@ -2773,6 +2782,54 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                                 (
                                     CtorDelegateTarget::This {
                                         target_params: target.clone(),
+                                        to_primary: c.has_primary_ctor,
+                                    },
+                                    args.clone(),
+                                    target,
+                                    false,
+                                )
+                            }
+                            ast::CtorDelegation::This(args) => {
+                                // `this(…)` may target the primary constructor OR a SIBLING secondary
+                                // (never itself). Build the candidate signatures — the primary (when
+                                // present) plus every OTHER secondary — and pick the one accepting the
+                                // arguments (by type, else the unique same-arity candidate).
+                                let arg_irs = tys_to_ir(&lo.arg_tys(args));
+                                // Candidate `(signature, is_primary)` pairs: the primary (index 0 when
+                                // present) plus every OTHER secondary.
+                                let mut candidates: Vec<(Vec<Ty>, bool)> = Vec::new();
+                                if c.has_primary_ctor {
+                                    candidates.push((primary_param_tys.clone(), true));
+                                }
+                                for (j, sig) in sec_param_tys.iter().enumerate() {
+                                    if j != sc_idx {
+                                        candidates.push((sig.clone(), false));
+                                    }
+                                }
+                                let typed = candidates.iter().find(|(p, _)| {
+                                    p.len() == arg_irs.len()
+                                        && arg_irs
+                                            .iter()
+                                            .zip(p.iter())
+                                            .all(|(a, pp)| ir_arg_assignable(a, pp))
+                                });
+                                let (target, to_primary) = match typed {
+                                    Some((p, prim)) => (p.clone(), *prim),
+                                    None => {
+                                        let same: Vec<&(Vec<Ty>, bool)> = candidates
+                                            .iter()
+                                            .filter(|(p, _)| p.len() == args.len())
+                                            .collect();
+                                        if same.len() != 1 {
+                                            return None;
+                                        }
+                                        (same[0].0.clone(), same[0].1)
+                                    }
+                                };
+                                (
+                                    CtorDelegateTarget::This {
+                                        target_params: target.clone(),
+                                        to_primary,
                                     },
                                     args.clone(),
                                     target,
@@ -2802,6 +2859,16 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                                 (CtorDelegateTarget::Super, vec![], vec![], true)
                             }
                         };
+                        // A branchy delegation argument (`this("O" + if (c) …)`) records stackmap
+                        // frames the secondary-ctor `<init>` prologue can't place consistently (the
+                        // arg is evaluated before `this` is on the stack) — bail rather than emit a
+                        // frame-inconsistent method (the file skips, never miscompiles).
+                        if delegate_args
+                            .iter()
+                            .any(|&a| body_contains_branch(lo.afile, a))
+                        {
+                            return None;
+                        }
                         if delegate_args.len() != target_tys.len() {
                             return None;
                         }

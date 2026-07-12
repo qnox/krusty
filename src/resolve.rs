@@ -4228,46 +4228,34 @@ pub fn check_file(file: &File, syms: &mut SymbolTable, diags: &mut DiagSink) -> 
                     match &sc.delegation {
                         CtorDelegation::This(args) => {
                             let ats: Vec<Ty> = args.iter().map(|a| c.expr(*a)).collect();
+                            // `this(…)` targets the primary constructor OR a SIBLING secondary (never
+                            // itself). Collect the candidate signatures and check assignability against
+                            // the unique same-arity one — the lowering resolves the exact target (and
+                            // bails on ambiguity), so a multi-candidate arity match isn't rejected here.
+                            let mut candidates: Vec<Vec<Ty>> = Vec::new();
                             if cl.has_primary_ctor {
-                                if ats.len() != primary_params.len() {
-                                    c.diags.error(
-                                        sc.span,
-                                        format!(
-                                            "krusty: this(…) expects {} args, got {}",
-                                            primary_params.len(),
-                                            ats.len()
-                                        ),
+                                candidates.push(primary_params.clone());
+                            }
+                            for s in &cl.secondary_ctors {
+                                if !std::ptr::eq(s, sc) {
+                                    candidates.push(
+                                        s.params.iter().map(|p| c.resolve_ty(&p.ty)).collect(),
                                     );
-                                } else {
-                                    for (i, (p, a)) in primary_params.iter().zip(&ats).enumerate() {
-                                        c.expect_assignable(
-                                            *p,
-                                            *a,
-                                            c.span(args[i]),
-                                            "this() argument",
-                                        );
-                                    }
                                 }
-                            } else {
-                                // No primary ctor: `this(…)` targets a sibling secondary. Best-effort
-                                // assignability check against the unique same-arity sibling (lowering bails
-                                // if the target is ambiguous), but never reject otherwise-valid code here.
-                                let sec_params: Vec<Vec<Ty>> = cl
-                                    .secondary_ctors
-                                    .iter()
-                                    .map(|s| s.params.iter().map(|p| c.resolve_ty(&p.ty)).collect())
-                                    .collect();
-                                let same: Vec<&Vec<Ty>> =
-                                    sec_params.iter().filter(|p| p.len() == ats.len()).collect();
-                                if same.len() == 1 {
-                                    for (i, (p, a)) in same[0].iter().zip(&ats).enumerate() {
-                                        c.expect_assignable(
-                                            *p,
-                                            *a,
-                                            c.span(args[i]),
-                                            "this() argument",
-                                        );
-                                    }
+                            }
+                            let same: Vec<&Vec<Ty>> =
+                                candidates.iter().filter(|p| p.len() == ats.len()).collect();
+                            if same.is_empty() {
+                                c.diags.error(
+                                    sc.span,
+                                    format!(
+                                        "krusty: this(…) has no target constructor taking {} args",
+                                        ats.len()
+                                    ),
+                                );
+                            } else if same.len() == 1 {
+                                for (i, (p, a)) in same[0].iter().zip(&ats).enumerate() {
+                                    c.expect_assignable(*p, *a, c.span(args[i]), "this() argument");
                                 }
                             }
                         }

@@ -750,12 +750,16 @@ fn emit_class(
             // `<init>(super_params)`. `this` is loaded first, so spill any branchy arg to a temp before.
             use crate::ir::CtorDelegateTarget;
             let (target_class, target_jvm_tys): (String, Vec<Ty>) = match &sc.delegate {
-                // `this(…)` targets an own `<init>`. In a class WITH a primary ctor that target IS the
-                // primary, whose live signature is `param_tys` (already value-class-rewritten) — use it
-                // rather than the lower-time `target_params` (which predates the value-class pass).
-                CtorDelegateTarget::This { target_params } => (
+                // `this(…)` targets an own `<init>` — the primary OR a sibling secondary. A delegation
+                // to the PRIMARY uses its LIVE signature `param_tys` (already rewritten by any IR→IR
+                // pass, e.g. value-class erasure of a value-class-typed ctor param); a sibling target
+                // uses the lower-time `target_params` (the sibling's own `<init>` descriptor).
+                CtorDelegateTarget::This {
+                    target_params,
+                    to_primary,
+                } => (
                     c.fq_name.clone(),
-                    if c.has_primary_ctor {
+                    if *to_primary {
                         param_tys.clone()
                     } else {
                         jvm_tys(target_params)
