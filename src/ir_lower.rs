@@ -15072,7 +15072,8 @@ impl<'a> Lower<'a> {
                 // (VerifyError). Instead guard the divergent member as a plain statement — `if (recv != null)
                 // { member }` — and yield `null` unconditionally; the `null` is only ever observed when the
                 // receiver was null (else control left via the `return`/`throw`).
-                if result_ty.non_null().is_nothing_like() || (from_scope_fn && lambda_body_diverges) {
+                if result_ty.non_null().is_nothing_like() || (from_scope_fn && lambda_body_diverges)
+                {
                     let guard = self.ir.add_expr(IrExpr::When {
                         branches: vec![(Some(cond), member)],
                     });
