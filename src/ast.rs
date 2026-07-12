@@ -729,6 +729,9 @@ pub struct PropDecl {
     /// `field` reference it is a computed property (no backing field); with an initializer or a
     /// `field` reference it reads the backing field.
     pub getter: Option<FunBody>,
+    /// `true` when the custom getter body references `field` — the property then has a real backing
+    /// field even without an initializer (assignable once in a constructor), per Kotlin semantics.
+    pub getter_reads_field: bool,
     /// A custom setter (`var x … set(v) { field = … }`) or a visibility-only setter (`private set`).
     pub setter: Option<PropAccessor>,
     /// `true` if declared `const val` — a compile-time constant. kotlinc inlines its value at use
