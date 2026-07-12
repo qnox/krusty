@@ -810,8 +810,13 @@ pub struct IrSecondaryCtor {
 #[derive(Clone, Debug)]
 pub enum CtorDelegateTarget {
     /// `this(args)` → `invokespecial` an own `<init>(target_params)` (the primary, or a sibling
-    /// secondary in a no-primary class). The class init body runs in the reached constructor, not here.
-    This { target_params: Vec<Ty> },
+    /// secondary). The class init body runs in the reached constructor, not here. `to_primary` marks
+    /// a delegation to the PRIMARY `<init>`, whose live (post-value-class-pass) signature the emitter
+    /// reads directly — `target_params` is the lower-time signature, correct only for a sibling target.
+    This {
+        target_params: Vec<Ty>,
+        to_primary: bool,
+    },
     /// `super(args)` (or implicit) in a class with NO primary constructor → `invokespecial` the
     /// superclass `<init>` (its signature is read live from the base class at emit time), then run the
     /// class init body (field initializers + `init {}`) before this constructor's own `body`.
