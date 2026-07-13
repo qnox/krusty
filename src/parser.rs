@@ -4314,7 +4314,30 @@ impl<'a> Parser<'a> {
             // No range operator: a plain iterable. It may still carry trailing infix calls that the
             // bp-9 start didn't consume (`for (x in progression step 2)`, `… step 2 step 0`) — continue
             // them so the whole expression (e.g. `progression.step(2)`) becomes the ForEach iterable.
-            let rstart = self.parse_for_trailing_infix(rstart);
+            let mut rstart = self.parse_for_trailing_infix(rstart);
+            // The iterable start was parsed at additive precedence (bp 9) so the range operators above
+            // stay visible. When it is a plain iterable (no range), lower-precedence operators the bp-9
+            // start left behind still belong to it — notably an elvis `?:` (`for (v in foo() ?: continue)`).
+            // Fold the elvis chain here so the whole expression becomes the ForEach iterable. Elvis is the
+            // loosest operator (below every binop), so nothing below it can precede the `)`; its RHS parses
+            // as a full value expression (`parse_elvis`, right-associative, ranges bind tighter).
+            while self.at(TokenKind::Question)
+                && self
+                    .t
+                    .get(self.i + 1)
+                    .map_or(false, |t| t.kind == TokenKind::Colon)
+            {
+                self.bump(); // '?'
+                self.bump(); // ':'
+                self.skip_newlines();
+                let rhs = self.parse_elvis();
+                let lspan = self.file.expr_spans[rstart.0 as usize];
+                let rspan = self.file.expr_spans[rhs.0 as usize];
+                rstart = self.file.add_expr(
+                    Expr::Elvis { lhs: rstart, rhs },
+                    Span::new(lspan.lo, rspan.hi),
+                );
+            }
             self.expect(TokenKind::RParen, "')'");
             self.skip_newlines();
             let body = self.parse_branch();

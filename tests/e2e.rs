@@ -316,6 +316,8 @@ mod feature_coverage_x_e2e;
 mod finally_e2e;
 #[path = "float_range_nan_e2e.rs"]
 mod float_range_nan_e2e;
+#[path = "for_iterable_elvis_e2e.rs"]
+mod for_iterable_elvis_e2e;
 #[path = "for_typed_loop_var_e2e.rs"]
 mod for_typed_loop_var_e2e;
 #[path = "fq_ctor_call_e2e.rs"]
