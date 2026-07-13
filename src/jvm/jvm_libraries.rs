@@ -227,16 +227,13 @@ impl JvmLibraries {
         Self::const_fields(&ci.fields, |f| Some(field_desc_to_ty(&f.descriptor)))
     }
 
-    fn metadata_static_companion_consts_for_type(
+    fn metadata_static_companion_consts_for_class(
         &self,
-        internal: &str,
+        ci: &crate::jvm::classreader::ClassInfo,
     ) -> std::collections::HashMap<String, LibraryConst> {
+        let internal = &ci.this_class;
         let companion_internal = format!("{internal}$Companion");
-        let Some((ci, companion)) = self
-            .cp
-            .find(internal)
-            .zip(self.cp.find(&companion_internal))
-        else {
+        let Some(companion) = self.cp.find(&companion_internal) else {
             return std::collections::HashMap::new();
         };
         let prop_rets = super::metadata::class_property_return_classes(&companion);
@@ -245,12 +242,13 @@ impl JvmLibraries {
         })
     }
 
-    fn companion_consts_for_type(
+    fn companion_consts_for_class(
         &self,
-        internal: &str,
+        ci: &crate::jvm::classreader::ClassInfo,
     ) -> std::collections::HashMap<String, LibraryConst> {
+        let internal = &ci.this_class;
         let mut out = self.primitive_companion_consts_for_type(internal);
-        out.extend(self.metadata_static_companion_consts_for_type(internal));
+        out.extend(self.metadata_static_companion_consts_for_class(ci));
         out
     }
 
@@ -519,15 +517,16 @@ impl JvmLibraries {
         sam
     }
 
-    fn value_companion_fns_for_class(&self, internal: &str) -> Vec<crate::libraries::CompanionFn> {
-        let Some(ci) = self
-            .cp
-            .find(internal)
-            .filter(|ci| metadata::class_inline(ci).is_some())
-        else {
+    fn value_companion_fns_for_class(
+        &self,
+        ci: &crate::jvm::classreader::ClassInfo,
+        inline: bool,
+    ) -> Vec<crate::libraries::CompanionFn> {
+        if !inline {
             return Vec::new();
-        };
-        let Some(companion_field) = metadata::class_companion_name(&ci) else {
+        }
+        let internal = &ci.this_class;
+        let Some(companion_field) = metadata::class_companion_name(ci) else {
             return Vec::new();
         };
         let companion_internal = format!("{internal}${companion_field}");
@@ -541,7 +540,7 @@ impl JvmLibraries {
                 let descriptor = m.jvm_desc?;
                 let (params, _) = parse_method_desc(descriptor);
                 Some(crate::libraries::CompanionFn {
-                    class_internal: internal.to_string(),
+                    class_internal: internal.clone(),
                     companion_internal: companion_internal.clone(),
                     companion_field: companion_field.clone(),
                     callable: LibraryCallable {
@@ -566,32 +565,26 @@ impl JvmLibraries {
     fn value_class_metadata_members_for_class(
         &self,
         ci: &crate::jvm::classreader::ClassInfo,
+        inline: bool,
+        meta_fns: &[metadata::MetaFn],
     ) -> Vec<LibraryMember> {
-        if metadata::class_inline(ci).is_none() {
+        if !inline {
             return Vec::new();
         }
-        metadata::class_functions(ci)
-            .into_iter()
+        meta_fns
+            .iter()
             .filter(|m| m.is_public && !m.is_extension)
             .filter_map(|m| {
-                crate::trace_compiler!(
-                    "resolve",
-                    "value-class member metadata {}.{} jvm={} desc={:?} ret={:?}",
-                    ci.this_class,
-                    m.kotlin_name,
-                    m.jvm_name,
-                    m.jvm_desc,
-                    m.ret_class
-                );
                 let descriptor = m.jvm_desc?.to_string();
                 let (params, physical_ret) = parse_method_desc(&descriptor);
                 // Value-class implementation methods are static and take the erased receiver as their
                 // first JVM parameter. Source member resolution sees only the value parameters.
                 let logical_params = params.get(1..).unwrap_or(&[]).to_vec();
                 let ret = metadata_return_info(m.ret_class, m.ret_nullable).apply(physical_ret);
-                let mut member = LibraryMember::new(m.kotlin_name, logical_params, ret, descriptor);
+                let mut member =
+                    LibraryMember::new(m.kotlin_name.clone(), logical_params, ret, descriptor);
                 member.owner = Some(ci.this_class.clone());
-                member.physical_name = Some(m.jvm_name);
+                member.physical_name = Some(m.jvm_name.clone());
                 member.physical_ret = physical_ret;
                 member.ret_nullable = m.ret_nullable;
                 member.inline = InlineKind::from_flags(m.is_inline, m.is_inline);
@@ -1358,25 +1351,28 @@ impl SymbolSource for JvmLibraries {
             // its record so a named-argument / omitted-`$default` member call resolves through the ONE
             // `resolve_type` member seam (the `instance_members` query), not a separate `functions()` walk.
             let meta_fns = metadata::class_functions(&ci);
-            let member_call_sig =
-                |member: &LibraryMember, jvm_name: &str| -> crate::libraries::CallSig {
-                    let value_arity = if member.suspend && !member.params.is_empty() {
-                        member.params.len() - 1
-                    } else {
-                        member.params.len()
-                    };
-                    meta_fns
-                        .iter()
-                        .find(|f| f.jvm_name == jvm_name && f.value_params.len() == value_arity)
-                        .map(|f| {
-                            crate::libraries::CallSig::metadata_member(
-                                value_arity,
-                                f.value_params.iter().map(|p| p.name.clone()).collect(),
-                                f.value_params.iter().map(|p| p.has_default).collect(),
-                            )
-                        })
-                        .unwrap_or_default()
+            let member_meta = |jvm_name: &str, value_arity: usize| {
+                meta_fns
+                    .iter()
+                    .find(|f| f.jvm_name == jvm_name && f.value_params.len() == value_arity)
+            };
+            let metadata_member_call_sig = |f: &metadata::MetaFn| {
+                crate::libraries::CallSig::metadata_member(
+                    f.value_params.len(),
+                    f.value_params.iter().map(|p| p.name.clone()).collect(),
+                    f.value_params.iter().map(|p| p.has_default).collect(),
+                )
+            };
+            let member_call_sig = |member: &LibraryMember, jvm_name: &str| {
+                let value_arity = if member.suspend && !member.params.is_empty() {
+                    member.params.len() - 1
+                } else {
+                    member.params.len()
                 };
+                member_meta(jvm_name, value_arity)
+                    .map(metadata_member_call_sig)
+                    .unwrap_or_default()
+            };
             for m in &ci.methods {
                 // Public members are callable from anywhere; a `protected` member is surfaced too so a
                 // subclass can reach it through the supertype walk (a compiling program only reaches it
@@ -1403,10 +1399,7 @@ impl SymbolSource for JvmLibraries {
                 // result — keeping the erased type as `physical_ret` for the emitter.
                 if member.suspend {
                     let value_arity = member.params.len().saturating_sub(1);
-                    if let Some(f) = meta_fns
-                        .iter()
-                        .find(|f| f.jvm_name == m.name && f.value_params.len() == value_arity)
-                    {
+                    if let Some(f) = member_meta(&m.name, value_arity) {
                         member.physical_ret = member.ret;
                         let logical = metadata_return_info(f.ret_class, f.ret_nullable)
                             .apply(member.physical_ret);
@@ -1449,7 +1442,7 @@ impl SymbolSource for JvmLibraries {
             // `Vid` argument. Recover the SOURCE name + logical (value-class) parameter types from `@Metadata`
             // and expose the member under the source name — keeping the mangled JVM name as `physical_name`
             // and the erased descriptor for emit (the value-classes pass unboxes the `Vid` argument).
-            for mf in metadata::class_functions(&ci) {
+            for mf in &meta_fns {
                 if !mf.is_public || mf.is_extension || mf.jvm_name == mf.kotlin_name {
                     continue;
                 }
@@ -1486,11 +1479,7 @@ impl SymbolSource for JvmLibraries {
                 member.physical_ret = physical_ret;
                 member.ret_nullable = mf.ret_nullable;
                 member.suspend = mf.is_suspend;
-                member.call_sig = crate::libraries::CallSig::metadata_member(
-                    mf.value_params.len(),
-                    mf.value_params.iter().map(|p| p.name.clone()).collect(),
-                    mf.value_params.iter().map(|p| p.has_default).collect(),
-                );
+                member.call_sig = metadata_member_call_sig(mf);
                 crate::trace_compiler!(
                     "resolve",
                     "mangled member {}.{} jvm={} logical_params={:?}",
@@ -1592,7 +1581,8 @@ impl SymbolSource for JvmLibraries {
             };
             // A classpath `@JvmInline value class` (detected via `@Metadata`): its erased underlying type, so
             // the JVM backend can unbox it like a user value class. `UInt` → `Int`, `Result` → `Any`.
-            let value_underlying = metadata::class_inline(&ci).map(|ic| {
+            let inline = metadata::class_inline(&ci);
+            let value_underlying = inline.as_ref().map(|ic| {
                 match ic.underlying_class.as_deref() {
                     Some(other) => kotlin_name_to_ty(other),
                     // The underlying type was carried in the @Metadata type TABLE (proto field 19), not
@@ -1609,7 +1599,8 @@ impl SymbolSource for JvmLibraries {
                         .unwrap_or_else(|| Ty::obj("kotlin/Any")),
                 }
             });
-            let value_class_metadata_members = self.value_class_metadata_members_for_class(&ci);
+            let value_class_metadata_members =
+                self.value_class_metadata_members_for_class(&ci, inline.is_some(), &meta_fns);
             // The class's own formal type parameters (`Pair` → `[A, B]`), for constructor type-argument
             // inference; empty for a non-generic type.
             let type_params = ci
@@ -1642,10 +1633,10 @@ impl SymbolSource for JvmLibraries {
                     .chain(self.builtin_members_for_type(internal))
                     .collect(),
                 companion,
-                companion_consts: self.companion_consts_for_type(&ci.this_class),
+                companion_consts: self.companion_consts_for_class(&ci),
                 sam_method: self.sam_method_for_class(&ci.this_class),
                 companion_object,
-                value_companion_fns: self.value_companion_fns_for_class(&ci.this_class),
+                value_companion_fns: self.value_companion_fns_for_class(&ci, inline.is_some()),
                 value_underlying,
                 alias_target: None,
                 type_params,
