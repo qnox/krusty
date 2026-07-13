@@ -1380,6 +1380,12 @@ impl<'a> Parser<'a> {
         } else if self.at(TokenKind::At) {
             self.skip_annotation();
             None
+        } else if self.at(TokenKind::Star) {
+            // A spread argument in an annotation (`@A(*arrayOf("O"), "K")` — a `vararg` annotation
+            // parameter). Annotation values are metadata krusty ignores, so just consume the `*` and
+            // parse the spread expression to keep the argument list well-formed.
+            self.bump(); // '*'
+            self.parse_annotation_value()
         } else {
             Some(self.parse_expr())
         }
