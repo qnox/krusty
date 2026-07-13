@@ -772,7 +772,6 @@ impl FunctionInfo {
         member.owner = Some(self.callable.owner.clone());
         member.physical_ret = self.callable.physical_ret;
         member.signature = self.callable.signature.clone();
-        member.ret_nullable = self.ret.nullable;
         member.inline = self.flags.inline;
         member.suspend = self.flags.suspend;
         member
