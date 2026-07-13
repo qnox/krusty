@@ -353,13 +353,39 @@ fn rewrite_anon_captures(file: &mut File) {
             Decl::Class(c) => {
                 let class_tps: std::collections::HashSet<String> =
                     c.type_params.iter().cloned().collect();
+                // The enclosing class's IMMUTABLE properties are also capturable by an anonymous object
+                // in a method body (`class A(val x) { fun foo() = object { fun r() = x } }`): a `val`
+                // never changes, so capturing its value at the anon's construction is equivalent to
+                // reading `this@A.x` — resolved by appending `x` (which reads `this.x` at the call site)
+                // as an anon-constructor argument. A `var` is excluded (a later mutation wouldn't be
+                // observed by a by-value capture), as is a body property without an explicit type.
+                let class_props: Vec<(String, TypeRef)> = c
+                    .props
+                    .iter()
+                    .filter(|p| p.is_property && !p.is_var)
+                    .map(|p| (p.name.clone(), p.ty.clone()))
+                    .chain(c.body_props.iter().filter_map(|p| {
+                        // Only a plain immutable BACKING-field property is captured by value: a `var`
+                        // (mutable), a custom-getter property (recomputes on each read, so a captured
+                        // snapshot would go stale), an extension property, or one without an initializer
+                        // (lateinit/abstract) is excluded — those stay unresolved and the file skips.
+                        let plain = !p.is_var
+                            && p.getter.is_none()
+                            && p.receiver.is_none()
+                            && p.init.is_some();
+                        (plain)
+                            .then(|| p.ty.clone().map(|t| (p.name.clone(), t)))
+                            .flatten()
+                    }))
+                    .collect();
                 for m in &c.methods {
                     if let Some(root) = fun_body_root(&m.body) {
-                        let params = m
+                        let mut params: Vec<(String, TypeRef)> = m
                             .params
                             .iter()
                             .map(|p| (p.name.clone(), p.ty.clone()))
                             .collect();
+                        params.extend(class_props.iter().cloned());
                         let mut tps = class_tps.clone();
                         tps.extend(m.type_params.iter().cloned());
                         push_body(params, tps, root);
