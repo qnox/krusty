@@ -13176,120 +13176,43 @@ impl<'a> Lower<'a> {
                 name,
                 value,
             } => {
-                let rt = self.info.ty(receiver);
-                // A `var` extension property write (`x.name = v`) → its static setter `setName(x, v)`.
-                if let Some(&sfid) = self.ext_prop_set_ids.get(&(rt.erased_recv(), name.clone())) {
-                    let pty = self.ir.functions[sfid as usize]
-                        .params
-                        .get(1)
-                        .cloned()
-                        .unwrap_or_else(|| ty_to_ir(self.info.ty(value)));
-                    let r = self.expr(receiver)?;
-                    let v = self.lower_arg(value, &pty)?;
-                    return Some(self.ir.add_expr(IrExpr::Call {
-                        callee: Callee::Local(sfid),
-                        dispatch_receiver: None,
-                        args: vec![r, v],
-                    }));
+                // A compound member-assign (`recv.a op= v`) reuses the `receiver` expr id in the
+                // parser's desugared `recv.a = recv.a op v`, so a side-effecting receiver (`foo.a += v`
+                // where `foo` is a property getter, or `bar().a += v`) would be evaluated TWICE. Spill a
+                // non-pure receiver to a temp once, mapping its id to `GetValue(temp)` for the store —
+                // mirroring the compound index-assign caching. A local/`this` receiver is pure (left to
+                // re-load, keeping bytecode parity with kotlinc for the common case).
+                let mut prelude = Vec::new();
+                let spill = self.is_compound_member_assign(receiver, &name, value)
+                    && !self.index_subst.contains_key(&receiver)
+                    && !self.is_pure_index_operand(receiver);
+                if spill {
+                    let lowered = self.expr(receiver)?;
+                    let slot = self.fresh_value();
+                    let ty = ty_to_ir(self.info.ty(receiver));
+                    let var = self.ir.add_expr(IrExpr::Variable {
+                        index: slot,
+                        ty,
+                        init: Some(lowered),
+                    });
+                    let getv = self.ir.add_expr(IrExpr::GetValue(slot));
+                    self.index_subst.insert(receiver, getv);
+                    prelude.push(var);
                 }
-                // A property write on a `var` of a class defined in ANOTHER file → its `setX(v)` accessor
-                // (the backing field is private). A cross-file `val` write bails.
-                if self.class_of(rt).is_none() {
-                    if let Ty::Obj(i, _) = &rt {
-                        if let Some((owner, pty, is_var, interface)) = self
-                            .syms
-                            .class_by_internal(i)
-                            .filter(|cs| cs.value_field.is_none())
-                            .and_then(|cs| {
-                                cs.props
-                                    .iter()
-                                    .find(|(n, _, _)| n == &name)
-                                    .map(|(_, t, v)| (i.to_string(), *t, *v, cs.is_interface))
-                            })
-                        {
-                            if !is_var {
-                                return None;
-                            }
-                            let r = self.expr(receiver)?;
-                            let v = self.lower_arg(value, &ty_to_ir(pty))?;
-                            return Some(self.ir.add_expr(IrExpr::Call {
-                                callee: Callee::CrossFileVirtual {
-                                    owner,
-                                    name: property_setter_name(&name),
-                                    params: vec![ty_to_ir(pty)],
-                                    ret: Ty::Unit,
-                                    interface,
-                                },
-                                dispatch_receiver: Some(r),
-                                args: vec![v],
-                            }));
-                        }
-                    }
+                let store = self.lower_assign_member(receiver, &name, value);
+                if spill {
+                    self.index_subst.remove(&receiver);
                 }
-                // A `var` member of a CLASSPATH type → its setter resolved by real `@Metadata` name
-                // (mirrors the getter read in `lower_member_read_on`). The setter `LibraryCallable`
-                // carries the owner/descriptor for the `invokevirtual`; its parameter type coerces the
-                // value (`Int` literal into a `Long` setter).
-                if self.class_of(rt).is_none() {
-                    if let Ty::Obj(_, _) = &rt {
-                        if let Some(setter) = crate::symbol_resolver::resolve_property_setter(
-                            &*self.syms.libraries,
-                            rt,
-                            &name,
-                        ) {
-                            let pty = setter
-                                .params
-                                .first()
-                                .map(|t| ty_to_ir(*t))
-                                .unwrap_or_else(|| ty_to_ir(self.info.ty(value)));
-                            let is_iface = self.library_type_is_interface(&setter.owner);
-                            let r = self.expr(receiver)?;
-                            let v = self.lower_arg(value, &pty)?;
-                            return Some(self.ir.add_expr(IrExpr::Call {
-                                callee: Callee::Virtual {
-                                    owner: setter.owner,
-                                    name: setter.name,
-                                    descriptor: setter.descriptor,
-                                    interface: is_iface,
-                                },
-                                dispatch_receiver: Some(r),
-                                args: vec![v],
-                            }));
-                        }
-                    }
+                let store = store?;
+                if prelude.is_empty() {
+                    Some(store)
+                } else {
+                    prelude.push(store);
+                    Some(self.ir.add_expr(IrExpr::Block {
+                        stmts: prelude,
+                        value: None,
+                    }))
                 }
-                let owner_internal = self.class_of(rt)?.internal.clone();
-                // The backing field is private; a write from outside the declaring class goes through
-                // the public `setX()` accessor (matching kotlinc). Inside the class, write directly.
-                if self.cur_class.as_deref() != Some(owner_internal.as_str()) {
-                    if let Some((mclass, mindex, mfid, _)) =
-                        self.resolve_method(&owner_internal, &property_setter_name(&name))
-                    {
-                        let pty = self.ir.functions[mfid as usize].params[0].clone();
-                        let r = self.expr(receiver)?;
-                        let v = self.lower_arg(value, &pty)?;
-                        return Some(self.ir.add_expr(IrExpr::MethodCall {
-                            class: mclass,
-                            index: mindex,
-                            receiver: r,
-                            args: vec![Some(v)],
-                        }));
-                    }
-                }
-                let (class, idx, field_ty) = {
-                    let ci = self.class_of(rt)?;
-                    let idx = ci.fields.iter().position(|(fn_, _)| *fn_ == name)? as u32;
-                    (ci.id, idx, ty_to_ir(ci.fields[idx as usize].1))
-                };
-                let r = self.expr(receiver)?;
-                // Coerce the value to the field's type (e.g. `Int` literal into a `Long` field).
-                let v = self.lower_arg(value, &field_ty)?;
-                Some(self.ir.add_expr(IrExpr::SetField {
-                    receiver: r,
-                    class,
-                    index: idx,
-                    value: v,
-                }))
             }
             Stmt::AssignIndex {
                 array,
@@ -13766,6 +13689,148 @@ impl<'a> Lower<'a> {
 
     /// Whether a `Stmt::AssignIndex` is a desugared compound assign (`a[i] op= v`): the parser emits
     /// `value = (a[i]) op v` reusing the SAME `array`/`index` expr ids, so the embedded `Index` matches.
+    /// Lower the STORE of `receiver.name = value` (the receiver already spilled by the caller when
+    /// compound). Dispatches to an extension-property setter, a cross-file/classpath setter, the
+    /// declaring class's `setX()` accessor, or a direct `putfield`.
+    fn lower_assign_member(
+        &mut self,
+        receiver: AstExprId,
+        name: &str,
+        value: AstExprId,
+    ) -> Option<u32> {
+        let rt = self.info.ty(receiver);
+        // A `var` extension property write (`x.name = v`) → its static setter `setName(x, v)`.
+        if let Some(&sfid) = self
+            .ext_prop_set_ids
+            .get(&(rt.erased_recv(), name.to_string()))
+        {
+            let pty = self.ir.functions[sfid as usize]
+                .params
+                .get(1)
+                .cloned()
+                .unwrap_or_else(|| ty_to_ir(self.info.ty(value)));
+            let r = self.expr(receiver)?;
+            let v = self.lower_arg(value, &pty)?;
+            return Some(self.ir.add_expr(IrExpr::Call {
+                callee: Callee::Local(sfid),
+                dispatch_receiver: None,
+                args: vec![r, v],
+            }));
+        }
+        // A property write on a `var` of a class defined in ANOTHER file → its `setX(v)` accessor
+        // (the backing field is private). A cross-file `val` write bails.
+        if self.class_of(rt).is_none() {
+            if let Ty::Obj(i, _) = &rt {
+                if let Some((owner, pty, is_var, interface)) = self
+                    .syms
+                    .class_by_internal(i)
+                    .filter(|cs| cs.value_field.is_none())
+                    .and_then(|cs| {
+                        cs.props
+                            .iter()
+                            .find(|(n, _, _)| n.as_str() == name)
+                            .map(|(_, t, v)| (i.to_string(), *t, *v, cs.is_interface))
+                    })
+                {
+                    if !is_var {
+                        return None;
+                    }
+                    let r = self.expr(receiver)?;
+                    let v = self.lower_arg(value, &ty_to_ir(pty))?;
+                    return Some(self.ir.add_expr(IrExpr::Call {
+                        callee: Callee::CrossFileVirtual {
+                            owner,
+                            name: property_setter_name(name),
+                            params: vec![ty_to_ir(pty)],
+                            ret: Ty::Unit,
+                            interface,
+                        },
+                        dispatch_receiver: Some(r),
+                        args: vec![v],
+                    }));
+                }
+            }
+        }
+        // A `var` member of a CLASSPATH type → its setter resolved by real `@Metadata` name
+        // (mirrors the getter read in `lower_member_read_on`). The setter `LibraryCallable`
+        // carries the owner/descriptor for the `invokevirtual`; its parameter type coerces the
+        // value (`Int` literal into a `Long` setter).
+        if self.class_of(rt).is_none() {
+            if let Ty::Obj(_, _) = &rt {
+                if let Some(setter) =
+                    crate::symbol_resolver::resolve_property_setter(&*self.syms.libraries, rt, name)
+                {
+                    let pty = setter
+                        .params
+                        .first()
+                        .map(|t| ty_to_ir(*t))
+                        .unwrap_or_else(|| ty_to_ir(self.info.ty(value)));
+                    let is_iface = self.library_type_is_interface(&setter.owner);
+                    let r = self.expr(receiver)?;
+                    let v = self.lower_arg(value, &pty)?;
+                    return Some(self.ir.add_expr(IrExpr::Call {
+                        callee: Callee::Virtual {
+                            owner: setter.owner,
+                            name: setter.name,
+                            descriptor: setter.descriptor,
+                            interface: is_iface,
+                        },
+                        dispatch_receiver: Some(r),
+                        args: vec![v],
+                    }));
+                }
+            }
+        }
+        let owner_internal = self.class_of(rt)?.internal.clone();
+        // The backing field is private; a write from outside the declaring class goes through
+        // the public `setX()` accessor (matching kotlinc). Inside the class, write directly.
+        if self.cur_class.as_deref() != Some(owner_internal.as_str()) {
+            if let Some((mclass, mindex, mfid, _)) =
+                self.resolve_method(&owner_internal, &property_setter_name(name))
+            {
+                let pty = self.ir.functions[mfid as usize].params[0].clone();
+                let r = self.expr(receiver)?;
+                let v = self.lower_arg(value, &pty)?;
+                return Some(self.ir.add_expr(IrExpr::MethodCall {
+                    class: mclass,
+                    index: mindex,
+                    receiver: r,
+                    args: vec![Some(v)],
+                }));
+            }
+        }
+        let (class, idx, field_ty) = {
+            let ci = self.class_of(rt)?;
+            let idx = ci.fields.iter().position(|(fn_, _)| fn_.as_str() == name)? as u32;
+            (ci.id, idx, ty_to_ir(ci.fields[idx as usize].1))
+        };
+        let r = self.expr(receiver)?;
+        // Coerce the value to the field's type (e.g. `Int` literal into a `Long` field).
+        let v = self.lower_arg(value, &field_ty)?;
+        Some(self.ir.add_expr(IrExpr::SetField {
+            receiver: r,
+            class,
+            index: idx,
+            value: v,
+        }))
+    }
+
+    /// Whether `receiver.name = value` is a compound assignment (`receiver.name op= …`): the parser
+    /// desugars it to `receiver.name = receiver.name op rhs`, so the `value` is a `Binary` whose left
+    /// operand re-reads the SAME `receiver`/`name`. The caller spills a side-effecting receiver once.
+    fn is_compound_member_assign(&self, receiver: AstExprId, name: &str, value: AstExprId) -> bool {
+        if let Expr::Binary { lhs, .. } = self.afile.expr(value) {
+            if let Expr::Member {
+                receiver: r2,
+                name: n2,
+            } = self.afile.expr(*lhs)
+            {
+                return *r2 == receiver && n2.as_str() == name;
+            }
+        }
+        false
+    }
+
     fn is_compound_index_assign(
         &self,
         array: AstExprId,

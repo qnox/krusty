@@ -180,6 +180,8 @@ mod companion_supertype_e2e;
 mod compare_to_zero_branch_e2e;
 #[path = "compound_index_assign_e2e.rs"]
 mod compound_index_assign_e2e;
+#[path = "compound_member_assign_lhs_caching_e2e.rs"]
+mod compound_member_assign_lhs_caching_e2e;
 #[path = "computed_prop_e2e.rs"]
 mod computed_prop_e2e;
 #[path = "const_constantvalue_e2e.rs"]
@@ -640,6 +642,8 @@ mod top_level_custom_accessor_e2e;
 mod top_level_generic_property_inference_e2e;
 #[path = "top_level_property_e2e.rs"]
 mod top_level_property_e2e;
+#[path = "toplevel_array_inference_e2e.rs"]
+mod toplevel_array_inference_e2e;
 #[path = "toplevel_property_ref_e2e.rs"]
 mod toplevel_property_ref_e2e;
 #[path = "trailing_lambda_default_e2e.rs"]
