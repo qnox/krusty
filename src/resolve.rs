@@ -7781,6 +7781,23 @@ impl<'a> Checker<'a> {
                                 }
                             }
                         }
+                        // `require(x is T)` / `check(x is T)` — a stdlib precondition that throws when the
+                        // condition is FALSE (`contract { returns() implies (x is T) }`), so the condition
+                        // holds for the rest of the block. Narrow a stable binding in the FIRST argument
+                        // (the condition), exactly as the `if (…) return` guard above does. Gated on the
+                        // stdlib name not being shadowed by a module-declared function.
+                        else if let Expr::Call { callee, args } = self.file.expr(ie).clone() {
+                            if let Expr::Name(fname) = self.file.expr(callee).clone() {
+                                if (fname == "require" || fname == "check")
+                                    && !args.is_empty()
+                                    && !self.module_declares(&fname)
+                                {
+                                    if let Some((n, t)) = self.smartcast_binding(args[0], false) {
+                                        self.declare(&n, t, false);
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
                 let t = match trailing {
