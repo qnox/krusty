@@ -18440,6 +18440,40 @@ impl<'a> Lower<'a> {
                         // Constructor: the call's result type is the class.
                         let ci = self.class_of(self.info.ty(e))?;
                         let class = ci.id;
+                        // An `inner class` construction (`Inner(args)` inside the enclosing class) needs
+                        // the enclosing INSTANCE as the synthetic first constructor argument (`this$0`,
+                        // which the class synthesis put at field 0). Supply the current `this` and lower
+                        // the explicit args after it. Only reached inside the enclosing instance (the
+                        // checker resolved it there), so `this` is in scope. The `this$0` field name is
+                        // krusty's synthetic outer-instance marker (created only by inner-class synthesis;
+                        // `$` cannot appear in a plain Kotlin identifier), so it exactly identifies an
+                        // inner class.
+                        let is_inner = self.ir.classes[class as usize]
+                            .fields
+                            .first()
+                            .is_some_and(|f| f.name == "this$0");
+                        if is_inner {
+                            let (this_v, _) = self.lookup("this")?;
+                            let outer = self.ir.add_expr(IrExpr::GetValue(this_v));
+                            let field_tys: Vec<Ty> = self.ir.classes[class as usize]
+                                .fields
+                                .iter()
+                                .map(|f| f.ty)
+                                .collect();
+                            let ctor_n = self.ir.classes[class as usize].ctor_param_count as usize;
+                            if ctor_n == args.len() + 1 {
+                                let mut a = vec![outer];
+                                for (i, &arg) in args.iter().enumerate() {
+                                    a.push(self.lower_arg(arg, &field_tys[i + 1])?);
+                                }
+                                return Some(self.ir.add_expr(IrExpr::New {
+                                    class,
+                                    args: a,
+                                    ctor_params: None,
+                                }));
+                            }
+                            return None;
+                        }
                         // Constructing an annotation (`A(args)`) builds its synthetic IMPL class — the
                         // annotation INTERFACE itself can't be `new`'d. Redirect to `<A>$annotationImpl`
                         // (same fields/ctor); the result still types as the annotation (the impl IS-A `A`).

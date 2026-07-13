@@ -12239,12 +12239,14 @@ impl<'a> Checker<'a> {
                         .find(|s| s.internal == nested)
                         .cloned()
                     {
-                        // An `inner class` needs the enclosing INSTANCE (a synthetic `this$0` ctor
-                        // parameter not in `ctor_params`), so `Inner(…)` unqualified isn't a plain
-                        // construction — leave it unresolved (skip). Only a PLAIN nested class resolves here.
-                        if cls.inner_of.is_none()
-                            && cls.ctor_params.len() == arg_tys.len()
-                            && arg_names.is_none()
+                        // A sibling nested class — plain or `inner`. An `inner class` also needs the
+                        // enclosing INSTANCE (a synthetic `this$0` the lowerer supplies from the current
+                        // `this`); its source `ctor_params` (like a plain class) exclude it, so the arity
+                        // check is the same. It is valid ONLY inside the enclosing instance where `this`
+                        // is available — this branch requires `this_ty == outer`, and an inner class must
+                        // declare exactly that outer (`inner_of == outer`) so `this` is the right instance.
+                        let inner_ok = cls.inner_of.as_deref().map_or(true, |o| o == outer);
+                        if inner_ok && cls.ctor_params.len() == arg_tys.len() && arg_names.is_none()
                         {
                             for (i, (p, a)) in cls.ctor_params.iter().zip(&arg_tys).enumerate() {
                                 self.expect_assignable(*p, *a, self.span(args[i]), "argument");
