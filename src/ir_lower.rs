@@ -512,20 +512,35 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
             field_type_params.extend(iface_delegate_fields.iter().map(|_| None));
             field_type_params.extend(expr_delegate_fields.iter().map(|_| None));
             let class_ty = Ty::obj(&internal);
+            // Resolve a supertype NAME written in `c`'s body to a FILE class/interface internal, if any.
+            // Handles a simple name, a qualified nested name (`Outer.Bar`, parsed to slash-form
+            // `Outer/Bar`), and a SIBLING or enclosing-scope nested type referenced by SIMPLE name from
+            // inside a nested `c` (`class Outer { interface Foo; class Impl: Foo }`). Comparing on the
+            // JVM INTERNAL name folds all three: `class_internal` maps both a decl's `Outer.Bar` and the
+            // name's dot-restored `Outer.Bar` to the same `…/Outer$Bar`, subsuming the simple case.
+            let resolve_file_supertype = |name: &str, want_iface: bool| -> Option<String> {
+                let mangled = name.replace('/', ".");
+                // Candidates in SCOPE order, nearest first: the name itself, then qualified by each
+                // enclosing prefix of `c` walking outward. Returning the first candidate that names a
+                // file decl (not the first file-order decl) gives Kotlin's nearest-scope-wins semantics
+                // when the same simple name is a nested type under more than one outer.
+                let mut candidates = vec![class_internal(file, &mangled)];
+                let mut prefix = c.name.as_str();
+                while let Some((p, _)) = prefix.rsplit_once('.') {
+                    candidates.push(class_internal(file, &format!("{p}.{mangled}")));
+                    prefix = p;
+                }
+                candidates.into_iter().find(|cand| {
+                    file.decls.iter().any(|&d| matches!(file.decl(d),
+                        Decl::Class(bc) if bc.is_interface() == want_iface && class_internal(file, &bc.name) == *cand))
+                })
+            };
             // Resolve a base class (`: A(args)`): a non-interface class declared in this file, OR a
             // CLASSPATH (Java/library) class — the subclass's `super(…)` becomes `invokespecial` on the
             // base's `<init>`. A base type that resolves to neither (or to an interface) → bail.
             let super_internal: Option<String> = match &c.base_class {
                 Some(base) => {
-                    // Match a file base class by INTERNAL name so a nested/qualified base resolves. A
-                    // dotted supertype `Outer.Bar` is parsed to slash-form `Outer/Bar`, while its hoisted
-                    // nested decl is named `Outer.Bar` (internal `Outer$Bar`) — comparing simple names
-                    // would miss it. `class_internal` maps both a decl's `Outer.Bar` and the base's
-                    // dot-restored `Outer.Bar` to the same `…/Outer$Bar`, subsuming the simple-name case.
-                    let base_internal = class_internal(file, &base.replace('/', "."));
-                    let file_base = file.decls.iter().any(|&d| matches!(file.decl(d),
-                        Decl::Class(bc) if !bc.is_interface() && class_internal(file, &bc.name) == base_internal));
-                    if file_base {
+                    if let Some(base_internal) = resolve_file_supertype(base, false) {
                         Some(base_internal)
                     } else {
                         // A classpath base class: map the source name to its internal (via imports). Only a
@@ -570,9 +585,8 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
             let mut iface_internals = Vec::new();
             for st_ref in &c.supertypes {
                 let st = &st_ref.name;
-                let is_file_iface = file.decls.iter().any(|&d| matches!(file.decl(d), Decl::Class(ic) if ic.name == *st && ic.is_interface()));
-                if is_file_iface {
-                    iface_internals.push(class_internal(file, st));
+                if let Some(internal) = resolve_file_supertype(st, true) {
+                    iface_internals.push(internal);
                     continue;
                 }
                 let resolved = lo

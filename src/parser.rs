@@ -2556,17 +2556,32 @@ impl<'a> Parser<'a> {
                         let id = self.file.add_decl(Decl::Class(nested));
                         self.file.decls.push(id);
                     }
+                    // A nested `interface` (optionally `sealed`) in a class body hoists to the file top
+                    // level as `Outer.Foo` (internal `Outer$Foo`), like a nested class — a sibling or child
+                    // can implement it by simple name. Objects/enums/annotations still drop (their
+                    // instance/entry shapes need more than a rename).
                     TokenKind::Ident
-                        if matches!(self.text(), "object" | "interface")
-                            || (matches!(self.text(), "enum" | "annotation")
-                                && self
-                                    .t
-                                    .get(self.i + 1)
-                                    .map_or(false, |t| t.kind == TokenKind::KwClass))
+                        if self.text() == "interface"
                             || (self.text() == "sealed"
                                 && self.t.get(self.i + 1).map_or(false, |t| {
                                     t.kind == TokenKind::Ident && t.text(self.src) == "interface"
                                 })) =>
+                    {
+                        if self.text() == "sealed" {
+                            self.bump();
+                        }
+                        let mut nested = self.parse_interface();
+                        nested.name = format!("{}.{}", name, nested.name);
+                        let id = self.file.add_decl(Decl::Class(nested));
+                        self.file.decls.push(id);
+                    }
+                    TokenKind::Ident
+                        if self.text() == "object"
+                            || (matches!(self.text(), "enum" | "annotation")
+                                && self
+                                    .t
+                                    .get(self.i + 1)
+                                    .map_or(false, |t| t.kind == TokenKind::KwClass)) =>
                     {
                         let _ = self.parse_nested_type_decl();
                     }

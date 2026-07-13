@@ -1781,18 +1781,35 @@ pub fn collect_signatures_with_cp(
                     // of those would be emitted as a bare default-package name → `NoClassDefFound`
                     // at load; reject (skip) instead — never emit an unresolved supertype.
                     let mut resolve_super = |s: &str| -> String {
-                        match class_names.get(s) {
-                            Some(internal) => internal.clone(),
-                            None if ctp.contains(s) => s.to_string(), // erased type parameter (degenerate)
+                        let resolved = class_names
+                            .get(s)
+                            .cloned()
+                            // An erased type parameter used as a supertype (degenerate) stays as-is.
+                            .or_else(|| ctp.contains(s).then(|| s.to_string()))
                             // A QUALIFIED nested supertype (`Foo.Bar` → `Foo/Bar` here) whose outer isn't a
-                            // package: the nested class is registered as `Outer$Nested`. Try that dollar
-                            // form and accept it only when it names a REAL declared class (some registered
-                            // simple name maps to it), so an unresolved name still errors.
-                            None if s.contains('/')
-                                && class_names.has_internal(&s.replace('/', "$")) =>
-                            {
-                                s.replace('/', "$")
-                            }
+                            // package: the nested class is registered as `Outer$Nested`. Accept the dollar
+                            // form only when it names a REAL declared class (some registered simple name
+                            // maps to it), so an unresolved name still errors.
+                            .or_else(|| {
+                                (s.contains('/') && class_names.has_internal(&s.replace('/', "$")))
+                                    .then(|| s.replace('/', "$"))
+                            })
+                            // A supertype named by SIMPLE name from inside a nested class may be a SIBLING
+                            // (or enclosing-scope) nested type: `class Outer { interface Foo; class Impl: Foo }`.
+                            // Try the name qualified by each enclosing prefix of the current class
+                            // (`Outer.Impl` → `Outer.Foo`, then walk further out).
+                            .or_else(|| {
+                                let mut prefix = c.name.as_str();
+                                while let Some((p, _)) = prefix.rsplit_once('.') {
+                                    if let Some(internal) = class_names.get(&format!("{p}.{s}")) {
+                                        return Some(internal.clone());
+                                    }
+                                    prefix = p;
+                                }
+                                None
+                            });
+                        match resolved {
+                            Some(internal) => internal,
                             None => {
                                 diags.error(c.span, format!("krusty: supertype '{s}' could not be resolved (provide it on the classpath)"));
                                 s.to_string()
