@@ -17,7 +17,7 @@
 //!     PoC keeps them as `return` so the surface — not the runtime — is what is under test.
 
 use crate::ir::{Callee, ExprId, IrConst, IrCtorArg, IrExpr, IrFile, IrFunction, IrTypeOp};
-use crate::jvm::names::property_getter_name;
+use crate::jvm::names::{property_getter_name, type_descriptor};
 use crate::libraries::InlineKind;
 use crate::plugins::{synthetic_class, IrPlugin, PluginContext};
 use crate::types::Ty;
@@ -127,12 +127,6 @@ fn class_ty(fq: &str) -> Ty {
     Ty::obj(fq)
 }
 
-/// The boxed reference descriptor for a primitive fq name, or `None` if it isn't a primitive.
-/// Routes through the canonical primitive→wrapper table in `jvm_class_map` rather than re-listing it.
-fn boxed_descriptor(fq: &str) -> Option<String> {
-    crate::jvm::jvm_class_map::kotlin_prim_to_wrapper(fq).map(|w| format!("L{w};"))
-}
-
 /// Rewrite every `PluginPlaceholder { plugin: "serialization" }` core emitted for a reified
 /// `StringFormat` round-trip into the concrete 2-arg member call. Core recorded the operands
 /// (`exprs = [receiver, serializer, value-or-string]`) and the resolved names (`data = [format
@@ -195,28 +189,7 @@ fn specialize_reified_placeholders(ir: &mut IrFile) {
 /// primitive is carried as its boxed type (`Int?` → `Ljava/lang/Integer;`), matching the getter krusty
 /// emits for a nullable primitive property.
 fn ty_descriptor(ty: &Ty) -> String {
-    let (fq, nullable) = match ty.kotlin_class_internal() {
-        Some(fq_name) => (fq_name, ty.is_nullable()),
-        None => ("kotlin/Any", false),
-    };
-    if nullable {
-        if let Some(boxed) = boxed_descriptor(fq) {
-            return boxed;
-        }
-    }
-    match fq {
-        "kotlin/Int" => "I".to_string(),
-        "kotlin/Long" => "J".to_string(),
-        "kotlin/Boolean" => "Z".to_string(),
-        "kotlin/Double" => "D".to_string(),
-        "kotlin/Float" => "F".to_string(),
-        "kotlin/String" => "Ljava/lang/String;".to_string(),
-        // A type-parameter-typed property erases to `Object` — its getter is `()Ljava/lang/Object;`.
-        "kotlin/Any" => "Ljava/lang/Object;".to_string(),
-        // Map a Kotlin builtin type to its JVM class (`kotlin/collections/List` → `java/util/List`), so a
-        // collection-field getter's descriptor matches the emitted `()Ljava/util/List;` accessor.
-        other => format!("L{};", crate::jvm::jvm_class_map::to_jvm_internal(other)),
-    }
+    type_descriptor(*ty)
 }
 
 /// The `CompositeDecoder.decode<T>Element` method + descriptor for a property type, or `None` for a
@@ -2569,27 +2542,23 @@ mod tests {
     }
 
     #[test]
-    fn boxed_descriptor_matches_wrapper_table() {
-        // The boxed descriptor for each primitive fq byte-matches the JVM wrapper literal — pins the
-        // de-dup (routed through `jvm_class_map::kotlin_prim_to_wrapper`) at this call site.
+    fn property_descriptor_uses_shared_jvm_mapping() {
+        assert_eq!(ty_descriptor(&Ty::Int), "I");
+        assert_eq!(ty_descriptor(&Ty::nullable(Ty::Int)), "Ljava/lang/Integer;");
+        assert_eq!(ty_descriptor(&Ty::nullable(Ty::Long)), "Ljava/lang/Long;");
         assert_eq!(
-            boxed_descriptor("kotlin/Int").as_deref(),
-            Some("Ljava/lang/Integer;")
+            ty_descriptor(&Ty::nullable(Ty::Char)),
+            "Ljava/lang/Character;"
         );
         assert_eq!(
-            boxed_descriptor("kotlin/Long").as_deref(),
-            Some("Ljava/lang/Long;")
+            ty_descriptor(&Ty::nullable(Ty::Boolean)),
+            "Ljava/lang/Boolean;"
         );
+        assert_eq!(ty_descriptor(&Ty::String), "Ljava/lang/String;");
         assert_eq!(
-            boxed_descriptor("kotlin/Char").as_deref(),
-            Some("Ljava/lang/Character;")
+            ty_descriptor(&Ty::obj("kotlin/collections/List")),
+            "Ljava/util/List;"
         );
-        assert_eq!(
-            boxed_descriptor("kotlin/Boolean").as_deref(),
-            Some("Ljava/lang/Boolean;")
-        );
-        // String is a reference, not a boxed primitive → no boxed descriptor.
-        assert_eq!(boxed_descriptor("kotlin/String"), None);
     }
 
     #[test]
