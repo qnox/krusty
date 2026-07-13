@@ -18272,14 +18272,35 @@ impl<'a> Lower<'a> {
                         );
                         let params = self.ir.functions[mfid as usize].params.clone();
                         let vararg = self.syms.method_is_vararg(&cur, &fname);
-                        let n_fixed = vararg_arity(vararg, params.len(), args.len())?;
                         let this = self.ir.add_expr(IrExpr::GetValue(0));
-                        let a = self.lower_call_args_vararg(&args, &params, vararg, n_fixed)?;
+                        let a: Vec<Option<u32>> = if !vararg
+                            && args.len() < params.len()
+                            && self.ir.fn_param_defaults.contains_key(&mfid)
+                        {
+                            // OMITTED default arguments (`foo(a)` where `foo(a, b = …)`): lower the
+                            // supplied args positionally, then pad the omitted tail with `None` — the
+                            // emitter reads a `None` entry as "use the default" and routes through the
+                            // method's `$default` stub, exactly as a qualified `this.foo(a)` call does.
+                            // Without this the strict `vararg_arity` below rejected the call.
+                            let mut a: Vec<Option<u32>> = self
+                                .lower_args(&args, &params[..args.len()])?
+                                .into_iter()
+                                .map(Some)
+                                .collect();
+                            a.resize(params.len(), None);
+                            a
+                        } else {
+                            let n_fixed = vararg_arity(vararg, params.len(), args.len())?;
+                            self.lower_call_args_vararg(&args, &params, vararg, n_fixed)?
+                                .into_iter()
+                                .map(Some)
+                                .collect()
+                        };
                         self.ir.add_expr(IrExpr::MethodCall {
                             class,
                             index,
                             receiver: this,
-                            args: a.into_iter().map(Some).collect(),
+                            args: a,
                         })
                     } else if let Some((class, index, mfid, cur_id)) =
                         self.inner_outer_method(&fname)

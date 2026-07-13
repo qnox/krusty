@@ -650,6 +650,8 @@ mod unit_as_any_e2e;
 mod unit_cast_e2e;
 #[path = "unit_value_e2e.rs"]
 mod unit_value_e2e;
+#[path = "unqualified_member_default_arg_e2e.rs"]
+mod unqualified_member_default_arg_e2e;
 #[path = "unsigned_array_e2e.rs"]
 mod unsigned_array_e2e;
 #[path = "unsigned_ext_e2e.rs"]
