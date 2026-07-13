@@ -6630,6 +6630,23 @@ impl<'a> Checker<'a> {
         } else {
             (expected, actual)
         };
+        // A non-null `@JvmInline value class` value assigned where the SAME value class's NULLABLE form is
+        // expected (`fun f(): AppId? = sib()` with `sib(): AppId`). A non-null value class is represented
+        // UNBOXED (its underlying), the nullable form BOXED (the wrapper) — a real representation change,
+        // so `strip_nullable_ref` deliberately keeps the two distinct rather than treat every nullable
+        // value class as its underlying. But this widening IS valid Kotlin; kotlinc boxes the underlying
+        // into the wrapper. Accept it — the value-classes emit pass boxes the unboxed tail at the return.
+        if matches!(
+            ctx,
+            "function body" | "getter body" | "local function body" | "return"
+        ) && expected.is_nullable()
+            && !actual.is_nullable()
+            && expected.non_null() == actual
+            && (self.ty_is_value_class(actual)
+                || self.syms.libraries.value_underlying(actual).is_some())
+        {
+            return;
+        }
         // An erased generic reference array (`Array<Any>`, e.g. `emptyArray<T>()` → `Object[]`) is
         // assignable to any specific reference array — `Array` is invariant, but the erased value
         // really is the target type at runtime, so kotlinc inserts a `checkcast` at the use site.
