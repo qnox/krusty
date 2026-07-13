@@ -4226,6 +4226,19 @@ impl<'a> Parser<'a> {
                                 start,
                             );
                         }
+                        Expr::IndexMulti { receiver, indices } => {
+                            self.bump(); // '='
+                            self.skip_newlines();
+                            let value = self.parse_expr();
+                            return self.finish_stmt(
+                                Stmt::AssignIndexMulti {
+                                    receiver,
+                                    indices,
+                                    value,
+                                },
+                                start,
+                            );
+                        }
                         _ => self
                             .diags
                             .error(self.tok().span, "invalid assignment target"),
@@ -5479,19 +5492,41 @@ impl<'a> Parser<'a> {
                             .insert(lhs.0, std::mem::take(&mut pending_targs));
                     }
                 }
-                // `array[index]` element access.
+                // `array[index]` element access, or `receiver[i, j, …]` — a multi-index `get` operator.
                 TokenKind::LBracket => {
                     self.bump();
                     self.skip_newlines();
-                    let index = self.parse_expr();
+                    let mut indices = vec![self.parse_expr()];
                     self.skip_newlines();
+                    while self.eat(TokenKind::Comma) {
+                        self.skip_newlines();
+                        if self.at(TokenKind::RBracket) {
+                            break; // tolerate a trailing comma
+                        }
+                        indices.push(self.parse_expr());
+                        self.skip_newlines();
+                    }
                     let lspan = self.file.expr_spans[lhs.0 as usize];
                     let end = self.tok().span;
                     self.expect(TokenKind::RBracket, "']'");
-                    lhs = self.file.add_expr(
-                        Expr::Index { array: lhs, index },
-                        Span::new(lspan.lo, end.hi),
-                    );
+                    let span = Span::new(lspan.lo, end.hi);
+                    lhs = if indices.len() == 1 {
+                        self.file.add_expr(
+                            Expr::Index {
+                                array: lhs,
+                                index: indices[0],
+                            },
+                            span,
+                        )
+                    } else {
+                        self.file.add_expr(
+                            Expr::IndexMulti {
+                                receiver: lhs,
+                                indices,
+                            },
+                            span,
+                        )
+                    };
                 }
                 // `expr<TypeArgs>(args)` — generic call with explicit type arguments.
                 // Disambiguate from `a < b > c` (two comparisons) by checking whether a balanced
@@ -7028,6 +7063,25 @@ mod tests {
         assert_eq!(g.enum_entries.len(), 2);
         assert!(g.companion_methods.iter().any(|m| m.name == "foo"));
         assert!(g.companion_props.iter().any(|p| p.name == "bar"));
+    }
+
+    #[test]
+    fn multi_index_subscript_parses() {
+        // `recv[i, j]` (two or more indices) parses as a multi-index `get` operator; a single index
+        // stays the ordinary `Index`. The assignment form `recv[i, j] = v` is a multi-index `set`.
+        assert_eq!(
+            tree("fun f(m: M): Int = m[1, 2]"),
+            "(fun f (param m M) :Int (index-multi m 1 2))\n"
+        );
+        assert_eq!(
+            tree("fun f(m: M) { m[1, 2] = 3 }"),
+            "(fun f (param m M) (block (set-index-multi m 1 2 3)))\n"
+        );
+        // A single index is unchanged.
+        assert_eq!(
+            tree("fun f(a: IntArray): Int = a[0]"),
+            "(fun f (param a IntArray) :Int (index a 0))\n"
+        );
     }
 
     #[test]

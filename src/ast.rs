@@ -213,6 +213,13 @@ pub enum Expr {
         array: ExprId,
         index: ExprId,
     },
+    /// `receiver[i, j, …]` — a MULTI-index subscript (two or more indices), which is always a
+    /// `get`/`set` operator call (`receiver.get(i, j, …)`); there is no built-in multi-dimensional
+    /// array in Kotlin. Kept separate from single-index `Index` so the common array case stays untouched.
+    IndexMulti {
+        receiver: ExprId,
+        indices: Vec<ExprId>,
+    },
     /// `callee(args)`. `callee` is `Name` (free function) or `Member` (method).
     Call {
         callee: ExprId,
@@ -316,6 +323,13 @@ pub enum Stmt {
     AssignIndex {
         array: ExprId,
         index: ExprId,
+        value: ExprId,
+    },
+    /// `receiver[i, j, …] = value` — a MULTI-index store, lowered to the `set(i, j, …, value)`
+    /// operator. Separate from `AssignIndex` so the single-index array store stays untouched.
+    AssignIndexMulti {
+        receiver: ExprId,
+        indices: Vec<ExprId>,
         value: ExprId,
     },
     /// `return [expr]` (no label → returns from the enclosing function) or `return@label [expr]`
@@ -926,6 +940,9 @@ impl File {
             } => fe(*value) || fe(*start) || fe(*end),
             Expr::Member { receiver, .. } => fe(*receiver),
             Expr::Index { array, index } => fe(*array) || fe(*index),
+            Expr::IndexMulti { receiver, indices } => {
+                fe(*receiver) || indices.iter().any(|&i| fe(i))
+            }
             Expr::Call { callee, args } => fe(*callee) || args.iter().any(|&a| fe(a)),
             Expr::SafeCall { receiver, args, .. } => {
                 fe(*receiver) || args.as_ref().map_or(false, |a| a.iter().any(|&x| fe(x)))
@@ -981,6 +998,11 @@ impl File {
                 index,
                 value,
             } => fe(*array) || fe(*index) || fe(*value),
+            Stmt::AssignIndexMulti {
+                receiver,
+                indices,
+                value,
+            } => fe(*receiver) || indices.iter().any(|&i| fe(i)) || fe(*value),
             Stmt::While { cond, body, .. } | Stmt::DoWhile { cond, body, .. } => {
                 fe(*cond) || fe(*body)
             }
@@ -1157,6 +1179,15 @@ impl File {
                 self.write_expr(*array, out);
                 out.push(' ');
                 self.write_expr(*index, out);
+                out.push(')');
+            }
+            Expr::IndexMulti { receiver, indices } => {
+                out.push_str("(index-multi ");
+                self.write_expr(*receiver, out);
+                for &i in indices {
+                    out.push(' ');
+                    self.write_expr(i, out);
+                }
                 out.push(')');
             }
             Expr::Try {
@@ -1407,6 +1438,21 @@ impl File {
                 self.write_expr(*array, out);
                 out.push(' ');
                 self.write_expr(*index, out);
+                out.push(' ');
+                self.write_expr(*value, out);
+                out.push(')');
+            }
+            Stmt::AssignIndexMulti {
+                receiver,
+                indices,
+                value,
+            } => {
+                out.push_str("(set-index-multi ");
+                self.write_expr(*receiver, out);
+                for &i in indices {
+                    out.push(' ');
+                    self.write_expr(i, out);
+                }
                 out.push(' ');
                 self.write_expr(*value, out);
                 out.push(')');
