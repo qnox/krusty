@@ -915,27 +915,25 @@ impl Classpath {
         self.class_meta(internal).fns.clone()
     }
 
-    /// Whether `@Metadata` describes a function named `jvm_name` on `internal` (facade parts merged). When
-    /// it does, the metadata signature is authoritative — callers must not fall back to the JVM `Signature`.
-    pub fn has_meta_function(&self, internal: &str, jvm_name: &str) -> bool {
-        self.class_meta(internal).by_jvm_name.contains_key(jvm_name)
-    }
-
     /// The metadata-primary [`GenericSig`] for the `internal.jvm_name` overload corresponding to the JVM
     /// method with `desc_params`. kotlinc omits the `method_signature` extension when it equals the
     /// computed default, so the correct overload is picked by aligning the metadata signature to the
     /// descriptor (receiver + value parameters) — the SAME selection the call-fact lookup uses, so both
-    /// agree. `None` when `@Metadata` has no matching function (a Java method / synthetic).
+    /// agree. Outer `None` means no metadata function by this JVM name, so the caller may use JVM
+    /// `Signature`; inner `None` means metadata owns the callable but has no usable generic signature.
     pub fn aligned_generic_sig(
         &self,
         internal: &str,
         jvm_name: &str,
         desc_params: &[Ty],
         desc_ret: &Ty,
-    ) -> Option<crate::libraries::GenericSig> {
+    ) -> Option<Option<crate::libraries::GenericSig>> {
         let meta = self.class_meta(internal);
-        let (_, idx) = aligned_meta_index(&meta, jvm_name, desc_params, desc_ret)?;
-        meta.fns.get(idx).and_then(|f| f.generic_sig.clone())
+        meta.by_jvm_name.contains_key(jvm_name).then(|| {
+            aligned_meta_index(&meta, jvm_name, desc_params, desc_ret)
+                .and_then(|(_, idx)| meta.fns.get(idx))
+                .and_then(|f| f.generic_sig.clone())
+        })
     }
 
     /// The SOURCE value-parameter types of `internal.fn_name` from `@Metadata`, as `Ty`s — the signature
