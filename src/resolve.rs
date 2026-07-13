@@ -4720,6 +4720,28 @@ struct Checker<'a> {
     loop_labels: Vec<String>,
 }
 
+/// Record a type-parameter → type binding, tracking a CONFLICT when the same parameter is bound to two
+/// different types across binding sites (a plain-value arg and a lambda return, or two lambda returns).
+/// The first binding is kept in `binds` (for the selection paths); `conflicted` names the ambiguous
+/// parameters so the generic-return inference can decline (their real type argument is a common
+/// supertype / intersection krusty can't compute).
+fn bind_or_conflict<'k>(
+    binds: &mut std::collections::HashMap<&'k str, Ty>,
+    conflicted: &mut std::collections::HashSet<&'k str>,
+    name: &'k str,
+    ty: Ty,
+) {
+    match binds.get(name) {
+        Some(&prev) if prev != ty => {
+            conflicted.insert(name);
+        }
+        Some(_) => {}
+        None => {
+            binds.insert(name, ty);
+        }
+    }
+}
+
 impl<'a> Checker<'a> {
     /// The arg-binding call-resolution layer over this checker's [`SymbolSource`]. Cheap to construct.
     fn resolver(&self) -> crate::symbol_resolver::SymbolResolver<'_> {
@@ -8739,7 +8761,6 @@ impl<'a> Checker<'a> {
                 Decl::Fun(f)
                     if f.name == fname
                         && f.receiver.is_none()
-                        && f.is_inline
                         && !f.type_params.is_empty()
                         && f.params.len() == arg_tys.len() =>
                 {
@@ -8750,31 +8771,115 @@ impl<'a> Checker<'a> {
         let tparams: std::collections::HashSet<&str> =
             f.type_params.iter().map(String::as_str).collect();
         let mut binds: std::collections::HashMap<&str, Ty> = std::collections::HashMap::new();
+        // Type parameters bound to two DIFFERENT types across binding sites (a plain-value param AND a
+        // lambda return, or two lambda returns) — the real type argument is their common supertype /
+        // intersection, which krusty can't compute, so a non-inline return over such a parameter is
+        // declined below. `or_insert` keeps the first binding for the (inline) selection paths; the
+        // conflict set is the soundness guard layered on top, covering EVERY binding site (not just the
+        // plain-value witness scan).
+        let mut conflicted: std::collections::HashSet<&str> = std::collections::HashSet::new();
         for (i, p) in f.params.iter().enumerate() {
             let at = &arg_tys[i];
             if p.ty.fun_params.is_empty() {
                 // A plain value parameter typed as a bare type parameter (`x: T`).
                 if tparams.contains(p.ty.name.as_str()) {
-                    binds.entry(p.ty.name.as_str()).or_insert(*at);
+                    bind_or_conflict(&mut binds, &mut conflicted, p.ty.name.as_str(), *at);
                 }
             } else if let Ty::Fun(fsig) = at {
                 // A function-typed parameter `(A) -> R`: bind `A` from the lambda's parameter types
                 // and `R` from its return type.
                 for (decl, actual) in p.ty.fun_params.iter().zip(&fsig.params) {
                     if tparams.contains(decl.name.as_str()) {
-                        binds.entry(decl.name.as_str()).or_insert(*actual);
+                        bind_or_conflict(&mut binds, &mut conflicted, decl.name.as_str(), *actual);
                     }
                 }
                 if let Some(rret) = &p.ty.arg {
                     if tparams.contains(rret.name.as_str()) {
-                        binds.entry(rret.name.as_str()).or_insert(fsig.ret);
+                        bind_or_conflict(&mut binds, &mut conflicted, rret.name.as_str(), fsig.ret);
                     }
                 }
             }
         }
-        f.ret
-            .as_ref()
-            .and_then(|r| binds.get(r.name.as_str()).copied())
+        // The return type parameter: from an explicit `: T` annotation, or — when the return is
+        // inferred — from an expression body that is a bare parameter reference (`fun <T> id(x: T) = x`),
+        // whose type is the parameter's declared type parameter.
+        let ret_tp: Option<String> = if let Some(r) = &f.ret {
+            Some(r.name.clone())
+        } else if let FunBody::Expr(b) = &f.body {
+            if let Expr::Name(n) = self.file.expr(*b) {
+                f.params
+                    .iter()
+                    .find(|p| &p.name == n)
+                    .filter(|p| p.ty.fun_params.is_empty() && tparams.contains(p.ty.name.as_str()))
+                    .map(|p| p.ty.name.clone())
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        // A type parameter with a declared upper bound (`<T : Int>`, `<T : Comparable<T>>`) is handled
+        // by the bound-driven machinery: a primitive bound SPECIALIZES the descriptor (`(I)I`) and a
+        // reference bound erases to it, while a primitive argument into a reference bound is DECLINED.
+        // Inferring a boxed/plain return here would fight those paths (VerifyError, or a call that must
+        // skip). Only recover the return for an UNBOUNDED type parameter.
+        let ret_tp = ret_tp.filter(|r| !f.type_param_bounds.iter().any(|(n, _)| n == r));
+        let bound = ret_tp.as_deref().and_then(|r| binds.get(r).copied())?;
+        // A NON-inline generic call crosses the JVM erasure boundary (return is physically `Object`),
+        // so recovering a concrete return here is only sound when the binding is UNAMBIGUOUS. krusty has
+        // no constraint solver / least-upper-bound, so decline (stay erased → the use site's members
+        // simply don't resolve, and the file skips instead of miscompiling) whenever the inference could
+        // disagree with the value actually returned. An `inline` function is spliced with no erasure
+        // boundary, so its binding flows directly and keeps the pre-existing behaviour.
+        if !f.is_inline {
+            let r = ret_tp.as_deref()?;
+            // The return type parameter was bound to two different types across binding sites (a
+            // plain-value arg and a lambda return, or two lambda returns `(Int) -> T` / `(String) -> T`)
+            // — its real type argument is a common supertype the emitter can't `checkcast` to soundly.
+            if conflicted.contains(r) {
+                return None;
+            }
+            // A vararg param (`vararg ts: T`) binds `T` to the element type, but the physical parameter
+            // is an array and the return machinery here doesn't model that — decline (KT-2739).
+            if f.params.last().is_some_and(|p| p.is_vararg) {
+                return None;
+            }
+            // Every plain-value parameter that mentions the return type parameter must bind it to the
+            // SAME concrete type. Two arguments binding `T` to different types means the real `T` is a
+            // common supertype / intersection (`select(x: T?, y: T)` called with unrelated args) — the
+            // returned value's runtime type can then differ from any single argument's, so a naive
+            // `checkcast` to one of them is a `ClassCastException`. A nullable-bare-`T` parameter
+            // (`x: T?`) is likewise excluded: its argument type carries a nullability the erased `T`
+            // slot doesn't, so it isn't a reliable witness for `T`.
+            let mut witness: Option<Ty> = None;
+            for (i, p) in f.params.iter().enumerate() {
+                if p.ty.fun_params.is_empty() && p.ty.name == r {
+                    if p.ty.nullable {
+                        return None;
+                    }
+                    // A `null` literal / bottom argument (`bar(null, …)`) binds `T` to `Null`/`Nothing`,
+                    // which is not the real `T` — the value actually returned (`r as T`) has the
+                    // expected type, so typing the return as the bottom type is a `VerifyError` (KT-73166).
+                    if matches!(arg_tys[i], Ty::Null | Ty::Nothing)
+                        || matches!(arg_tys[i], Ty::Nullable(inner) if matches!(*inner, Ty::Nothing))
+                    {
+                        return None;
+                    }
+                    match witness {
+                        None => witness = Some(arg_tys[i]),
+                        Some(w) if w != arg_tys[i] => return None,
+                        _ => {}
+                    }
+                }
+            }
+            // The runtime value of a primitive binding is its BOXED wrapper — type it as `Wrapper?` (as
+            // `explicit_generic_return` does) so a use site unboxes through the normal nullable-primitive
+            // machinery rather than the emitter calling a primitive method on a boxed value.
+            if !bound.is_reference() {
+                return bound.nullable_boxed();
+            }
+        }
+        Some(bound)
     }
 
     /// A user top-level generic function called with an EXPLICIT type argument (`asSeq<String>(x)`)
@@ -11629,10 +11734,12 @@ impl<'a> Checker<'a> {
                         ret_ty = inferred;
                     }
                     // A user generic call whose return is a type parameter: bind from all arguments.
-                    if user_generic.is_some() {
-                        if let Some(r) = self.user_generic_return(&fname, &arg_tys) {
-                            ret_ty = r;
-                        }
+                    // Not gated on a lambda argument (`user_generic`) — a plain generic call like
+                    // `id('a')` for `fun <T> id(x: T): T` must also recover its concrete return so a use
+                    // site (`id('a') > id('b')`) resolves instead of erasing to `Any`. The helper
+                    // self-checks that the callee is generic and returns a bare type parameter.
+                    if let Some(r) = self.user_generic_return(&fname, &arg_tys) {
+                        ret_ty = r;
                     }
                     // An EXPLICIT type argument (`asSeq<String>(x)`) on a generic call whose return is a
                     // bare type parameter takes precedence — the result type is the supplied argument.
