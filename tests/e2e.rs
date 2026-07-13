@@ -450,6 +450,8 @@ mod map_get_nullable_elvis_e2e;
 mod member_array_ctor_inference_e2e;
 #[path = "member_ctrl_inference_e2e.rs"]
 mod member_ctrl_inference_e2e;
+#[path = "member_default_implicit_receiver_e2e.rs"]
+mod member_default_implicit_receiver_e2e;
 #[path = "member_infix_inference_e2e.rs"]
 mod member_infix_inference_e2e;
 #[path = "metadata_kept_params.rs"]
