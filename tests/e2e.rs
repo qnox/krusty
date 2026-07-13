@@ -12,6 +12,8 @@ mod abstract_member_check_e2e;
 mod abstract_modifier_consistency_e2e;
 #[path = "annotation_instantiation_e2e.rs"]
 mod annotation_instantiation_e2e;
+#[path = "anon_fun_statement_e2e.rs"]
+mod anon_fun_statement_e2e;
 #[path = "anon_object_capture_e2e.rs"]
 mod anon_object_capture_e2e;
 #[path = "anon_object_capture_member_e2e.rs"]
