@@ -12502,10 +12502,18 @@ impl<'a> Checker<'a> {
             }
         }
         // Two values of the SAME class join to that class with erased type arguments (`List<C>` and
-        // `List<D>` → `List<*>`).
-        if let (Ty::Obj(ai, _), Ty::Obj(bi, _)) = (a, b) {
+        // `List<D>` → `List<*>`), differing only in NULLABILITY to its nullable form (`C` and `C?` → `C?`).
+        // Comparing the NON-NULL forms covers the mixed case (`x ?: y` where one side is `C` and the other
+        // `C?` — e.g. a map get typed `C` elvis a nullable member return `C?`), which the bare-`Obj` match
+        // missed, collapsing it to `Any`.
+        if let (Some(ai), Some(bi)) = (a.non_null().obj_internal(), b.non_null().obj_internal()) {
             if ai == bi {
-                return Ty::obj(ai);
+                let base = Ty::obj(ai);
+                return if a.is_nullable() || b.is_nullable() {
+                    Ty::nullable(base)
+                } else {
+                    base
+                };
             }
         }
         // Two values of DIFFERENT reference classes join to their common supertype, which krusty

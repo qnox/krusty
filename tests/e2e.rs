@@ -250,6 +250,8 @@ mod duplicate_param_check_e2e;
 mod elvis_newline_continuation_e2e;
 #[path = "empty_loop_body_e2e.rs"]
 mod empty_loop_body_e2e;
+#[path = "elvis_nullability_join_e2e.rs"]
+mod elvis_nullability_join_e2e;
 #[path = "enum_body_property_e2e.rs"]
 mod enum_body_property_e2e;
 #[path = "enum_class_signature_e2e.rs"]
