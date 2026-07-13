@@ -1029,11 +1029,7 @@ impl Classpath {
         };
         MetadataCallFacts {
             kept_params: None,
-            call_sig: CallSig::metadata_member(
-                arity,
-                f.value_params.iter().map(|p| p.name.clone()).collect(),
-                f.value_params.iter().map(|p| p.has_default).collect(),
-            ),
+            call_sig: f.member_call_sig(),
             ret: metadata_return_info(f.ret_class, f.ret_nullable),
         }
     }

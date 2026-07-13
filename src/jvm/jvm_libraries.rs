@@ -1359,13 +1359,6 @@ impl SymbolSource for JvmLibraries {
                     .iter()
                     .find(|f| f.jvm_name == jvm_name && f.value_params.len() == value_arity)
             };
-            let metadata_member_call_sig = |f: &metadata::MetaFn| {
-                crate::libraries::CallSig::metadata_member(
-                    f.value_params.len(),
-                    f.value_params.iter().map(|p| p.name.clone()).collect(),
-                    f.value_params.iter().map(|p| p.has_default).collect(),
-                )
-            };
             let member_call_sig = |member: &LibraryMember, jvm_name: &str| {
                 let value_arity = if member.suspend && !member.params.is_empty() {
                     member.params.len() - 1
@@ -1373,7 +1366,7 @@ impl SymbolSource for JvmLibraries {
                     member.params.len()
                 };
                 member_meta(jvm_name, value_arity)
-                    .map(metadata_member_call_sig)
+                    .map(metadata::MetaFn::member_call_sig)
                     .unwrap_or_default()
             };
             for m in &ci.methods {
@@ -1482,7 +1475,7 @@ impl SymbolSource for JvmLibraries {
                 member.physical_ret = physical_ret;
                 member.ret_nullable = mf.ret_nullable;
                 member.suspend = mf.is_suspend;
-                member.call_sig = metadata_member_call_sig(mf);
+                member.call_sig = mf.member_call_sig();
                 crate::trace_compiler!(
                     "resolve",
                     "mangled member {}.{} jvm={} logical_params={:?}",
