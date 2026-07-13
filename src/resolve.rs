@@ -10156,25 +10156,23 @@ impl<'a> Checker<'a> {
                 {
                     if let Some(internal) = self.qualified_nested_ctor_internal(receiver, &name) {
                         let qualified = internal.clone();
-                        // NAMED arguments (`Op.Ext(a = 1, b = "x")`, or omitting a defaulted param):
-                        // map the labels onto positions via the nested class's `@Metadata` ctor names,
-                        // exactly as the unqualified/simple-name classpath-ctor path does. Every param
-                        // supplied ⇒ a plain constructor; an omitted defaulted param ⇒ the
-                        // `<init>$default` synthetic (the lowerer fills placeholder + mask + marker).
+                        // Named classpath constructors use metadata names/defaults; lowering selects
+                        // either the plain constructor or the default-argument synthetic.
                         if arg_names.is_some() {
-                            if let Some((param_names, param_defaults)) = self
+                            if let Some(ctor_params) = self
                                 .syms
                                 .libraries
                                 .resolve_type(&internal)
                                 .and_then(|t| t.constructor_named_params(args.len()))
                             {
-                                let required = required_arity(param_names.len(), &param_defaults);
+                                let required =
+                                    required_arity(ctor_params.names.len(), &ctor_params.defaults);
                                 match map_call_args(
                                     args,
                                     arg_names.as_deref(),
-                                    &param_names,
+                                    &ctor_params.names,
                                     required,
-                                    &param_defaults,
+                                    &ctor_params.defaults,
                                 ) {
                                     Ok(slots) => {
                                         for &a in slots.iter().flatten() {
@@ -11932,26 +11930,24 @@ impl<'a> Checker<'a> {
                         }
                         return self.ctor_result(call, &cls.internal);
                     }
-                    // A CLASSPATH constructor with NAMED arguments (`Point(y = 2, x = 1)`, or
-                    // `Cfg(a = 1, c = "x")` OMITTING a defaulted `b`): reorder the labels onto parameter
-                    // positions via the ctor's `@Metadata` names + per-parameter default flags. Every
-                    // parameter supplied ⇒ a plain constructor; an omitted defaulted parameter ⇒ the
-                    // `<init>$default` synthetic (the lowerer fills the placeholder + bitmask + marker).
+                    // Named classpath constructors use metadata names/defaults; lowering selects
+                    // either the plain constructor or the default-argument synthetic.
                     if arg_names.is_some() {
                         if let Some(internal) = self.classpath_class_internal(&fname) {
-                            if let Some((param_names, param_defaults)) = self
+                            if let Some(ctor_params) = self
                                 .syms
                                 .libraries
                                 .resolve_type(&internal)
                                 .and_then(|t| t.constructor_named_params(args.len()))
                             {
-                                let required = required_arity(param_names.len(), &param_defaults);
+                                let required =
+                                    required_arity(ctor_params.names.len(), &ctor_params.defaults);
                                 match map_call_args(
                                     args,
                                     arg_names.as_deref(),
-                                    &param_names,
+                                    &ctor_params.names,
                                     required,
-                                    &param_defaults,
+                                    &ctor_params.defaults,
                                 ) {
                                     Ok(slots) => {
                                         // Type-check every PROVIDED argument (omitted-default slots are `None`).

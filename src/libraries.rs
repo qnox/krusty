@@ -545,6 +545,20 @@ pub struct CallSig {
     pub vararg: bool,
 }
 
+#[derive(Clone, Default, Debug, PartialEq, Eq)]
+pub struct ParamList {
+    pub names: Vec<String>,
+    pub defaults: Vec<bool>,
+}
+
+impl ParamList {
+    pub fn named_usable(&self, min_arity: usize) -> bool {
+        self.names.len() >= min_arity
+            && self.names.len() == self.defaults.len()
+            && !self.names.iter().any(String::is_empty)
+    }
+}
+
 impl CallSig {
     pub fn source(
         param_names: Vec<String>,
@@ -960,11 +974,8 @@ pub struct LibraryType {
     /// Whether a `@JvmInline value class`'s primary constructor is defaulted — kotlinc emits a
     /// `constructor-impl$default` synthetic exactly then, which realizes an all-defaulted `Id()`.
     pub value_ctor_has_default: bool,
-    /// Each constructor's SOURCE parameter names PLUS a per-parameter "declares a default value" flag,
-    /// from `@Metadata`. A NAMED call may OMIT a defaulted parameter (`Cfg(a = 1, c = "x")`); the caller
-    /// picks the constructor whose parameter list is long enough and lowers omitted slots to
-    /// kotlinc's `<init>$default` synthetic. Empty when no constructor metadata is recorded.
-    pub ctor_named_params: Vec<(Vec<String>, Vec<bool>)>,
+    /// Constructor SOURCE parameter names plus per-parameter default flags from `@Metadata`.
+    pub ctor_named_params: Vec<ParamList>,
     /// Properties whose JVM getter is value-class-`@JvmName`-mangled (`Holder(val id: Vid)` →
     /// `getId-<hash>`) and whose physical return erases to the value class's underlying, so ordinary
     /// getter resolution misses them. Keyed by SOURCE property name; the member carries the MANGLED getter
@@ -1001,15 +1012,11 @@ impl LibraryType {
         self.enum_entries.iter().any(|e| e == name)
     }
 
-    /// The SOURCE parameter names + per-parameter default flags of a constructor with at least
-    /// `min_arity` parameters, so a NAMED call may OMIT a defaulted one (`Cfg(a = 1, c = "x")`). Picks the
-    /// first recorded constructor whose (name, default) lists are non-empty, aligned, and long enough.
-    pub fn constructor_named_params(&self, min_arity: usize) -> Option<(Vec<String>, Vec<bool>)> {
+    /// Constructor source parameter names/default flags for a named call with `min_arity` supplied args.
+    pub fn constructor_named_params(&self, min_arity: usize) -> Option<ParamList> {
         self.ctor_named_params
             .iter()
-            .find(|(n, d)| {
-                n.len() >= min_arity && n.len() == d.len() && !n.iter().any(String::is_empty)
-            })
+            .find(|params| params.named_usable(min_arity))
             .cloned()
     }
 
@@ -1194,7 +1201,7 @@ impl TargetRuntime for EmptySymbolSource {}
 
 #[cfg(test)]
 mod tests {
-    use super::{InlineKind, Visibility};
+    use super::{InlineKind, ParamList, Visibility};
 
     #[test]
     fn visibility_from_metadata_maps_the_kotlin_enum() {
@@ -1283,19 +1290,21 @@ mod tests {
 
     #[test]
     fn library_type_constructor_named_params_picks_long_enough_and_valid() {
+        let expected = ParamList {
+            names: vec!["host".into(), "port".into()],
+            defaults: vec![false, true],
+        };
         let t = ty_with(|t| {
-            t.ctor_named_params = vec![(vec!["host".into(), "port".into()], vec![false, true])];
+            t.ctor_named_params = vec![expected.clone()];
         });
-        // A call omitting the defaulted trailing `port` (arity 1) still matches the 2-param ctor.
-        assert_eq!(
-            t.constructor_named_params(1),
-            Some((vec!["host".into(), "port".into()], vec![false, true]))
-        );
-        // A call with more args than any recorded ctor has no match.
+        assert_eq!(t.constructor_named_params(1), Some(expected));
         assert!(t.constructor_named_params(3).is_none());
-        // An entry with an empty (unnamed) parameter is rejected — named-arg mapping needs every name.
+
         let bad = ty_with(|t| {
-            t.ctor_named_params = vec![(vec!["".into()], vec![false])];
+            t.ctor_named_params = vec![ParamList {
+                names: vec!["".into()],
+                defaults: vec![false],
+            }];
         });
         assert!(bad.constructor_named_params(0).is_none());
     }
