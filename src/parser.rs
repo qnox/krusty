@@ -4303,7 +4303,16 @@ impl<'a> Parser<'a> {
             }
             TokenKind::KwFor => self.parse_for(start, loop_label),
             // Local function declaration: `fun name(params): Ret { body }` inside a function body.
-            TokenKind::KwFun => {
+            // A `fun` directly followed by `(` (`fun () …`) is an ANONYMOUS-function EXPRESSION used in
+            // statement position (`for (…) fun () {}`), not a local declaration — fall through to the
+            // expression path (which parses it via `parse_anon_fun`). A named/generic/receiver local fun
+            // (`fun name`, `fun <T> name`, `fun Recv.name`) keeps the declaration path unchanged.
+            TokenKind::KwFun
+                if !self
+                    .t
+                    .get(self.i + 1)
+                    .is_some_and(|t| t.kind == TokenKind::LParen) =>
+            {
                 // Local functions don't carry a `suspend` modifier through this path; a local
                 // `suspend fun` is handled (skipped) downstream via the suspend guard in lowering.
                 let f = self.parse_fun(false, false, false, false, false);
