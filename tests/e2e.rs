@@ -664,6 +664,8 @@ mod transitive_type_bound_e2e;
 mod trim_indent_e2e;
 #[path = "try_catch_e2e.rs"]
 mod try_catch_e2e;
+#[path = "try_catch_expr_generic_merge_e2e.rs"]
+mod try_catch_expr_generic_merge_e2e;
 #[path = "type_param_vararg_check_e2e.rs"]
 mod type_param_vararg_check_e2e;
 #[path = "typeparam_cast_e2e.rs"]

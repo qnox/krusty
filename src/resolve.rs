@@ -7168,13 +7168,25 @@ impl<'a> Checker<'a> {
                     let ht = self.expr(c.body);
                     self.pop_scope();
                     // A `try` used as a statement needn't have body/catch agree; merge leniently
-                    // (mismatch → `Unit`) so only an expression use that needs a value is constrained.
+                    // (mismatch → `Unit`) so only an expression use that needs a value is constrained. A
+                    // diverging (`Nothing`) branch drops out. Two values of the SAME class with differing
+                    // type arguments (`List<Backup>` from the body vs `List<Nothing>` from a bare
+                    // `emptyList()` catch) merge to that class with erased arguments (`List<*>`), assignable
+                    // to the declared `List<Backup>` return — instead of collapsing to `Unit`, which wrongly
+                    // typed an expression-bodied `try { … } catch { emptyList() }` as `Unit`. (This mirrors
+                    // one case of `join` without its by-span coercion side effects, which mis-emit here.)
                     result = if result == ht {
                         result
                     } else if result == Ty::Nothing {
                         ht
                     } else if ht == Ty::Nothing {
                         result
+                    } else if let (Ty::Obj(ai, _), Ty::Obj(bi, _)) = (result, ht) {
+                        if ai == bi {
+                            Ty::obj(ai)
+                        } else {
+                            Ty::Unit
+                        }
                     } else {
                         Ty::Unit
                     };
