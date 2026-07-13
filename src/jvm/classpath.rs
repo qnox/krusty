@@ -983,19 +983,17 @@ impl Classpath {
                 CallSig::metadata_plain(desc_params.len())
             });
         };
+        let names = c.value_params.iter().map(|p| p.name.clone()).collect();
+        let defaults = c.value_params.iter().map(|p| p.has_default).collect();
         MetadataCallFacts {
             kept_params: Some(end),
             call_sig: if extension {
-                CallSig::metadata_extension(
-                    end,
-                    c.value_params.iter().map(|p| p.name.clone()).collect(),
-                    c.value_params.iter().map(|p| p.has_default).collect(),
-                )
+                CallSig::metadata_extension(end, names, defaults)
             } else {
                 CallSig::metadata_top_level(
                     end,
-                    c.value_params.iter().map(|p| p.name.clone()).collect(),
-                    c.value_params.iter().map(|p| p.has_default).collect(),
+                    names,
+                    defaults,
                     c.value_params
                         .iter()
                         .map(|p| p.recv_fun_receiver.as_deref().map(Ty::obj))
