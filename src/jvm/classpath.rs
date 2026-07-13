@@ -457,15 +457,14 @@ pub struct TypeIndex {
 
 /// Per-class `@Metadata` cache: class internal name → every function decoded from its `Package` metadata
 /// (with the multifile-facade part classes merged in). This is the SINGLE decode of a class's `d1` for the
-/// function lookups below — `meta_functions`, `metadata_receiver_types`, `metadata_call_facts`, and
-/// parameter metadata all project over it instead of each re-decoding and re-merging.
+/// function lookups below — `meta_functions`, `metadata_call_facts`, and parameter metadata all project
+/// over it instead of each re-decoding and re-merging.
 type MetaFnsCache = RefCell<crate::lru::LruCache<String, std::rc::Rc<ClassMeta>>>;
 
 /// One top-level callable decoded from `@Metadata`, with the fields classpath lookup needs kept
 /// together so return type, receiver, nullability, parameter names/defaults, and receiver-lambda
 /// annotations cannot drift across parallel maps.
 struct MetaCallable {
-    kotlin_name: String,
     jvm_name: String,
     receiver_class: Option<&'static str>,
     is_extension: bool,
@@ -500,11 +499,9 @@ impl MetadataCallFacts {
 }
 
 /// The per-function `@Metadata` lookups for one class, all derived from its single decoded function list
-/// (facade parts merged). Computed once per class in [`Classpath::class_meta`]; the public
-/// `metadata_*` methods just index these maps.
+/// (facade parts merged). Computed once per class in [`Classpath::class_meta`].
 struct ClassMeta {
     callables: Vec<MetaCallable>,
-    by_kotlin_name: HashMap<String, Vec<usize>>,
     by_jvm_name: HashMap<String, Vec<usize>>,
     /// The full facade-merged [`MetaFn`] list this is projected from — exposed via
     /// [`Classpath::meta_functions`] for the lookups that need a whole `MetaFn` (return class by JVM
@@ -852,8 +849,7 @@ impl Classpath {
     }
 
     /// The decoded `@Metadata` function lookups for `internal` (facade parts merged), decoded once and
-    /// cached. The single `d1` decode that `meta_functions`/`metadata_receiver_types`/
-    /// `metadata_call_facts` all project over.
+    /// cached. The single `d1` decode that `meta_functions`/`metadata_call_facts` all project over.
     fn class_meta(&self, internal: &str) -> std::rc::Rc<ClassMeta> {
         if let Some(m) = self.meta_fns.borrow_mut().get(internal) {
             cache_stat!(meta_fns, true);
@@ -879,7 +875,6 @@ impl Classpath {
         let callables: Vec<MetaCallable> = fns
             .iter()
             .map(|f| MetaCallable {
-                kotlin_name: f.kotlin_name.clone(),
                 jvm_name: f.jvm_name.clone(),
                 receiver_class: f.receiver_class,
                 is_extension: f.is_extension,
@@ -898,18 +893,12 @@ impl Classpath {
                     .collect(),
             })
             .collect();
-        let mut by_kotlin_name: HashMap<String, Vec<usize>> = HashMap::new();
         let mut by_jvm_name: HashMap<String, Vec<usize>> = HashMap::new();
         for (i, c) in callables.iter().enumerate() {
-            by_kotlin_name
-                .entry(c.kotlin_name.clone())
-                .or_default()
-                .push(i);
             by_jvm_name.entry(c.jvm_name.clone()).or_default().push(i);
         }
         let meta = std::rc::Rc::new(ClassMeta {
             callables,
-            by_kotlin_name,
             by_jvm_name,
             fns: fns.into(),
         });
@@ -1030,27 +1019,6 @@ impl Classpath {
             ),
             ret: metadata_return_info(f.ret_class, f.ret_nullable),
         }
-    }
-
-    /// All Kotlin extension-receiver internal names of `fn_name` in `internal` (`plusAssign` →
-    /// `[kotlin/collections/MutableCollection, …/MutableMap]`), from `@Metadata`. A name is overloaded
-    /// across receivers, so a receiver applies if it is a subtype of ANY entry. The JVM signature erases
-    /// the receiver to its first parameter; only `@Metadata` keeps the read-only/mutable identity. Empty
-    /// for a non-extension function.
-    pub fn metadata_receiver_types(&self, internal: &str, fn_name: &str) -> Vec<String> {
-        let meta = self.class_meta(internal);
-        let mut out = Vec::new();
-        if let Some(idxs) = meta.by_kotlin_name.get(fn_name) {
-            for &i in idxs {
-                if let Some(cn) = meta.callables[i].receiver_class {
-                    let cn = cn.to_string();
-                    if !out.contains(&cn) {
-                        out.push(cn);
-                    }
-                }
-            }
-        }
-        out
     }
 
     /// A facade class's lambda-return-overload Kotlin names, cached (part-merged for a multifile facade).
