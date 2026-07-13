@@ -3078,6 +3078,12 @@ fn infer_lit_ty_p(
                     if let Some(ret) = fun_rets.get(n.as_str()) {
                         return *ret;
                     }
+                    // A primitive-array size constructor (`IntArray(n)`, `CharArray(n) { … }`) — a stdlib
+                    // intrinsic the federated probe below doesn't surface as a return type. (`Array(n){}`
+                    // needs the lambda's element type, so it stays with the full checker.)
+                    if let Some(elem) = Ty::primitive_array_element(n) {
+                        return Ty::array(elem);
+                    }
                     // A JDK/classpath type resolvable by simple name (`val sb = StringBuilder()`).
                     if let Some(internal) = class_names.get(n.as_str()) {
                         return Ty::obj(internal);
