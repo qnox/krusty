@@ -13179,9 +13179,62 @@ impl<'a> Lower<'a> {
                     value: v,
                 }))
             }
-            // A multi-argument `set` operator (`recv[i, j] = v`) — checker-typed; backend emission is a
-            // later slice, so skip the file rather than miscompile.
-            Stmt::AssignIndexMulti { .. } => {
+            // A multi-argument `set` operator (`recv[i, j] = v`) → `recv.set(i, j, v)`. A USER-class
+            // member and a library member are emitted here; a same-module EXTENSION `set` still bails.
+            Stmt::AssignIndexMulti {
+                receiver,
+                indices,
+                value,
+            } => {
+                let rt = self.info.ty(receiver);
+                if let Ty::Obj(internal, _) = rt {
+                    if let Some((class, midx, fid, _)) = self.resolve_method(internal, "set") {
+                        let params = self.ir.functions[fid as usize].params.clone();
+                        if params.len() == indices.len() + 1 {
+                            let recv_v = self.expr(receiver)?;
+                            let mut a = Vec::new();
+                            for (k, &ix) in indices.iter().enumerate() {
+                                a.push(Some(self.lower_arg(ix, &params[k])?));
+                            }
+                            a.push(Some(self.lower_arg(value, &params[indices.len()])?));
+                            return Some(self.ir.add_expr(IrExpr::MethodCall {
+                                class,
+                                index: midx,
+                                receiver: recv_v,
+                                args: a,
+                            }));
+                        }
+                    }
+                    let mut set_arg_tys: Vec<Ty> =
+                        indices.iter().map(|&i| self.info.ty(i)).collect();
+                    set_arg_tys.push(self.info.ty(value));
+                    if let Some(m) = crate::symbol_resolver::resolve_instance(
+                        &*self.syms.libraries,
+                        internal,
+                        "set",
+                        &set_arg_tys,
+                    ) {
+                        if m.params.len() == indices.len() + 1 {
+                            let is_iface = self.library_type_is_interface(internal);
+                            let recv_v = self.expr(receiver)?;
+                            let mut a = Vec::new();
+                            for (k, &ix) in indices.iter().enumerate() {
+                                a.push(self.lower_arg(ix, &ty_to_ir(m.params[k]))?);
+                            }
+                            a.push(self.lower_arg(value, &ty_to_ir(m.params[indices.len()]))?);
+                            return Some(self.ir.add_expr(IrExpr::Call {
+                                callee: Callee::Virtual {
+                                    owner: internal.to_string(),
+                                    name: "set".to_string(),
+                                    descriptor: m.descriptor.clone(),
+                                    interface: is_iface,
+                                },
+                                dispatch_receiver: Some(recv_v),
+                                args: a,
+                            }));
+                        }
+                    }
+                }
                 set_bail("stmt AssignIndexMulti");
                 None
             }
@@ -15951,9 +16004,58 @@ impl<'a> Lower<'a> {
             }
             // `a[i]` read. User/library `get` operators resolve through their member metadata; arrays
             // keep the IR intrinsic because the backend reads the element from the receiver type.
-            // A multi-argument `get` operator (`recv[i, j]`) — checker-typed, but the backend emission
-            // is a later slice; skip the file rather than miscompile.
-            Expr::IndexMulti { .. } => {
+            // A multi-argument `get` operator (`recv[i, j]`) → `recv.get(i, j)`. A USER-class member and
+            // a library member are emitted here (mirroring the single-index paths); a same-module
+            // EXTENSION `get` operator is a later slice, so it still bails.
+            Expr::IndexMulti { receiver, indices } => {
+                let rt = self.info.ty(receiver);
+                if let Ty::Obj(internal, _) = rt {
+                    // User-class member `operator fun get(i, j, …)`.
+                    if let Some((class, midx, fid, _)) = self.resolve_method(internal, "get") {
+                        let params = self.ir.functions[fid as usize].params.clone();
+                        if params.len() == indices.len() {
+                            let recv_v = self.expr(receiver)?;
+                            let mut a = Vec::new();
+                            for (k, &ix) in indices.iter().enumerate() {
+                                a.push(Some(self.lower_arg(ix, &params[k])?));
+                            }
+                            return Some(self.ir.add_expr(IrExpr::MethodCall {
+                                class,
+                                index: midx,
+                                receiver: recv_v,
+                                args: a,
+                            }));
+                        }
+                    }
+                    // Library member `get(i, j, …)`.
+                    let its: Vec<Ty> = indices.iter().map(|&i| self.info.ty(i)).collect();
+                    if let Some(m) = crate::symbol_resolver::resolve_instance(
+                        &*self.syms.libraries,
+                        internal,
+                        "get",
+                        &its,
+                    ) {
+                        if m.params.len() == indices.len() {
+                            let is_iface = self.library_type_is_interface(internal);
+                            let recv_v = self.expr(receiver)?;
+                            let mut a = Vec::new();
+                            for (k, &ix) in indices.iter().enumerate() {
+                                a.push(self.lower_arg(ix, &ty_to_ir(m.params[k]))?);
+                            }
+                            let read = self.ir.add_expr(IrExpr::Call {
+                                callee: Callee::Virtual {
+                                    owner: internal.to_string(),
+                                    name: "get".to_string(),
+                                    descriptor: m.descriptor.clone(),
+                                    interface: is_iface,
+                                },
+                                dispatch_receiver: Some(recv_v),
+                                args: a,
+                            });
+                            return Some(self.coerce_generic_read(read, e, m.ret));
+                        }
+                    }
+                }
                 set_bail("expr IndexMulti");
                 return None;
             }
