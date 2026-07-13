@@ -104,7 +104,7 @@ pub fn emit_all_with_class_meta(
         // cross-module — resolves against the same ABI kotlinc emits. A value-class-mangled function or a
         // complex default (lambda / construction / spilled temp) is skipped (`toplevel_default_stub_safe`).
         if crate::ir::toplevel_default_stub_safe(ir, i as u32) {
-            let defaults = &ir.fn_param_defaults[&(i as u32)];
+            let defaults = ir.param_defaults(i as u32).unwrap();
             emit_facade_default_stub(ir, i as u32, facade, &mut cw, defaults, bodies);
         }
     }
@@ -920,7 +920,7 @@ fn emit_class(
         }
         // A method with default-valued parameters gets a `<name>$default(self, params…, mask, marker)`
         // synthetic stub (the JVM realization of default arguments).
-        if let Some(defaults) = ir.fn_param_defaults.get(&fid) {
+        if let Some(defaults) = ir.param_defaults(fid) {
             emit_default_stub(
                 ir, fid, &c.fq_name, facade, &mut cw, defaults, bodies, false,
             );
@@ -2185,7 +2185,7 @@ fn emit_interface_class(
         // An interface method with default parameters gets a STATIC `<name>$default(iface, params…, mask,
         // marker)` (the JVM realization of interface default args) — it applies the defaults then dispatches
         // to the abstract method via `invokeinterface`.
-        if let Some(defaults) = ir.fn_param_defaults.get(&fid) {
+        if let Some(defaults) = ir.param_defaults(fid) {
             emit_default_stub(ir, fid, &c.fq_name, facade, &mut cw, defaults, bodies, true);
         }
     }

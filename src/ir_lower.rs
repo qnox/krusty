@@ -12,8 +12,8 @@ use std::collections::HashMap;
 
 use crate::ast::{self, BinOp, Decl, Expr, ExprId as AstExprId, FunBody, Stmt, TemplatePart};
 use crate::ir::{
-    Callee, ClassId, ExprId, IrBinOp, IrCatch, IrClass, IrConst, IrCtorArg, IrEnumEntry, IrExpr,
-    IrField, IrFile, IrFunction, IrTypeOp,
+    Callee, ClassId, ExprId, FnParamInfo, IrBinOp, IrCatch, IrClass, IrConst, IrCtorArg,
+    IrEnumEntry, IrExpr, IrField, IrFile, IrFunction, IrTypeOp,
 };
 use crate::jvm::names::{property_getter_name, property_setter_name};
 use crate::libraries::{
@@ -823,10 +823,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 if m.visibility.is_private() {
                     lo.ir.private_methods.insert(fid);
                 }
-                // Mark a method with default parameters now (pass 1) so a call lowered before this
-                // class's pass-2 body sees that it has defaults; the real default exprs are lowered in
-                // pass 2 and overwrite this marker. (>31 parameters — kotlinc's multi-`int` mask — aren't
-                // modeled; leaving them unmarked makes an omitted-arg call bail, so the file is skipped.)
+                // Mark defaults in pass 1; pass 2 overwrites the marker with lowered expressions.
                 if !m.params.iter().any(|p| p.default.is_some())
                     && !m.params.is_empty()
                     && m.params.len() <= 31
@@ -835,22 +832,24 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     if let Some(defaults) =
                         lo.base_const_defaults(file, c.base_class.as_deref(), &m.name, &sig.params)
                     {
-                        lo.ir
-                            .fn_param_names
-                            .insert(fid, m.params.iter().map(|p| p.name.clone()).collect());
-                        lo.ir.fn_param_defaults.insert(fid, defaults);
+                        lo.ir.fn_params.insert(
+                            fid,
+                            FnParamInfo::defaults(
+                                m.params.iter().map(|p| p.name.clone()).collect(),
+                                defaults,
+                            ),
+                        );
                     }
                 }
                 if m.params.iter().any(|p| p.default.is_some()) && m.params.len() <= 31 {
-                    lo.ir.fn_param_defaults.insert(fid, Vec::new());
-                    lo.ir
-                        .fn_param_names
-                        .insert(fid, m.params.iter().map(|p| p.name.clone()).collect());
-                    // An INTERFACE method is abstract (no body), so pass 2's body loop never fills its
-                    // default exprs — lower them HERE. Restrict to CONSTANT defaults (a literal needs no
-                    // param/`this` scope), so the `$default` stub is always valid; a non-constant interface
-                    // default isn't modeled — drop the marker so an omitted-arg call bails (skips), never
-                    // miscompiles. kotlinc realizes interface defaults via a static `<iface>.<name>$default`.
+                    lo.ir.fn_params.insert(
+                        fid,
+                        FnParamInfo::defaults(
+                            m.params.iter().map(|p| p.name.clone()).collect(),
+                            Vec::new(),
+                        ),
+                    );
+                    // Interface defaults have no pass-2 body; only constant defaults are modelable here.
                     if c.is_interface() {
                         let mut defaults = Vec::new();
                         let mut modelable = true;
@@ -873,10 +872,11 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                             }
                         }
                         if modelable {
-                            lo.ir.fn_param_defaults.insert(fid, defaults);
+                            if let Some(info) = lo.ir.fn_params.get_mut(&fid) {
+                                info.defaults = Some(defaults);
+                            }
                         } else {
-                            lo.ir.fn_param_defaults.remove(&fid);
-                            lo.ir.fn_param_names.remove(&fid);
+                            lo.ir.fn_params.remove(&fid);
                         }
                     }
                 }
@@ -1734,20 +1734,18 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                             None => defaults.push(None),
                         }
                     }
-                    lo.ir.fn_param_defaults.insert(fid, defaults);
                     let mut names = vec!["$receiver".to_string(); recv_off];
                     names.extend(f.params.iter().map(|p| p.name.clone()));
-                    lo.ir.fn_param_names.insert(fid, names);
+                    lo.ir
+                        .fn_params
+                        .insert(fid, FnParamInfo::defaults(names, defaults));
                 }
-                // Record parameter names for a NO-DEFAULT (non-vararg) function/extension too, so a
-                // named-argument reorder can map labels onto positions (the reorder itself is done at the
-                // call site; the names are neutral metadata). Only names — no `$default` stub.
-                if !lo.ir.fn_param_names.contains_key(&fid) && !f.params.iter().any(|p| p.is_vararg)
-                {
+                // Names-only metadata supports named-argument reorder without a default stub.
+                if !lo.ir.fn_params.contains_key(&fid) && !f.params.iter().any(|p| p.is_vararg) {
                     let recv_off = usize::from(f.receiver.is_some());
                     let mut names = vec!["$receiver".to_string(); recv_off];
                     names.extend(f.params.iter().map(|p| p.name.clone()));
-                    lo.ir.fn_param_names.insert(fid, names);
+                    lo.ir.fn_params.insert(fid, FnParamInfo::names(names));
                 }
                 let ret_ty = lo.ir.functions[fid as usize].ret.clone();
                 // A top-level `tailrec fun` (no extension receiver): rewrite its tail self-calls into a
@@ -2129,7 +2127,9 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                                 None => defaults.push(None),
                             }
                         }
-                        lo.ir.fn_param_defaults.insert(fid, defaults);
+                        if let Some(info) = lo.ir.fn_params.get_mut(&fid) {
+                            info.defaults = Some(defaults);
+                        }
                     }
                     let ret_ty = lo.ir.functions[fid as usize].ret.clone();
                     lo.lower_body(&m.body, &ret_ty, fid)?;
@@ -7426,8 +7426,7 @@ impl<'a> Lower<'a> {
                     .collect();
                 checks.resize(fields.len(), None);
                 self.ir.functions[copy_fid as usize].param_checks = checks;
-                // Each `copy` parameter defaults to the corresponding property of the receiver (the JVM
-                // backend realizes this as `copy$default`). The mask is one `int` (≤31 params).
+                // Each `copy` parameter defaults to the corresponding receiver property.
                 if fields.len() <= 31 {
                     let defaults: Vec<Option<u32>> = (0..fields.len())
                         .map(|i| {
@@ -7439,10 +7438,13 @@ impl<'a> Lower<'a> {
                             }))
                         })
                         .collect();
-                    self.ir.fn_param_defaults.insert(copy_fid, defaults);
-                    self.ir
-                        .fn_param_names
-                        .insert(copy_fid, fields.iter().map(|(n, _)| n.clone()).collect());
+                    self.ir.fn_params.insert(
+                        copy_fid,
+                        FnParamInfo::defaults(
+                            fields.iter().map(|(n, _)| n.clone()).collect(),
+                            defaults,
+                        ),
+                    );
                 }
             }
         }
@@ -8351,12 +8353,7 @@ impl<'a> Lower<'a> {
         }))
     }
 
-    /// Lower a NAMED-argument call to a same-module USER EXTENSION function (`"x".test(b = …, a = …)`)
-    /// with all parameters required and exactly supplied. An extension lowers to a static `Call` whose
-    /// first argument is the receiver; this evaluates the RECEIVER first, then each argument in SOURCE
-    /// order into a temp, then loads the temps in parameter (slot) order — Kotlin's evaluation order while
-    /// binding labels to positions. Wrapped in a `Block` so the temps live across the call. `fid`'s IR
-    /// params are `[receiver, p0, p1, …]`; `fn_param_names` is aligned (`["$receiver", p0, p1, …]`).
+    /// Lower a named same-module extension call while preserving source evaluation order.
     fn lower_named_ext_call(
         &mut self,
         call: AstExprId,
@@ -8369,7 +8366,7 @@ impl<'a> Lower<'a> {
         if args.len() + 1 != n {
             return None;
         }
-        let names = self.ir.fn_param_names.get(&fid)?.clone();
+        let names = self.ir.param_names(fid)?.to_vec();
         if names.len() != n {
             return None;
         }
@@ -9975,11 +9972,7 @@ impl<'a> Lower<'a> {
         None
     }
 
-    /// Find an interface method `name` (in `internal`'s transitive interface hierarchy) that declares
-    /// DEFAULT ARGUMENTS (a registered `fn_param_defaults` — i.e. a `$default` stub is emitted on that
-    /// interface). Used to resolve an OMITTED-argument call `impl.foo()` whose default is declared on a
-    /// super-interface and not redeclared on the override. Returns the INTERFACE's class id (so the call
-    /// targets `<iface>.foo$default`).
+    /// Find an inherited interface method that declares default arguments.
     fn resolve_defaulted_iface_method(
         &self,
         internal: &str,
@@ -10001,7 +9994,7 @@ impl<'a> Lower<'a> {
             for itf in &self.ir.classes[ci.id as usize].interfaces {
                 if let Some(ici) = self.classes.get(itf) {
                     if let Some(&(idx, fid, ret)) = ici.methods.get(name) {
-                        if self.ir.fn_param_defaults.contains_key(&fid)
+                        if self.ir.has_param_defaults(fid)
                             && !found.iter().any(|(_, _, f, _)| *f == fid)
                         {
                             found.push((ici.id, idx, fid, ret));
@@ -18794,13 +18787,7 @@ impl<'a> Lower<'a> {
                     if let Some(v) = self.lower_fq_toplevel_call(receiver, &name, &args, e) {
                         return Some(v);
                     }
-                    // NAMED-ARGUMENT call to a same-file USER instance method (`z.test(b = …, a = …)`) with
-                    // all parameters required and exactly supplied: reorder onto positions, evaluating the
-                    // receiver then the arguments in SOURCE order (temps). `resolve_method` scopes to IR
-                    // (user) classes, so a classpath member falls through to its own reorder below. A method
-                    // with defaults/varargs is left to the default/vararg paths (this fires only at exact
-                    // arity with no defaults). Once it fires, we never fall through to positional pairing
-                    // (which would bind the labels in the wrong order).
+                    // Exact named user-member calls reorder arguments before positional lowering.
                     if self.afile.call_arg_names.contains_key(&e.0) {
                         if let Some(internal) =
                             self.info.ty(receiver).obj_internal().map(str::to_string)
@@ -18809,8 +18796,7 @@ impl<'a> Lower<'a> {
                                 let params_len = self.ir.functions[fid as usize].params.len();
                                 let no_defaults = self
                                     .ir
-                                    .fn_param_defaults
-                                    .get(&fid)
+                                    .param_defaults(fid)
                                     .is_none_or(|d| d.iter().all(|x| x.is_none()));
                                 // A no-default user member with named args: the ONLY correct lowering is a
                                 // reorder — never the positional pairing below. Handle it (exact arity, no
@@ -19359,14 +19345,10 @@ impl<'a> Lower<'a> {
                                     args: a,
                                 }));
                             }
-                            // OMITTED extension arguments (`"x".foo()` where `foo(a = 1)`): fill them at the
-                            // call site from the registered CONSTANT defaults (IR params are
-                            // `[receiver, p1…]`; defaults are aligned to them). Named/positional args map to
-                            // their logical slots; unfilled slots take their constant default.
-                            if let (Some(defaults), Some(names)) = (
-                                self.ir.fn_param_defaults.get(&fid).cloned(),
-                                self.ir.fn_param_names.get(&fid).cloned(),
-                            ) {
+                            // Omitted extension arguments are filled from constant defaults.
+                            if let Some(param_info) = self.ir.fn_params.get(&fid).cloned() {
+                                let defaults = param_info.defaults;
+                                let names = param_info.names;
                                 let n = params.len();
                                 let arg_names = self.afile.call_arg_names.get(&e.0).cloned();
                                 let recv = self.lower_arg(receiver, &params[0])?;
@@ -19403,8 +19385,10 @@ impl<'a> Lower<'a> {
                                             Some(v) => *v,
                                             // A constant default — clone it as a fresh node (avoid aliasing).
                                             None => match defaults
-                                                .get(k)
-                                                .and_then(|d| *d)
+                                                .as_ref()
+                                                .and_then(|defaults| {
+                                                    defaults.get(k).and_then(|d| *d)
+                                                })
                                                 .map(|d| self.ir.exprs[d as usize].clone())
                                             {
                                                 Some(IrExpr::Const(c)) => {
@@ -19590,9 +19574,7 @@ impl<'a> Lower<'a> {
                             }
                         }
                     }
-                    // A call to a method with parameter defaults, possibly with named/omitted args. Map
-                    // each provided argument to its parameter position; omitted positions stay `None` (a
-                    // call with holes). The backend fills the holes (JVM: `$default` stub + mask).
+                    // Method defaults leave omitted positions as `None`; the backend fills them.
                     if let Some(internal) = self
                         .class_of(self.recv_ty(receiver))
                         .map(|ci| ci.internal.clone())
@@ -19600,22 +19582,16 @@ impl<'a> Lower<'a> {
                         if let Some((class, index, fid, _)) = self
                             .resolve_method(&internal, &name)
                             .filter(|(_, _, fid, _)| {
-                                // Prefer the override unless it lacks defaults yet the call omits args —
-                                // then the default is inherited from a super-interface (resolved below).
-                                self.ir.fn_param_defaults.contains_key(fid)
+                                // Prefer the override unless omitted args need inherited defaults.
+                                self.ir.has_param_defaults(*fid)
                                     || args.len() == self.ir.functions[*fid as usize].params.len()
                             })
                             .or_else(|| self.resolve_defaulted_iface_method(&internal, &name))
                         {
-                            if self.ir.fn_param_defaults.contains_key(&fid) {
+                            if self.ir.has_param_defaults(fid) {
                                 let params = self.ir.functions[fid as usize].params.clone();
                                 let n = params.len();
-                                let param_names = self
-                                    .ir
-                                    .fn_param_names
-                                    .get(&fid)
-                                    .cloned()
-                                    .unwrap_or_default();
+                                let param_names = self.ir.param_names(fid).unwrap_or(&[]).to_vec();
                                 let names = self.afile.call_arg_names.get(&e.0).cloned();
                                 let mut provided: Vec<Option<u32>> = vec![None; n];
                                 let mut next_pos = 0usize;

@@ -869,6 +869,28 @@ pub struct IrStatic {
     pub custom_accessor: bool,
 }
 
+#[derive(Clone, Default, Debug)]
+pub struct FnParamInfo {
+    pub names: Vec<String>,
+    pub defaults: Option<Vec<Option<ExprId>>>,
+}
+
+impl FnParamInfo {
+    pub fn names(names: Vec<String>) -> Self {
+        Self {
+            names,
+            defaults: None,
+        }
+    }
+
+    pub fn defaults(names: Vec<String>, defaults: Vec<Option<ExprId>>) -> Self {
+        Self {
+            names,
+            defaults: Some(defaults),
+        }
+    }
+}
+
 /// One lowered source file (`IrFile`) — its arenas. Index-based, bulk-freeable.
 #[derive(Default)]
 pub struct IrFile {
@@ -885,13 +907,8 @@ pub struct IrFile {
     /// value class's UNBOXED underlying, not an opaque `Object`. Populated for every lowered expression;
     /// consumed ONLY by the value-class pass (the sole owner of value-class knowledge).
     pub logical_types: std::collections::HashMap<u32, Ty>,
-    /// `FunId` → each parameter's default-value expression (`None` = required). The *meaning* of a
-    /// default is backend-agnostic language data; a backend chooses how to realize it (the JVM emits a
-    /// `name$default(params, mask, marker)` stub; JS uses native default parameters).
-    pub fn_param_defaults: std::collections::HashMap<u32, Vec<Option<ExprId>>>,
-    /// `FunId` → parameter names, for mapping a call's named/omitted arguments onto positions. Recorded
-    /// only for functions that have defaults (where such mapping is needed).
-    pub fn_param_names: std::collections::HashMap<u32, Vec<String>>,
+    /// `FunId` → source parameter names and, when present, default-value expressions.
+    pub fn_params: std::collections::HashMap<u32, FnParamInfo>,
     /// Instance methods kotlinc leaves NON-`final` even in a final class — currently the data-class
     /// `Object`-overrides (`toString`/`hashCode`/`equals`), which kotlinc emits `public` (open) rather
     /// than `public final`. The JVM backend omits `ACC_FINAL` for a `FunId` in this set.
@@ -991,6 +1008,15 @@ pub struct IrGenericSig {
 }
 
 impl IrFile {
+    pub fn param_defaults(&self, fid: u32) -> Option<&Vec<Option<ExprId>>> {
+        self.fn_params.get(&fid)?.defaults.as_ref()
+    }
+    pub fn has_param_defaults(&self, fid: u32) -> bool {
+        self.param_defaults(fid).is_some()
+    }
+    pub fn param_names(&self, fid: u32) -> Option<&[String]> {
+        Some(&self.fn_params.get(&fid)?.names)
+    }
     pub fn expr(&self, id: ExprId) -> &IrExpr {
         &self.exprs[id as usize]
     }
@@ -1150,7 +1176,7 @@ pub fn toplevel_default_stub_safe(ir: &IrFile, fid: u32) -> bool {
         return false;
     }
     let n = f.params.len() as u32;
-    let Some(defaults) = ir.fn_param_defaults.get(&fid) else {
+    let Some(defaults) = ir.param_defaults(fid) else {
         return false;
     };
     defaults
@@ -1422,20 +1448,20 @@ mod tests {
         let mut f = IrFile::default();
         let fid = add_toplevel_fn(&mut f, "greet", Ty::Int);
         let def = f.add_expr(IrExpr::Const(IrConst::Int(5)));
-        f.fn_param_defaults.insert(fid, vec![Some(def)]);
+        f.fn_params
+            .insert(fid, FnParamInfo::defaults(Vec::new(), vec![Some(def)]));
         assert!(toplevel_default_stub_safe(&f, fid));
     }
 
     #[test]
     fn toplevel_default_stub_safe_rejects_mangled_and_missing_defaults() {
-        // A value-class-mangled name is rejected outright.
         let mut f = IrFile::default();
         let fid = add_toplevel_fn(&mut f, "greet-abc123", Ty::Int);
         let def = f.add_expr(IrExpr::Const(IrConst::Int(5)));
-        f.fn_param_defaults.insert(fid, vec![Some(def)]);
+        f.fn_params
+            .insert(fid, FnParamInfo::defaults(Vec::new(), vec![Some(def)]));
         assert!(!toplevel_default_stub_safe(&f, fid));
 
-        // No registered defaults at all → not safe (nothing to stub).
         let mut g = IrFile::default();
         let gid = add_toplevel_fn(&mut g, "hello", Ty::Int);
         assert!(!toplevel_default_stub_safe(&g, gid));
@@ -1443,20 +1469,19 @@ mod tests {
 
     #[test]
     fn toplevel_default_stub_safe_rejects_overloaded_and_unsafe_default() {
-        // An overloaded top-level name can't route among $default synthetics.
         let mut f = IrFile::default();
         let fid = add_toplevel_fn(&mut f, "over", Ty::Int);
         add_toplevel_fn(&mut f, "over", Ty::String);
         let def = f.add_expr(IrExpr::Const(IrConst::Int(0)));
-        f.fn_param_defaults.insert(fid, vec![Some(def)]);
+        f.fn_params
+            .insert(fid, FnParamInfo::defaults(Vec::new(), vec![Some(def)]));
         assert!(!toplevel_default_stub_safe(&f, fid));
 
-        // A default that reads a value index beyond the parameters is unsafe.
         let mut g = IrFile::default();
         let gid = add_toplevel_fn(&mut g, "spill", Ty::Int);
-        // Param count is 1; reading slot 3 is a spilled temp → rejected.
         let bad = g.add_expr(IrExpr::GetValue(3));
-        g.fn_param_defaults.insert(gid, vec![Some(bad)]);
+        g.fn_params
+            .insert(gid, FnParamInfo::defaults(Vec::new(), vec![Some(bad)]));
         assert!(!toplevel_default_stub_safe(&g, gid));
     }
 }
