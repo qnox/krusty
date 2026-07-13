@@ -426,6 +426,8 @@ mod local_fun_ref_e2e;
 mod map_entry_destructure_e2e;
 #[path = "map_get_nullable_elvis_e2e.rs"]
 mod map_get_nullable_elvis_e2e;
+#[path = "member_array_ctor_inference_e2e.rs"]
+mod member_array_ctor_inference_e2e;
 #[path = "member_ctrl_inference_e2e.rs"]
 mod member_ctrl_inference_e2e;
 #[path = "member_infix_inference_e2e.rs"]
