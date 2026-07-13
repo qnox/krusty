@@ -2958,6 +2958,41 @@ fn infer_lit_ty(
     infer_lit_ty_p(file, e, class_names, fun_rets, &[], src)
 }
 
+/// The array type produced by a creation-builtin call in the lightweight inferer: a primitive
+/// `intArrayOf(…)`/`byteArrayOf(…)`/… (element = the fixed primitive), or `arrayOf(…)` whose arguments
+/// all AGREE on one REFERENCE type (element = that type — `Array<T>` = `[LT;`, and nullability erases
+/// in the descriptor, so an explicit `arrayOf<T?>` reaches the same JVM type). Declines (`None`) — a
+/// sound skip — for a mixed/empty `arrayOf` and for a PRIMITIVE-argument `arrayOf(1, 2)`: its element
+/// boxes to `Array<Integer>`, but an explicit `arrayOf<Int?>(…)` (which this lightweight probe can't
+/// see) or an expected-type context can change the element, so it is left to the full checker's
+/// `check_array_builtin` — inferring it here risked disagreeing with the checked initializer type.
+fn array_builtin_ret(fname: &str, arg_tys: &[Ty]) -> Option<Ty> {
+    let prim = match fname {
+        "intArrayOf" => Some(Ty::Int),
+        "longArrayOf" => Some(Ty::Long),
+        "doubleArrayOf" => Some(Ty::Double),
+        "floatArrayOf" => Some(Ty::Float),
+        "booleanArrayOf" => Some(Ty::Boolean),
+        "charArrayOf" => Some(Ty::Char),
+        "byteArrayOf" => Some(Ty::Byte),
+        "shortArrayOf" => Some(Ty::Short),
+        "uintArrayOf" => Some(Ty::UInt),
+        "ulongArrayOf" => Some(Ty::ULong),
+        _ => None,
+    };
+    if let Some(elem) = prim {
+        return Some(Ty::array(elem));
+    }
+    if fname == "arrayOf" {
+        if let Some(&first) = arg_tys.first() {
+            if first.is_reference() && arg_tys.iter().all(|&t| t == first) {
+                return Some(Ty::array(first));
+            }
+        }
+    }
+    None
+}
+
 /// The common type of two branch values for the lightweight signature inferer: identical types
 /// collapse, numeric types widen (`Int`/`Long` → `Long`); anything else is `Error` (so the caller
 /// conservatively skips rather than guessing a supertype). Deliberately narrower than the full
@@ -3127,6 +3162,13 @@ fn infer_lit_ty_p(
                         .iter()
                         .map(|a| infer_lit_ty_p(file, *a, class_names, fun_rets, props, src))
                         .collect();
+                    // Array-creation builtins (`arrayOf`, `intArrayOf`, …) are `@InlineOnly` intrinsics
+                    // the federated probe doesn't surface as a return type — infer the element here,
+                    // matching the full checker's `check_array_builtin` (which decides the property's
+                    // field type identically, keeping the two in sync).
+                    if let Some(t) = array_builtin_ret(n, &arg_tys) {
+                        return t;
+                    }
                     if !arg_tys.contains(&Ty::Error) {
                         if let Some(c) = resolver.resolve_top_level_callable(n, &arg_tys, &[]) {
                             return c.ret;
