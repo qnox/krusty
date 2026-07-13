@@ -6647,6 +6647,18 @@ impl<'a> Checker<'a> {
         {
             return;
         }
+        // A nullable REFERENCE argument whose non-null form is the expected type: krusty erases reference
+        // nullability from a declared parameter (`C?` param → `C`), so a genuinely-nullable argument — an
+        // INFERRED `C?` such as an elvis / branch-join result, which (unlike a declared type) keeps its
+        // `?` — must still pass. The two share the JVM representation and krusty does not enforce
+        // null-safety. `strip_nullable_ref` leaves a value class / nullable primitive nullable (their
+        // nullable form is a distinct representation), so those are correctly NOT accepted here.
+        if actual.is_nullable()
+            && !expected.is_nullable()
+            && self.strip_nullable_ref(actual) == expected
+        {
+            return;
+        }
         // An erased generic reference array (`Array<Any>`, e.g. `emptyArray<T>()` → `Object[]`) is
         // assignable to any specific reference array — `Array` is invariant, but the erased value
         // really is the target type at runtime, so kotlinc inserts a `checkcast` at the use site.

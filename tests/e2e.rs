@@ -504,6 +504,8 @@ mod nullable_cast_e2e;
 mod nullable_function_type_e2e;
 #[path = "nullable_primitive_box_e2e.rs"]
 mod nullable_primitive_box_e2e;
+#[path = "nullable_ref_arg_to_erased_param_e2e.rs"]
+mod nullable_ref_arg_to_erased_param_e2e;
 #[path = "nullable_unit_e2e.rs"]
 mod nullable_unit_e2e;
 #[path = "number_and_ctor_coverage_e2e.rs"]
