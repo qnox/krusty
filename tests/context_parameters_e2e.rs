@@ -47,3 +47,18 @@ fn context_forwarded_through_enclosing_context() {
         fun box(): String = with(A(\"OK\")) { mid() }\n";
     assert_eq!(run(SRC).expect("context forwarded"), "OK");
 }
+
+#[test]
+fn implicit_receiver_member_shadows_top_level() {
+    // Inside `with(Scope)`, an unqualified call to a name that is BOTH a member of the receiver and a
+    // top-level function binds the MEMBER (kotlinc scoping: the receiver is the nearer scope). Outside
+    // the block, the top-level function is called.
+    const SRC: &str = "class Scope { fun tag(): String = \"member\" }\n\
+        fun tag(): String = \"top-level\"\n\
+        fun box(): String {\n\
+        \x20 val inside = with(Scope()) { tag() }\n\
+        \x20 val outside = tag()\n\
+        \x20 return if (inside == \"member\" && outside == \"top-level\") \"OK\" else \"no: \" + inside + \"/\" + outside\n\
+        }\n";
+    assert_eq!(run(SRC).expect("member shadows top-level"), "OK");
+}

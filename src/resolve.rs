@@ -11805,15 +11805,14 @@ impl<'a> Checker<'a> {
                 let module_top: Option<crate::libraries::FunctionInfo> =
                     crate::module_symbols::ModuleSymbols::new(self.syms)
                         .resolve_top_level(&fname, &arg_tys);
-                if module_top.is_none() && !user_shadows {
-                    // Unqualified call to a member of the implicit receiver of a builtin/library type — a
-                    // receiver-lambda body (`"ab".run { uppercase() }`, `sb.apply { append(x) }`).
-                    if let Some(rt) = self.this_ty {
-                        if let Some(ret) =
-                            self.this_member_call_ret(call, rt, &fname, &arg_tys, args)
-                        {
-                            return ret;
-                        }
+                // A member of the nearest implicit receiver (a receiver-lambda body / `with` block —
+                // `"ab".run { uppercase() }`, `with(scope) { test1() }`) shadows a top-level function of
+                // the same name: the receiver is a closer scope, so kotlinc binds the member. Attempt it
+                // FIRST — `this_member_call_ret` returns `None` when no member matches the arguments, so a
+                // genuine top-level call (no such member) still falls through to `module_top` below.
+                if let Some(rt) = self.this_ty {
+                    if let Some(ret) = self.this_member_call_ret(call, rt, &fname, &arg_tys, args) {
+                        return ret;
                     }
                 }
                 if let Some(fi) = module_top {

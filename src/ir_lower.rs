@@ -17807,6 +17807,20 @@ impl<'a> Lower<'a> {
                             }
                         }
                     }
+                    // Member of the nearest implicit receiver shadows a same-module top-level function of
+                    // the same name (kotlinc scoping — the checker resolves it as a member, so the lowerer
+                    // must too). Only in a receiver-lambda body (`cur_class` cleared) and when the name is
+                    // not a local; `lower_this_member_call` returns `None` when no member matches, so a
+                    // genuine top-level call still falls through to the module-function path below.
+                    if self.cur_class.is_none() && self.lookup(&fname).is_none() {
+                        if let Some((this_v, this_ty)) = self.lookup("this") {
+                            if let Some(r) =
+                                self.lower_this_member_call(this_v, this_ty, &fname, &args, e)
+                            {
+                                return Some(r);
+                            }
+                        }
+                    }
                     if let Some((fi, fid)) = {
                         // Select the overload (matching the arg types) through the current module as a
                         // `SymbolSource` (ModuleSymbols), then resolve its method id. Only a function
