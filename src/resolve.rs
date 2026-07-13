@@ -3794,6 +3794,9 @@ pub enum StmtLowering {
     LocalFunction(Box<LocalFunInfo>),
     /// A compound assignment (`target op= rhs`) selected as an in-place `opAssign` operator call.
     PlusAssign,
+    /// A `kotlin.contracts.contract { … }` statement: erased metadata, never executed and emits no
+    /// bytecode (kotlinc drops it at codegen). The lowerer skips it entirely.
+    Erased,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -4730,6 +4733,31 @@ impl<'a> Checker<'a> {
     /// through the module source rather than touching `syms.funs` directly.
     fn module_declares(&self, name: &str) -> bool {
         crate::module_symbols::ModuleSymbols::new(self.syms).declares_top_level(name)
+    }
+    /// True when `e` is a call to the `kotlin.contracts.contract { … }` intrinsic — the erased
+    /// contract-declaration block. The callee name `contract` is confirmed to resolve to a
+    /// top-level function in `kotlin/contracts` through the symbol resolver, so a user function that
+    /// happens to be named `contract` is not mistaken for it.
+    fn is_contract_call(&self, e: ExprId) -> bool {
+        let Expr::Call { callee, .. } = self.file.expr(e) else {
+            return false;
+        };
+        let Expr::Name(name) = self.file.expr(*callee) else {
+            return false;
+        };
+        if name != "contract" {
+            return false;
+        }
+        // A user-declared top-level `fun contract(…)` in this module shadows the stdlib intrinsic —
+        // then the call is a real function and must NOT be erased.
+        if self.module_declares("contract") {
+            return false;
+        }
+        self.resolver()
+            .top_level_function_set("contract")
+            .overloads
+            .iter()
+            .any(|o| o.callable.owner.starts_with("kotlin/contracts"))
     }
     fn set(&mut self, e: ExprId, t: Ty) -> Ty {
         self.expr_types[e.0 as usize] = t;
@@ -12706,7 +12734,16 @@ impl<'a> Checker<'a> {
                 self.pop_scope();
             }
             Stmt::Expr(e) => {
-                self.expr(e);
+                // A `kotlin.contracts.contract { … }` statement is erased metadata: it is never
+                // executed and produces no bytecode (kotlinc drops it). Its lambda body uses the
+                // `ContractBuilder` DSL (`callsInPlace`/`returns`/`implies`) which isn't ordinary
+                // executable code — skip type-checking it and mark the statement for the lowerer to
+                // drop, instead of resolving the DSL members as if they were real calls.
+                if self.is_contract_call(e) {
+                    self.stmt_lowers.insert(s, StmtLowering::Erased);
+                } else {
+                    self.expr(e);
+                }
             }
             Stmt::LocalFun(f) => {
                 self.check_local_fun(&f.clone(), s);
