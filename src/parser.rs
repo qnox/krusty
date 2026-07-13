@@ -4778,12 +4778,34 @@ impl<'a> Parser<'a> {
     /// Elvis `?:` is the lowest-precedence binary operator (below `||`).
     fn parse_elvis(&mut self) -> ExprId {
         let mut lhs = self.parse_bp(0);
-        while self.at(TokenKind::Question)
-            && self
-                .t
-                .get(self.i + 1)
-                .map_or(false, |t| t.kind == TokenKind::Colon)
-        {
+        loop {
+            // Elvis may continue on a following line: Kotlin's grammar allows `NL* ?:` (a newline
+            // before the operator is part of the elvis expression, not a statement terminator), so
+            // `x\n    ?: y` binds as `x ?: y`. Peek past any newlines; consume them and continue only
+            // when `?:` actually follows — otherwise the newline stays a statement terminator.
+            if self.at(TokenKind::Newline) {
+                let mut j = self.i;
+                while self.t.get(j).is_some_and(|t| t.kind == TokenKind::Newline) {
+                    j += 1;
+                }
+                let is_elvis = self.t.get(j).is_some_and(|t| t.kind == TokenKind::Question)
+                    && self
+                        .t
+                        .get(j + 1)
+                        .is_some_and(|t| t.kind == TokenKind::Colon);
+                if !is_elvis {
+                    break;
+                }
+                self.skip_newlines();
+            }
+            if !(self.at(TokenKind::Question)
+                && self
+                    .t
+                    .get(self.i + 1)
+                    .map_or(false, |t| t.kind == TokenKind::Colon))
+            {
+                break;
+            }
             self.bump(); // '?'
             self.bump(); // ':'
             self.skip_newlines();

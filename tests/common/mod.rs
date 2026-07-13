@@ -20,13 +20,15 @@ use krusty::jvm::classpath::Classpath;
 /// from the single immortal owner thread instead binds the signal to a thread that lives for the whole
 /// process, so it fires only at real teardown.
 #[allow(dead_code)]
-fn die_with_parent(cmd: &mut Command) {
+fn die_with_parent(_cmd: &mut Command) {
+    // `_cmd` is consumed only by the Linux `pre_exec` below; on every other target the body compiles
+    // out, so the leading underscore keeps it from reading as an unused parameter there.
     #[cfg(target_os = "linux")]
     // SAFETY: `pre_exec` runs in the forked child before `exec`; `prctl` is async-signal-safe and touches
     // no shared state, so it is valid in that restricted context.
     unsafe {
         use std::os::unix::process::CommandExt;
-        cmd.pre_exec(|| {
+        _cmd.pre_exec(|| {
             libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL as libc::c_ulong);
             Ok(())
         });
