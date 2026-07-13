@@ -2840,6 +2840,58 @@ fn collect_all_reassigned(file: &File, e: ExprId, out: &mut std::collections::Ha
     *out = cell.into_inner();
 }
 
+/// Names reassigned (`=`/`++`/`--`) INSIDE a nested lambda within `e`. A closure that writes a captured
+/// `var` (possibly to null) could run between a narrowing assignment and a later read, so such a `var`
+/// must never be flow-narrowed (soundness for [`Local::narrowed`]). Mirrors [`collect_all_reassigned`]
+/// but only collects once the traversal has descended into a lambda body.
+fn collect_closure_reassigned(file: &File, e: ExprId, out: &mut std::collections::HashSet<String>) {
+    let cell = std::cell::RefCell::new(std::mem::take(out));
+    fn ce(
+        file: &File,
+        e: ExprId,
+        in_closure: bool,
+        cell: &std::cell::RefCell<std::collections::HashSet<String>>,
+    ) {
+        let in_closure = in_closure || matches!(file.expr(e), Expr::Lambda { .. });
+        if in_closure {
+            if let Expr::IncDec { target, .. } = file.expr(e) {
+                if let Expr::Name(n) = file.expr(*target) {
+                    cell.borrow_mut().insert(n.clone());
+                }
+            }
+        }
+        file.any_child_expr(
+            e,
+            &mut |c| {
+                ce(file, c, in_closure, cell);
+                false
+            },
+            &mut |s| {
+                cs(file, s, in_closure, cell);
+                false
+            },
+        );
+    }
+    fn cs(
+        file: &File,
+        s: StmtId,
+        in_closure: bool,
+        cell: &std::cell::RefCell<std::collections::HashSet<String>>,
+    ) {
+        if in_closure {
+            if let Stmt::Assign { name, .. } | Stmt::IncDec { name, .. } = file.stmt(s) {
+                cell.borrow_mut().insert(name.clone());
+            }
+        }
+        file.any_child_stmt(s, &mut |c| {
+            ce(file, c, in_closure, cell);
+            false
+        });
+    }
+    ce(file, e, false, &cell);
+    *out = cell.into_inner();
+}
+
 fn infer_getter_ty(file: &File, e: ExprId, locals: &HashMap<&str, Ty>) -> Ty {
     match file.expr(e) {
         Expr::IntLit(_) => Ty::Int,
@@ -3937,6 +3989,10 @@ impl TypeInfo {
 struct Local {
     ty: Ty,
     is_var: bool,
+    /// A flow-narrowed READ type for a `var` that was assigned a non-null value (`var x: Int?; x = 10`
+    /// smart-casts subsequent reads to `Int`). Separate from the declared `ty`, which still governs
+    /// what may be ASSIGNED (a later `x = null` stays legal). `None` = read as the declared type.
+    narrowed: Option<Ty>,
 }
 
 fn is_nothing_ty(t: Ty) -> bool {
@@ -4014,6 +4070,8 @@ fn make_checker<'a>(file: &'a File, syms: &'a SymbolTable, diags: &'a mut DiagSi
         synthetic_ext_calls: HashMap::new(),
         context_args: HashMap::new(),
         fn_reassigned: std::collections::HashSet::new(),
+        fn_closure_reassigned: std::collections::HashSet::new(),
+        narrow_active: false,
         expr_depth: 0,
         allow_lambda_mutation: false,
         loop_labels: Vec::new(),
@@ -4823,6 +4881,13 @@ struct Checker<'a> {
     /// closures). A captured `var` is boxed only if it's in here — kotlinc treats a captured-but-never-
     /// reassigned `var` as effectively final (passed by value).
     fn_reassigned: std::collections::HashSet<String>,
+    /// Names reassigned INSIDE a closure (lambda) within the function body. A `var` in here can be set
+    /// (e.g. to null) by a closure invoked between a narrowing assignment and a later read, so it is
+    /// never flow-narrowed after an assignment (soundness for [`Local::narrowed`]).
+    fn_closure_reassigned: std::collections::HashSet<String>,
+    /// True while any [`Local::narrowed`] flow-narrowing is set — a cheap guard so the common (no
+    /// narrowing) path skips the scope walk in [`Self::clear_local_narrows`] on every push/pop.
+    narrow_active: bool,
     /// Current type-checking recursion depth — guards against a stack overflow on a pathologically
     /// deep expression; past the limit, the expression types as `Error` (the file is skipped).
     expr_depth: u32,
@@ -5008,10 +5073,15 @@ impl<'a> Checker<'a> {
     }
 
     fn push_scope(&mut self) {
+        // A flow-narrowing (`Local::narrowed`) is only sound along a straight-line statement sequence
+        // in one scope; crossing INTO a nested scope (a branch/loop/block/lambda body) or back OUT of
+        // one can invalidate it, so drop all narrowings at every scope boundary.
+        self.clear_local_narrows();
         self.scopes.push(HashMap::new());
     }
     fn pop_scope(&mut self) {
         self.scopes.pop();
+        self.clear_local_narrows();
     }
     fn update_lambda_info(&mut self, e: ExprId, update: impl FnOnce(&mut LambdaInfo)) {
         let mut info = match self.expr_lowers.remove(&e) {
@@ -5136,13 +5206,43 @@ impl<'a> Checker<'a> {
             .count()
     }
     fn declare(&mut self, name: &str, ty: Ty, is_var: bool) {
-        self.scopes
-            .last_mut()
-            .unwrap()
-            .insert(name.to_string(), Local { ty, is_var });
+        self.scopes.last_mut().unwrap().insert(
+            name.to_string(),
+            Local {
+                ty,
+                is_var,
+                narrowed: None,
+            },
+        );
     }
     fn lookup(&self, name: &str) -> Option<&Local> {
         self.scopes.iter().rev().find_map(|s| s.get(name))
+    }
+    /// Record (or clear, with `None`) the flow-narrowed read type of the innermost `name` binding.
+    fn set_local_narrow(&mut self, name: &str, narrowed: Option<Ty>) {
+        if narrowed.is_some() {
+            self.narrow_active = true;
+        }
+        for scope in self.scopes.iter_mut().rev() {
+            if let Some(l) = scope.get_mut(name) {
+                l.narrowed = narrowed;
+                return;
+            }
+        }
+    }
+    /// Drop ALL flow-narrowings. Called at scope boundaries (branch/loop/block/lambda): a narrowing
+    /// established on a straight-line path is not guaranteed to hold once control can branch, loop, or
+    /// defer into a closure, so it is conservatively discarded (sound; only linear narrowings survive).
+    fn clear_local_narrows(&mut self) {
+        if !self.narrow_active {
+            return;
+        }
+        for scope in self.scopes.iter_mut() {
+            for l in scope.values_mut() {
+                l.narrowed = None;
+            }
+        }
+        self.narrow_active = false;
     }
     /// Whether `name` is already declared in the *innermost* (current) scope — a conflicting
     /// redeclaration (kotlinc rejects it). A declaration in an *outer* scope is legal shadowing.
@@ -5956,8 +6056,10 @@ impl<'a> Checker<'a> {
         }
         // The set of locals reassigned anywhere in this function (for captured-`var` boxing).
         self.fn_reassigned.clear();
+        self.fn_closure_reassigned.clear();
         if let FunBody::Expr(b) | FunBody::Block(b) = &f.body {
             collect_all_reassigned(self.file, *b, &mut self.fn_reassigned);
+            collect_closure_reassigned(self.file, *b, &mut self.fn_closure_reassigned);
         }
         // Inline functions are expanded at each call site by the lowerer (like kotlinc's inliner),
         // so the body is checked here but never emitted standalone. A lambda *parameter* of an
@@ -6086,8 +6188,10 @@ impl<'a> Checker<'a> {
             }
         }
         self.fn_reassigned.clear();
+        self.fn_closure_reassigned.clear();
         if let FunBody::Expr(b) | FunBody::Block(b) = &f.body {
             collect_all_reassigned(self.file, *b, &mut self.fn_reassigned);
+            collect_closure_reassigned(self.file, *b, &mut self.fn_closure_reassigned);
         }
         let resolve = class_internal_resolver(self.syms);
         let added = self
@@ -7528,7 +7632,7 @@ impl<'a> Checker<'a> {
                 }
             }
             Expr::Name(n) => match self.lookup(&n) {
-                Some(l) => l.ty,
+                Some(l) => l.narrowed.unwrap_or(l.ty),
                 // `field` inside an accessor body → the property's backing field. `field` is a soft
                 // keyword: it only has this meaning when an accessor is being checked (and a real
                 // local named `field` would have been found by `lookup` above).
@@ -12630,6 +12734,22 @@ impl<'a> Checker<'a> {
                     self.local_decl_types.insert(s, d);
                 }
                 self.declare(&name, bind, is_var);
+                // Flow-narrow a nullable `var` whose initializer is a non-null value (`var x: Int? = 10`
+                // reads as `Int`), matching kotlinc's smart-cast, but only when the var is not written
+                // inside a closure that could reset it to null on a deferred path. A `val` is left
+                // un-narrowed: narrowing a nullable-PRIMITIVE `val` to its unboxed form would change the
+                // physical representation an identity `===`/safe-call/`!!` still relies on (the value
+                // stays boxed), so those keep the declared type — kotlinc narrows in the type system
+                // without changing the boxed storage, which this backend can't reproduce for a `val`.
+                if is_var
+                    && bind.is_nullable()
+                    && !it.is_nullable()
+                    && !matches!(it, Ty::Null | Ty::Error)
+                    && !it.is_nothing_like()
+                    && !self.fn_closure_reassigned.contains(&name)
+                {
+                    self.set_local_narrow(&name, Some(it));
+                }
             }
             Stmt::LocalDelegate {
                 is_var,
@@ -12850,6 +12970,20 @@ impl<'a> Checker<'a> {
                                 self.file.stmt_spans[s.0 as usize],
                                 "assignment",
                             );
+                            // Flow-narrow a nullable `var` to the assigned value's non-null type
+                            // (`var x: Int?; x = 10` → reads as `Int`), matching kotlinc's smart-cast.
+                            // Only when the value is genuinely non-null, and the `var` is never written
+                            // inside a closure (which could reset it to null on a deferred path). A
+                            // reassignment that is nullable (or the var is closure-written) clears any
+                            // prior narrowing so a later read widens back to the declared type.
+                            if is_var {
+                                let narrow = lty.is_nullable()
+                                    && !vt.is_nullable()
+                                    && !matches!(vt, Ty::Null | Ty::Error)
+                                    && !vt.is_nothing_like()
+                                    && !self.fn_closure_reassigned.contains(&name);
+                                self.set_local_narrow(&name, narrow.then_some(vt));
+                            }
                         }
                         None if self.companion_of.is_some()
                             && self.syms.props.contains_key(&name) =>
