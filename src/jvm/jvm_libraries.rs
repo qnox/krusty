@@ -953,7 +953,11 @@ pub fn desc_to_ty(d: &str) -> Ty {
         s if s == type_descriptor(Ty::String) => Ty::String,
         s if s.starts_with('[') => Ty::array(desc_to_ty(&s[1..])),
         s if s.starts_with('L') && s.ends_with(';') => {
-            let internal = to_kotlin_internal(&s[1..s.len() - 1]);
+            let raw_internal = &s[1..s.len() - 1];
+            if raw_internal == "java/lang/Void" {
+                return Ty::Unit;
+            }
+            let internal = to_kotlin_internal(raw_internal);
             if let Some(n) = internal
                 .strip_prefix("kotlin/jvm/functions/Function")
                 .and_then(|n| n.parse::<usize>().ok())
@@ -2663,5 +2667,17 @@ impl crate::libraries::TargetRuntime for JvmLibraries {
     fn is_reified_assert_fails_with_default(&self, callable: &LibraryCallable) -> bool {
         callable.owner == "kotlin/test/AssertionsKt__AssertionsKt"
             && callable.name == "assertFailsWith$default"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::desc_to_ty;
+    use crate::types::Ty;
+
+    #[test]
+    fn descriptor_void_reference_normalizes_before_core() {
+        assert_eq!(desc_to_ty("Ljava/lang/Void;"), Ty::Unit);
+        assert_eq!(desc_to_ty("V"), Ty::Unit);
     }
 }

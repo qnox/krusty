@@ -264,16 +264,11 @@ impl Ty {
         }
     }
 
-    /// `Nothing` in any of the shapes it surfaces as. The checker erases `Nothing?` to `Nothing` and
-    /// sometimes carries the bottom type as an `Obj` named `kotlin/Nothing` (or its mapped backend form
-    /// `java/lang/Void`, the only Kotlin type that maps to `Void`). Front-end/lowering code asks this
-    /// instead of reaching into the JVM class map, keeping the bottom-type test platform-neutral.
+    /// Whether this is the semantic bottom type. Nullable bottom (`Nothing?`) is not diverging; it is
+    /// a real nullable value whose only inhabitant is `null`. JVM `Void` is normalized by the JVM symbol
+    /// source and must not leak into the core type model.
     pub fn is_nothing_like(&self) -> bool {
-        match self {
-            Ty::Nothing => true,
-            Ty::Obj(n, _) => *n == "kotlin/Nothing" || *n == "java/lang/Void",
-            _ => false,
-        }
+        matches!(self, Ty::Nothing)
     }
 
     /// Kotlin class identity for types that have one in source-level member/subtype lookup.
@@ -448,6 +443,7 @@ impl Ty {
             "ULong" => Ty::ULong,
             "String" => Ty::String,
             "Unit" => Ty::Unit,
+            "Nothing" => Ty::Nothing,
             "Any" => Ty::obj("kotlin/Any"),
             _ => return None,
         })

@@ -1848,6 +1848,18 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                                 let own_desc = lo.syms.libraries.type_descriptor(own_ty)?;
                                 if sty_desc != own_desc {
                                     let gname = property_getter_name(&pname);
+                                    let super_ret = lo
+                                        .classes
+                                        .get(&sup)
+                                        .and_then(|ci| ci.methods.get(&gname))
+                                        .map(|(_, fid, _)| lo.ir.functions[*fid as usize].ret)
+                                        .unwrap_or_else(|| ty_to_ir(sty));
+                                    let own_ret = lo
+                                        .classes
+                                        .get(&internal)
+                                        .and_then(|ci| ci.methods.get(&gname))
+                                        .map(|(_, fid, _)| lo.ir.functions[*fid as usize].ret)
+                                        .unwrap_or_else(|| ty_to_ir(own_ty));
                                     let already = lo.ir.classes[cid as usize]
                                         .bridges
                                         .iter()
@@ -1857,9 +1869,9 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                                             crate::ir::Bridge {
                                                 name: gname,
                                                 erased_params: vec![],
-                                                erased_ret: ty_to_ir(sty),
+                                                erased_ret: super_ret,
                                                 concrete_params: vec![],
-                                                concrete_ret: ty_to_ir(own_ty),
+                                                concrete_ret: own_ret,
                                                 target_name: None,
                                                 box_ret: None,
                                                 unbox_params: Vec::new(),
@@ -15247,21 +15259,25 @@ impl<'a> Lower<'a> {
                 if lty == Ty::Null {
                     return self.lower_arg(rhs, &ty_to_ir(result_ty));
                 }
-                // A `Nothing`/`Nothing?` lhs (the checker erases the `?`, so both surface as the mapped
-                // `Void` object or `Ty::Nothing`). A DIVERGING lhs (`throw`/`return`/a `Nothing` call) makes
+                // A `Nothing`/`Nothing?` lhs. A DIVERGING lhs (`throw`/`return`/a `Nothing` call) makes
                 // the elvis just the lhs (the rhs is dead). A non-diverging one is a `Nothing?`-returning
                 // call — always `null` at runtime (`Nothing` has no non-null value) — so the elvis takes the
-                // rhs; evaluate the lhs first for its side effects (its non-null branch, a `Void` used as the
-                // result type, would otherwise break the merge frame).
+                // rhs after evaluating the lhs for side effects.
                 let lty_is_nothing = lty.non_null().is_nothing_like();
                 if lty_is_nothing {
                     if self.expr_diverges(lhs) {
                         return self.expr(lhs);
                     }
                     let lv = self.expr(lhs)?;
+                    let tmp = self.fresh_value();
+                    let sink = self.ir.add_expr(IrExpr::Variable {
+                        index: tmp,
+                        ty: Ty::obj("kotlin/Any"),
+                        init: Some(lv),
+                    });
                     let rv = self.lower_arg(rhs, &ty_to_ir(result_ty))?;
                     return Some(self.ir.add_expr(IrExpr::Block {
-                        stmts: vec![lv],
+                        stmts: vec![sink],
                         value: Some(rv),
                     }));
                 }
@@ -17429,10 +17445,8 @@ impl<'a> Lower<'a> {
                 let body_tys: Vec<Ty> = arms.iter().map(|a| self.info.ty(a.body)).collect();
                 // A `Nothing`-typed arm (a `throw`/`return`, or a CALL to a `Nothing`-returning function)
                 // pushes nothing at the merge — it's exempt from the "mixes Unit with a value" bail. The
-                // checker represents `Nothing` as the bottom variant for `throw`/`return` but as the mapped
-                // object (whose JVM erasure is `java/lang/Void`) for a declared `fun … : Nothing` result.
-                // Both shapes are diverging arms (the emitter terminates them via
-                // `KotlinNothingValueException`).
+                // checker represents semantic bottom as `Ty::Nothing`; JVM `Void` is normalized by the
+                // JVM symbol source and must not affect common lowering decisions.
                 let is_diverging_arm = |t: &Ty| -> bool { t.is_nothing_like() };
                 let any_unit = body_tys.iter().any(|t| *t == Ty::Unit);
                 if any_unit
@@ -21259,6 +21273,9 @@ fn ty_of(file: &ast::File, r: &ast::TypeRef, plat: &dyn CompilerPlatform) -> Ty 
     if let Some(t) = crate::resolve::typeref_leaf(r, &mut |x| ty_of(file, x, plat)) {
         // A nullable primitive is `Nullable(prim)`, a reference slot consistent with the checker —
         // otherwise a boxed value would be stored in a primitive field and unboxed wrong.
+        if r.nullable && t == Ty::Nothing {
+            return Ty::nullable(Ty::Nothing);
+        }
         if r.nullable && !t.is_reference() {
             return t.nullable_boxed().unwrap_or(t);
         }
