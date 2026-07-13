@@ -3253,8 +3253,27 @@ impl TParams {
         let erasure = names
             .iter()
             .map(|n| {
-                let b = bounds.iter().find(|(bn, _)| bn == n).map(|(_, b)| b);
-                (n.clone(), tparam_bound_erasure(b, resolve))
+                // A bound may name ANOTHER type parameter of the same declaration
+                // (`<T1 : C, T2 : T1>`): follow the chain to the first bound that is a real
+                // class/primitive so `T2` erases to `C`, not `Any`. Cycle-guarded (`<A : B, B : A>`).
+                let mut cur = n.as_str();
+                let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+                let erased = loop {
+                    let b = bounds.iter().find(|(bn, _)| bn == cur).map(|(_, b)| b);
+                    match b {
+                        // The bound is itself a (non-nullable, un-parameterized) type parameter of this
+                        // declaration — hop to it and keep chasing.
+                        Some(tb)
+                            if !tb.nullable
+                                && names.iter().any(|m| m == &tb.name)
+                                && seen.insert(cur) =>
+                        {
+                            cur = tb.name.as_str();
+                        }
+                        other => break tparam_bound_erasure(other, resolve),
+                    }
+                };
+                (n.clone(), erased)
             })
             .collect();
         TParams { erasure }
