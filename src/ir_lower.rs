@@ -9812,8 +9812,9 @@ impl<'a> Lower<'a> {
     }
 
     /// Emit `recv.name(args)` on an already-lowered receiver value `recv_v` of type `recv_ty`, resolving
-    /// a USER-class member or a LIBRARY member (an extension operator is not handled here → `None`).
-    /// Returns the call value and its result type. Used by the reference-range `in` desugaring.
+    /// a USER-class member, a same-module EXTENSION operator, or a LIBRARY member. Returns the call value
+    /// and its result type, or `None` when none applies. Used by the reference-range `in` desugaring and
+    /// the multi-index subscript operator.
     fn lower_op_call(
         &mut self,
         recv_v: u32,
@@ -9833,6 +9834,27 @@ impl<'a> Lower<'a> {
                     class,
                     index: midx,
                     receiver: recv_v,
+                    args: a,
+                });
+                return Some((call, ret));
+            }
+        }
+        // A same-module EXTENSION operator (`operator fun Recv.rangeTo(o)`): lowered as a static function
+        // `invokestatic <facade>.name(recv, args…)` — its first parameter is the receiver.
+        if let Some(&fid) = self
+            .ext_fun_ids
+            .get(&(recv_ty.erased_recv(), name.to_string()))
+        {
+            let params = self.ir.functions[fid as usize].params.clone();
+            let ret = self.ir.functions[fid as usize].ret;
+            if params.len() == args.len() + 1 {
+                let mut a = vec![recv_v];
+                for (k, &arg) in args.iter().enumerate() {
+                    a.push(self.lower_arg(arg, &params[k + 1])?);
+                }
+                let call = self.ir.add_expr(IrExpr::Call {
+                    callee: Callee::Local(fid),
+                    dispatch_receiver: None,
                     args: a,
                 });
                 return Some((call, ret));
@@ -13241,54 +13263,14 @@ impl<'a> Lower<'a> {
                 indices,
                 value,
             } => {
+                // `recv[i, j, …] = v` → `recv.set(i, j, …, v)` — a user member, a same-module extension,
+                // or a library member. The value is the trailing `set` argument.
                 let rt = self.info.ty(receiver);
-                if let Ty::Obj(internal, _) = rt {
-                    if let Some((class, midx, fid, _)) = self.resolve_method(internal, "set") {
-                        let params = self.ir.functions[fid as usize].params.clone();
-                        if params.len() == indices.len() + 1 {
-                            let recv_v = self.expr(receiver)?;
-                            let mut a = Vec::new();
-                            for (k, &ix) in indices.iter().enumerate() {
-                                a.push(Some(self.lower_arg(ix, &params[k])?));
-                            }
-                            a.push(Some(self.lower_arg(value, &params[indices.len()])?));
-                            return Some(self.ir.add_expr(IrExpr::MethodCall {
-                                class,
-                                index: midx,
-                                receiver: recv_v,
-                                args: a,
-                            }));
-                        }
-                    }
-                    let mut set_arg_tys: Vec<Ty> =
-                        indices.iter().map(|&i| self.info.ty(i)).collect();
-                    set_arg_tys.push(self.info.ty(value));
-                    if let Some(m) = crate::symbol_resolver::resolve_instance(
-                        &*self.syms.libraries,
-                        internal,
-                        "set",
-                        &set_arg_tys,
-                    ) {
-                        if m.params.len() == indices.len() + 1 {
-                            let is_iface = self.library_type_is_interface(internal);
-                            let recv_v = self.expr(receiver)?;
-                            let mut a = Vec::new();
-                            for (k, &ix) in indices.iter().enumerate() {
-                                a.push(self.lower_arg(ix, &ty_to_ir(m.params[k]))?);
-                            }
-                            a.push(self.lower_arg(value, &ty_to_ir(m.params[indices.len()]))?);
-                            return Some(self.ir.add_expr(IrExpr::Call {
-                                callee: Callee::Virtual {
-                                    owner: internal.to_string(),
-                                    name: "set".to_string(),
-                                    descriptor: m.descriptor.clone(),
-                                    interface: is_iface,
-                                },
-                                dispatch_receiver: Some(recv_v),
-                                args: a,
-                            }));
-                        }
-                    }
+                let recv_v = self.expr(receiver)?;
+                let mut set_args = indices.clone();
+                set_args.push(value);
+                if let Some((v, _)) = self.lower_op_call(recv_v, rt, "set", &set_args) {
+                    return Some(v);
                 }
                 set_bail("stmt AssignIndexMulti");
                 None
@@ -16063,53 +16045,13 @@ impl<'a> Lower<'a> {
             // a library member are emitted here (mirroring the single-index paths); a same-module
             // EXTENSION `get` operator is a later slice, so it still bails.
             Expr::IndexMulti { receiver, indices } => {
+                // `recv[i, j, …]` → `recv.get(i, j, …)` — a user member, a same-module extension, or a
+                // library member (`lower_op_call` covers all three). A library `get` with an erased
+                // generic return is coerced to the concrete element type (`coerce_generic_read`).
                 let rt = self.info.ty(receiver);
-                if let Ty::Obj(internal, _) = rt {
-                    // User-class member `operator fun get(i, j, …)`.
-                    if let Some((class, midx, fid, _)) = self.resolve_method(internal, "get") {
-                        let params = self.ir.functions[fid as usize].params.clone();
-                        if params.len() == indices.len() {
-                            let recv_v = self.expr(receiver)?;
-                            let mut a = Vec::new();
-                            for (k, &ix) in indices.iter().enumerate() {
-                                a.push(Some(self.lower_arg(ix, &params[k])?));
-                            }
-                            return Some(self.ir.add_expr(IrExpr::MethodCall {
-                                class,
-                                index: midx,
-                                receiver: recv_v,
-                                args: a,
-                            }));
-                        }
-                    }
-                    // Library member `get(i, j, …)`.
-                    let its: Vec<Ty> = indices.iter().map(|&i| self.info.ty(i)).collect();
-                    if let Some(m) = crate::symbol_resolver::resolve_instance(
-                        &*self.syms.libraries,
-                        internal,
-                        "get",
-                        &its,
-                    ) {
-                        if m.params.len() == indices.len() {
-                            let is_iface = self.library_type_is_interface(internal);
-                            let recv_v = self.expr(receiver)?;
-                            let mut a = Vec::new();
-                            for (k, &ix) in indices.iter().enumerate() {
-                                a.push(self.lower_arg(ix, &ty_to_ir(m.params[k]))?);
-                            }
-                            let read = self.ir.add_expr(IrExpr::Call {
-                                callee: Callee::Virtual {
-                                    owner: internal.to_string(),
-                                    name: "get".to_string(),
-                                    descriptor: m.descriptor.clone(),
-                                    interface: is_iface,
-                                },
-                                dispatch_receiver: Some(recv_v),
-                                args: a,
-                            });
-                            return Some(self.coerce_generic_read(read, e, m.ret));
-                        }
-                    }
+                let recv_v = self.expr(receiver)?;
+                if let Some((v, ret)) = self.lower_op_call(recv_v, rt, "get", &indices) {
+                    return Some(self.coerce_generic_read(v, e, ret));
                 }
                 set_bail("expr IndexMulti");
                 return None;

@@ -22,3 +22,14 @@ fn user_class_member_range_in_operator() {
         }\n";
     assert_eq!(run(SRC).expect("user member range in"), "OK");
 }
+
+#[test]
+fn extension_range_in_operator() {
+    // `rangeTo` is a same-module EXTENSION operator; `contains` is a member of the range type.
+    const SRC: &str =
+        "class VR(val a: Int, val b: Int) { operator fun contains(v: V): Boolean = v.x in a..b }\n\
+        class V(val x: Int)\n\
+        operator fun V.rangeTo(o: V): VR = VR(x, o.x)\n\
+        fun box(): String = if (V(2) in V(1)..V(3) && V(5) !in V(1)..V(3)) \"OK\" else \"no\"\n";
+    assert_eq!(run(SRC).expect("extension range in"), "OK");
+}

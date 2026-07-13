@@ -21,3 +21,17 @@ fn user_class_member_get_and_set() {
         }\n";
     assert_eq!(run(SRC).expect("multi-index member get/set"), "OK");
 }
+
+#[test]
+fn extension_get_set_operator() {
+    // `get`/`set` are same-module EXTENSION operators on a user class.
+    const SRC: &str = "class Grid { val d: IntArray = IntArray(4) }\n\
+        operator fun Grid.get(i: Int, j: Int): Int = d[i * 2 + j]\n\
+        operator fun Grid.set(i: Int, j: Int, v: Int) { d[i * 2 + j] = v }\n\
+        fun box(): String {\n\
+        \x20 val g = Grid()\n\
+        \x20 g[1, 1] = 9\n\
+        \x20 return if (g[1, 1] == 9 && g[0, 0] == 0) \"OK\" else \"no\"\n\
+        }\n";
+    assert_eq!(run(SRC).expect("extension get/set"), "OK");
+}
