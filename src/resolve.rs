@@ -8869,8 +8869,11 @@ impl<'a> Checker<'a> {
         };
         // Inside the lambda the receiver is NON-null: a nullable-primitive receiver (`Int?` =
         // `java/lang/Integer`, e.g. from a chained `s?.let { … }?.let { it + 1 }`) binds `it`/`this` as
-        // the UNBOXED primitive (`Int`), so `it + 1` is primitive arithmetic, not `Integer + Int`.
-        let rt = rt.nullable_primitive().unwrap_or(rt);
+        // the UNBOXED primitive (`Int`), so `it + 1` is primitive arithmetic, not `Integer + Int`. A
+        // nullable REFERENCE receiver (`Map.Entry<K,V>?` from `map.entries.find { … }?.let { … }`) must
+        // likewise drop its nullability, else a destructuring lambda param (`{ (k, v) -> … }`) resolves
+        // `componentN` against the nullable type and fails ("cannot destructure … no operator 'component1'").
+        let rt = rt.nullable_primitive().unwrap_or_else(|| rt.non_null());
         match name {
             "run" | "apply" if params.is_empty() => {
                 let bt = self.check_with_receiver_labeled(rt, body, Some(name));
