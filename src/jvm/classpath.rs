@@ -11,7 +11,7 @@
 //! - Kotlin type aliases from `@kotlin.Metadata` `d2` arrays in `*TypeAliasesKt.class` files
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -195,7 +195,6 @@ struct CacheStats {
     functions: CacheCounter,
     meta_fns: CacheCounter,
     bodies: CacheCounter,
-    suspend_names: CacheCounter,
     builtin_members: CacheCounter,
 }
 
@@ -214,8 +213,7 @@ pub fn trace_cache_stats() {
         let s = cache_stats();
         crate::trace_compiler!(
             "cache",
-            "class L1 {} · L2 {} | ext L1 {} · L2 {} | fns {} | meta_fns {} | bodies {} | \
-             suspend {} | builtin {}",
+            "class L1 {} · L2 {} | ext L1 {} · L2 {} | fns {} | meta_fns {} | bodies {} | builtin {}",
             s.l1_class.line("hits"),
             s.l2_class.line("hits"),
             s.ext_l1.line("hits"),
@@ -223,7 +221,6 @@ pub fn trace_cache_stats() {
             s.functions.line("hits"),
             s.meta_fns.line("hits"),
             s.bodies.line("hits"),
-            s.suspend_names.line("hits"),
             s.builtin_members.line("hits"),
         );
     }
@@ -503,6 +500,7 @@ impl MetadataCallFacts {
 struct ClassMeta {
     callables: Vec<MetaCallable>,
     by_jvm_name: HashMap<String, Vec<usize>>,
+    suspend_names: HashSet<String>,
     /// The full facade-merged [`MetaFn`] list this is projected from — exposed via
     /// [`Classpath::meta_functions`] for the lookups that need a whole `MetaFn` (return class by JVM
     /// name, receiver-function params) rather than one of the maps above, so they share THIS decode
@@ -623,10 +621,6 @@ pub struct Classpath {
     /// Cache of lazily-read method bodies (`(internal, name, descriptor) → MethodCode`), so the inline
     /// expander reads each inline function's body once even when it's called many times.
     bodies: RefCell<crate::lru::LruCache<(String, String, String), Option<MethodCode>>>,
-    /// Cache of the `suspend` function names declared by a class (from its `@Metadata` `IS_SUSPEND`
-    /// flag), so suspension-point recognition at a call site doesn't re-decode the metadata per call.
-    suspend_names:
-        RefCell<crate::lru::LruCache<String, std::rc::Rc<std::collections::HashSet<String>>>>,
     /// Cache of each class's decoded `@Metadata` functions (facade parts merged) — the single decode the
     /// return-type / receiver / nullability / kept-param lookups all project over (see [`MetaFnsCache`]).
     meta_fns: MetaFnsCache,
@@ -728,7 +722,6 @@ impl Classpath {
             pkg_tree: RefCell::new(None),
             jimage: RefCell::new(None),
             bodies: RefCell::new(crate::lru::LruCache::new(BODY_CAP)),
-            suspend_names: RefCell::new(crate::lru::LruCache::new(META_CAP)),
             meta_fns: RefCell::new(crate::lru::LruCache::new(META_CAP)),
             meta_overloads: RefCell::new(crate::lru::LruCache::new(META_CAP)),
             functions: RefCell::new(crate::lru::LruCache::new(FN_CAP)),
@@ -770,15 +763,14 @@ impl Classpath {
             .as_ref()
             .map_or(0, |t| t.package_count());
         format!(
-            "classpath#{} L1_class={} L2_class={} fns={} meta_fns={} meta_ovl={} suspend={} bodies={} \
-             builtin={} | jimage={} type={} ext={} pkgtree={}",
+            "classpath#{} L1_class={} L2_class={} fns={} meta_fns={} meta_ovl={} bodies={} builtin={} | \
+             jimage={} type={} ext={} pkgtree={}",
             self.id,
             self.local_cache.borrow().len(),
             self.cache.read().unwrap().len(),
             self.functions.borrow().len(),
             self.meta_fns.borrow().len(),
             self.meta_overloads.borrow().len(),
-            self.suspend_names.borrow().len(),
             self.bodies.borrow().len(),
             self.builtin_members.borrow().len(),
             jimage,
@@ -861,13 +853,39 @@ impl Classpath {
             .as_ref()
             .map(|c| super::metadata::package_functions(c))
             .unwrap_or_default();
+        let mut suspend_names: HashSet<String> = fns
+            .iter()
+            .filter(|f| f.is_suspend)
+            .map(|f| f.kotlin_name.clone())
+            .collect();
+        if let Some(ci) = &ci {
+            suspend_names.extend(
+                super::metadata::class_functions(ci)
+                    .into_iter()
+                    .filter(|f| f.is_suspend)
+                    .map(|f| f.kotlin_name),
+            );
+        }
         // A multifile FACADE has no function metadata of its own — its `d1` lists the PART class names,
         // which hold the functions; merge them in (the parts' `d1` is decoded once here, not per lookup).
         if fns.is_empty() {
             if let Some(ci) = &ci {
                 for part in &ci.kotlin_d1 {
                     if let Some(pci) = self.find(part) {
-                        fns.extend(super::metadata::package_functions(&pci));
+                        let mut part_fns = super::metadata::package_functions(&pci);
+                        suspend_names.extend(
+                            part_fns
+                                .iter()
+                                .filter(|f| f.is_suspend)
+                                .map(|f| f.kotlin_name.clone()),
+                        );
+                        suspend_names.extend(
+                            super::metadata::class_functions(&pci)
+                                .into_iter()
+                                .filter(|f| f.is_suspend)
+                                .map(|f| f.kotlin_name),
+                        );
+                        fns.append(&mut part_fns);
                     }
                 }
             }
@@ -900,6 +918,7 @@ impl Classpath {
         let meta = std::rc::Rc::new(ClassMeta {
             callables,
             by_jvm_name,
+            suspend_names,
             fns: fns.into(),
         });
         self.meta_fns
@@ -1607,38 +1626,23 @@ impl Classpath {
     }
 
     /// Whether `internal.name(...)` is a Kotlin `suspend` function, per the class's `@Metadata`
-    /// `IS_SUSPEND` flag (decoded once per class and cached). A call to it is a coroutine suspension
-    /// point. Includes the multifile-facade part-class superclass walk.
+    /// `IS_SUSPEND` flag. A call to it is a coroutine suspension point. Includes the superclass walk
+    /// needed for facade part classes.
     pub fn is_suspend_method(&self, internal: &str, name: &str) -> bool {
-        if let Some(set) = self.suspend_names.borrow_mut().get(internal) {
-            cache_stat!(suspend_names, true);
-            return set.contains(name);
-        }
-        cache_stat!(suspend_names, false);
-        let ci = self.find(internal);
-        let mut names = ci
-            .as_ref()
-            .map(|c| super::metadata::suspend_method_names(c))
-            .unwrap_or_default();
-        let mut cur = ci.as_ref().and_then(|ci| ci.super_class.clone());
-        while let Some(s) = cur {
+        let mut cur = Some(internal.to_string());
+        while let Some(s) = cur.take() {
             if s == "java/lang/Object" {
                 break;
             }
+            if self.class_meta(&s).suspend_names.contains(name) {
+                return true;
+            }
             match self.find(&s) {
-                Some(pci) => {
-                    names.extend(super::metadata::suspend_method_names(&pci));
-                    cur = pci.super_class.clone();
-                }
+                Some(ci) => cur = ci.super_class.clone(),
                 None => break,
             }
         }
-        let set = std::rc::Rc::new(names);
-        let hit = set.contains(name);
-        self.suspend_names
-            .borrow_mut()
-            .insert(internal.to_string(), set);
-        hit
+        false
     }
 
     /// Find extension function candidates for `receiver_desc.method_name`.
