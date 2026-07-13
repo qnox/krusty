@@ -3599,6 +3599,13 @@ pub struct TypeInfo {
     /// name. The lowerer reads the callable here instead of re-resolving; it carries `inline`, so the
     /// backend splices when needed.
     pub synthetic_ext_calls: HashMap<(ExprId, String), crate::libraries::LibraryCallable>,
+    /// For a call to a function with CONTEXT PARAMETERS (`context(a: A) fun f()`) where the context
+    /// arguments are supplied IMPLICITLY, the in-scope source that fills each leading context parameter,
+    /// in order — either the sentinel `"this"` (the enclosing implicit receiver, e.g. a `with` block's
+    /// receiver) or the name of an in-scope local / enclosing context parameter. Keyed by the call
+    /// `ExprId`. The lowerer loads each named value and PREPENDS them to the call arguments so the
+    /// emitted call matches the callee's leading context parameters.
+    pub context_args: HashMap<ExprId, Vec<String>>,
 }
 
 /// A call target the checker resolved, stashed for the lowerer keyed by `ExprId`. One entry per call —
@@ -3921,6 +3928,7 @@ fn make_checker<'a>(file: &'a File, syms: &'a SymbolTable, diags: &'a mut DiagSi
         resolved_call_type_args: HashMap::new(),
         resolved_calls: HashMap::new(),
         synthetic_ext_calls: HashMap::new(),
+        context_args: HashMap::new(),
         fn_reassigned: std::collections::HashSet::new(),
         expr_depth: 0,
         allow_lambda_mutation: false,
@@ -4632,6 +4640,7 @@ pub fn check_file(file: &File, syms: &mut SymbolTable, diags: &mut DiagSink) -> 
         resolved_call_type_args,
         resolved_calls,
         synthetic_ext_calls,
+        context_args,
         ..
     } = c;
     for ((name, params), ret) in inferred_fun_rets {
@@ -4665,6 +4674,7 @@ pub fn check_file(file: &File, syms: &mut SymbolTable, diags: &mut DiagSink) -> 
         resolved_call_type_args,
         resolved_calls,
         synthetic_ext_calls,
+        context_args,
     }
 }
 
@@ -4723,6 +4733,8 @@ struct Checker<'a> {
     /// [`ResolvedCall`] for the variants.
     resolved_calls: HashMap<ExprId, ResolvedCall>,
     synthetic_ext_calls: HashMap<(ExprId, String), crate::libraries::LibraryCallable>,
+    /// Implicit context arguments per call (see [`TypeInfo::context_args`]).
+    context_args: HashMap<ExprId, Vec<String>>,
     /// Names reassigned anywhere in the function body currently being checked (including inside its
     /// closures). A captured `var` is boxed only if it's in here — kotlinc treats a captured-but-never-
     /// reassigned `var` as effectively final (passed by value).
@@ -4799,6 +4811,67 @@ impl<'a> Checker<'a> {
             .overloads
             .iter()
             .any(|o| o.callable.owner.starts_with("kotlin/contracts"))
+    }
+    /// The number of context parameters of an UNAMBIGUOUS same-module top-level function `fname`
+    /// (`context(a: A) fun fname()` → 1). `0` when the name is absent, overloaded (ambiguous — the
+    /// resolved overload's context arity can't be read back from the `FunctionInfo`), or has none.
+    fn context_count_of(&self, fname: &str) -> usize {
+        let mut it = self
+            .file
+            .decls
+            .iter()
+            .filter_map(|&d| match self.file.decl(d) {
+                Decl::Fun(f) if f.name == fname && f.receiver.is_none() => Some(f.context_count),
+                _ => None,
+            });
+        match (it.next(), it.next()) {
+            (Some(c), None) => c,
+            _ => 0,
+        }
+    }
+    /// Resolve each context-parameter type to an in-scope source that satisfies it: the enclosing
+    /// implicit receiver (the sentinel `"this"`, e.g. a `with` block's receiver) if its type is a
+    /// subtype, else an in-scope local / enclosing context parameter of a matching type (innermost
+    /// first). `None` if any context parameter has no satisfying source (the call then falls back to the
+    /// normal arity path and skips). The returned names are what the lowerer loads and prepends.
+    fn resolve_context_args(&self, ctx_types: &[Ty]) -> Option<Vec<String>> {
+        let matches = |have: Ty, want: Ty| -> bool {
+            if have == want {
+                return true;
+            }
+            match (have.obj_internal(), want.obj_internal()) {
+                (Some(h), Some(w)) => self.obj_is_subtype(h, w),
+                _ => false,
+            }
+        };
+        let mut out = Vec::with_capacity(ctx_types.len());
+        for &want in ctx_types {
+            if let Some(this_t) = self.this_ty {
+                if matches(this_t, want) {
+                    out.push("this".to_string());
+                    continue;
+                }
+            }
+            // Innermost scope first, matching Kotlin's context resolution preferring the nearest binding.
+            let local = self.scopes.iter().rev().find_map(|s| {
+                s.iter()
+                    .find(|(_, l)| matches(l.ty, want))
+                    .map(|(n, _)| n.clone())
+            });
+            if let Some(name) = local {
+                out.push(name);
+            } else {
+                return None;
+            }
+        }
+        // Two context parameters resolving to the SAME source is ambiguous (kotlinc rejects duplicate
+        // context types); decline rather than pass one value into two parameters.
+        for i in 0..out.len() {
+            if out[i + 1..].contains(&out[i]) {
+                return None;
+            }
+        }
+        Some(out)
     }
     fn set(&mut self, e: ExprId, t: Ty) -> Ty {
         self.expr_types[e.0 as usize] = t;
@@ -11764,6 +11837,54 @@ impl<'a> Checker<'a> {
                     // bare type parameter takes precedence — the result type is the supplied argument.
                     if let Some(r) = self.explicit_generic_return(call, &fname) {
                         ret_ty = r;
+                    }
+                    // Context parameters (`context(a: A) fun f()`): the leading `context_count`
+                    // parameters are supplied IMPLICITLY from the enclosing context, not positionally.
+                    // When the explicit arguments exactly fill the remaining (value) parameters and every
+                    // context parameter is satisfied by an in-scope source (an implicit receiver or an
+                    // enclosing context parameter/local), resolve them and record the sources for the
+                    // lowerer. Otherwise fall through (a missing context → the normal arity error → skip).
+                    let ctx_count = self.context_count_of(&fname);
+                    // A member of the enclosing implicit receiver with the same name takes precedence
+                    // over a context-parameter function (kotlinc resolution order). krusty resolves the
+                    // implicit-receiver member only when there is no top-level shadow, so rather than
+                    // mis-bind the context function here, decline the context resolution (the call then
+                    // hits the normal arity path and the file skips — sound, never a wrong binding).
+                    let shadowed_by_member = self.this_ty.is_some_and(|t| {
+                        // A user-class member, OR a member on a classpath/builtin receiver type — either
+                        // takes precedence over a context-parameter function, so decline context
+                        // resolution (the call then skips) rather than risk a wrong binding.
+                        t.obj_internal()
+                            .is_some_and(|i| self.syms.method_of(i, &fname).is_some())
+                            || crate::symbol_resolver::resolve_instance_member(
+                                &*self.syms.libraries,
+                                t,
+                                &fname,
+                                &arg_tys,
+                            )
+                            .is_some()
+                    });
+                    if ctx_count > 0
+                        && !shadowed_by_member
+                        && ctx_count <= params.len()
+                        && arg_tys.len() == params.len() - ctx_count
+                    {
+                        let ctx_types = &params[..ctx_count];
+                        if let Some(sources) = self.resolve_context_args(ctx_types) {
+                            // Type-check the explicit (value) arguments against the trailing parameters.
+                            for (i, a) in arg_tys.iter().enumerate() {
+                                self.expect_assignable(
+                                    params[ctx_count + i],
+                                    *a,
+                                    self.span(args[i]),
+                                    "argument",
+                                );
+                            }
+                            self.resolved_calls
+                                .insert(call, ResolvedCall::TopLevel(fi.callable.clone()));
+                            self.context_args.insert(call, sources);
+                            return ret_ty;
+                        }
                     }
                     if cs.vararg {
                         // The `vararg` is always the LAST parameter (`n_fixed` = its index). The minimum

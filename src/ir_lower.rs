@@ -17893,6 +17893,28 @@ impl<'a> Lower<'a> {
                             }));
                         }
                         let params = self.ir.functions[fid as usize].params.clone();
+                        // Context parameters (`context(a: A) fun f()`): the checker resolved each leading
+                        // context parameter to an in-scope source; load and PREPEND them, then the
+                        // explicit arguments fill the remaining parameters. Only the plain exact-arity
+                        // case is modelled (no vararg / omitted defaults combined with context).
+                        if let Some(sources) = self.info.context_args.get(&e).cloned() {
+                            let ctx_n = sources.len();
+                            if ctx_n + args.len() == params.len() {
+                                let mut a = Vec::new();
+                                for src in &sources {
+                                    let (v, _) = self.lookup(src)?;
+                                    a.push(self.ir.add_expr(IrExpr::GetValue(v)));
+                                }
+                                for (i, &arg) in args.iter().enumerate() {
+                                    a.push(self.lower_arg(arg, &params[ctx_n + i])?);
+                                }
+                                return Some(self.ir.add_expr(IrExpr::Call {
+                                    callee: Callee::Local(fid),
+                                    dispatch_receiver: None,
+                                    args: a,
+                                }));
+                            }
+                        }
                         // Omitted trailing args are filled from constant-literal defaults.
                         let meta: Vec<(String, Option<AstExprId>)> = self
                             .top_fun_decl(&fname)
@@ -18093,6 +18115,22 @@ impl<'a> Lower<'a> {
                             && (c.params.len() != args.len()
                                 || self.info.ty(args[args.len() - 1]) != *c.params.last().unwrap());
                         let mut a = Vec::new();
+                        // Context parameters (`context(a: A) fun f()`): the checker resolved each leading
+                        // context parameter to an in-scope source (`"this"` = the enclosing implicit
+                        // receiver, or a named local). Load and PREPEND them so the emitted argument list
+                        // matches the callee's leading context parameters. Combining context parameters
+                        // with a vararg / `$default` call is not modelled — skip (sound).
+                        let ctx_sources = self.info.context_args.get(&e).cloned();
+                        let ctx_n = ctx_sources.as_ref().map_or(0, |v| v.len());
+                        if ctx_n > 0 {
+                            if vararg || c.default_call {
+                                return None;
+                            }
+                            for src in ctx_sources.as_ref().unwrap() {
+                                let (v, _) = self.lookup(src)?;
+                                a.push(self.ir.add_expr(IrExpr::GetValue(v)));
+                            }
+                        }
                         if vararg {
                             let fixed = c.params.len() - 1;
                             if args.len() < fixed {
@@ -18181,11 +18219,13 @@ impl<'a> Lower<'a> {
                                 a.push(self.ir.add_expr(IrExpr::Const(IrConst::Null)));
                             }
                         } else {
-                            if c.params.len() != args.len() {
+                            // `ctx_n` leading context arguments are already in `a`; the explicit source
+                            // arguments fill the remaining parameters `c.params[ctx_n..]`.
+                            if c.params.len() != ctx_n + args.len() {
                                 return None;
                             }
                             for (i, &arg) in args.iter().enumerate() {
-                                a.push(self.lower_arg(arg, &ty_to_ir(c.params[i]))?);
+                                a.push(self.lower_arg(arg, &ty_to_ir(c.params[ctx_n + i]))?);
                             }
                         }
                         let call = self.ir.add_expr(IrExpr::Call {
