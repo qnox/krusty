@@ -11,7 +11,7 @@ use std::collections::HashMap;
 
 use crate::ast::*;
 use crate::diag::{DiagSink, Span};
-use crate::libraries::{required_arity, CompilerPlatform, EmptySymbolSource};
+use crate::libraries::{required_arity, CallSig, CompilerPlatform, EmptySymbolSource};
 use crate::symbol_source::SymbolSource;
 use crate::types::{Ty, Visibility};
 
@@ -2259,6 +2259,20 @@ pub fn map_call_args(
         }
     }
     Ok(slots)
+}
+
+pub fn map_call_sig_args(
+    args: &[ExprId],
+    names: Option<&[Option<String>]>,
+    sig: &CallSig,
+) -> Result<Vec<Option<ExprId>>, String> {
+    map_call_args(
+        args,
+        names,
+        &sig.param_names,
+        sig.required,
+        &sig.param_defaults,
+    )
 }
 
 /// Does the default-argument expression `e` read any of `names` (the function's own parameters)?
@@ -10861,13 +10875,7 @@ impl<'a> Checker<'a> {
                             && (arg_names.is_some()
                                 || (arg_tys.len() != params.len() && cs.required < params.len()))
                         {
-                            match map_call_args(
-                                args,
-                                arg_names.as_deref(),
-                                &cs.param_names,
-                                cs.required,
-                                &cs.param_defaults,
-                            ) {
+                            match map_call_sig_args(args, arg_names.as_deref(), cs) {
                                 Ok(slots) => {
                                     for (i, slot) in slots.iter().enumerate() {
                                         if let Some(a) = slot {
@@ -10923,17 +10931,10 @@ impl<'a> Checker<'a> {
                             .find(|m| !m.call_sig.param_names.is_empty())
                         {
                             let params = fi.params.clone();
-                            let pn = &fi.call_sig.param_names;
                             // Honour the member's per-parameter DEFAULT flags (a data-class `copy` defaults
                             // every parameter to the receiver's property), so a named call may OMIT one —
                             // otherwise every label would be required and `r.copy(b = "y")` errors on `a`.
-                            match map_call_args(
-                                args,
-                                Some(names),
-                                pn,
-                                fi.call_sig.required,
-                                &fi.call_sig.param_defaults,
-                            ) {
+                            match map_call_sig_args(args, Some(names), &fi.call_sig) {
                                 Ok(slots) => {
                                     for (i, slot) in slots.iter().enumerate() {
                                         if let Some(a) = slot {
@@ -11204,13 +11205,7 @@ impl<'a> Checker<'a> {
                             && !cs.param_names.is_empty()
                         {
                             // Omitted/named extension arguments filled by parameter defaults.
-                            match map_call_args(
-                                args,
-                                arg_names.as_deref(),
-                                &cs.param_names,
-                                cs.required,
-                                &cs.param_defaults,
-                            ) {
+                            match map_call_sig_args(args, arg_names.as_deref(), cs) {
                                 Ok(slots) => {
                                     for (i, slot) in slots.iter().enumerate() {
                                         if let Some(a) = slot {
@@ -12203,13 +12198,7 @@ impl<'a> Checker<'a> {
                             }
                         }
                     } else if let Some(names) = &arg_names {
-                        match map_call_args(
-                            args,
-                            Some(names),
-                            &cs.param_names,
-                            cs.required,
-                            &cs.param_defaults,
-                        ) {
+                        match map_call_sig_args(args, Some(names), cs) {
                             Ok(slots) => {
                                 for (i, slot) in slots.iter().enumerate() {
                                     if let Some(a) = slot {
@@ -12240,13 +12229,7 @@ impl<'a> Checker<'a> {
                         {
                             *last = Some(name.clone());
                         }
-                        match map_call_args(
-                            args,
-                            Some(&synth),
-                            &cs.param_names,
-                            cs.required,
-                            &cs.param_defaults,
-                        ) {
+                        match map_call_sig_args(args, Some(&synth), cs) {
                             Ok(slots) => {
                                 for (i, slot) in slots.iter().enumerate() {
                                     if let Some(a) = slot {
