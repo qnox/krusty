@@ -30,3 +30,26 @@ fn extends_no_arg_nested_base() {
         fun box(): String = Baz().tag()\n";
     assert_eq!(run(SRC).expect("no-arg nested base"), "OK");
 }
+
+#[test]
+fn nested_class_implements_sibling_nested_interface() {
+    // A nested class implements a SIBLING nested interface named by simple name (`Foo`, not
+    // `Test.Foo`) — resolved through the enclosing scope. The interface is hoisted and emitted.
+    const SRC: &str = "class Test {\n\
+        \x20 interface Foo { fun r(): String }\n\
+        \x20 class Impl: Foo { override fun r() = \"OK\" }\n\
+        }\n\
+        fun box(): String = Test.Impl().r()\n";
+    assert_eq!(run(SRC).expect("sibling nested iface"), "OK");
+}
+
+#[test]
+fn nested_class_extends_sibling_nested_class() {
+    // A nested class extends a SIBLING nested (open) class by simple name.
+    const SRC: &str = "class Test {\n\
+        \x20 open class Base(val s: String)\n\
+        \x20 class Sub: Base(\"OK\")\n\
+        }\n\
+        fun box(): String = Test.Sub().s\n";
+    assert_eq!(run(SRC).expect("sibling nested base"), "OK");
+}
