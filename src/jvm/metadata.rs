@@ -930,6 +930,13 @@ pub struct MetaFn {
     pub generic_sig: Option<GenericSig>,
 }
 
+/// A JVM method signature carried by Kotlin metadata: method name + descriptor as one fact.
+#[derive(Clone, Debug)]
+pub struct MetaJvmMethodSig {
+    pub name: String,
+    pub desc: String,
+}
+
 /// One `Property` decoded from a class's `@Metadata`: its source name, logical (Kotlin) return-type
 /// class, the REAL getter/setter JVM method names + descriptors (from the `JvmPropertySignature`
 /// extension — so a caller need not guess `getX`), and the source facts a resolver needs (visibility,
@@ -942,11 +949,9 @@ pub struct MetaProp {
     pub ret_class: Option<String>,
     /// The JVM getter method name (`getLength`, or a `@JvmName`/value-class-mangled spelling) + its
     /// descriptor, from the `JvmPropertySignature`. `None` if the metadata omits an explicit getter.
-    pub getter_name: Option<String>,
-    pub getter_desc: Option<String>,
+    pub getter: Option<MetaJvmMethodSig>,
     /// The JVM setter (present iff the property is a `var` with an emitted setter).
-    pub setter_name: Option<String>,
-    pub setter_desc: Option<String>,
+    pub setter: Option<MetaJvmMethodSig>,
     pub visibility: crate::types::Visibility,
     pub is_const: bool,
     /// `var` (has a setter) vs `val`.
@@ -1486,25 +1491,18 @@ fn decode_properties(ci: &ClassInfo, prop_field: u64) -> Vec<MetaProp> {
             continue;
         };
         let (getter, setter) = sig;
-        let resolve_sig = |s: Option<(u64, u64)>| -> (Option<String>, Option<String>) {
-            match s {
-                Some((nid, did)) => (
-                    resolve_string(&records, d2, nid as usize),
-                    resolve_string(&records, d2, did as usize),
-                ),
-                None => (None, None),
-            }
+        let resolve_sig = |(nid, did): (u64, u64)| {
+            Some(MetaJvmMethodSig {
+                name: resolve_string(&records, d2, nid as usize)?,
+                desc: resolve_string(&records, d2, did as usize)?,
+            })
         };
-        let (getter_name, getter_desc) = resolve_sig(getter);
-        let (setter_name, setter_desc) = resolve_sig(setter);
         let is_var = setter.is_some() || flags & IS_VAR_BIT != 0;
         out.push(MetaProp {
             name,
             ret_class: ret,
-            getter_name,
-            getter_desc,
-            setter_name,
-            setter_desc,
+            getter: getter.and_then(resolve_sig),
+            setter: setter.and_then(resolve_sig),
             visibility: crate::types::Visibility::from_metadata(flags_visibility(flags)),
             is_const: flags & IS_CONST_BIT != 0,
             is_var,
