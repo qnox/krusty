@@ -11348,14 +11348,7 @@ impl<'a> Lower<'a> {
         if arg_names.is_none() && args.len() == cs.param_names.len() {
             return None;
         }
-        let slots = crate::resolve::map_call_args(
-            args,
-            arg_names.as_deref(),
-            &cs.param_names,
-            cs.required,
-            &cs.param_defaults,
-        )
-        .ok()?;
+        let slots = crate::resolve::map_call_sig_args(args, arg_names.as_deref(), &cs).ok()?;
         let (desc, real, _ret, suspend) = crate::symbol_resolver::synthetic_default_member(
             &*self.syms.libraries,
             &owner,
