@@ -566,32 +566,26 @@ impl JvmLibraries {
     fn value_class_metadata_members_for_class(
         &self,
         ci: &crate::jvm::classreader::ClassInfo,
+        inline: bool,
+        meta_fns: &[metadata::MetaFn],
     ) -> Vec<LibraryMember> {
-        if metadata::class_inline(ci).is_none() {
+        if !inline {
             return Vec::new();
         }
-        metadata::class_functions(ci)
-            .into_iter()
+        meta_fns
+            .iter()
             .filter(|m| m.is_public && !m.is_extension)
             .filter_map(|m| {
-                crate::trace_compiler!(
-                    "resolve",
-                    "value-class member metadata {}.{} jvm={} desc={:?} ret={:?}",
-                    ci.this_class,
-                    m.kotlin_name,
-                    m.jvm_name,
-                    m.jvm_desc,
-                    m.ret_class
-                );
                 let descriptor = m.jvm_desc?.to_string();
                 let (params, physical_ret) = parse_method_desc(&descriptor);
                 // Value-class implementation methods are static and take the erased receiver as their
                 // first JVM parameter. Source member resolution sees only the value parameters.
                 let logical_params = params.get(1..).unwrap_or(&[]).to_vec();
                 let ret = metadata_return_info(m.ret_class, m.ret_nullable).apply(physical_ret);
-                let mut member = LibraryMember::new(m.kotlin_name, logical_params, ret, descriptor);
+                let mut member =
+                    LibraryMember::new(m.kotlin_name.clone(), logical_params, ret, descriptor);
                 member.owner = Some(ci.this_class.clone());
-                member.physical_name = Some(m.jvm_name);
+                member.physical_name = Some(m.jvm_name.clone());
                 member.physical_ret = physical_ret;
                 member.ret_nullable = m.ret_nullable;
                 member.inline = InlineKind::from_flags(m.is_inline, m.is_inline);
@@ -1588,7 +1582,8 @@ impl SymbolSource for JvmLibraries {
             };
             // A classpath `@JvmInline value class` (detected via `@Metadata`): its erased underlying type, so
             // the JVM backend can unbox it like a user value class. `UInt` → `Int`, `Result` → `Any`.
-            let value_underlying = metadata::class_inline(&ci).map(|ic| {
+            let inline = metadata::class_inline(&ci);
+            let value_underlying = inline.as_ref().map(|ic| {
                 match ic.underlying_class.as_deref() {
                     Some(other) => kotlin_name_to_ty(other),
                     // The underlying type was carried in the @Metadata type TABLE (proto field 19), not
@@ -1605,7 +1600,8 @@ impl SymbolSource for JvmLibraries {
                         .unwrap_or_else(|| Ty::obj("kotlin/Any")),
                 }
             });
-            let value_class_metadata_members = self.value_class_metadata_members_for_class(&ci);
+            let value_class_metadata_members =
+                self.value_class_metadata_members_for_class(&ci, inline.is_some(), &meta_fns);
             // The class's own formal type parameters (`Pair` → `[A, B]`), for constructor type-argument
             // inference; empty for a non-generic type.
             let type_params = ci
