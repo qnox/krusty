@@ -1216,10 +1216,7 @@ impl SymbolSource for JvmLibraries {
                         continue;
                     }
                     // Need the real accessor to emit anything; skip a property whose metadata omits it.
-                    let (Some(getter_name), Some(getter_desc)) = (mp.getter_name, mp.getter_desc)
-                    else {
-                        continue;
-                    };
+                    let Some(getter) = mp.getter else { continue };
                     let ret_ty = mp
                         .ret_class
                         .as_deref()
@@ -1227,22 +1224,20 @@ impl SymbolSource for JvmLibraries {
                     let ty = Ty::obj(mp.ret_class.as_deref().unwrap_or("kotlin/Any"));
                     let getter = LibraryCallable::library(
                         cn.clone(),
-                        getter_name,
+                        getter.name,
                         vec![],
                         ret_ty,
                         ret_ty,
-                        getter_desc,
+                        getter.desc,
                     );
-                    // Only expose a setter when BOTH its name and descriptor are present — an empty
-                    // descriptor would corrupt the emit lookup.
-                    let setter = mp.setter_name.zip(mp.setter_desc).map(|(sn, sd)| {
+                    let setter = mp.setter.map(|s| {
                         LibraryCallable::library(
                             cn.clone(),
-                            sn,
+                            s.name,
                             vec![ret_ty],
                             Ty::Unit,
                             Ty::Unit,
-                            sd,
+                            s.desc,
                         )
                     });
                     overloads.push(PropertyInfo {
@@ -1873,31 +1868,33 @@ impl SymbolSource for JvmLibraries {
                 if mp.name != name || mp.receiver_class.is_none() {
                     continue; // this property name, extension only
                 }
-                let (Some(gname), Some(gdesc)) = (mp.getter_name.clone(), mp.getter_desc.clone())
-                else {
+                let Some(getter_sig) = mp.getter else {
                     continue;
                 };
-                let (gparams, gret) = parse_method_desc(&gdesc);
+                let (gparams, gret) = parse_method_desc(&getter_sig.desc);
                 if gparams.is_empty() {
                     continue;
                 }
                 let ret_ty = mp.ret_class.as_deref().map_or(gret, kotlin_name_to_ty);
-                let getter =
-                    LibraryCallable::library(facade.clone(), gname, gparams, ret_ty, gret, gdesc);
-                let setter = match (mp.setter_name.clone(), mp.setter_desc.clone()) {
-                    (Some(sname), Some(sdesc)) => {
-                        let (sparams, sret) = parse_method_desc(&sdesc);
-                        Some(LibraryCallable::library(
-                            facade.clone(),
-                            sname,
-                            sparams,
-                            sret,
-                            sret,
-                            sdesc,
-                        ))
-                    }
-                    _ => None,
-                };
+                let getter = LibraryCallable::library(
+                    facade.clone(),
+                    getter_sig.name,
+                    gparams,
+                    ret_ty,
+                    gret,
+                    getter_sig.desc,
+                );
+                let setter = mp.setter.map(|setter_sig| {
+                    let (sparams, sret) = parse_method_desc(&setter_sig.desc);
+                    LibraryCallable::library(
+                        facade.clone(),
+                        setter_sig.name,
+                        sparams,
+                        sret,
+                        sret,
+                        setter_sig.desc,
+                    )
+                });
                 props.push(PropertyInfo {
                     kind: PropKind::Extension,
                     receiver: Some(Ty::obj(
