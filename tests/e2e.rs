@@ -358,6 +358,8 @@ mod import_scope_conformance_e2e;
 mod indy_infra_e2e;
 #[path = "inferred_computed_prop_e2e.rs"]
 mod inferred_computed_prop_e2e;
+#[path = "inferred_property_type_args_e2e.rs"]
+mod inferred_property_type_args_e2e;
 #[path = "inheritance_e2e.rs"]
 mod inheritance_e2e;
 #[path = "inline_deep_coverage_e2e.rs"]
