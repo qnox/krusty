@@ -236,7 +236,11 @@ impl JvmLibraries {
         let Some(companion) = self.cp.find(&companion_internal) else {
             return std::collections::HashMap::new();
         };
-        let prop_rets = super::metadata::class_property_return_classes(&companion);
+        let prop_rets: std::collections::HashMap<_, _> =
+            super::metadata::class_properties(&companion)
+                .into_iter()
+                .filter_map(|p| p.ret_class.map(|ret| (p.name, ret)))
+                .collect();
         Self::const_fields(&ci.fields, |f| {
             prop_rets.get(&f.name).map(|ret| kotlin_name_to_ty(ret))
         })
@@ -603,15 +607,16 @@ impl JvmLibraries {
         ci: &crate::jvm::classreader::ClassInfo,
     ) -> Vec<(String, LibraryMember)> {
         let internal = &ci.this_class;
-        metadata::class_property_return_classes(ci)
+        metadata::class_properties(ci)
             .into_iter()
-            .filter_map(|(property, logical)| {
+            .filter_map(|p| {
+                let logical = p.ret_class?;
                 // Only a value-class-typed property (mangled getter); an ordinary property keeps its
                 // normal getter path. Test value-class-ness via the `@JvmInline` `@Metadata` flag DIRECTLY
                 // (not `value_underlying`, which would call `resolve_type` and recurse mid-build).
                 let lci = self.cp.find(&logical)?;
                 metadata::class_inline(&lci)?;
-                let mut chars = property.chars();
+                let mut chars = p.name.chars();
                 let cap = chars.next()?.to_uppercase().collect::<String>();
                 let getter = format!("get{cap}{}", chars.as_str());
                 let dashed = format!("{getter}-");
@@ -621,8 +626,11 @@ impl JvmLibraries {
                     .find(|mm| mm.name == getter || mm.name.starts_with(&dashed))?;
                 crate::trace_compiler!(
                     "value_classes",
-                    "value-class property {internal}.{property} -> getter {} : {logical}",
-                    m.name
+                    "value-class property {}.{} -> getter {} : {}",
+                    internal,
+                    p.name,
+                    m.name,
+                    logical
                 );
                 let mut member = LibraryMember::new(
                     m.name.clone(),
@@ -631,7 +639,7 @@ impl JvmLibraries {
                     m.descriptor.clone(),
                 );
                 member.owner = Some(internal.clone());
-                Some((property, member))
+                Some((p.name, member))
             })
             .collect()
     }
