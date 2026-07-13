@@ -7479,7 +7479,13 @@ impl<'a> Checker<'a> {
                     t
                 } else {
                     match &args {
-                        None => self.check_member(rt, &name, self.span(e), Some(e)),
+                        // After `?.` the receiver is non-null, so resolve the member against the NON-NULL
+                        // receiver type — mirroring the args (extension) branch below. A genuinely nullable
+                        // receiver that ISN'T smart-cast (a call result: `xs.firstOrNull()?.field`) reached
+                        // here as `Nullable(Obj(..))`, and `check_member` doesn't peel the nullable for a
+                        // user class, so a member read on it failed ("unresolved member … on 'C'"). A
+                        // smart-cast local (`val c: C? = C(); c?.x`) already arrived non-null, which hid this.
+                        None => self.check_member(rt.non_null(), &name, self.span(e), Some(e)),
                         Some(a) => {
                             // A safe call to a lambda-taking extension (`c?.takeIf { it.at > 0 }`) types its
                             // lambda argument against the extension's block parameter (bound by the NON-NULL
