@@ -517,9 +517,16 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
             // base's `<init>`. A base type that resolves to neither (or to an interface) → bail.
             let super_internal: Option<String> = match &c.base_class {
                 Some(base) => {
-                    let is_file_class = file.decls.iter().any(|&d| matches!(file.decl(d), Decl::Class(bc) if bc.name == *base && !bc.is_interface()));
-                    if is_file_class {
-                        Some(class_internal(file, base))
+                    // Match a file base class by INTERNAL name so a nested/qualified base resolves. A
+                    // dotted supertype `Outer.Bar` is parsed to slash-form `Outer/Bar`, while its hoisted
+                    // nested decl is named `Outer.Bar` (internal `Outer$Bar`) — comparing simple names
+                    // would miss it. `class_internal` maps both a decl's `Outer.Bar` and the base's
+                    // dot-restored `Outer.Bar` to the same `…/Outer$Bar`, subsuming the simple-name case.
+                    let base_internal = class_internal(file, &base.replace('/', "."));
+                    let file_base = file.decls.iter().any(|&d| matches!(file.decl(d),
+                        Decl::Class(bc) if !bc.is_interface() && class_internal(file, &bc.name) == base_internal));
+                    if file_base {
+                        Some(base_internal)
                     } else {
                         // A classpath base class: map the source name to its internal (via imports). Only a
                         // CONCRETE (non-final, non-abstract) non-interface class is a safe superclass to

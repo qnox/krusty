@@ -3154,12 +3154,43 @@ impl<'a> Parser<'a> {
                         let block = self.parse_block_expr();
                         init_order.push(ClassInit::Block(block));
                     }
+                    // A plain nested class in an object body (`object Foo { class Bar … }`) hoists to the
+                    // file top level as `Foo.Bar` (internal `Foo$Bar`) — exactly like a class-body nested
+                    // type. `inner class` inside an object captures no valid enclosing instance (an object
+                    // is a singleton), so keep dropping those (unsupported → skip, not miscompile).
+                    TokenKind::KwClass if !mods.iter().any(|m| m == "inner") => {
+                        let mut nested = self.parse_class();
+                        nested.name = format!("{}.{}", name, nested.name);
+                        let id = self.file.add_decl(Decl::Class(nested));
+                        self.file.decls.push(id);
+                    }
                     TokenKind::KwClass => {
                         let _ = self.parse_nested_type_decl();
                     }
+                    // A nested `data class Bar(…)` in an object body → hoist like a plain nested class.
+                    // An `inner data class` captures no enclosing instance in an object (singleton) — drop
+                    // it (unsupported → skip) exactly as the plain-`class` arm drops `inner class`.
+                    TokenKind::Ident
+                        if self.text() == "data"
+                            && self
+                                .t
+                                .get(self.i + 1)
+                                .map_or(false, |t| t.kind == TokenKind::KwClass) =>
+                    {
+                        self.bump(); // 'data'
+                        if mods.iter().any(|m| m == "inner") {
+                            let _ = self.parse_nested_type_decl();
+                        } else {
+                            let mut nested = self.parse_class();
+                            nested.is_data = true;
+                            nested.name = format!("{}.{}", name, nested.name);
+                            let id = self.file.add_decl(Decl::Class(nested));
+                            self.file.decls.push(id);
+                        }
+                    }
                     TokenKind::Ident
                         if matches!(self.text(), "object" | "interface")
-                            || (matches!(self.text(), "data" | "enum" | "annotation")
+                            || (matches!(self.text(), "enum" | "annotation")
                                 && self
                                     .t
                                     .get(self.i + 1)

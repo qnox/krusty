@@ -462,6 +462,8 @@ mod named_args_classpath_e2e;
 mod named_ctor_args_e2e;
 #[path = "named_super_arg_e2e.rs"]
 mod named_super_arg_e2e;
+#[path = "nested_class_supertype_e2e.rs"]
+mod nested_class_supertype_e2e;
 #[path = "nested_class_unqualified_e2e.rs"]
 mod nested_class_unqualified_e2e;
 #[path = "nested_decls_in_object_e2e.rs"]
