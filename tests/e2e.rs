@@ -454,6 +454,8 @@ mod member_ctrl_inference_e2e;
 mod member_default_implicit_receiver_e2e;
 #[path = "member_infix_inference_e2e.rs"]
 mod member_infix_inference_e2e;
+#[path = "member_read_on_nullable_call_result_e2e.rs"]
+mod member_read_on_nullable_call_result_e2e;
 #[path = "metadata_kept_params.rs"]
 mod metadata_kept_params;
 #[path = "metadata_reader_e2e.rs"]

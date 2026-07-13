@@ -11168,6 +11168,11 @@ impl<'a> Lower<'a> {
     /// `java/lang/String.length()` just like `uppercase()`). `recv` is the already-lowered receiver
     /// value. Returns `None` when the type exposes no such member.
     fn lower_member_read_on(&mut self, recv: u32, rt: Ty, name: &str, e: AstExprId) -> Option<u32> {
+        // Resolve against the NON-NULL type. A receiver whose static type keeps its `?` (a smart-cast /
+        // `!!` value bound to a call-result local, whose narrowing krusty doesn't propagate to the read
+        // site) is a valid reference at runtime — the getter dispatches the same, and krusty does not
+        // enforce null-safety. Without this a `foo().bar` on a `Foo?`-typed result resolves no member.
+        let rt = rt.non_null();
         // A property on a class defined in ANOTHER file → its public `getX()` accessor (the backing
         // field is private). Resolved from the sibling class's `ClassSig`.
         if let Ty::Obj(i, _) = rt {
