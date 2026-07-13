@@ -938,6 +938,14 @@ impl MetaFn {
             self.value_params.iter().map(|p| p.has_default).collect(),
         )
     }
+
+    pub fn extension_call_sig(&self) -> CallSig {
+        CallSig::metadata_extension(
+            self.value_params.len() + 1,
+            self.value_params.iter().map(|p| p.name.clone()).collect(),
+            self.value_params.iter().map(|p| p.has_default).collect(),
+        )
+    }
 }
 
 /// A JVM method signature carried by Kotlin metadata: method name + descriptor as one fact.

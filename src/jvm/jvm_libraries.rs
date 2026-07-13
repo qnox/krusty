@@ -1775,17 +1775,7 @@ impl SymbolSource for JvmLibraries {
                 if params.is_empty() {
                     continue;
                 }
-                // The SOURCE value-parameter names + default flags (from `@Metadata`), so a call with
-                // out-of-order NAMED arguments to a classpath extension (`"s".tag(count = 7, name = "hi")`)
-                // reorders through the same `param_names` a member/top-level call uses. The physical count
-                // is the SOURCE value arity plus the receiver — `mf.value_params` already excludes the
-                // synthetic descriptor tail (a suspend `Continuation`, a Compose mask), which `params.len()`
-                // would wrongly include; `metadata_extension` peels the leading receiver back off.
-                let call_sig = crate::libraries::CallSig::metadata_extension(
-                    mf.value_params.len() + 1,
-                    mf.value_params.iter().map(|p| p.name.clone()).collect(),
-                    mf.value_params.iter().map(|p| p.has_default).collect(),
-                );
+                let call_sig = mf.extension_call_sig();
                 let ret_class = mf.ret_class.map(kotlin_name_to_ty);
                 let ret = match ret_class {
                     Some(t) if mf.ret_nullable && t.is_jvm_scalar() => Ty::nullable(t),
