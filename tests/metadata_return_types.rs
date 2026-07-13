@@ -3,7 +3,11 @@
 //! `java/util/List`. This is the foundation for distinguishing read-only vs mutable collections.
 
 use krusty::jvm::classpath::Classpath;
+use krusty::jvm::jvm_libraries::JvmLibraries;
 use krusty::jvm::metadata::{package_functions, parse_builtins};
+use krusty::symbol_resolver::SymbolResolver;
+use krusty::types::Ty;
+use std::rc::Rc;
 
 use super::common;
 
@@ -160,27 +164,37 @@ fn kotlin_collection_subtyping() {
 }
 
 /// `@Metadata` carries the Kotlin extension-receiver of `plusAssign` — `MutableCollection`/`MutableMap`
-/// — which the JVM signature erases to a `java/util/Collection`/`Map` parameter. This is what lets
-/// overload resolution reject `plusAssign` on a read-only `List` (no `Mutable*` receiver is its supertype).
+/// — which the JVM signature erases to a `java/util/Collection`/`Map` parameter. Assert through the
+/// resolver surface, not a name-only metadata probe: the selected callable should exist only for a
+/// mutable receiver.
 #[test]
 fn plus_assign_receiver_is_mutable() {
     let Some(jar) = common::stdlib_jar() else {
         eprintln!("skip: no kotlin-stdlib jar");
         return;
     };
-    let cp = Classpath::new(vec![jar]);
-    let krs = cp.metadata_receiver_types("kotlin/collections/CollectionsKt", "plusAssign");
-    assert!(
-        krs.iter()
-            .any(|k| k == "kotlin/collections/MutableCollection"),
-        "plusAssign must have a MutableCollection receiver, got {krs:?}"
+    let libs = JvmLibraries::new(Rc::new(Classpath::new(vec![jar])));
+    let scope = ["kotlin/collections".to_string()];
+    let resolver = SymbolResolver::new_scoped(&libs, &scope);
+    let mutable = resolver.resolve_extension_callable(
+        "plusAssign",
+        Ty::obj("kotlin/collections/MutableCollection"),
+        &[Ty::Int],
+        &[],
     );
-    // `plus` (read-only) must NOT carry a Mutable receiver — else it would be wrongly rejected on `List`.
-    let plus = cp.metadata_receiver_types("kotlin/collections/CollectionsKt", "plus");
     assert!(
-        !plus
-            .iter()
-            .any(|k| k.starts_with("kotlin/collections/Mutable")),
-        "plus must not be a Mutable* extension, got {plus:?}"
+        mutable.is_some(),
+        "plusAssign must resolve for a MutableCollection receiver"
+    );
+    assert!(
+        resolver
+            .resolve_extension_callable(
+                "plusAssign",
+                Ty::obj("kotlin/collections/List"),
+                &[Ty::Int],
+                &[],
+            )
+            .is_none(),
+        "plusAssign must not bind a read-only List receiver"
     );
 }

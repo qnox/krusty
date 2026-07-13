@@ -264,7 +264,7 @@ it selectable.
 Expected deletion:
 
 - `metadata_return_type`, `metadata_return_nullable`,
-  `metadata_receiver_types`, `metadata_param_names`, `metadata_param_defaults`,
+  `metadata_param_names`, `metadata_param_defaults`,
   `metadata_kept_params`, and similar public probes from non-construction paths;
 - name-only maps where overload-specific data is required.
 
@@ -3113,3 +3113,15 @@ factory fix can land at FAIL:0. So the order is: (a) fix/bail value-class-throug
 (starting with `Result.getOrThrow()` in a lambda), (b) apply the `try_inline_static_as` value-use-lambda
 fix, (c) the suspend-lambda state machine with captures (blocker #2). The factory-splice code change is
 exact and re-appliable from this note.
+
+### Metadata Receiver Probe Deleted
+
+The next metadata cleanup removed the public `Classpath::metadata_receiver_types(owner, name)` probe.
+Receiver metadata is now verified through the normal `SymbolResolver`/`LibraryCallable` selection seam:
+`plusAssign` resolves for `MutableCollection` and does not bind a read-only `List`. With the name-only
+probe gone, `ClassMeta` no longer builds the `by_kotlin_name` side index or stores each callable's
+duplicated Kotlin name. This removes one metadata side channel and one per-class cache map; receiver
+facts stay coupled to the selected overload produced from the shared metadata decode.
+
+Verification:
+`cargo test --profile gate metadata_return_types::plus_assign_receiver_is_mutable -- --nocapture`.

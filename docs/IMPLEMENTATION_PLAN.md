@@ -2847,9 +2847,9 @@ bodies exist only as jar bytecode):
   `NameResolverImpl` (`metadata::builtins_supertypes`; `Class.supertype_id` → `type_table` →
   `Type.class_name`). NOT hardcoded.
 - Resolution is Kotlin-type-aware, generically (kotlinc has no `is_mutable_collection`): `+=` resolves a
-  `plusAssign` operator candidate; `extension_callable` rejects a candidate whose Kotlin receiver (decoded
-  from `@Metadata` `Function.receiver_type`, `metadata_receiver_types`) is a collection type the actual
-  receiver is not a subtype of (`Classpath::kotlin_subtype` over the builtins hierarchy). So
+  `plusAssign` operator candidate; selected extension overloads carry their Kotlin receiver decoded from
+  `@Metadata` `Function.receiver_type`, and the resolver rejects a candidate whose receiver is a collection
+  type the actual receiver is not a subtype of (`Classpath::kotlin_subtype` over the builtins hierarchy). So
   `MutableCollection.plusAssign` applies to `MutableList`/`ArrayList` but NOT to a read-only `List`, which
   then lows as `list = list.plus(x)`. Names are overloaded across receivers (`plus` on
   `Collection`/`Map`/`Set`), so the receiver set is UNIONed across facade parts and "subtype of any" admits
