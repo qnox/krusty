@@ -903,6 +903,69 @@ public class M {\n\
 }
 
 #[test]
+fn suspend_in_try_catch_with_spilled_locals() {
+    // A `suspend fun` with a suspension point INSIDE a `try { … } catch { … }`, plus a suspension
+    // BEFORE the try and locals spilled across both (the shape mission-core's MissionActionService
+    // uses). The try body's second suspension (`risky`) may throw; the catch supplies a fallback. The
+    // CPS state machine wraps its dispatch so an exception thrown while a try-region state is active
+    // routes to the catch state. Definite-assignment-gated spilling keeps the body-only local `r`
+    // (whose slot the register allocator coalesces with the reference-typed catch var) from being
+    // spilled dead on the exceptional edge (else: "ref stored into int field" VerifyError).
+    // Values match kotlinc: compute(false) = risky(7) + "cfg".length(3) = 10; compute(true) = -1.
+    let _jh = match java_home() {
+        Some(j) if std::path::Path::new(&format!("{j}/bin/javac")).exists() => j,
+        _ => return,
+    };
+    let Some(stdlib) = stdlib_jar() else {
+        return;
+    };
+    let dir = std::env::temp_dir().join(format!("krusty_susp_trycatch_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    compile_krusty_with_stdlib(
+        "S",
+        "suspend fun setup(): String = \"cfg\"\n\
+         suspend fun risky(fail: Boolean): Int { if (fail) throw IllegalStateException(\"boom\"); return 7 }\n\
+         suspend fun compute(fail: Boolean): Int {\n\
+         val cfg = setup()\n\
+         return try {\n\
+         val r = risky(fail)\n\
+         r + cfg.length\n\
+         } catch (e: IllegalStateException) { -1 }\n\
+         }\n",
+        &stdlib,
+        &dir,
+    );
+    let driver = "import kotlin.coroutines.*;\n\
+public class M {\n\
+  static Continuation<Object> k() {\n\
+    return new Continuation<Object>() {\n\
+      public CoroutineContext getContext() { return EmptyCoroutineContext.INSTANCE; }\n\
+      public void resumeWith(Object o) { }\n\
+    };\n\
+  }\n\
+  public static void main(String[] a) {\n\
+    Object r1 = SKt.compute(false, k());\n\
+    Object r2 = SKt.compute(true, k());\n\
+    boolean ok = r1.equals(Integer.valueOf(10)) && r2.equals(Integer.valueOf(-1));\n\
+    System.out.println(ok ? \"OK\" : (\"r1=\" + r1 + \" r2=\" + r2));\n\
+  }\n\
+}\n";
+    fs::write(dir.join("M.java"), driver).unwrap();
+    let cp = format!("{}:{}", dir.to_str().unwrap(), stdlib);
+    let Some(out) = common::javac_run(
+        dir.join("M.java").to_str().unwrap(),
+        &cp,
+        dir.to_str().unwrap(),
+        "M",
+    ) else {
+        return;
+    };
+    let _ = fs::remove_dir_all(&dir);
+    assert_eq!(out.trim(), "OK", "suspend in try/catch");
+}
+
+#[test]
 fn leaf_suspend_fun_has_cps_signature() {
     // `suspend fun foo(): Int = 42` has no suspension point, so kotlinc emits no state machine — just
     // the CPS signature: `static Object foo(Continuation<? super Integer>)` returning the boxed value.
