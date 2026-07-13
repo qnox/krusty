@@ -682,32 +682,32 @@ fn can_derive_element_serializer(ir: &IrFile, ty: &Ty) -> bool {
     builtin_element_serializer(ty).is_some()
 }
 
-/// The internal name of the kotlinx builtin `KSerializer` singleton (`…INSTANCE`) for a directly
-/// serializable element type — used as the element serializer for a NULLABLE property, which goes
-/// through `encode/decodeNullableSerializableElement` (there is no `encodeNullable<Prim>Element`).
-///
-/// Covers `String` (reference) and the primitive set. For a nullable primitive the property's getter
-/// and field are the boxed type (`Int?` → `getX()Ljava/lang/Integer;`, verified what krusty emits), so
-/// the value reaching `encode/decodeNullableSerializableElement(…, Object)` is already a reference — no
-/// extra autoboxing. The serializer singleton itself serializes the unboxed primitive.
+fn builtin_element_key(ty: &Ty) -> Option<&'static str> {
+    Some(match ty.kotlin_class_internal()? {
+        "java/lang/Integer" => "kotlin/Int",
+        "java/lang/Long" => "kotlin/Long",
+        "java/lang/Boolean" => "kotlin/Boolean",
+        "java/lang/Double" => "kotlin/Double",
+        "java/lang/Float" => "kotlin/Float",
+        "java/lang/Character" => "kotlin/Char",
+        "java/lang/Byte" => "kotlin/Byte",
+        "java/lang/Short" => "kotlin/Short",
+        "java/lang/String" => "kotlin/String",
+        fq => fq,
+    })
+}
+
 fn builtin_element_serializer(ty: &Ty) -> Option<&'static str> {
-    let fq = ty.kotlin_class_internal()?;
-    // A nullable primitive is lowered to its BOXED fq name (`Int?` → `java/lang/Integer`), so match
-    // both the Kotlin primitive name and the boxed name.
-    Some(match fq {
-        "kotlin/String" | "java/lang/String" => "kotlinx/serialization/internal/StringSerializer",
-        "kotlin/Int" | "java/lang/Integer" => "kotlinx/serialization/internal/IntSerializer",
-        "kotlin/Long" | "java/lang/Long" => "kotlinx/serialization/internal/LongSerializer",
-        "kotlin/Boolean" | "java/lang/Boolean" => {
-            "kotlinx/serialization/internal/BooleanSerializer"
-        }
-        "kotlin/Double" | "java/lang/Double" => "kotlinx/serialization/internal/DoubleSerializer",
-        "kotlin/Float" | "java/lang/Float" => "kotlinx/serialization/internal/FloatSerializer",
-        "kotlin/Char" | "java/lang/Character" => "kotlinx/serialization/internal/CharSerializer",
-        "kotlin/Byte" | "java/lang/Byte" => "kotlinx/serialization/internal/ByteSerializer",
-        "kotlin/Short" | "java/lang/Short" => "kotlinx/serialization/internal/ShortSerializer",
-        // A stdlib reference type with a kotlinx BUILTIN `KSerializer` singleton (no `encode<T>Element`
-        // shortcut — goes through `encode/decodeSerializableElement` like a nested @Serializable).
+    Some(match builtin_element_key(ty)? {
+        "kotlin/String" => "kotlinx/serialization/internal/StringSerializer",
+        "kotlin/Int" => "kotlinx/serialization/internal/IntSerializer",
+        "kotlin/Long" => "kotlinx/serialization/internal/LongSerializer",
+        "kotlin/Boolean" => "kotlinx/serialization/internal/BooleanSerializer",
+        "kotlin/Double" => "kotlinx/serialization/internal/DoubleSerializer",
+        "kotlin/Float" => "kotlinx/serialization/internal/FloatSerializer",
+        "kotlin/Char" => "kotlinx/serialization/internal/CharSerializer",
+        "kotlin/Byte" => "kotlinx/serialization/internal/ByteSerializer",
+        "kotlin/Short" => "kotlinx/serialization/internal/ShortSerializer",
         "kotlin/uuid/Uuid" => "kotlinx/serialization/internal/UuidSerializer",
         _ => return None,
     })
@@ -739,17 +739,16 @@ fn value_class_underlying(ir: &IrFile, ty: &Ty) -> Option<Ty> {
 fn inline_prim_methods(
     ty: &Ty,
 ) -> Option<(&'static str, &'static str, &'static str, &'static str)> {
-    let fq = ty.kotlin_class_internal()?;
-    Some(match fq {
-        "kotlin/Int" | "java/lang/Integer" => ("encodeInt", "(I)V", "decodeInt", "()I"),
-        "kotlin/Long" | "java/lang/Long" => ("encodeLong", "(J)V", "decodeLong", "()J"),
-        "kotlin/Boolean" | "java/lang/Boolean" => ("encodeBoolean", "(Z)V", "decodeBoolean", "()Z"),
-        "kotlin/Double" | "java/lang/Double" => ("encodeDouble", "(D)V", "decodeDouble", "()D"),
-        "kotlin/Float" | "java/lang/Float" => ("encodeFloat", "(F)V", "decodeFloat", "()F"),
-        "kotlin/Char" | "java/lang/Character" => ("encodeChar", "(C)V", "decodeChar", "()C"),
-        "kotlin/Byte" | "java/lang/Byte" => ("encodeByte", "(B)V", "decodeByte", "()B"),
-        "kotlin/Short" | "java/lang/Short" => ("encodeShort", "(S)V", "decodeShort", "()S"),
-        "kotlin/String" | "java/lang/String" => (
+    Some(match builtin_element_key(ty)? {
+        "kotlin/Int" => ("encodeInt", "(I)V", "decodeInt", "()I"),
+        "kotlin/Long" => ("encodeLong", "(J)V", "decodeLong", "()J"),
+        "kotlin/Boolean" => ("encodeBoolean", "(Z)V", "decodeBoolean", "()Z"),
+        "kotlin/Double" => ("encodeDouble", "(D)V", "decodeDouble", "()D"),
+        "kotlin/Float" => ("encodeFloat", "(F)V", "decodeFloat", "()F"),
+        "kotlin/Char" => ("encodeChar", "(C)V", "decodeChar", "()C"),
+        "kotlin/Byte" => ("encodeByte", "(B)V", "decodeByte", "()B"),
+        "kotlin/Short" => ("encodeShort", "(S)V", "decodeShort", "()S"),
+        "kotlin/String" => (
             "encodeString",
             "(Ljava/lang/String;)V",
             "decodeString",
