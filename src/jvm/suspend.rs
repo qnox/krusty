@@ -528,6 +528,16 @@ fn hoist_expr(
             };
             e
         }
+        // A STATEMENT-LESS `Block` in VALUE position — an INLINE function's body spliced into a `return`/
+        // `val =`/argument position collapses to `{ <value> }` (`return myRun { await() }` →
+        // `return { await() }`). Hoist a suspension in its trailing value; the block is just grouping. An
+        // inline fn does not break the suspend context, so the spliced tail suspension is an ordinary
+        // bound-local suspension here. A block WITH statements is left for the flattener (lifting its
+        // statements out would reorder them — e.g. a suspend body spliced inside a loop).
+        IrExpr::Block {
+            stmts,
+            value: Some(v),
+        } if stmts.is_empty() => hoist_expr(ir, v, suspend_set, orig_rets, prelude),
         // A leaf or a conditional/unhandled node: leave it (any suspension inside surfaces to the
         // flattener, which restructures it or skips the file).
         _ => e,
