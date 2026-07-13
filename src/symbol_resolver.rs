@@ -1477,6 +1477,12 @@ fn descriptor_arg_subtype_of_param(lib: &dyn CompilerPlatform, arg: Ty, param: T
     if aj == pj {
         return true;
     }
+    // A `null` literal (`Ty::Null`) / `Nothing` argument is a subtype of every REFERENCE type, so it
+    // fits any object parameter (`Rec(desc = null, …)` where `desc: String?`). Without this an argument
+    // list mixing a `null` with another descriptor-widened argument matched no constructor overload.
+    if matches!(arg, Ty::Null | Ty::Nothing) && pj.is_reference() {
+        return true;
+    }
     // Only a reference argument can widen to a reference parameter through the type hierarchy.
     let (Ty::Obj(arg_internal, _), Some(param_internal)) = (arg, pj.obj_internal()) else {
         return false;
