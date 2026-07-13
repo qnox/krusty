@@ -414,12 +414,13 @@ impl JvmLibraries {
         // a synthetic, or a PROPERTY getter — recorded as a property, not a function) do we read the JVM
         // `Signature`, which uses the legacy receiver-in-`params[0]` shape.
         let (desc_params, desc_ret) = parse_method_desc_with_field_params(jvm_desc);
-        if self.cp.has_meta_function(owner, jvm_name) {
+        if let Some(gsig) = self
+            .cp
+            .aligned_generic_sig(owner, jvm_name, &desc_params, &desc_ret)
+        {
             // Metadata DESCRIBES this class's function — it is the authoritative signature and there is NO
             // fallback to the JVM `Signature`. A failure to align/decode here is a bug to fix in the reader.
-            return self
-                .cp
-                .aligned_generic_sig(owner, jvm_name, &desc_params, &desc_ret);
+            return gsig;
         }
         // No `@Metadata` FUNCTION for the name — the JVM `Signature` is the only source. Its extension
         // receiver is the leading value parameter; move it to the `receiver` ATTRIBUTE so the signature has

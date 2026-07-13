@@ -943,9 +943,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   - **`suspend` interface members** (`suspend fun getConfig(id): Config`). The member walk strips the
     trailing `Continuation` parameter and recovers the real return from the `Continuation<T>` type
     argument in the generic signature (`suspend_return_from_gsig`; `Continuation<-Unit>` → `Unit`). Member
-    suspend detection was fixed at its root: `metadata::suspend_method_names` now reads BOTH the file
-    facade's `Package.function` (field 3) AND a class/interface's `Class.function` (field 9) — it
-    previously saw only top-level functions, so interface/class member `suspend` funs were invisible.
+    suspend detection reads both the file facade's `Package.function` (field 3) and a class/interface's
+    `Class.function` (field 9) `MetaFn::is_suspend` flag — it previously saw only top-level functions, so
+    interface/class member `suspend` funs were invisible.
   - **Lowering a classpath suspend-member call.** A `LibraryMember` now carries `suspend`; the classpath
     instance-call lowering records the call in `ir.suspend_calls` so the coroutine pass threads the
     `Continuation` (its CPS descriptor rebuilt for a `Callee::Virtual` in `append_continuation`) and types
