@@ -71,18 +71,38 @@ if [ "${#bins[@]}" -eq 0 ]; then
   exit 1
 fi
 
+# Portable epoch milliseconds. GNU `date +%s%3N` yields millis, but BSD/macOS `date` has no `%N` and
+# emits a literal `N` (`1700000000N`), which would poison the `$((end - start))` arithmetic below and
+# abort the whole run under `set -e`. Detect a non-numeric result and fall back to python3 (true millis)
+# or whole-second precision — the value only feeds the cosmetic TIMINGS report, so coarser is fine.
+epoch_ms() {
+  local t
+  t="$(date +%s%3N 2>/dev/null)"
+  case "$t" in
+    '' | *[!0-9]*)
+      if command -v python3 >/dev/null 2>&1; then
+        python3 -c 'import time; print(int(time.time()*1000))'
+      else
+        echo $(($(date +%s) * 1000))
+      fi
+      ;;
+    *) printf '%s\n' "$t" ;;
+  esac
+}
+export -f epoch_ms
+
 run_one() {
   local b="${2%%::*}" extra="" name
   [ "$2" != "$b" ] && extra="${2#*::}"
   name="$(basename "$b")"
   local start end ms
-  start="$(date +%s%3N)"
+  start="$(epoch_ms)"
   if "$b" $extra >"$1/$name.log" 2>&1; then
     :
   else
     echo "$b" >>"$1/FAILED"
   fi
-  end="$(date +%s%3N)"
+  end="$(epoch_ms)"
   ms=$((end - start))
   printf '%08d %s\n' "$ms" "$name" >>"$1/TIMINGS"
 }
