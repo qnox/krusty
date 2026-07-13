@@ -622,7 +622,13 @@ struct ParsedFunction {
 /// receiver `Function.receiver_type = 5` (both inline `Type`s in package metadata).
 fn parse_function(body: &[u8]) -> Option<ParsedFunction> {
     let mut pb = Pb { b: body, i: 0 };
-    let mut flags = 0u64;
+    // Kotlin `metadata.proto` declares `Function.flags = 9 [default = 6]` — a PUBLIC FINAL declaration
+    // (visibility bits 1-3 = 3, modality/memberKind = 0). protobuf OMITS a field equal to its default, so
+    // the common public-final function serializes NO flags field; initializing to 0 would then decode it
+    // as visibility INTERNAL (an interface's ABSTRACT method has non-default flags, so it was serialized
+    // and decoded correctly — which hid the bug). Start from the proto default so an absent field is
+    // read as public-final.
+    let mut flags = 6u64;
     let mut name_id = 0u64;
     let mut jvm_sig = None;
     let mut ret_class = None;

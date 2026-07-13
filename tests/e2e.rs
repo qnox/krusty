@@ -434,6 +434,8 @@ mod local_class_e2e;
 mod local_class_scoping_e2e;
 #[path = "local_fun_ref_e2e.rs"]
 mod local_fun_ref_e2e;
+#[path = "mangled_member_concrete_class_e2e.rs"]
+mod mangled_member_concrete_class_e2e;
 #[path = "mangled_member_nested_param_e2e.rs"]
 mod mangled_member_nested_param_e2e;
 #[path = "mangled_member_null_arg_e2e.rs"]
