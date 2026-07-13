@@ -13179,6 +13179,12 @@ impl<'a> Lower<'a> {
                     value: v,
                 }))
             }
+            // A multi-argument `set` operator (`recv[i, j] = v`) — checker-typed; backend emission is a
+            // later slice, so skip the file rather than miscompile.
+            Stmt::AssignIndexMulti { .. } => {
+                set_bail("stmt AssignIndexMulti");
+                None
+            }
             Stmt::AssignIndex {
                 array,
                 index,
@@ -15945,6 +15951,12 @@ impl<'a> Lower<'a> {
             }
             // `a[i]` read. User/library `get` operators resolve through their member metadata; arrays
             // keep the IR intrinsic because the backend reads the element from the receiver type.
+            // A multi-argument `get` operator (`recv[i, j]`) — checker-typed, but the backend emission
+            // is a later slice; skip the file rather than miscompile.
+            Expr::IndexMulti { .. } => {
+                set_bail("expr IndexMulti");
+                return None;
+            }
             Expr::Index { array, index } => {
                 let at = self.info.ty(array);
                 // `m[i]` on a USER class with an `operator fun get(index)` → `m.get(i)` (walks supers, so

@@ -2453,6 +2453,11 @@ fn bc_complex_s(file: &File, s: StmtId, vforbid: bool, cross: bool) -> bool {
             index,
             value,
         } => val(*array) || val(*index) || val(*value),
+        Stmt::AssignIndexMulti {
+            receiver,
+            indices,
+            value,
+        } => val(*receiver) || indices.iter().any(|&i| val(i)) || val(*value),
         Stmt::Return(Some(e), _) => val(*e),
         Stmt::Return(None, _) | Stmt::IncDec { .. } | Stmt::LocalLateinit { .. } => false,
         // A statement's value is discarded — its (possibly `if`/`when`) tree stays in statement position.
@@ -2730,6 +2735,17 @@ fn collect_lambda_outer_writes(
             } => {
                 ce(file, *array, active, out);
                 ce(file, *index, active, out);
+                ce(file, *value, active, out);
+            }
+            Stmt::AssignIndexMulti {
+                receiver,
+                indices,
+                value,
+            } => {
+                ce(file, *receiver, active, out);
+                for &i in indices {
+                    ce(file, i, active, out);
+                }
                 ce(file, *value, active, out);
             }
             Stmt::Return(Some(e), _) => ce(file, *e, active, out),
@@ -6819,6 +6835,58 @@ impl<'a> Checker<'a> {
                         format!("'{}' is not an array (cannot index)", at.name()),
                     );
                 }
+                Ty::Error
+            }
+            Expr::IndexMulti { receiver, indices } => {
+                // `recv[i, j, …]` is a multi-argument `get` operator (`recv.get(i, j, …)`). Type the
+                // receiver and indices, then resolve `get` with all index types — a member, a same-module
+                // extension (`operator fun Array<String>.get(a, b)`), or a library member. The result is
+                // the operator's return type. (The lowering is a later slice — a file using this still
+                // skips at the backend, but it type-checks here rather than failing to parse.)
+                let rt = self.expr(receiver);
+                let its: Vec<Ty> = indices.iter().map(|&i| self.expr(i)).collect();
+                if rt == Ty::Error {
+                    return Ty::Error;
+                }
+                if let Some(internal) = rt.obj_internal() {
+                    if let Some(sig) = self.syms.method_of(internal, "get") {
+                        if sig.params.len() == its.len() {
+                            for (i, &pt) in sig.params.iter().enumerate() {
+                                self.expect_assignable(pt, its[i], self.span(indices[i]), "index");
+                            }
+                            return self.set(e, sig.ret);
+                        }
+                    }
+                }
+                if let Some(sig) = self
+                    .syms
+                    .ext_funs
+                    .get(&(rt.erased_recv(), "get".to_string()))
+                    .cloned()
+                {
+                    if sig.params.len() == its.len() {
+                        for (i, &pt) in sig.params.iter().enumerate() {
+                            self.expect_assignable(pt, its[i], self.span(indices[i]), "index");
+                        }
+                        return self.set(e, sig.ret);
+                    }
+                }
+                if let Some(m) = crate::symbol_resolver::resolve_instance_member(
+                    &*self.syms.libraries,
+                    rt,
+                    "get",
+                    &its,
+                ) {
+                    return self.set(e, m.ret);
+                }
+                self.diags.error(
+                    self.span(e),
+                    format!(
+                        "no 'get' operator taking {} indices on '{}'",
+                        its.len(),
+                        rt.name()
+                    ),
+                );
                 Ty::Error
             }
             Expr::Try {
@@ -12810,6 +12878,68 @@ impl<'a> Checker<'a> {
                             );
                         }
                     }
+                }
+            }
+            Stmt::AssignIndexMulti {
+                receiver,
+                indices,
+                value,
+            } => {
+                // `recv[i, j, …] = v` is the multi-argument `set` operator (`recv.set(i, j, …, v)`).
+                // Type the receiver, indices, and value, then confirm a `set` taking that many indices
+                // plus the value exists — a member, a same-module extension, or a library member. (The
+                // backend lowering is a later slice; a file using this type-checks here but skips at
+                // codegen rather than failing to parse.)
+                let rt = self.expr(receiver);
+                let its: Vec<Ty> = indices.iter().map(|&i| self.expr(i)).collect();
+                let vt = self.expr(value);
+                let span = self.file.stmt_spans[s.0 as usize];
+                if rt == Ty::Error {
+                    return;
+                }
+                let mut set_args = its.clone();
+                set_args.push(vt);
+                // Resolve `set` as a member or same-module extension (checking every argument type),
+                // else a library member (type-aware in the resolver).
+                let member_set = rt
+                    .obj_internal()
+                    .and_then(|i| self.syms.method_of(i, "set"))
+                    .filter(|sig| sig.params.len() == set_args.len())
+                    .or_else(|| {
+                        self.syms
+                            .ext_funs
+                            .get(&(rt.erased_recv(), "set".to_string()))
+                            .filter(|sig| sig.params.len() == set_args.len())
+                            .cloned()
+                    });
+                let ok = if let Some(sig) = member_set {
+                    let all_spans: Vec<Span> = indices
+                        .iter()
+                        .map(|&i| self.span(i))
+                        .chain(std::iter::once(self.span(value)))
+                        .collect();
+                    for (k, &pt) in sig.params.iter().enumerate() {
+                        self.expect_assignable(pt, set_args[k], all_spans[k], "indexed assignment");
+                    }
+                    true
+                } else {
+                    crate::symbol_resolver::resolve_instance_member(
+                        &*self.syms.libraries,
+                        rt,
+                        "set",
+                        &set_args,
+                    )
+                    .is_some()
+                };
+                if !ok {
+                    self.diags.error(
+                        span,
+                        format!(
+                            "no 'set' operator taking {} indices on '{}'",
+                            its.len(),
+                            rt.name()
+                        ),
+                    );
                 }
             }
             Stmt::Break(label) | Stmt::Continue(label) => {
