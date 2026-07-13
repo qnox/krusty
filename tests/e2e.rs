@@ -188,6 +188,8 @@ mod const_read_inline_e2e;
 mod const_val_e2e;
 #[path = "construction_default_arg_e2e.rs"]
 mod construction_default_arg_e2e;
+#[path = "contract_erasure_e2e.rs"]
+mod contract_erasure_e2e;
 #[path = "coroutine_intrinsics_e2e.rs"]
 mod coroutine_intrinsics_e2e;
 #[path = "cross_file_ctor_default_e2e.rs"]

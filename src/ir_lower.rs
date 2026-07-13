@@ -5559,6 +5559,10 @@ impl<'a> Lower<'a> {
     /// Lower one statement into `out`. A destructuring declaration splices its bindings directly so the
     /// component locals live in the enclosing scope (a nested `Block` would scope them away at emit).
     fn append_stmt(&mut self, s: crate::ast::StmtId, out: &mut Vec<u32>) -> Option<()> {
+        // A checker-erased statement (a `kotlin.contracts.contract { … }` block) emits no bytecode.
+        if matches!(self.info.stmt_lowers.get(&s), Some(StmtLowering::Erased)) {
+            return Some(());
+        }
         if let Stmt::Destructure { entries, init } = self.afile.stmt(s).clone() {
             let sp = self.afile.destructure_source_props.get(&s.0).cloned();
             return self.lower_destructure(&entries, init, sp.as_deref(), out);
