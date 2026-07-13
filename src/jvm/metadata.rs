@@ -8,7 +8,7 @@
 //! String ids index the `d2` table.
 
 use super::classreader::ClassInfo;
-use crate::libraries::GenericSig;
+use crate::libraries::{CallSig, GenericSig};
 use crate::types::{intern, Ty};
 use std::collections::HashMap;
 
@@ -928,6 +928,16 @@ pub struct MetaFn {
     /// straight from `@Metadata` rather than the JVM `Signature` attribute — a JVM-agnostic, Kotlin-faithful
     /// source (nullability, variance, Kotlin type identities). `None` when the return type won't decode.
     pub generic_sig: Option<GenericSig>,
+}
+
+impl MetaFn {
+    pub fn member_call_sig(&self) -> CallSig {
+        CallSig::metadata_member(
+            self.value_params.len(),
+            self.value_params.iter().map(|p| p.name.clone()).collect(),
+            self.value_params.iter().map(|p| p.has_default).collect(),
+        )
+    }
 }
 
 /// A JVM method signature carried by Kotlin metadata: method name + descriptor as one fact.
