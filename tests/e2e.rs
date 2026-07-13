@@ -438,6 +438,8 @@ mod metadata_reader_e2e;
 mod metadata_return_types;
 #[path = "missing_return_check_e2e.rs"]
 mod missing_return_check_e2e;
+#[path = "multi_index_operator_e2e.rs"]
+mod multi_index_operator_e2e;
 #[path = "multiline_catch_e2e.rs"]
 mod multiline_catch_e2e;
 #[path = "name_based_destructuring_e2e.rs"]
