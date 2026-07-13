@@ -3055,7 +3055,22 @@ fn infer_lit_ty_p(
                     }
                     // A JDK/classpath type resolvable by simple name (`val sb = StringBuilder()`).
                     if let Some(internal) = class_names.get(n.as_str()) {
-                        return Ty::obj(internal);
+                        let internal = internal.clone();
+                        // Preserve EXPLICIT type arguments on a generic constructor call
+                        // (`ConcurrentHashMap<String, V>()`) so an inferred PROPERTY keeps them — else a
+                        // later indexing / generic-member access on the field erases its element to `Any`.
+                        // (The full checker keeps them for a local `val`; the signature phase must too.)
+                        if let Some(targs) = file.call_type_args.get(&e.0).filter(|t| !t.is_empty())
+                        {
+                            let empty_tp = TParams::from_bindings([]);
+                            let mut sink = crate::diag::DiagSink::new();
+                            let args: Vec<Ty> = targs
+                                .iter()
+                                .map(|r| ty_of_ref(r, class_names, &empty_tp, &mut sink))
+                                .collect();
+                            return Ty::obj_args(&internal, &args);
+                        }
+                        return Ty::obj(&internal);
                     }
                     // A top-level library/stdlib function — federated resolution (no hardcoded names).
                     if let Some(t) = resolved_ret(&resolver, n, None) {
