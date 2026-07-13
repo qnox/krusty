@@ -4834,6 +4834,48 @@ impl<'a> Checker<'a> {
             .iter()
             .any(|o| o.callable.owner.starts_with("kotlin/contracts"))
     }
+    /// Resolve an operator/method call `receiver.name(args)` — a user-class MEMBER, a same-module
+    /// EXTENSION, or a library member — checking each argument type, and return its result type.
+    /// `None` when no such method of matching arity exists (the caller then declines). Used by the
+    /// reference-range `in` desugaring (`rangeTo` then `contains`).
+    fn operator_call_ret(
+        &mut self,
+        receiver: Ty,
+        name: &str,
+        arg_tys: &[Ty],
+        arg_exprs: &[ExprId],
+    ) -> Option<Ty> {
+        if let Some(internal) = receiver.obj_internal() {
+            if let Some(sig) = self.syms.method_of(internal, name) {
+                if sig.params.len() == arg_tys.len() {
+                    for (i, &pt) in sig.params.iter().enumerate() {
+                        self.expect_assignable(pt, arg_tys[i], self.span(arg_exprs[i]), "argument");
+                    }
+                    return Some(sig.ret);
+                }
+            }
+        }
+        if let Some(sig) = self
+            .syms
+            .ext_funs
+            .get(&(receiver.erased_recv(), name.to_string()))
+            .cloned()
+        {
+            if !sig.vararg && sig.params.len() == arg_tys.len() {
+                for (i, &pt) in sig.params.iter().enumerate() {
+                    self.expect_assignable(pt, arg_tys[i], self.span(arg_exprs[i]), "argument");
+                }
+                return Some(sig.ret);
+            }
+        }
+        crate::symbol_resolver::resolve_instance_member(
+            &*self.syms.libraries,
+            receiver,
+            name,
+            arg_tys,
+        )
+        .map(|m| m.ret)
+    }
     /// The number of context parameters of an UNAMBIGUOUS same-module top-level function `fname`
     /// (`context(a: A) fun fname()` → 1). `0` when the name is absent, overloaded (ambiguous — the
     /// resolved overload's context arity can't be read back from the `FunctionInfo`), or has none.
@@ -7108,6 +7150,24 @@ impl<'a> Checker<'a> {
                 // mixed range (Int value, Long bounds) would need promotion that isn't modeled yet.
                 if prim(&vt) && vt == st && st == et {
                     Ty::Boolean
+                } else if st.is_reference() && st == et {
+                    // A REFERENCE range `a..b` with a user/library `rangeTo` operator: `x in a..b`
+                    // desugars to `a.rangeTo(b).contains(x)`. Resolve `rangeTo` → the range type, then
+                    // `contains` on that type → `Boolean`. The lowerer re-resolves and emits the two
+                    // operator calls. Declines (skips) when either operator is absent.
+                    if let Some(range_ty) = self.operator_call_ret(st, "rangeTo", &[et], &[end]) {
+                        if self
+                            .operator_call_ret(range_ty, "contains", &[vt], &[value])
+                            .is_some()
+                        {
+                            return self.set(e, Ty::Boolean);
+                        }
+                    }
+                    self.diags.error(
+                        self.span(e),
+                        "krusty: 'in' is only supported for primitive numeric ranges".to_string(),
+                    );
+                    Ty::Error
                 } else {
                     self.diags.error(
                         self.span(e),

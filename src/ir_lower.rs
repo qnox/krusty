@@ -9811,6 +9811,61 @@ impl<'a> Lower<'a> {
         Some((c, i, f, cur_id))
     }
 
+    /// Emit `recv.name(args)` on an already-lowered receiver value `recv_v` of type `recv_ty`, resolving
+    /// a USER-class member or a LIBRARY member (an extension operator is not handled here → `None`).
+    /// Returns the call value and its result type. Used by the reference-range `in` desugaring.
+    fn lower_op_call(
+        &mut self,
+        recv_v: u32,
+        recv_ty: Ty,
+        name: &str,
+        args: &[AstExprId],
+    ) -> Option<(u32, Ty)> {
+        let internal = recv_ty.obj_internal()?.to_string();
+        if let Some((class, midx, fid, ret)) = self.resolve_method(&internal, name) {
+            let params = self.ir.functions[fid as usize].params.clone();
+            if params.len() == args.len() {
+                let mut a = Vec::new();
+                for (k, &arg) in args.iter().enumerate() {
+                    a.push(Some(self.lower_arg(arg, &params[k])?));
+                }
+                let call = self.ir.add_expr(IrExpr::MethodCall {
+                    class,
+                    index: midx,
+                    receiver: recv_v,
+                    args: a,
+                });
+                return Some((call, ret));
+            }
+        }
+        let arg_tys: Vec<Ty> = args.iter().map(|&a| self.info.ty(a)).collect();
+        if let Some(m) = crate::symbol_resolver::resolve_instance(
+            &*self.syms.libraries,
+            &internal,
+            name,
+            &arg_tys,
+        ) {
+            if m.params.len() == args.len() {
+                let is_iface = self.library_type_is_interface(&internal);
+                let mut a = Vec::new();
+                for (k, &arg) in args.iter().enumerate() {
+                    a.push(self.lower_arg(arg, &ty_to_ir(m.params[k]))?);
+                }
+                let call = self.ir.add_expr(IrExpr::Call {
+                    callee: Callee::Virtual {
+                        owner: internal.clone(),
+                        name: name.to_string(),
+                        descriptor: m.descriptor.clone(),
+                        interface: is_iface,
+                    },
+                    dispatch_receiver: Some(recv_v),
+                    args: a,
+                });
+                return Some((call, m.ret));
+            }
+        }
+        None
+    }
     fn resolve_method(&self, internal: &str, name: &str) -> Option<(ClassId, u32, u32, Ty)> {
         let mut cur = Some(internal.to_string());
         while let Some(ci_name) = cur {
@@ -16924,6 +16979,29 @@ impl<'a> Lower<'a> {
                 negated,
             } => {
                 use crate::ast::RangeKind;
+                // A REFERENCE range (`x in a..b` where `a`/`b` are user/library types) is not a
+                // primitive comparison chain — it desugars to `a.rangeTo(b).contains(x)`. Emit the two
+                // operator calls (a member or a library member); an extension `rangeTo`/`contains` is a
+                // later slice, so that shape returns `None` (skips) rather than miscompiles.
+                let start_ty = self.info.ty(start);
+                if start_ty.is_reference() {
+                    let recv0 = self.expr(start)?;
+                    let (range_v, range_ty) =
+                        self.lower_op_call(recv0, start_ty, "rangeTo", &[end])?;
+                    let (contains_v, _) =
+                        self.lower_op_call(range_v, range_ty, "contains", &[value])?;
+                    if negated {
+                        // `!in` → `!contains(...)`, emitted as `contains == false` (the lowering has no
+                        // logical-not node — see the primitive `UnOp::Not` path).
+                        let f = self.ir.add_expr(IrExpr::Const(IrConst::Boolean(false)));
+                        return Some(self.ir.add_expr(IrExpr::PrimitiveBinOp {
+                            op: IrBinOp::Eq,
+                            lhs: contains_v,
+                            rhs: f,
+                        }));
+                    }
+                    return Some(contains_v);
+                }
                 // Evaluate the bounds then the value once each (source order: start, end, value —
                 // matching kotlinc's `start..end` then `.contains(value)`), into temps, then a
                 // comparison chain. `!in` uses the De Morgan dual so no logical-not node is needed.
