@@ -3706,6 +3706,12 @@ fn break_continue_stmt_tail_only(file: &ast::File, s: ast::StmtId) -> bool {
                 && break_continue_tail_only(file, *body, true)
         }
         Stmt::ForEach { iterable, body, .. } => {
+            // The iterable is a dirty (non-tail) position for `break`/`continue`. Even a
+            // short-circuiting `for (v in foo() ?: continue)` — where the jump itself has a clean
+            // operand stack — is declined: a local assigned past the jump (the iterator, or a `val`
+            // fed by the iterable) is unset on the continue edge, and krusty's StackMapTable does not
+            // yet merge that `top` local state into the loop back-edge frame (VerifyError). Skip until
+            // the emitter tracks definite-assignment across the jump.
             break_continue_tail_only(file, *iterable, false)
                 && break_continue_tail_only(file, *body, true)
         }
