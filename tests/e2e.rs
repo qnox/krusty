@@ -434,6 +434,8 @@ mod local_class_e2e;
 mod local_class_scoping_e2e;
 #[path = "local_fun_ref_e2e.rs"]
 mod local_fun_ref_e2e;
+#[path = "mangled_member_null_arg_e2e.rs"]
+mod mangled_member_null_arg_e2e;
 #[path = "map_entry_destructure_e2e.rs"]
 mod map_entry_destructure_e2e;
 #[path = "map_get_nullable_elvis_e2e.rs"]

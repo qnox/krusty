@@ -2473,6 +2473,13 @@ fn arg_subtype_assignable(lib: &dyn CompilerPlatform, param: &Ty, arg: &Ty) -> b
     if param == arg || *param == Ty::obj("kotlin/Any") {
         return true;
     }
+    // `null`/`Nothing` is assignable to any REFERENCE parameter — a bare `null` literal passed for a
+    // classpath reference/nullable parameter (`p.exec(id, actId, null)` where `params: String?`).
+    // Overload selection accepts it; nullability strictness is a separate check. Without this a
+    // value-class-param (mangled) member reached with a `null` argument fails to resolve at all.
+    if matches!(arg, Ty::Null | Ty::Nothing) && param.is_reference() {
+        return true;
+    }
     // A builtin reference arg (`Ty::String`) isn't an `Obj`, so map it to its class internal name
     // (`kotlin/String`, whose classpath supertypes include `java/lang/CharSequence`/`Comparable`) — so
     // `Regex("…").matches(s: String)` matches the `CharSequence` parameter via the supertype walk.
