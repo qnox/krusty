@@ -436,6 +436,12 @@ pub struct FunDecl {
     /// method with the receiver prepended as the first parameter.
     pub receiver: Option<TypeRef>,
     pub params: Vec<Param>,
+    /// Number of LEADING entries in `params` that are context parameters (`context(a: A) fun f()`).
+    /// kotlinc lowers context receivers to leading value parameters; krusty models them the same way,
+    /// so they are ordinary params for the body/signature, and this count lets the call-site resolver
+    /// fill them IMPLICITLY from the enclosing context (an implicit receiver / an outer context param)
+    /// instead of from positional arguments. `0` for a function without context parameters.
+    pub context_count: usize,
     pub ret: Option<TypeRef>,
     pub body: FunBody,
     /// Generic type-parameter names (`fun <T, U> …`), erased to `Any`/`Object`.

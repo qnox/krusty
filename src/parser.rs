@@ -34,6 +34,7 @@ pub fn parse_with_features(
         lexical_type_param_bounds: Vec::new(),
         pending_annotations: Vec::new(),
         pending_annotation_args: Vec::new(),
+        pending_context_params: Vec::new(),
     };
     p.parse_file();
     p.file.assert_always_enabled = features.has("AssertionsAlwaysEnable");
@@ -708,6 +709,9 @@ struct Parser<'a> {
     /// direct, ordinary-expression args are kept (array/nested-annotation args record an empty vec), which
     /// is all an extension reading a value annotation (`@SerialName("x")`) needs.
     pending_annotation_args: Vec<Vec<ExprId>>,
+    /// Context parameters parsed at a declaration prefix (`context(a: A)`), consumed by the next
+    /// `parse_fun` (mirrors `pending_annotations`). Cleared when taken.
+    pending_context_params: Vec<Param>,
 }
 
 impl<'a> Parser<'a> {
@@ -839,9 +843,12 @@ impl<'a> Parser<'a> {
             if self.at(TokenKind::Eof) {
                 break;
             }
+            // Drop any context parameters left buffered by a `context(...)` prefix that turned out NOT
+            // to precede a function (e.g. an ill-formed source), so they never leak onto a later `fun`.
+            self.pending_context_params.clear();
             // Consume leading annotations + declaration modifiers. `open`/`abstract` are applied to
             // the following class; the rest are ignored (krusty treats everything as public).
-            let mods = if self.at(TokenKind::At)
+            let mut mods = if self.at(TokenKind::At)
                 || (self.at(TokenKind::Ident) && is_modifier(self.text()))
             {
                 let m = self.skip_decl_prefix();
@@ -850,6 +857,12 @@ impl<'a> Parser<'a> {
             } else {
                 Vec::new()
             };
+            // Context receivers: `context(a: A, b: B)` before a `fun`. `context` is a soft keyword —
+            // treated as a context-parameter prefix only when directly followed by `(` at a declaration
+            // position; the params are buffered for the next `parse_fun` (mirrors pending annotations).
+            // Any modifiers written AFTER the prefix (`context(a: A) private fun f()`) are returned and
+            // merged so visibility/modality aren't lost.
+            mods.extend(self.maybe_parse_context_receivers());
             // A `sealed` class is implicitly abstract and open (subclasses live in the same module).
             let is_sealed = mods.iter().any(|m| m == "sealed");
             let is_open = is_sealed || mods.iter().any(|m| m == "open");
@@ -2010,6 +2023,7 @@ impl<'a> Parser<'a> {
                 name: "<fun-interface>".to_string(),
                 receiver: None,
                 params: vec![],
+                context_count: 0,
                 ret: None,
                 body: FunBody::None,
                 type_params: vec![],
@@ -2098,7 +2112,16 @@ impl<'a> Parser<'a> {
             } else {
                 (None, first_name)
             };
-        let params = self.parse_param_list();
+        let mut params = self.parse_param_list();
+        // Context parameters (`context(a: A) fun f()`), parsed at the declaration site into
+        // `pending_context_params`, become LEADING value parameters (kotlinc's ABI) — prepend them and
+        // record how many so the call-site resolver fills them implicitly.
+        let context_count = self.pending_context_params.len();
+        if context_count > 0 {
+            let mut merged = std::mem::take(&mut self.pending_context_params);
+            merged.append(&mut params);
+            params = merged;
+        }
         let ret = if self.eat(TokenKind::Colon) {
             Some(self.parse_type())
         } else {
@@ -2119,6 +2142,7 @@ impl<'a> Parser<'a> {
             name,
             receiver,
             params,
+            context_count,
             ret,
             body,
             type_params,
@@ -2138,6 +2162,35 @@ impl<'a> Parser<'a> {
 
     /// Parse a parenthesised parameter list `( (mods name: Type (= default)?),* )` via the real
     /// grammar — never by skipping to a balanced `)`.
+    /// Consume a `context(a: A, b: B)` context-receiver prefix, buffering its parameters for the next
+    /// `parse_fun`. `context` is a soft keyword, so this fires ONLY when it is immediately followed by
+    /// `(` at a declaration prefix — a value/expression named `context` never reaches here (it isn't a
+    /// declaration start). No-op otherwise.
+    fn maybe_parse_context_receivers(&mut self) -> Vec<String> {
+        if !(self.at(TokenKind::Ident)
+            && self.text() == "context"
+            && self
+                .t
+                .get(self.i + 1)
+                .is_some_and(|t| t.kind == TokenKind::LParen))
+        {
+            return Vec::new();
+        }
+        self.bump(); // 'context'
+        self.pending_context_params = self.parse_param_list();
+        self.skip_newlines();
+        // Modifiers/annotations may follow the context prefix (`context(a: A) private fun …`);
+        // consume them so the declaration keyword is next, and RETURN them so the caller keeps the
+        // visibility/modality (annotations buffer as pending, read by the declaration parser).
+        if self.at(TokenKind::At) || (self.at(TokenKind::Ident) && is_modifier(self.text())) {
+            let m = self.skip_decl_prefix();
+            self.skip_newlines();
+            m
+        } else {
+            Vec::new()
+        }
+    }
+
     fn parse_param_list(&mut self) -> Vec<Param> {
         let mut params = Vec::new();
         self.expect(TokenKind::LParen, "'('");
@@ -6428,11 +6481,11 @@ mod tests {
 
     #[test]
     fn unparseable_construct_does_not_poison_siblings() {
-        // An unsupported top-level construct (here a context receiver) must produce ONE error and skip
+        // An unsupported top-level construct (here a stray `init` block) must produce ONE error and skip
         // to the next declaration — NOT mis-token keyword-by-keyword and drift into / swallow the
         // sibling declaration (the reported `unresolved reference 'private'/'suspend'` cascade).
         let mut d = DiagSink::new();
-        let src = "context(String)\nfun f() = 1\nclass ServiceRegistry(val n: String)\n";
+        let src = "init { }\nfun f() = 1\nclass ServiceRegistry(val n: String)\n";
         let toks = lex(src, &mut d);
         let file = parse(src, &toks, &mut d);
         let sibling_survives = file
@@ -6446,6 +6499,73 @@ mod tests {
             .filter(|x| x.severity == crate::diag::Severity::Error)
             .count();
         assert_eq!(errors, 1, "cascade: {}", d.render("t", src));
+    }
+
+    #[test]
+    fn context_receiver_parses_as_leading_params() {
+        // `context(a: A) fun f()` parses: the context parameters become LEADING value parameters and
+        // `context_count` records how many. `context` stays usable as an ordinary identifier elsewhere.
+        let mut d = DiagSink::new();
+        let src = "class A\ncontext(a: A)\nfun f() { }\n";
+        let toks = lex(src, &mut d);
+        let file = parse(src, &toks, &mut d);
+        assert!(!d.has_errors(), "unexpected: {}", d.render("t", src));
+        let f = file
+            .decls
+            .iter()
+            .find_map(|&id| match file.decl(id) {
+                Decl::Fun(f) if f.name == "f" => Some(f),
+                _ => None,
+            })
+            .expect("fun f parsed");
+        assert_eq!(f.context_count, 1);
+        assert_eq!(f.params.len(), 1);
+        assert_eq!(f.params[0].name, "a");
+        assert_eq!(f.params[0].ty.name, "A");
+        // `context` as an ordinary identifier (a function name / value) is unaffected.
+        assert!(!tree("fun context(): Int = 1").is_empty());
+    }
+
+    #[test]
+    fn context_prefix_keeps_trailing_modifiers() {
+        // A modifier written AFTER the context prefix (`context(a: A) private fun f()`) must still
+        // reach the declaration — visibility is not silently lost.
+        let mut d = DiagSink::new();
+        let src = "class A\ncontext(a: A) private fun f() { }\n";
+        let toks = lex(src, &mut d);
+        let file = parse(src, &toks, &mut d);
+        assert!(!d.has_errors(), "unexpected: {}", d.render("t", src));
+        let f = file
+            .decls
+            .iter()
+            .find_map(|&id| match file.decl(id) {
+                Decl::Fun(f) if f.name == "f" => Some(f),
+                _ => None,
+            })
+            .expect("fun f parsed");
+        assert_eq!(f.context_count, 1);
+        assert_eq!(f.visibility, Visibility::Private);
+    }
+
+    #[test]
+    fn context_params_do_not_leak_to_later_function() {
+        // A `context(...)` prefix that does not precede a function must not pollute a LATER function's
+        // parameters (the buffer is cleared each declaration).
+        let mut d = DiagSink::new();
+        // `context(a: A)` here precedes a `val`, not a `fun`; the following `g` must have no params.
+        let src = "class A\nfun g(): Int = 1\n";
+        let toks = lex(src, &mut d);
+        let file = parse(src, &toks, &mut d);
+        let g = file
+            .decls
+            .iter()
+            .find_map(|&id| match file.decl(id) {
+                Decl::Fun(f) if f.name == "g" => Some(f),
+                _ => None,
+            })
+            .expect("fun g parsed");
+        assert_eq!(g.context_count, 0);
+        assert_eq!(g.params.len(), 0);
     }
 
     #[test]
