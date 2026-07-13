@@ -1358,25 +1358,28 @@ impl SymbolSource for JvmLibraries {
             // its record so a named-argument / omitted-`$default` member call resolves through the ONE
             // `resolve_type` member seam (the `instance_members` query), not a separate `functions()` walk.
             let meta_fns = metadata::class_functions(&ci);
-            let member_call_sig =
-                |member: &LibraryMember, jvm_name: &str| -> crate::libraries::CallSig {
-                    let value_arity = if member.suspend && !member.params.is_empty() {
-                        member.params.len() - 1
-                    } else {
-                        member.params.len()
-                    };
-                    meta_fns
-                        .iter()
-                        .find(|f| f.jvm_name == jvm_name && f.value_params.len() == value_arity)
-                        .map(|f| {
-                            crate::libraries::CallSig::metadata_member(
-                                value_arity,
-                                f.value_params.iter().map(|p| p.name.clone()).collect(),
-                                f.value_params.iter().map(|p| p.has_default).collect(),
-                            )
-                        })
-                        .unwrap_or_default()
+            let member_meta = |jvm_name: &str, value_arity: usize| {
+                meta_fns
+                    .iter()
+                    .find(|f| f.jvm_name == jvm_name && f.value_params.len() == value_arity)
+            };
+            let metadata_member_call_sig = |f: &metadata::MetaFn| {
+                crate::libraries::CallSig::metadata_member(
+                    f.value_params.len(),
+                    f.value_params.iter().map(|p| p.name.clone()).collect(),
+                    f.value_params.iter().map(|p| p.has_default).collect(),
+                )
+            };
+            let member_call_sig = |member: &LibraryMember, jvm_name: &str| {
+                let value_arity = if member.suspend && !member.params.is_empty() {
+                    member.params.len() - 1
+                } else {
+                    member.params.len()
                 };
+                member_meta(jvm_name, value_arity)
+                    .map(metadata_member_call_sig)
+                    .unwrap_or_default()
+            };
             for m in &ci.methods {
                 // Public members are callable from anywhere; a `protected` member is surfaced too so a
                 // subclass can reach it through the supertype walk (a compiling program only reaches it
@@ -1403,10 +1406,7 @@ impl SymbolSource for JvmLibraries {
                 // result — keeping the erased type as `physical_ret` for the emitter.
                 if member.suspend {
                     let value_arity = member.params.len().saturating_sub(1);
-                    if let Some(f) = meta_fns
-                        .iter()
-                        .find(|f| f.jvm_name == m.name && f.value_params.len() == value_arity)
-                    {
+                    if let Some(f) = member_meta(&m.name, value_arity) {
                         member.physical_ret = member.ret;
                         let logical = metadata_return_info(f.ret_class, f.ret_nullable)
                             .apply(member.physical_ret);
@@ -1449,7 +1449,7 @@ impl SymbolSource for JvmLibraries {
             // `Vid` argument. Recover the SOURCE name + logical (value-class) parameter types from `@Metadata`
             // and expose the member under the source name — keeping the mangled JVM name as `physical_name`
             // and the erased descriptor for emit (the value-classes pass unboxes the `Vid` argument).
-            for mf in metadata::class_functions(&ci) {
+            for mf in &meta_fns {
                 if !mf.is_public || mf.is_extension || mf.jvm_name == mf.kotlin_name {
                     continue;
                 }
@@ -1486,11 +1486,7 @@ impl SymbolSource for JvmLibraries {
                 member.physical_ret = physical_ret;
                 member.ret_nullable = mf.ret_nullable;
                 member.suspend = mf.is_suspend;
-                member.call_sig = crate::libraries::CallSig::metadata_member(
-                    mf.value_params.len(),
-                    mf.value_params.iter().map(|p| p.name.clone()).collect(),
-                    mf.value_params.iter().map(|p| p.has_default).collect(),
-                );
+                member.call_sig = metadata_member_call_sig(mf);
                 crate::trace_compiler!(
                     "resolve",
                     "mangled member {}.{} jvm={} logical_params={:?}",
