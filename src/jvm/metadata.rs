@@ -11,7 +11,6 @@ use super::classreader::ClassInfo;
 use crate::libraries::GenericSig;
 use crate::types::{intern, Ty};
 use std::collections::HashMap;
-use std::collections::HashSet;
 
 /// Decode a Kotlin `@Metadata` `Type` message into a signature [`Ty`] — the metadata-primary,
 /// JVM-agnostic generic type. Kotlin generics come straight from `@Metadata` (the same source kotlinc
@@ -2151,18 +2150,6 @@ fn parse_package_parts(body: &[u8], jvm_pkgs: &[String]) -> Option<(String, Vec<
         facades.push(join(loc, short));
     }
     Some((pkg, facades))
-}
-
-pub fn suspend_method_names(ci: &ClassInfo) -> HashSet<String> {
-    if ci.kotlin_d1.is_empty() {
-        return HashSet::new();
-    }
-    class_functions(ci)
-        .into_iter()
-        .chain(package_functions(ci))
-        .filter(|f| f.is_suspend)
-        .map(|f| f.kotlin_name)
-        .collect()
 }
 
 #[cfg(test)]
