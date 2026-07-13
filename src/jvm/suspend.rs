@@ -70,6 +70,13 @@ pub fn lower_suspend(ir: &mut IrFile, facade: &str) -> bool {
     );
     for fid in fids {
         let body = ir.functions[fid as usize].body;
+        // Normalize `return { stmts…; value }` into `stmts…; return value`. An elvis / safe-call subject
+        // that suspends lowers to a value-position `Block` binding a temp (`{ val t = susp()…; when{…} }`);
+        // hoisting can't see into a value block, so the suspension would hide there and the flattener bail.
+        // Splicing lifts the block's statements to the top level where the hoister/flattener handle them.
+        if let Some(b) = body {
+            splice_return_blocks(ir, b);
+        }
         // Hoist a suspension nested at an unconditional position in an expression (`foo() + 2`) into a
         // preceding `val tmp = foo()` temp, so the flattener only meets suspensions at handled positions.
         if let Some(b) = body {
@@ -134,6 +141,74 @@ pub fn lower_suspend(ir: &mut IrFile, facade: &str) -> bool {
         }
     }
     true
+}
+
+/// Lift a value-position `Block` out of a top-level statement's direct operand, so a suspension buried in
+/// the block's statements surfaces at the top level where the hoister/flattener handle it. An elvis /
+/// safe-call whose subject suspends lowers to `{ val t = susp()…; when{…} }` in `return`/`val =`/assign
+/// position — a block the hoister can't see into, so the flattener would bail. This rewrites:
+///   `return { s…; v }`      → `s…; return v`
+///   `val x = { s…; v }`     → `s…; val x = v`
+///   `x = { s…; v }`         → `s…; x = v`
+/// Only a value-bearing block is spliced (a value-less / divergent block is left alone). Re-runs until
+/// settled, so nested blocks (safe-call inside elvis) fully unfold; lifted statements are reprocessed.
+fn splice_return_blocks(ir: &mut IrFile, b: ExprId) {
+    let IrExpr::Block { stmts, value } = ir.exprs[b as usize].clone() else {
+        return;
+    };
+    let mut new_stmts: Vec<ExprId> = Vec::with_capacity(stmts.len());
+    let mut changed = false;
+    for s in stmts {
+        let spliced = match ir.exprs[s as usize].clone() {
+            IrExpr::Return(Some(inner)) => value_block(ir, inner).map(|(bs, bv)| {
+                new_stmts.extend(bs);
+                ir.add_expr(IrExpr::Return(Some(bv)))
+            }),
+            IrExpr::Variable {
+                index,
+                ty,
+                init: Some(inner),
+            } => value_block(ir, inner).map(|(bs, bv)| {
+                new_stmts.extend(bs);
+                ir.add_expr(IrExpr::Variable {
+                    index,
+                    ty,
+                    init: Some(bv),
+                })
+            }),
+            IrExpr::SetValue { var, value: inner } => value_block(ir, inner).map(|(bs, bv)| {
+                new_stmts.extend(bs);
+                ir.add_expr(IrExpr::SetValue { var, value: bv })
+            }),
+            _ => None,
+        };
+        match spliced {
+            Some(ns) => {
+                new_stmts.push(ns);
+                changed = true;
+            }
+            None => new_stmts.push(s),
+        }
+    }
+    if changed {
+        ir.exprs[b as usize] = IrExpr::Block {
+            stmts: new_stmts,
+            value,
+        };
+        // A lifted statement may itself carry a value-block (safe-call nested in elvis) — repeat.
+        splice_return_blocks(ir, b);
+    }
+}
+
+/// If `e` is a value-bearing `Block`, return `(its statements, its value)`; else `None`.
+fn value_block(ir: &IrFile, e: ExprId) -> Option<(Vec<ExprId>, ExprId)> {
+    match &ir.exprs[e as usize] {
+        IrExpr::Block {
+            stmts,
+            value: Some(v),
+        } => Some((stmts.clone(), *v)),
+        _ => None,
+    }
 }
 
 /// Rewrite each top-level `return <suspend call>` in `b` into `val tmp = <suspend call>; return tmp`
