@@ -227,16 +227,13 @@ impl JvmLibraries {
         Self::const_fields(&ci.fields, |f| Some(field_desc_to_ty(&f.descriptor)))
     }
 
-    fn metadata_static_companion_consts_for_type(
+    fn metadata_static_companion_consts_for_class(
         &self,
-        internal: &str,
+        ci: &crate::jvm::classreader::ClassInfo,
     ) -> std::collections::HashMap<String, LibraryConst> {
+        let internal = &ci.this_class;
         let companion_internal = format!("{internal}$Companion");
-        let Some((ci, companion)) = self
-            .cp
-            .find(internal)
-            .zip(self.cp.find(&companion_internal))
-        else {
+        let Some(companion) = self.cp.find(&companion_internal) else {
             return std::collections::HashMap::new();
         };
         let prop_rets = super::metadata::class_property_return_classes(&companion);
@@ -245,12 +242,13 @@ impl JvmLibraries {
         })
     }
 
-    fn companion_consts_for_type(
+    fn companion_consts_for_class(
         &self,
-        internal: &str,
+        ci: &crate::jvm::classreader::ClassInfo,
     ) -> std::collections::HashMap<String, LibraryConst> {
+        let internal = &ci.this_class;
         let mut out = self.primitive_companion_consts_for_type(internal);
-        out.extend(self.metadata_static_companion_consts_for_type(internal));
+        out.extend(self.metadata_static_companion_consts_for_class(ci));
         out
     }
 
@@ -519,15 +517,16 @@ impl JvmLibraries {
         sam
     }
 
-    fn value_companion_fns_for_class(&self, internal: &str) -> Vec<crate::libraries::CompanionFn> {
-        let Some(ci) = self
-            .cp
-            .find(internal)
-            .filter(|ci| metadata::class_inline(ci).is_some())
-        else {
+    fn value_companion_fns_for_class(
+        &self,
+        ci: &crate::jvm::classreader::ClassInfo,
+        inline: bool,
+    ) -> Vec<crate::libraries::CompanionFn> {
+        if !inline {
             return Vec::new();
-        };
-        let Some(companion_field) = metadata::class_companion_name(&ci) else {
+        }
+        let internal = &ci.this_class;
+        let Some(companion_field) = metadata::class_companion_name(ci) else {
             return Vec::new();
         };
         let companion_internal = format!("{internal}${companion_field}");
@@ -541,7 +540,7 @@ impl JvmLibraries {
                 let descriptor = m.jvm_desc?;
                 let (params, _) = parse_method_desc(descriptor);
                 Some(crate::libraries::CompanionFn {
-                    class_internal: internal.to_string(),
+                    class_internal: internal.clone(),
                     companion_internal: companion_internal.clone(),
                     companion_field: companion_field.clone(),
                     callable: LibraryCallable {
@@ -1634,10 +1633,10 @@ impl SymbolSource for JvmLibraries {
                     .chain(self.builtin_members_for_type(internal))
                     .collect(),
                 companion,
-                companion_consts: self.companion_consts_for_type(&ci.this_class),
+                companion_consts: self.companion_consts_for_class(&ci),
                 sam_method: self.sam_method_for_class(&ci.this_class),
                 companion_object,
-                value_companion_fns: self.value_companion_fns_for_class(&ci.this_class),
+                value_companion_fns: self.value_companion_fns_for_class(&ci, inline.is_some()),
                 value_underlying,
                 alias_target: None,
                 type_params,
