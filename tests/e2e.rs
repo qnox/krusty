@@ -192,6 +192,8 @@ mod const_read_inline_e2e;
 mod const_val_e2e;
 #[path = "construction_default_arg_e2e.rs"]
 mod construction_default_arg_e2e;
+#[path = "context_function_type_e2e.rs"]
+mod context_function_type_e2e;
 #[path = "context_parameters_e2e.rs"]
 mod context_parameters_e2e;
 #[path = "contract_erasure_e2e.rs"]
