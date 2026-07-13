@@ -686,6 +686,8 @@ mod value_class_init_validate_e2e;
 mod value_class_map_key_e2e;
 #[path = "var_extension_property_e2e.rs"]
 mod var_extension_property_e2e;
+#[path = "var_smartcast_after_assign_e2e.rs"]
+mod var_smartcast_after_assign_e2e;
 #[path = "vararg_e2e.rs"]
 mod vararg_e2e;
 #[path = "when_branch_if_no_else_e2e.rs"]
