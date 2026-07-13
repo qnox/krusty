@@ -145,9 +145,6 @@ fn serialization_activates_from_source_annotation() {
 
 #[test]
 fn top_level_function_registers_parameter_defaults_for_plugins() {
-    // A plugin/transform that rewrites a default-valued call (e.g. Compose's `$default` mask) needs the
-    // LOWERED default exprs. Member methods and data-class `copy` already register them; a plain
-    // top-level function must too, with the static value layout (params at values 0..n, no `this`).
     let Some((_file, ir)) =
         lower("fun bar(a: Int, b: String = \"hello\", c: Boolean = true) = \"\"")
     else {
@@ -160,9 +157,8 @@ fn top_level_function_registers_parameter_defaults_for_plugins() {
         .position(|f| f.name == "bar")
         .expect("bar lowered") as u32;
     let defaults = ir
-        .fn_param_defaults
-        .get(&fid)
-        .expect("top-level fn with defaults must register fn_param_defaults");
+        .param_defaults(fid)
+        .expect("top-level fn with defaults must register parameter defaults");
     assert_eq!(
         defaults.len(),
         3,
