@@ -3563,6 +3563,9 @@ fn ty_of_ref_with(
         if base == Ty::Unit {
             return Ty::nullable(Ty::obj("kotlin/Unit"));
         }
+        if base == Ty::Nothing {
+            return Ty::nullable(Ty::Nothing);
+        }
         if let Some(nb) = base.nullable_boxed() {
             return nb;
         }
@@ -5321,6 +5324,9 @@ impl<'a> Checker<'a> {
         if r.nullable && !base.is_reference() && base != Ty::Error {
             if base == Ty::Unit {
                 return Ty::nullable(Ty::obj("kotlin/Unit"));
+            }
+            if base == Ty::Nothing {
+                return Ty::nullable(Ty::Nothing);
             }
             if let Some(nb) = base.nullable_boxed() {
                 return nb;
@@ -7217,7 +7223,9 @@ impl<'a> Checker<'a> {
                         Ty::Nullable(inner) => *inner,
                         _ => lt,
                     }
-                } else if lt == Ty::Null {
+                } else if lt == Ty::Null
+                    || matches!(lt0, Ty::Nullable(inner) if *inner == Ty::Nothing)
+                {
                     rt
                 } else if rt == Ty::Null {
                     lt

@@ -1660,10 +1660,15 @@ fn emit_bridges(c: &crate::ir::IrClass, cw: &mut ClassWriter) {
             );
             continue;
         }
-        if b.concrete_ret.non_null() == Ty::Nothing {
-            // Kotlin `Nothing` methods are emitted with a void JVM descriptor and must not fall
-            // through. If they ever do, throw here so a bridge with a non-void erased return still
-            // has verifier-valid control flow instead of trying to return a nonexistent value.
+        if b.concrete_ret == Ty::Nothing {
+            // Kotlin `Nothing` methods must not fall through. If the concrete descriptor still leaves a
+            // physical carrier value, discard it before throwing so the assertion path starts with a clean
+            // stack for every bridge return representation.
+            if cr == Ty::Nothing {
+                code.pop();
+            } else {
+                discard(cr, &mut code);
+            }
             let ae = cw.class_ref("java/lang/AssertionError");
             code.new_obj(ae);
             code.dup();
@@ -7021,6 +7026,9 @@ pub fn ir_ty_to_jvm(t: &Ty) -> Ty {
     // 1-slot reference), NOT the unboxed scalar. Map it before peeling `?`, so descriptors, slots and
     // stackmap frames all see the reference. A nullable REFERENCE keeps its descriptor (peel below).
     if let Ty::Nullable(inner) = t {
+        if **inner == Ty::Nothing {
+            return Ty::obj("kotlin/Any");
+        }
         if let Some(boxed) = inner.boxed_ref() {
             // `boxed_ref` already picks the right wrapper — `java/lang/Integer` for `Int?`, the inline-class
             // `kotlin/UInt` for `UInt?` — so do NOT re-map through `ir_ty_to_jvm` (which would erase the
@@ -7110,8 +7118,15 @@ pub fn ir_ty_to_jvm(t: &Ty) -> Ty {
     }
 }
 
+fn ir_param_ty_to_jvm(t: &Ty) -> Ty {
+    match ir_ty_to_jvm(t) {
+        Ty::Nothing => Ty::obj("kotlin/Any"),
+        other => other,
+    }
+}
+
 pub(crate) fn jvm_tys(tys: &[Ty]) -> Vec<Ty> {
-    tys.iter().map(ir_ty_to_jvm).collect()
+    tys.iter().map(ir_param_ty_to_jvm).collect()
 }
 
 /// Whether a JVM type is an ERASED TOP reference — the `java/lang/Object` a type parameter erases to, or
