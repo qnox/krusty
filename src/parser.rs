@@ -798,6 +798,32 @@ impl<'a> Parser<'a> {
             false
         }
     }
+    /// True when the current token is a `;` (the lexer emits it as a `Newline`, but its source text is
+    /// `";"` — distinguishing an explicit statement terminator from a plain line break). Used to detect
+    /// an EMPTY loop body (`while (c);`), which must not swallow the following statement as the body.
+    fn at_semicolon(&self) -> bool {
+        self.at(TokenKind::Newline) && self.text() == ";"
+    }
+    /// Parse a loop body after the header's closing `)`. An explicit `;` is an EMPTY body (`while (c);`,
+    /// `for (…);`) — consumed here so the following statement is NOT mistaken for the body; otherwise the
+    /// body is the next statement/expression (possibly on the next line, so plain line breaks are skipped
+    /// first). `parse_branch` handles a bare statement body (`while (c) i++`), not just an expression.
+    fn parse_loop_body(&mut self) -> ExprId {
+        if self.at_semicolon() {
+            let sp = self.tok().span;
+            self.bump();
+            self.file.add_expr(
+                Expr::Block {
+                    stmts: Vec::new(),
+                    trailing: None,
+                },
+                sp,
+            )
+        } else {
+            self.skip_newlines();
+            self.parse_branch()
+        }
+    }
     fn skip_newlines(&mut self) {
         while self.at(TokenKind::Newline) {
             self.bump();
@@ -4121,9 +4147,7 @@ impl<'a> Parser<'a> {
                 self.expect(TokenKind::LParen, "'('");
                 let cond = self.parse_expr();
                 self.expect(TokenKind::RParen, "')'");
-                self.skip_newlines();
-                // `parse_branch` handles a statement body (e.g. `while (c) i++`), not just an expression.
-                let body = self.parse_branch();
+                let body = self.parse_loop_body();
                 self.finish_stmt(
                     Stmt::While {
                         cond,
@@ -4135,8 +4159,7 @@ impl<'a> Parser<'a> {
             }
             TokenKind::KwDo => {
                 self.bump();
-                self.skip_newlines();
-                let body = self.parse_branch();
+                let body = self.parse_loop_body();
                 self.skip_newlines();
                 self.expect(TokenKind::KwWhile, "'while'");
                 self.expect(TokenKind::LParen, "'('");
@@ -4416,8 +4439,7 @@ impl<'a> Parser<'a> {
                 );
             }
             self.expect(TokenKind::RParen, "')'");
-            self.skip_newlines();
-            let body = self.parse_branch();
+            let body = self.parse_loop_body();
             let body = self.desugar_destructure_body(&name, destructure, body);
             // `for (i in X.indices)` → counted loop `0 until X.size`.
             if let Expr::Member {
@@ -4602,8 +4624,7 @@ impl<'a> Parser<'a> {
             };
             let iterable = self.parse_for_trailing_infix(base);
             self.expect(TokenKind::RParen, "')'");
-            self.skip_newlines();
-            let body = self.parse_branch();
+            let body = self.parse_loop_body();
             let body = self.desugar_destructure_body(&name, destructure, body);
             return self.finish_stmt(
                 Stmt::ForEach {
@@ -4616,8 +4637,7 @@ impl<'a> Parser<'a> {
             );
         }
         self.expect(TokenKind::RParen, "')'");
-        self.skip_newlines();
-        let body = self.parse_branch();
+        let body = self.parse_loop_body();
         self.finish_stmt(
             Stmt::For {
                 name,

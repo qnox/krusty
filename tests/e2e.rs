@@ -242,6 +242,8 @@ mod duplicate_enum_entry_check_e2e;
 mod duplicate_param_check_e2e;
 #[path = "elvis_newline_continuation_e2e.rs"]
 mod elvis_newline_continuation_e2e;
+#[path = "empty_loop_body_e2e.rs"]
+mod empty_loop_body_e2e;
 #[path = "enum_body_property_e2e.rs"]
 mod enum_body_property_e2e;
 #[path = "enum_class_signature_e2e.rs"]
