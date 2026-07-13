@@ -1717,6 +1717,12 @@ impl<'a> Parser<'a> {
         // Enum body member properties (`enum class C { A; val x = … }`) and their initializer order.
         let mut body_props: Vec<PropDecl> = Vec::new();
         let mut init_order: Vec<ClassInit> = Vec::new();
+        // A `companion object { … }` in the enum body (`enum class E { A; companion object { … } }`).
+        let mut companion_methods: Vec<FunDecl> = Vec::new();
+        let mut companion_props: Vec<PropDecl> = Vec::new();
+        let mut companion_base: Option<String> = None;
+        let mut companion_base_args: Vec<ExprId> = Vec::new();
+        let mut companion_supertypes: Vec<String> = Vec::new();
         self.skip_newlines();
         if self.eat(TokenKind::LBrace) {
             self.skip_newlines();
@@ -1871,9 +1877,21 @@ impl<'a> Parser<'a> {
                     TokenKind::Ident if matches!(self.text(), "object" | "interface") => {
                         let _ = self.parse_nested_type_decl();
                     }
-                    TokenKind::Ident if self.text() == "companion" => {
-                        self.bump();
-                        let _ = self.parse_nested_type_decl();
+                    TokenKind::Ident
+                        if self.text() == "companion"
+                            && self.t.get(self.i + 1).is_some_and(|t| {
+                                t.kind == TokenKind::Ident && t.text(self.src) == "object"
+                            }) =>
+                    {
+                        // `companion object { … }` in the enum body — parse it like a regular class's
+                        // companion (anonymous name allowed) and attach its members to the enum.
+                        self.parse_companion(
+                            &mut companion_methods,
+                            &mut companion_props,
+                            &mut companion_base,
+                            &mut companion_base_args,
+                            &mut companion_supertypes,
+                        );
                     }
                     _ => break,
                 }
@@ -1898,11 +1916,11 @@ impl<'a> Parser<'a> {
             type_param_bounds: Vec::new(),
             props,
             methods,
-            companion_methods: Vec::new(),
-            companion_props: Vec::new(),
-            companion_base: None,
-            companion_base_args: Vec::new(),
-            companion_supertypes: Vec::new(),
+            companion_methods,
+            companion_props,
+            companion_base,
+            companion_base_args,
+            companion_supertypes,
             body_props,
             init_order,
             is_data: false,
@@ -6987,6 +7005,29 @@ mod tests {
             tree("class Calc(val base: Int) {\n  fun addTo(n: Int): Int = base + n\n}"),
             "(class Calc (val base Int) (method addTo (param n Int) :Int))\n"
         );
+    }
+
+    #[test]
+    fn enum_companion_object_parses_and_attaches_members() {
+        // A `companion object { … }` in an enum body (`enum class E { A; companion object { … } }`)
+        // parses (was "expected object name") and its members attach to the enum's companion, exactly
+        // like a regular class's companion.
+        let mut d = DiagSink::new();
+        let src = "enum class Game { ROCK, PAPER; companion object { fun foo() = ROCK; val bar = PAPER } }\n";
+        let toks = lex(src, &mut d);
+        let file = parse(src, &toks, &mut d);
+        assert!(!d.has_errors(), "unexpected: {}", d.render("t", src));
+        let g = file
+            .decls
+            .iter()
+            .find_map(|&id| match file.decl(id) {
+                Decl::Class(c) if c.name == "Game" => Some(c),
+                _ => None,
+            })
+            .expect("enum Game parsed");
+        assert_eq!(g.enum_entries.len(), 2);
+        assert!(g.companion_methods.iter().any(|m| m.name == "foo"));
+        assert!(g.companion_props.iter().any(|p| p.name == "bar"));
     }
 
     #[test]
