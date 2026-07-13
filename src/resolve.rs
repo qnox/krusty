@@ -242,6 +242,11 @@ impl ClassNames {
     pub fn contains_key(&self, k: &str) -> bool {
         self.user.contains_key(k) || self.base.contains_key(k)
     }
+    /// Does some registered simple name resolve to this JVM internal name? Used to confirm a
+    /// qualified nested supertype (`Foo/Bar` → `Foo$Bar`) names a REAL declared class.
+    pub fn has_internal(&self, internal: &str) -> bool {
+        self.user.values().any(|v| v == internal) || self.base.values().any(|v| v == internal)
+    }
     pub fn insert(&mut self, k: String, v: String) -> Option<String> {
         self.user.insert(k, v)
     }
@@ -1779,6 +1784,15 @@ pub fn collect_signatures_with_cp(
                         match class_names.get(s) {
                             Some(internal) => internal.clone(),
                             None if ctp.contains(s) => s.to_string(), // erased type parameter (degenerate)
+                            // A QUALIFIED nested supertype (`Foo.Bar` → `Foo/Bar` here) whose outer isn't a
+                            // package: the nested class is registered as `Outer$Nested`. Try that dollar
+                            // form and accept it only when it names a REAL declared class (some registered
+                            // simple name maps to it), so an unresolved name still errors.
+                            None if s.contains('/')
+                                && class_names.has_internal(&s.replace('/', "$")) =>
+                            {
+                                s.replace('/', "$")
+                            }
                             None => {
                                 diags.error(c.span, format!("krusty: supertype '{s}' could not be resolved (provide it on the classpath)"));
                                 s.to_string()
