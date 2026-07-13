@@ -5353,11 +5353,7 @@ impl<'a> Lower<'a> {
         None
     }
 
-    /// Lower a NAMED classpath constructor call, mapping labels onto parameter positions via `@Metadata`.
-    /// When every parameter is supplied, delegate to the plain positional path. When a DEFAULTED parameter
-    /// is OMITTED (`Cfg(a = 1, c = "x")` for `Cfg(a, b = 9, c = "z")`), emit kotlinc's synthetic
-    /// `<init>(<params…>, int mask, DefaultConstructorMarker)`: each provided arg (coerced) or a
-    /// `zero_placeholder` for an omitted one, then the omitted-position bitmask, then the `null` marker.
+    /// Lower a named classpath constructor call using metadata parameter names/defaults.
     fn lower_external_new_named(
         &mut self,
         internal: &str,
@@ -5365,18 +5361,18 @@ impl<'a> Lower<'a> {
         args: &[AstExprId],
     ) -> Option<u32> {
         let names = self.afile.call_arg_names.get(&call.0)?.clone();
-        let (param_names, param_defaults) = self
+        let ctor_params = self
             .syms
             .libraries
             .resolve_type(internal)
             .and_then(|t| t.constructor_named_params(args.len()))?;
-        let required = required_arity(param_names.len(), &param_defaults);
+        let required = required_arity(ctor_params.names.len(), &ctor_params.defaults);
         let slots = crate::resolve::map_call_args(
             args,
             Some(&names),
-            &param_names,
+            &ctor_params.names,
             required,
-            &param_defaults,
+            &ctor_params.defaults,
         )
         .ok()?;
         if slots.iter().all(Option::is_some) {

@@ -8,7 +8,7 @@
 //! String ids index the `d2` table.
 
 use super::classreader::ClassInfo;
-use crate::libraries::{CallSig, GenericSig};
+use crate::libraries::{CallSig, GenericSig, ParamList};
 use crate::types::{intern, Ty};
 use std::collections::HashMap;
 
@@ -1193,11 +1193,8 @@ fn parse_type_alias(body: &[u8], records: &[Rec], d2: &[String]) -> Option<(Stri
     Some((name, internal))
 }
 
-/// The SOURCE value-parameter names and default flags of every constructor in a `Class`'s `@Metadata`
-/// (`Class.constructor` field 8 → `Constructor.value_parameter` field 2), one pair per constructor in
-/// declaration order (the primary constructor is first). Drives NAMED-ARGUMENT resolution for classpath
-/// constructor calls; descriptors don't carry names or source-level default declarations.
-pub fn class_constructor_params(ci: &ClassInfo) -> Vec<(Vec<String>, Vec<bool>)> {
+/// Constructor source parameter names/default flags from `Class` `@Metadata`, in declaration order.
+pub fn class_constructor_params(ci: &ClassInfo) -> Vec<ParamList> {
     let mut out = Vec::new();
     if ci.kotlin_d1.is_empty() {
         return out;
@@ -1255,7 +1252,7 @@ pub fn class_constructor_params(ci: &ClassInfo) -> Vec<(Vec<String>, Vec<bool>)>
                         }
                     }
                 }
-                out.push((names, defaults));
+                out.push(ParamList { names, defaults });
             }
             (_, w) => {
                 if pb.skip(w).is_none() {
