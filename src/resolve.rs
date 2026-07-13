@@ -2450,14 +2450,9 @@ fn bc_complex_s(file: &File, s: StmtId, vforbid: bool, cross: bool) -> bool {
         } => val(*receiver) || val(*value),
         Stmt::AssignIndex {
             array,
-            index,
-            value,
-        } => val(*array) || val(*index) || val(*value),
-        Stmt::AssignIndexMulti {
-            receiver,
             indices,
             value,
-        } => val(*receiver) || indices.iter().any(|&i| val(i)) || val(*value),
+        } => val(*array) || indices.iter().any(|&i| val(i)) || val(*value),
         Stmt::Return(Some(e), _) => val(*e),
         Stmt::Return(None, _) | Stmt::IncDec { .. } | Stmt::LocalLateinit { .. } => false,
         // A statement's value is discarded — its (possibly `if`/`when`) tree stays in statement position.
@@ -2730,19 +2725,10 @@ fn collect_lambda_outer_writes(
             }
             Stmt::AssignIndex {
                 array,
-                index,
-                value,
-            } => {
-                ce(file, *array, active, out);
-                ce(file, *index, active, out);
-                ce(file, *value, active, out);
-            }
-            Stmt::AssignIndexMulti {
-                receiver,
                 indices,
                 value,
             } => {
-                ce(file, *receiver, active, out);
+                ce(file, *array, active, out);
                 for &i in indices {
                     ce(file, i, active, out);
                 }
@@ -6835,68 +6821,41 @@ impl<'a> Checker<'a> {
                     .unwrap_or(bret);
                 Ty::fun(fun_params, ret)
             }
-            Expr::Index { array, index } => {
+            Expr::Index { array, indices } => {
+                // `a[i]` / `recv[i, j, …]` — a subscript. A SINGLE index over an array is element access
+                // (or `String.get`); otherwise (and for two-or-more indices) it is a `get(i, j, …)`
+                // operator — a user member, a same-module extension, or a library member.
                 let at = self.expr(array);
-                let it = self.expr(index);
-                if let Some(elem) = at.array_elem() {
-                    self.expect_assignable(Ty::Int, it, self.span(index), "array index");
-                    return self.set(e, elem);
-                }
-                // `str[i]` is the `String.get(Int): Char` operator — resolved from the builtins String
-                // declarations (then the curated table for anything builtins doesn't declare).
-                if at == Ty::String {
-                    if let Some(ret) = crate::symbol_resolver::resolve_instance_member(
-                        &*self.syms.libraries,
-                        at,
-                        "get",
-                        &[it],
-                    )
-                    .map(|m| m.ret)
-                    {
-                        return self.set(e, ret);
+                let its: Vec<Ty> = indices.iter().map(|&i| self.expr(i)).collect();
+                if indices.len() == 1 {
+                    if let Some(elem) = at.array_elem() {
+                        self.expect_assignable(
+                            Ty::Int,
+                            its[0],
+                            self.span(indices[0]),
+                            "array index",
+                        );
+                        return self.set(e, elem);
                     }
-                }
-                // `m[i]` on a USER class with an `operator fun get(index)` → `m.get(i)`.
-                if let Ty::Obj(internal, _) = at {
-                    if let Some(sig) = self.syms.method_of(internal, "get") {
-                        if sig.params.len() == 1 {
-                            self.expect_assignable(sig.params[0], it, self.span(index), "index");
-                            return self.set(e, sig.ret);
+                    // `str[i]` is the `String.get(Int): Char` operator.
+                    if at == Ty::String {
+                        if let Some(ret) = crate::symbol_resolver::resolve_instance_member(
+                            &*self.syms.libraries,
+                            at,
+                            "get",
+                            &its,
+                        )
+                        .map(|m| m.ret)
+                        {
+                            return self.set(e, ret);
                         }
                     }
                 }
-                // `coll[i]` on a library type → the `get(index)` operator member (`List.get(Int)`,
-                // `Map.get(K)`); the index type is checked against the member's parameter.
-                if let Ty::Obj(..) = at {
-                    if let Some(m) = crate::symbol_resolver::resolve_instance_member(
-                        &*self.syms.libraries,
-                        at,
-                        "get",
-                        &[it],
-                    ) {
-                        return self.set(e, m.ret);
-                    }
-                }
-                if at != Ty::Error {
-                    self.diags.error(
-                        self.span(e),
-                        format!("'{}' is not an array (cannot index)", at.name()),
-                    );
-                }
-                Ty::Error
-            }
-            Expr::IndexMulti { receiver, indices } => {
-                // `recv[i, j, …]` is a multi-argument `get` operator (`recv.get(i, j, …)`). Type the
-                // receiver and indices, then resolve `get` with all index types — a member, a same-module
-                // extension (`operator fun Array<String>.get(a, b)`), or a library member. The result is
-                // the operator's return type. (The lowering is a later slice — a file using this still
-                // skips at the backend, but it type-checks here rather than failing to parse.)
-                let rt = self.expr(receiver);
-                let its: Vec<Ty> = indices.iter().map(|&i| self.expr(i)).collect();
-                if rt == Ty::Error {
+                if at == Ty::Error {
                     return Ty::Error;
                 }
-                if let Some(internal) = rt.obj_internal() {
+                // A user-class member `operator fun get(i, j, …)`.
+                if let Some(internal) = at.obj_internal() {
                     if let Some(sig) = self.syms.method_of(internal, "get") {
                         if sig.params.len() == its.len() {
                             for (i, &pt) in sig.params.iter().enumerate() {
@@ -6906,10 +6865,11 @@ impl<'a> Checker<'a> {
                         }
                     }
                 }
+                // A same-module extension `operator fun Recv.get(i, j, …)`.
                 if let Some(sig) = self
                     .syms
                     .ext_funs
-                    .get(&(rt.erased_recv(), "get".to_string()))
+                    .get(&(at.erased_recv(), "get".to_string()))
                     .cloned()
                 {
                     if sig.params.len() == its.len() {
@@ -6919,9 +6879,10 @@ impl<'a> Checker<'a> {
                         return self.set(e, sig.ret);
                     }
                 }
+                // A library `get(i, j, …)` member (`List.get(Int)`, `Map.get(K)`).
                 if let Some(m) = crate::symbol_resolver::resolve_instance_member(
                     &*self.syms.libraries,
-                    rt,
+                    at,
                     "get",
                     &its,
                 ) {
@@ -6929,11 +6890,15 @@ impl<'a> Checker<'a> {
                 }
                 self.diags.error(
                     self.span(e),
-                    format!(
-                        "no 'get' operator taking {} indices on '{}'",
-                        its.len(),
-                        rt.name()
-                    ),
+                    if indices.len() == 1 {
+                        format!("'{}' is not an array (cannot index)", at.name())
+                    } else {
+                        format!(
+                            "no 'get' operator taking {} indices on '{}'",
+                            its.len(),
+                            at.name()
+                        )
+                    },
                 );
                 Ty::Error
             }
@@ -12902,79 +12867,38 @@ impl<'a> Checker<'a> {
             }
             Stmt::AssignIndex {
                 array,
-                index,
-                value,
-            } => {
-                let at = self.expr(array);
-                let it = self.expr(index);
-                let vt = self.expr(value);
-                let span = self.file.stmt_spans[s.0 as usize];
-                match at.array_elem() {
-                    Some(elem) => {
-                        self.expect_assignable(Ty::Int, it, span, "array index");
-                        self.expect_assignable(elem, vt, span, "array element assignment");
-                    }
-                    // `m[i] = v` on a USER class with an `operator fun set(index, value)` → `m.set(i, v)`.
-                    None if matches!(at, Ty::Obj(internal, _)
-                        if self.syms.method_of(internal, "set").is_some_and(|sig| sig.params.len() == 2)) =>
-                    {
-                        if let Ty::Obj(internal, _) = at {
-                            if let Some(sig) = self.syms.method_of(internal, "set") {
-                                self.expect_assignable(sig.params[0], it, span, "index");
-                                self.expect_assignable(
-                                    sig.params[1],
-                                    vt,
-                                    span,
-                                    "indexed assignment",
-                                );
-                            }
-                        }
-                    }
-                    // `coll[i] = v` on a library type → its `set(index, value)` operator member
-                    // (`MutableList.set(Int, E)`, `MutableMap.put(K, V)`).
-                    None if matches!(at, Ty::Obj(internal, _)
-                        if crate::symbol_resolver::resolve_instance(&*self.syms.libraries, internal, "set", &[it, vt]).is_some()
-                            || crate::symbol_resolver::resolve_instance(&*self.syms.libraries, internal, "put", &[it, vt]).is_some()) =>
-                        {}
-                    None => {
-                        if at != Ty::Error {
-                            self.diags.error(
-                                span,
-                                format!("'{}' is not an array (cannot index-assign)", at.name()),
-                            );
-                        }
-                    }
-                }
-            }
-            Stmt::AssignIndexMulti {
-                receiver,
                 indices,
                 value,
             } => {
-                // `recv[i, j, …] = v` is the multi-argument `set` operator (`recv.set(i, j, …, v)`).
-                // Type the receiver, indices, and value, then confirm a `set` taking that many indices
-                // plus the value exists — a member, a same-module extension, or a library member. (The
-                // backend lowering is a later slice; a file using this type-checks here but skips at
-                // codegen rather than failing to parse.)
-                let rt = self.expr(receiver);
+                // `a[i] = v` (array element store) / `recv[i, j, …] = v` (the `set(i, j, …, v)` operator —
+                // a user member, a same-module extension, or a library member; `m[k] = v` on a Map is
+                // `put`). The value is the trailing `set` argument.
+                let at = self.expr(array);
                 let its: Vec<Ty> = indices.iter().map(|&i| self.expr(i)).collect();
                 let vt = self.expr(value);
                 let span = self.file.stmt_spans[s.0 as usize];
-                if rt == Ty::Error {
+                if indices.len() == 1 {
+                    if let Some(elem) = at.array_elem() {
+                        self.expect_assignable(Ty::Int, its[0], span, "array index");
+                        self.expect_assignable(elem, vt, span, "array element assignment");
+                        return;
+                    }
+                }
+                if at == Ty::Error {
                     return;
                 }
                 let mut set_args = its.clone();
                 set_args.push(vt);
                 // Resolve `set` as a member or same-module extension (checking every argument type),
-                // else a library member (type-aware in the resolver).
-                let member_set = rt
+                // else a library member (type-aware in the resolver); a single-index Map store is `put`.
+                let member_set = at
                     .obj_internal()
                     .and_then(|i| self.syms.method_of(i, "set"))
                     .filter(|sig| sig.params.len() == set_args.len())
                     .or_else(|| {
                         self.syms
                             .ext_funs
-                            .get(&(rt.erased_recv(), "set".to_string()))
+                            .get(&(at.erased_recv(), "set".to_string()))
                             .filter(|sig| sig.params.len() == set_args.len())
                             .cloned()
                     });
@@ -12991,20 +12915,32 @@ impl<'a> Checker<'a> {
                 } else {
                     crate::symbol_resolver::resolve_instance_member(
                         &*self.syms.libraries,
-                        rt,
+                        at,
                         "set",
                         &set_args,
                     )
                     .is_some()
+                        || (indices.len() == 1
+                            && crate::symbol_resolver::resolve_instance_member(
+                                &*self.syms.libraries,
+                                at,
+                                "put",
+                                &set_args,
+                            )
+                            .is_some())
                 };
-                if !ok {
+                if !ok && at != Ty::Error {
                     self.diags.error(
                         span,
-                        format!(
-                            "no 'set' operator taking {} indices on '{}'",
-                            its.len(),
-                            rt.name()
-                        ),
+                        if indices.len() == 1 {
+                            format!("'{}' is not an array (cannot index-assign)", at.name())
+                        } else {
+                            format!(
+                                "no 'set' operator taking {} indices on '{}'",
+                                its.len(),
+                                at.name()
+                            )
+                        },
                     );
                 }
             }

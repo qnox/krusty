@@ -3687,11 +3687,13 @@ fn break_continue_stmt_tail_only(file: &ast::File, s: ast::StmtId) -> bool {
         }
         Stmt::AssignIndex {
             array,
-            index,
+            indices,
             value,
         } => {
             break_continue_tail_only(file, *array, false)
-                && break_continue_tail_only(file, *index, false)
+                && indices
+                    .iter()
+                    .all(|&i| break_continue_tail_only(file, i, false))
                 && break_continue_tail_only(file, *value, true)
         }
         // A loop CONDITION / range is a dirty (non-tail) position (`while (break)`); the body is scanned
@@ -13256,30 +13258,25 @@ impl<'a> Lower<'a> {
                     value: v,
                 }))
             }
-            // A multi-argument `set` operator (`recv[i, j] = v`) → `recv.set(i, j, v)`. A USER-class
-            // member and a library member are emitted here; a same-module EXTENSION `set` still bails.
-            Stmt::AssignIndexMulti {
-                receiver,
+            Stmt::AssignIndex {
+                array,
                 indices,
                 value,
             } => {
-                // `recv[i, j, …] = v` → `recv.set(i, j, …, v)` — a user member, a same-module extension,
-                // or a library member. The value is the trailing `set` argument.
-                let rt = self.info.ty(receiver);
-                let recv_v = self.expr(receiver)?;
-                let mut set_args = indices.clone();
-                set_args.push(value);
-                if let Some((v, _)) = self.lower_op_call(recv_v, rt, "set", &set_args) {
-                    return Some(v);
+                // A MULTI-index store (`recv[i, j] = v`) → the `set(i, j, …, v)` operator (a user member,
+                // a same-module extension, or a library member; `lower_op_call` covers all three).
+                if indices.len() != 1 {
+                    let rt = self.info.ty(array);
+                    let recv_v = self.expr(array)?;
+                    let mut set_args = indices.clone();
+                    set_args.push(value);
+                    if let Some((v, _)) = self.lower_op_call(recv_v, rt, "set", &set_args) {
+                        return Some(v);
+                    }
+                    set_bail("stmt AssignIndex(multi)");
+                    return None;
                 }
-                set_bail("stmt AssignIndexMulti");
-                None
-            }
-            Stmt::AssignIndex {
-                array,
-                index,
-                value,
-            } => {
+                let index = indices[0];
                 // A compound index-assign (`a[i] op= v`) desugars (in the parser) to `value = a[i] op v`,
                 // REUSING the `array`/`index` expr ids — so lowering the store and the embedded read would
                 // evaluate a side-effecting receiver/index twice (`a[f()] += v` calls `f()` twice). Spill
@@ -13745,10 +13742,10 @@ impl<'a> Lower<'a> {
         if let Expr::Binary { lhs, .. } = self.afile.expr(value) {
             if let Expr::Index {
                 array: a2,
-                index: i2,
+                indices: i2,
             } = self.afile.expr(*lhs)
             {
-                return *a2 == array && *i2 == index;
+                return *a2 == array && i2.len() == 1 && i2[0] == index;
             }
         }
         false
@@ -13862,6 +13859,16 @@ impl<'a> Lower<'a> {
                     }));
                 }
             }
+        }
+        // A non-array receiver with a same-module EXTENSION `operator fun Recv.set(index, value)` — via
+        // `lower_op_call`. A non-array object without any `set` operator is NOT an array, so bail (skip)
+        // rather than fall through to the `aastore` intrinsic (which would store into a non-array).
+        if at.array_elem().is_none() && at.obj_internal().is_some() {
+            let recv_v = self.expr(array)?;
+            if let Some((v, _)) = self.lower_op_call(recv_v, at, "set", &[index, value]) {
+                return Some(v);
+            }
+            return None;
         }
         let a = self.expr(array)?;
         // The index is always an `Int` — unbox a generic/erased `Object` index (a destructured
@@ -16041,87 +16048,33 @@ impl<'a> Lower<'a> {
             }
             // `a[i]` read. User/library `get` operators resolve through their member metadata; arrays
             // keep the IR intrinsic because the backend reads the element from the receiver type.
-            // A multi-argument `get` operator (`recv[i, j]`) → `recv.get(i, j)`. A USER-class member and
-            // a library member are emitted here (mirroring the single-index paths); a same-module
-            // EXTENSION `get` operator is a later slice, so it still bails.
-            Expr::IndexMulti { receiver, indices } => {
-                // `recv[i, j, …]` → `recv.get(i, j, …)` — a user member, a same-module extension, or a
-                // library member (`lower_op_call` covers all three). A library `get` with an erased
-                // generic return is coerced to the concrete element type (`coerce_generic_read`).
-                let rt = self.info.ty(receiver);
-                let recv_v = self.expr(receiver)?;
-                if let Some((v, ret)) = self.lower_op_call(recv_v, rt, "get", &indices) {
-                    return Some(self.coerce_generic_read(v, e, ret));
-                }
-                set_bail("expr IndexMulti");
-                return None;
-            }
-            Expr::Index { array, index } => {
+            Expr::Index { array, indices } => {
                 let at = self.info.ty(array);
-                // `m[i]` on a USER class with an `operator fun get(index)` → `m.get(i)` (walks supers, so
-                // an inherited operator resolves — consistent with the checker's `method_of`).
-                if let Ty::Obj(internal, _) = at {
-                    if at.array_elem().is_none() {
-                        let getm = self
-                            .resolve_method(internal, "get")
-                            .map(|(class, midx, fid, _)| (class, midx, fid));
-                        if let Some((class, midx, fid)) = getm {
-                            let pty = self.ir.functions[fid as usize]
-                                .params
-                                .first()
-                                .cloned()
-                                .unwrap_or_else(|| ty_to_ir(self.info.ty(index)));
-                            let a = self.expr(array)?;
-                            let i = self.lower_arg(index, &pty)?;
-                            return Some(self.ir.add_expr(IrExpr::MethodCall {
-                                class,
-                                index: midx,
-                                receiver: a,
-                                args: vec![Some(i)],
-                            }));
-                        }
-                    }
-                }
-                // `coll[i]` on a library type (`List`, `Map`) → its `get(index)` operator member.
-                if let Ty::Obj(internal, _) = at {
-                    if at.array_elem().is_none() {
-                        let it = self.info.ty(index);
-                        if let Some(m) = crate::symbol_resolver::resolve_instance(
-                            &*self.syms.libraries,
-                            internal,
-                            "get",
-                            &[it],
-                        ) {
-                            let is_iface = self.library_type_is_interface(internal);
-                            let a = self.expr(array)?;
-                            let i = self.lower_arg(
-                                index,
-                                &ty_to_ir(m.params.first().copied().unwrap_or(it)),
-                            )?;
-                            let read = self.ir.add_expr(IrExpr::Call {
-                                callee: Callee::Virtual {
-                                    owner: internal.to_string(),
-                                    name: "get".to_string(),
-                                    descriptor: m.descriptor.clone(),
-                                    interface: is_iface,
-                                },
-                                dispatch_receiver: Some(a),
-                                args: vec![i],
-                            });
-                            return Some(self.coerce_generic_read(read, e, m.ret));
-                        }
-                    }
-                }
-                let a = self.expr(array)?;
-                let i = self.expr(index)?;
-                if at == Ty::String {
+                // A single index into an actual array → the array-get intrinsic.
+                if indices.len() == 1 && at.array_elem().is_some() {
+                    let a = self.expr(array)?;
+                    let i = self.expr(indices[0])?;
+                    self.ir.add_expr(IrExpr::Call {
+                        callee: Callee::External("kotlin/Array.get".to_string()),
+                        dispatch_receiver: Some(a),
+                        args: vec![i],
+                    })
+                } else if indices.len() == 1 && at == Ty::String {
+                    // `str[i]` → the `String.get(Int)` member.
+                    let a = self.expr(array)?;
+                    let i = self.expr(indices[0])?;
                     return self.lower_library_instance_call_on(a, at, "get", vec![i], &[Ty::Int]);
+                } else {
+                    // Any other receiver → the `get(i, j, …)` operator: a user member, a same-module
+                    // extension, or a library member (`lower_op_call` covers all three, single or multi
+                    // index). A library `get` with an erased generic return is coerced to the element type.
+                    let recv_v = self.expr(array)?;
+                    if let Some((v, ret)) = self.lower_op_call(recv_v, at, "get", &indices) {
+                        return Some(self.coerce_generic_read(v, e, ret));
+                    }
+                    set_bail("expr Index");
+                    return None;
                 }
-                self.ir.add_expr(IrExpr::Call {
-                    callee: Callee::External("kotlin/Array.get".to_string()),
-                    dispatch_receiver: Some(a),
-                    args: vec![i],
-                })
             }
             Expr::Member { receiver, name } => {
                 // A classpath nested singleton object recorded by the checker (`PrimitiveKind.STRING`) →

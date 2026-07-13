@@ -4213,26 +4213,13 @@ impl<'a> Parser<'a> {
                                 start,
                             );
                         }
-                        Expr::Index { array, index } => {
+                        Expr::Index { array, indices } => {
                             self.bump(); // '='
                             self.skip_newlines();
                             let value = self.parse_expr();
                             return self.finish_stmt(
                                 Stmt::AssignIndex {
                                     array,
-                                    index,
-                                    value,
-                                },
-                                start,
-                            );
-                        }
-                        Expr::IndexMulti { receiver, indices } => {
-                            self.bump(); // '='
-                            self.skip_newlines();
-                            let value = self.parse_expr();
-                            return self.finish_stmt(
-                                Stmt::AssignIndexMulti {
-                                    receiver,
                                     indices,
                                     value,
                                 },
@@ -4277,16 +4264,22 @@ impl<'a> Parser<'a> {
                                 start,
                             );
                         }
-                        Expr::Index { array, index } => {
+                        Expr::Index { array, indices } => {
                             self.bump();
                             self.skip_newlines();
                             let rhs = self.parse_expr();
-                            let lhs = self.file.add_expr(Expr::Index { array, index }, op_span);
+                            let lhs = self.file.add_expr(
+                                Expr::Index {
+                                    array,
+                                    indices: indices.clone(),
+                                },
+                                op_span,
+                            );
                             let value = self.file.add_expr(Expr::Binary { op, lhs, rhs }, op_span);
                             return self.finish_stmt(
                                 Stmt::AssignIndex {
                                     array,
-                                    index,
+                                    indices,
                                     value,
                                 },
                                 start,
@@ -5510,23 +5503,13 @@ impl<'a> Parser<'a> {
                     let end = self.tok().span;
                     self.expect(TokenKind::RBracket, "']'");
                     let span = Span::new(lspan.lo, end.hi);
-                    lhs = if indices.len() == 1 {
-                        self.file.add_expr(
-                            Expr::Index {
-                                array: lhs,
-                                index: indices[0],
-                            },
-                            span,
-                        )
-                    } else {
-                        self.file.add_expr(
-                            Expr::IndexMulti {
-                                receiver: lhs,
-                                indices,
-                            },
-                            span,
-                        )
-                    };
+                    lhs = self.file.add_expr(
+                        Expr::Index {
+                            array: lhs,
+                            indices,
+                        },
+                        span,
+                    );
                 }
                 // `expr<TypeArgs>(args)` — generic call with explicit type arguments.
                 // Disambiguate from `a < b > c` (two comparisons) by checking whether a balanced
@@ -5932,15 +5915,21 @@ impl<'a> Parser<'a> {
                     start,
                 )
             }
-            Expr::Index { array, index }
-                if self.is_pure_path(array) && self.is_pure_path(index) =>
+            Expr::Index { array, indices }
+                if self.is_pure_path(array) && indices.iter().all(|&i| self.is_pure_path(i)) =>
             {
-                let lhs = self.file.add_expr(Expr::Index { array, index }, op_span);
+                let lhs = self.file.add_expr(
+                    Expr::Index {
+                        array,
+                        indices: indices.clone(),
+                    },
+                    op_span,
+                );
                 let value = self.build_inc_dec_call(lhs, op_name, op_span);
                 self.finish_stmt(
                     Stmt::AssignIndex {
                         array,
-                        index,
+                        indices,
                         value,
                     },
                     start,
@@ -5968,7 +5957,9 @@ impl<'a> Parser<'a> {
             | Expr::BoolLit(_)
             | Expr::NullLit => true,
             Expr::Member { receiver, .. } => self.is_pure_path(*receiver),
-            Expr::Index { array, index } => self.is_pure_path(*array) && self.is_pure_path(*index),
+            Expr::Index { array, indices } => {
+                self.is_pure_path(*array) && indices.iter().all(|&i| self.is_pure_path(i))
+            }
             _ => false,
         }
     }
