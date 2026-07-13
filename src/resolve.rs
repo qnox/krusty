@@ -7684,6 +7684,21 @@ impl<'a> Checker<'a> {
                             return self.set(e, ty);
                         }
                     }
+                    // An unqualified COMPANION property inside a REGULAR member (`HEX_RADIX` where
+                    // `companion object { const val HEX_RADIX = 16 }`): the companion's members are hoisted
+                    // to static fields on the outer class and are readable unqualified from any member.
+                    // The `companion_of` branch above only fires when checking a companion member; this
+                    // covers the bare form from a plain method (the qualified `C.HEX_RADIX` path already
+                    // resolves it via `static_props`).
+                    if let Some(Ty::Obj(internal, _)) = self.this_ty {
+                        if let Some(&ty) = self
+                            .syms
+                            .class_by_internal(internal)
+                            .and_then(|c| c.static_props.get(&n))
+                        {
+                            return self.set(e, ty);
+                        }
+                    }
                     // A bare name resolved against the implicit receiver (`this`) of arbitrary type —
                     // e.g. `length` inside `"ab".run { length }` (`this` is `String`). Goes through the
                     // general member read so builtin/library members (`String.length`) resolve too.

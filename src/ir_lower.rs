@@ -161,6 +161,20 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     }
                 }
             }
+            // A `companion object`'s `const val`s are hoisted to `public static final` fields on the
+            // OUTER class, but kotlinc INLINES a const read at every use site (`ldc`), qualified
+            // (`C.HEX`) or bare from a member (`fun f() = HEX`). Record their literals under the outer
+            // class's internal so both read paths (`object_const_lits`) inline the value like a top-level
+            // const — otherwise a bare companion-const read finds no instance field/getter and bails.
+            let internal = class_internal(file, &c.name);
+            for p in c.companion_props.iter().filter(|p| p.is_const) {
+                if let Some(lit) = p.init.and_then(|i| {
+                    ast_literal_const(file, i, body_prop_ty(file, info, p, &*syms.libraries))
+                }) {
+                    lo.object_const_lits
+                        .insert((internal.clone(), p.name.clone()), lit);
+                }
+            }
         }
     }
 
