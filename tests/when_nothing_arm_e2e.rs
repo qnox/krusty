@@ -1,7 +1,6 @@
 //! A `when`-STATEMENT whose arms assign (Unit) plus an arm that calls a `Nothing`-returning function is
-//! valid: the `Nothing` arm pushes nothing at the merge (the emitter terminates it). The checker
-//! represents that arm's type as the mapped `Void` object, so the lowerer's "mixes Unit with a value"
-//! bail must recognize it as diverging. Round-tripped on the JVM.
+//! valid: the `Nothing` arm pushes nothing at the merge (the emitter terminates it), so the lowerer's
+//! "mixes Unit with a value" bail must recognize it as diverging. Round-tripped on the JVM.
 
 use super::common;
 

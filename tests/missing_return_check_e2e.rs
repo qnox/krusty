@@ -144,8 +144,6 @@ fn early_return_in_loop_then_return() {
 
 #[test]
 fn nothing_returning_user_function_tail_call() {
-    // A user `fun … : Nothing` call terminates — the checker types it as the `Void`-mapped `Obj`
-    // form, which `is_nothing_ty` recognizes (regression guard for the review finding).
     assert_accepts("fun fail(): Nothing = throw RuntimeException()\nfun f(): Int { fail() }");
     assert_accepts("fun fail(): Nothing = throw RuntimeException()\nfun f(x: Int): Int { if (x > 0) return 1 else fail() }");
 }

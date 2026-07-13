@@ -3995,10 +3995,6 @@ struct Local {
     narrowed: Option<Ty>,
 }
 
-fn is_nothing_ty(t: Ty) -> bool {
-    t.is_nothing_like()
-}
-
 /// The packages in scope for an unqualified TOP-LEVEL / extension function call in `file`: the leveled
 /// import packages (same-package, star, explicit, defaults) plus each explicit import's package. Used to
 /// scope BOTH the checker and the lowerer so the two resolve a `@JvmName`-mangled library family (e.g.
@@ -5805,9 +5801,8 @@ impl<'a> Checker<'a> {
     /// `while (true)` is treated as non-terminating-fallthrough regardless of an inner `break`.
     fn body_terminates(&self, e: ExprId) -> bool {
         // A `Nothing`-typed expression never completes normally (the checker already resolved the
-        // result type — no hardcoded intrinsic name list). `is_nothing_ty` recognizes both the
-        // `Ty::Nothing` bottom and the `Obj("…/Void")` form the checker uses for a `Nothing` call.
-        if is_nothing_ty(self.expr_types[e.0 as usize]) {
+        // result type — no hardcoded intrinsic name list).
+        if self.expr_types[e.0 as usize].is_nothing_like() {
             return true;
         }
         match self.file.expr(e) {
@@ -12542,10 +12537,10 @@ impl<'a> Checker<'a> {
         }
         // `Nothing` is the bottom type: a diverging branch contributes no value, so the join is the
         // other branch (`if (c) x else throw e` has the type of `x`).
-        if is_nothing_ty(a) {
+        if a.is_nothing_like() {
             return b;
         }
-        if is_nothing_ty(b) {
+        if b.is_nothing_like() {
             return a;
         }
         if let Some(t) = Ty::promote(a, b) {
