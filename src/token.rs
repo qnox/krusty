@@ -61,6 +61,7 @@ pub enum TokenKind {
     LtEq,
     Gt,
     GtEq,
+    Amp,        // &  (definitely-non-null intersection `T & Any`)
     AndAnd,     // &&
     OrOr,       // ||
     Not,        // !

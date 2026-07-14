@@ -3295,7 +3295,22 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// Parse a type, folding a trailing definitely-non-null intersection `T & Any` (the only legal
+    /// intersection in Kotlin source) into the left operand with `nullable = false`. `T & Any` erases
+    /// identically to `T`; its only observable effect is that a value of it is non-null, which the
+    /// `as` cast enforces at runtime (a null assertion). The `& Any` right operand is parsed and
+    /// discarded — `Any` is the only permitted right side.
     fn parse_type(&mut self) -> TypeRef {
+        let mut ty = self.parse_type_atom();
+        while self.at(TokenKind::Amp) {
+            self.bump(); // '&'
+            let _any = self.parse_type_atom();
+            ty.nullable = false;
+        }
+        ty
+    }
+
+    fn parse_type_atom(&mut self) -> TypeRef {
         // Leading type annotations (`@Composable () -> Unit`, `@UnsafeVariance T`): consume them and
         // record by the type's start offset so a plugin can recover them via `TypeRef.span.lo`.
         // Without this, an `@` before a type would fail to parse. NOTE: a following `(` is NOT consumed
