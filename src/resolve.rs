@@ -4979,6 +4979,30 @@ fn bind_or_conflict<'k>(
     }
 }
 
+impl crate::assignable::TypeOracle for Checker<'_> {
+    fn direct_supertypes(&self, internal: &str) -> Vec<String> {
+        self.module
+            .resolve_type(internal)
+            .or_else(|| self.syms.libraries.resolve_type(internal))
+            .map(|t| t.supertypes)
+            .unwrap_or_default()
+    }
+
+    fn canonical_class(&self, internal: &str) -> String {
+        if internal.starts_with("kotlin/collections/") {
+            crate::symbol_resolver::platform_class_identity(
+                self.syms
+                    .libraries
+                    .jvm_descriptor_form(Ty::obj(internal))
+                    .obj_internal()
+                    .unwrap_or(internal),
+            )
+        } else {
+            internal.to_string()
+        }
+    }
+}
+
 impl<'a> Checker<'a> {
     /// The arg-binding call-resolution layer over this checker's [`SymbolSource`]. Cheap to construct.
     fn resolver(&self) -> crate::symbol_resolver::SymbolResolver<'_> {
@@ -6393,24 +6417,10 @@ impl<'a> Checker<'a> {
     /// Is `sub` a subtype of `sup`? Reflexive, through implemented interfaces, and up the base-class
     /// chain.
     fn obj_is_subtype(&self, sub: &str, sup: &str) -> bool {
-        // Decided in Kotlin type space (`kotlin/Double : kotlin/Number`), not by JVM erasure. The one
-        // exception: a Kotlin collection interface IS its single JVM interface (`kotlin/collections/List`
-        // and `…/MutableList` ARE `java/util/List`), so collection names compare on that JVM identity and
-        // everything else compares verbatim. Per-node (the `seen` walk stays finite).
-        let collection_id = |name: &str| -> String {
-            if name.starts_with("kotlin/collections/") {
-                self.syms
-                    .libraries
-                    .jvm_descriptor_form(Ty::obj(name))
-                    .obj_internal()
-                    .unwrap_or(name)
-                    .to_string()
-            } else {
-                name.to_string()
-            }
+        let sup_id = crate::assignable::TypeOracle::canonical_class(self, sup);
+        let matches_sup = |name: &str| {
+            name == sup || crate::assignable::TypeOracle::canonical_class(self, name) == sup_id
         };
-        let sup_id = collection_id(sup);
-        let matches_sup = |name: &str| name == sup || collection_id(name) == sup_id;
         if matches_sup(sub) {
             return true;
         }
@@ -6423,22 +6433,12 @@ impl<'a> Checker<'a> {
             }
             return false;
         }
-        // A classpath type: walk its supertype chain (superclass + interfaces) to see if `sup` is reachable.
-        let mut seen = std::collections::HashSet::new();
-        let mut q = std::collections::VecDeque::new();
-        q.push_back(sub.to_string());
-        while let Some(cur) = q.pop_front() {
-            if matches_sup(&cur) {
-                return true;
-            }
-            if !seen.insert(cur.clone()) {
-                continue;
-            }
-            if let Some(t) = self.syms.libraries.resolve_type(&cur) {
-                q.extend(t.supertypes);
-            }
-        }
-        false
+        crate::assignable::is_subtype(
+            &crate::assignable::TyCtx::new(),
+            self,
+            Ty::obj(sub),
+            Ty::obj(sup),
+        )
     }
 
     /// Are two reference types comparable as `when`-subject value arms? A `when (s) { A -> … }` over a
@@ -6753,9 +6753,15 @@ impl<'a> Checker<'a> {
                 }
             }
         }
-        // `Array<T>` reference-element covariance (JVM: `Integer[]` is-a `Object[]`): `Array<Array<Int>>`
-        // → `Array<Array<*>>` (a `*`/`out` element erases to `Any?`). Recurse on the element type.
-        if self.array_covariant_assignable(expected, actual) {
+        if expected.array_elem().is_some()
+            && actual.array_elem().is_some()
+            && crate::assignable::is_subtype(
+                &crate::assignable::TyCtx::new(),
+                self,
+                actual,
+                expected,
+            )
+        {
             return;
         }
         if expected != actual {
@@ -6776,47 +6782,6 @@ impl<'a> Checker<'a> {
                 )
             };
             self.diags.error(span, msg);
-        }
-    }
-
-    /// `Array<A>` is assignable to `Array<E>` when the elements are — JVM reference arrays are covariant
-    /// (`Integer[]` is-a `Object[]`), and a `*`/`out` projection erases the expected element to `Any?`.
-    /// Returns `false` for non-array types (the caller's other rules decide those).
-    fn array_covariant_assignable(&self, expected: Ty, actual: Ty) -> bool {
-        let (Some(e), Some(a)) = (expected.array_elem(), actual.array_elem()) else {
-            return false;
-        };
-        self.elem_covariant_assignable(e, a)
-    }
-
-    /// Element-level covariance for [`array_covariant_assignable`]: equal types, nested arrays, an `Any`/
-    /// `Any?` (star) expected element accepting anything, or a reference-subtype element.
-    fn elem_covariant_assignable(&self, expected: Ty, actual: Ty) -> bool {
-        if expected == actual {
-            return true;
-        }
-        if let (Some(e), Some(a)) = (expected.array_elem(), actual.array_elem()) {
-            return self.elem_covariant_assignable(e, a);
-        }
-        // A star projection (`*`) or `in`/`out` variance erases the element to `Any?` on whichever side
-        // it appears; either way the array assignment is JVM-sound (reference-array covariance), so a
-        // `kotlin/Any` element on EITHER side accepts the other.
-        let exp = expected.non_null();
-        let act = actual.non_null();
-        if exp.obj_internal() == Some("kotlin/Any") || act.obj_internal() == Some("kotlin/Any") {
-            return true;
-        }
-        // Otherwise require the actual element to be a reference subtype of the expected element.
-        match (
-            exp.obj_internal(),
-            actual
-                .non_null()
-                .boxed_ref()
-                .and_then(|b| b.obj_internal())
-                .or_else(|| actual.non_null().obj_internal()),
-        ) {
-            (Some(e), Some(a)) => self.obj_is_subtype(a, e),
-            _ => false,
         }
     }
 
