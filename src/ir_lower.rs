@@ -11774,13 +11774,10 @@ impl<'a> Lower<'a> {
         name: &str,
         args: &Option<Vec<AstExprId>>,
     ) -> Option<u32> {
-        let a = args.as_ref()?;
-        if a.len() != 1 {
-            return None;
-        }
-        let Expr::Lambda { params, body } = self.afile.expr(a[0]).clone() else {
+        let [arg] = args.as_deref()? else {
             return None;
         };
+        let (params, body) = self.synth_arg_lambda(*arg)?;
         let (pname, returns_receiver) = match name {
             "let" => (ast::first_lambda_param_or_it(&params), false),
             "also" => (ast::first_lambda_param_or_it(&params), true),
