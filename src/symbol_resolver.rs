@@ -971,14 +971,7 @@ impl<'a> SymbolResolver<'a> {
                 return None;
             }
             if !info.call_sig.param_defaults.is_empty()
-                && (prefix_len..last_param).any(|i| {
-                    !info
-                        .call_sig
-                        .param_defaults
-                        .get(i)
-                        .copied()
-                        .unwrap_or(false)
-                })
+                && (prefix_len..last_param).any(|i| !info.call_sig.param_has_default(i))
             {
                 return None;
             }
@@ -994,14 +987,7 @@ impl<'a> SymbolResolver<'a> {
             return None;
         }
         if !info.call_sig.param_defaults.is_empty()
-            && (args.len()..real_count).any(|i| {
-                !info
-                    .call_sig
-                    .param_defaults
-                    .get(i)
-                    .copied()
-                    .unwrap_or(false)
-            })
+            && (args.len()..real_count).any(|i| !info.call_sig.param_has_default(i))
         {
             return None;
         }
@@ -2460,8 +2446,7 @@ fn best_by_args<'a>(
                 // metadata; when it is absent (a classpath callable whose @Metadata didn't align, so the
                 // vector is empty), fall back to the `required` count — the prefix already covers every
                 // required parameter, so the middle ones are all defaulted (mirrors the prefix arm above).
-                let mid_optional = (prefix..last)
-                    .all(|i| o.call_sig.param_defaults.get(i).copied().unwrap_or(false))
+                let mid_optional = (prefix..last).all(|i| o.call_sig.param_has_default(i))
                     || o.call_sig.required <= prefix;
                 prefix <= last
                     && fun_arg_matches(lib, &lp[last], args.last().unwrap())

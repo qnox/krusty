@@ -12175,13 +12175,12 @@ impl<'a> Checker<'a> {
                         // fixed parameters first, then vararg elements.
                         let n_fixed = params.len() - 1;
                         let min_args = (0..n_fixed)
-                            .take_while(|&i| !cs.param_defaults.get(i).copied().unwrap_or(false))
+                            .take_while(|&i| !cs.param_has_default(i))
                             .count();
                         // Any omitted fixed parameter must be defaulted (a middle non-default hole can't be
                         // filled positionally by later arguments).
                         let omitted_ok = arg_tys.len() >= n_fixed
-                            || (arg_tys.len()..n_fixed)
-                                .all(|i| cs.param_defaults.get(i).copied().unwrap_or(false));
+                            || (arg_tys.len()..n_fixed).all(|i| cs.param_has_default(i));
                         if arg_tys.len() < min_args || !omitted_ok {
                             self.diags.error(
                                 span,
