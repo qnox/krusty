@@ -903,6 +903,144 @@ public class M {\n\
 }
 
 #[test]
+fn suspend_receiver_of_elvis_safecall_chain() {
+    // An expression-body suspend fn whose suspension is the leftmost receiver of a chain feeding an
+    // elvis / safe-call (`getConfig().instances[id]?.let { … } ?: -1` — the shape mission-core's
+    // requireInstance uses). The elvis/safe-call subject lowers to a value-position `Block` binding a
+    // temp; the hoister can't see into a value block, so without `splice_return_blocks` (which lifts
+    // `return { s…; v }` / `val x = { s…; v }` to `s…; return v` / `s…; val x = v`) the suspension
+    // hides there and the flattener bails. Values match kotlinc: pick("a") = 1 + 100 = 101; pick("z")
+    // (absent) = -1.
+    let _jh = match java_home() {
+        Some(j) if std::path::Path::new(&format!("{j}/bin/javac")).exists() => j,
+        _ => return,
+    };
+    let Some(stdlib) = stdlib_jar() else {
+        return;
+    };
+    let dir = std::env::temp_dir().join(format!("krusty_susp_elvischain_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    compile_krusty_with_stdlib(
+        "S",
+        "class Cfg(val instances: Map<String, Int>)\n\
+         suspend fun getConfig(): Cfg = Cfg(mapOf(\"a\" to 1, \"b\" to 2))\n\
+         suspend fun pick(id: String): Int = getConfig().instances[id]?.let { it + 100 } ?: -1\n",
+        &stdlib,
+        &dir,
+    );
+    let driver = "import kotlin.coroutines.*;\n\
+public class M {\n\
+  static Continuation<Object> k() {\n\
+    return new Continuation<Object>() {\n\
+      public CoroutineContext getContext() { return EmptyCoroutineContext.INSTANCE; }\n\
+      public void resumeWith(Object o) { }\n\
+    };\n\
+  }\n\
+  public static void main(String[] a) {\n\
+    Object r1 = SKt.pick(\"a\", k());\n\
+    Object r2 = SKt.pick(\"z\", k());\n\
+    boolean ok = r1.equals(Integer.valueOf(101)) && r2.equals(Integer.valueOf(-1));\n\
+    System.out.println(ok ? \"OK\" : (\"r1=\" + r1 + \" r2=\" + r2));\n\
+  }\n\
+}\n";
+    fs::write(dir.join("M.java"), driver).unwrap();
+    let cp = format!("{}:{}", dir.to_str().unwrap(), stdlib);
+    let Some(out) = common::javac_run(
+        dir.join("M.java").to_str().unwrap(),
+        &cp,
+        dir.to_str().unwrap(),
+        "M",
+    ) else {
+        return;
+    };
+    let _ = fs::remove_dir_all(&dir);
+    assert_eq!(
+        out.trim(),
+        "OK",
+        "suspend receiver of elvis/safe-call chain"
+    );
+}
+
+#[test]
+fn suspend_try_catch_with_branch_in_catch_is_skipped_not_miscompiled() {
+    // A BRANCH (`?.`/elvis/`if`) in a suspend try's CATCH body introduces a temp whose slot the state
+    // machine's exception-handler frame cannot reconcile with the try region (a stack-map mismatch → a
+    // load-time VerifyError). krusty must SKIP the file (emit nothing runnable) rather than miscompile.
+    // Assert it produces no `box()` result — i.e. the shape is rejected, not silently mis-lowered.
+    const SRC: &str = "suspend fun risky(fail: Boolean): Int { if (fail) throw IllegalStateException(\"boom\"); return 7 }\n\
+        suspend fun compute(fail: Boolean): Int = try { risky(fail) } catch (e: IllegalStateException) { e.message?.length ?: -1 }\n\
+        fun box(): String = \"OK\"\n";
+    assert!(
+        common::compile_and_run_with_stdlib(SRC, "Main").is_none(),
+        "a branchy suspend catch body must be SKIPPED (not miscompiled to a VerifyError)"
+    );
+}
+
+#[test]
+fn suspend_in_try_catch_with_spilled_locals() {
+    // A `suspend fun` with a suspension point INSIDE a `try { … } catch { … }`, plus a suspension
+    // BEFORE the try and locals spilled across both (the shape mission-core's MissionActionService
+    // uses). The try body's second suspension (`risky`) may throw; the catch supplies a fallback. The
+    // CPS state machine wraps its dispatch so an exception thrown while a try-region state is active
+    // routes to the catch state. Definite-assignment-gated spilling keeps the body-only local `r`
+    // (whose slot the register allocator coalesces with the reference-typed catch var) from being
+    // spilled dead on the exceptional edge (else: "ref stored into int field" VerifyError).
+    // Values match kotlinc: compute(false) = risky(7) + "cfg".length(3) = 10; compute(true) = -1.
+    let _jh = match java_home() {
+        Some(j) if std::path::Path::new(&format!("{j}/bin/javac")).exists() => j,
+        _ => return,
+    };
+    let Some(stdlib) = stdlib_jar() else {
+        return;
+    };
+    let dir = std::env::temp_dir().join(format!("krusty_susp_trycatch_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    compile_krusty_with_stdlib(
+        "S",
+        "suspend fun setup(): String = \"cfg\"\n\
+         suspend fun risky(fail: Boolean): Int { if (fail) throw IllegalStateException(\"boom\"); return 7 }\n\
+         suspend fun compute(fail: Boolean): Int {\n\
+         val cfg = setup()\n\
+         return try {\n\
+         val r = risky(fail)\n\
+         r + cfg.length\n\
+         } catch (e: IllegalStateException) { -1 }\n\
+         }\n",
+        &stdlib,
+        &dir,
+    );
+    let driver = "import kotlin.coroutines.*;\n\
+public class M {\n\
+  static Continuation<Object> k() {\n\
+    return new Continuation<Object>() {\n\
+      public CoroutineContext getContext() { return EmptyCoroutineContext.INSTANCE; }\n\
+      public void resumeWith(Object o) { }\n\
+    };\n\
+  }\n\
+  public static void main(String[] a) {\n\
+    Object r1 = SKt.compute(false, k());\n\
+    Object r2 = SKt.compute(true, k());\n\
+    boolean ok = r1.equals(Integer.valueOf(10)) && r2.equals(Integer.valueOf(-1));\n\
+    System.out.println(ok ? \"OK\" : (\"r1=\" + r1 + \" r2=\" + r2));\n\
+  }\n\
+}\n";
+    fs::write(dir.join("M.java"), driver).unwrap();
+    let cp = format!("{}:{}", dir.to_str().unwrap(), stdlib);
+    let Some(out) = common::javac_run(
+        dir.join("M.java").to_str().unwrap(),
+        &cp,
+        dir.to_str().unwrap(),
+        "M",
+    ) else {
+        return;
+    };
+    let _ = fs::remove_dir_all(&dir);
+    assert_eq!(out.trim(), "OK", "suspend in try/catch");
+}
+
+#[test]
 fn leaf_suspend_fun_has_cps_signature() {
     // `suspend fun foo(): Int = 42` has no suspension point, so kotlinc emits no state machine — just
     // the CPS signature: `static Object foo(Continuation<? super Integer>)` returning the boxed value.

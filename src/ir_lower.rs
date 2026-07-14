@@ -161,6 +161,20 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     }
                 }
             }
+            // A `companion object`'s `const val`s are hoisted to `public static final` fields on the
+            // OUTER class, but kotlinc INLINES a const read at every use site (`ldc`), qualified
+            // (`C.HEX`) or bare from a member (`fun f() = HEX`). Record their literals under the outer
+            // class's internal so both read paths (`object_const_lits`) inline the value like a top-level
+            // const — otherwise a bare companion-const read finds no instance field/getter and bails.
+            let internal = class_internal(file, &c.name);
+            for p in c.companion_props.iter().filter(|p| p.is_const) {
+                if let Some(lit) = p.init.and_then(|i| {
+                    ast_literal_const(file, i, body_prop_ty(file, info, p, &*syms.libraries))
+                }) {
+                    lo.object_const_lits
+                        .insert((internal.clone(), p.name.clone()), lit);
+                }
+            }
         }
     }
 
@@ -842,42 +856,43 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     }
                 }
                 if m.params.iter().any(|p| p.default.is_some()) && m.params.len() <= 31 {
-                    lo.ir.fn_params.insert(
-                        fid,
-                        FnParamInfo::defaults(
-                            m.params.iter().map(|p| p.name.clone()).collect(),
-                            Vec::new(),
-                        ),
-                    );
-                    // Interface defaults have no pass-2 body; only constant defaults are modelable here.
-                    if c.is_interface() {
-                        let mut defaults = Vec::new();
-                        let mut modelable = true;
-                        for (p, t) in m.params.iter().zip(&sig.params) {
-                            match p.default {
-                                None => defaults.push(None), // a required parameter
-                                Some(d) if is_const_literal(file, d) => {
-                                    match lo.lower_arg(d, &ty_to_ir(*t)) {
-                                        Some(e) => defaults.push(Some(e)),
-                                        None => {
-                                            modelable = false;
-                                            break;
-                                        }
+                    // Lower each CONSTANT default NOW (pass 1) for BOTH class and interface methods, so a
+                    // call that OMITS them and is lowered BEFORE this method's pass-2 body — a FORWARD
+                    // reference (the caller is defined earlier in the class, e.g. `hasPermission` calling a
+                    // later `private resolveRoles(id, x = null)`) — can still fill them. A constant needs no
+                    // param/`this` scope, so it is valid this early. A NON-constant default is left `None`:
+                    // a class method's is filled by pass 2 from the body scope; an INTERFACE has no pass-2
+                    // body, so an unmodeled default there drops the whole marker (an omitted-arg call then
+                    // bails/skips rather than miscompiles).
+                    let mut defaults = Vec::new();
+                    let mut all_const = true;
+                    for (p, t) in m.params.iter().zip(&sig.params) {
+                        match p.default {
+                            None => defaults.push(None), // a required parameter
+                            Some(d) if is_const_literal(file, d) => {
+                                match lo.lower_arg(d, &ty_to_ir(*t)) {
+                                    Some(e) => defaults.push(Some(e)),
+                                    None => {
+                                        all_const = false;
+                                        defaults.push(None);
                                     }
                                 }
-                                Some(_) => {
-                                    modelable = false; // a non-constant default isn't modeled
-                                    break;
-                                }
+                            }
+                            Some(_) => {
+                                all_const = false;
+                                defaults.push(None); // a non-constant default — pass 2 fills it (class only)
                             }
                         }
-                        if modelable {
-                            if let Some(info) = lo.ir.fn_params.get_mut(&fid) {
-                                info.defaults = Some(defaults);
-                            }
-                        } else {
-                            lo.ir.fn_params.remove(&fid);
-                        }
+                    }
+                    let names = m.params.iter().map(|p| p.name.clone()).collect();
+                    if c.is_interface() && !all_const {
+                        // An interface's non-constant default is never modeled (no pass-2 body) — drop the
+                        // marker so an omitted-arg call skips the file instead of miscompiling.
+                        lo.ir.fn_params.remove(&fid);
+                    } else {
+                        lo.ir
+                            .fn_params
+                            .insert(fid, FnParamInfo::defaults(names, defaults));
                     }
                 }
                 // Tag a `suspend` member method for the coroutine pass (same as a top-level suspend fun).
@@ -11154,6 +11169,11 @@ impl<'a> Lower<'a> {
     /// `java/lang/String.length()` just like `uppercase()`). `recv` is the already-lowered receiver
     /// value. Returns `None` when the type exposes no such member.
     fn lower_member_read_on(&mut self, recv: u32, rt: Ty, name: &str, e: AstExprId) -> Option<u32> {
+        // Resolve against the NON-NULL type. A receiver whose static type keeps its `?` (a smart-cast /
+        // `!!` value bound to a call-result local, whose narrowing krusty doesn't propagate to the read
+        // site) is a valid reference at runtime — the getter dispatches the same, and krusty does not
+        // enforce null-safety. Without this a `foo().bar` on a `Foo?`-typed result resolves no member.
+        let rt = rt.non_null();
         // A property on a class defined in ANOTHER file → its public `getX()` accessor (the backing
         // field is private). Resolved from the sibling class's `ClassSig`.
         if let Ty::Obj(i, _) = rt {
@@ -11534,6 +11554,92 @@ impl<'a> Lower<'a> {
         Some(out)
     }
 
+    /// Lower an implicit-receiver user instance-method call that OMITS one or more CONSTANT-default
+    /// arguments (`resolveRoles(subjectId)` where `resolveRoles(id, filter = null)`). Map the provided
+    /// args (positional or named) onto their slots, fill each omitted slot with its registered constant
+    /// default, and build a plain `MethodCall` on `this` — semantically identical to kotlinc's `$default`
+    /// dispatch for a constant default (it passes the same value), and the same fill the explicit-receiver
+    /// and extension paths use. `None` (caller falls through / skips) when a name doesn't map, a slot is
+    /// double-filled, or an omitted slot's default is non-constant (that needs the `$default` synthetic).
+    /// Whether a method resolved by NAME (`resolve_method`, which does no overload disambiguation) is the
+    /// one the checker actually selected for call `e` — judged by return type. Lenient: only rejects when
+    /// BOTH types are concrete and clearly differ (a genuine wrong-overload pick, e.g. `Boolean` vs `Int`);
+    /// an erased / type-variable / mixed return can't be told apart here, so it is allowed (the per-arg
+    /// `lower_arg` type-checks remain the backstop). Used to gate the omitted-constant-default fill so an
+    /// overloaded method never fills the wrong overload's defaults (which would silently miscompile).
+    fn member_ret_matches_call(&self, resolved_ret: &Ty, e: AstExprId) -> bool {
+        let call_ty = self.info.ty(e);
+        let (a, b) = (resolved_ret.non_null(), call_ty.non_null());
+        match (a.obj_internal(), b.obj_internal()) {
+            (Some(ai), Some(bi)) => ai == bi,
+            (None, None) => a == b,
+            _ => true,
+        }
+    }
+
+    fn lower_this_member_default_call(
+        &mut self,
+        this_v: u32,
+        class: ClassId,
+        index: u32,
+        mfid: u32,
+        call: AstExprId,
+        args: &[AstExprId],
+    ) -> Option<u32> {
+        let params = self.ir.functions[mfid as usize].params.clone();
+        let info = self.ir.fn_params.get(&mfid)?;
+        let defaults = info.defaults.clone()?;
+        let names = info.names.clone();
+        let n = params.len();
+        if names.len() != n || args.len() >= n {
+            return None;
+        }
+        let arg_names = self.afile.call_arg_names.get(&call.0).cloned();
+        let mut slot: Vec<Option<u32>> = vec![None; n];
+        let mut pos = 0usize;
+        for (ai, arg) in args.iter().enumerate() {
+            let nm = arg_names
+                .as_ref()
+                .and_then(|v| v.get(ai).cloned().flatten());
+            let p = match nm {
+                Some(s) => names.iter().position(|f| *f == s)?,
+                None => {
+                    let p = pos;
+                    pos += 1;
+                    p
+                }
+            };
+            if p >= n || slot[p].is_some() {
+                return None;
+            }
+            slot[p] = Some(self.lower_arg(*arg, &params[p])?);
+        }
+        let recv = self.ir.add_expr(IrExpr::GetValue(this_v));
+        let mut a: Vec<Option<u32>> = Vec::with_capacity(n);
+        for (k, s) in slot.iter().enumerate() {
+            let v = match s {
+                Some(v) => *v,
+                // A constant default — clone it as a fresh node (avoid aliasing). A non-constant default
+                // isn't fillable at the call site here (needs `$default`) → skip the file.
+                None => match defaults
+                    .get(k)
+                    .and_then(|d| *d)
+                    .map(|d| self.ir.exprs[d as usize].clone())
+                {
+                    Some(IrExpr::Const(c)) => self.ir.add_expr(IrExpr::Const(c)),
+                    _ => return None,
+                },
+            };
+            a.push(Some(v));
+        }
+        Some(self.ir.add_expr(IrExpr::MethodCall {
+            class,
+            index,
+            receiver: recv,
+            args: a,
+        }))
+    }
+
     fn lower_this_member_call(
         &mut self,
         this_v: u32,
@@ -11544,7 +11650,7 @@ impl<'a> Lower<'a> {
     ) -> Option<u32> {
         // A user instance method on the receiver's class — `this.m(args)`.
         if let Some(internal) = this_ty.obj_internal() {
-            if let Some((class, index, mfid, _)) = self.resolve_method(internal, name) {
+            if let Some((class, index, mfid, ret)) = self.resolve_method(internal, name) {
                 let params = self.ir.functions[mfid as usize].params.clone();
                 let vararg = self.syms.method_is_vararg(internal, name);
                 if let Some(n_fixed) = vararg_arity(vararg, params.len(), args.len()) {
@@ -11556,6 +11662,23 @@ impl<'a> Lower<'a> {
                         receiver: recv,
                         args: a.into_iter().map(Some).collect(),
                     }));
+                }
+                // An implicit-receiver member call OMITTING one or more CONSTANT-default arguments
+                // (`resolveRoles(subjectId)` on `resolveRoles(id, filter = null)`): fill the omitted slots
+                // with their constant defaults and call the plain method — the same call-site fill the
+                // explicit-receiver (`recv.m(…)`) and extension paths already use. A non-constant default
+                // needs the `$default` synthetic (not modeled here) → `None`, so the file skips.
+                //
+                // `resolve_method` selects by NAME only (no arg-type disambiguation), so with OVERLOADS it
+                // may pick the wrong one and fill the wrong defaults. Guard by requiring the resolved
+                // method's return type to match the checker's (correctly overload-resolved) call type —
+                // a mismatch means the wrong overload, so bail (skip the file) rather than miscompile.
+                if args.len() < params.len() && !vararg && self.member_ret_matches_call(&ret, e) {
+                    if let Some(v) =
+                        self.lower_this_member_default_call(this_v, class, index, mfid, e, args)
+                    {
+                        return Some(v);
+                    }
                 }
             }
         }
@@ -18149,10 +18272,19 @@ impl<'a> Lower<'a> {
                         // `resolve_method` walks user classes only, so this lowers as neither a sibling nor
                         // a top-level call; route it through the enclosing `this` (slot 0) and the member
                         // the checker recorded (`lower_this_member_call` reuses `resolved_calls`).
+                        // Fire when the checker recorded the member, OR when it is a sibling method of the
+                        // enclosing class (`resolve_method`) — the latter covers a bare call OMITTING a
+                        // constant-default argument (`resolveRoles(id)` on `resolveRoles(id, x = null)`),
+                        // which the checker does not record as `resolved_member`. `lower_this_member_call`
+                        // then fills the omitted default (or falls through to `None` = skip the file).
                         if self.cur_class.is_some()
                             && self.lookup(&fname).is_none()
                             && !self.module_declares(&fname)
-                            && self.info.resolved_member(e).is_some()
+                            && (self.info.resolved_member(e).is_some()
+                                || self
+                                    .cur_class
+                                    .as_ref()
+                                    .is_some_and(|cur| self.resolve_method(cur, &fname).is_some()))
                         {
                             self.lookup("this").and_then(|(this_v, this_ty)| {
                                 self.lower_this_member_call(this_v, this_ty, &fname, &args, e)

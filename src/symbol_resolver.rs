@@ -2469,8 +2469,36 @@ fn fun_return_compatible(lib: &dyn CompilerPlatform, param: Ty, arg: Ty) -> bool
 
 /// Whether `arg` is assignable to `param` allowing a reference SUBTYPE (`arg`'s classpath supertype
 /// closure contains `param`). Falls back to exact / `Any` for the trivial cases.
+/// Canonicalize a class internal name's NESTED separators to the JVM `$` form: `lib/Outer.Inner` (a
+/// Kotlin @Metadata nested spelling) → `lib/Outer$Inner`. Only the segment after the last `/` (the
+/// class path, never the package) is rewritten; a non-nested name is returned unchanged.
+fn nested_canon(internal: &str) -> String {
+    match internal.rfind('/') {
+        Some(i) => format!("{}{}", &internal[..=i], internal[i + 1..].replace('.', "$")),
+        None => internal.replace('.', "$"),
+    }
+}
+
 fn arg_subtype_assignable(lib: &dyn CompilerPlatform, param: &Ty, arg: &Ty) -> bool {
     if param == arg || *param == Ty::obj("kotlin/Any") {
+        return true;
+    }
+    // A NESTED classifier from @Metadata is spelled with `.` after the package (`lib/Outer.Inner`), while
+    // a resolved type reference uses the JVM `$` form (`lib/Outer$Inner`) — the SAME type under two
+    // spellings, so a value-class-param (mangled) member with a nested-type parameter failed to match its
+    // argument. Canonicalize the nested separator on both sides (idempotent for a `$` name, a no-op for a
+    // non-nested one) and accept an exact match; the remap-mapped built-in nested types (`Map.Entry`)
+    // canonicalize identically on both sides, so their existing matches are unaffected.
+    if let (Ty::Obj(p, pa), Ty::Obj(a, aa)) = (param, arg) {
+        if pa.is_empty() && aa.is_empty() && nested_canon(p) == nested_canon(a) {
+            return true;
+        }
+    }
+    // `null`/`Nothing` is assignable to any REFERENCE parameter — a bare `null` literal passed for a
+    // classpath reference/nullable parameter (`p.exec(id, actId, null)` where `params: String?`).
+    // Overload selection accepts it; nullability strictness is a separate check. Without this a
+    // value-class-param (mangled) member reached with a `null` argument fails to resolve at all.
+    if matches!(arg, Ty::Null | Ty::Nothing) && param.is_reference() {
         return true;
     }
     // A builtin reference arg (`Ty::String`) isn't an `Obj`, so map it to its class internal name

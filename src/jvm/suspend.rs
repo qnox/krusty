@@ -70,6 +70,13 @@ pub fn lower_suspend(ir: &mut IrFile, facade: &str) -> bool {
     );
     for fid in fids {
         let body = ir.functions[fid as usize].body;
+        // Normalize `return { stmts…; value }` into `stmts…; return value`. An elvis / safe-call subject
+        // that suspends lowers to a value-position `Block` binding a temp (`{ val t = susp()…; when{…} }`);
+        // hoisting can't see into a value block, so the suspension would hide there and the flattener bail.
+        // Splicing lifts the block's statements to the top level where the hoister/flattener handle them.
+        if let Some(b) = body {
+            splice_return_blocks(ir, b);
+        }
         // Hoist a suspension nested at an unconditional position in an expression (`foo() + 2`) into a
         // preceding `val tmp = foo()` temp, so the flattener only meets suspensions at handled positions.
         if let Some(b) = body {
@@ -80,6 +87,7 @@ pub fn lower_suspend(ir: &mut IrFile, facade: &str) -> bool {
         // bound-local point. Uses the function's (pre-CPS) declared return type for `tmp`.
         let ret_ty = ir.functions[fid as usize].ret.clone();
         if let Some(b) = body {
+            desugar_value_try(ir, b, &suspend_set, &ret_ty);
             desugar_tail_suspend(ir, b, &suspend_set, &ret_ty);
         }
         let has_susp = body.is_some_and(|b| expr_calls_suspend(ir, b, &suspend_set));
@@ -135,6 +143,74 @@ pub fn lower_suspend(ir: &mut IrFile, facade: &str) -> bool {
     true
 }
 
+/// Lift a value-position `Block` out of a top-level statement's direct operand, so a suspension buried in
+/// the block's statements surfaces at the top level where the hoister/flattener handle it. An elvis /
+/// safe-call whose subject suspends lowers to `{ val t = susp()…; when{…} }` in `return`/`val =`/assign
+/// position — a block the hoister can't see into, so the flattener would bail. This rewrites:
+///   `return { s…; v }`      → `s…; return v`
+///   `val x = { s…; v }`     → `s…; val x = v`
+///   `x = { s…; v }`         → `s…; x = v`
+/// Only a value-bearing block is spliced (a value-less / divergent block is left alone). Re-runs until
+/// settled, so nested blocks (safe-call inside elvis) fully unfold; lifted statements are reprocessed.
+fn splice_return_blocks(ir: &mut IrFile, b: ExprId) {
+    let IrExpr::Block { stmts, value } = ir.exprs[b as usize].clone() else {
+        return;
+    };
+    let mut new_stmts: Vec<ExprId> = Vec::with_capacity(stmts.len());
+    let mut changed = false;
+    for s in stmts {
+        let spliced = match ir.exprs[s as usize].clone() {
+            IrExpr::Return(Some(inner)) => value_block(ir, inner).map(|(bs, bv)| {
+                new_stmts.extend(bs);
+                ir.add_expr(IrExpr::Return(Some(bv)))
+            }),
+            IrExpr::Variable {
+                index,
+                ty,
+                init: Some(inner),
+            } => value_block(ir, inner).map(|(bs, bv)| {
+                new_stmts.extend(bs);
+                ir.add_expr(IrExpr::Variable {
+                    index,
+                    ty,
+                    init: Some(bv),
+                })
+            }),
+            IrExpr::SetValue { var, value: inner } => value_block(ir, inner).map(|(bs, bv)| {
+                new_stmts.extend(bs);
+                ir.add_expr(IrExpr::SetValue { var, value: bv })
+            }),
+            _ => None,
+        };
+        match spliced {
+            Some(ns) => {
+                new_stmts.push(ns);
+                changed = true;
+            }
+            None => new_stmts.push(s),
+        }
+    }
+    if changed {
+        ir.exprs[b as usize] = IrExpr::Block {
+            stmts: new_stmts,
+            value,
+        };
+        // A lifted statement may itself carry a value-block (safe-call nested in elvis) — repeat.
+        splice_return_blocks(ir, b);
+    }
+}
+
+/// If `e` is a value-bearing `Block`, return `(its statements, its value)`; else `None`.
+fn value_block(ir: &IrFile, e: ExprId) -> Option<(Vec<ExprId>, ExprId)> {
+    match &ir.exprs[e as usize] {
+        IrExpr::Block {
+            stmts,
+            value: Some(v),
+        } => Some((stmts.clone(), *v)),
+        _ => None,
+    }
+}
+
 /// Rewrite each top-level `return <suspend call>` in `b` into `val tmp = <suspend call>; return tmp`
 /// (a fresh local typed `ret_ty`), so a tail-position suspension is handled as an ordinary bound-local
 /// suspension point. Runs before the CPS rewrite, so `ret_ty` is the function's declared return type.
@@ -169,6 +245,111 @@ fn desugar_tail_suspend(ir: &mut IrFile, b: ExprId, suspend_set: &HashSet<u32>, 
             value,
         };
     }
+}
+
+/// Desugar a VALUE-position `try` whose body suspends into a STATEMENT-position one binding a temp, so the
+/// flattener (which models a `try` STATEMENT) can handle it: `return try { … } catch { … }` becomes
+/// `var tmp = <default>; try { … tmp = <body value> } catch { … tmp = <catch value> }; return tmp`. A
+/// suspending branch value is bound to a fresh `Variable` first (the flattener's `stmt_suspension` handles
+/// a suspend `Variable` init, not a `SetValue`), then copied to `tmp`. Only `return <try>` is rewritten
+/// (the shape mission-core uses); a `val`/assignment of a suspending `try` is left to skip the file.
+fn desugar_value_try(ir: &mut IrFile, b: ExprId, suspend_set: &HashSet<u32>, ret_ty: &Ty) {
+    let IrExpr::Block { stmts, value } = ir.exprs[b as usize].clone() else {
+        return;
+    };
+    let mut new_stmts: Vec<ExprId> = Vec::with_capacity(stmts.len() + 2);
+    let mut changed = false;
+    for s in stmts {
+        if let IrExpr::Return(Some(e)) = ir.exprs[s as usize] {
+            if matches!(ir.exprs[e as usize], IrExpr::Try { .. })
+                && expr_calls_suspend(ir, e, suspend_set)
+            {
+                let IrExpr::Try {
+                    body,
+                    catches,
+                    finally,
+                    ..
+                } = ir.exprs[e as usize].clone()
+                else {
+                    unreachable!()
+                };
+                let tmp = max_value_index(ir) + 1;
+                let dflt = zero_value(ir, ret_ty);
+                let decl = ir.add_expr(IrExpr::Variable {
+                    index: tmp,
+                    ty: *ret_ty,
+                    init: Some(dflt),
+                });
+                let new_body = assign_branch_to_tmp(ir, body, tmp, ret_ty, suspend_set);
+                let new_catches: Vec<crate::ir::IrCatch> = catches
+                    .into_iter()
+                    .map(|c| crate::ir::IrCatch {
+                        var: c.var,
+                        exc_internal: c.exc_internal,
+                        body: assign_branch_to_tmp(ir, c.body, tmp, ret_ty, suspend_set),
+                    })
+                    .collect();
+                let new_try = ir.add_expr(IrExpr::Try {
+                    body: new_body,
+                    catches: new_catches,
+                    finally,
+                    result: Ty::Unit,
+                });
+                let get = ir.add_expr(IrExpr::GetValue(tmp));
+                let ret = ir.add_expr(IrExpr::Return(Some(get)));
+                new_stmts.push(decl);
+                new_stmts.push(new_try);
+                new_stmts.push(ret);
+                changed = true;
+                continue;
+            }
+        }
+        new_stmts.push(s);
+    }
+    if changed {
+        ir.exprs[b as usize] = IrExpr::Block {
+            stmts: new_stmts,
+            value,
+        };
+    }
+}
+
+/// Rewrite a `try`/`catch` branch into a value-LESS block that runs its statements and assigns its VALUE
+/// to `tmp`. A suspending value is bound to a fresh `Variable` (so the flattener handles the suspension),
+/// then copied to `tmp`; a non-suspending value is assigned directly. A branch with no value (a divergent
+/// `return`/`throw`) is left unchanged.
+fn assign_branch_to_tmp(
+    ir: &mut IrFile,
+    branch: ExprId,
+    tmp: u32,
+    ty: &Ty,
+    suspend_set: &HashSet<u32>,
+) -> ExprId {
+    let (mut stmts, value) = match ir.exprs[branch as usize].clone() {
+        IrExpr::Block { stmts, value } => (stmts, value),
+        _ => (Vec::new(), Some(branch)),
+    };
+    if let Some(v) = value {
+        if expr_calls_suspend(ir, v, suspend_set) {
+            let fresh = max_value_index(ir) + 1;
+            let var = ir.add_expr(IrExpr::Variable {
+                index: fresh,
+                ty: *ty,
+                init: Some(v),
+            });
+            let get = ir.add_expr(IrExpr::GetValue(fresh));
+            let set = ir.add_expr(IrExpr::SetValue {
+                var: tmp,
+                value: get,
+            });
+            stmts.push(var);
+            stmts.push(set);
+        } else {
+            let set = ir.add_expr(IrExpr::SetValue { var: tmp, value: v });
+            stmts.push(set);
+        }
+    }
+    ir.add_expr(IrExpr::Block { stmts, value: None })
 }
 
 /// Hoist each suspension call that sits at an *unconditional* position inside a top-level statement's
@@ -822,7 +1003,12 @@ fn build_state_machine(ir: &mut IrFile, facade: &str, fid: u32, b: ExprId, unit_
         field_base: 0, // dedicated continuation class: result/label/spilled at field 0..
         spilled: spilled.clone(),
         states: vec![Vec::new()],
-        next_local: base + 3,
+        state_handlers: vec![None],
+        cur_handler: None,
+        catch_var: base + 3,
+        // Value parameters are assigned on entry (captured at construction, restored at the loop top).
+        assigned: param_caps.iter().map(|(l, _)| *l).collect(),
+        next_local: base + 4,
         failed: false,
     };
     flat.flatten(&stmts, 0, None);
@@ -834,6 +1020,8 @@ fn build_state_machine(ir: &mut IrFile, facade: &str, fid: u32, b: ExprId, unit_
         return false;
     }
     let states = std::mem::take(&mut flat.states);
+    let state_handlers = std::mem::take(&mut flat.state_handlers);
+    let catch_var = flat.catch_var;
 
     // --- assemble: prologue + while(true){ r=cont.result; restore spilled; when(label){states} } ---
     let k = |ir: &mut IrFile, e: IrExpr| ir.add_expr(e);
@@ -975,6 +1163,8 @@ fn build_state_machine(ir: &mut IrFile, facade: &str, fid: u32, b: ExprId, unit_
     branches.push((None, else_block));
 
     let dispatch = k(ir, IrExpr::When { branches });
+    let dispatch =
+        wrap_dispatch_for_handlers(ir, dispatch, &state_handlers, catch_var, cont_v, cont_id, 0);
     loop_stmts.push(dispatch);
     let loop_body = k(
         ir,
@@ -1113,7 +1303,13 @@ fn build_lambda_state_machine(
         field_base,
         spilled: spilled.clone(),
         states: vec![Vec::new()],
-        next_local: base + 2,
+        state_handlers: vec![None],
+        cur_handler: None,
+        catch_var: base + 2,
+        // Captures/parameters live in leading fields (excluded from `spilled`), so no spilled local is
+        // assigned on entry.
+        assigned: std::collections::HashSet::new(),
+        next_local: base + 3,
         failed: false,
     };
     for (n, &s) in stmts.iter().enumerate() {
@@ -1137,6 +1333,8 @@ fn build_lambda_state_machine(
         flat.spilled
     );
     let states = std::mem::take(&mut flat.states);
+    let state_handlers = std::mem::take(&mut flat.state_handlers);
+    let catch_var = flat.catch_var;
 
     let k = |ir: &mut IrFile, e: IrExpr| ir.add_expr(e);
     let cint = |ir: &mut IrFile, n: i32| ir.add_expr(IrExpr::Const(IrConst::Int(n)));
@@ -1256,6 +1454,15 @@ fn build_lambda_state_machine(
     );
     branches.push((None, else_block));
     let dispatch = k(ir, IrExpr::When { branches });
+    let dispatch = wrap_dispatch_for_handlers(
+        ir,
+        dispatch,
+        &state_handlers,
+        catch_var,
+        0,
+        class_id,
+        field_base,
+    );
     loop_stmts.push(dispatch);
     let loop_body = k(
         ir,
@@ -1325,6 +1532,23 @@ struct Flat<'a> {
     field_base: u32,
     spilled: Vec<(u32, Ty)>,
     states: Vec<Vec<ExprId>>,
+    /// Parallel to `states`: the handler state (a `catch` body's entry) whose `try` region covers this
+    /// state, if any. A suspension inside a `try { … } catch { … }` marks the try-body states with their
+    /// handler; the assembly then routes an exception thrown while `this.label` is such a state to the
+    /// handler (via a `label`-based check in the dispatch's `catch`), leaving one thrown elsewhere to
+    /// re-propagate. No per-state flag local/field is needed — `this.label` already identifies the state.
+    state_handlers: Vec<Option<usize>>,
+    /// The handler state currently in effect while flattening a `try` body (set/restored around it).
+    cur_handler: Option<usize>,
+    /// Value-index for the `catch`'s exception variable (a transient local; only used to stash the
+    /// exception into the `result` field for the handler state to read back through `r_v`).
+    catch_var: u32,
+    /// Spilled locals definitely assigned on the current flatten path. `spill_all` skips a spilled var
+    /// not in this set: on an exceptional edge (a `catch` body reached without the `try` body's writes)
+    /// a body-only local is dead, and spilling its (coalesced, possibly wrong-typed) slot would emit a
+    /// verify-invalid store. A skipped field keeps a same-typed prior value or its default, and the
+    /// loop-top restore is always type-correct — so gating on definite assignment is sound.
+    assigned: std::collections::HashSet<u32>,
     next_local: u32,
     failed: bool,
 }
@@ -1343,10 +1567,16 @@ impl Flat<'_> {
     }
     fn new_state(&mut self) -> usize {
         self.states.push(Vec::new());
+        self.state_handlers.push(self.cur_handler);
         self.states.len() - 1
     }
     fn is_spilled(&self, l: u32) -> bool {
         self.spilled.iter().any(|(x, _)| *x == l)
+    }
+    fn mark_assigned(&mut self, l: u32) {
+        if self.is_spilled(l) {
+            self.assigned.insert(l);
+        }
     }
     fn spill_field(&self, l: u32) -> u32 {
         2 + self.spilled.iter().position(|(x, _)| *x == l).unwrap() as u32
@@ -1367,6 +1597,11 @@ impl Flat<'_> {
     }
     fn spill_all(&mut self, out: &mut Vec<ExprId>) {
         for (l, ty) in self.spilled.clone() {
+            // A spilled local not definitely assigned on this path is dead here (its slot may hold a
+            // coalesced value of another type); skip it — its field keeps a type-correct prior/default.
+            if !self.assigned.contains(&l) {
+                continue;
+            }
             let f = self.spill_field(l);
             // A `Unit`-typed local has no on-stack value (`gv` would underflow) — its live value across
             // the suspension is always the `Unit` singleton, so store that directly.
@@ -1447,6 +1682,7 @@ impl Flat<'_> {
         );
         let rg = self.gv(self.r_v);
         let unb = unbox(self.ir, rg, ty);
+        self.mark_assigned(local);
         if self.is_spilled(local) {
             out.push(self.add(IrExpr::SetValue {
                 var: local,
@@ -1537,6 +1773,7 @@ impl Flat<'_> {
                         init: Some(*value),
                     }));
                 }
+                self.mark_assigned(local);
                 self.goto(&mut bb, merge);
             }
             let block = self.add(IrExpr::Block {
@@ -1602,11 +1839,15 @@ impl Flat<'_> {
         } = self.ir.exprs[stmt as usize]
         {
             if self.is_spilled(index) {
+                self.mark_assigned(index);
                 return self.add(IrExpr::SetValue {
                     var: index,
                     value: init,
                 });
             }
+        }
+        if let IrExpr::SetValue { var, .. } = self.ir.exprs[stmt as usize] {
+            self.mark_assigned(var);
         }
         stmt
     }
@@ -1730,6 +1971,80 @@ impl Flat<'_> {
                     self.states[cont] = cs;
                     // exit: the rest
                     self.flatten(&stmts[i + 1..], exit, after);
+                    return;
+                }
+            }
+            // A `try { … } catch (e) { … }` STATEMENT whose body suspends. Model the common shape: a
+            // SINGLE catch, no `finally`, a NON-suspending catch body. The try-body states are marked with
+            // a handler; the assembly's dispatch `catch` routes an exception thrown while `this.label` is
+            // one of them to the handler state, leaving a suspension BEFORE/AFTER the try uncaught. Richer
+            // shapes (finally, multiple catches, a suspending catch) skip the whole file.
+            if let IrExpr::Try {
+                body,
+                catches,
+                finally,
+                ..
+            } = &self.ir.exprs[stmt as usize]
+            {
+                if expr_calls_suspend(self.ir, stmt, self.suspend) {
+                    let (body, catches, finally) = (*body, catches.clone(), *finally);
+                    // A BRANCH (`When`) in the catch body — a `?.`/elvis/`if` — introduces a temp/local
+                    // whose slot the state machine's exception-handler frame can't reconcile with the try
+                    // region (the handler range spans states where that slot is uninitialized), producing
+                    // a stack-map mismatch. Skip the file rather than miscompile; a straight-line catch
+                    // body (the common `catch (e) { log(e); default }` shape) is fine.
+                    if finally.is_some()
+                        || catches.len() != 1
+                        || expr_calls_suspend(self.ir, catches[0].body, self.suspend)
+                        || expr_contains_when(self.ir, catches[0].body)
+                    {
+                        self.failed = true;
+                        self.states[cur] = out;
+                        return;
+                    }
+                    let catch = catches.into_iter().next().unwrap();
+                    let saved = self.cur_handler;
+                    // `try_after` and `handler` belong to the ENCLOSING handler region, not this try's.
+                    let try_after = self.new_state();
+                    let handler = self.new_state();
+                    self.cur_handler = Some(handler);
+                    let try_entry = self.new_state();
+                    self.goto(&mut out, try_entry);
+                    self.states[cur] = out;
+                    // Definite-assignment on entry to the try (= before the body's own writes). The
+                    // handler is reached via the exceptional edge WITHOUT the body's writes, so it must
+                    // start from this set — not the body's accumulated one — else a body-only local
+                    // would be spilled dead at handler→try_after.
+                    let a_entry = self.assigned.clone();
+                    let body_stmts = self.block_stmts(body);
+                    self.flatten(&body_stmts, try_entry, Some(try_after));
+                    let a_body = std::mem::replace(&mut self.assigned, a_entry);
+                    self.cur_handler = saved;
+                    // Handler state: the stashed exception arrives in `result` (loaded into `r_v` at the
+                    // loop top, like a resume value). Rather than bind it to a catch-variable LOCAL —
+                    // which the IR's value-index reuse can alias with a body local of another type, and
+                    // which the emitter can slot-coalesce with an `int` temp (storing a ref into an int
+                    // slot → VerifyError) — replace each read of the catch variable in the catch body with
+                    // `(ExcType) r_v` directly. Valid because a suspending catch is bailed above, so `r_v`
+                    // still holds the exception throughout the (non-suspending) catch body.
+                    let exc_ty = Ty::obj(&catch.exc_internal);
+                    let mut reads: Vec<ExprId> = Vec::new();
+                    collect_getvalue(self.ir, catch.body, catch.var, &mut reads);
+                    for n in reads {
+                        let rv = self.gv(self.r_v);
+                        self.ir.exprs[n as usize] = IrExpr::TypeOp {
+                            op: IrTypeOp::Cast,
+                            arg: rv,
+                            type_operand: exc_ty,
+                        };
+                    }
+                    let catch_stmts = self.block_stmts(catch.body);
+                    self.flatten(&catch_stmts, handler, Some(try_after));
+                    // `try_after` joins the body and handler paths: a spilled local is definitely
+                    // assigned there only if assigned on BOTH (intersection).
+                    let a_handler = std::mem::take(&mut self.assigned);
+                    self.assigned = a_body.intersection(&a_handler).copied().collect();
+                    self.flatten(&stmts[i + 1..], try_after, after);
                     return;
                 }
             }
@@ -2174,6 +2489,108 @@ fn throw_on_failure(ir: &mut IrFile, result_v: u32) -> ExprId {
     })
 }
 
+/// Wrap the state-dispatch `when` in `try { <dispatch> } catch (Throwable e) { when(this.label) {
+/// <try-region states of handler H> -> { this.result = e; this.label = H } … else -> throw e } }`. An
+/// exception thrown while executing a `try`-region state (synchronously OR as a failed resume —
+/// `throwOnFailure` runs at each state entry, and `this.label` is a try-region state throughout) routes to
+/// that try's handler state; one thrown while `this.label` is any other state re-propagates. The
+/// exception is stashed in the `result` field (the handler state reads it back through `r_v`;
+/// `throwOnFailure` is a no-op on a raw `Throwable`, which is not a `Result.Failure`). Using `this.label`
+/// (an existing field) avoids any per-state flag local — so no slot collides with `emit_try`'s catch var.
+/// Returns the dispatch unchanged when no state has a handler.
+fn wrap_dispatch_for_handlers(
+    ir: &mut IrFile,
+    dispatch: ExprId,
+    state_handlers: &[Option<usize>],
+    catch_var: u32,
+    cont_v: u32,
+    cont_id: ClassId,
+    field_base: u32,
+) -> ExprId {
+    // Group the try-region states by their handler state, preserving first-seen order.
+    let mut groups: Vec<(usize, Vec<usize>)> = Vec::new();
+    for (i, h) in state_handlers.iter().enumerate() {
+        if let Some(h) = *h {
+            match groups.iter_mut().find(|(gh, _)| *gh == h) {
+                Some((_, v)) => v.push(i),
+                None => groups.push((h, vec![i])),
+            }
+        }
+    }
+    if groups.is_empty() {
+        return dispatch;
+    }
+    let mut branches: Branches = Vec::new();
+    for (h, states) in &groups {
+        // cond: `this.label == s0 || this.label == s1 || …`
+        let mut cond: Option<ExprId> = None;
+        for &s in states {
+            let recv = ir.add_expr(IrExpr::GetValue(cont_v));
+            let lbl = ir.add_expr(IrExpr::GetField {
+                receiver: recv,
+                class: cont_id,
+                index: field_base + 1,
+            });
+            let sc = ir.add_expr(IrExpr::Const(IrConst::Int(s as i32)));
+            let eq = ir.add_expr(IrExpr::PrimitiveBinOp {
+                op: IrBinOp::Eq,
+                lhs: lbl,
+                rhs: sc,
+            });
+            cond = Some(match cond {
+                None => eq,
+                Some(c) => ir.add_expr(IrExpr::PrimitiveBinOp {
+                    op: IrBinOp::Or,
+                    lhs: c,
+                    rhs: eq,
+                }),
+            });
+        }
+        // route: `this.result = e; this.label = h`
+        let this_res = ir.add_expr(IrExpr::GetValue(cont_v));
+        let exc_v = ir.add_expr(IrExpr::GetValue(catch_var));
+        let store_res = ir.add_expr(IrExpr::SetField {
+            receiver: this_res,
+            class: cont_id,
+            index: field_base,
+            value: exc_v,
+        });
+        let this_l = ir.add_expr(IrExpr::GetValue(cont_v));
+        let hc = ir.add_expr(IrExpr::Const(IrConst::Int(*h as i32)));
+        let set_lbl = ir.add_expr(IrExpr::SetField {
+            receiver: this_l,
+            class: cont_id,
+            index: field_base + 1,
+            value: hc,
+        });
+        let route = ir.add_expr(IrExpr::Block {
+            stmts: vec![store_res, set_lbl],
+            value: None,
+        });
+        branches.push((cond, route));
+    }
+    // else: re-throw the caught exception (it belongs to no active try region).
+    let exc = ir.add_expr(IrExpr::GetValue(catch_var));
+    let throw = ir.add_expr(IrExpr::Throw { operand: exc });
+    let rethrow = ir.add_expr(IrExpr::Block {
+        stmts: vec![throw],
+        value: None,
+    });
+    branches.push((None, rethrow));
+    let when = ir.add_expr(IrExpr::When { branches });
+    let catch = crate::ir::IrCatch {
+        var: catch_var,
+        exc_internal: "java/lang/Throwable".to_string(),
+        body: when,
+    };
+    ir.add_expr(IrExpr::Try {
+        body: dispatch,
+        catches: vec![catch],
+        finally: None,
+        result: Ty::Unit,
+    })
+}
+
 /// Coerce an `Object` value to `target` (unbox a primitive, or checkcast a reference).
 fn unbox(ir: &mut IrFile, value: ExprId, target: &Ty) -> ExprId {
     // The CPS resume value is `Object`; a reference target (`Config`, `String`, `List<…>`) needs a real
@@ -2405,6 +2822,48 @@ fn rewrite_subtree(ir: &mut IrFile, e: ExprId, f: &mut impl FnMut(&mut IrExpr)) 
     for c in kids {
         rewrite_subtree(ir, c, f);
     }
+}
+
+/// Whether `e`'s subtree contains a `When` (a branch — `if`/`when`/`?.`/elvis) in its OWN (directly
+/// flattened) flow. A branch in a suspend try's CATCH body creates a temp whose slot the exception-
+/// handler frame can't reconcile → skip. A `When` nested inside a `Lambda` is compiled to a SEPARATE
+/// method (not inlined into the handler state), so it is NOT a conflict — don't descend into lambdas.
+fn expr_contains_when(ir: &IrFile, e: ExprId) -> bool {
+    match &ir.exprs[e as usize] {
+        IrExpr::When { .. } => return true,
+        IrExpr::Lambda { .. } => return false,
+        _ => {}
+    }
+    let mut found = false;
+    for_each_child(&ir.exprs, e, &mut |c| {
+        if !found && expr_contains_when(ir, c) {
+            found = true;
+        }
+    });
+    found
+}
+
+/// Collect the node ids of every `GetValue(var)` in `e`'s subtree (a catch body) that means the catch
+/// variable, so each can be rewritten to read the exception from `r_v` instead of a catch-variable local.
+/// A `Lambda` has its OWN value numbering: its CAPTURES read the enclosing scope (so a captured catch var
+/// is collected), but its `inline_body`'s locals are numbered independently — do NOT descend into it, or a
+/// lambda-local that happens to reuse `var`'s index would be wrongly rewritten (mirrors `shift_value_indices`).
+fn collect_getvalue(ir: &IrFile, e: ExprId, var: u32, out: &mut Vec<ExprId>) {
+    match &ir.exprs[e as usize] {
+        IrExpr::GetValue(i) if *i == var => {
+            out.push(e);
+            return;
+        }
+        IrExpr::Lambda { captures, .. } => {
+            let caps = captures.clone();
+            for c in caps {
+                collect_getvalue(ir, c, var, out);
+            }
+            return;
+        }
+        _ => {}
+    }
+    for_each_child(&ir.exprs, e, &mut |c| collect_getvalue(ir, c, var, out));
 }
 
 /// Apply `f` to the node at `e` and every node in its subtree (pre-order), read-only. The single home

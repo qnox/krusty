@@ -6630,6 +6630,35 @@ impl<'a> Checker<'a> {
         } else {
             (expected, actual)
         };
+        // A non-null `@JvmInline value class` value assigned where the SAME value class's NULLABLE form is
+        // expected (`fun f(): AppId? = sib()` with `sib(): AppId`). A non-null value class is represented
+        // UNBOXED (its underlying), the nullable form BOXED (the wrapper) — a real representation change,
+        // so `strip_nullable_ref` deliberately keeps the two distinct rather than treat every nullable
+        // value class as its underlying. But this widening IS valid Kotlin; kotlinc boxes the underlying
+        // into the wrapper. Accept it — the value-classes emit pass boxes the unboxed tail at the return.
+        if matches!(
+            ctx,
+            "function body" | "getter body" | "local function body" | "return"
+        ) && expected.is_nullable()
+            && !actual.is_nullable()
+            && expected.non_null() == actual
+            && (self.ty_is_value_class(actual)
+                || self.syms.libraries.value_underlying(actual).is_some())
+        {
+            return;
+        }
+        // A nullable REFERENCE argument whose non-null form is the expected type: krusty erases reference
+        // nullability from a declared parameter (`C?` param → `C`), so a genuinely-nullable argument — an
+        // INFERRED `C?` such as an elvis / branch-join result, which (unlike a declared type) keeps its
+        // `?` — must still pass. The two share the JVM representation and krusty does not enforce
+        // null-safety. `strip_nullable_ref` leaves a value class / nullable primitive nullable (their
+        // nullable form is a distinct representation), so those are correctly NOT accepted here.
+        if actual.is_nullable()
+            && !expected.is_nullable()
+            && self.strip_nullable_ref(actual) == expected
+        {
+            return;
+        }
         // An erased generic reference array (`Array<Any>`, e.g. `emptyArray<T>()` → `Object[]`) is
         // assignable to any specific reference array — `Array` is invariant, but the erased value
         // really is the target type at runtime, so kotlinc inserts a `checkcast` at the use site.
@@ -7168,13 +7197,25 @@ impl<'a> Checker<'a> {
                     let ht = self.expr(c.body);
                     self.pop_scope();
                     // A `try` used as a statement needn't have body/catch agree; merge leniently
-                    // (mismatch → `Unit`) so only an expression use that needs a value is constrained.
+                    // (mismatch → `Unit`) so only an expression use that needs a value is constrained. A
+                    // diverging (`Nothing`) branch drops out. Two values of the SAME class with differing
+                    // type arguments (`List<Backup>` from the body vs `List<Nothing>` from a bare
+                    // `emptyList()` catch) merge to that class with erased arguments (`List<*>`), assignable
+                    // to the declared `List<Backup>` return — instead of collapsing to `Unit`, which wrongly
+                    // typed an expression-bodied `try { … } catch { emptyList() }` as `Unit`. (This mirrors
+                    // one case of `join` without its by-span coercion side effects, which mis-emit here.)
                     result = if result == ht {
                         result
                     } else if result == Ty::Nothing {
                         ht
                     } else if ht == Ty::Nothing {
                         result
+                    } else if let (Ty::Obj(ai, _), Ty::Obj(bi, _)) = (result, ht) {
+                        if ai == bi {
+                            Ty::obj(ai)
+                        } else {
+                            Ty::Unit
+                        }
                     } else {
                         Ty::Unit
                     };
@@ -7479,7 +7520,13 @@ impl<'a> Checker<'a> {
                     t
                 } else {
                     match &args {
-                        None => self.check_member(rt, &name, self.span(e), Some(e)),
+                        // After `?.` the receiver is non-null, so resolve the member against the NON-NULL
+                        // receiver type — mirroring the args (extension) branch below. A genuinely nullable
+                        // receiver that ISN'T smart-cast (a call result: `xs.firstOrNull()?.field`) reached
+                        // here as `Nullable(Obj(..))`, and `check_member` doesn't peel the nullable for a
+                        // user class, so a member read on it failed ("unresolved member … on 'C'"). A
+                        // smart-cast local (`val c: C? = C(); c?.x`) already arrived non-null, which hid this.
+                        None => self.check_member(rt.non_null(), &name, self.span(e), Some(e)),
                         Some(a) => {
                             // A safe call to a lambda-taking extension (`c?.takeIf { it.at > 0 }`) types its
                             // lambda argument against the extension's block parameter (bound by the NON-NULL
@@ -7681,6 +7728,21 @@ impl<'a> Checker<'a> {
                     // means `this.v` (sibling method calls already resolve via `this_ty`).
                     if let Some(Ty::Obj(internal, _)) = self.this_ty {
                         if let Some((ty, _)) = self.lookup_prop(internal, &n) {
+                            return self.set(e, ty);
+                        }
+                    }
+                    // An unqualified COMPANION property inside a REGULAR member (`HEX_RADIX` where
+                    // `companion object { const val HEX_RADIX = 16 }`): the companion's members are hoisted
+                    // to static fields on the outer class and are readable unqualified from any member.
+                    // The `companion_of` branch above only fires when checking a companion member; this
+                    // covers the bare form from a plain method (the qualified `C.HEX_RADIX` path already
+                    // resolves it via `static_props`).
+                    if let Some(Ty::Obj(internal, _)) = self.this_ty {
+                        if let Some(&ty) = self
+                            .syms
+                            .class_by_internal(internal)
+                            .and_then(|c| c.static_props.get(&n))
+                        {
                             return self.set(e, ty);
                         }
                     }
@@ -8847,8 +8909,11 @@ impl<'a> Checker<'a> {
         };
         // Inside the lambda the receiver is NON-null: a nullable-primitive receiver (`Int?` =
         // `java/lang/Integer`, e.g. from a chained `s?.let { … }?.let { it + 1 }`) binds `it`/`this` as
-        // the UNBOXED primitive (`Int`), so `it + 1` is primitive arithmetic, not `Integer + Int`.
-        let rt = rt.nullable_primitive().unwrap_or(rt);
+        // the UNBOXED primitive (`Int`), so `it + 1` is primitive arithmetic, not `Integer + Int`. A
+        // nullable REFERENCE receiver (`Map.Entry<K,V>?` from `map.entries.find { … }?.let { … }`) must
+        // likewise drop its nullability, else a destructuring lambda param (`{ (k, v) -> … }`) resolves
+        // `componentN` against the nullable type and fails ("cannot destructure … no operator 'component1'").
+        let rt = rt.nullable_primitive().unwrap_or_else(|| rt.non_null());
         match name {
             "run" | "apply" if params.is_empty() => {
                 let bt = self.check_with_receiver_labeled(rt, body, Some(name));
@@ -12448,10 +12513,18 @@ impl<'a> Checker<'a> {
             }
         }
         // Two values of the SAME class join to that class with erased type arguments (`List<C>` and
-        // `List<D>` → `List<*>`).
-        if let (Ty::Obj(ai, _), Ty::Obj(bi, _)) = (a, b) {
+        // `List<D>` → `List<*>`), differing only in NULLABILITY to its nullable form (`C` and `C?` → `C?`).
+        // Comparing the NON-NULL forms covers the mixed case (`x ?: y` where one side is `C` and the other
+        // `C?` — e.g. a map get typed `C` elvis a nullable member return `C?`), which the bare-`Obj` match
+        // missed, collapsing it to `Any`.
+        if let (Some(ai), Some(bi)) = (a.non_null().obj_internal(), b.non_null().obj_internal()) {
             if ai == bi {
-                return Ty::obj(ai);
+                let base = Ty::obj(ai);
+                return if a.is_nullable() || b.is_nullable() {
+                    Ty::nullable(base)
+                } else {
+                    base
+                };
             }
         }
         // Two values of DIFFERENT reference classes join to their common supertype, which krusty
