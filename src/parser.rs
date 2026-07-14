@@ -3388,6 +3388,13 @@ impl<'a> Parser<'a> {
             self.bump(); // '@'
             let qname = self.parse_qualified_name();
             self.parse_type_args(); // `@Foo<Bar>` — type arguments on the annotation
+                                    // An argument-bearing type annotation `@Ann("a") String`. A following `(` is annotation
+                                    // args ONLY if it is NOT the parameter list of a function type — `@Composable () -> Unit`
+                                    // has the `(` belong to the type. Disambiguate by peeking past the balanced `(…)`: an
+                                    // `->` after it means a function type (leave the `(`), otherwise consume the args.
+            if self.at(TokenKind::LParen) && !self.paren_group_precedes_arrow(self.i) {
+                let _ = self.parse_annotation_args();
+            }
             if !qname.is_empty() {
                 type_anns.push(qname.rsplit('.').next().unwrap_or(&qname).to_string());
             }
@@ -4387,7 +4394,22 @@ impl<'a> Parser<'a> {
             }
             TokenKind::KwDo => {
                 self.bump();
-                let body = self.parse_loop_body();
+                // An EMPTY do-while body (`do while (cond);`): the `do` is immediately followed by the
+                // `while` keyword, so there is no body statement. (A non-do loop body may itself be a
+                // `while` loop, so this empty-body shortcut is do-while-specific.)
+                let body_span = self.tok().span;
+                self.skip_newlines();
+                let body = if self.at(TokenKind::KwWhile) {
+                    self.file.add_expr(
+                        Expr::Block {
+                            stmts: Vec::new(),
+                            trailing: None,
+                        },
+                        body_span,
+                    )
+                } else {
+                    self.parse_loop_body()
+                };
                 self.skip_newlines();
                 self.expect(TokenKind::KwWhile, "'while'");
                 self.expect(TokenKind::LParen, "'('");
@@ -6468,6 +6490,32 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// Whether the balanced parenthesized group starting at token index `at` (which must be `(`) is
+    /// immediately followed by `->` — i.e. it is a function type's parameter list, not an annotation
+    /// argument list. Used to disambiguate `@Ann("a") String` (annotation args) from
+    /// `@Composable () -> Unit` (function type).
+    fn paren_group_precedes_arrow(&self, at: usize) -> bool {
+        let mut j = at;
+        let mut depth = 0i32;
+        loop {
+            match self.t.get(j).map(|t| t.kind) {
+                None => return false,
+                Some(TokenKind::LParen) => depth += 1,
+                Some(TokenKind::RParen) => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return self
+                            .t
+                            .get(j + 1)
+                            .is_some_and(|t| t.kind == TokenKind::Arrow);
+                    }
+                }
+                _ => {}
+            }
+            j += 1;
+        }
+    }
+
     /// Whether a top-level `->` (a lambda's parameter arrow) precedes the matching `}`, scanning from
     /// token index `from`. Distinguishes a lambda `{ p -> … }` from a statement block. A lambda's
     /// parameter list (everything before its arrow) is only names, `:`, commas, destructuring parens,
@@ -6495,6 +6543,12 @@ impl<'a> Parser<'a> {
                     | TokenKind::KwPackage
                     | TokenKind::Eq,
                 ) if depth == 0 => return false,
+                // An `object` expression (`{ object : () -> Unit { … } }`): `object` is a hard keyword,
+                // never a lambda parameter name, so a `->` reached inside its supertype/body belongs to a
+                // function-type supertype — the brace is a BLOCK, not a lambda.
+                Some(TokenKind::Ident) if depth == 0 && self.t[j].text(self.src) == "object" => {
+                    return false
+                }
                 Some(TokenKind::Arrow) if depth == 0 => return true,
                 Some(TokenKind::RBrace) if depth == 0 => return false,
                 Some(TokenKind::LParen | TokenKind::LBracket | TokenKind::LBrace) => depth += 1,
