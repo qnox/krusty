@@ -7652,6 +7652,16 @@ impl<'a> Lower<'a> {
         ty.obj_internal().and_then(|i| self.classes.get(i))
     }
 
+    fn single_lambda_arg(&self, args: &[AstExprId]) -> Option<(AstExprId, Vec<String>, AstExprId)> {
+        let [arg] = args else {
+            return None;
+        };
+        let Expr::Lambda { params, body } = self.afile.expr(*arg).clone() else {
+            return None;
+        };
+        Some((*arg, params, body))
+    }
+
     /// Route a library `inline fun` call with a lambda argument (`recv.<name> { … }`) to the bytecode
     /// inliner (`Callee::Static` with `inline`), carrying the receiver and the lambda — so its real body
     /// is spliced rather than desugared per-function. Metadata-driven: gated on the resolved callable's
@@ -19128,66 +19138,59 @@ impl<'a> Lower<'a> {
                     // `for (x in this) body` — inline it to a for-each loop (no closure), so a mutable
                     // capture in the lambda works, exactly as kotlinc's inlining does. Gated on the
                     // receiver being iterable (so a user `forEach` on a non-iterable falls through).
-                    if name == "forEach" && args.len() == 1 {
-                        if let Expr::Lambda {
-                            params,
-                            body: lbody,
-                        } = self.afile.expr(args[0]).clone()
-                        {
-                            let rty = self.info.ty(receiver);
-                            // An array, a `String`, or an `Obj` iterable (List/Set/Iterable) — all handled
-                            // by `lower_for_each` (and the checker element-types the lambda parameter).
-                            let iterable = rty.array_elem().is_some()
-                                || rty == Ty::String
-                                || rty.obj_internal().map_or(false, |i| {
-                                    self.syms.libraries.counted_loop_info(i).is_some()
-                                        || crate::symbol_resolver::resolve_instance(
-                                            &*self.syms.libraries,
-                                            i,
-                                            "iterator",
-                                            &[],
-                                        )
-                                        .is_some()
-                                        || self.has_library_iterator_extension(receiver)
-                                });
-                            if iterable {
-                                let param = ast::first_lambda_param_or_it(&params);
-                                return self.lower_for_each(&param, receiver, lbody, None);
-                            }
+                    let one_lambda_arg = self.single_lambda_arg(&args);
+                    if let ("forEach", Some((_, params, lbody))) =
+                        (name.as_str(), one_lambda_arg.as_ref())
+                    {
+                        let rty = self.info.ty(receiver);
+                        // An array, a `String`, or an `Obj` iterable (List/Set/Iterable) — all handled
+                        // by `lower_for_each` (and the checker element-types the lambda parameter).
+                        let iterable = rty.array_elem().is_some()
+                            || rty == Ty::String
+                            || rty.obj_internal().map_or(false, |i| {
+                                self.syms.libraries.counted_loop_info(i).is_some()
+                                    || crate::symbol_resolver::resolve_instance(
+                                        &*self.syms.libraries,
+                                        i,
+                                        "iterator",
+                                        &[],
+                                    )
+                                    .is_some()
+                                    || self.has_library_iterator_extension(receiver)
+                            });
+                        if iterable {
+                            let param = ast::first_lambda_param_or_it(params);
+                            return self.lower_for_each(&param, receiver, *lbody, None);
                         }
                     }
                     // `iterable.forEachIndexed { i, x -> body }` — the inline `forEachIndexed`, whose
                     // body is `var i = 0; for (x in this) { action(i, x); i++ }`. Inline it via the
                     // iterator path with an index counter (Obj iterables only, same as `forEach`).
-                    if name == "forEachIndexed" && args.len() == 1 {
-                        if let Expr::Lambda {
-                            params,
-                            body: lbody,
-                        } = self.afile.expr(args[0]).clone()
-                        {
-                            let rty = self.info.ty(receiver);
-                            let iterable = rty.obj_internal().map_or(false, |i| {
-                                crate::symbol_resolver::resolve_instance(
-                                    &*self.syms.libraries,
-                                    i,
-                                    "iterator",
-                                    &[],
-                                )
-                                .is_some()
-                                    || self.has_library_iterator_extension(receiver)
-                            });
-                            if iterable && params.len() == 2 {
-                                let idx = params[0].clone();
-                                let elem = params[1].clone();
-                                return self.lower_foreach_iterator(
-                                    &elem,
-                                    receiver,
-                                    lbody,
-                                    rty,
-                                    Some(&idx),
-                                    None,
-                                );
-                            }
+                    if let ("forEachIndexed", Some((_, params, lbody))) =
+                        (name.as_str(), one_lambda_arg.as_ref())
+                    {
+                        let rty = self.info.ty(receiver);
+                        let iterable = rty.obj_internal().map_or(false, |i| {
+                            crate::symbol_resolver::resolve_instance(
+                                &*self.syms.libraries,
+                                i,
+                                "iterator",
+                                &[],
+                            )
+                            .is_some()
+                                || self.has_library_iterator_extension(receiver)
+                        });
+                        if iterable && params.len() == 2 {
+                            let idx = params[0].clone();
+                            let elem = params[1].clone();
+                            return self.lower_foreach_iterator(
+                                &elem,
+                                receiver,
+                                *lbody,
+                                rty,
+                                Some(&idx),
+                                None,
+                            );
                         }
                     }
                     // Metadata-driven inline route: any library `inline fun` taking a single lambda whose
@@ -19199,12 +19202,11 @@ impl<'a> Lower<'a> {
                     // `run`/`apply` are receiver lambdas (the lambda's `this` is the receiver); the
                     // bytecode splice routes them as ordinary value-lambdas, mishandling that receiver, so
                     // they go to the receiver-aware fallback below instead.
-                    if args.len() == 1
-                        && !matches!(name.as_str(), "run" | "apply")
-                        && matches!(self.afile.expr(args[0]), Expr::Lambda { .. })
-                    {
-                        if let Some(call) = self.try_route_lambda_inline(e, receiver, args[0]) {
-                            return Some(call);
+                    if !matches!(name.as_str(), "run" | "apply") {
+                        if let Some((arg, ..)) = one_lambda_arg.as_ref() {
+                            if let Some(call) = self.try_route_lambda_inline(e, receiver, *arg) {
+                                return Some(call);
+                            }
                         }
                     }
                     // FALLBACK for the cases the route can't splice — a lambda capturing `this`/fields (no
@@ -19218,56 +19220,50 @@ impl<'a> Lower<'a> {
                     // through). `let`/`run` yield the body value; `also`/`apply` yield the receiver.
                     let is_recv_lambda = matches!(name.as_str(), "run" | "apply");
                     let scope_fn = matches!(name.as_str(), "let" | "also") || is_recv_lambda;
-                    if scope_fn && args.len() == 1 {
-                        if let Expr::Lambda {
-                            params,
-                            body: lbody,
-                        } = self.afile.expr(args[0]).clone()
-                        {
-                            let rty = self.info.ty(receiver);
-                            // A receiver lambda binds the receiver as `this`; member access in the body
-                            // resolves against its type through the implicit-`this` paths (own class
-                            // field/getter, or a builtin/library accessor for `String`/collections/…).
-                            let recv = self.expr(receiver)?;
-                            let depth = self.scope.len();
-                            let p_slot = self.fresh_value();
-                            let pname = if is_recv_lambda {
-                                "this".to_string()
-                            } else {
-                                ast::first_lambda_param_or_it(&params)
-                            };
-                            // An inlined receiver lambda runs in the *caller's* method, so the receiver's
-                            // members are accessed externally (getter/setter), never as the enclosing
-                            // class's own private fields — clear `cur_class` for the body.
-                            let saved_cur = self.cur_class.clone();
-                            if is_recv_lambda {
-                                self.cur_class = None;
-                            }
-                            self.scope.push((pname, p_slot, rty));
-                            let var_p = self.ir.add_expr(IrExpr::Variable {
-                                index: p_slot,
-                                ty: ty_to_ir(rty),
-                                init: Some(recv),
-                            });
-                            let body_val = self.expr(lbody);
-                            self.scope.truncate(depth);
-                            self.cur_class = saved_cur;
-                            let body_val = body_val?;
-                            let returns_receiver = matches!(name.as_str(), "also" | "apply");
-                            let result = if !returns_receiver {
-                                self.ir.add_expr(IrExpr::Block {
-                                    stmts: vec![var_p],
-                                    value: Some(body_val),
-                                })
-                            } else {
-                                let recv_read = self.ir.add_expr(IrExpr::GetValue(p_slot));
-                                self.ir.add_expr(IrExpr::Block {
-                                    stmts: vec![var_p, body_val],
-                                    value: Some(recv_read),
-                                })
-                            };
-                            return Some(result);
+                    if let (true, Some((_, params, lbody))) = (scope_fn, one_lambda_arg.as_ref()) {
+                        let rty = self.info.ty(receiver);
+                        // A receiver lambda binds the receiver as `this`; member access in the body
+                        // resolves against its type through the implicit-`this` paths (own class
+                        // field/getter, or a builtin/library accessor for `String`/collections/…).
+                        let recv = self.expr(receiver)?;
+                        let depth = self.scope.len();
+                        let p_slot = self.fresh_value();
+                        let pname = if is_recv_lambda {
+                            "this".to_string()
+                        } else {
+                            ast::first_lambda_param_or_it(params)
+                        };
+                        // An inlined receiver lambda runs in the *caller's* method, so the receiver's
+                        // members are accessed externally (getter/setter), never as the enclosing
+                        // class's own private fields — clear `cur_class` for the body.
+                        let saved_cur = self.cur_class.clone();
+                        if is_recv_lambda {
+                            self.cur_class = None;
                         }
+                        self.scope.push((pname, p_slot, rty));
+                        let var_p = self.ir.add_expr(IrExpr::Variable {
+                            index: p_slot,
+                            ty: ty_to_ir(rty),
+                            init: Some(recv),
+                        });
+                        let body_val = self.expr(*lbody);
+                        self.scope.truncate(depth);
+                        self.cur_class = saved_cur;
+                        let body_val = body_val?;
+                        let returns_receiver = matches!(name.as_str(), "also" | "apply");
+                        let result = if !returns_receiver {
+                            self.ir.add_expr(IrExpr::Block {
+                                stmts: vec![var_p],
+                                value: Some(body_val),
+                            })
+                        } else {
+                            let recv_read = self.ir.add_expr(IrExpr::GetValue(p_slot));
+                            self.ir.add_expr(IrExpr::Block {
+                                stmts: vec![var_p, body_val],
+                                value: Some(recv_read),
+                            })
+                        };
+                        return Some(result);
                     }
                     // Nested-class construction `Outer.Inner(args)` — the receiver is a class name and
                     // the call's result type is the nested class. Emit `new Outer$Inner(args)`.
