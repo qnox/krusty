@@ -13802,16 +13802,13 @@ impl<'a> Lower<'a> {
         index: AstExprId,
         value: AstExprId,
     ) -> bool {
-        if let Expr::Binary { lhs, .. } = self.afile.expr(value) {
-            if let Expr::Index {
-                array: a2,
-                indices: i2,
-            } = self.afile.expr(*lhs)
-            {
-                return *a2 == array && i2.len() == 1 && i2[0] == index;
-            }
-        }
-        false
+        let Expr::Binary { lhs, .. } = self.afile.expr(value) else {
+            return false;
+        };
+        let Expr::Index { array: a2, indices } = self.afile.expr(*lhs) else {
+            return false;
+        };
+        *a2 == array && matches!(indices.as_slice(), [only] if *only == index)
     }
 
     /// Whether an index-assign receiver/index operand is side-effect-free, so re-evaluating it (rather
