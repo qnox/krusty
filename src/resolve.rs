@@ -4752,7 +4752,7 @@ pub fn check_file(file: &File, syms: &mut SymbolTable, diags: &mut DiagSink) -> 
                                 c.syms
                                     .ext_props
                                     .get(&(rt.erased_recv(), p.name.clone()))
-                                    .map(|(t, _)| *t)
+                                    .map(|&(t, _)| t)
                             })
                         })
                         .unwrap_or(Ty::Error);
