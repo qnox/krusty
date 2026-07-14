@@ -1051,6 +1051,38 @@ fn run_suspend_box(src: &str, tag: &str) -> Option<String> {
 }
 
 #[test]
+fn suspend_unit_fn_bare_early_return() {
+    // A `suspend fun` returning Unit with an EARLY BARE `return` (a guard `if (skip) return`) BEFORE a
+    // later suspension point. In the CPS state machine the method returns `Object`, so a bare `return`
+    // must `areturn Unit.INSTANCE` — emitting a void `return` (as the bare `Return(None)` did) yields
+    // "Method expects a return value" at load. Mission-core hit: `UserManagementService.acceptInvitation`
+    // (`… ?: return`, `if (status != PENDING) return`). proc(b,true) leaves v=0; proc(b,false) sets v=1.
+    if common::stdlib_jar().is_none()
+        || common::coroutines_jar().is_none()
+        || common::jdk_modules().is_none()
+    {
+        return;
+    }
+    const SRC: &str = "import kotlinx.coroutines.runBlocking\n\
+        class B { var v: Int = 0 }\n\
+        suspend fun leaf(): Int = 1\n\
+        suspend fun proc(b: B, skip: Boolean) {\n\
+            if (skip) return\n\
+            val x = leaf()\n\
+            b.v = x\n\
+        }\n\
+        fun box(): String = runBlocking {\n\
+            val b1 = B(); proc(b1, true)\n\
+            val b2 = B(); proc(b2, false)\n\
+            if (b1.v == 0 && b2.v == 1) \"OK\" else \"F b1=\" + b1.v + \" b2=\" + b2.v\n\
+        }\n";
+    assert_eq!(
+        run_suspend_box(SRC, "Main").expect("suspend bare-return compile+run"),
+        "OK"
+    );
+}
+
+#[test]
 fn suspend_in_catch_body_spills_exception() {
     // A `suspend fun` whose CATCH body itself contains a suspension point AND reads the caught
     // exception both BEFORE and AFTER that suspension (mission-core's MissionChangeService.approveChange

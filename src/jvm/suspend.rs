@@ -2895,7 +2895,15 @@ fn binds_value_class_suspension(ir: &IrFile, e: ExprId, suspend_set: &HashSet<u3
 
 fn box_returns(ir: &mut IrFile, e: ExprId) -> bool {
     match ir.exprs[e as usize].clone() {
-        IrExpr::Return(None) => true,
+        IrExpr::Return(None) => {
+            // The CPS method returns `Object`, so a BARE `return` — a `Unit`-returning suspend fn's early
+            // exit (`x ?: return`, `if (…) return`) — must `areturn Unit.INSTANCE`, not a void `return`
+            // (which fails verification: "Method expects a return value"). Every other return in the
+            // assembled state machine already yields a value.
+            let unit = ir.add_expr(IrExpr::UnitInstance);
+            ir.exprs[e as usize] = IrExpr::Return(Some(unit));
+            true
+        }
         IrExpr::Return(Some(v)) => {
             // Already an Object-yielding suspension return (COROUTINE_SUSPENDED) needs no box; but a
             // double coercion to Object is harmless (identity on a reference), so box uniformly.
