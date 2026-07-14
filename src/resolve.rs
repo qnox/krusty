@@ -341,6 +341,14 @@ impl SymbolTable {
         })
     }
 
+    fn fun_ret_by_erased_params(&self, name: &str, params: &[ErasedTypeKey]) -> Option<Ty> {
+        let overloads = self.funs.get(name)?;
+        overloads
+            .iter()
+            .find(|sig| overloads.len() == 1 || erased_params_semantic_key(sig) == params)
+            .map(|sig| sig.ret)
+    }
+
     /// Resolve a class reference type `Ty::Obj` back to its declaration (by internal name).
     pub fn class_by_internal(&self, internal: &str) -> Option<&ClassSig> {
         self.classes.values().find(|c| c.internal == internal)
@@ -6096,23 +6104,14 @@ impl<'a> Checker<'a> {
                 .or_else(|| f.ret.as_ref().map(|r| self.resolve_ty(r)))
                 .unwrap_or(Ty::Unit);
         } else {
-            // Use this declaration's own collected overload's return type (matched by its erased
-            // parameter descriptors when the name is overloaded); for a companion method (not in `funs`)
-            // fall back to the declared return type.
+            // Use this declaration's own collected return type; companion methods fall back to the
+            // declared return type because they are not stored in `funs`.
             let want: Vec<ErasedTypeKey> = f
                 .params
                 .iter()
                 .map(|p| erased_type_key(self.resolve_ty(&p.ty)))
                 .collect();
-            let own_ret = self.syms.funs.get(&f.name).and_then(|v| {
-                if v.len() == 1 {
-                    Some(v[0].ret)
-                } else {
-                    v.iter()
-                        .find(|s| erased_params_semantic_key(s) == want)
-                        .map(|s| s.ret)
-                }
-            });
+            let own_ret = self.syms.fun_ret_by_erased_params(&f.name, &want);
             self.ret_ty = own_ret
                 .or_else(|| f.ret.as_ref().map(|r| self.resolve_ty(r)))
                 .unwrap_or(Ty::Unit);
