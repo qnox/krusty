@@ -137,6 +137,7 @@ pub fn type_descriptor(ty: Ty) -> String {
             s.params.len() + usize::from(s.suspend)
         ),
         Ty::Nullable(inner) => match *inner {
+            Ty::Unit => obj_desc("kotlin/Unit"),
             Ty::UInt => obj_desc("kotlin/UInt"),
             Ty::ULong => obj_desc("kotlin/ULong"),
             other => type_descriptor(other.boxed_ref().unwrap_or(other)),
@@ -180,6 +181,15 @@ mod tests {
     fn nullable_unsigned_primitive_descriptor_boxes_to_inline_class() {
         assert_eq!(type_descriptor(Ty::nullable(Ty::UInt)), "Lkotlin/UInt;");
         assert_eq!(type_descriptor(Ty::nullable(Ty::ULong)), "Lkotlin/ULong;");
+    }
+
+    #[test]
+    fn nullable_unit_descriptor_is_singleton_reference() {
+        assert_eq!(type_descriptor(Ty::nullable(Ty::Unit)), "Lkotlin/Unit;");
+        assert_eq!(
+            method_descriptor(&[Ty::nullable(Ty::Unit)], Ty::Unit),
+            "(Lkotlin/Unit;)V"
+        );
     }
 
     #[test]

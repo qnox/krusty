@@ -7112,6 +7112,9 @@ pub fn ir_ty_to_jvm(t: &Ty) -> Ty {
         if **inner == Ty::Nothing {
             return Ty::obj("kotlin/Any");
         }
+        if **inner == Ty::Unit {
+            return Ty::obj("kotlin/Unit");
+        }
         if let Some(boxed) = inner.boxed_ref() {
             // `boxed_ref` already picks the right wrapper — `java/lang/Integer` for `Int?`, the inline-class
             // `kotlin/UInt` for `UInt?` — so do NOT re-map through `ir_ty_to_jvm` (which would erase the

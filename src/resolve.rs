@@ -3754,12 +3754,11 @@ fn ty_of_ref_with(
     // A nullable primitive is `Nullable(prim)` (it boxes to its wrapper at the backend boundary); a
     // non-boxable primitive (unsigned/value) is still rejected (skip, never miscompiled).
     if r.nullable && !base.is_reference() && base != Ty::Error {
-        // `Unit?` is a nullable `kotlin/Unit` reference (`Unit.INSTANCE`/`null`), not a primitive.
-        if base == Ty::Unit {
-            return Ty::nullable(Ty::obj("kotlin/Unit"));
-        }
         if base == Ty::Nothing {
             return Ty::nullable(Ty::Nothing);
+        }
+        if base == Ty::Unit {
+            return Ty::nullable(Ty::Unit);
         }
         if let Some(nb) = base.nullable_boxed() {
             return nb;
@@ -5590,11 +5589,11 @@ impl<'a> Checker<'a> {
             Ty::Error
         };
         if r.nullable && !base.is_reference() && base != Ty::Error {
-            if base == Ty::Unit {
-                return Ty::nullable(Ty::obj("kotlin/Unit"));
-            }
             if base == Ty::Nothing {
                 return Ty::nullable(Ty::Nothing);
+            }
+            if base == Ty::Unit {
+                return Ty::nullable(Ty::Unit);
             }
             if let Some(nb) = base.nullable_boxed() {
                 return nb;
@@ -6650,19 +6649,15 @@ impl<'a> Checker<'a> {
         } else {
             (expected, actual)
         };
-        // A non-null `@JvmInline value class` value assigned where the SAME value class's NULLABLE form is
-        // expected (`fun f(): AppId? = sib()` with `sib(): AppId`). A non-null value class is represented
-        // UNBOXED (its underlying), the nullable form BOXED (the wrapper) — a real representation change,
-        // so `strip_nullable_ref` deliberately keeps the two distinct rather than treat every nullable
-        // value class as its underlying. But this widening IS valid Kotlin; kotlinc boxes the underlying
-        // into the wrapper. Accept it — the value-classes emit pass boxes the unboxed tail at the return.
+        // Same-type non-null value flowing into its nullable form (`X` -> `X?`, including `Unit?`).
         if matches!(
             ctx,
             "function body" | "getter body" | "local function body" | "return"
         ) && expected.is_nullable()
             && !actual.is_nullable()
             && expected.non_null() == actual
-            && (self.ty_is_value_class(actual)
+            && (actual == Ty::Unit
+                || self.ty_is_value_class(actual)
                 || self.syms.libraries.value_underlying(actual).is_some())
         {
             return;
@@ -6705,14 +6700,6 @@ impl<'a> Checker<'a> {
             return;
         }
         if actual == Ty::obj("kotlin/Any") && expected != Ty::Unit {
-            return;
-        }
-        // `Unit` (the non-reference modeling) and `kotlin/Unit` (its singleton reference form) are the same
-        // type — `fun f(): Unit? = unitExpr` assigns a `Unit` value to a `kotlin/Unit` slot. The lowerer's
-        // arg/return coercion materializes `Unit.INSTANCE`.
-        if (actual == Ty::Unit && expected == Ty::obj("kotlin/Unit"))
-            || (expected == Ty::Unit && actual == Ty::obj("kotlin/Unit"))
-        {
             return;
         }
         // A primitive flowing into a reference supertype is checked through its boxed source type; the
@@ -7263,19 +7250,7 @@ impl<'a> Checker<'a> {
             } => {
                 let ot = self.expr(operand);
                 let tt = self.resolve_ty(&ty);
-                // `Unit` is the reference type `kotlin/Unit` at the JVM — normalize so a cast to/from it
-                // (`println() as Any`, `x as Unit`, `4 as? Unit`, `foo() as? Int`) uses the reference-cast
-                // paths below rather than being rejected (`Ty::Unit.is_reference()` is false).
-                let ot = if ot == Ty::Unit {
-                    Ty::obj("kotlin/Unit")
-                } else {
-                    ot
-                };
-                let tt = if tt == Ty::Unit {
-                    Ty::obj("kotlin/Unit")
-                } else {
-                    tt
-                };
+                let unit_cast = ot == Ty::Unit || tt == Ty::Unit;
                 // `checkcast` needs a reference operand. The target is either a *known* reference type (an
                 // unresolved one erases to a no-op `Object` cast — rejected), or a non-unsigned primitive:
                 // `x as Int` on a reference operand is an unbox (`checkcast Integer; intValue()`).
@@ -7309,8 +7284,8 @@ impl<'a> Checker<'a> {
                     && ot.jvm_boxed_ref().is_some()
                     && !self.ty_is_value_class(ot)
                     && (tt.is_reference() || tt.boxed_ref().is_some());
-                if (!(tt.is_reference() || prim_unbox)
-                    || (!ot.is_reference() && !prim_box && ot != Ty::Error))
+                if (!(tt.is_reference() || prim_unbox || unit_cast)
+                    || (!ot.is_reference() && !prim_box && !unit_cast && ot != Ty::Error))
                     && !prim_operand_safe_cast
                 {
                     self.diags.error(
@@ -7777,9 +7752,8 @@ impl<'a> Checker<'a> {
                         Ty::obj("kotlin/Any")
                     } else if n == "Unit" {
                         // The `Unit` singleton used as a value (`foo(Unit)`, `val x = Unit`, `return
-                        // Unit`) — the `kotlin/Unit` object, read as its `INSTANCE` in lowering. Only a
-                        // fallback: any local/property/object named `Unit` was resolved above.
-                        Ty::obj("kotlin/Unit")
+                        // Unit`). Lowering materializes the JVM singleton when a value is needed.
+                        Ty::Unit
                     } else if let Some(ct) = self.classpath_companion_ty(&n) {
                         // A bare reference to a CLASSPATH class with a companion object (`Json` →
                         // `Json.Default`): its value is the companion instance, typed as the companion's
@@ -8668,11 +8642,7 @@ impl<'a> Checker<'a> {
                 let wrapper_vs_prim =
                     |w: Ty, p: Ty| w.nullable_primitive().map_or(false, |pw| pw == p);
                 let is_any_ref = |t: Ty| t.non_null() == Ty::obj("kotlin/Any");
-                // `Unit` and its singleton reference `kotlin/Unit` are the same value, comparable with
-                // `==`/`!=` (`bar() == Unit`, `h.u != Unit`): the non-reference `Ty::Unit` and the
-                // `kotlin/Unit` object the `Unit` literal / a Unit-typed field carry.
-                let is_unit =
-                    |t: Ty| t.non_null() == Ty::Unit || t.non_null() == Ty::obj("kotlin/Unit");
+                let is_unit = |t: Ty| t.non_null() == Ty::Unit;
                 let has_boxable_value_equality = |t: Ty| {
                     matches!(
                         t,
@@ -12498,8 +12468,9 @@ impl<'a> Checker<'a> {
         if b == Ty::Null && a.is_reference() {
             return a;
         }
-        // `Unit` joins with `null` (or any other type in a discard context) as Unit.
-        // This handles `if (cond) unitExpr else null` used as a statement.
+        if (a == Ty::Unit && b == Ty::Null) || (b == Ty::Unit && a == Ty::Null) {
+            return Ty::nullable(Ty::Unit);
+        }
         if a == Ty::Unit || b == Ty::Unit {
             return Ty::Unit;
         }
