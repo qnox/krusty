@@ -1041,6 +1041,86 @@ public class M {\n\
 }
 
 #[test]
+fn suspend_in_catch_body_spills_exception() {
+    // A `suspend fun` whose CATCH body itself contains a suspension point AND reads the caught
+    // exception both BEFORE and AFTER that suspension (mission-core's MissionChangeService.approveChange
+    // shape: `catch (e) { log(e); repo.updateStatus(...); throw e }`). The exception cannot be read from
+    // `r_v` after the catch's own suspend call clobbers it — so it is spilled to a dedicated continuation
+    // field and restored per-state, exactly like any local live across a suspension. Values match kotlinc:
+    // compute(sb,false) = risky(7) + "cfg".length(3) = 10 and sb ends "R"; compute(sb,true) rethrows the
+    // original IllegalStateException("boom") after running the catch's suspend, with sb ending "R[boomC]".
+    let _jh = match java_home() {
+        Some(j) if std::path::Path::new(&format!("{j}/bin/javac")).exists() => j,
+        _ => return,
+    };
+    let Some(stdlib) = stdlib_jar() else {
+        return;
+    };
+    let dir = std::env::temp_dir().join(format!("krusty_susp_catch_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    compile_krusty_with_stdlib(
+        "S",
+        "suspend fun setup(): String = \"cfg\"\n\
+         suspend fun tick(sb: StringBuilder, t: String): Int { sb.append(t); return t.length }\n\
+         suspend fun risky(sb: StringBuilder, fail: Boolean): Int {\n\
+         tick(sb, \"R\")\n\
+         if (fail) throw IllegalStateException(\"boom\")\n\
+         return 7\n\
+         }\n\
+         suspend fun compute(sb: StringBuilder, fail: Boolean): Int {\n\
+         val cfg = setup()\n\
+         try {\n\
+         val r = risky(sb, fail)\n\
+         return r + cfg.length\n\
+         } catch (e: Exception) {\n\
+         sb.append(\"[\").append(e.message)\n\
+         tick(sb, \"C\")\n\
+         sb.append(\"]\")\n\
+         throw e\n\
+         }\n\
+         }\n",
+        &stdlib,
+        &dir,
+    );
+    let driver = "import kotlin.coroutines.*;\n\
+public class M {\n\
+  static Continuation<Object> k() {\n\
+    return new Continuation<Object>() {\n\
+      public CoroutineContext getContext() { return EmptyCoroutineContext.INSTANCE; }\n\
+      public void resumeWith(Object o) { }\n\
+    };\n\
+  }\n\
+  public static void main(String[] a) {\n\
+    StringBuilder ok = new StringBuilder();\n\
+    Object r1 = SKt.compute(ok, false, k());\n\
+    boolean good = r1.equals(Integer.valueOf(10)) && ok.toString().equals(\"R\");\n\
+    StringBuilder bad = new StringBuilder();\n\
+    String caught = \"\";\n\
+    try {\n\
+      SKt.compute(bad, true, k());\n\
+    } catch (IllegalStateException e) {\n\
+      caught = e.getMessage();\n\
+    }\n\
+    good = good && caught.equals(\"boom\") && bad.toString().equals(\"R[boomC]\");\n\
+    System.out.println(good ? \"OK\" : (\"r1=\" + r1 + \" ok=\" + ok + \" caught=\" + caught + \" bad=\" + bad));\n\
+  }\n\
+}\n";
+    fs::write(dir.join("M.java"), driver).unwrap();
+    let cp = format!("{}:{}", dir.to_str().unwrap(), stdlib);
+    let Some(out) = common::javac_run(
+        dir.join("M.java").to_str().unwrap(),
+        &cp,
+        dir.to_str().unwrap(),
+        "M",
+    ) else {
+        return;
+    };
+    let _ = fs::remove_dir_all(&dir);
+    assert_eq!(out.trim(), "OK", "suspend in catch body");
+}
+
+#[test]
 fn leaf_suspend_fun_has_cps_signature() {
     // `suspend fun foo(): Int = 42` has no suspension point, so kotlinc emits no state machine — just
     // the CPS signature: `static Object foo(Continuation<? super Integer>)` returning the boxed value.

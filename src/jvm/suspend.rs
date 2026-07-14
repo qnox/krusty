@@ -981,6 +981,32 @@ fn build_state_machine(ir: &mut IrFile, facade: &str, fid: u32, b: ExprId, unit_
     let cont_v = base;
     let r_v = base + 1;
     let suspended_v = base + 2;
+    // The dispatch's own transient exception var is `base + 3`; the flattener's fresh locals start at
+    // `base + 4`. A `try/catch` whose CATCH body suspends needs the caught exception to outlive that
+    // suspension: allocate a fresh, collision-free value-index per such catch (above `base + 3`), rewrite
+    // the catch body's reads of the user variable to it, and add it to the spill set BEFORE the
+    // continuation class is built so it gets an `L$i` field. The handler binds it from `r_v` on entry.
+    let mut catch_spills: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
+    let mut next_ev = base + 4;
+    {
+        let mut tries: Vec<(u32, ExprId, String)> = Vec::new();
+        find_suspending_catch_tries(ir, b, &suspend_set, &mut tries);
+        for (cvar, cbody, exc_internal) in tries {
+            let ev = next_ev;
+            next_ev += 1;
+            let mut reads: Vec<ExprId> = Vec::new();
+            collect_getvalue(ir, cbody, cvar, &mut reads);
+            for n in reads {
+                ir.exprs[n as usize] = IrExpr::GetValue(ev);
+            }
+            spilled.push((ev, spill_field_ty(Ty::obj(&exc_internal))));
+            catch_spills.insert(cvar, ev);
+        }
+    }
+    // Derive the flattener's first fresh local from the actual number of exception spills allocated
+    // (`next_ev`), NOT `catch_spills.len()` — so even if two catches ever shared a value-index (making
+    // the map shorter than the allocations) no `fresh()` local could alias an `ev`.
+    let flat_next_local = next_ev;
 
     let cont_id = build_continuation_class(
         ir,
@@ -1006,9 +1032,10 @@ fn build_state_machine(ir: &mut IrFile, facade: &str, fid: u32, b: ExprId, unit_
         state_handlers: vec![None],
         cur_handler: None,
         catch_var: base + 3,
+        catch_spills,
         // Value parameters are assigned on entry (captured at construction, restored at the loop top).
         assigned: param_caps.iter().map(|(l, _)| *l).collect(),
-        next_local: base + 4,
+        next_local: flat_next_local,
         failed: false,
     };
     flat.flatten(&stmts, 0, None);
@@ -1306,6 +1333,9 @@ fn build_lambda_state_machine(
         state_handlers: vec![None],
         cur_handler: None,
         catch_var: base + 2,
+        // A suspend LAMBDA's `invokeSuspend` doesn't yet model a suspending catch (the shape bails in
+        // `flatten` as before), so no exception spills are pre-allocated here.
+        catch_spills: std::collections::HashMap::new(),
         // Captures/parameters live in leading fields (excluded from `spilled`), so no spilled local is
         // assigned on entry.
         assigned: std::collections::HashSet::new(),
@@ -1543,6 +1573,12 @@ struct Flat<'a> {
     /// Value-index for the `catch`'s exception variable (a transient local; only used to stash the
     /// exception into the `result` field for the handler state to read back through `r_v`).
     catch_var: u32,
+    /// For a `try { … } catch (e) { …; suspend(); … }` whose CATCH body ITSELF suspends: maps the
+    /// user catch variable's value-index to a fresh, spilled value-index holding the caught exception.
+    /// The catch body's reads of `e` are pre-rewritten to this index; the handler state binds it from
+    /// `r_v` (`e = (E) r_v`) once on entry, and it is spilled/restored like any local so it survives the
+    /// catch's own suspension (after which `r_v` holds the resume value, no longer the exception).
+    catch_spills: std::collections::HashMap<u32, u32>,
     /// Spilled locals definitely assigned on the current flatten path. `spill_all` skips a spilled var
     /// not in this set: on an exceptional edge (a `catch` body reached without the `try` body's writes)
     /// a body-only local is dead, and spilling its (coalesced, possibly wrong-typed) slot would emit a
@@ -1975,10 +2011,11 @@ impl Flat<'_> {
                 }
             }
             // A `try { … } catch (e) { … }` STATEMENT whose body suspends. Model the common shape: a
-            // SINGLE catch, no `finally`, a NON-suspending catch body. The try-body states are marked with
-            // a handler; the assembly's dispatch `catch` routes an exception thrown while `this.label` is
-            // one of them to the handler state, leaving a suspension BEFORE/AFTER the try uncaught. Richer
-            // shapes (finally, multiple catches, a suspending catch) skip the whole file.
+            // SINGLE catch, no `finally`, a straight-line catch body (which MAY itself suspend). The
+            // try-body states are marked with a handler; the assembly's dispatch `catch` routes an
+            // exception thrown while `this.label` is one of them to the handler state, leaving a suspension
+            // BEFORE/AFTER the try uncaught. Richer shapes (finally, multiple catches, a BRANCH in the
+            // catch) skip the whole file.
             if let IrExpr::Try {
                 body,
                 catches,
@@ -1993,10 +2030,19 @@ impl Flat<'_> {
                     // region (the handler range spans states where that slot is uninitialized), producing
                     // a stack-map mismatch. Skip the file rather than miscompile; a straight-line catch
                     // body (the common `catch (e) { log(e); default }` shape) is fine.
-                    if finally.is_some()
-                        || catches.len() != 1
-                        || expr_calls_suspend(self.ir, catches[0].body, self.suspend)
-                        || expr_contains_when(self.ir, catches[0].body)
+                    // A `finally`, or anything other than a single `catch`, is unmodeled — bail before
+                    // touching `catches[0]` (a try/finally has none).
+                    if finally.is_some() || catches.len() != 1 {
+                        self.failed = true;
+                        self.states[cur] = out;
+                        return;
+                    }
+                    let catch_suspends = expr_calls_suspend(self.ir, catches[0].body, self.suspend);
+                    if expr_contains_when(self.ir, catches[0].body)
+                        // A suspending catch must have been pre-allocated an exception spill in
+                        // `build_state_machine`; if not (e.g. a shape reached only after a lambda
+                        // boundary), skip rather than emit an unbound read.
+                        || (catch_suspends && !self.catch_spills.contains_key(&catches[0].var))
                     {
                         self.failed = true;
                         self.states[cur] = out;
@@ -2021,24 +2067,46 @@ impl Flat<'_> {
                     let a_body = std::mem::replace(&mut self.assigned, a_entry);
                     self.cur_handler = saved;
                     // Handler state: the stashed exception arrives in `result` (loaded into `r_v` at the
-                    // loop top, like a resume value). Rather than bind it to a catch-variable LOCAL —
-                    // which the IR's value-index reuse can alias with a body local of another type, and
-                    // which the emitter can slot-coalesce with an `int` temp (storing a ref into an int
-                    // slot → VerifyError) — replace each read of the catch variable in the catch body with
-                    // `(ExcType) r_v` directly. Valid because a suspending catch is bailed above, so `r_v`
-                    // still holds the exception throughout the (non-suspending) catch body.
+                    // loop top, like a resume value).
                     let exc_ty = Ty::obj(&catch.exc_internal);
-                    let mut reads: Vec<ExprId> = Vec::new();
-                    collect_getvalue(self.ir, catch.body, catch.var, &mut reads);
-                    for n in reads {
+                    let catch_stmts = if catch_suspends {
+                        // The catch body itself suspends, so `r_v` is clobbered by its own resume. Bind
+                        // the exception ONCE from `r_v` on handler entry into its spilled local `ev`
+                        // (whose reads were pre-rewritten in `build_state_machine`); the spill machinery
+                        // then carries it across the catch's suspension and restores it for the later
+                        // reads (`throw e`).
+                        let ev = self.catch_spills[&catch.var];
                         let rv = self.gv(self.r_v);
-                        self.ir.exprs[n as usize] = IrExpr::TypeOp {
+                        let cast = self.add(IrExpr::TypeOp {
                             op: IrTypeOp::Cast,
                             arg: rv,
                             type_operand: exc_ty,
-                        };
-                    }
-                    let catch_stmts = self.block_stmts(catch.body);
+                        });
+                        let bind = self.add(IrExpr::SetValue {
+                            var: ev,
+                            value: cast,
+                        });
+                        let mut cs = vec![bind];
+                        cs.extend(self.block_stmts(catch.body));
+                        cs
+                    } else {
+                        // A NON-suspending catch body: `r_v` still holds the exception throughout, so
+                        // read it there directly. Avoids a catch-variable LOCAL — which the IR's
+                        // value-index reuse can alias with a body local of another type, and which the
+                        // emitter can slot-coalesce with an `int` temp (a ref stored into an int slot →
+                        // VerifyError).
+                        let mut reads: Vec<ExprId> = Vec::new();
+                        collect_getvalue(self.ir, catch.body, catch.var, &mut reads);
+                        for n in reads {
+                            let rv = self.gv(self.r_v);
+                            self.ir.exprs[n as usize] = IrExpr::TypeOp {
+                                op: IrTypeOp::Cast,
+                                arg: rv,
+                                type_operand: exc_ty,
+                            };
+                        }
+                        self.block_stmts(catch.body)
+                    };
                     self.flatten(&catch_stmts, handler, Some(try_after));
                     // `try_after` joins the body and handler paths: a spilled local is definitely
                     // assigned there only if assigned on BOTH (intersection).
@@ -2077,10 +2145,36 @@ impl Flat<'_> {
             let s2 = self.rewrite_plain(stmt);
             out.push(s2);
         }
-        if let Some(a) = after {
-            self.goto(&mut out, a);
+        // Transfer to `after` on fall-through — but ONLY if the sequence can fall through. If the last
+        // statement diverges (`return`/`throw`), the transition is unreachable dead code: emitting it
+        // would leave a `goto` after a `return`/`athrow` with no stack-map frame → a load-time
+        // VerifyError. A `return` STATEMENT inside a suspend `try` body, or a `throw` ending a catch body,
+        // both hit this.
+        let diverges = stmts.last().is_some_and(|&s| stmt_diverges(self.ir, s));
+        if !diverges {
+            if let Some(a) = after {
+                self.goto(&mut out, a);
+            }
         }
         self.states[cur] = out;
+    }
+}
+
+/// Whether statement `s` always transfers control away (never falls through): a `return`/`throw`, or a
+/// block/`when` all of whose exits do. Used to suppress a dead fall-through transition after it.
+fn stmt_diverges(ir: &IrFile, s: ExprId) -> bool {
+    match &ir.exprs[s as usize] {
+        IrExpr::Return(_) | IrExpr::Throw { .. } => true,
+        IrExpr::Block { stmts, value: None } => {
+            stmts.last().is_some_and(|&last| stmt_diverges(ir, last))
+        }
+        IrExpr::When { branches } => {
+            // A `when` diverges only if it is exhaustive (has an `else`) AND every arm diverges.
+            !branches.is_empty()
+                && branches.last().is_some_and(|(cond, _)| cond.is_none())
+                && branches.iter().all(|(_, body)| stmt_diverges(ir, *body))
+        }
+        _ => false,
     }
 }
 
@@ -2864,6 +2958,62 @@ fn collect_getvalue(ir: &IrFile, e: ExprId, var: u32, out: &mut Vec<ExprId>) {
         _ => {}
     }
     for_each_child(&ir.exprs, e, &mut |c| collect_getvalue(ir, c, var, out));
+}
+
+/// Collect `(catch_var, catch_body, exc_internal)` for each `try { … } catch (e) { … }` in `e`'s
+/// subtree whose CATCH body itself suspends and matches the state machine's straight-line single-catch
+/// shape — so [`build_state_machine`] can spill each caught exception across the catch's own suspension
+/// (`r_v` no longer holds it once the catch resumes). Does NOT descend into `Lambda` bodies (a suspend
+/// lambda has its own state machine, and its value-indices are numbered independently). Skips a catch
+/// whose body nests another suspending catch: the two exception variables may alias the same reused
+/// value-index, which would make the scoped read-rewrite unsound — `flatten` then bails that shape.
+fn find_suspending_catch_tries(
+    ir: &IrFile,
+    e: ExprId,
+    suspend_set: &HashSet<u32>,
+    out: &mut Vec<(u32, ExprId, String)>,
+) {
+    match &ir.exprs[e as usize] {
+        IrExpr::Lambda { .. } => return,
+        IrExpr::Try {
+            catches, finally, ..
+        } if finally.is_none()
+            && catches.len() == 1
+            && expr_calls_suspend(ir, catches[0].body, suspend_set)
+            && !expr_contains_when(ir, catches[0].body)
+            && !catch_body_nests_suspending_catch(ir, catches[0].body, suspend_set) =>
+        {
+            let c = &catches[0];
+            out.push((c.var, c.body, c.exc_internal.clone()));
+        }
+        _ => {}
+    }
+    for_each_child(&ir.exprs, e, &mut |c| {
+        find_suspending_catch_tries(ir, c, suspend_set, out)
+    });
+}
+
+/// Whether `e` (a catch body) is, or contains (excluding `Lambda` bodies), a `try/catch` whose own catch
+/// body suspends — a nested suspending catch whose exception variable could alias the enclosing one.
+fn catch_body_nests_suspending_catch(ir: &IrFile, e: ExprId, suspend_set: &HashSet<u32>) -> bool {
+    match &ir.exprs[e as usize] {
+        IrExpr::Lambda { .. } => return false,
+        IrExpr::Try { catches, .. }
+            if catches
+                .iter()
+                .any(|c| expr_calls_suspend(ir, c.body, suspend_set)) =>
+        {
+            return true;
+        }
+        _ => {}
+    }
+    let mut found = false;
+    for_each_child(&ir.exprs, e, &mut |c| {
+        if !found && catch_body_nests_suspending_catch(ir, c, suspend_set) {
+            found = true;
+        }
+    });
+    found
 }
 
 /// Apply `f` to the node at `e` and every node in its subtree (pre-order), read-only. The single home
