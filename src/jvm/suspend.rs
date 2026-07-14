@@ -2696,7 +2696,7 @@ fn build_get_or_create(
 /// A type-correct zero/`null` placeholder for `ty`, used as a value-parameter argument when
 /// `invokeSuspend` re-enters the outer function — the real value is restored from the continuation
 /// field at the loop top, so this placeholder is immediately overwritten (kotlinc passes `iconst_0`).
-fn zero_value(ir: &mut IrFile, ty: &Ty) -> ExprId {
+pub(crate) fn zero_value(ir: &mut IrFile, ty: &Ty) -> ExprId {
     use crate::types::Ty;
     let c = match super::ir_emit::ir_ty_to_jvm(ty) {
         Ty::Boolean => IrConst::Boolean(false),

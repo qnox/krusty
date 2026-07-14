@@ -392,6 +392,8 @@ mod inheritance_e2e;
 mod inline_deep_coverage_e2e;
 #[path = "inline_e2e.rs"]
 mod inline_e2e;
+#[path = "inline_lambda_value_return_e2e.rs"]
+mod inline_lambda_value_return_e2e;
 #[path = "inline_splice_e2e.rs"]
 mod inline_splice_e2e;
 #[path = "inline_splice_ldc_wide_e2e.rs"]

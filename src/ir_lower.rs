@@ -12797,7 +12797,7 @@ impl<'a> Lower<'a> {
                 // labeled return with no matching frame is a `return@enclosingFn` — fall through to the
                 // normal function-return handling below (the label names the enclosing function).
                 if let Some(lbl) = &ret_label {
-                    if let Some((_, _, brk, _)) = self
+                    if let Some((_, slot, brk, rty)) = self
                         .inline_lambda_ret
                         .iter()
                         .rev()
@@ -12806,7 +12806,18 @@ impl<'a> Lower<'a> {
                     {
                         let mut stmts = Vec::new();
                         if let Some(e) = e {
-                            stmts.push(self.expr(e)?);
+                            // A VALUE-result labeled return (`x.let { return@let v }`) assigns `v` to the
+                            // frame's result slot; the wrapper loop's value is read from it afterward. A
+                            // `Unit` result just runs the (side-effecting) expression for effect.
+                            if rty != Ty::Unit && rty != Ty::Nothing {
+                                let val = self.lower_arg(e, &rty)?;
+                                stmts.push(self.ir.add_expr(IrExpr::SetValue {
+                                    var: slot,
+                                    value: val,
+                                }));
+                            } else {
+                                stmts.push(self.expr(e)?);
+                            }
                         }
                         stmts.push(self.ir.add_expr(IrExpr::Break { label: Some(brk) }));
                         return Some(self.ir.add_expr(IrExpr::Block { stmts, value: None }));
@@ -15198,9 +15209,53 @@ impl<'a> Lower<'a> {
         // (a `let { return@let v }`) is not yet — bail rather than miscompile.
         if body_has_labeled_return(self.afile, lam_body, &lam_label) {
             let lam_ret = self.info.ty(lam_body);
+            // VALUE-result labeled return (`x.let { if (c) return@let a; b }`): bind a result slot,
+            // wrap the body in a `while(true){ result = <fall-through value>; break@brk }` (a
+            // `return@let v` inside assigns `result = v` then breaks — see the handler above), and yield
+            // the slot. A body that always diverges (every path a `return@let`) has a `Nothing`
+            // fall-through with no result type here — leave that (rarer) shape to the Unit path / skip.
             if lam_ret != Ty::Unit && lam_ret != Ty::Nothing {
+                let brk = format!("$lamret${}", self.fresh_value());
+                let result_slot = self.fresh_value();
+                let dflt = crate::jvm::suspend::zero_value(&mut self.ir, &lam_ret);
+                let decl = self.ir.add_expr(IrExpr::Variable {
+                    index: result_slot,
+                    ty: ty_to_ir(lam_ret),
+                    init: Some(dflt),
+                });
+                stmts.push(decl);
+                self.inline_lambda_ret
+                    .push((lam_label.clone(), result_slot, brk.clone(), lam_ret));
+                let body_val = self.expr(lam_body);
+                self.inline_lambda_ret.pop();
                 self.scope.truncate(depth);
-                return None;
+                let body_val = body_val?;
+                // Normal fall-through: the body's own value is the result.
+                let assign = self.ir.add_expr(IrExpr::SetValue {
+                    var: result_slot,
+                    value: body_val,
+                });
+                let brk_stmt = self.ir.add_expr(IrExpr::Break {
+                    label: Some(brk.clone()),
+                });
+                let loop_body = self.ir.add_expr(IrExpr::Block {
+                    stmts: vec![assign, brk_stmt],
+                    value: None,
+                });
+                let cond = self.ir.add_expr(IrExpr::Const(IrConst::Boolean(true)));
+                let loopw = self.ir.add_expr(IrExpr::While {
+                    cond,
+                    body: loop_body,
+                    update: None,
+                    post_test: false,
+                    label: Some(brk),
+                });
+                stmts.push(loopw);
+                let get = self.ir.add_expr(IrExpr::GetValue(result_slot));
+                return Some(self.ir.add_expr(IrExpr::Block {
+                    stmts,
+                    value: Some(get),
+                }));
             }
             let brk = format!("$lamret${}", self.fresh_value());
             self.inline_lambda_ret
