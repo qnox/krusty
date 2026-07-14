@@ -8764,11 +8764,20 @@ impl<'a> Lower<'a> {
             let idx = cls.fields.iter().position(|f| f.name == *name)?;
             (cls.fields[idx].ty, !cls.fields[idx].is_final)
         };
-        // Member mutable property references need a mutable property-reference runtime class and setter
-        // dispatch; top-level mutable references are modeled separately.
-        if is_var {
-            return None;
+        // A user function whose name collides with the property's accessor (`var x` alongside a
+        // `fun getX()`/`fun setX()`) means the `getX()`/`setX()` the reference dispatches to isn't
+        // reliably emitted — the two share a JVM name and krusty doesn't split them by descriptor, so
+        // the accessor the ref calls can be missing. Decline (skip) rather than miscompile into a
+        // NoSuchMethodError.
+        if let Some(sig) = self.syms.class_by_internal(&owner) {
+            if sig.methods.contains_key(&property_getter_name(name))
+                || (is_var && sig.methods.contains_key(&property_setter_name(name)))
+            {
+                return None;
+            }
         }
+        // A mutable (`var`) reference uses the `KMutableProperty*` runtime class and gets a `set`
+        // method (emitted alongside `get`); an immutable one stays `KProperty*`.
         let bound = capture.is_some();
         let synth_fq = class_internal(
             self.afile,
@@ -8776,7 +8785,7 @@ impl<'a> Lower<'a> {
         );
         self.lambda_seq += 1;
         let superclass = self
-            .property_reference_impl(if bound { 0 } else { 1 }, false)?
+            .property_reference_impl(if bound { 0 } else { 1 }, is_var)?
             .internal;
         let synth_id = self.ir.add_class(IrClass {
             fq_name: synth_fq,
@@ -8811,7 +8820,7 @@ impl<'a> Lower<'a> {
                 prop_ty,
                 bound,
                 static_dispatch: false,
-                mutable: false,
+                mutable: is_var,
             }),
             func_ref: None,
             bridges: vec![],

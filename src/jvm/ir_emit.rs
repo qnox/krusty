@@ -1072,6 +1072,39 @@ fn emit_prop_ref_class(c: &crate::ir::IrClass, facade: &str) -> Vec<u8> {
         &get,
     );
 
+    // `set(Object, Object)V` (an unbound `var` reference): `((Owner) it).setName(v)` after
+    // casting/unboxing the value argument to the property type.
+    if pr.mutable {
+        let setter = property_setter_name(&pr.prop_name);
+        let setter_desc = format!("({}){}", type_descriptor(prop_jvm), "V");
+        let mut set = CodeBuilder::new(3);
+        set.aload(1);
+        let owner_ref = cw.class_ref(&pr.owner_internal);
+        set.checkcast(owner_ref);
+        set.aload(2);
+        if prop_jvm.is_jvm_scalar() {
+            let wref = cw.class_ref(
+                crate::jvm::jvm_class_map::wrapper_internal(prop_jvm).unwrap_or("java/lang/Object"),
+            );
+            set.checkcast(wref);
+            unbox_prim(&mut cw, &mut set, prop_jvm);
+        } else if let Some(internal) = checkcast_internal(prop_jvm) {
+            let cref = cw.class_ref(&internal);
+            set.checkcast(cref);
+        }
+        let sref = cw.methodref(&pr.owner_internal, &setter, &setter_desc);
+        set.invokevirtual(sref, slot_words(prop_jvm) as i32, 0);
+        set.ret_void();
+        set.ensure_locals(3);
+        set.link();
+        cw.add_method(
+            0x0001,
+            "set",
+            "(Ljava/lang/Object;Ljava/lang/Object;)V",
+            &set,
+        );
+    }
+
     // `<clinit>`: INSTANCE = new.
     let mut clinit = CodeBuilder::new(0);
     let cls = cw.class_ref(&fq);
@@ -1136,6 +1169,36 @@ fn emit_bound_prop_ref_class(c: &crate::ir::IrClass, pr: &crate::ir::PropRef) ->
     get.ensure_locals(1);
     get.link();
     cw.add_method(0x0001, "get", "()Ljava/lang/Object;", &get);
+
+    // `set(Object)V` (a bound `var` reference): `((Owner) this.receiver).setName(v)` after
+    // casting/unboxing the argument to the property type.
+    if pr.mutable {
+        let setter = property_setter_name(&pr.prop_name);
+        let setter_desc = format!("({}){}", type_descriptor(prop_jvm), "V");
+        let mut set = CodeBuilder::new(2);
+        set.aload(0);
+        let recv_f = cw.fieldref(&c.superclass, "receiver", "Ljava/lang/Object;");
+        set.getfield(recv_f, 1);
+        let owner_ref = cw.class_ref(&pr.owner_internal);
+        set.checkcast(owner_ref);
+        set.aload(1);
+        if prop_jvm.is_jvm_scalar() {
+            let wref = cw.class_ref(
+                crate::jvm::jvm_class_map::wrapper_internal(prop_jvm).unwrap_or("java/lang/Object"),
+            );
+            set.checkcast(wref);
+            unbox_prim(&mut cw, &mut set, prop_jvm);
+        } else if let Some(internal) = checkcast_internal(prop_jvm) {
+            let cref = cw.class_ref(&internal);
+            set.checkcast(cref);
+        }
+        let sref = cw.methodref(&pr.owner_internal, &setter, &setter_desc);
+        set.invokevirtual(sref, slot_words(prop_jvm) as i32, 0);
+        set.ret_void();
+        set.ensure_locals(2);
+        set.link();
+        cw.add_method(0x0001, "set", "(Ljava/lang/Object;)V", &set);
+    }
     cw.finish()
 }
 

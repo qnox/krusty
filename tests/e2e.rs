@@ -480,6 +480,8 @@ mod missing_return_check_e2e;
 mod multi_index_operator_e2e;
 #[path = "multiline_catch_e2e.rs"]
 mod multiline_catch_e2e;
+#[path = "mutable_property_ref_e2e.rs"]
+mod mutable_property_ref_e2e;
 #[path = "name_based_destructuring_e2e.rs"]
 mod name_based_destructuring_e2e;
 #[path = "named_arg_member_e2e.rs"]
