@@ -12500,13 +12500,10 @@ impl<'a> Checker<'a> {
         if recv == Ty::Error {
             return false;
         }
-        // User operator param type, member first then module extension. Classpath `+=` stays on the
-        // inline-splice path through `record_synthetic_ext` below.
         let param = crate::module_symbols::ModuleSymbols::new(self.syms)
             .instance_members(recv, aname)
             .into_iter()
-            .find(|m| m.params.len() == 1)
-            .map(|m| m.params[0])
+            .find_map(|m| (m.params.len() == 1).then(|| m.params[0]))
             .or_else(|| {
                 self.syms
                     .ext_funs
