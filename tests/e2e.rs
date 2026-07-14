@@ -394,6 +394,8 @@ mod inline_splice_ldc_wide_e2e;
 mod inline_vc_suspend_coverage_e2e;
 #[path = "inner_class_construction_e2e.rs"]
 mod inner_class_construction_e2e;
+#[path = "inner_class_outer_tparam_e2e.rs"]
+mod inner_class_outer_tparam_e2e;
 #[path = "interface_companion_e2e.rs"]
 mod interface_companion_e2e;
 #[path = "interface_default_args_e2e.rs"]
