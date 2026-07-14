@@ -18924,18 +18924,17 @@ impl<'a> Lower<'a> {
                     if let Some(call) = self.try_reified_serial(receiver, &name, &args, e) {
                         return Some(call);
                     }
-                    // An arithmetic operator member called by name on a primitive numeric receiver
-                    // (`a.plus(b)` ≡ `a + b`) → the same `PrimitiveBinOp` lowering as the operator form.
-                    if args.len() == 1
-                        && self.has_scalar_value_repr(self.info.ty(receiver))
-                        && !(self.afile.infix_calls.contains(&e.0)
-                            && self.ext_fun_ids.contains_key(&(
-                                self.info.ty(receiver).erased_recv(),
-                                name.clone(),
-                            )))
-                    {
+                    if let ([arg], true) = (
+                        &args[..],
+                        self.has_scalar_value_repr(self.info.ty(receiver))
+                            && !(self.afile.infix_calls.contains(&e.0)
+                                && self.ext_fun_ids.contains_key(&(
+                                    self.info.ty(receiver).erased_recv(),
+                                    name.clone(),
+                                ))),
+                    ) {
                         if let Some(r) =
-                            self.lower_prim_op_method(receiver, &name, args[0], self.info.ty(e))
+                            self.lower_prim_op_method(receiver, &name, *arg, self.info.ty(e))
                         {
                             return Some(r);
                         }
