@@ -8839,11 +8839,10 @@ impl<'a> Checker<'a> {
         name: &str,
         args: &Option<Vec<ExprId>>,
     ) -> Option<Ty> {
-        let a = args.as_ref()?;
-        if a.len() != 1 {
+        let [arg] = args.as_deref()? else {
             return None;
-        }
-        let Expr::Lambda { params, body } = self.file.expr(a[0]).clone() else {
+        };
+        let Expr::Lambda { params, body } = self.file.expr(*arg).clone() else {
             return None;
         };
         // Inside the lambda the receiver is NON-null: a nullable-primitive receiver (`Int?` =
@@ -8856,7 +8855,7 @@ impl<'a> Checker<'a> {
                 Some(if name == "apply" { rt } else { bt })
             }
             "let" | "also" => {
-                let lt = self.check_lambda_with_types(a[0], &[rt]);
+                let lt = self.check_lambda_with_types(*arg, &[rt]);
                 Some(if name == "also" {
                     rt
                 } else if let Ty::Fun(s) = lt {
