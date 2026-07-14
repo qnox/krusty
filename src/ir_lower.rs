@@ -7924,9 +7924,9 @@ impl<'a> Lower<'a> {
         args: &[AstExprId],
         call: AstExprId,
     ) -> Option<u32> {
-        if args.len() != 1 {
+        let [arg] = args else {
             return None;
-        }
+        };
         let fmt = self.info.ty(receiver).obj_internal()?.to_string();
         if !self.is_string_format(&fmt) {
             return None;
@@ -7942,19 +7942,11 @@ impl<'a> Lower<'a> {
         // ever emits for a class that does NOT trigger `run_enabled` (e.g. a cross-file `@Serializable`),
         // the placeholder would survive; `jvm_can_emit` then DECLINES the file (no miscompile) rather
         // than emitting an un-lowered node.
-        match name {
-            "encodeToString" => {
-                let c = self.serializable_internal(self.info.ty(args[0]))?;
-                let recv = self.expr(receiver)?;
-                let ser = self.serializer_crossfile(&c);
-                let val = self.expr(args[0])?;
-                Some(self.ir.add_expr(IrExpr::PluginPlaceholder {
-                    plugin: "serialization",
-                    kind: "encodeToString",
-                    exprs: vec![recv, ser, val],
-                    data: vec![fmt, c],
-                }))
-            }
+        let (kind, c) = match name {
+            "encodeToString" => (
+                "encodeToString",
+                self.serializable_internal(self.info.ty(*arg))?,
+            ),
             "decodeFromString" => {
                 // The decoded type is the explicit type argument `<C>`.
                 let targ = self
@@ -7963,19 +7955,19 @@ impl<'a> Lower<'a> {
                     .get(&call.0)
                     .and_then(|ts| ts.first())
                     .and_then(|tr| self.ty_ref(tr))?;
-                let c = self.serializable_internal(targ)?;
-                let recv = self.expr(receiver)?;
-                let ser = self.serializer_crossfile(&c);
-                let s = self.expr(args[0])?;
-                Some(self.ir.add_expr(IrExpr::PluginPlaceholder {
-                    plugin: "serialization",
-                    kind: "decodeFromString",
-                    exprs: vec![recv, ser, s],
-                    data: vec![fmt, c],
-                }))
+                ("decodeFromString", self.serializable_internal(targ)?)
             }
-            _ => None,
-        }
+            _ => return None,
+        };
+        let recv = self.expr(receiver)?;
+        let ser = self.serializer_crossfile(&c);
+        let value = self.expr(*arg)?;
+        Some(self.ir.add_expr(IrExpr::PluginPlaceholder {
+            plugin: "serialization",
+            kind,
+            exprs: vec![recv, ser, value],
+            data: vec![fmt, c],
+        }))
     }
 
     /// Lower a call's arguments, filling omitted trailing parameters from their **constant-literal**
