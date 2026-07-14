@@ -1121,6 +1121,76 @@ public class M {\n\
 }
 
 #[test]
+fn suspend_return_when_with_suspending_branches() {
+    // A `suspend fun` whose EXPRESSION body is `= when (op) { … }` with suspensions in the BRANCH
+    // VALUES/bodies (not the condition) — mission-core's MissionChangeService.applyOperation shape,
+    // including an `else -> throw` divergent arm. Desugars to `val tmp; when (op) { … tmp = v }; return
+    // tmp`, each branch flattened as a suspending `when`-statement arm. Values match kotlinc:
+    // handle(A(5)) = "a5" with sb "A!"; handle(B) = null with sb "B"; handle(C) = "c" with sb "C".
+    let _jh = match java_home() {
+        Some(j) if std::path::Path::new(&format!("{j}/bin/javac")).exists() => j,
+        _ => return,
+    };
+    let Some(stdlib) = stdlib_jar() else {
+        return;
+    };
+    let dir = std::env::temp_dir().join(format!("krusty_susp_retwhen_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    compile_krusty_with_stdlib(
+        "S",
+        "suspend fun leafA(sb: StringBuilder, n: Int): String { sb.append(\"A\"); return \"a\" + n }\n\
+         suspend fun leafB(sb: StringBuilder): String? { sb.append(\"B\"); return null }\n\
+         suspend fun handle(sb: StringBuilder, k: Int): String? =\n\
+         when (k) {\n\
+         0 -> { val r = leafA(sb, 5); sb.append(\"!\"); r }\n\
+         1 -> leafB(sb)\n\
+         2 -> { sb.append(\"C\"); \"c\" }\n\
+         else -> throw IllegalStateException(\"no\")\n\
+         }\n",
+        &stdlib,
+        &dir,
+    );
+    let driver = "import kotlin.coroutines.*;\n\
+public class M {\n\
+  static Continuation<Object> k() {\n\
+    return new Continuation<Object>() {\n\
+      public CoroutineContext getContext() { return EmptyCoroutineContext.INSTANCE; }\n\
+      public void resumeWith(Object o) { }\n\
+    };\n\
+  }\n\
+  public static void main(String[] a) {\n\
+    StringBuilder s1 = new StringBuilder();\n\
+    Object r1 = SKt.handle(s1, 0, k());\n\
+    StringBuilder s2 = new StringBuilder();\n\
+    Object r2 = SKt.handle(s2, 1, k());\n\
+    StringBuilder s3 = new StringBuilder();\n\
+    Object r3 = SKt.handle(s3, 2, k());\n\
+    boolean ok = \"a5\".equals(r1) && s1.toString().equals(\"A!\")\n\
+      && r2 == null && s2.toString().equals(\"B\")\n\
+      && \"c\".equals(r3) && s3.toString().equals(\"C\");\n\
+    System.out.println(ok ? \"OK\" : (\"r1=\" + r1 + \" s1=\" + s1 + \" r2=\" + r2 + \" s2=\" + s2 + \" r3=\" + r3 + \" s3=\" + s3));\n\
+  }\n\
+}\n";
+    fs::write(dir.join("M.java"), driver).unwrap();
+    let cp = format!("{}:{}", dir.to_str().unwrap(), stdlib);
+    let Some(out) = common::javac_run(
+        dir.join("M.java").to_str().unwrap(),
+        &cp,
+        dir.to_str().unwrap(),
+        "M",
+    ) else {
+        return;
+    };
+    let _ = fs::remove_dir_all(&dir);
+    assert_eq!(
+        out.trim(),
+        "OK",
+        "suspend return-when with suspending branches"
+    );
+}
+
+#[test]
 fn leaf_suspend_fun_has_cps_signature() {
     // `suspend fun foo(): Int = 42` has no suspension point, so kotlinc emits no state machine — just
     // the CPS signature: `static Object foo(Continuation<? super Integer>)` returning the boxed value.

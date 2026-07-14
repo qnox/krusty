@@ -88,6 +88,7 @@ pub fn lower_suspend(ir: &mut IrFile, facade: &str) -> bool {
         let ret_ty = ir.functions[fid as usize].ret.clone();
         if let Some(b) = body {
             desugar_value_try(ir, b, &suspend_set, &ret_ty);
+            desugar_value_when(ir, b, &suspend_set, &ret_ty);
             desugar_tail_suspend(ir, b, &suspend_set, &ret_ty);
         }
         let has_susp = body.is_some_and(|b| expr_calls_suspend(ir, b, &suspend_set));
@@ -314,6 +315,68 @@ fn desugar_value_try(ir: &mut IrFile, b: ExprId, suspend_set: &HashSet<u32>, ret
     }
 }
 
+/// Desugar a VALUE-position `when`/`if` in `return` position whose BRANCH VALUES suspend (but whose
+/// CONDITIONS do not — a suspending condition is hoisted earlier) into a STATEMENT-position `when` binding
+/// a temp: `return when (x) { a -> v0; else -> v1 }` becomes `var tmp = <default>; when (x) { a -> { …
+/// tmp = v0 }; else -> { … tmp = v1 } }; return tmp`. The flattener models a `when` STATEMENT with
+/// suspending branch bodies (`emit_when_stmt`), so each branch's suspension surfaces there. Only
+/// `return <when>` is rewritten (the shape mission-core's `applyOperation` uses); a `val`/assignment of a
+/// suspending value-`when` is left to the flattener's `stmt_cond_suspension` / a skip.
+fn desugar_value_when(ir: &mut IrFile, b: ExprId, suspend_set: &HashSet<u32>, ret_ty: &Ty) {
+    let IrExpr::Block { stmts, value } = ir.exprs[b as usize].clone() else {
+        return;
+    };
+    let mut new_stmts: Vec<ExprId> = Vec::with_capacity(stmts.len() + 2);
+    let mut changed = false;
+    for s in stmts {
+        if let IrExpr::Return(Some(e)) = ir.exprs[s as usize] {
+            // Only a `when` whose BRANCH values suspend and whose CONDITIONS do NOT (those are hoisted
+            // before this pass) — otherwise leave it to the condition-hoist / a skip.
+            if matches!(ir.exprs[e as usize], IrExpr::When { .. })
+                && expr_calls_suspend(ir, e, suspend_set)
+                && !when_cond_suspends(ir, e, suspend_set)
+            {
+                let IrExpr::When { branches } = ir.exprs[e as usize].clone() else {
+                    unreachable!()
+                };
+                let tmp = max_value_index(ir) + 1;
+                let dflt = zero_value(ir, ret_ty);
+                let decl = ir.add_expr(IrExpr::Variable {
+                    index: tmp,
+                    ty: *ret_ty,
+                    init: Some(dflt),
+                });
+                let new_branches: Branches = branches
+                    .into_iter()
+                    .map(|(cond, body)| {
+                        (
+                            cond,
+                            assign_branch_to_tmp(ir, body, tmp, ret_ty, suspend_set),
+                        )
+                    })
+                    .collect();
+                let new_when = ir.add_expr(IrExpr::When {
+                    branches: new_branches,
+                });
+                let get = ir.add_expr(IrExpr::GetValue(tmp));
+                let ret = ir.add_expr(IrExpr::Return(Some(get)));
+                new_stmts.push(decl);
+                new_stmts.push(new_when);
+                new_stmts.push(ret);
+                changed = true;
+                continue;
+            }
+        }
+        new_stmts.push(s);
+    }
+    if changed {
+        ir.exprs[b as usize] = IrExpr::Block {
+            stmts: new_stmts,
+            value,
+        };
+    }
+}
+
 /// Rewrite a `try`/`catch` branch into a value-LESS block that runs its statements and assigns its VALUE
 /// to `tmp`. A suspending value is bound to a fresh `Variable` (so the flattener handles the suspension),
 /// then copied to `tmp`; a non-suspending value is assigned directly. A branch with no value (a divergent
@@ -330,7 +393,13 @@ fn assign_branch_to_tmp(
         _ => (Vec::new(), Some(branch)),
     };
     if let Some(v) = value {
-        if expr_calls_suspend(ir, v, suspend_set) {
+        if stmt_diverges(ir, v) {
+            // A divergent branch VALUE (`else -> throw …`, `-> return …`, or a nested all-arms-divergent
+            // `if`/`when`) produces no value to bind: emit it as a plain statement. Assigning it to `tmp`
+            // would leave a dead `goto` after the `athrow`/`return` (a frameless VerifyError);
+            // `stmt_diverges` on this same value suppresses that trailing goto.
+            stmts.push(v);
+        } else if expr_calls_suspend(ir, v, suspend_set) {
             let fresh = max_value_index(ir) + 1;
             let var = ir.add_expr(IrExpr::Variable {
                 index: fresh,
