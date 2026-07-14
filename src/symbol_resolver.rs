@@ -1754,10 +1754,8 @@ pub fn resolve_instance(
 }
 
 /// Resolve a library instance member for a BOUND callable reference (`"KOTLIN"::get`) — where there are
-/// no call arguments to drive overload resolution. Returns the UNIQUE fixed-arity (non-vararg, no
-/// defaults) overload of `name` on `internal`, or `None` when the member is absent, varargs/defaulted, or
-/// AMBIGUOUS (overloaded) — kotlinc resolves the latter from the expected function type, which a bare
-/// reference lacks here, so bailing to a clean skip is correct.
+/// no call arguments to drive overload resolution. Returns the UNIQUE fixed-arity overload of `name` on
+/// `internal`, or `None` when the member is absent, defaulted/vararg, or ambiguous.
 pub fn resolve_instance_ref(
     lib: &dyn CompilerPlatform,
     recv: Ty,
@@ -1767,7 +1765,7 @@ pub fn resolve_instance_ref(
         .member_overloads(recv, name)
         .overloads
         .into_iter()
-        .filter(|o| o.callable.vararg_elem.is_none() && !o.call_sig.has_default_params());
+        .filter(|o| o.call_sig.requires_all_args(o.callable.params.len()));
     let o = fixed.next()?;
     // Duplicate facts for the same signature are not ambiguous; distinct signatures are.
     if fixed.any(|other| {
