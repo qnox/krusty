@@ -7788,16 +7788,15 @@ impl<'a> Checker<'a> {
                             // Only apply the extension when the RIGHT operand actually matches its
                             // parameter type; otherwise this is the builtin (`Int * Int` inside the body
                             // of a `Int.times(V)` extension must NOT re-pick that extension and infer `V`).
-                            if fi.extension_value_params().len() == 1 {
+                            if let [p] = fi.extension_value_params() {
                                 // Match the lowerer's guard (ir_lower Binary extension path): an exact
                                 // operand/param match, or a reference subtype. No loose cross-numeric
                                 // clause — a numeric-param operator on a primitive is the builtin's job
                                 // (and `p == rt` already covers a same-type numeric param).
-                                let p = fi.extension_value_params()[0];
-                                let arg_ok = p == rt
+                                let arg_ok = *p == rt
                                     || (p.is_reference()
                                         && rt.is_reference()
-                                        && match (p.obj_internal(), rt.obj_internal()) {
+                                        && match ((*p).obj_internal(), rt.obj_internal()) {
                                             (Some(ps), Some(rs)) => self.obj_is_subtype(rs, ps),
                                             _ => true,
                                         });
