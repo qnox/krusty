@@ -953,6 +953,7 @@ impl<'a> SymbolResolver<'a> {
         args: &[Ty],
     ) -> Option<Vec<(usize, usize)>> {
         let real_count = params.len();
+        let sig = &info.call_sig;
         if args.len() > real_count {
             return None;
         }
@@ -970,9 +971,7 @@ impl<'a> SymbolResolver<'a> {
             {
                 return None;
             }
-            if !info.call_sig.param_defaults.is_empty()
-                && (prefix_len..last_param).any(|i| !info.call_sig.param_has_default(i))
-            {
+            if sig.has_known_required_param(prefix_len..last_param) {
                 return None;
             }
             let mut mapping: Vec<(usize, usize)> = (0..prefix_len).map(|i| (i, i)).collect();
@@ -986,9 +985,7 @@ impl<'a> SymbolResolver<'a> {
         {
             return None;
         }
-        if !info.call_sig.param_defaults.is_empty()
-            && (args.len()..real_count).any(|i| !info.call_sig.param_has_default(i))
-        {
+        if sig.has_known_required_param(args.len()..real_count) {
             return None;
         }
         Some((0..args.len()).map(|i| (i, i)).collect())
@@ -1785,20 +1782,13 @@ pub fn resolve_instance_ref(
     recv: Ty,
     name: &str,
 ) -> Option<LibraryMember> {
-    // A vararg or a member with a DEFAULTED parameter has no single fixed arity a bare reference can pin
-    // down (kotlinc resolves those from the expected function type) → skip. `param_defaults` is the
-    // authoritative per-parameter default flag: empty for a builtin member (no source metadata, and
-    // builtin operators carry no defaults), populated for a source member (a `true` marks a default).
     let mut fixed = lib
         .member_overloads(recv, name)
         .overloads
         .into_iter()
-        .filter(|o| {
-            o.callable.vararg_elem.is_none() && !o.call_sig.param_defaults.iter().any(|&d| d)
-        });
+        .filter(|o| o.callable.vararg_elem.is_none() && !o.call_sig.has_default_params());
     let o = fixed.next()?;
-    // Distinct SIGNATURES are genuinely ambiguous (kotlinc needs an expected function type); duplicate
-    // facts for the same signature (a member surfaced by two sources) are not — dedup on the shape.
+    // Duplicate facts for the same signature are not ambiguous; distinct signatures are.
     if fixed.any(|other| {
         other.callable.params != o.callable.params || other.callable.ret != o.callable.ret
     }) {
