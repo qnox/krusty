@@ -1114,8 +1114,7 @@ impl LibraryType {
     pub fn value_class_property(&self, property: &str) -> Option<&LibraryMember> {
         self.value_class_properties
             .iter()
-            .find(|(p, _)| p == property)
-            .map(|(_, m)| m)
+            .find_map(|(p, m)| (p == property).then_some(m))
     }
 }
 
