@@ -220,6 +220,8 @@ mod default_args_synthetic_e2e;
 mod default_import_resolution_e2e;
 #[path = "deferred_val_init_e2e.rs"]
 mod deferred_val_init_e2e;
+#[path = "definitely_non_null_type_e2e.rs"]
+mod definitely_non_null_type_e2e;
 #[path = "delegate_by_lazy_e2e.rs"]
 mod delegate_by_lazy_e2e;
 #[path = "delegated_local_prop_e2e.rs"]
