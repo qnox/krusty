@@ -10584,20 +10584,15 @@ impl<'a> Checker<'a> {
                         return None;
                     }
                     let has_lam = |lpt: &[Vec<Ty>]| lpt.iter().any(|v| !v.is_empty());
-                    // Exact-receiver user extension (module source rung 0): its lambda parameter types
-                    // come straight off the call shape.
                     if let Some(fi) = self.resolver().exact_receiver_extensions(rt, &name).next() {
                         if has_lam(&fi.call_sig.lambda_param_types) {
                             return Some(fi.call_sig.lambda_param_types);
                         }
                     }
-                    // Generic receiver (rung 1, the `Any` key): the decl's receiver type param → `rt` in
-                    // the lambda param types (the type-param→receiver mapping stays AST-based).
                     let fi = self
                         .resolver()
-                        .receiver_extensions(rt, &name)
-                        .into_iter()
-                        .find(|o| o.receiver_rank == 1)?;
+                        .generic_receiver_extensions(rt, &name)
+                        .next()?;
                     if !has_lam(&fi.call_sig.lambda_param_types) {
                         return None;
                     }
@@ -11174,18 +11169,11 @@ impl<'a> Checker<'a> {
                         return fi.callable.ret;
                     }
                 }
-                // A user GENERIC-receiver extension `<T> T.foo()` — its receiver erases to `kotlin/Any`,
-                // so it's keyed under the `Any` descriptor and matches ANY actual receiver. Specialize the
-                // return: a return naming the receiver type param (`T`) → the actual receiver type `rt`;
-                // one naming a value-param type param → that argument's type; else the declared return.
                 if erased_type_key(rt) != erased_type_key(Ty::obj("kotlin/Any")) {
-                    // The generic-receiver extension keys under the `Any` descriptor — rung 1 in the
-                    // module source's extension lookup (rung 0 is the exact receiver, handled above).
                     let module_ext = self
                         .resolver()
-                        .receiver_extensions(rt, &name)
-                        .into_iter()
-                        .find(|o| o.receiver_rank == 1);
+                        .generic_receiver_extensions(rt, &name)
+                        .next();
                     if let Some(fi) = module_ext {
                         let logical = fi.extension_value_params().to_vec();
                         if logical.len() == arg_tys.len() {
