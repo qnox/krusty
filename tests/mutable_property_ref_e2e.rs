@@ -259,3 +259,11 @@ fn nullable_typeparam_tostring_ref_declines() {
         "nullable-typeparam toString ref must decline, not NPE"
     );
 }
+
+#[test]
+fn generic_toplevel_function_ref() {
+    // ::id where fun <T> id(x: T): T — the generic type param erases to Object in the lifted static.
+    const MAIN: &str = "fun <T> id(x: T): T = x\n\
+        fun box(): String = \"OK\".let(::id)\n";
+    assert_eq!(run(MAIN).expect("generic top-level function ref"), "OK");
+}
