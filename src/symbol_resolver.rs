@@ -1684,7 +1684,7 @@ pub fn resolve_synthetic_constructor(
         // allows for a plain constructor, here composed with the value-class-erased synthetic-marker ctor
         // (which a plain subtype pass skips because of the trailing marker parameter).
         if !erased.iter().zip(real_params).all(|(a, p)| {
-            crate::libraries::arg_assignable(p, a) || descriptor_arg_subtype_of_param(lib, *a, *p)
+            p == a || *p == Ty::obj("kotlin/Any") || descriptor_arg_subtype_of_param(lib, *a, *p)
         }) {
             continue;
         }

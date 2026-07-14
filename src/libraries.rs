@@ -1118,15 +1118,6 @@ impl LibraryType {
     }
 }
 
-/// Whether `arg` can be passed where `param` is expected, in erased Kotlin terms: an exact `Ty`
-/// match, or any argument into an erased generic (`Any`) parameter — a primitive boxes into it
-/// (`List<Int>.add(E)` → `add(Object)`, calling with `Int` boxes to `Integer`), a reference passes
-/// directly. This is what lets a primitive argument select the erased `(Object)` overload instead of
-/// falling through to a longer-arity overload it happens to prefix.
-pub(crate) fn arg_assignable(param: &Ty, arg: &Ty) -> bool {
-    param == arg || *param == Ty::obj("kotlin/Any")
-}
-
 /// The best overload named `name` among `candidates` for `args`: an exact-arity exact-`Ty` match,
 /// else an exact-arity match with autoboxing into erased `Any` parameters, else a prefix match (the
 /// loose fallback covering varargs/defaulted trailing parameters).
@@ -1142,7 +1133,10 @@ pub(crate) fn best_overload<'a>(
         .or_else(|| {
             named.clone().find(|m| {
                 m.params.len() == args.len()
-                    && m.params.iter().zip(args).all(|(p, a)| arg_assignable(p, a))
+                    && m.params
+                        .iter()
+                        .zip(args)
+                        .all(|(p, a)| p == a || *p == Ty::obj("kotlin/Any"))
             })
         })
         .or_else(|| {
