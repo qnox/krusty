@@ -2286,9 +2286,68 @@ impl Flat<'_> {
                     // region (the handler range spans states where that slot is uninitialized), producing
                     // a stack-map mismatch. Skip the file rather than miscompile; a straight-line catch
                     // body (the common `catch (e) { log(e); default }` shape) is fine.
-                    // A `finally`, or anything other than a single `catch`, is unmodeled — bail before
-                    // touching `catches[0]` (a try/finally has none).
-                    if finally.is_some() || catches.len() != 1 {
+                    // A try-FINALLY (no catch): the finally must run on BOTH exits of the suspending try
+                    // body — normal completion (→ continue after the try) and an exception (→ run finally,
+                    // then re-throw). Model it with a `fin_normal` state (normal path) and a `fin_handler`
+                    // state (the try region's exception handler); the finally block is emitted in each.
+                    // Scoped to a NON-suspending finally (a suspending one would itself span states) and a
+                    // body with no bare `return` (a function return inside the try needs a
+                    // finally-before-return transfer not yet modeled). Other finally shapes skip the file.
+                    if let Some(fin) = finally {
+                        if catches.is_empty()
+                            && !expr_calls_suspend(self.ir, fin, self.suspend)
+                            && !expr_has_return(self.ir, body)
+                        {
+                            let saved = self.cur_handler;
+                            let try_after = self.new_state();
+                            let fin_handler = self.new_state();
+                            self.cur_handler = Some(fin_handler);
+                            let try_entry = self.new_state();
+                            let fin_normal = self.new_state();
+                            self.goto(&mut out, try_entry);
+                            self.states[cur] = out;
+                            // Definite-assignment on entry to the try (before the body's own writes) —
+                            // the handler is reached exceptionally WITHOUT those writes.
+                            let a_entry = self.assigned.clone();
+                            let body_stmts = self.block_stmts(body);
+                            self.flatten(&body_stmts, try_entry, Some(fin_normal));
+                            let a_body = self.assigned.clone();
+                            self.cur_handler = saved;
+                            // Normal path: run the finally, then fall through to after the try. The body
+                            // completed, so its writes are in scope here.
+                            self.assigned = a_body;
+                            let fin_stmts = self.block_stmts(fin);
+                            self.flatten(&fin_stmts, fin_normal, Some(try_after));
+                            let a_after = self.assigned.clone();
+                            // Exceptional path: the stashed exception arrives in `r_v` (loaded at the loop
+                            // top, like a resume value). Run the finally, then re-throw it. Reached without
+                            // the body's writes → start from the pre-try assignment set.
+                            self.assigned = a_entry;
+                            let mut fh_stmts = self.block_stmts(fin);
+                            let rv = self.gv(self.r_v);
+                            // `r_v` is typed `Object` (the resume/exception slot); `athrow` needs a
+                            // `Throwable`.
+                            let exc = self.add(IrExpr::TypeOp {
+                                op: IrTypeOp::Cast,
+                                arg: rv,
+                                type_operand: Ty::obj("java/lang/Throwable"),
+                            });
+                            fh_stmts.push(self.add(IrExpr::Throw { operand: exc }));
+                            self.flatten(&fh_stmts, fin_handler, None);
+                            // Continue after the try (normal path only).
+                            self.assigned = a_after;
+                            let rest: Vec<ExprId> = stmts[i + 1..].to_vec();
+                            self.flatten(&rest, try_after, after);
+                            return;
+                        }
+                        // A finally combined with a catch, a suspending finally, or a return in the try
+                        // body is unmodeled — skip the file rather than miscompile.
+                        self.failed = true;
+                        self.states[cur] = out;
+                        return;
+                    }
+                    // Anything other than a single `catch` (no finally) is unmodeled.
+                    if catches.len() != 1 {
                         self.failed = true;
                         self.states[cur] = out;
                         return;
@@ -2413,6 +2472,23 @@ impl Flat<'_> {
             }
         }
         self.states[cur] = out;
+    }
+}
+
+/// Whether `e`'s subtree contains a bare `return` (a function return), NOT descending into a nested
+/// lambda (whose `return` is its own). A `return` inside a suspending try body needs a
+/// finally-before-return transfer the flattener does not yet model, so the try-finally path declines it.
+fn expr_has_return(ir: &IrFile, e: ExprId) -> bool {
+    match &ir.exprs[e as usize] {
+        IrExpr::Return(_) => true,
+        IrExpr::Lambda { .. } => false,
+        _ => {
+            let mut found = false;
+            crate::ir::for_each_child(&ir.exprs, e, &mut |c| {
+                found = found || expr_has_return(ir, c);
+            });
+            found
+        }
     }
 }
 

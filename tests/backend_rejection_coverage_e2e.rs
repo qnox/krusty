@@ -108,9 +108,12 @@ fn delegated_property_map_accepted() {
 
 #[test]
 fn suspend_try_finally_rejected() {
+    // A NON-suspending finally around a suspending try body IS supported (see
+    // suspend_try_finally_body_e2e). A SUSPENDING finally would itself span coroutine states — still
+    // unmodeled, so it must bail rather than miscompile.
     assert!(rejects(
         "suspend fun d() {}\n\
-         suspend fun f() { try { d() } finally { println(\"x\") }; d() }\n"
+         suspend fun f() { try { d() } finally { d() }; d() }\n"
     ));
 }
 
