@@ -420,6 +420,16 @@ impl Ty {
         self.boxed_ref().is_some().then(|| Ty::nullable(self))
     }
 
+    /// Source-level nullable form for non-reference values that still have a valid reference
+    /// representation. `Unit?` and `Nothing?` are real source types; primitive `T?` is represented as
+    /// `Nullable(T)` until the backend picks its boxed carrier.
+    pub fn nullable_non_ref(self) -> Option<Ty> {
+        match self {
+            Ty::Nothing | Ty::Unit => Some(Ty::nullable(self)),
+            _ => self.nullable_boxed(),
+        }
+    }
+
     /// A function type `(params) -> ret`.
     pub fn fun(params: Vec<Ty>, ret: Ty) -> Ty {
         Ty::Fun(intern_fnsig(FnSig {
@@ -943,5 +953,16 @@ mod tests {
         assert_eq!(Ty::ULong.nullable_boxed(), Some(Ty::nullable(Ty::ULong)));
         // Already a reference → not a primitive to box.
         assert_eq!(Ty::String.nullable_boxed(), None);
+    }
+
+    #[test]
+    fn nullable_non_ref_keeps_source_forms() {
+        assert_eq!(Ty::Unit.nullable_non_ref(), Some(Ty::nullable(Ty::Unit)));
+        assert_eq!(
+            Ty::Nothing.nullable_non_ref(),
+            Some(Ty::nullable(Ty::Nothing))
+        );
+        assert_eq!(Ty::Int.nullable_non_ref(), Some(Ty::nullable(Ty::Int)));
+        assert_eq!(Ty::String.nullable_non_ref(), None);
     }
 }
