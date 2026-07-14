@@ -826,8 +826,8 @@ impl<'a> SymbolResolver<'a> {
                 let rank = source_receiver_rank(&self.src, receiver, decl_recv)?;
                 Some((rank, p))
             })
-            .min_by_key(|(rank, _)| *rank)
-            .map(|(_, p)| p)?;
+            .min_by_key(|(rank, _)| *rank)?
+            .1;
         Some(p.getter).filter(|c| c.ret.is_read_value_result())
     }
 

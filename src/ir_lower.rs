@@ -3259,8 +3259,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                                 None => syms
                                     .supertype_methods(&internal)
                                     .into_iter()
-                                    .find(|(n, _)| n == &bm.name)
-                                    .map(|(_, s)| s)?,
+                                    .find_map(|(n, s)| (n == bm.name).then_some(s))?,
                             };
                             let params = tys_to_ir(&sig.params);
                             let fid = lo.ir.add_fun(IrFunction {
@@ -13086,7 +13085,7 @@ impl<'a> Lower<'a> {
                     let ty = self
                         .statics
                         .get(&name)
-                        .map(|(_, t)| *t)
+                        .map(|&(_, t)| t)
                         .unwrap_or(Ty::Error);
                     let val = self.lower_arg(value, &ty_to_ir(ty))?;
                     Some(self.ir.add_expr(IrExpr::Call {
