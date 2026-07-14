@@ -568,6 +568,10 @@ impl CallSig {
         self.param_has_default(idx) || (self.vararg && idx + 1 == param_count)
     }
 
+    pub fn can_map_omitted_args(&self, param_count: usize) -> bool {
+        self.required < param_count && !self.param_names.is_empty()
+    }
+
     pub fn source(
         param_names: Vec<String>,
         param_defaults: Vec<bool>,

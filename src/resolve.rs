@@ -9891,10 +9891,7 @@ impl<'a> Checker<'a> {
                             .top_level_function_set(n)
                             .overloads
                             .iter()
-                            .any(|o| {
-                                o.kind == crate::libraries::FnKind::TopLevel
-                                    && !o.call_sig.param_names.is_empty()
-                            })
+                            .any(|o| o.kind == crate::libraries::FnKind::TopLevel && !o.call_sig.param_names.is_empty())
                         // A CLASSPATH CONSTRUCTOR whose `@Metadata` records parameter names
                         // (`Point(y = 2, x = 1)`, or `Cfg(a = 1, c = "x")` omitting a defaulted `b`,
                         // against a data/plain class from a dependency). `constructor_named_params` returns
@@ -10862,10 +10859,7 @@ impl<'a> Checker<'a> {
                     let module_member = if short {
                         members
                             .iter()
-                            .find(|o| {
-                                o.call_sig.required < o.params.len()
-                                    && !o.call_sig.param_names.is_empty()
-                            })
+                            .find(|o| o.call_sig.can_map_omitted_args(o.params.len()))
                             .or_else(|| members.first())
                             .cloned()
                     } else {
@@ -11209,8 +11203,7 @@ impl<'a> Checker<'a> {
                         let logical: Vec<Ty> = fi.callable.params[1..].to_vec();
                         let cs = &fi.call_sig;
                         if (arg_names.is_some() || arg_tys.len() != logical.len())
-                            && cs.required < logical.len()
-                            && !cs.param_names.is_empty()
+                            && cs.can_map_omitted_args(logical.len())
                         {
                             // Omitted/named extension arguments filled by parameter defaults.
                             match map_call_sig_args(args, arg_names.as_deref(), cs) {
