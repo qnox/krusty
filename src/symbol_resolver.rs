@@ -1422,14 +1422,12 @@ fn params_match_descriptor_form(lib: &dyn CompilerPlatform, params: &[Ty], args:
 fn descriptor_arg_subtype_of_param(lib: &dyn CompilerPlatform, arg: Ty, param: Ty) -> bool {
     let pj = lib.jvm_descriptor_form(param);
     let aj = lib.jvm_descriptor_form(arg);
-    if aj == pj {
-        return true;
-    }
-    // Only a reference argument can widen to a reference parameter through the type hierarchy.
-    let (Ty::Obj(arg_internal, _), Some(param_internal)) = (arg, pj.obj_internal()) else {
-        return false;
-    };
-    is_classpath_subtype(lib, arg_internal, param_internal, 0)
+    crate::assignable::is_subtype(
+        &crate::assignable::TyCtx::new(),
+        &PlatformOracle(lib),
+        aj,
+        pj,
+    )
 }
 
 fn value_erased_args(lib: &dyn CompilerPlatform, args: &[Ty]) -> Vec<Ty> {
@@ -2436,23 +2434,15 @@ fn fun_return_compatible(lib: &dyn CompilerPlatform, param: Ty, arg: Ty) -> bool
         ar.non_null().kotlin_class_internal(),
     ) {
         if pr.is_reference() && ar.is_reference() {
-            return is_classpath_subtype(lib, a, p, 0);
+            return crate::assignable::is_subtype(
+                &crate::assignable::TyCtx::new(),
+                &PlatformOracle(lib),
+                Ty::obj(a),
+                Ty::obj(p),
+            );
         }
     }
     false
-}
-
-/// `sub` is `super_` or transitively extends/implements it, via the ONE `is_subtype` relation over the
-/// class hierarchy (`PlatformOracle` supplies the classpath supertype walk and the collection JVM-identity
-/// canonicalization that equates `kotlin/collections/List` with `java/util/List`). `_depth` is retained
-/// for the call signature; the relation bounds its own walk with a `seen` set.
-fn is_classpath_subtype(lib: &dyn CompilerPlatform, sub: &str, super_: &str, _depth: u32) -> bool {
-    crate::assignable::is_subtype(
-        &crate::assignable::TyCtx::new(),
-        &PlatformOracle(lib),
-        Ty::obj(sub),
-        Ty::obj(super_),
-    )
 }
 
 #[cfg(test)]
