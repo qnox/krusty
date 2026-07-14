@@ -486,6 +486,16 @@ impl<'a> SymbolResolver<'a> {
             .filter(|o| o.receiver_rank == 0)
     }
 
+    pub(crate) fn generic_receiver_extensions(
+        &self,
+        recv: Ty,
+        name: &str,
+    ) -> impl Iterator<Item = FunctionInfo> {
+        self.receiver_extensions(recv, name)
+            .into_iter()
+            .filter(|o| o.receiver_rank == 1)
+    }
+
     /// Whether `name` has an `inline` top-level overload.
     pub fn toplevel_is_inline(&self, name: &str) -> bool {
         self.top_level_function_set(name)
