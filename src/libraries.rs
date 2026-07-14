@@ -775,6 +775,18 @@ impl FunctionInfo {
         self.kind == FnKind::TopLevel
     }
 
+    pub fn is_member(&self) -> bool {
+        self.kind == FnKind::Member
+    }
+
+    pub fn is_extension(&self) -> bool {
+        self.kind == FnKind::Extension
+    }
+
+    pub fn is_member_or_extension(&self) -> bool {
+        self.is_member() || self.is_extension()
+    }
+
     pub fn plain(kind: FnKind, receiver: Option<Ty>, callable: LibraryCallable) -> Self {
         FunctionInfo {
             kind,

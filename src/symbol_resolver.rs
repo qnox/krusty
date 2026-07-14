@@ -272,8 +272,7 @@ fn ranked_extension_overloads_by_recv<'a>(
         .overloads
         .iter()
         .filter(|o| {
-            o.kind == FnKind::Extension
-                && (o.public() || (allow_must_inline && o.flags.inline.must_inline()))
+            o.is_extension() && (o.public() || (allow_must_inline && o.flags.inline.must_inline()))
         })
         .filter_map(|o| {
             // The legacy `functions()` provider labels every candidate with the QUERIED receiver, not its
@@ -409,7 +408,7 @@ impl<'a> SymbolResolver<'a> {
     /// slice only when there is no import scope.
     pub(crate) fn receiver_extensions(&self, recv: Ty, name: &str) -> Vec<FunctionInfo> {
         let applies = |o: &FunctionInfo| {
-            o.kind == FnKind::Extension
+            o.is_extension()
                 && o.receiver
                     .and_then(|dr| source_receiver_rank(&self.src, recv, dr))
                     .is_some()
@@ -1144,15 +1143,9 @@ impl<'a> SymbolResolver<'a> {
         candidates
             .into_iter()
             .find(|o| {
-                matches!(o.kind, FnKind::Extension | FnKind::Member)
-                    // A same-module callable emits through the module path, not this @JvmName-mangled
-                    // (`@OverloadResolutionByLambdaReturnType`) classpath-family selector — its facade is
-                    // the file being compiled, so it carries no emit owner here.
+                o.is_member_or_extension()
                     && !matches!(o.callable.origin, Origin::Module { .. })
                     && o.callable.ret == lambda_ret
-                    // Scoped candidates include every same-named overload (e.g. `Array<Int>.sumOf` as
-                    // well as `Iterable<Int>.sumOf`); an extension must match THIS receiver, else a
-                    // wrong-owner descriptor (`ArraysKt.sumOfInt([I)` for a `List`) is emitted.
                     && match o.kind {
                         FnKind::Extension => o.receiver.is_none_or(|dr| {
                             source_receiver_rank(&self.src, receiver, dr).is_some()
@@ -1169,20 +1162,14 @@ impl<'a> SymbolResolver<'a> {
                     o.callable.descriptor,
                     o.kind
                 );
-                (o.callable, o.kind == FnKind::Member)
+                let is_member = o.is_member();
+                (o.callable, is_member)
             })
     }
 
     /// Parameter types for the lambda argument of a call selected by lambda return type
-    /// (`Iterable<T>.sumOf { … }`). The special candidate family is represented in `FunctionSet` with
-    /// `receiver_rank = u32::MAX`; bind the receiver into the generic signature and read the function
-    /// parameter's input types from that selected family instead of asking the provider a second time.
+    /// (`Iterable<T>.sumOf { … }`), read from the selected overload family.
     pub fn lambda_return_overload_param_types(&self, receiver: Ty, name: &str) -> Option<Vec<Ty>> {
-        // Candidates from the ONE query (`resolve_symbols`, scope-pruned) — the plain `functions()` walk
-        // finds the family by the bytecode `@JvmName` (`sumOfInt`), which the Kotlin name never matches.
-        // A `@OverloadResolutionByLambdaReturnType` group's overloads all share the SAME selector INPUT
-        // (`(T) -> R` — only `R` varies), so binding `it` from any of them is unambiguous: bind the
-        // receiver's type args into the selector and read its input (`Iterable<Int>.sumOf` → `it: Int`).
         let candidates: Vec<FunctionInfo> = match self.fn_scope {
             Some(scope) => resolve_symbols_in_scope(&self.src, name, scope)
                 .into_iter()
@@ -1196,7 +1183,7 @@ impl<'a> SymbolResolver<'a> {
         candidates
             .iter()
             .filter(|o| {
-                o.kind == FnKind::Extension
+                o.is_extension()
                     && o.receiver
                         .is_none_or(|dr| source_receiver_rank(self.lib, receiver, dr).is_some())
             })
@@ -2310,7 +2297,7 @@ fn logical_value_params(
     recv: Ty,
     type_args: &[Ty],
 ) -> Vec<Ty> {
-    if o.kind != FnKind::Extension {
+    if !o.is_extension() {
         return o.callable.params.clone();
     }
     match o.generic_sig.as_ref() {
