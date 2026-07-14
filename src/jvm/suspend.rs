@@ -1039,6 +1039,26 @@ fn build_state_machine(ir: &mut IrFile, facade: &str, fid: u32, b: ExprId, unit_
         let hi = this_offset + real_params.len() as u32;
         (idx >= this_offset && idx < hi).then(|| real_params[(idx - this_offset) as usize].clone())
     };
+    // A local whose EVERY reference lies strictly AFTER the last top-level suspending statement is not
+    // live across any suspension — e.g. the iterator/counter of a STRUCTURAL (non-suspending) loop that
+    // runs entirely in the final resume state. Spilling it is unsound: the spill layout gives it a
+    // continuation-field restore slot, but the tail's own local allocator numbers the same value a
+    // different slot, so the structural loop's back-edge stackmap frame disagrees (`locals[N]=top` vs
+    // `Iterator`) → VerifyError. Retain only a value-index that is a PARAMETER or is WRITTEN somewhere up
+    // to and including the last suspending statement (so it genuinely predates a suspension a later read
+    // crosses). A loop-body local of the last suspending statement (itself a suspending loop) is written
+    // inside that statement's subtree, so it is correctly kept.
+    let last_susp = stmts
+        .iter()
+        .rposition(|&s| expr_calls_suspend(ir, s, &suspend_set))
+        .unwrap_or(first);
+    let mut head_writes: Vec<u32> = Vec::new();
+    for &s in &stmts[..=last_susp] {
+        collect_live_writes(ir, s, &suspend_set, &mut head_writes);
+    }
+    head_writes.sort_unstable();
+    head_writes.dedup();
+    reads.retain(|idx| param_ty(*idx).is_some() || head_writes.binary_search(idx).is_ok());
     let mut spilled: Vec<(u32, Ty)> = Vec::new();
     for idx in reads {
         if let Some(ty) = param_ty(idx).or_else(|| find_local_ty(ir, b, idx)) {
@@ -1373,6 +1393,22 @@ fn build_lambda_state_machine(
     }
     reads.sort_unstable();
     reads.dedup();
+    // Drop tail-confined locals (every reference after the last top-level suspending statement — e.g. a
+    // structural loop's iterator that runs entirely in the final resume state). See the twin comment in
+    // `build_state_machine`: spilling them mis-frames the loop back-edge. A capture/param (`2..2+field_base`)
+    // is retained (reloaded in the prologue); otherwise keep only a value WRITTEN up to & including the
+    // last suspending statement.
+    let last_susp = stmts
+        .iter()
+        .rposition(|&s| expr_calls_suspend(ir, s, &suspend_set))
+        .unwrap_or(first);
+    let mut head_writes: Vec<u32> = Vec::new();
+    for &s in &stmts[..=last_susp] {
+        collect_live_writes(ir, s, &suspend_set, &mut head_writes);
+    }
+    head_writes.sort_unstable();
+    head_writes.dedup();
+    reads.retain(|idx| (2..2 + field_base).contains(idx) || head_writes.binary_search(idx).is_ok());
     let mut spilled: Vec<(u32, Ty)> = Vec::new();
     for idx in reads {
         // Capture/parameter locals (value-indices `2..2+field_base`) are reloaded from their fields in
@@ -1851,18 +1887,18 @@ impl Flat<'_> {
         }
     }
     /// Whether `e`'s subtree contains a nested STRUCTURAL loop — a `While` whose own body does NOT
-    /// suspend (so the flattener leaves it intact rather than state-splitting it). Emitting such a loop
-    /// inside a flattened (state-split) body mis-allocates its iterator local, so the caller declines.
-    /// Stops at a `Lambda` (a separate scope). A nested SUSPENDING loop is not "structural" — it is itself
-    /// flattened — so recurse past it to look for a deeper structural one.
+    /// suspend. Emitting one inside a flattened (state-split) body can still mis-frame its locals for
+    /// richer shapes, so the caller declines. Recurses past a nested SUSPENDING loop (itself flattened)
+    /// to find a deeper structural one.
     fn body_has_structural_loop(&self, e: ExprId) -> bool {
         match &self.ir.exprs[e as usize] {
             IrExpr::While { body, .. } if !expr_calls_suspend(self.ir, *body, self.suspend) => true,
-            // A real CLOSURE lambda's loop lives in a separate impl method (fine). A structural loop
-            // hidden in a lambda that the backend SPLICES inline (`run{}`/`let{}`/`forEach{}`) would land
-            // in the flattened body — but every such shape independently DECLINES in the flattener /
-            // collection-HOF path today, so this arm is safe. If a future change let a splice-hidden loop
-            // through, extend the guard to descend into `Lambda.inline_body`.
+            // Stops at a `Lambda` — its own body is a separate scope, EXCEPT for a lambda the backend
+            // SPLICES inline (`run{}`/`let{}`/`forEach{}`), whose loop would land in the flattened body.
+            // Every such splice-hidden-loop shape independently DECLINES today in the flattener /
+            // collection-HOF path (verified: a `while` inside `forEach{}` inside a suspending loop
+            // declines), so this arm is safe. If a future change lets one THROUGH, extend the guard to
+            // descend into `Lambda.inline_body`.
             IrExpr::Lambda { .. } => false,
             _ => {
                 let mut found = false;
@@ -2202,10 +2238,10 @@ impl Flat<'_> {
                 if expr_calls_suspend(self.ir, *body, self.suspend) {
                     let (cond, body, update, post_test, label) =
                         (*cond, *body, *update, *post_test, label.clone());
-                    // A STRUCTURAL (non-suspending) loop nested in this flattened body mis-numbers its
-                    // iterator local across the state split (the enclosing loop's iterator slot is
-                    // clobbered → a stackmap-inconsistent VerifyError). Not yet modeled — DECLINE rather
-                    // than miscompile. A nested SUSPENDING loop is fine (it is itself flattened).
+                    // A STRUCTURAL (non-suspending) loop nested in this flattened body still hits a
+                    // definite-assignment / frame bug across the state split for richer shapes (a
+                    // 3-level nest with a `when` + non-local return) — DECLINE rather than miscompile.
+                    // The spill refinement + boxing fix handle many nestings, but not all yet.
                     if self.body_has_structural_loop(body) {
                         self.failed = true;
                         self.states[cur] = out;
@@ -2437,6 +2473,40 @@ fn collect_reads(ir: &IrFile, e: ExprId, out: &mut Vec<u32>) {
             out.push(*i);
         }
     });
+}
+
+/// Value-indices WRITTEN in `e` that are LIVE across a suspension — the writes NOT confined to a
+/// non-suspending (STRUCTURAL) loop. A write inside a structural loop is redone every iteration and read
+/// within the same iteration, so it never carries a value across the enclosing suspension; spilling such a
+/// local mis-frames the structural loop's back-edge. A write inside a SUSPENDING loop IS live (loop-carried
+/// across the inner suspension), so descend there.
+fn collect_live_writes(ir: &IrFile, e: ExprId, suspend_set: &HashSet<u32>, out: &mut Vec<u32>) {
+    match ir.exprs[e as usize].clone() {
+        IrExpr::Variable { index, init, .. } => {
+            out.push(index);
+            if let Some(i) = init {
+                collect_live_writes(ir, i, suspend_set, out);
+            }
+        }
+        IrExpr::SetValue { var, value } => {
+            out.push(var);
+            collect_live_writes(ir, value, suspend_set, out);
+        }
+        IrExpr::While {
+            cond, body, update, ..
+        } => {
+            collect_live_writes(ir, cond, suspend_set, out);
+            if expr_calls_suspend(ir, body, suspend_set) {
+                collect_live_writes(ir, body, suspend_set, out);
+                if let Some(u) = update {
+                    collect_live_writes(ir, u, suspend_set, out);
+                }
+            }
+        }
+        _ => crate::ir::for_each_child(&ir.exprs, e, &mut |c| {
+            collect_live_writes(ir, c, suspend_set, out)
+        }),
+    }
 }
 
 /// The declared type of local `idx`, from its (first, pre-order) `Variable` declaration in `b`'s subtree.

@@ -6781,7 +6781,16 @@ impl<'a> Emitter<'a> {
                 | IrBinOp::RefNe
                 | IrBinOp::And
                 | IrBinOp::Or => Ty::Boolean,
-                _ => self.value_ty(*lhs),
+                // An arithmetic/bitwise op leaves a PRIMITIVE on the stack — the emitter unboxes each
+                // operand first. So the result type is the UNBOXED primitive of the lhs, even when the lhs
+                // value is a boxed wrapper (`it + 100` where `it` is an `Integer` from a `Map` get). Using
+                // the boxed `value_ty(lhs)` here made a caller (e.g. the safe-call/elvis boxing coercion)
+                // believe the result was already a reference and skip its `valueOf` → an `int`/`Integer`
+                // stackmap mismatch once the masking spill was removed.
+                _ => {
+                    let t = self.value_ty(*lhs);
+                    boxed_prim_of(t).unwrap_or(t)
+                }
             },
             IrExpr::When { branches } => self.value_ty_of_when(branches),
             IrExpr::EnumEntry { class, .. } | IrExpr::EnumValueOf { class, .. } => {
