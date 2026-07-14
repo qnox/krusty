@@ -1040,153 +1040,98 @@ public class M {\n\
     assert_eq!(out.trim(), "OK", "suspend in try/catch");
 }
 
+/// Compile a suspend snippet with krusty (stdlib + coroutines + JDK modules) and run its
+/// `fun box(): String = runBlocking { … }` on the shared box runner — the same harness the other
+/// `suspend … runBlocking { }` behavioural tests use. `None` if the toolchain isn't provisioned.
+fn run_suspend_box(src: &str, tag: &str) -> Option<String> {
+    let sl = common::stdlib_jar()?;
+    let coro = common::coroutines_jar()?;
+    let jdk = common::jdk_modules()?;
+    common::compile_and_run_box(src, tag, &[sl, coro, jdk.clone()], Some(&jdk))
+}
+
 #[test]
 fn suspend_in_catch_body_spills_exception() {
     // A `suspend fun` whose CATCH body itself contains a suspension point AND reads the caught
     // exception both BEFORE and AFTER that suspension (mission-core's MissionChangeService.approveChange
     // shape: `catch (e) { log(e); repo.updateStatus(...); throw e }`). The exception cannot be read from
     // `r_v` after the catch's own suspend call clobbers it — so it is spilled to a dedicated continuation
-    // field and restored per-state, exactly like any local live across a suspension. Values match kotlinc:
-    // compute(sb,false) = risky(7) + "cfg".length(3) = 10 and sb ends "R"; compute(sb,true) rethrows the
-    // original IllegalStateException("boom") after running the catch's suspend, with sb ending "R[boomC]".
-    let _jh = match java_home() {
-        Some(j) if std::path::Path::new(&format!("{j}/bin/javac")).exists() => j,
-        _ => return,
-    };
-    let Some(stdlib) = stdlib_jar() else {
-        return;
-    };
-    let dir = std::env::temp_dir().join(format!("krusty_susp_catch_{}", std::process::id()));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).unwrap();
-    compile_krusty_with_stdlib(
-        "S",
-        "suspend fun setup(): String = \"cfg\"\n\
-         suspend fun tick(sb: StringBuilder, t: String): Int { sb.append(t); return t.length }\n\
-         suspend fun risky(sb: StringBuilder, fail: Boolean): Int {\n\
-         tick(sb, \"R\")\n\
-         if (fail) throw IllegalStateException(\"boom\")\n\
-         return 7\n\
-         }\n\
-         suspend fun compute(sb: StringBuilder, fail: Boolean): Int {\n\
-         val cfg = setup()\n\
-         try {\n\
-         val r = risky(sb, fail)\n\
-         return r + cfg.length\n\
-         } catch (e: Exception) {\n\
-         sb.append(\"[\").append(e.message)\n\
-         tick(sb, \"C\")\n\
-         sb.append(\"]\")\n\
-         throw e\n\
-         }\n\
-         }\n",
-        &stdlib,
-        &dir,
+    // field and restored per-state, exactly like any local live across a suspension. compute(sb,false) =
+    // risky(7) + "cfg".length(3) = 10 with sb "R"; compute(sb,true) rethrows the original
+    // IllegalStateException("boom") after running the catch's suspend, with sb "R[boomC]".
+    if common::stdlib_jar().is_none()
+        || common::coroutines_jar().is_none()
+        || common::jdk_modules().is_none()
+    {
+        return; // toolchain not provisioned
+    }
+    const SRC: &str = "import kotlinx.coroutines.runBlocking\n\
+        suspend fun setup(): String = \"cfg\"\n\
+        suspend fun tick(sb: StringBuilder, t: String): Int { sb.append(t); return t.length }\n\
+        suspend fun risky(sb: StringBuilder, fail: Boolean): Int {\n\
+            tick(sb, \"R\")\n\
+            if (fail) throw IllegalStateException(\"boom\")\n\
+            return 7\n\
+        }\n\
+        suspend fun compute(sb: StringBuilder, fail: Boolean): Int {\n\
+            val cfg = setup()\n\
+            try {\n\
+                val r = risky(sb, fail)\n\
+                return r + cfg.length\n\
+            } catch (e: Exception) {\n\
+                sb.append(\"[\").append(e.message)\n\
+                tick(sb, \"C\")\n\
+                sb.append(\"]\")\n\
+                throw e\n\
+            }\n\
+        }\n\
+        fun box(): String = runBlocking {\n\
+            val s1 = StringBuilder(); val r1 = compute(s1, false)\n\
+            val s2 = StringBuilder(); var caught = \"none\"\n\
+            try { compute(s2, true) } catch (e: Exception) { caught = e.message.toString() }\n\
+            if (r1 == 10 && s1.toString() == \"R\" && caught == \"boom\" && s2.toString() == \"R[boomC]\") \"OK\"\n\
+            else \"F r1=$r1 s1=$s1 caught=$caught s2=$s2\"\n\
+        }\n";
+    assert_eq!(
+        run_suspend_box(SRC, "Main").expect("suspend-in-catch compile+run"),
+        "OK"
     );
-    let driver = "import kotlin.coroutines.*;\n\
-public class M {\n\
-  static Continuation<Object> k() {\n\
-    return new Continuation<Object>() {\n\
-      public CoroutineContext getContext() { return EmptyCoroutineContext.INSTANCE; }\n\
-      public void resumeWith(Object o) { }\n\
-    };\n\
-  }\n\
-  public static void main(String[] a) {\n\
-    StringBuilder ok = new StringBuilder();\n\
-    Object r1 = SKt.compute(ok, false, k());\n\
-    boolean good = r1.equals(Integer.valueOf(10)) && ok.toString().equals(\"R\");\n\
-    StringBuilder bad = new StringBuilder();\n\
-    String caught = \"\";\n\
-    try {\n\
-      SKt.compute(bad, true, k());\n\
-    } catch (IllegalStateException e) {\n\
-      caught = e.getMessage();\n\
-    }\n\
-    good = good && caught.equals(\"boom\") && bad.toString().equals(\"R[boomC]\");\n\
-    System.out.println(good ? \"OK\" : (\"r1=\" + r1 + \" ok=\" + ok + \" caught=\" + caught + \" bad=\" + bad));\n\
-  }\n\
-}\n";
-    fs::write(dir.join("M.java"), driver).unwrap();
-    let cp = format!("{}:{}", dir.to_str().unwrap(), stdlib);
-    let Some(out) = common::javac_run(
-        dir.join("M.java").to_str().unwrap(),
-        &cp,
-        dir.to_str().unwrap(),
-        "M",
-    ) else {
-        return;
-    };
-    let _ = fs::remove_dir_all(&dir);
-    assert_eq!(out.trim(), "OK", "suspend in catch body");
 }
 
 #[test]
 fn suspend_return_when_with_suspending_branches() {
-    // A `suspend fun` whose EXPRESSION body is `= when (op) { … }` with suspensions in the BRANCH
+    // A `suspend fun` whose EXPRESSION body is `= when (k) { … }` with suspensions in the BRANCH
     // VALUES/bodies (not the condition) — mission-core's MissionChangeService.applyOperation shape,
-    // including an `else -> throw` divergent arm. Desugars to `val tmp; when (op) { … tmp = v }; return
-    // tmp`, each branch flattened as a suspending `when`-statement arm. Values match kotlinc:
-    // handle(A(5)) = "a5" with sb "A!"; handle(B) = null with sb "B"; handle(C) = "c" with sb "C".
-    let _jh = match java_home() {
-        Some(j) if std::path::Path::new(&format!("{j}/bin/javac")).exists() => j,
-        _ => return,
-    };
-    let Some(stdlib) = stdlib_jar() else {
-        return;
-    };
-    let dir = std::env::temp_dir().join(format!("krusty_susp_retwhen_{}", std::process::id()));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).unwrap();
-    compile_krusty_with_stdlib(
-        "S",
-        "suspend fun leafA(sb: StringBuilder, n: Int): String { sb.append(\"A\"); return \"a\" + n }\n\
-         suspend fun leafB(sb: StringBuilder): String? { sb.append(\"B\"); return null }\n\
-         suspend fun handle(sb: StringBuilder, k: Int): String? =\n\
-         when (k) {\n\
-         0 -> { val r = leafA(sb, 5); sb.append(\"!\"); r }\n\
-         1 -> leafB(sb)\n\
-         2 -> { sb.append(\"C\"); \"c\" }\n\
-         else -> throw IllegalStateException(\"no\")\n\
-         }\n",
-        &stdlib,
-        &dir,
-    );
-    let driver = "import kotlin.coroutines.*;\n\
-public class M {\n\
-  static Continuation<Object> k() {\n\
-    return new Continuation<Object>() {\n\
-      public CoroutineContext getContext() { return EmptyCoroutineContext.INSTANCE; }\n\
-      public void resumeWith(Object o) { }\n\
-    };\n\
-  }\n\
-  public static void main(String[] a) {\n\
-    StringBuilder s1 = new StringBuilder();\n\
-    Object r1 = SKt.handle(s1, 0, k());\n\
-    StringBuilder s2 = new StringBuilder();\n\
-    Object r2 = SKt.handle(s2, 1, k());\n\
-    StringBuilder s3 = new StringBuilder();\n\
-    Object r3 = SKt.handle(s3, 2, k());\n\
-    boolean ok = \"a5\".equals(r1) && s1.toString().equals(\"A!\")\n\
-      && r2 == null && s2.toString().equals(\"B\")\n\
-      && \"c\".equals(r3) && s3.toString().equals(\"C\");\n\
-    System.out.println(ok ? \"OK\" : (\"r1=\" + r1 + \" s1=\" + s1 + \" r2=\" + r2 + \" s2=\" + s2 + \" r3=\" + r3 + \" s3=\" + s3));\n\
-  }\n\
-}\n";
-    fs::write(dir.join("M.java"), driver).unwrap();
-    let cp = format!("{}:{}", dir.to_str().unwrap(), stdlib);
-    let Some(out) = common::javac_run(
-        dir.join("M.java").to_str().unwrap(),
-        &cp,
-        dir.to_str().unwrap(),
-        "M",
-    ) else {
-        return;
-    };
-    let _ = fs::remove_dir_all(&dir);
+    // including an `else -> throw` divergent arm. Desugars to `val tmp; when (k) { … tmp = v }; return
+    // tmp`, each branch flattened as a suspending `when`-statement arm. handle(0) = "a5" with sb "A!";
+    // handle(1) = null with sb "B"; handle(2) = "c" with sb "C".
+    if common::stdlib_jar().is_none()
+        || common::coroutines_jar().is_none()
+        || common::jdk_modules().is_none()
+    {
+        return; // toolchain not provisioned
+    }
+    const SRC: &str = "import kotlinx.coroutines.runBlocking\n\
+        suspend fun leafA(sb: StringBuilder, n: Int): String { sb.append(\"A\"); return \"a\" + n }\n\
+        suspend fun leafB(sb: StringBuilder): String? { sb.append(\"B\"); return null }\n\
+        suspend fun handle(sb: StringBuilder, k: Int): String? =\n\
+            when (k) {\n\
+                0 -> { val r = leafA(sb, 5); sb.append(\"!\"); r }\n\
+                1 -> leafB(sb)\n\
+                2 -> { sb.append(\"C\"); \"c\" }\n\
+                else -> throw IllegalStateException(\"no\")\n\
+            }\n\
+        fun box(): String = runBlocking {\n\
+            val s1 = StringBuilder(); val r1 = handle(s1, 0)\n\
+            val s2 = StringBuilder(); val r2 = handle(s2, 1)\n\
+            val s3 = StringBuilder(); val r3 = handle(s3, 2)\n\
+            if (r1 == \"a5\" && s1.toString() == \"A!\" && r2 == null && s2.toString() == \"B\"\n\
+                && r3 == \"c\" && s3.toString() == \"C\") \"OK\"\n\
+            else \"F r1=$r1 s1=$s1 r2=$r2 s2=$s2 r3=$r3 s3=$s3\"\n\
+        }\n";
     assert_eq!(
-        out.trim(),
-        "OK",
-        "suspend return-when with suspending branches"
+        run_suspend_box(SRC, "Main").expect("return-when compile+run"),
+        "OK"
     );
 }
 
