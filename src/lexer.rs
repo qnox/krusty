@@ -128,6 +128,7 @@ impl<'a> Lexer<'a> {
             b'>' if self.peek2() == b'=' => self.two(TokenKind::GtEq),
             b'>' => self.one(TokenKind::Gt),
             b'&' if self.peek2() == b'&' => self.two(TokenKind::AndAnd),
+            b'&' => self.one(TokenKind::Amp),
             b'|' if self.peek2() == b'|' => self.two(TokenKind::OrOr),
             b'"' => return self.string(lo),
             b'\'' => return self.char_lit(lo),
