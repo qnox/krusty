@@ -8457,9 +8457,7 @@ impl<'a> Lower<'a> {
             .top_level_function_set(fname)
             .overloads
             .into_iter()
-            .filter(|o| {
-                o.kind == crate::libraries::FnKind::TopLevel && !o.call_sig.param_names.is_empty()
-            })
+            .filter(|o| o.is_top_level_with_param_names())
             .map(|o| o.call_sig.param_names)
             .collect();
         let [param_names] = sets.as_slice() else {
@@ -15628,7 +15626,7 @@ impl<'a> Lower<'a> {
                         .top_level_function_set(&name)
                         .overloads
                         .iter()
-                        .any(|o| o.kind == crate::libraries::FnKind::TopLevel);
+                        .any(|o| o.is_top_level());
                 if !self.module_declares(&name) && !names_a_function {
                     let ci = self.class_of(sig.ret)?;
                     let class_id = ci.id;
@@ -15726,9 +15724,7 @@ impl<'a> Lower<'a> {
                 let tl: Vec<_> = self
                     .resolver()
                     .top_level_function_set(&name)
-                    .overloads
-                    .into_iter()
-                    .filter(|o| o.kind == crate::libraries::FnKind::TopLevel)
+                    .into_top_level()
                     .collect();
                 let [o] = tl.as_slice() else { return None };
                 let c = &o.callable;

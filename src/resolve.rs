@@ -3120,9 +3120,7 @@ fn infer_lit_ty_p(
                 .collect(),
             None => resolver
                 .top_level_function_set(name)
-                .overloads
-                .into_iter()
-                .filter(|o| o.kind == crate::libraries::FnKind::TopLevel)
+                .into_top_level()
                 .map(|o| o.callable.ret)
                 .collect(),
         };
@@ -3347,9 +3345,7 @@ fn infer_lit_ty_p(
         } if name != "class" => {
             let tl: Vec<_> = resolver
                 .top_level_function_set(name)
-                .overloads
-                .into_iter()
-                .filter(|o| o.kind == crate::libraries::FnKind::TopLevel)
+                .into_top_level()
                 .collect();
             match tl.as_slice() {
                 [o] if o.callable.vararg_elem.is_none() => {
@@ -8312,9 +8308,7 @@ impl<'a> Checker<'a> {
                         let tl: Vec<_> = self
                             .resolver()
                             .top_level_function_set(&name)
-                            .overloads
-                            .into_iter()
-                            .filter(|o| o.kind == crate::libraries::FnKind::TopLevel)
+                            .into_top_level()
                             .collect();
                         if let [o] = tl.as_slice() {
                             if o.callable.vararg_elem.is_none()
@@ -9887,7 +9881,7 @@ impl<'a> Checker<'a> {
                             .top_level_function_set(n)
                             .overloads
                             .iter()
-                            .any(|o| o.kind == crate::libraries::FnKind::TopLevel && !o.call_sig.param_names.is_empty())
+                            .any(|o| o.is_top_level_with_param_names())
                         // A CLASSPATH CONSTRUCTOR whose `@Metadata` records parameter names
                         // (`Point(y = 2, x = 1)`, or `Cfg(a = 1, c = "x")` omitting a defaulted `b`,
                         // against a data/plain class from a dependency). `constructor_named_params` returns
@@ -9925,12 +9919,12 @@ impl<'a> Checker<'a> {
                         .resolver()
                         .instance_members(rt, name)
                         .iter()
-                        .any(|m| !m.call_sig.param_names.is_empty());
+                        .any(|m| m.call_sig.has_param_names());
                     let ext_named = self
                         .resolver()
                         .receiver_extensions(rt, name)
                         .iter()
-                        .any(|o| !o.call_sig.param_names.is_empty());
+                        .any(|o| o.call_sig.has_param_names());
                     member_named || ext_named
                 }
                 _ => false,
@@ -10844,7 +10838,7 @@ impl<'a> Checker<'a> {
                         // a NAMED call may reorder (`z.test(b = …, a = …)`), so a positional check would
                         // pair each argument with the wrong parameter. Fires for any named call, and for an
                         // omitted-argument call to a method with defaults.
-                        if !cs.param_names.is_empty()
+                        if cs.has_param_names()
                             && (arg_names.is_some()
                                 || (arg_tys.len() != params.len() && cs.required < params.len()))
                         {
@@ -10899,7 +10893,7 @@ impl<'a> Checker<'a> {
                             .resolver()
                             .instance_members(rt, &name)
                             .into_iter()
-                            .find(|m| !m.call_sig.param_names.is_empty())
+                            .find(|m| m.call_sig.has_param_names())
                         {
                             let params = fi.params.clone();
                             // Honour the member's per-parameter DEFAULT flags (a data-class `copy` defaults
@@ -11062,7 +11056,7 @@ impl<'a> Checker<'a> {
                         .resolver()
                         .receiver_extensions(rt, &name)
                         .into_iter()
-                        .filter(|o| !o.call_sig.param_names.is_empty())
+                        .filter(|o| o.call_sig.has_param_names())
                         .map(|o| o.call_sig.param_names)
                         .collect();
                     if let [pn] = sets.as_slice() {
@@ -12238,10 +12232,7 @@ impl<'a> Checker<'a> {
                                 .top_level_function_set(&fname)
                                 .overloads
                                 .into_iter()
-                                .filter(|o| {
-                                    o.kind == crate::libraries::FnKind::TopLevel
-                                        && !o.call_sig.param_names.is_empty()
-                                })
+                                .filter(|o| o.is_top_level_with_param_names())
                                 .map(|o| o.call_sig.param_names)
                                 .collect();
                             match pnames.as_slice() {

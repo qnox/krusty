@@ -480,9 +480,7 @@ impl<'a> SymbolResolver<'a> {
     /// Whether `name` has an `inline` top-level overload.
     pub fn toplevel_is_inline(&self, name: &str) -> bool {
         self.top_level_function_set(name)
-            .overloads
-            .iter()
-            .filter(|o| o.kind == FnKind::TopLevel)
+            .top_level()
             .any(|o| o.flags.inline.can_inline())
     }
 
@@ -490,9 +488,7 @@ impl<'a> SymbolResolver<'a> {
     /// (same-module `suspend fun`, via `module_symbols`) and from `@Metadata` (classpath callees).
     pub fn toplevel_is_suspend(&self, name: &str) -> bool {
         self.top_level_function_set(name)
-            .overloads
-            .iter()
-            .filter(|o| o.kind == FnKind::TopLevel)
+            .top_level()
             .any(|o| o.flags.suspend)
     }
 
@@ -555,7 +551,7 @@ impl<'a> SymbolResolver<'a> {
         let parsed: Vec<(&FunctionInfo, Vec<Ty>, Ty)> = fs
             .overloads
             .iter()
-            .filter(|o| o.kind == FnKind::TopLevel && o.public())
+            .filter(|o| o.is_top_level() && o.public())
             .map(|o| (o, o.callable.params.clone(), o.callable.ret))
             .collect();
 
@@ -998,7 +994,7 @@ impl<'a> SymbolResolver<'a> {
         type_args: &[Ty],
     ) -> Option<LibraryCallable> {
         let fsd = self.top_level_function_set(&format!("{name}$default"));
-        for o in fsd.overloads.iter().filter(|o| o.kind == FnKind::TopLevel) {
+        for o in fsd.top_level() {
             let c = &o.callable;
             if !o.public() && !o.flags.inline.must_inline() {
                 continue;
@@ -1023,7 +1019,7 @@ impl<'a> SymbolResolver<'a> {
                     .overloads
                     .into_iter()
                     .filter(|b| {
-                        b.kind == FnKind::TopLevel
+                        b.is_top_level()
                             && b.generic_sig.is_some()
                             && b.callable.params.len() == params.len()
                     })
@@ -1063,7 +1059,7 @@ impl<'a> SymbolResolver<'a> {
         args: &[Ty],
         type_args: &[Ty],
     ) -> Option<LibraryCallable> {
-        for o in fs.overloads.iter().filter(|o| o.kind == FnKind::TopLevel) {
+        for o in fs.top_level() {
             let c = &o.callable;
             let params = &c.params;
             if !c.inline.must_inline() {
@@ -1099,9 +1095,7 @@ impl<'a> SymbolResolver<'a> {
     /// Whether `name` has a top-level overload that MUST be inlined (`@InlineOnly`, no callable method).
     pub fn toplevel_has_must_inline(&self, name: &str) -> bool {
         self.top_level_function_set(name)
-            .overloads
-            .iter()
-            .filter(|o| o.kind == FnKind::TopLevel)
+            .top_level()
             .any(|o| o.flags.inline.must_inline())
     }
 
@@ -1235,36 +1229,34 @@ impl<'a> SymbolResolver<'a> {
         let has_exact = fs
             .overloads
             .iter()
-            .any(|o| o.kind == FnKind::TopLevel && o.callable.params.len() == arg_tys.len());
-        fs.overloads
-            .iter()
-            .filter(|o| o.kind == FnKind::TopLevel)
-            .find_map(|o| {
-                let gsig = o.generic_sig.as_ref()?;
-                if has_exact && gsig.params.len() != arg_tys.len() {
-                    return None;
+            .any(|o| o.is_top_level() && o.callable.params.len() == arg_tys.len());
+        let result = fs.top_level().find_map(|o| {
+            let gsig = o.generic_sig.as_ref()?;
+            if has_exact && gsig.params.len() != arg_tys.len() {
+                return None;
+            }
+            let map = trailing_default_arg_indices(gsig.params.len(), arg_tys)?;
+            let mut binds = std::collections::HashMap::new();
+            for (ai, at) in arg_tys.iter().enumerate() {
+                if let (Some(t), Some(ps)) = (at, gsig.params.get(map[ai])) {
+                    unify_ty(*ps, *t, &mut binds);
                 }
-                let map = trailing_default_arg_indices(gsig.params.len(), arg_tys)?;
-                let mut binds = std::collections::HashMap::new();
-                for (ai, at) in arg_tys.iter().enumerate() {
-                    if let (Some(t), Some(ps)) = (at, gsig.params.get(map[ai])) {
-                        unify_ty(*ps, *t, &mut binds);
-                    }
-                }
-                let out: Vec<Vec<Ty>> = map
-                    .iter()
-                    .map(|&pi| {
-                        gsig.params
-                            .get(pi)
-                            .map(|ps| function_input_types(*ps, &binds))
-                            .unwrap_or_default()
-                    })
-                    .collect();
-                out.iter()
-                    .zip(arg_tys)
-                    .any(|(v, at)| at.is_none() && !v.is_empty())
-                    .then_some(out)
-            })
+            }
+            let out: Vec<Vec<Ty>> = map
+                .iter()
+                .map(|&pi| {
+                    gsig.params
+                        .get(pi)
+                        .map(|ps| function_input_types(*ps, &binds))
+                        .unwrap_or_default()
+                })
+                .collect();
+            out.iter()
+                .zip(arg_tys)
+                .any(|(v, at)| at.is_none() && !v.is_empty())
+                .then_some(out)
+        });
+        result
     }
 
     /// Receiver type for each top-level function parameter that is a receiver function type
@@ -1284,22 +1276,20 @@ impl<'a> SymbolResolver<'a> {
         let has_exact = fs
             .overloads
             .iter()
-            .any(|o| o.kind == FnKind::TopLevel && o.callable.params.len() == arg_tys.len());
-        fs.overloads
-            .iter()
-            .filter(|o| o.kind == FnKind::TopLevel)
-            .find_map(|o| {
-                let recvs = &o.call_sig.lambda_receivers;
-                if has_exact && recvs.len() != arg_tys.len() {
-                    return None;
-                }
-                let map = trailing_default_arg_indices(recvs.len(), arg_tys)?;
-                let out: Vec<Option<Ty>> = map
-                    .iter()
-                    .map(|&pi| recvs.get(pi).cloned().flatten())
-                    .collect();
-                out.iter().any(|o| o.is_some()).then_some(out)
-            })
+            .any(|o| o.is_top_level() && o.callable.params.len() == arg_tys.len());
+        let result = fs.top_level().find_map(|o| {
+            let recvs = &o.call_sig.lambda_receivers;
+            if has_exact && recvs.len() != arg_tys.len() {
+                return None;
+            }
+            let map = trailing_default_arg_indices(recvs.len(), arg_tys)?;
+            let out: Vec<Option<Ty>> = map
+                .iter()
+                .map(|&pi| recvs.get(pi).cloned().flatten())
+                .collect();
+            out.iter().any(|o| o.is_some()).then_some(out)
+        });
+        result
     }
 
     /// Per-param `crossinline`/`noinline` flags for a top-level function (its lambda argument is
@@ -1311,14 +1301,10 @@ impl<'a> SymbolResolver<'a> {
         arg_tys: &[Option<Ty>],
     ) -> Option<Vec<bool>> {
         // Unscoped over the federated source — lambda-shape must cover an FQ unimported callee.
-        self.top_level_function_set(name)
-            .overloads
-            .iter()
-            .filter(|o| o.kind == FnKind::TopLevel)
-            .find_map(|o| {
-                let m = &o.call_sig.lambda_materialized;
-                (m.len() == arg_tys.len() && m.iter().any(|b| *b)).then(|| m.clone())
-            })
+        self.top_level_function_set(name).top_level().find_map(|o| {
+            let m = &o.call_sig.lambda_materialized;
+            (m.len() == arg_tys.len() && m.iter().any(|b| *b)).then(|| m.clone())
+        })
     }
 
     /// Lambda parameter types for an extension call before lambda bodies are typed. This binds the

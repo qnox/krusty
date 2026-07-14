@@ -560,6 +560,10 @@ impl ParamList {
 }
 
 impl CallSig {
+    pub fn has_param_names(&self) -> bool {
+        !self.param_names.is_empty()
+    }
+
     pub fn has_default_params(&self) -> bool {
         self.param_defaults.iter().any(|&d| d)
     }
@@ -577,7 +581,7 @@ impl CallSig {
     }
 
     pub fn can_map_omitted_args(&self, param_count: usize) -> bool {
-        self.required < param_count && !self.param_names.is_empty()
+        self.required < param_count && self.has_param_names()
     }
 
     pub fn source(
@@ -759,6 +763,14 @@ pub struct FunctionInfo {
 }
 
 impl FunctionInfo {
+    pub fn is_top_level(&self) -> bool {
+        self.kind == FnKind::TopLevel
+    }
+
+    pub fn is_top_level_with_param_names(&self) -> bool {
+        self.is_top_level() && self.call_sig.has_param_names()
+    }
+
     pub fn plain(kind: FnKind, receiver: Option<Ty>, callable: LibraryCallable) -> Self {
         FunctionInfo {
             kind,
@@ -857,6 +869,16 @@ pub struct FnFlags {
 #[derive(Clone, Default)]
 pub struct FunctionSet {
     pub overloads: Vec<FunctionInfo>,
+}
+
+impl FunctionSet {
+    pub fn top_level(&self) -> impl Iterator<Item = &FunctionInfo> {
+        self.overloads.iter().filter(|o| o.is_top_level())
+    }
+
+    pub fn into_top_level(self) -> impl Iterator<Item = FunctionInfo> {
+        self.overloads.into_iter().filter(|o| o.is_top_level())
+    }
 }
 
 /// How a resolved PROPERTY relates to the access's receiver — the property analogue of [`FnKind`]
