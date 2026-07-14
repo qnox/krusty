@@ -189,7 +189,6 @@ pub struct PropMeta {
 /// `Package` property flags kotlinc emits for top-level `val`/`var` (public, with accessors).
 const PKG_VAL_FLAGS: u64 = 8710;
 const PKG_VAR_FLAGS: u64 = 1798;
-const DECLARES_DEFAULT_VALUE: u64 = 0; // (unused here; kept for symmetry)
 
 fn jvm_method_sig(st: &mut StringTable, name: &str, desc: &str) -> Pb {
     let mut p = Pb::new();
@@ -199,7 +198,6 @@ fn jvm_method_sig(st: &mut StringTable, name: &str, desc: &str) -> Pb {
 }
 
 fn property_pb(st: &mut StringTable, m: &PropMeta) -> Pb {
-    let _ = DECLARES_DEFAULT_VALUE;
     let mut p = Pb::new();
     p.field_varint(2, st.local(&m.name) as u64); // Property.name = 2
     let ret = type_pb(st, m.ty);

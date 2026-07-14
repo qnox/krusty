@@ -6845,37 +6845,38 @@ impl<'a> Checker<'a> {
             return None;
         };
         let (n, m) = (exp.params.len(), sig.params.len());
+        let call_sig = sig.call_sig();
         // VARARG COLLECTION: `::of` where `of`'s last parameter is a `vararg` (and the leading fixed
         // parameters have no defaults) adapted to a function type with MORE parameters than fixed — the
         // extra expected parameters are collected into the vararg array. `fixed` = m-1 leading parameters.
         if sig.vararg && !sig.is_suspend {
             let fixed = m - 1;
             let coerce_unit = exp.ret == Ty::Unit && sig.ret != Ty::Unit;
-            let fixed_ok = (0..fixed).all(|i| sig.param_defaults.get(i) != Some(&true))
+            let fixed_ok = (0..fixed).all(|i| !call_sig.param_has_default(i))
                 && sig.params.get(..fixed) == exp.params.get(..fixed);
             // Only when there is at least one COLLECTED argument (n > fixed) — an exactly-fixed count is
             // the empty-vararg drop handled by the `vararg_tail` path below.
-            if n > fixed && fixed_ok && (sig.ret == exp.ret || coerce_unit) {
-                if let Some(elem) = sig.params[fixed].array_elem() {
-                    // Each collected argument must fit the vararg element (an `Any` element accepts any).
-                    let elem_ok = exp.params[fixed..]
+            if n > fixed
+                && fixed_ok
+                && (sig.ret == exp.ret || coerce_unit)
+                && sig.params[fixed].array_elem().is_some_and(|elem| {
+                    exp.params[fixed..]
                         .iter()
-                        .all(|&p| elem == Ty::obj("kotlin/Any") || p == elem);
-                    if elem_ok {
-                        self.expr_lowers.insert(
-                            ref_expr,
-                            ExprLowering::AdaptedVarargCollect {
-                                name: name.to_string(),
-                                target_params: sig.params.clone(),
-                                adapted_params: exp.params.clone(),
-                                ret: exp.ret,
-                                fixed,
-                                object_internal,
-                            },
-                        );
-                        return Some(Ty::fun(exp.params.clone(), exp.ret));
-                    }
-                }
+                        .all(|&p| elem == Ty::obj("kotlin/Any") || p == elem)
+                })
+            {
+                self.expr_lowers.insert(
+                    ref_expr,
+                    ExprLowering::AdaptedVarargCollect {
+                        name: name.to_string(),
+                        target_params: sig.params.clone(),
+                        adapted_params: exp.params.clone(),
+                        ret: exp.ret,
+                        fixed,
+                        object_internal,
+                    },
+                );
+                return Some(Ty::fun(exp.params.clone(), exp.ret));
             }
         }
         // Only the vararg-collection shape is modeled for an object-member target; the `$default`/drop
@@ -6899,12 +6900,8 @@ impl<'a> Checker<'a> {
         // parameter (`vararg_tail`) is a plain call; a vararg preceded by dropped defaults routes through
         // `$default` with an empty array for the vararg slot.
         let vararg_tail = sig.vararg && n == m - 1;
-        if n < m && !vararg_tail {
-            let droppable =
-                |k: usize| sig.param_defaults.get(k) == Some(&true) || (k == m - 1 && sig.vararg);
-            if sig.param_defaults.is_empty() || !(n..m).all(droppable) {
-                return None;
-            }
+        if n < m && !vararg_tail && !(n..m).all(|k| call_sig.param_droppable(k, m)) {
+            return None;
         }
         self.expr_lowers.insert(
             ref_expr,
