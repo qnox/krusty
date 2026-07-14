@@ -17894,6 +17894,7 @@ impl<'a> Lower<'a> {
                     } else {
                         args
                     };
+                    let one_lambda_arg = self.single_lambda_arg(&args);
                     // Reified free function `serializer<T>()` (kotlinx.serialization.serializer): a
                     // `reified inline` that can't be called directly (throws at runtime) — desugar to
                     // `T.serializer()` for a `@Serializable` T, the way kotlinc's inliner does.
@@ -17917,17 +17918,14 @@ impl<'a> Lower<'a> {
                     // block()`): inline the lambda body directly as the value. The receiver scope
                     // functions (`x.let`/`with(x)`) are intercepted similarly; without this, no-receiver
                     // `run` falls to the bytecode splicer, which bails on a branchy body (`run { if … }`).
-                    if fname == "run"
-                        && args.len() == 1
-                        && self.lookup(&fname).is_none()
-                        && !self.module_declares(&fname)
-                    {
-                        if let Expr::Lambda { params, body } = self.afile.expr(args[0]).clone() {
-                            if params.is_empty()
-                                && !body_has_labeled_return(self.afile, body, "run")
-                            {
-                                return self.expr(body);
-                            }
+                    if let ("run", Some((_, params, body)), true, true) = (
+                        fname.as_str(),
+                        one_lambda_arg.as_ref(),
+                        self.lookup(&fname).is_none(),
+                        !self.module_declares(&fname),
+                    ) {
+                        if params.is_empty() && !body_has_labeled_return(self.afile, *body, "run") {
+                            return self.expr(*body);
                         }
                     }
                     // A call to a lifted local function — the checker mapped this call to its decl.
@@ -17980,9 +17978,8 @@ impl<'a> Lower<'a> {
                         return self.lower_inline_fn_call(&fname, &args, e.0, None);
                     }
                     // SAM conversion `Pred { lambda }`: constructor syntax for a functional interface.
-                    if args.len() == 1
-                        && self.lookup(&fname).is_none()
-                        && matches!(self.afile.expr(args[0]), Expr::Lambda { .. })
+                    if let (Some((arg, params, body)), true) =
+                        (one_lambda_arg.as_ref(), self.lookup(&fname).is_none())
                     {
                         if let Some(internal) = self.info.ty(e).obj_internal() {
                             let target = self.sam_target(internal).or_else(|| {
@@ -17994,16 +17991,12 @@ impl<'a> Lower<'a> {
                             });
                             if let Some((method, void)) = target {
                                 let iface = internal.to_string();
-                                if let Expr::Lambda { params, body } =
-                                    self.afile.expr(args[0]).clone()
-                                {
-                                    return self.lower_lambda_sam(
-                                        args[0],
-                                        &params,
-                                        body,
-                                        Some((iface, method, void)),
-                                    );
-                                }
+                                return self.lower_lambda_sam(
+                                    *arg,
+                                    params,
+                                    *body,
+                                    Some((iface, method, void)),
+                                );
                             }
                         }
                     }
