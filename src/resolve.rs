@@ -3360,15 +3360,14 @@ fn infer_lit_ty_p(
             let rt = infer_lit_ty_p(file, *hi, class_names, fun_rets, props, src);
             Ty::range_value_type(lt, rt).unwrap_or(Ty::Error)
         }
-        // A top-level function reference initializing a property gets the function type of an
-        // unambiguous classpath function; the full checker types same-module/local refs.
+        // A top-level property initialized from an unambiguous classpath function reference.
         Expr::CallableRef {
             receiver: None,
             name,
         } if name != "class" => {
             let overloads = resolver.top_level_function_set(name);
             match overloads.into_single_top_level() {
-                Some(o) if o.callable.vararg_elem.is_none() => {
+                Some(o) if o.call_sig.requires_all_args(o.callable.params.len()) => {
                     Ty::fun(o.callable.params.clone(), o.callable.ret)
                 }
                 _ => Ty::Error,
