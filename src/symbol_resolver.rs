@@ -549,9 +549,8 @@ impl<'a> SymbolResolver<'a> {
         type_args: &[Ty],
     ) -> Option<LibraryCallable> {
         let parsed: Vec<(&FunctionInfo, Vec<Ty>, Ty)> = fs
-            .overloads
-            .iter()
-            .filter(|o| o.is_top_level() && o.public())
+            .top_level()
+            .filter(|o| o.public())
             .map(|o| (o, o.callable.params.clone(), o.callable.ret))
             .collect();
 
@@ -1016,13 +1015,8 @@ impl<'a> SymbolResolver<'a> {
                 // sibling doesn't cross-bind.
                 let bases: Vec<FunctionInfo> = self
                     .top_level_function_set(name)
-                    .overloads
-                    .into_iter()
-                    .filter(|b| {
-                        b.is_top_level()
-                            && b.generic_sig.is_some()
-                            && b.callable.params.len() == params.len()
-                    })
+                    .into_top_level()
+                    .filter(|b| b.generic_sig.is_some() && b.callable.params.len() == params.len())
                     .collect();
                 bases
                     .iter()
@@ -1226,10 +1220,7 @@ impl<'a> SymbolResolver<'a> {
         // of this name matches the provided argument count exactly. A name WITH an exact-arity overload
         // (`run { … }`) always uses that overload's own parameter positions — never an alignment against a
         // wider overload — so a legitimately-empty lambda-parameter result is not shadowed by one.
-        let has_exact = fs
-            .overloads
-            .iter()
-            .any(|o| o.is_top_level() && o.callable.params.len() == arg_tys.len());
+        let has_exact = fs.has_top_level_arity(arg_tys.len());
         let result = fs.top_level().find_map(|o| {
             let gsig = o.generic_sig.as_ref()?;
             if has_exact && gsig.params.len() != arg_tys.len() {
@@ -1273,10 +1264,7 @@ impl<'a> SymbolResolver<'a> {
         // Same rule as `top_level_lambda_param_types`: only fall back to the default-omitted trailing-lambda
         // alignment (`runBlocking { … }` binds `this: CoroutineScope`) when NO overload matches the argument
         // count exactly, so an exact-arity call never mis-binds a receiver from a wider overload.
-        let has_exact = fs
-            .overloads
-            .iter()
-            .any(|o| o.is_top_level() && o.callable.params.len() == arg_tys.len());
+        let has_exact = fs.has_top_level_arity(arg_tys.len());
         let result = fs.top_level().find_map(|o| {
             let recvs = &o.call_sig.lambda_receivers;
             if has_exact && recvs.len() != arg_tys.len() {

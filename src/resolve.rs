@@ -9879,9 +9879,7 @@ impl<'a> Checker<'a> {
                         || self
                             .resolver()
                             .top_level_function_set(n)
-                            .overloads
-                            .iter()
-                            .any(|o| o.is_top_level_with_param_names())
+                            .has_top_level_with_param_names()
                         // A CLASSPATH CONSTRUCTOR whose `@Metadata` records parameter names
                         // (`Point(y = 2, x = 1)`, or `Cfg(a = 1, c = "x")` omitting a defaulted `b`,
                         // against a data/plain class from a dependency). `constructor_named_params` returns
@@ -12230,9 +12228,7 @@ impl<'a> Checker<'a> {
                             let pnames: Vec<Vec<String>> = self
                                 .resolver()
                                 .top_level_function_set(&fname)
-                                .overloads
-                                .into_iter()
-                                .filter(|o| o.is_top_level_with_param_names())
+                                .into_top_level_with_param_names()
                                 .map(|o| o.call_sig.param_names)
                                 .collect();
                             match pnames.as_slice() {
