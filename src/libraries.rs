@@ -720,15 +720,13 @@ impl ReturnInfo {
     }
 
     pub fn apply_with_class(self, class: Option<Ty>, fallback: Ty) -> Ty {
-        let ret = class
-            .map(|meta| {
-                if meta.type_args().is_empty() && !fallback.type_args().is_empty() {
-                    Ty::obj_args(meta.name(), fallback.type_args())
-                } else {
-                    meta
-                }
-            })
-            .unwrap_or(fallback);
+        let ret = match class {
+            Some(meta) if meta.type_args().is_empty() && !fallback.type_args().is_empty() => {
+                Ty::obj_args(meta.name(), fallback.type_args())
+            }
+            Some(meta) => meta,
+            None => fallback,
+        };
         if self.nullable && !ret.is_nullable() && (ret.boxed_ref().is_some() || ret.is_reference())
         {
             Ty::nullable(ret)
