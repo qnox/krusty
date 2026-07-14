@@ -3911,16 +3911,41 @@ impl<'a> Emitter<'a> {
                 // claimed in StackMapTable frames recorded inside a branchy initializer (where the
                 // verifier still sees it as `top`).
                 let jt = ir_ty_to_jvm(&ty);
+                // Reuse the slot if this value-index is already live with a compatible verification
+                // type. A spilled local is declared twice — once by the dispatch loop-top restore,
+                // once by its real in-body declaration in a resume state — for the SAME value-index.
+                // They must share a slot: then the loop-top restore's assignment covers the fresh path
+                // too, so the slot reads as definitely-assigned in later frames. A fresh slot per
+                // declaration instead leaves the in-body slot `top` on the fresh edge to a `?: continue`
+                // target — a StackMapTable VerifyError (ResAgg getAllResources/getResourceById). Reuse
+                // only when the verification types agree: identical, or both reference types (the
+                // restore reads an `Object` continuation field and the in-body decl may be a narrower
+                // reference — the wider header type still verifies every subtype back-edge). Never
+                // reuse across differing primitives (e.g. an `int` slot as a `float` — same width but a
+                // different verification category would pin a wrong frame type).
+                let is_ref = |t: Ty| matches!(t, Ty::String | Ty::Obj(..)) || t.is_array();
+                let reuse = self
+                    .slots
+                    .get(&index)
+                    .copied()
+                    .filter(|(_, ejt)| *ejt == jt || (is_ref(*ejt) && is_ref(jt)))
+                    .map(|(s, _)| s);
                 if let Some(i) = init {
                     self.emit_value(i, code);
                     emit_num_conv(self.value_ty(i), jt, code);
-                    let slot = self.next_slot;
-                    self.next_slot += slot_words(jt);
+                    let slot = reuse.unwrap_or_else(|| {
+                        let s = self.next_slot;
+                        self.next_slot += slot_words(jt);
+                        s
+                    });
                     self.slots.insert(index, (slot, jt));
                     store(jt, slot, code);
                 } else {
-                    let slot = self.next_slot;
-                    self.next_slot += slot_words(jt);
+                    let slot = reuse.unwrap_or_else(|| {
+                        let s = self.next_slot;
+                        self.next_slot += slot_words(jt);
+                        s
+                    });
                     self.slots.insert(index, (slot, jt));
                 }
             }

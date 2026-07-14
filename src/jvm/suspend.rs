@@ -1886,29 +1886,6 @@ impl Flat<'_> {
             }
         }
     }
-    /// Whether `e`'s subtree contains a nested STRUCTURAL loop — a `While` whose own body does NOT
-    /// suspend. Emitting one inside a flattened (state-split) body can still mis-frame its locals for
-    /// richer shapes, so the caller declines. Recurses past a nested SUSPENDING loop (itself flattened)
-    /// to find a deeper structural one.
-    fn body_has_structural_loop(&self, e: ExprId) -> bool {
-        match &self.ir.exprs[e as usize] {
-            IrExpr::While { body, .. } if !expr_calls_suspend(self.ir, *body, self.suspend) => true,
-            // Stops at a `Lambda` — its own body is a separate scope, EXCEPT for a lambda the backend
-            // SPLICES inline (`run{}`/`let{}`/`forEach{}`), whose loop would land in the flattened body.
-            // Every such splice-hidden-loop shape independently DECLINES today in the flattener /
-            // collection-HOF path (verified: a `while` inside `forEach{}` inside a suspending loop
-            // declines), so this arm is safe. If a future change lets one THROUGH, extend the guard to
-            // descend into `Lambda.inline_body`.
-            IrExpr::Lambda { .. } => false,
-            _ => {
-                let mut found = false;
-                crate::ir::for_each_child(&self.ir.exprs, e, &mut |c| {
-                    found = found || self.body_has_structural_loop(c);
-                });
-                found
-            }
-        }
-    }
     /// The state a `continue`/`break` transfers to: the `cont`/`exit` of the innermost active loop frame,
     /// or the frame whose label matches. `None` when no such loop is being flattened (a jump the caller
     /// leaves structural).
@@ -2238,15 +2215,6 @@ impl Flat<'_> {
                 if expr_calls_suspend(self.ir, *body, self.suspend) {
                     let (cond, body, update, post_test, label) =
                         (*cond, *body, *update, *post_test, label.clone());
-                    // A STRUCTURAL (non-suspending) loop nested in this flattened body still hits a
-                    // definite-assignment / frame bug across the state split for richer shapes (a
-                    // 3-level nest with a `when` + non-local return) — DECLINE rather than miscompile.
-                    // The spill refinement + boxing fix handle many nestings, but not all yet.
-                    if self.body_has_structural_loop(body) {
-                        self.failed = true;
-                        self.states[cur] = out;
-                        return;
-                    }
                     let header = self.new_state();
                     let body_entry = self.new_state();
                     let cont = self.new_state();
