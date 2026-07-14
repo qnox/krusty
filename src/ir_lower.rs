@@ -7847,8 +7847,7 @@ impl<'a> Lower<'a> {
         self.afile
             .type_aliases
             .iter()
-            .find(|(a, _)| a == name)
-            .map(|(_, t)| t.clone())
+            .find_map(|(a, t)| (a == name).then(|| t.clone()))
             .unwrap_or_else(|| name.to_string())
     }
 
@@ -11177,10 +11176,9 @@ impl<'a> Lower<'a> {
                     .class_by_internal(i)
                     .filter(|cs| cs.value_field.is_none())
                     .and_then(|cs| {
-                        cs.props
-                            .iter()
-                            .find(|(n, _, _)| n == name)
-                            .map(|(_, t, _)| (i.to_string(), *t, cs.is_interface))
+                        cs.props.iter().find_map(|(n, t, _)| {
+                            (n == name).then(|| (i.to_string(), *t, cs.is_interface))
+                        })
                     })
                 {
                     return Some(self.ir.add_expr(IrExpr::Call {
@@ -13802,10 +13800,9 @@ impl<'a> Lower<'a> {
                     .class_by_internal(i)
                     .filter(|cs| cs.value_field.is_none())
                     .and_then(|cs| {
-                        cs.props
-                            .iter()
-                            .find(|(n, _, _)| n.as_str() == name)
-                            .map(|(_, t, v)| (i.to_string(), *t, *v, cs.is_interface))
+                        cs.props.iter().find_map(|(n, t, v)| {
+                            (n.as_str() == name).then(|| (i.to_string(), *t, *v, cs.is_interface))
+                        })
                     })
                 {
                     if !is_var {
@@ -15764,8 +15761,7 @@ impl<'a> Lower<'a> {
                 if let Some(fid) = self
                     .fun_ids
                     .iter()
-                    .find(|((n, _), _)| n == &name)
-                    .map(|(_, id)| *id)
+                    .find_map(|((n, _), id)| (n == &name).then_some(*id))
                 {
                     let ret = self.ir.functions[fid as usize].ret.clone();
                     let fn_params = self.ir.functions[fid as usize].params.clone();

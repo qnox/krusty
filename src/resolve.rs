@@ -3455,7 +3455,7 @@ impl TParams {
                 let mut cur = n.as_str();
                 let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
                 let erased = loop {
-                    let b = bounds.iter().find(|(bn, _)| bn == cur).map(|(_, b)| b);
+                    let b = bounds.iter().find_map(|(bn, b)| (bn == cur).then_some(b));
                     match b {
                         // The bound is itself a (non-nullable, un-parameterized) type parameter of this
                         // declaration — hop to it and keep chasing.
@@ -5100,8 +5100,7 @@ impl<'a> Checker<'a> {
             // Innermost scope first, matching Kotlin's context resolution preferring the nearest binding.
             let local = self.scopes.iter().rev().find_map(|s| {
                 s.iter()
-                    .find(|(_, l)| matches(l.ty, want))
-                    .map(|(n, _)| n.clone())
+                    .find_map(|(n, l)| matches(l.ty, want).then(|| n.clone()))
             });
             if let Some(name) = local {
                 out.push(name);
