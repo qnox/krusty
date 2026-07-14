@@ -6208,6 +6208,101 @@ impl<'a> Lower<'a> {
         scan(self, &cur, bound, body, deep)
     }
 
+    /// Does the AST expression `body` (a lambda body, function body, …) contain a SUSPENSION point — a
+    /// call to a `suspend` function (top-level, member, extension, or `invoke` operator)? Works at the
+    /// AST level, so it is usable during lowering before the IR `suspend_calls` set exists. The scan
+    /// descends into nested lambdas (conservative: a suspension anywhere counts), matching the file's
+    /// suspend gate. Used both to classify a suspend lambda literal and to guard the non-inlined
+    /// suspend-inline-HOF path (a plain `Function0` argument cannot legally call a suspend function).
+    fn ast_body_suspends(&self, body: AstExprId) -> bool {
+        let susp_names: std::collections::HashSet<String> = self
+            .afile
+            .decls
+            .iter()
+            .filter_map(|&d| match self.afile.decl(d) {
+                ast::Decl::Fun(f) if f.is_suspend => Some(f.name.clone()),
+                _ => None,
+            })
+            .collect();
+        let call_names_cell = std::cell::RefCell::new(Vec::new());
+        collect_call_names(self.afile, body, &call_names_cell);
+        if call_names_cell
+            .into_inner()
+            .iter()
+            .any(|n| susp_names.contains(n))
+        {
+            return true;
+        }
+        // A MEMBER / invoke-operator suspend call (`getResult()` = `GetResult.suspend operator fun
+        // invoke()`, `x.m()` where `m` is `suspend`) is invisible to the top-level-name check above —
+        // resolve each callee's type + method `is_suspend` so the body isn't misclassified as leaf.
+        let callees = std::cell::RefCell::new(Vec::new());
+        collect_calls(self.afile, body, &callees);
+        callees.into_inner().into_iter().any(|call| {
+            let method_suspends = |internal: &str, name: &str| {
+                self.syms
+                    .class_by_internal(internal)
+                    .and_then(|c| c.methods.get(name))
+                    .is_some_and(|s| s.is_suspend)
+            };
+            // The checker's `Invoke` lowering carries suspend-ness reliably (the receiver's static
+            // type may be `Error` at the call site): a suspend function VALUE, or a suspend `invoke`
+            // operator on a class receiver.
+            if let Some(crate::resolve::ExprLowering::Invoke { kind, .. }) =
+                self.info.expr_lowers.get(&call)
+            {
+                match kind {
+                    crate::resolve::InvokeKind::Function { suspend, .. } if *suspend => {
+                        return true
+                    }
+                    crate::resolve::InvokeKind::Operator { receiver_ty }
+                        if receiver_ty
+                            .obj_internal()
+                            .is_some_and(|i| method_suspends(i, "invoke")) =>
+                    {
+                        return true
+                    }
+                    _ => {}
+                }
+            }
+            // A classpath top-level `suspend fun` called by name (`delay(…)`): the CHECKER recorded
+            // the resolved callable with its suspend flag.
+            if self
+                .info
+                .resolved_top_level(call)
+                .is_some_and(|c| c.suspend)
+            {
+                return true;
+            }
+            // A plain member call `recv.m(args)` to a suspend method — a USER class method (its
+            // suspend flag is in `syms`), or a CLASSPATH member / suspend EXTENSION (`Mutex.withLock`)
+            // whose suspend-ness the CHECKER recorded on the resolved callable. The lowerer only reads.
+            if let ast::Expr::Call { callee, .. } = self.afile.expr(call) {
+                if let ast::Expr::Member { receiver, name } = self.afile.expr(*callee) {
+                    let recv_ty = self.info.ty(*receiver);
+                    if recv_ty
+                        .obj_internal()
+                        .is_some_and(|i| method_suspends(i, name))
+                    {
+                        return true;
+                    }
+                    if self
+                        .info
+                        .resolved_member(call)
+                        .is_some_and(|m| m.member.suspend)
+                        || self
+                            .info
+                            .resolved_extension(call)
+                            .is_some_and(|c| c.suspend)
+                    {
+                        return true;
+                    }
+                }
+            }
+            false
+        })
+    }
+
     /// Lower a `suspend` lambda literal to a concrete `kotlin/coroutines/jvm/internal/SuspendLambda`
     /// subclass (kotlinc's representation), returning a `New` of that class with the captured values and
     /// a `null` completion. Arity 0 with no INTERNAL suspension for now: the class implements
@@ -6246,90 +6341,7 @@ impl<'a> Lower<'a> {
         // If so its `invokeSuspend` is a state machine with the lambda instance as the continuation —
         // for now only a single TAIL suspend call (`{ foo() }`) with no captures is modeled; anything
         // else bails (skip the file) rather than miscompile the continuation threading.
-        let susp_names: std::collections::HashSet<String> = self
-            .afile
-            .decls
-            .iter()
-            .filter_map(|&d| match self.afile.decl(d) {
-                ast::Decl::Fun(f) if f.is_suspend => Some(f.name.clone()),
-                _ => None,
-            })
-            .collect();
-        let call_names_cell = std::cell::RefCell::new(Vec::new());
-        collect_call_names(self.afile, body, &call_names_cell);
-        let call_names = call_names_cell.into_inner();
-        // A MEMBER / invoke-operator suspend call (`getResult()` = `GetResult.suspend operator fun
-        // invoke()`, `x.m()` where `m` is `suspend`) is invisible to the top-level-name check above —
-        // resolve each callee's type + method `is_suspend` so the lambda isn't misclassified as a leaf.
-        let suspend_member_call = {
-            let callees = std::cell::RefCell::new(Vec::new());
-            collect_calls(self.afile, body, &callees);
-            callees.into_inner().into_iter().any(|call| {
-                let method_suspends = |internal: &str, name: &str| {
-                    self.syms
-                        .class_by_internal(internal)
-                        .and_then(|c| c.methods.get(name))
-                        .is_some_and(|s| s.is_suspend)
-                };
-                // The checker's `Invoke` lowering carries suspend-ness reliably (the receiver's static
-                // type may be `Error` at the call site): a suspend function VALUE, or a suspend `invoke`
-                // operator on a class receiver.
-                if let Some(crate::resolve::ExprLowering::Invoke { kind, .. }) =
-                    self.info.expr_lowers.get(&call)
-                {
-                    match kind {
-                        crate::resolve::InvokeKind::Function { suspend, .. } if *suspend => {
-                            return true
-                        }
-                        crate::resolve::InvokeKind::Operator { receiver_ty }
-                            if receiver_ty
-                                .obj_internal()
-                                .is_some_and(|i| method_suspends(i, "invoke")) =>
-                        {
-                            return true
-                        }
-                        _ => {}
-                    }
-                }
-                // A classpath top-level `suspend fun` called by name (`delay(…)`): the CHECKER recorded
-                // the resolved callable with its suspend flag.
-                if self
-                    .info
-                    .resolved_top_level(call)
-                    .is_some_and(|c| c.suspend)
-                {
-                    return true;
-                }
-                // A plain member call `recv.m(args)` to a suspend method — a USER class method (its
-                // suspend flag is in `syms`), or a CLASSPATH member / suspend EXTENSION (`Mutex.withLock`)
-                // whose suspend-ness the CHECKER recorded on the resolved callable. The lowerer only reads.
-                if let ast::Expr::Call { callee, .. } = self.afile.expr(call) {
-                    if let ast::Expr::Member { receiver, name } = self.afile.expr(*callee) {
-                        let recv_ty = self.info.ty(*receiver);
-                        if recv_ty
-                            .obj_internal()
-                            .is_some_and(|i| method_suspends(i, name))
-                        {
-                            return true;
-                        }
-                        if self
-                            .info
-                            .resolved_member(call)
-                            .is_some_and(|m| m.member.suspend)
-                            || self
-                                .info
-                                .resolved_extension(call)
-                                .is_some_and(|c| c.suspend)
-                        {
-                            return true;
-                        }
-                    }
-                }
-                false
-            })
-        };
-        let body_suspends =
-            suspend_member_call || call_names.iter().any(|n| susp_names.contains(n));
+        let body_suspends = self.ast_body_suspends(body);
         let jvm_arity = arity + 1; // + the trailing continuation
         let function_iface = self
             .syms
@@ -20045,6 +20057,31 @@ impl<'a> Lower<'a> {
                         });
                         self.coerce_to_static(call, m.ret, m.physical_ret)
                     } else if let Some(c) = self.info.resolved_extension(e).cloned() {
+                        // SAFETY GUARD (never miscompile): a non-inlined `suspend inline fun` (e.g.
+                        // `Mutex.withLock`) is lowered below as a PLAIN `name$default(…, Function0, cont)`
+                        // call — each lambda argument becomes a NON-suspend `Function`. That is valid only
+                        // when the lambda body does not suspend (`m.withLock { 42 }` works). A non-suspend
+                        // function-typed param whose lambda body DOES suspend is accepted by the front end
+                        // solely because the callee is `inline` (an inline lambda inherits the caller's
+                        // suspendability) — but krusty is NOT splicing it here, so the emitted `Function0`
+                        // would be asked to call a suspend function it cannot, yielding invalid bytecode
+                        // (krusty exits 0 but `-Xverify:all` reports an operand-stack underflow). Until
+                        // general suspend-inline splicing lands (inline the lock/try/finally body and splice
+                        // the user lambda into the enclosing CPS state machine, as kotlinc does), DECLINE.
+                        // Generic (keyed on the shape, not the `withLock` name — the `$default` synthetic's
+                        // metadata `inline` flag is `None` anyway, so it can't be the discriminator).
+                        if c.suspend {
+                            for &arg in args.iter() {
+                                if let Expr::Lambda { body, .. } = self.afile.expr(arg) {
+                                    let non_suspend_fun =
+                                        matches!(self.info.ty(arg), Ty::Fun(s) if !s.suspend);
+                                    if non_suspend_fun && self.ast_body_suspends(*body) {
+                                        set_bail("suspend-inline HOF lambda suspends");
+                                        return None;
+                                    }
+                                }
+                            }
+                        }
                         // A library extension `recv.name(args)` → `invokestatic facade.name(recv, args)`.
                         // The CHECKER resolved it (sole resolver) and recorded the callable; the lowerer
                         // only reads it. Owner + descriptor come from that record — no name hardcoded.

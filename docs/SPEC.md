@@ -1155,6 +1155,21 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `_ => false` fallthrough on a LAMBDA argument in `return m.map { … }`, bailing the state machine; a lambda
   argument is a value (its body is a separate impl function, not a `return` of the suspend fn) so it is now
   a leaf there (varargs recurse into their elements). Test: `tests/suspend_collection_hof_e2e.rs`.
+- **A non-inlined `suspend inline fun` whose lambda argument itself SUSPENDS is DECLINED, not miscompiled
+  (safety guard).** `kotlinx.coroutines.sync.Mutex.withLock` is `suspend inline fun <T> Mutex.withLock(owner:
+  Any? = null, action: () -> T): T`. krusty does not splice it — it lowers the call as a plain
+  `MutexKt.withLock$default(mutex, owner, Function0, cont)`, passing the lambda as a NON-suspend `Function0`.
+  That is correct only when the lambda body does not suspend (`m.withLock { 42 }` compiles + runs; see
+  `build840_nn1`). When the body suspends, a `Function0.invoke()` cannot legally call a suspend function, so
+  the emitted closure is invalid bytecode — krusty exits 0 but `-Xverify:all` reports an operand-stack
+  underflow. A non-suspend `() -> T` param whose lambda body suspends is only accepted by the front end
+  because the callee is `inline` (an inline lambda inherits the caller's suspendability), so `ir_lower`'s
+  resolved-extension path DECLINES the file when `c.suspend` and a non-suspend function-typed lambda argument
+  suspends (`ast_body_suspends`, the AST-level suspend detector shared with the suspend-lambda classifier).
+  Generic — keyed on the shape, not the `withLock` name (the `$default` synthetic's metadata `inline` flag is
+  `None`). The real fix (general suspend-inline splicing: inline the lock/try/finally body and splice the user
+  lambda into the enclosing CPS state machine, as kotlinc does) is future work; until then this guarantees a
+  bail over a miscompile. Test: `tests/suspend_inline_hof_suspending_lambda_reject_e2e.rs`.
 - **A fully-qualified top-level function call `a.b.helper(args)`.** The callee is a dotted path whose prefix
   is a PACKAGE (its leftmost segment not a value in scope, via `dotted_root`) and whose last segment is a
   top-level function of that package (compiled to `a/b/<File>Kt`). The checker resolves the overload with
