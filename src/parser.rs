@@ -2720,6 +2720,42 @@ impl<'a> Parser<'a> {
             loop {
                 self.skip_newlines();
                 let sup_span = self.tok().span;
+                // A FUNCTION-TYPE supertype (`class C : () -> R`, `(A) -> R`, `Recv.() -> R`): a class
+                // implementing a function type implements `kotlin/jvm/functions/FunctionN` (arity N =
+                // value parameters, with an extension receiver folded in as the first). Parse the type
+                // and record the `FunctionN` interface. A `suspend` function-type supertype maps to a
+                // different (`SuspendFunctionN`) shape krusty doesn't model — reject so the file skips.
+                if self.at_function_type_supertype() {
+                    let ft = self.parse_type();
+                    let arity = ft.fun_params.len();
+                    if ft.fun_suspend || arity > 22 {
+                        // A `suspend` function type (a distinct `SuspendFunctionN` shape) and an arity
+                        // beyond the stdlib's `Function0..22` (big-arity `FunctionN`) are not modeled.
+                        self.diags.error(
+                            sup_span,
+                            "krusty: this function-type supertype is not supported".to_string(),
+                        );
+                    } else {
+                        let mut targs = ft.fun_params.clone();
+                        if let Some(ret) = ft.arg.as_deref() {
+                            targs.push(ret.clone());
+                        }
+                        ifaces.push(TypeRef {
+                            name: crate::types::FUNCTION_N_INTERNAL[arity].to_string(),
+                            nullable: false,
+                            arg: None,
+                            targs,
+                            span: sup_span,
+                            fun_params: Vec::new(),
+                            fun_has_receiver: false,
+                            fun_suspend: false,
+                        });
+                    }
+                    if !self.eat(TokenKind::Comma) {
+                        break;
+                    }
+                    continue;
+                }
                 let name = self.parse_qualified_name();
                 let simple = name.rsplit('.').next().unwrap_or(&name).to_string();
                 // Fully-qualified name (e.g. java.util.RandomAccess) → JVM internal format.
@@ -6362,6 +6398,41 @@ impl<'a> Parser<'a> {
     /// block. Used to disambiguate a lambda branch body from a statement block.
     fn at_lambda_brace(&self) -> bool {
         self.lambda_arrow_before_close(self.i + 1)
+    }
+
+    /// Whether the supertype entry at the current position is a FUNCTION TYPE (`() -> R`, `(A) -> R`,
+    /// `Recv.() -> R`, `suspend (A) -> R`) rather than a class/interface name — detected by a depth-0
+    /// `->` before the entry's terminator (`,`, `{`, `by`/`where`, or end). A regular supertype (even
+    /// a generic `Base<A>` or a base-class call `Base(args)`) has no top-level `->` (a lambda argument's
+    /// arrow sits inside `(`/`{`, at depth > 0), so this cleanly distinguishes the two.
+    fn at_function_type_supertype(&self) -> bool {
+        let mut j = self.i;
+        let mut depth = 0i32;
+        loop {
+            match self.t.get(j).map(|t| t.kind) {
+                None => return false,
+                Some(TokenKind::Arrow) if depth == 0 => return true,
+                Some(TokenKind::LBrace) if depth == 0 => return false, // class body
+                Some(TokenKind::Comma) if depth == 0 => return false,  // next supertype
+                // Track generic-argument brackets too (`<` is a single `Lt`, `>` a single `Gt`), so a
+                // function type used as a type ARGUMENT — `Base<() -> R>` — keeps its `->` at depth > 0
+                // and is NOT mistaken for a function-type supertype.
+                Some(
+                    TokenKind::LParen | TokenKind::LBracket | TokenKind::LBrace | TokenKind::Lt,
+                ) => depth += 1,
+                Some(
+                    TokenKind::RParen | TokenKind::RBracket | TokenKind::RBrace | TokenKind::Gt,
+                ) => depth -= 1,
+                // `by` (delegation) / `where` (constraints) terminate a plain-name supertype entry.
+                Some(TokenKind::Ident)
+                    if depth == 0 && matches!(self.t[j].text(self.src), "by" | "where") =>
+                {
+                    return false
+                }
+                _ => {}
+            }
+            j += 1;
+        }
     }
 
     /// Whether a top-level `->` (a lambda's parameter arrow) precedes the matching `}`, scanning from

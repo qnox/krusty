@@ -142,6 +142,34 @@ pub fn prim_array_name(elem: Ty) -> Option<&'static str> {
     })
 }
 
+/// The JVM functional-interface internal name for each arity, `kotlin/jvm/functions/Function0..22`
+/// (the arities the Kotlin stdlib declares). Indexed by arity; higher arities have no fixed interface.
+pub const FUNCTION_N_INTERNAL: [&str; 23] = [
+    "kotlin/jvm/functions/Function0",
+    "kotlin/jvm/functions/Function1",
+    "kotlin/jvm/functions/Function2",
+    "kotlin/jvm/functions/Function3",
+    "kotlin/jvm/functions/Function4",
+    "kotlin/jvm/functions/Function5",
+    "kotlin/jvm/functions/Function6",
+    "kotlin/jvm/functions/Function7",
+    "kotlin/jvm/functions/Function8",
+    "kotlin/jvm/functions/Function9",
+    "kotlin/jvm/functions/Function10",
+    "kotlin/jvm/functions/Function11",
+    "kotlin/jvm/functions/Function12",
+    "kotlin/jvm/functions/Function13",
+    "kotlin/jvm/functions/Function14",
+    "kotlin/jvm/functions/Function15",
+    "kotlin/jvm/functions/Function16",
+    "kotlin/jvm/functions/Function17",
+    "kotlin/jvm/functions/Function18",
+    "kotlin/jvm/functions/Function19",
+    "kotlin/jvm/functions/Function20",
+    "kotlin/jvm/functions/Function21",
+    "kotlin/jvm/functions/Function22",
+];
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub enum Ty {
     Int,
@@ -292,6 +320,18 @@ impl Ty {
             Ty::ULong => Some("kotlin/ULong"),
             Ty::Nullable(inner) => inner.kotlin_class_internal(),
             Ty::TyParam(_, bound) => bound.kotlin_class_internal(),
+            _ => None,
+        }
+    }
+
+    /// The JVM functional-interface internal name (`kotlin/jvm/functions/FunctionN`) a function type
+    /// implements — used for subtype/assignability tests against a user class that declares a
+    /// function-type supertype. Kept SEPARATE from [`kotlin_class_internal`] (which returns `None` for a
+    /// `Ty::Fun`): a function value is not, in general, interchangeable with its `FunctionN` class in the
+    /// backend, so only the assignability checks that want the interface identity opt in here.
+    pub fn function_interface_internal(self) -> Option<&'static str> {
+        match self {
+            Ty::Fun(s) => FUNCTION_N_INTERNAL.get(s.params.len()).copied(),
             _ => None,
         }
     }

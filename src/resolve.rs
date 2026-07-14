@@ -6732,6 +6732,17 @@ impl<'a> Checker<'a> {
             if self.syms.libraries.function_like_arity(actual) == Some(e.params.len()) {
                 return;
             }
+            // A user class that declares a function-type supertype (`class C : () -> R`) implements the
+            // matching `kotlin/jvm/functions/FunctionN`, so an instance is-a `(…) -> R`. Reach that
+            // interface through the class hierarchy.
+            if let (Some(actual_internal), Some(fn_internal)) = (
+                actual.obj_internal(),
+                expected.function_interface_internal(),
+            ) {
+                if self.obj_is_subtype(actual_internal, fn_internal) {
+                    return;
+                }
+            }
         }
         // SAM conversion: a function value (lambda) is assignable to a simple `fun interface` — the
         // lowering builds an instance whose single abstract method runs the lambda.
