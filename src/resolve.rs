@@ -531,9 +531,6 @@ pub fn arg_assignable_simple(p: Ty, a: Ty) -> bool {
     if p == a || a == Ty::Error || p == Ty::Error || a == Ty::Nothing {
         return true;
     }
-    if a == Ty::Null {
-        return p.is_reference();
-    }
     if p.is_numeric() && a.is_numeric() {
         return true;
     }

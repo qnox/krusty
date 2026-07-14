@@ -2314,7 +2314,7 @@ fn logical_value_params(
 }
 
 fn platform_arg_assignable(lib: &dyn CompilerPlatform, param: &Ty, arg: &Ty) -> bool {
-    (matches!(arg, Ty::Null | Ty::Nothing) && param.is_reference())
+    (*arg == Ty::Null && param.is_reference())
         || crate::assignable::is_assignable(
             &crate::assignable::TyCtx::new(),
             &PlatformOracle(lib),
