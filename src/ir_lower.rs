@@ -5609,13 +5609,11 @@ impl<'a> Lower<'a> {
         callee: AstExprId,
         args: &[AstExprId],
     ) -> Option<ExprId> {
-        if args.len() != 1 || !self.afile.is_spread_arg(args[0]) {
-            return None; // only `foo(*a)` (one spread arg, no fixed/mixed args)
-        }
-        let spread = args[0];
-        // kotlinc loads the spread twice (`aload a; aload a; arraylength`); only a simple reusable name
-        // (a local/parameter) is safe to lower twice — a complex expression would need a temp we don't
-        // emit, so skip it.
+        let spread = match args {
+            [spread] if self.afile.is_spread_arg(*spread) => *spread,
+            _ => return None,
+        };
+        // kotlinc loads the spread twice; only a simple reusable name is safe without a temp.
         if !matches!(self.afile.expr(spread), ast::Expr::Name(_)) {
             return None;
         }
@@ -5623,10 +5621,11 @@ impl<'a> Lower<'a> {
             return None;
         };
         let decl = self.top_fun_decl(&fname)?;
-        if decl.params.len() != 1 || !decl.params[0].is_vararg {
-            return None;
-        }
-        let elem = ty_of(self.afile, &decl.params[0].ty, &*self.syms.libraries);
+        let param = match decl.params.as_slice() {
+            [param] if param.is_vararg => param,
+            _ => return None,
+        };
+        let elem = ty_of(self.afile, &param.ty, &*self.syms.libraries);
         // A primitive element uses the matching platform array-copy overload and needs no checkcast
         // (the result is already the exact array type). Unsigned `UInt`/`ULong` varargs are a value-class
         // array with a different copy path — leave those (skip) rather than miscompile.
