@@ -5901,7 +5901,7 @@ impl<'a> Checker<'a> {
     fn body_terminates(&self, e: ExprId) -> bool {
         // A `Nothing`-typed expression never completes normally (the checker already resolved the
         // result type — no hardcoded intrinsic name list).
-        if self.expr_types[e.0 as usize].is_nothing_like() {
+        if self.expr_types[e.0 as usize] == Ty::Nothing {
             return true;
         }
         match self.file.expr(e) {
@@ -12458,10 +12458,10 @@ impl<'a> Checker<'a> {
         }
         // `Nothing` is the bottom type: a diverging branch contributes no value, so the join is the
         // other branch (`if (c) x else throw e` has the type of `x`).
-        if a.is_nothing_like() {
+        if a == Ty::Nothing {
             return b;
         }
-        if b.is_nothing_like() {
+        if b == Ty::Nothing {
             return a;
         }
         if let Some(t) = Ty::promote(a, b) {
@@ -12656,7 +12656,7 @@ impl<'a> Checker<'a> {
                     && bind.is_nullable()
                     && !it.is_nullable()
                     && !matches!(it, Ty::Null | Ty::Error)
-                    && !it.is_nothing_like()
+                    && it != Ty::Nothing
                     && !self.fn_closure_reassigned.contains(&name)
                 {
                     self.set_local_narrow(&name, Some(it));
@@ -12890,7 +12890,7 @@ impl<'a> Checker<'a> {
                                 let narrow = lty.is_nullable()
                                     && !vt.is_nullable()
                                     && !matches!(vt, Ty::Null | Ty::Error)
-                                    && !vt.is_nothing_like()
+                                    && vt != Ty::Nothing
                                     && !self.fn_closure_reassigned.contains(&name);
                                 self.set_local_narrow(&name, narrow.then_some(vt));
                             }

@@ -15339,8 +15339,7 @@ impl<'a> Lower<'a> {
                 // (VerifyError). Instead guard the divergent member as a plain statement — `if (recv != null)
                 // { member }` — and yield `null` unconditionally; the `null` is only ever observed when the
                 // receiver was null (else control left via the `return`/`throw`).
-                if result_ty.non_null().is_nothing_like() || (from_scope_fn && lambda_body_diverges)
-                {
+                if result_ty.non_null() == Ty::Nothing || (from_scope_fn && lambda_body_diverges) {
                     let guard = self.ir.add_expr(IrExpr::When {
                         branches: vec![(Some(cond), member)],
                     });
@@ -15405,7 +15404,7 @@ impl<'a> Lower<'a> {
                 // the elvis just the lhs (the rhs is dead). A non-diverging one is a `Nothing?`-returning
                 // call — always `null` at runtime (`Nothing` has no non-null value) — so the elvis takes the
                 // rhs after evaluating the lhs for side effects.
-                let lty_is_nothing = lty.non_null().is_nothing_like();
+                let lty_is_nothing = lty.non_null() == Ty::Nothing;
                 if lty_is_nothing {
                     if self.expr_diverges(lhs) {
                         return self.expr(lhs);
@@ -17576,9 +17575,8 @@ impl<'a> Lower<'a> {
                 let body_tys: Vec<Ty> = arms.iter().map(|a| self.info.ty(a.body)).collect();
                 // A `Nothing`-typed arm (a `throw`/`return`, or a CALL to a `Nothing`-returning function)
                 // pushes nothing at the merge — it's exempt from the "mixes Unit with a value" bail. The
-                // checker represents semantic bottom as `Ty::Nothing`; JVM `Void` is normalized by the
-                // JVM symbol source and must not affect common lowering decisions.
-                let is_diverging_arm = |t: &Ty| -> bool { t.is_nothing_like() };
+                // checker represents semantic bottom as `Ty::Nothing`.
+                let is_diverging_arm = |t: &Ty| -> bool { *t == Ty::Nothing };
                 let any_unit = body_tys.iter().any(|t| *t == Ty::Unit);
                 if any_unit
                     && !body_tys

@@ -292,13 +292,6 @@ impl Ty {
         }
     }
 
-    /// Whether this is the semantic bottom type. Nullable bottom (`Nothing?`) is not diverging; it is
-    /// a real nullable value whose only inhabitant is `null`. JVM `Void` is normalized by the JVM symbol
-    /// source and must not leak into the core type model.
-    pub fn is_nothing_like(&self) -> bool {
-        matches!(self, Ty::Nothing)
-    }
-
     /// Kotlin class identity for types that have one in source-level member/subtype lookup.
     ///
     /// This is not a JVM descriptor mapping: it returns Kotlin internal names (`kotlin/Int`,
