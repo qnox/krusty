@@ -8418,6 +8418,19 @@ impl<'a> Checker<'a> {
                                         return self.set(e, ty);
                                     }
                                 }
+                                // bound EXTENSION property reference `obj::ext` (`val Recv.ext`) — a
+                                // `KProperty0`; the lowerer synthesizes a reference calling the static
+                                // extension getter/setter with the captured receiver.
+                                if let Some(&(_, is_var)) = self
+                                    .syms
+                                    .ext_props
+                                    .get(&(Ty::obj(&internal).erased_recv(), name.clone()))
+                                {
+                                    self.expr(r); // capture the receiver
+                                    if let Some(ty) = self.property_ref_ty(0, is_var) {
+                                        return self.set(e, ty);
+                                    }
+                                }
                             }
                         }
                         // unbound `Type::m` (skip objects: `O::m` is bound to the singleton, which
