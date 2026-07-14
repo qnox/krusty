@@ -13301,7 +13301,7 @@ impl<'a> Lower<'a> {
             } => {
                 // A MULTI-index store (`recv[i, j] = v`) → the `set(i, j, …, v)` operator (a user member,
                 // a same-module extension, or a library member; `lower_op_call` covers all three).
-                if indices.len() != 1 {
+                let &[index] = indices.as_slice() else {
                     let rt = self.info.ty(array);
                     let recv_v = self.expr(array)?;
                     let mut set_args = indices.clone();
@@ -13311,8 +13311,7 @@ impl<'a> Lower<'a> {
                     }
                     set_bail("stmt AssignIndex(multi)");
                     return None;
-                }
-                let index = indices[0];
+                };
                 // A compound index-assign (`a[i] op= v`) desugars (in the parser) to `value = a[i] op v`,
                 // REUSING the `array`/`index` expr ids — so lowering the store and the embedded read would
                 // evaluate a side-effecting receiver/index twice (`a[f()] += v` calls `f()` twice). Spill
