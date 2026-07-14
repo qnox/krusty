@@ -17873,35 +17873,19 @@ impl<'a> Lower<'a> {
                     {
                         return self.lower_inline_fn_call(&fname, &args, e.0, None);
                     }
-                    // SAM conversion `Pred { lambda }` — a functional interface built from a lambda;
-                    // lower the lambda as a `LambdaMetafactory` instance targeting the interface's
-                    // single abstract method (instead of `FunctionN.invoke`).
+                    // SAM conversion `Pred { lambda }`: constructor syntax for a functional interface.
                     if args.len() == 1
                         && self.lookup(&fname).is_none()
                         && matches!(self.afile.expr(args[0]), Expr::Lambda { .. })
                     {
                         if let Some(internal) = self.info.ty(e).obj_internal() {
-                            // A file interface (its single method), or a classpath functional interface
-                            // (`Runnable`, …) — its single abstract method from the library set.
-                            let target = self
-                                .classes
-                                .get(internal)
-                                .filter(|ci| {
-                                    self.ir.classes[ci.id as usize].is_interface
-                                        && self.ir.classes[ci.id as usize].methods.len() == 1
-                                })
-                                .map(|ci| {
-                                    let f = &self.ir.functions
-                                        [self.ir.classes[ci.id as usize].methods[0] as usize];
-                                    (f.name.clone(), f.ret == ty_to_ir(Ty::Unit))
-                                })
-                                .or_else(|| {
-                                    self.syms
-                                        .libraries
-                                        .resolve_type(internal)
-                                        .and_then(|t| t.sam_method)
-                                        .map(|m| (m.name, m.ret == Ty::Unit))
-                                });
+                            let target = self.sam_target(internal).or_else(|| {
+                                self.syms
+                                    .libraries
+                                    .resolve_type(internal)
+                                    .and_then(|t| t.sam_method)
+                                    .map(|m| (m.name, m.ret == Ty::Unit))
+                            });
                             if let Some((method, void)) = target {
                                 let iface = internal.to_string();
                                 if let Expr::Lambda { params, body } =
