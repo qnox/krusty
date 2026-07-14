@@ -10748,8 +10748,7 @@ impl<'a> Lower<'a> {
             Ty::Long => IrConst::Long(0),
             Ty::Double => IrConst::Double(0.0),
             Ty::Float => IrConst::Float(0.0),
-            // Plain JVM-int-family primitives (and a value-class type with a scalar/int repr) → `0`.
-            Ty::Int | Ty::Byte | Ty::Short | Ty::Char | Ty::Boolean => IrConst::Int(0),
+            // Plain JVM-int-family primitives and value-class scalar reps → `0`.
             t if self.has_scalar_value_repr(t) => IrConst::Int(0),
             _ => IrConst::Null,
         };
