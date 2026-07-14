@@ -8745,7 +8745,27 @@ impl<'a> Lower<'a> {
                     ty.obj_internal()?.to_string(),
                     Some(self.ir.add_expr(IrExpr::GetValue(v))),
                 ),
-                None => (class_internal(self.afile, &rn), None),
+                None => {
+                    let owner = class_internal(self.afile, &rn);
+                    // An OBJECT singleton receiver (`O::p`) is BOUND to `O.INSTANCE`; a plain class name
+                    // (`Type::p`) stays an UNBOUND reference (`get(receiver)`).
+                    match self
+                        .classes
+                        .get(&owner)
+                        .map(|ci| ci.id)
+                        .filter(|&cid| self.ir.classes[cid as usize].is_object)
+                    {
+                        Some(cid) => {
+                            let inst = self.ir.add_expr(IrExpr::StaticInstance {
+                                owner: cid,
+                                ty: cid,
+                                field: "INSTANCE",
+                            });
+                            (owner, Some(inst))
+                        }
+                        None => (owner, None),
+                    }
+                }
             },
             _ => {
                 // Only a USER-class receiver is handled here; a library receiver is left to
