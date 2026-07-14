@@ -7066,14 +7066,9 @@ impl<'a> Checker<'a> {
                 // operator — a user member, a same-module extension, or a library member.
                 let at = self.expr(array);
                 let its: Vec<Ty> = indices.iter().map(|&i| self.expr(i)).collect();
-                if indices.len() == 1 {
+                if let [index] = indices.as_slice() {
                     if let Some(elem) = at.array_elem() {
-                        self.expect_assignable(
-                            Ty::Int,
-                            its[0],
-                            self.span(indices[0]),
-                            "array index",
-                        );
+                        self.expect_assignable(Ty::Int, its[0], self.span(*index), "array index");
                         return self.set(e, elem);
                     }
                     // `str[i]` is the `String.get(Int): Char` operator.
