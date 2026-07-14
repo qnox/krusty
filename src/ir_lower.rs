@@ -21455,14 +21455,8 @@ fn ty_of(file: &ast::File, r: &ast::TypeRef, plat: &dyn CompilerPlatform) -> Ty 
     // Function type, builtin scalar, or primitive array — the leaf shared by every type resolver.
     if let Some(t) = crate::resolve::typeref_leaf(r, &mut |x| ty_of(file, x, plat)) {
         // Nullable primitives/Unit are reference slots consistent with the checker.
-        if r.nullable && t == Ty::Nothing {
-            return Ty::nullable(Ty::Nothing);
-        }
-        if r.nullable && t == Ty::Unit {
-            return Ty::nullable(Ty::Unit);
-        }
-        if r.nullable && !t.is_reference() {
-            return t.nullable_boxed().unwrap_or(t);
+        if r.nullable {
+            return t.nullable_non_ref().unwrap_or(t);
         }
         return t;
     }

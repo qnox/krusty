@@ -3673,14 +3673,6 @@ pub(crate) fn typeref_leaf(r: &TypeRef, recurse: &mut dyn FnMut(&TypeRef) -> Ty)
     Ty::primitive_array_element(&r.name).map(Ty::array)
 }
 
-fn nullable_non_ref_ty(base: Ty) -> Option<Ty> {
-    match base {
-        Ty::Nothing => Some(Ty::nullable(Ty::Nothing)),
-        Ty::Unit => Some(Ty::nullable(Ty::Unit)),
-        _ => base.nullable_boxed(),
-    }
-}
-
 /// Resolve a syntactic type reference to a `Ty`: a primitive/String/Unit, a declared class
 /// (→ `Ty::Obj`), or a generic type parameter (erased per `TParams`, normally `Any`).
 fn ty_of_ref(r: &TypeRef, classes: &ClassNames, tparams: &TParams, diags: &mut DiagSink) -> Ty {
@@ -3759,10 +3751,10 @@ fn ty_of_ref_with(
         diags.error(r.span, format!("unresolved reference '{}'.", r.name));
         Ty::Error
     };
-    // A nullable primitive is `Nullable(prim)` (it boxes to its wrapper at the backend boundary); a
-    // non-boxable primitive (unsigned/value) is still rejected (skip, never miscompiled).
+    // A nullable primitive/Unit/Nothing stays a source `Nullable(T)`; the backend chooses the concrete
+    // reference carrier at the emit boundary. Unsupported non-reference values are rejected here.
     if r.nullable && !base.is_reference() && base != Ty::Error {
-        if let Some(nullable) = nullable_non_ref_ty(base) {
+        if let Some(nullable) = base.nullable_non_ref() {
             return nullable;
         }
         diags.error(
@@ -5591,7 +5583,7 @@ impl<'a> Checker<'a> {
             Ty::Error
         };
         if r.nullable && !base.is_reference() && base != Ty::Error {
-            if let Some(nullable) = nullable_non_ref_ty(base) {
+            if let Some(nullable) = base.nullable_non_ref() {
                 return nullable;
             }
             self.diags.error(
