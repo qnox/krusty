@@ -15846,14 +15846,10 @@ impl<'a> Lower<'a> {
                 {
                     let ret = self.ir.functions[fid as usize].ret.clone();
                     let fn_params = self.ir.functions[fid as usize].params.clone();
-                    // A generic referenced function erases its type parameters — not modeled.
+                    // A generic referenced function erases its type parameters to `Object` in the lifted
+                    // static (`id(Object)Object`), which is exactly the SAM `invoke` shape — so a generic
+                    // `::id` references fine. The IR function's params/ret are already erased.
                     if fn_params.len() != arity {
-                        return None;
-                    }
-                    if self
-                        .top_fun_decl(&name)
-                        .map_or(false, |f| !f.type_params.is_empty())
-                    {
                         return None;
                     }
                     if ret == Ty::Nothing {
