@@ -422,6 +422,8 @@ mod labeled_expression_e2e;
 mod labeled_this_e2e;
 #[path = "lambda_e2e.rs"]
 mod lambda_e2e;
+#[path = "lambda_vs_block_fun_type_e2e.rs"]
+mod lambda_vs_block_fun_type_e2e;
 #[path = "lateinit_local_e2e.rs"]
 mod lateinit_local_e2e;
 #[path = "list_fold_e2e.rs"]
