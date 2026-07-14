@@ -3609,7 +3609,7 @@ fn collect_tparams(
     names
         .iter()
         .map(|name| {
-            let bound_ref = bounds.iter().find(|(n, _)| n == name).map(|(_, tr)| tr);
+            let bound_ref = bounds.iter().find_map(|(n, tr)| (n == name).then_some(tr));
             let bound = bound_ref
                 .map(|tr| ty_to_ir(ty_of(file, tr, plat)))
                 .unwrap_or(Ty::nullable(Ty::obj("kotlin/Any")));
@@ -4705,8 +4705,7 @@ impl<'a> Lower<'a> {
         let this_v = self
             .scope
             .iter()
-            .find(|(n, _, _)| n == "this")
-            .map(|(_, v, _)| *v)?;
+            .find_map(|(n, v, _)| (n == "this").then_some(*v))?;
         let mut stmts = Vec::new();
         for step in &c.init_order {
             match step {
