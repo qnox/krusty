@@ -7680,11 +7680,6 @@ impl<'a> Lower<'a> {
         if !c.inline.can_inline() {
             return None;
         }
-        // The platform must be able to splice this body (branchless, single lambda-invoke, single exit) —
-        // else the emitter would fall back to a real call, which is broken for an `@InlineOnly` callee.
-        if !c.inline.can_inline() {
-            return None;
-        }
         // The emitter's lambda-splice is branchless-only: a branch in the lambda body produces a
         // stackmap frame it can't relocate mid-splice. Route only a branchless body; a branchy one
         // falls through to the per-function desugar, which lowers the body with normal branchy codegen.
