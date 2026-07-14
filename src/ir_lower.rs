@@ -1185,6 +1185,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 let cty = body_prop_ty(file, info, cp, &*syms.libraries);
                 lo.cur_class = None;
                 lo.scope.clear();
+                lo.boxed_elem.clear();
                 lo.next_value = 0;
                 // `companion_props_lowerable` admitted this companion, so its initializer MUST lower —
                 // if it doesn't (or its type is `Error`), bail the whole file rather than silently drop
@@ -1217,6 +1218,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     let cty = body_prop_ty(file, info, bp, &*syms.libraries);
                     lo.cur_class = None;
                     lo.scope.clear();
+                    lo.boxed_elem.clear();
                     lo.next_value = 0;
                     if let (Some(initx), false) = (bp.init, cty == Ty::Error) {
                         if let Some(init) = lo.lower_arg(initx, &ty_to_ir(cty)) {
@@ -1697,6 +1699,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
             Decl::Fun(f) => {
                 set_bail("deep:fun");
                 lo.scope.clear();
+                lo.boxed_elem.clear();
                 lo.next_value = 0;
                 lo.cur_class = None;
                 lo.cur_fn_name = f.name.clone();
@@ -2140,6 +2143,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     }
                     let (_, fid, _) = lo.classes[&internal].methods[&m.name];
                     lo.scope.clear();
+                    lo.boxed_elem.clear();
                     lo.next_value = 0;
                     lo.cur_class = Some(internal.clone());
                     lo.cur_fn_name = m.name.clone();
@@ -2209,6 +2213,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     let gname = property_getter_name(&p.name);
                     let (_, fid, _) = lo.classes[&internal].methods[&gname];
                     lo.scope.clear();
+                    lo.boxed_elem.clear();
                     lo.next_value = 0;
                     lo.cur_class = Some(internal.clone());
                     lo.cur_fn_name = gname;
@@ -2237,6 +2242,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                         let gname = property_getter_name(&p.name);
                         let (_, fid, _) = lo.classes[&internal].methods[&gname];
                         lo.scope.clear();
+                        lo.boxed_elem.clear();
                         lo.next_value = 0;
                         lo.cur_class = Some(internal.clone());
                         lo.cur_field = Some((class_id, fidx, fty_ir.clone()));
@@ -2258,6 +2264,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                             let (_, fid, _) = lo.classes[&internal].methods[&sname];
                             let pty = body_prop_ty(file, info, p, &*syms.libraries);
                             lo.scope.clear();
+                            lo.boxed_elem.clear();
                             lo.next_value = 0;
                             lo.cur_class = Some(internal.clone());
                             lo.cur_field = Some((class_id, fidx, fty_ir.clone()));
@@ -2420,6 +2427,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                         }
                         let (_, fid, _) = lo.classes[&comp_fq].methods[&m.name];
                         lo.scope.clear();
+                        lo.boxed_elem.clear();
                         lo.next_value = 0;
                         lo.cur_class = Some(comp_fq.clone());
                         lo.cur_fn_name = m.name.clone();
@@ -2533,6 +2541,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 if !base_args.is_empty() {
                     let class_id = lo.classes[&internal].id;
                     lo.scope.clear();
+                    lo.boxed_elem.clear();
                     lo.next_value = 0;
                     lo.cur_class = Some(internal.clone());
                     let this_v = lo.fresh_value();
@@ -2609,6 +2618,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     let ctor_count = lo.ir.classes[class_id as usize].ctor_param_count;
                     let _ = ctor_count;
                     lo.scope.clear();
+                    lo.boxed_elem.clear();
                     lo.next_value = 0;
                     lo.cur_class = Some(internal.clone());
                     // Property initializers run here (`var s: T = x as T`), so class type params are
@@ -2858,6 +2868,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     let mut secs = Vec::new();
                     for (sc_idx, sc) in c.secondary_ctors.iter().enumerate() {
                         lo.scope.clear();
+                        lo.boxed_elem.clear();
                         lo.next_value = 0;
                         lo.cur_class = Some(internal.clone());
                         lo.cur_tparams = class_tparams(file, c, &*syms.libraries);
@@ -3130,6 +3141,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                         .collect();
                     for (ei, entry) in c.enum_entries.iter().enumerate() {
                         lo.scope.clear();
+                        lo.boxed_elem.clear();
                         lo.next_value = 0;
                         lo.cur_class = None;
                         // Resolve the entry's (possibly named / reordered / omitted) arguments to one
@@ -3278,6 +3290,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                         // Subclass ctor init: `this.<prop> = <init>` for each property (run after super()).
                         if !prop_fields.is_empty() {
                             lo.scope.clear();
+                            lo.boxed_elem.clear();
                             lo.next_value = 0;
                             lo.cur_class = Some(sub_fq.clone());
                             lo.cur_fn_name = "<init>".to_string();
@@ -3328,6 +3341,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                                 param_checks: vec![],
                             });
                             lo.scope.clear();
+                            lo.boxed_elem.clear();
                             lo.next_value = 0;
                             lo.cur_class = Some(body_cur.clone());
                             lo.cur_fn_name = bm.name.clone();
@@ -3371,6 +3385,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
             Decl::Property(p) => {
                 set_bail("deep:property");
                 lo.scope.clear();
+                lo.boxed_elem.clear();
                 lo.next_value = 0;
                 lo.cur_class = None;
                 if let Some(recv_ref) = &p.receiver {
@@ -3392,6 +3407,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                         let sfid = *lo.ext_prop_set_ids.get(&(recv_key, p.name.clone()))?;
                         let setter = p.setter.as_ref().unwrap();
                         lo.scope.clear();
+                        lo.boxed_elem.clear();
                         lo.next_value = 0;
                         lo.cur_fn_name = property_setter_name(&p.name);
                         lo.lambda_seq = 0;
@@ -3423,6 +3439,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     });
                     if let Some(&(gfid, _)) = lo.computed_props.get(&p.name) {
                         lo.scope.clear();
+                        lo.boxed_elem.clear();
                         lo.next_value = 0;
                         lo.cur_fn_name = property_getter_name(&p.name);
                         lo.lambda_seq = 0;
@@ -3443,6 +3460,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     }
                     if let Some(&sfid) = lo.computed_setters.get(&p.name) {
                         lo.scope.clear();
+                        lo.boxed_elem.clear();
                         lo.next_value = 0;
                         lo.cur_fn_name = property_setter_name(&p.name);
                         lo.lambda_seq = 0;
@@ -3512,6 +3530,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
             continue;
         };
         lo.scope.clear();
+        lo.boxed_elem.clear();
         lo.next_value = 0;
         lo.cur_class = None;
         lo.cur_fn_name = lo.ir.functions[fid as usize].name.clone();
@@ -6018,7 +6037,12 @@ impl<'a> Lower<'a> {
         // innermost binding (the last in the scope stack). A real CLOSURE also captures a name used in a
         // NESTED lambda (`f { g { use(outer) } }`); an INLINE-spliced lambda accesses it directly, so its
         // captures must NOT be inflated by nested uses (the splice's stack frames would break).
-        let deep = lambda_info.capture != LambdaCapture::InlineSplice;
+        // Descend into nested lambdas to detect TRANSITIVE captures for EVERY lambda, including an
+        // inline-splice one: a nested closure inside a block-bodied splice (`xs.map { x -> val r =
+        // ys.map { y -> outer } }`) captures `outer` from the enclosing frame, so the splice must keep
+        // `outer` in scope for it. (A splice accesses its OWN direct captures inline; a deeper name it
+        // only threads through for the nested closure.)
+        let deep = true;
         let mut captures: Vec<(String, u32, Ty)> = Vec::new();
         for (name, v, ty) in self.scope.iter().rev() {
             let used = if deep {
