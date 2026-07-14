@@ -21434,14 +21434,12 @@ fn ir_type_is_object(t: &Ty) -> bool {
 fn ir_arg_assignable(arg: &Ty, param: &Ty) -> bool {
     arg == param
         || (ir_type_is_object(param) && ir_type_is_reference(arg))
-        // Same erased CLASS with differing type arguments — the IR carries no generic detail, so a
-        // `List<String>` argument fits a `List<T>` primary-ctor field (`ICs(listOf("x","y"))` picks the
-        // primary `constructor-impl(List)`, not the secondary `(T)` that would re-wrap it). The precise
-        // type-argument check already happened in the checker; here only the erased class must agree.
-        || matches!(
-            (arg.non_null().obj_internal(), param.non_null().obj_internal()),
-            (Some(a), Some(p)) if a == p
-        )
+        // Same erased class with differing type arguments; the precise generic check already happened in
+        // the checker.
+        || arg
+            .non_null()
+            .obj_internal()
+            .is_some_and(|a| param.non_null().obj_internal() == Some(a))
 }
 
 /// Whether `e` declares a local `val`/`var` (a `Stmt::Local`/`Destructure`), not descending into a
