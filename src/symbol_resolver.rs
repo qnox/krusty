@@ -50,11 +50,19 @@ impl crate::assignable::TypeOracle for PlatformOracle<'_> {
         self.0.value_underlying(ty)
     }
     fn canonical_class(&self, internal: &str) -> String {
-        self.0
-            .jvm_descriptor_form(Ty::obj(internal))
-            .obj_internal()
-            .unwrap_or(internal)
-            .to_string()
+        nested_class_identity(
+            self.0
+                .jvm_descriptor_form(Ty::obj(internal))
+                .obj_internal()
+                .unwrap_or(internal),
+        )
+    }
+}
+
+fn nested_class_identity(internal: &str) -> String {
+    match internal.rfind('/') {
+        Some(i) => format!("{}{}", &internal[..=i], internal[i + 1..].replace('.', "$")),
+        None => internal.replace('.', "$"),
     }
 }
 
@@ -2260,12 +2268,15 @@ fn select_overload(
             return Some(o.clone());
         }
     }
-    // SUBTYPE / value-class-underlying pass: an argument whose supertype closure includes the parameter
-    // type (a `KSerializer` where `SerializationStrategy` is expected), or a value-class argument matching
-    // its erased underlying. The exact/widened passes miss these (only exact or erased `Any`).
+    // Platform assignability pass: subtype closure, erased `Any`, and value-class underlying matching.
+    // The exact/widened passes miss these while preserving their higher priority.
     for cands in by_rank.values() {
         if let Some((o, _)) = cands.iter().find(|(_, lp)| {
-            lp.len() == args.len() && lp.iter().zip(args).all(|(p, a)| arg_assignable(lib, p, a))
+            lp.len() == args.len()
+                && lp
+                    .iter()
+                    .zip(args)
+                    .all(|(p, a)| platform_arg_assignable(lib, p, a))
         }) {
             return Some((*o).clone());
         }
@@ -2325,22 +2336,14 @@ fn logical_value_params(
     }
 }
 
-/// Whether `arg` is assignable to `param` allowing a reference SUBTYPE or a value-class argument matching
-/// its erased underlying — the union of the source-level subtype rule and value-class unboxing.
-fn arg_assignable(lib: &dyn CompilerPlatform, param: &Ty, arg: &Ty) -> bool {
-    arg_subtype_assignable(lib, param, arg)
-        || lib.value_underlying(*arg).is_some_and(|u| *param == u)
-}
-
-/// `arg`'s class transitively extends/implements `param`'s class, mapping a function-TYPE parameter
-/// (`Ty::Fun`) to its `kotlin/FunctionN` class — so a `KProperty1` (which implements `Function1`) fits a
-/// `(T) -> R` parameter. Uses `kotlin_class_internal` on BOTH sides (which resolves `Ty::Fun`), unlike
-/// [`arg_subtype_assignable`]'s `obj_internal` (which is `None` for a function type).
-fn ref_subtype_fits(lib: &dyn CompilerPlatform, param: &Ty, arg: &Ty) -> bool {
-    match (param.kotlin_class_internal(), arg.kotlin_class_internal()) {
-        (Some(target), Some(start)) => is_classpath_subtype(lib, start, target, 0),
-        _ => false,
-    }
+fn platform_arg_assignable(lib: &dyn CompilerPlatform, param: &Ty, arg: &Ty) -> bool {
+    (matches!(arg, Ty::Null | Ty::Nothing) && param.is_reference())
+        || crate::assignable::is_assignable(
+            &crate::assignable::TyCtx::new(),
+            &PlatformOracle(lib),
+            *arg,
+            *param,
+        )
 }
 
 /// Pick the best overload whose logical value parameters accept `args`, in Kotlin applicability order:
@@ -2358,8 +2361,7 @@ fn best_by_args<'a>(
     let fits = |p: &Ty, a: &Ty| {
         *p == *a
             || fun_arg_matches(lib, p, a)
-            || arg_assignable(lib, p, a)
-            || ref_subtype_fits(lib, p, a)
+            || platform_arg_assignable(lib, p, a)
             // A function-shaped argument that IS-A `FunctionN` by supertype (a `KProperty1` fits a
             // `(T) -> R` param) — matched by arity, since it is neither a `Ty::Fun` nor equal to the param.
             || p.fun_arity()
@@ -2462,56 +2464,6 @@ fn fun_return_compatible(lib: &dyn CompilerPlatform, param: Ty, arg: Ty) -> bool
         }
     }
     false
-}
-
-/// Whether `arg` is assignable to `param` allowing a reference SUBTYPE (`arg`'s classpath supertype
-/// closure contains `param`). Falls back to exact / `Any` for the trivial cases.
-/// Canonicalize a class internal name's NESTED separators to the JVM `$` form: `lib/Outer.Inner` (a
-/// Kotlin @Metadata nested spelling) → `lib/Outer$Inner`. Only the segment after the last `/` (the
-/// class path, never the package) is rewritten; a non-nested name is returned unchanged.
-fn nested_canon(internal: &str) -> String {
-    match internal.rfind('/') {
-        Some(i) => format!("{}{}", &internal[..=i], internal[i + 1..].replace('.', "$")),
-        None => internal.replace('.', "$"),
-    }
-}
-
-fn arg_subtype_assignable(lib: &dyn CompilerPlatform, param: &Ty, arg: &Ty) -> bool {
-    if param == arg || *param == Ty::obj("kotlin/Any") {
-        return true;
-    }
-    // A NESTED classifier from @Metadata is spelled with `.` after the package (`lib/Outer.Inner`), while
-    // a resolved type reference uses the JVM `$` form (`lib/Outer$Inner`) — the SAME type under two
-    // spellings, so a value-class-param (mangled) member with a nested-type parameter failed to match its
-    // argument. Canonicalize the nested separator on both sides (idempotent for a `$` name, a no-op for a
-    // non-nested one) and accept an exact match; the remap-mapped built-in nested types (`Map.Entry`)
-    // canonicalize identically on both sides, so their existing matches are unaffected.
-    if let (Ty::Obj(p, pa), Ty::Obj(a, aa)) = (param, arg) {
-        if pa.is_empty() && aa.is_empty() && nested_canon(p) == nested_canon(a) {
-            return true;
-        }
-    }
-    // `null`/`Nothing` is assignable to any REFERENCE parameter — a bare `null` literal passed for a
-    // classpath reference/nullable parameter (`p.exec(id, actId, null)` where `params: String?`).
-    // Overload selection accepts it; nullability strictness is a separate check. Without this a
-    // value-class-param (mangled) member reached with a `null` argument fails to resolve at all.
-    if matches!(arg, Ty::Null | Ty::Nothing) && param.is_reference() {
-        return true;
-    }
-    // A builtin reference arg (`Ty::String`) isn't an `Obj`, so map it to its class internal name
-    // (`kotlin/String`, whose classpath supertypes include `java/lang/CharSequence`/`Comparable`) — so
-    // `Regex("…").matches(s: String)` matches the `CharSequence` parameter via the supertype walk.
-    // Only a NON-NULLABLE reference arg maps this way: passing `String?` where `CharSequence` (non-null)
-    // is expected is a null-safety error kotlinc rejects, so it must not select the overload via subtype.
-    let arg_internal = if arg.is_reference() && !arg.is_nullable() {
-        arg.kotlin_class_internal()
-    } else {
-        None
-    };
-    match (param.obj_internal(), arg_internal) {
-        (Some(p), Some(a)) => is_classpath_subtype(lib, a, p, 0),
-        _ => false,
-    }
 }
 
 /// `sub` is `super_` or transitively extends/implements it, via the ONE `is_subtype` relation over the
