@@ -660,6 +660,8 @@ mod suspend_collection_hof_e2e;
 mod suspend_default_param_e2e;
 #[path = "suspend_e2e.rs"]
 mod suspend_e2e;
+#[path = "suspend_inline_hof_suspending_lambda_reject_e2e.rs"]
+mod suspend_inline_hof_suspending_lambda_reject_e2e;
 #[path = "suspend_member_after_call_e2e.rs"]
 mod suspend_member_after_call_e2e;
 #[path = "suspend_return_type_recovery_e2e.rs"]
