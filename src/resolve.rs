@@ -1396,7 +1396,36 @@ pub fn collect_signatures_with_cp(
                         .get(&c.name)
                         .cloned()
                         .unwrap_or_else(|| class_internal(file, &c.name));
-                    let ctp = TParams::erased(&c.type_params);
+                    // An `inner class` captures the enclosing instance, so the outer class's type
+                    // parameters are in scope for its own member/ctor/field types (`inner class N :
+                    // Iterator<T>` where `T` is the outer's parameter). Walk the `inner_of` chain and
+                    // include each enclosing class's parameters (erased, like the class's own).
+                    let mut ctp_names = c.type_params.clone();
+                    {
+                        let mut outer = c.inner_of.clone();
+                        let mut guard = 0;
+                        while let Some(on) = outer {
+                            guard += 1;
+                            if guard > 32 {
+                                break;
+                            }
+                            if let Some(oc) = file
+                                .decls
+                                .iter()
+                                .filter_map(|&d| match file.decl(d) {
+                                    Decl::Class(x) => Some(x),
+                                    _ => None,
+                                })
+                                .find(|x| x.name == on)
+                            {
+                                ctp_names.extend(oc.type_params.iter().cloned());
+                                outer = oc.inner_of.clone();
+                            } else {
+                                break;
+                            }
+                        }
+                    }
+                    let ctp = TParams::erased(&ctp_names);
                     // Bring this class's own NESTED types into scope by their SIMPLE name (`Inner` →
                     // `Outer$Inner`), so a member's parameter/return/field type may reference a sibling
                     // nested type unqualified (`fun m(i: Inner)`) — Kotlin's nested-type scoping. A nested
@@ -4351,8 +4380,28 @@ pub fn check_file(file: &File, syms: &mut SymbolTable, diags: &mut DiagSink) -> 
                 // members) per the `java.lang.annotation.Annotation` contract — so an array member is
                 // supported (no krusty-synthesized reference-equality member to miscompile).
                 // Class type parameters are in scope for all members (erased; only function params
-                // specialize — see `TParams::erased`).
-                c.tparams = TParams::erased(&cl.type_params);
+                // specialize — see `TParams::erased`). An `inner class` also captures the enclosing
+                // instance, so the outer class's type parameters are visible in its members
+                // (kotlinc); walk the `inner_of` chain and include each enclosing class's parameters.
+                let mut tparam_names = cl.type_params.clone();
+                {
+                    let mut outer = cl.inner_of.clone();
+                    let mut guard = 0;
+                    while let Some(o) = outer {
+                        guard += 1;
+                        if guard > 32 {
+                            break;
+                        }
+                        let key = o.rsplit(['/', '$']).next().unwrap_or(&o).to_string();
+                        if let Some(s) = syms.classes.get(&key) {
+                            tparam_names.extend(s.tparam_names.iter().cloned());
+                            outer = s.inner_of.clone();
+                        } else {
+                            break;
+                        }
+                    }
+                }
+                c.tparams = TParams::erased(&tparam_names);
                 // Member functions are checked with the class's properties (resolved in Stage C)
                 // visible as an implicit `this` scope.
                 let mut props = syms
