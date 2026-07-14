@@ -10309,10 +10309,9 @@ impl<'a> Checker<'a> {
                         }
                     }
                 }
-                // `recv.run { … }` / `recv.apply { … }`: the lambda body has `recv` as its implicit
-                // receiver (`this`); `run` yields the body, `apply` the receiver.
-                if matches!(name.as_str(), "run" | "apply") && args.len() == 1 {
-                    if let Expr::Lambda { params, body } = self.file.expr(args[0]).clone() {
+                // `recv.run {…}` / `recv.apply {…}`: body receiver is `recv`; result is body/receiver.
+                if let ("run" | "apply", [arg]) = (name.as_str(), args) {
+                    if let Expr::Lambda { params, body } = self.file.expr(*arg).clone() {
                         if params.is_empty() {
                             let rt = self.expr(receiver);
                             let bt =
