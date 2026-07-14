@@ -334,6 +334,13 @@ impl Default for SymbolTable {
 }
 
 impl SymbolTable {
+    pub fn single_fun(&self, name: &str) -> Option<Signature> {
+        self.funs.get(name).and_then(|v| match v.as_slice() {
+            [sig] => Some(sig.clone()),
+            _ => None,
+        })
+    }
+
     /// Resolve a class reference type `Ty::Obj` back to its declaration (by internal name).
     pub fn class_by_internal(&self, internal: &str) -> Option<&ClassSig> {
         self.classes.values().find(|c| c.internal == internal)
@@ -6815,12 +6822,7 @@ impl<'a> Checker<'a> {
         }
         // The target is a same-file top-level function, or a member imported from a same-file `object`
         // (`import Host.foo`) — the latter recorded so the adapter invokes it on `Host.INSTANCE`.
-        let (sig, object_internal) = if let Some(sig) = self
-            .syms
-            .funs
-            .get(name)
-            .and_then(|v| (v.len() == 1).then(|| v[0].clone()))
-        {
+        let (sig, object_internal) = if let Some(sig) = self.syms.single_fun(name) {
             (sig, None)
         } else if !self.module_declares(name) {
             let internal = self.object_member_import(name)?;
@@ -8254,12 +8256,7 @@ impl<'a> Checker<'a> {
                             return self.set(e, ty);
                         }
                     }
-                    if let Some(sig) = self
-                        .syms
-                        .funs
-                        .get(&name)
-                        .and_then(|v| (v.len() == 1).then(|| v[0].clone()))
-                    {
+                    if let Some(sig) = self.syms.single_fun(&name) {
                         if sig.requires_all_args() {
                             return self.set(e, Ty::fun(sig.params.clone(), sig.ret));
                         }
@@ -11423,11 +11420,7 @@ impl<'a> Checker<'a> {
                 // For lambda-argument pre-typing we need a single known signature; use it only when the
                 // name is unambiguous (one overload). An overloaded call's lambda `it` falls back to the
                 // erased type — a minor precision loss, not a miscompile.
-                let known_sig = self
-                    .syms
-                    .funs
-                    .get(&fname)
-                    .and_then(|v| (v.len() == 1).then(|| v[0].clone()));
+                let known_sig = self.syms.single_fun(&fname);
                 // An array init constructor `IntArray(n) { i -> … }` / `Array(n) { i -> … }` types its
                 // lambda's parameter (the index) as `Int`.
                 let array_init_lambda = (Ty::primitive_array_element(&fname).is_some()
