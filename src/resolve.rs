@@ -236,6 +236,10 @@ impl ClassSig {
             .find(|(n, _, _)| n == name)
             .map(|(_, t, v)| (*t, *v))
     }
+
+    pub fn single_method(&self) -> Option<&Signature> {
+        (self.methods.len() == 1).then(|| self.methods.values().next().unwrap())
+    }
 }
 
 /// Simple type name → JVM internal name, split into a SHARED read-only base (the library/classpath
@@ -6532,16 +6536,10 @@ impl<'a> Checker<'a> {
             })
     }
 
-    /// The abstract-method parameter types of a simple fun interface — used to type a lambda being
-    /// SAM-converted to it so its parameters resolve concretely (and the lowered impl matches the SAM
-    /// descriptor). `None` unless the interface has exactly one method.
+    /// The SAM parameter types of a simple fun interface, used to type a converted lambda.
     fn fun_interface_sam_params(&self, internal: &str) -> Option<Vec<Ty>> {
         let c = self.syms.class_by_internal(internal)?;
-        if c.methods.len() == 1 {
-            Some(c.methods.values().next().unwrap().params.clone())
-        } else {
-            None
-        }
+        Some(c.single_method()?.params.clone())
     }
 
     /// Check call arguments against a parameter list. For a `vararg`, the fixed parameters match
@@ -11392,16 +11390,14 @@ impl<'a> Checker<'a> {
                     let r = self.ret_ty;
                     return self.set(call, r);
                 }
-                // SAM conversion `Pred { lambda }` — a (fun) interface with a single abstract method
-                // built from a lambda. Type the lambda from the SAM method's parameters; the result is
-                // the interface type.
+                // SAM conversion `Pred { lambda }`: type the lambda from the SAM method parameters.
                 if args.len() == 1
                     && matches!(self.file.expr(args[0]), Expr::Lambda { .. })
                     && self.lookup(&fname).is_none()
                 {
                     if let Some(cls) = self.syms.classes.get(&fname).cloned() {
-                        if cls.is_interface && cls.methods.len() == 1 {
-                            let pts = cls.methods.values().next().unwrap().params.clone();
+                        if let Some(sig) = cls.single_method().filter(|_| cls.is_interface) {
+                            let pts = sig.params.clone();
                             self.check_lambda_with_types(args[0], &pts);
                             return self.set(call, Ty::obj(&cls.internal));
                         }
