@@ -2384,14 +2384,7 @@ fn best_by_args<'a>(
         .or_else(|| {
             cands.iter().find(|(o, lp)| {
                 lp.len() >= args.len()
-                    // A prefix match (fewer args than params) is only a valid UNDER-application when the
-                    // omitted trailing parameters are optional — i.e. the call still supplies every REQUIRED
-                    // parameter. Otherwise a 1-arg call would spuriously bind a 2-required-param member
-                    // (`getFor(id, t)`), shadowing the genuine 1-param extension overload and erasing its
-                    // generic return to `Any`. `required == 0` (no metadata) keeps the legacy behaviour.
-                    && (lp.len() == args.len()
-                        || o.call_sig.required == 0
-                        || o.call_sig.required <= args.len())
+                    && (lp.len() == args.len() || o.call_sig.supplied_required_args(args.len()))
                     && lp[..args.len()].iter().zip(args).all(|(p, a)| fits(p, a))
             })
         })
@@ -2406,15 +2399,9 @@ fn best_by_args<'a>(
                     return false;
                 };
                 let prefix = args.len() - 1;
-                // Every omitted MIDDLE param must be optional. Prefer the per-parameter `param_defaults`
-                // metadata; when it is absent (a classpath callable whose @Metadata didn't align, so the
-                // vector is empty), fall back to the `required` count — the prefix already covers every
-                // required parameter, so the middle ones are all defaulted (mirrors the prefix arm above).
-                let mid_optional = (prefix..last).all(|i| o.call_sig.param_has_default(i))
-                    || o.call_sig.required <= prefix;
                 prefix <= last
                     && fun_arg_matches(lib, &lp[last], args.last().unwrap())
-                    && mid_optional
+                    && o.call_sig.omitted_middle_params_optional(prefix, last)
                     && lp[..prefix.min(lp.len())]
                         .iter()
                         .zip(&args[..prefix])
