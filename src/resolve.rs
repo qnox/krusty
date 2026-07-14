@@ -10093,14 +10093,7 @@ impl<'a> Checker<'a> {
                             };
                             match params {
                                 Some(ps) => {
-                                    for (i, (p, a)) in ps.iter().zip(&arg_tys).enumerate() {
-                                        self.expect_assignable(
-                                            *p,
-                                            *a,
-                                            self.span(args[i]),
-                                            "argument",
-                                        );
-                                    }
+                                    self.expect_call_args(&ps, false, args, &arg_tys);
                                 }
                                 None => self.diags.error(
                                     span,
@@ -10150,10 +10143,7 @@ impl<'a> Checker<'a> {
                                     ),
                                 );
                             } else {
-                                for (i, (p, a)) in cls.ctor_params.iter().zip(&arg_tys).enumerate()
-                                {
-                                    self.expect_assignable(*p, *a, self.span(args[i]), "argument");
-                                }
+                                self.expect_call_args(&cls.ctor_params, false, args, &arg_tys);
                             }
                             return Ty::obj(&cls.internal);
                         }
@@ -10238,9 +10228,7 @@ impl<'a> Checker<'a> {
                                 &internal,
                                 &arg_tys,
                             ) {
-                                for (i, (p, a)) in m.params.iter().zip(&arg_tys).enumerate() {
-                                    self.expect_assignable(*p, *a, self.span(args[i]), "argument");
-                                }
+                                self.expect_call_args(&m.params, false, args, &arg_tys);
                             }
                             return Ty::obj(&internal);
                         }
@@ -10337,9 +10325,7 @@ impl<'a> Checker<'a> {
                         if let Some(sup) = sup.filter(|s| matches_qual(s)) {
                             // A user base-class method.
                             if let Some(sig) = self.syms.method_of(&sup, &name) {
-                                for (i, (p, a)) in sig.params.iter().zip(&arg_tys).enumerate() {
-                                    self.expect_assignable(*p, *a, self.span(args[i]), "argument");
-                                }
+                                self.expect_call_args(&sig.params, false, args, &arg_tys);
                                 return sig.ret;
                             }
                             // A classpath base-class method (`class C : ArrayList<…>() { … super.add(x) }`).
@@ -10367,9 +10353,7 @@ impl<'a> Checker<'a> {
                             .filter_map(|iface| self.syms.method_of(iface, &name))
                             .collect();
                         if let [sig] = matches.as_slice() {
-                            for (i, (p, a)) in sig.params.iter().zip(&arg_tys).enumerate() {
-                                self.expect_assignable(*p, *a, self.span(args[i]), "argument");
-                            }
+                            self.expect_call_args(&sig.params, false, args, &arg_tys);
                             return sig.ret;
                         }
                     }
@@ -10403,9 +10387,7 @@ impl<'a> Checker<'a> {
                                     ),
                                 );
                             } else {
-                                for (i, (p, a)) in sig.params.iter().zip(&arg_tys).enumerate() {
-                                    self.expect_assignable(*p, *a, self.span(args[i]), "argument");
-                                }
+                                self.expect_call_args(&sig.params, false, args, &arg_tys);
                             }
                             return sig.ret;
                         }
@@ -10432,14 +10414,7 @@ impl<'a> Checker<'a> {
                                             ),
                                         );
                                     }
-                                    for (i, (p, a)) in sig.params.iter().zip(&arg_tys).enumerate() {
-                                        self.expect_assignable(
-                                            *p,
-                                            *a,
-                                            self.span(args[i]),
-                                            "argument",
-                                        );
-                                    }
+                                    self.expect_call_args(&sig.params, false, args, &arg_tys);
                                     sig.ret
                                 }
                                 None => {
@@ -11793,9 +11768,7 @@ impl<'a> Checker<'a> {
                             .and_then(|c| c.static_methods.get(&fname))
                             .cloned()
                         {
-                            for (i, (p, a)) in sig.params.iter().zip(&arg_tys).enumerate() {
-                                self.expect_assignable(*p, *a, self.span(args[i]), "argument");
-                            }
+                            self.expect_call_args(&sig.params, false, args, &arg_tys);
                             return sig.ret;
                         }
                     }
@@ -11865,9 +11838,7 @@ impl<'a> Checker<'a> {
                                 .find(|sp| sp.len() == got && self.ctor_args_match(sp, &arg_tys))
                                 .or_else(|| cls.secondary_ctors.iter().find(|sp| sp.len() == got));
                             if let Some(sparams) = chosen {
-                                for (i, (p, a)) in sparams.iter().zip(&arg_tys).enumerate() {
-                                    self.expect_assignable(*p, *a, self.span(args[i]), "argument");
-                                }
+                                self.expect_call_args(sparams, false, args, &arg_tys);
                                 return self.ctor_result(call, &cls.internal);
                             }
                             self.diags.error(
@@ -11890,20 +11861,11 @@ impl<'a> Checker<'a> {
                                     .iter()
                                     .find(|sp| self.ctor_args_match(sp, &arg_tys))
                                 {
-                                    for (i, (p, a)) in sparams.iter().zip(&arg_tys).enumerate() {
-                                        self.expect_assignable(
-                                            *p,
-                                            *a,
-                                            self.span(args[i]),
-                                            "argument",
-                                        );
-                                    }
+                                    self.expect_call_args(sparams, false, args, &arg_tys);
                                     return self.ctor_result(call, &cls.internal);
                                 }
                             }
-                            for (i, (p, a)) in ctor_params.iter().zip(&arg_tys).enumerate() {
-                                self.expect_assignable(*p, *a, self.span(args[i]), "argument");
-                            }
+                            self.expect_call_args(&ctor_params, false, args, &arg_tys);
                         }
                         return self.ctor_result(call, &cls.internal);
                     }
@@ -12393,9 +12355,7 @@ impl<'a> Checker<'a> {
                         let inner_ok = cls.inner_of.as_deref().map_or(true, |o| o == outer);
                         if inner_ok && cls.ctor_params.len() == arg_tys.len() && arg_names.is_none()
                         {
-                            for (i, (p, a)) in cls.ctor_params.iter().zip(&arg_tys).enumerate() {
-                                self.expect_assignable(*p, *a, self.span(args[i]), "argument");
-                            }
+                            self.expect_call_args(&cls.ctor_params, false, args, &arg_tys);
                             return self.ctor_result(call, &cls.internal);
                         }
                     }
