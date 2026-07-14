@@ -8783,9 +8783,23 @@ impl<'a> Lower<'a> {
         // property (`val A.ext`, not a field) dispatches through the static `getName(A)`/`setName(A, v)`
         // on the facade — `ext_facade = Some(())` selects that emit shape.
         let (prop_ty, is_var, ext_facade): (Ty, bool, Option<String>) = {
-            let cls = &self.ir.classes[owner_id as usize];
-            if let Some(idx) = cls.fields.iter().position(|f| f.name == *name) {
-                (cls.fields[idx].ty, !cls.fields[idx].is_final, None)
+            // Search the receiver class and its superclasses for a backing field — an inherited member
+            // property's getter/setter are inherited too, so the reference dispatches them on the
+            // receiver just like an own property.
+            let mut field = None;
+            let mut cur = Some(owner_id);
+            while let Some(cid) = cur {
+                let cls = &self.ir.classes[cid as usize];
+                if let Some(idx) = cls.fields.iter().position(|f| f.name == *name) {
+                    field = Some((cls.fields[idx].ty, !cls.fields[idx].is_final));
+                    break;
+                }
+                cur = (!cls.superclass.is_empty() && cls.superclass != "kotlin/Any")
+                    .then(|| self.classes.get(&cls.superclass).map(|c| c.id))
+                    .flatten();
+            }
+            if let Some((pty, is_var)) = field {
+                (pty, is_var, None)
             } else {
                 let key = (Ty::obj(&owner).erased_recv(), name.to_string());
                 let gfid = *self.ext_prop_get_ids.get(&key)?;
