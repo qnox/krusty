@@ -8483,6 +8483,17 @@ impl<'a> Checker<'a> {
                                         return self.set(e, Ty::fun(sig.params.clone(), sig.ret));
                                     }
                                 }
+                                // Object property reference `O::p` — bound to the singleton, a
+                                // `KProperty0` whose get/set dispatch the member accessor on `O.INSTANCE`.
+                                if let Some(is_var) = cls
+                                    .props
+                                    .iter()
+                                    .find_map(|(n, _, v)| (*n == name).then_some(*v))
+                                {
+                                    if let Some(ty) = self.property_ref_ty(0, is_var) {
+                                        return self.set(e, ty);
+                                    }
+                                }
                             }
                         }
                     }

@@ -186,3 +186,16 @@ fn bound_mutable_extension_property_ref() {
         "OK"
     );
 }
+
+#[test]
+fn object_property_ref() {
+    // `F::u` where F is an object → KProperty0 bound to F.INSTANCE.
+    const MAIN: &str = "object F { var u = 0 }\n\
+        fun box(): String {\n\
+        \x20 val fu = F::u\n\
+        \x20 if (fu() != 0) return \"fail-invoke\"\n\
+        \x20 fu.set(8)\n\
+        \x20 return if (F.u == 8 && fu.get() == 8) \"OK\" else \"fail: ${F.u}\"\n\
+        }\n";
+    assert_eq!(run(MAIN).expect("object property ref"), "OK");
+}
