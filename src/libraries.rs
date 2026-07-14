@@ -564,6 +564,10 @@ impl CallSig {
         self.param_defaults.get(idx).copied().unwrap_or(false)
     }
 
+    pub fn param_droppable(&self, idx: usize, param_count: usize) -> bool {
+        self.param_has_default(idx) || (self.vararg && idx + 1 == param_count)
+    }
+
     pub fn source(
         param_names: Vec<String>,
         param_defaults: Vec<bool>,
