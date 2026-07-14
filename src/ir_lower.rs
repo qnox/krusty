@@ -18787,22 +18787,21 @@ impl<'a> Lower<'a> {
                             }
                         }
                     }
-                    // `recv.startCoroutine(completion)` — a `kotlin.coroutines` extension intrinsic
-                    // (recognized via the registry). The target runtime owns the helper's physical
-                    // owner/descriptor.
-                    if args.len() == 1
-                        && matches!(self.info.ty(receiver), Ty::Fun(s) if s.suspend)
-                        && crate::libraries::coroutine_intrinsic(&name)
-                            == Some(crate::libraries::CoroutineIntrinsic::StartCoroutine)
-                    {
-                        let recv_v = self.expr(receiver)?;
-                        let cont_ir = ty_to_ir(Ty::obj("kotlin/coroutines/Continuation"));
-                        let comp_v = self.lower_arg(args[0], &cont_ir)?;
-                        return self.runtime_call(
-                            RuntimeOp::StartCoroutine,
-                            Ty::Unit,
-                            vec![recv_v, comp_v],
-                        );
+                    // `recv.startCoroutine(completion)` — a `kotlin.coroutines` intrinsic.
+                    if let [completion_arg] = args.as_slice() {
+                        if matches!(self.info.ty(receiver), Ty::Fun(s) if s.suspend)
+                            && crate::libraries::coroutine_intrinsic(&name)
+                                == Some(crate::libraries::CoroutineIntrinsic::StartCoroutine)
+                        {
+                            let recv_v = self.expr(receiver)?;
+                            let cont_ir = ty_to_ir(Ty::obj("kotlin/coroutines/Continuation"));
+                            let comp_v = self.lower_arg(*completion_arg, &cont_ir)?;
+                            return self.runtime_call(
+                                RuntimeOp::StartCoroutine,
+                                Ty::Unit,
+                                vec![recv_v, comp_v],
+                            );
+                        }
                     }
                     // `super.method(args)` → a non-virtual `invokespecial` on `this` (value 0) to the base
                     // class's method (the receiver's own override is skipped). The base is the current
