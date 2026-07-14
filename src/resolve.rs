@@ -5174,13 +5174,11 @@ impl<'a> Checker<'a> {
                     // extension's own (`callable.params[0]` is the receiver). Lowered as a static call.
                     let fi = self
                         .resolver()
-                        .receiver_extensions(receiver_ty, CALLABLE_INVOKE_OPERATOR)
-                        .into_iter()
+                        .exact_receiver_extensions(receiver_ty, CALLABLE_INVOKE_OPERATOR)
                         .find(|o| {
-                            o.receiver_rank == 0
-                                // Select by arity (`callable.params[0]` is the receiver) so an
-                                // overloaded `invoke()` / `invoke(Int)` picks the right one.
-                                && o.callable.params.len() == arg_tys.len() + 1
+                            // Select by arity (`callable.params[0]` is the receiver) so an overloaded
+                            // `invoke()` / `invoke(Int)` picks the right one.
+                            o.callable.params.len() == arg_tys.len() + 1
                                 // A `suspend operator fun …invoke` would need continuation threading the
                                 // ExtensionOperator lowering doesn't do — leave it unresolved (skip).
                                 && !o.flags.suspend
@@ -7445,12 +7443,7 @@ impl<'a> Checker<'a> {
                 // User-defined extension on a non-nullable primitive receiver: safe call is a no-op
                 // (primitives can never be null), so emit as a direct static call.
                 if !rt.is_reference() {
-                    if let Some(fi) = self
-                        .resolver()
-                        .receiver_extensions(rt, &name)
-                        .into_iter()
-                        .find(|o| o.receiver_rank == 0)
-                    {
+                    if let Some(fi) = self.resolver().exact_receiver_extensions(rt, &name).next() {
                         let logical: Vec<Ty> = fi.callable.params[1..].to_vec();
                         let arg_tys = args.as_deref().map_or_else(Vec::new, |a| self.arg_tys(a));
                         if logical.len() != arg_tys.len() {
@@ -7793,11 +7786,8 @@ impl<'a> Checker<'a> {
                 if lt != Ty::Error && rt != Ty::Error && !lt.is_reference() {
                     let op_name = op.arith_operator_name();
                     if let Some(fname) = op_name {
-                        if let Some(fi) = self
-                            .resolver()
-                            .receiver_extensions(lt, fname)
-                            .into_iter()
-                            .find(|o| o.receiver_rank == 0)
+                        if let Some(fi) =
+                            self.resolver().exact_receiver_extensions(lt, fname).next()
                         {
                             // logical params (receiver is `callable.params[0]`) — operators take one arg.
                             // Only apply the extension when the RIGHT operand actually matches its
@@ -10601,12 +10591,7 @@ impl<'a> Checker<'a> {
                     let has_lam = |lpt: &[Vec<Ty>]| lpt.iter().any(|v| !v.is_empty());
                     // Exact-receiver user extension (module source rung 0): its lambda parameter types
                     // come straight off the call shape.
-                    if let Some(fi) = self
-                        .resolver()
-                        .receiver_extensions(rt, &name)
-                        .into_iter()
-                        .find(|o| o.receiver_rank == 0)
-                    {
+                    if let Some(fi) = self.resolver().exact_receiver_extensions(rt, &name).next() {
                         if has_lam(&fi.call_sig.lambda_param_types) {
                             return Some(fi.call_sig.lambda_param_types);
                         }
@@ -10973,9 +10958,9 @@ impl<'a> Checker<'a> {
                     // *infix* form (`a rem b`) while the dot form (`a.rem(b)`) keeps the builtin.
                     let user_ext = self
                         .resolver()
-                        .receiver_extensions(rt, &name)
-                        .iter()
-                        .any(|o| o.receiver_rank == 0);
+                        .exact_receiver_extensions(rt, &name)
+                        .next()
+                        .is_some();
                     let infix_user_ext = self.file.infix_calls.contains(&call.0) && user_ext;
                     if !infix_user_ext && rt.is_numeric() {
                         // Binary arithmetic methods: `a.plus(b)` ≡ `a + b` (same numeric promotion).
@@ -11154,11 +11139,7 @@ impl<'a> Checker<'a> {
                 // its `callable.params` prepend the receiver and `callable.descriptor` is the full static
                 // `(recv + params)ret` the emitter wants.
                 {
-                    let module_ext = self
-                        .resolver()
-                        .receiver_extensions(rt, &name)
-                        .into_iter()
-                        .find(|o| o.receiver_rank == 0);
+                    let module_ext = self.resolver().exact_receiver_extensions(rt, &name).next();
                     if let Some(fi) = module_ext {
                         // Logical params (the receiver is `callable.params[0]`; the rest are the args).
                         let logical: Vec<Ty> = fi.callable.params[1..].to_vec();
@@ -12774,9 +12755,8 @@ impl<'a> Checker<'a> {
                         // A USER-defined `operator fun Recv.componentN()` extension (same module).
                         .or_else(|| {
                             self.resolver()
-                                .receiver_extensions(it, &comp)
-                                .into_iter()
-                                .find(|o| o.receiver_rank == 0 && o.callable.params.len() == 1)
+                                .exact_receiver_extensions(it, &comp)
+                                .find(|o| o.callable.params.len() == 1)
                                 .map(|o| o.callable.ret)
                         })
                         // An indexable type (`List`): `componentN` is the inline `get(N-1)` — use the
