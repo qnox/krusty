@@ -192,6 +192,29 @@ pub fn lower_value_classes(
         .filter(|&i| ir.classes[i as usize].is_value)
         .collect();
 
+    // A value class whose underlying (single-field) type is an INNER-class instance is unsupported:
+    // the box/unbox path does not thread the enclosing `this$0` receiver an inner class carries, so
+    // codegen would emit an unsound cast (the shape reaches here only via an `Outer<X>.Inner<Y>`
+    // underlying). Bail so the whole file skips cleanly rather than miscompiling. An inner class is
+    // identified by its synthetic `this$0` first field (created only at inner-class synthesis).
+    let inner_class_names: std::collections::HashSet<String> = ir
+        .classes
+        .iter()
+        .filter(|c| c.fields.first().is_some_and(|f| f.name == "this$0"))
+        .map(|c| c.fq_name.replace(['.', '$'], "/"))
+        .collect();
+    if !inner_class_names.is_empty()
+        && value_class_ids.iter().any(|&cid| {
+            ir.classes[cid as usize]
+                .fields
+                .first()
+                .and_then(|f| f.ty.kotlin_class_internal())
+                .is_some_and(|n| inner_class_names.contains(&n.replace(['.', '$'], "/")))
+        })
+    {
+        return false;
+    }
+
     // Synthesize each value class's `-impl`/`equals`/`hashCode`/`toString` members up front (a JVM
     // concern — `ir_lower` only emits the plain single-field class). Done before the analysis below so
     // they participate in `vc_methods`/erasure like any other method.
