@@ -318,14 +318,56 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 }
             }
         }
-        // A member `suspend fn` on a class that IMPLEMENTS a supertype (an interface/class → the JVM emits
-        // BRIDGE methods) isn't modeled: the CPS-signature method and the generic bridge disagree on shape.
-        // Skip rather than miscompile (`SuspendingMutableMap : Map` with a `suspend fun clear()`). A suspend
-        // member on a plain class (no supertype, no bridges — the coroutine-intrinsics operator `invoke`)
-        // stays supported.
+        // A member `suspend fn` overriding a supertype method may need a generic-erasure BRIDGE (the CPS
+        // override's descriptor vs the supertype's erased one), which the coroutine lowering does not
+        // synthesize — that mismatch would miscompile (`SuspendingMutableMap : Map<K,V>`). But a bridge is
+        // needed ONLY when generics are involved: if the class has NO type parameters AND every supertype
+        // is a RAW (non-parameterized) type, the override's erased signature equals the supertype method's,
+        // so the single CPS method directly implements it — no bridge (the common suspend-decorator /
+        // interface-impl shape, e.g. `ChangeAwareEngine : ThrusterEngine`). Bail only for the generic
+        // shape, which still can't be modeled.
+        // Whether a CLASSPATH supertype's transitive closure contains a GENERIC type — a generic ancestor
+        // could carry a suspend method that, when overridden concretely, needs an erasure bridge the
+        // coroutine pass can't fix up. Pass-2's bridge check only walks SAME-FILE super-interfaces
+        // (`collect_iface_methods`) and a classpath SAM, so a classpath NON-SAM interface with a generic
+        // suspend ancestor would slip — catch that here. (A raw `s.targs`/`s.arg` at THIS class is the
+        // direct-generic case; this closes the transitive-classpath one.)
+        let classpath_super_has_generic = |name: &str| -> bool {
+            let start = syms
+                .class_names
+                .get(name)
+                .cloned()
+                .unwrap_or_else(|| name.to_string());
+            let mut stack = vec![start];
+            let mut seen = std::collections::HashSet::new();
+            while let Some(i) = stack.pop() {
+                if !seen.insert(i.clone()) {
+                    continue;
+                }
+                if let Some(t) = syms.libraries.resolve_type(&i) {
+                    if !t.type_params.is_empty() {
+                        return true;
+                    }
+                    stack.extend(t.supertypes.iter().cloned());
+                }
+            }
+            false
+        };
         let suspend_member_needs_bridge = file.decls.iter().any(|&d| {
             matches!(file.decl(d), Decl::Class(c)
-                if !c.supertypes.is_empty() && c.methods.iter().any(|m| m.is_suspend))
+                if (!c.supertypes.is_empty() || c.base_class.is_some())
+                    && c.methods.iter().any(|m| m.is_suspend)
+                    && (!c.type_params.is_empty()
+                        || c.supertypes.iter().any(|s| {
+                            !s.targs.is_empty()
+                                || s.arg.is_some()
+                                || classpath_super_has_generic(&s.name)
+                        })
+                        // A GENERIC classpath BASE CLASS with an open suspend fn overridden concretely
+                        // needs an erasure bridge the superclass loop can't build (a classpath base breaks
+                        // `resolve_method`), so guard it here too. `c.base_class` drops the type args, so
+                        // check the base's own genericity (and its closure) directly.
+                        || c.base_class.as_deref().is_some_and(classpath_super_has_generic)))
         });
         if suspend_member_needs_bridge {
             return None;
@@ -1795,6 +1837,12 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                             let op = lo.ir.functions[own_fid as usize].params.clone();
                             let or = lo.ir.functions[own_fid as usize].ret.clone();
                             if bp != op || br != or {
+                                // A suspend override needing an erasure bridge can't be modeled (the
+                                // coroutine pass rewrites the concrete method to CPS afterwards but never
+                                // fixes up the bridge) — skip the file rather than emit a broken bridge.
+                                if m.is_suspend {
+                                    return None;
+                                }
                                 // Generic/covariant override → synthesize an `ACC_BRIDGE` method with
                                 // the supertype's erased descriptor that delegates to the concrete one.
                                 let cid = lo.classes[&internal].id;
@@ -1993,6 +2041,18 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                                 let ir_ = lo.ir.functions[ifid as usize].ret.clone();
                                 let cp = lo.ir.functions[impl_fid as usize].params.clone();
                                 let cr = lo.ir.functions[impl_fid as usize].ret.clone();
+                                if ip != cp || ir_ != cr {
+                                    // A generic-erasure bridge for a SUSPEND override can't be modeled: the
+                                    // coroutine pass rewrites the concrete method to CPS (a trailing
+                                    // `Continuation`, `Object` return) AFTER this, but never fixes up the
+                                    // bridge — so the emitted bridge and its target would both lack the
+                                    // continuation. Skip the file rather than emit a broken bridge. (The
+                                    // early bail already lets the no-bridge case through; this catches a
+                                    // mismatch reached transitively through a raw-looking super-interface.)
+                                    if lo.ir.suspend_funs.contains(&impl_fid) {
+                                        return None;
+                                    }
+                                }
                                 if (ip != cp || ir_ != cr)
                                     && seen.insert(format!("{}{:?}{:?}", mname, ip, ir_))
                                 {
@@ -2029,6 +2089,13 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                                     let ir_ = ty_to_ir(m.ret);
                                     let cp = lo.ir.functions[impl_fid as usize].params.clone();
                                     let cr = lo.ir.functions[impl_fid as usize].ret.clone();
+                                    // A suspend override needing an erasure bridge can't be modeled (the
+                                    // bridge isn't CPS-fixed-up) — skip the file. See the same guard above.
+                                    if (ip != cp || ir_ != cr)
+                                        && lo.ir.suspend_funs.contains(&impl_fid)
+                                    {
+                                        return None;
+                                    }
                                     if (ip != cp || ir_ != cr)
                                         && seen.insert(format!("{}{:?}{:?}", m.name, ip, ir_))
                                     {
