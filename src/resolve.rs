@@ -56,6 +56,10 @@ impl Signature {
         !self.vararg && self.params.len() == self.required
     }
 
+    pub fn single_param(&self) -> Option<Ty> {
+        (self.params.len() == 1).then(|| self.params[0])
+    }
+
     pub fn call_sig(&self) -> CallSig {
         CallSig::source(
             self.param_names.clone(),
@@ -7809,16 +7813,14 @@ impl<'a> Checker<'a> {
                         }
                     }
                 }
-                // A class MEMBER operator (`operator fun plus(o: V): V` on the receiver class): `a + b` →
-                // `a.plus(b)`. The body's own arithmetic is on the field types (no self-recursion). The
-                // lowering re-resolves the member, so only the result type is recorded here.
+                // A class member operator (`a + b` -> `a.plus(b)`). Lowering re-resolves it.
                 if let Ty::Obj(internal, _) = &lt {
                     let op_name = op.arith_operator_name();
                     if let Some(fname) = op_name {
                         if let Some(sig) = self.syms.method_of(internal, fname) {
-                            if sig.params.len() == 1 && rt != Ty::Error {
+                            if let Some(param) = sig.single_param().filter(|_| rt != Ty::Error) {
                                 self.expect_assignable(
-                                    sig.params[0],
+                                    param,
                                     rt,
                                     self.span(rhs),
                                     "operator argument",
@@ -7827,15 +7829,14 @@ impl<'a> Checker<'a> {
                             }
                         }
                     }
-                    // A class `operator fun compareTo(o): Int` drives `<`/`<=`/`>`/`>=` (`a < b` →
-                    // `a.compareTo(b) < 0`), yielding `Boolean`.
+                    // A class `compareTo(o): Int` drives `<`/`<=`/`>`/`>=`.
                     if matches!(op, BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge)
                         && rt != Ty::Error
                     {
                         if let Some(sig) = self.syms.method_of(internal, "compareTo") {
-                            if sig.params.len() == 1 && sig.ret == Ty::Int {
+                            if let Some(param) = sig.single_param().filter(|_| sig.ret == Ty::Int) {
                                 self.expect_assignable(
-                                    sig.params[0],
+                                    param,
                                     rt,
                                     self.span(rhs),
                                     "operator argument",
@@ -12499,10 +12500,8 @@ impl<'a> Checker<'a> {
         if recv == Ty::Error {
             return false;
         }
-        // Parameter type of a USER operator, if one exists (member first, then extension) — through the
-        // MODULE source ONLY. A classpath `+=` (e.g. `MutableCollection.plusAssign`) must NOT bind here: it
-        // keeps its inline-splice lowering via `record_synthetic_ext` below. A module member's `params` are
-        // `[arg]`; a module extension's `Signature.params` are the value params `[arg]` (receiver is the key).
+        // User operator param type, member first then module extension. Classpath `+=` stays on the
+        // inline-splice path through `record_synthetic_ext` below.
         let param = crate::module_symbols::ModuleSymbols::new(self.syms)
             .instance_members(recv, aname)
             .into_iter()
@@ -12512,8 +12511,7 @@ impl<'a> Checker<'a> {
                 self.syms
                     .ext_funs
                     .get(&(recv.erased_recv(), aname.to_string()))
-                    .filter(|sig| sig.params.len() == 1)
-                    .map(|sig| sig.params[0])
+                    .and_then(|sig| sig.single_param())
             });
         let rt = self.expr(rhs);
         if let Some(param) = param {
