@@ -15041,13 +15041,11 @@ impl<'a> Lower<'a> {
                 // warns "unnecessary safe call") ≡ `a.foo(b)`. Fold an arithmetic operator-method call to
                 // the plain primitive op — `var a = 10; a?.plus(10)` works like `a.plus(10)`.
                 if !rty.is_reference() {
-                    if let Some(args) = &args {
-                        if args.len() == 1 {
-                            if let Some(r) =
-                                self.lower_prim_op_method(receiver, &name, args[0], self.info.ty(e))
-                            {
-                                return Some(r);
-                            }
+                    if let Some([arg]) = args.as_deref() {
+                        if let Some(r) =
+                            self.lower_prim_op_method(receiver, &name, *arg, self.info.ty(e))
+                        {
+                            return Some(r);
                         }
                     }
                 }
