@@ -1022,7 +1022,7 @@ fn emit_prop_ref_class(c: &crate::ir::IrClass, facade: &str) -> Vec<u8> {
         return emit_toplevel_prop_ref_class(c, pr, facade);
     }
     if pr.bound {
-        return emit_bound_prop_ref_class(c, pr);
+        return emit_bound_prop_ref_class(c, pr, facade);
     }
     let fq = c.fq_name.clone();
     let self_desc = format!("L{fq};");
@@ -1125,7 +1125,11 @@ fn emit_prop_ref_class(c: &crate::ir::IrClass, facade: &str) -> Vec<u8> {
 /// `(Object receiver)` delegating to `super(receiver, owner.class, name, "getName()desc", 0)` (the base
 /// stores the receiver), and a no-arg `get()` reading `((Owner) this.receiver).getName()`. Constructed
 /// per use with the captured receiver — no `INSTANCE` singleton.
-fn emit_bound_prop_ref_class(c: &crate::ir::IrClass, pr: &crate::ir::PropRef) -> Vec<u8> {
+fn emit_bound_prop_ref_class(
+    c: &crate::ir::IrClass,
+    pr: &crate::ir::PropRef,
+    facade: &str,
+) -> Vec<u8> {
     let fq = c.fq_name.clone();
     let mut cw = ClassWriter::new(&fq, &c.superclass);
     cw.set_access(0x0010 | 0x0020); // FINAL | SUPER
@@ -1133,6 +1137,10 @@ fn emit_bound_prop_ref_class(c: &crate::ir::IrClass, pr: &crate::ir::PropRef) ->
     let prop_jvm = ir_ty_to_jvm(&pr.prop_ty);
     let getter_desc = format!("(){}", type_descriptor(prop_jvm));
     let signature = format!("{}{}", pr.getter_name, getter_desc);
+    // An EXTENSION property: get/set dispatch to a STATIC accessor `getName(Recv)`/`setName(Recv, v)`
+    // on the facade, with the captured receiver passed as the first argument.
+    let ext = pr.ext_facade.as_ref().map(|f| facade_sentinel(f, facade));
+    let ext_get_desc = format!("(L{};){}", pr.owner_internal, type_descriptor(prop_jvm));
 
     // `<init>(Object)V`: super(receiver, owner.class, name, "getName()desc", 0).
     let mut ctor = CodeBuilder::new(2);
@@ -1153,15 +1161,21 @@ fn emit_bound_prop_ref_class(c: &crate::ir::IrClass, pr: &crate::ir::PropRef) ->
     ctor.link();
     cw.add_method(0x0000, "<init>", "(Ljava/lang/Object;)V", &ctor);
 
-    // `get()Object`: ((Owner) this.receiver).getName(), boxed if primitive.
+    // `get()Object`: for a member ref `((Owner) this.receiver).getName()`; for an extension ref
+    // `Facade.getName((Owner) this.receiver)`. Boxed if primitive.
     let mut get = CodeBuilder::new(1);
     get.aload(0);
     let recv_f = cw.fieldref(&c.superclass, "receiver", "Ljava/lang/Object;");
     get.getfield(recv_f, 1);
     let owner_ref = cw.class_ref(&pr.owner_internal);
     get.checkcast(owner_ref);
-    let gref = cw.methodref(&pr.owner_internal, &pr.getter_name, &getter_desc);
-    get.invokevirtual(gref, 0, slot_words(prop_jvm) as i32);
+    if let Some(facade) = &ext {
+        let gref = cw.methodref(facade, &pr.getter_name, &ext_get_desc);
+        get.invokestatic(gref, 1, slot_words(prop_jvm) as i32);
+    } else {
+        let gref = cw.methodref(&pr.owner_internal, &pr.getter_name, &getter_desc);
+        get.invokevirtual(gref, 0, slot_words(prop_jvm) as i32);
+    }
     if prop_jvm.is_jvm_scalar() {
         box_prim_free(&mut cw, &mut get, prop_jvm);
     }
@@ -1192,8 +1206,14 @@ fn emit_bound_prop_ref_class(c: &crate::ir::IrClass, pr: &crate::ir::PropRef) ->
             let cref = cw.class_ref(&internal);
             set.checkcast(cref);
         }
-        let sref = cw.methodref(&pr.owner_internal, &setter, &setter_desc);
-        set.invokevirtual(sref, slot_words(prop_jvm) as i32, 0);
+        if let Some(facade) = &ext {
+            let ext_set_desc = format!("(L{};{})V", pr.owner_internal, type_descriptor(prop_jvm));
+            let sref = cw.methodref(facade, &setter, &ext_set_desc);
+            set.invokestatic(sref, 1 + slot_words(prop_jvm) as i32, 0);
+        } else {
+            let sref = cw.methodref(&pr.owner_internal, &setter, &setter_desc);
+            set.invokevirtual(sref, slot_words(prop_jvm) as i32, 0);
+        }
         set.ret_void();
         set.ensure_locals(2);
         set.link();

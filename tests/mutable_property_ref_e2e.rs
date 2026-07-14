@@ -131,3 +131,58 @@ fn bound_mutable_property_ref_reference_type() {
         "OK"
     );
 }
+
+#[test]
+fn bound_extension_function_ref() {
+    const MAIN: &str = "class A(val v: Int)\n\
+        fun A.g(x: Int) = x * v\n\
+        fun box(): String {\n\
+        \x20 val a = A(5)\n\
+        \x20 val ag = a::g\n\
+        \x20 return if (ag(10) == 50) \"OK\" else \"fail: ${ag(10)}\"\n\
+        }\n";
+    assert_eq!(run(MAIN).expect("bound extension function ref"), "OK");
+}
+
+#[test]
+fn unbound_extension_function_ref() {
+    const MAIN: &str = "class A(val v: Int)\n\
+        fun A.g(x: Int) = x * v\n\
+        fun box(): String {\n\
+        \x20 val ag = A::g\n\
+        \x20 val a = A(5)\n\
+        \x20 return if (ag(a, 10) == 50) \"OK\" else \"fail: ${ag(a, 10)}\"\n\
+        }\n";
+    assert_eq!(run(MAIN).expect("unbound extension function ref"), "OK");
+}
+
+#[test]
+fn bound_extension_property_ref() {
+    // `a::w` where `val A.w` is an extension property → KProperty0 dispatching the static ext getter.
+    const MAIN: &str = "class A(val v: Int)\n\
+        val A.w: Int get() = 1000 * v\n\
+        fun box(): String {\n\
+        \x20 val a = A(5)\n\
+        \x20 val aw = a::w\n\
+        \x20 return if (aw() == 5000 && aw.get() == 5000) \"OK\" else \"fail: ${aw()}\"\n\
+        }\n";
+    assert_eq!(run(MAIN).expect("bound extension property ref"), "OK");
+}
+
+#[test]
+fn bound_mutable_extension_property_ref() {
+    const MAIN: &str = "class A(var v: Int)\n\
+        var A.w: Int\n\
+        \x20 get() = v\n\
+        \x20 set(x) { v = x }\n\
+        fun box(): String {\n\
+        \x20 val a = A(5)\n\
+        \x20 val aw = a::w\n\
+        \x20 aw.set(9)\n\
+        \x20 return if (a.v == 9 && aw.get() == 9) \"OK\" else \"fail: ${a.v}\"\n\
+        }\n";
+    assert_eq!(
+        run(MAIN).expect("bound mutable extension property ref"),
+        "OK"
+    );
+}

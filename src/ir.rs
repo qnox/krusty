@@ -792,6 +792,11 @@ pub struct PropRef {
     /// The referenced property is a `var` — emit a `set(Object)` override (calls `setName`). Only
     /// meaningful with `static_dispatch` (a `MutablePropertyReference0Impl`).
     pub mutable: bool,
+    /// An EXTENSION property reference (`obj::ext`, `Type::ext` where `val Recv.ext`): the getter/setter
+    /// are STATIC methods on this facade taking the receiver as the first argument (`getExt(Recv)` /
+    /// `setExt(Recv, v)`), unlike a member reference's instance `getExt()`. `None` for member/top-level
+    /// references. The reference's receiver-class metadata still lives in `owner_internal`.
+    pub ext_facade: Option<String>,
 }
 
 /// A secondary constructor: `<init>(params)` evaluates `delegate_args`, calls the delegate target

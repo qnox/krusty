@@ -8759,21 +8759,36 @@ impl<'a> Lower<'a> {
             }
         };
         let owner_id = self.classes.get(&owner)?.id;
-        let (prop_ty, is_var) = {
+        // A member field property dispatches through the instance `getName()`/`setName()`; an EXTENSION
+        // property (`val A.ext`, not a field) dispatches through the static `getName(A)`/`setName(A, v)`
+        // on the facade — `ext_facade = Some(())` selects that emit shape.
+        let (prop_ty, is_var, ext_facade): (Ty, bool, Option<String>) = {
             let cls = &self.ir.classes[owner_id as usize];
-            let idx = cls.fields.iter().position(|f| f.name == *name)?;
-            (cls.fields[idx].ty, !cls.fields[idx].is_final)
+            if let Some(idx) = cls.fields.iter().position(|f| f.name == *name) {
+                (cls.fields[idx].ty, !cls.fields[idx].is_final, None)
+            } else {
+                let key = (Ty::obj(&owner).erased_recv(), name.to_string());
+                let gfid = *self.ext_prop_get_ids.get(&key)?;
+                let is_var = self.ext_prop_set_ids.contains_key(&key);
+                (
+                    self.ir.functions[gfid as usize].ret,
+                    is_var,
+                    Some(String::new()),
+                )
+            }
         };
-        // A user function whose name collides with the property's accessor (`var x` alongside a
+        // A user function whose name collides with a MEMBER property's accessor (`var x` alongside a
         // `fun getX()`/`fun setX()`) means the `getX()`/`setX()` the reference dispatches to isn't
         // reliably emitted — the two share a JVM name and krusty doesn't split them by descriptor, so
         // the accessor the ref calls can be missing. Decline (skip) rather than miscompile into a
-        // NoSuchMethodError.
-        if let Some(sig) = self.syms.class_by_internal(&owner) {
-            if sig.methods.contains_key(&property_getter_name(name))
-                || (is_var && sig.methods.contains_key(&property_setter_name(name)))
-            {
-                return None;
+        // NoSuchMethodError. (An extension property's accessor lives on the facade, so no clash.)
+        if ext_facade.is_none() {
+            if let Some(sig) = self.syms.class_by_internal(&owner) {
+                if sig.methods.contains_key(&property_getter_name(name))
+                    || (is_var && sig.methods.contains_key(&property_setter_name(name)))
+                {
+                    return None;
+                }
             }
         }
         // A mutable (`var`) reference uses the `KMutableProperty*` runtime class and gets a `set`
@@ -8821,6 +8836,7 @@ impl<'a> Lower<'a> {
                 bound,
                 static_dispatch: false,
                 mutable: is_var,
+                ext_facade,
             }),
             func_ref: None,
             bridges: vec![],
@@ -8914,6 +8930,7 @@ impl<'a> Lower<'a> {
                 bound: true,
                 static_dispatch: false,
                 mutable: false,
+                ext_facade: None,
             }),
             func_ref: None,
             bridges: vec![],
@@ -9225,6 +9242,7 @@ impl<'a> Lower<'a> {
                 bound: false,
                 static_dispatch: true,
                 mutable: is_var,
+                ext_facade: None,
             }),
             func_ref: None,
             bridges: vec![],
