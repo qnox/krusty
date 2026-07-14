@@ -494,8 +494,7 @@ fn erased_key_ty(key: ErasedTypeKey) -> Ty {
 /// erase to their bound.
 fn erased_type_key(t: Ty) -> ErasedTypeKey {
     let key = match t {
-        Ty::UInt => Ty::Int,
-        Ty::ULong => Ty::Long,
+        u if u.is_unsigned() => u.scalar_value_repr().unwrap(),
         Ty::String => Ty::obj("kotlin/String"),
         Ty::Obj("kotlin/Array", args) => {
             let e = args
