@@ -32,6 +32,11 @@ impl crate::assignable::TypeOracle for SourceOracle<'_> {
             .map(|t| t.supertypes)
             .unwrap_or_default()
     }
+    fn value_underlying(&self, ty: Ty) -> Option<Ty> {
+        self.0
+            .resolve_type(ty.kotlin_class_internal()?)
+            .and_then(|t| t.value_underlying)
+    }
 }
 
 /// [`crate::assignable::TypeOracle`] over a [`CompilerPlatform`]: adds value-class underlying and the
@@ -923,11 +928,12 @@ impl<'a> SymbolResolver<'a> {
 
     fn arg_fits_or_subtype(&self, param: &Ty, arg: &Ty) -> bool {
         self.arg_fits(param, arg)
-            || self
-                .lib
-                .value_underlying(*arg)
-                .is_some_and(|underlying| *param == underlying)
-            || self.reference_subtype(arg, param)
+            || crate::assignable::is_assignable(
+                &crate::assignable::TyCtx::new(),
+                &SourceOracle(&self.src),
+                *arg,
+                *param,
+            )
     }
 
     fn arg_fits(&self, param: &Ty, arg: &Ty) -> bool {
@@ -936,36 +942,6 @@ impl<'a> SymbolResolver<'a> {
                 .fun_arity()
                 .zip(self.lib.function_like_arity(*arg))
                 .is_some_and(|(p, a)| usize::from(p) == a)
-    }
-
-    fn reference_subtype(&self, arg: &Ty, param: &Ty) -> bool {
-        let Some(target) = param.kotlin_class_internal() else {
-            return false;
-        };
-        let Some(start) = arg.kotlin_class_internal() else {
-            return false;
-        };
-        if start == target {
-            return true;
-        }
-        let mut seen = std::collections::HashSet::new();
-        let mut queue = std::collections::VecDeque::new();
-        queue.push_back(start.to_string());
-        while let Some(internal) = queue.pop_front() {
-            if !seen.insert(internal.clone()) {
-                continue;
-            }
-            let Some(t) = self.src.resolve_type(&internal) else {
-                continue;
-            };
-            for sup in t.supertypes {
-                if sup == target {
-                    return true;
-                }
-                queue.push_back(sup);
-            }
-        }
-        false
     }
 
     fn default_arg_mapping(
