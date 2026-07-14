@@ -584,6 +584,10 @@ impl CallSig {
         self.required < param_count && self.has_param_names()
     }
 
+    pub fn requires_all_args(&self, param_count: usize) -> bool {
+        !self.vararg && self.required == param_count
+    }
+
     pub fn supplied_required_args(&self, supplied: usize) -> bool {
         self.required == 0 || self.required <= supplied
     }
@@ -898,6 +902,11 @@ impl FunctionSet {
 
     pub fn into_top_level(self) -> impl Iterator<Item = FunctionInfo> {
         self.overloads.into_iter().filter(|o| o.is_top_level())
+    }
+
+    pub fn into_single_top_level(self) -> Option<FunctionInfo> {
+        let mut top_level = self.into_top_level();
+        top_level.next().filter(|_| top_level.next().is_none())
     }
 
     pub fn top_level_with_param_names(&self) -> impl Iterator<Item = &FunctionInfo> {

@@ -3335,20 +3335,15 @@ fn infer_lit_ty_p(
             let rt = infer_lit_ty_p(file, *hi, class_names, fun_rets, props, src);
             Ty::range_value_type(lt, rt).unwrap_or(Ty::Error)
         }
-        // A top-level function reference `::foo` initializing a property (`val x = ::Test`). Its type is
-        // the function type `(params) -> ret` of the referenced function. Only a receiver-less,
-        // UNAMBIGUOUS (single top-level overload) classpath function resolves here through the federated
-        // source — enough for a property's signature; the full checker types same-module/local refs.
+        // A top-level function reference initializing a property gets the function type of an
+        // unambiguous classpath function; the full checker types same-module/local refs.
         Expr::CallableRef {
             receiver: None,
             name,
         } if name != "class" => {
-            let tl: Vec<_> = resolver
-                .top_level_function_set(name)
-                .into_top_level()
-                .collect();
-            match tl.as_slice() {
-                [o] if o.callable.vararg_elem.is_none() => {
+            let overloads = resolver.top_level_function_set(name);
+            match overloads.into_single_top_level() {
+                Some(o) if o.callable.vararg_elem.is_none() => {
                     Ty::fun(o.callable.params.clone(), o.callable.ret)
                 }
                 _ => Ty::Error,
@@ -8285,18 +8280,13 @@ impl<'a> Checker<'a> {
                             }
                         }
                     }
-                    // A CLASSPATH top-level function reference (`::greet` from a jar/dependency module) —
-                    // a single non-vararg, fully-applied `TopLevel` overload. Typed as its function type;
-                    // the lowering emits a `FunctionReferenceImpl` whose `invoke` calls it.
                     if !self.syms.classes.contains_key(&name) && self.lookup(&name).is_none() {
-                        let tl: Vec<_> = self
+                        let overload = self
                             .resolver()
                             .top_level_function_set(&name)
-                            .into_top_level()
-                            .collect();
-                        if let [o] = tl.as_slice() {
-                            if o.callable.vararg_elem.is_none()
-                                && o.call_sig.required == o.callable.params.len()
+                            .into_single_top_level();
+                        if let Some(o) = overload {
+                            if o.call_sig.requires_all_args(o.callable.params.len())
                                 && o.callable.ret != Ty::Nothing
                             {
                                 return self
