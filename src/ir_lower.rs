@@ -6093,7 +6093,7 @@ impl<'a> Lower<'a> {
                 stmts: vec![ve],
                 value: Some(unit),
             });
-            (ty_to_ir(Ty::obj("kotlin/Unit")), b, inline_b)
+            (ty_to_ir(stored_value_ty(Ty::Unit)), b, inline_b)
         } else {
             let ret_val = if sig.ret.is_reference()
                 && !matches!(sig.ret, Ty::Null)
@@ -9087,11 +9087,7 @@ impl<'a> Lower<'a> {
                 value: None,
             })
         };
-        let adapter_ret = if unit_return {
-            ty_to_ir(Ty::obj("kotlin/Unit"))
-        } else {
-            ty_to_ir(ret)
-        };
+        let adapter_ret = ty_to_ir(stored_value_ty(ret));
         let adapter_fid = self.ir.add_fun(IrFunction {
             name: format!("{}$adaptvc${}", self.cur_fn_name, e.0),
             params: adapted_params.iter().map(|t| ty_to_ir(*t)).collect(),
@@ -9199,11 +9195,7 @@ impl<'a> Lower<'a> {
                 value: None,
             })
         };
-        let adapter_ret = if unit_return {
-            ty_to_ir(Ty::obj("kotlin/Unit"))
-        } else {
-            ty_to_ir(ret)
-        };
+        let adapter_ret = ty_to_ir(stored_value_ty(ret));
         let adapter_fid = self.ir.add_fun(IrFunction {
             name: format!("{}$adapt${}", self.cur_fn_name, e.0),
             params: adapted_params.iter().map(|t| ty_to_ir(*t)).collect(),
@@ -9344,7 +9336,7 @@ impl<'a> Lower<'a> {
         self.ir.add_fun(IrFunction {
             name: impl_name,
             params,
-            ret: ty_to_ir(Ty::obj("kotlin/Unit")),
+            ret: ty_to_ir(stored_value_ty(Ty::Unit)),
             body: Some(block),
             is_static: true,
             dispatch_receiver: None,
@@ -9732,7 +9724,7 @@ impl<'a> Lower<'a> {
         let (stmts, impl_ret) = if ret == Ty::Unit {
             let unit = self.ir.add_expr(IrExpr::UnitInstance);
             let ret_e = self.ir.add_expr(IrExpr::Return(Some(unit)));
-            (vec![mc, ret_e], ty_to_ir(Ty::obj("kotlin/Unit")))
+            (vec![mc, ret_e], ty_to_ir(stored_value_ty(Ty::Unit)))
         } else {
             let ret_e = self.ir.add_expr(IrExpr::Return(Some(mc)));
             (vec![ret_e], ty_to_ir(ret))
@@ -12857,7 +12849,7 @@ impl<'a> Lower<'a> {
                 // `kotlin.Unit` singleton to the slot (a `kotlin/Unit` reference). `val u = f()` where
                 // `f(): Unit` → run `f()`, then store `GETSTATIC kotlin/Unit.INSTANCE`.
                 if init_ty == Ty::Unit {
-                    let unit_ty = Ty::obj("kotlin/Unit");
+                    let unit_ty = stored_value_ty(Ty::Unit);
                     let side = self.expr(init)?;
                     let unit_val = self.ir.add_expr(IrExpr::UnitInstance);
                     let seq = self.ir.add_expr(IrExpr::Block {
@@ -17673,7 +17665,7 @@ impl<'a> Lower<'a> {
                 // A `Nothing`-typed arm (a `throw`/`return`, or a CALL to a `Nothing`-returning function)
                 // pushes nothing at the merge — it's exempt from the "mixes Unit with a value" bail. The
                 // checker represents semantic bottom as `Ty::Nothing`.
-                let unit_value_ty = Ty::obj("kotlin/Unit");
+                let unit_value_ty = stored_value_ty(Ty::Unit);
                 let is_unit_body = |t: Ty| t == Ty::Unit || t == unit_value_ty;
                 let any_unit = body_tys.iter().any(|t| is_unit_body(*t));
                 let all_unit = any_unit
