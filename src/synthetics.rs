@@ -138,9 +138,9 @@ fn b_prim_vararg(syn: &'static Synthetic, lw: &mut Lower<'_>, c: &SynthCall<'_>)
 /// fill loop. Other arities decline.
 fn b_prim_size(syn: &'static Synthetic, lw: &mut Lower<'_>, c: &SynthCall<'_>) -> Option<ExprId> {
     let elem = prim_elem(syn.name)?;
-    match c.args.len() {
-        1 => {
-            let size = lw.synth_expr(c.args[0])?;
+    match c.args {
+        [size_arg] => {
+            let size = lw.synth_expr(*size_arg)?;
             // The allocation intrinsic keys on the PHYSICAL primitive array class. An unsigned array is
             // the unboxed underlying signed array (`UIntArray` = `[I`, `ULongArray` = `[J`), so allocate
             // via `kotlin/IntArray.<init>` / `kotlin/LongArray.<init>` — the emitter has no
@@ -156,9 +156,9 @@ fn b_prim_size(syn: &'static Synthetic, lw: &mut Lower<'_>, c: &SynthCall<'_>) -
                 args: vec![size],
             }))
         }
-        2 => {
-            let (params, body) = lw.synth_arg_lambda(c.args[1])?;
-            lw.build_fill_array(elem, c.args[0], params, body)
+        [size_arg, init_arg] => {
+            let (params, body) = lw.synth_arg_lambda(*init_arg)?;
+            lw.build_fill_array(elem, *size_arg, params, body)
         }
         _ => None,
     }
@@ -179,17 +179,17 @@ fn b_ref_vararg(_syn: &'static Synthetic, lw: &mut Lower<'_>, c: &SynthCall<'_>)
 /// primitive (`Array<Int>` = `Integer[]`): `build_fill_array` allocates the wrapper array and
 /// `kotlin/Array.set` boxes each filled value. Declines a non-lambda call.
 fn b_ref_array(_syn: &'static Synthetic, lw: &mut Lower<'_>, c: &SynthCall<'_>) -> Option<ExprId> {
-    if c.args.len() != 2 {
+    let [size_arg, init_arg] = c.args else {
         return None;
-    }
+    };
     // Box a primitive element so the array is `Integer[]` (the checker types `Array(n){…}` as
     // `Obj("kotlin/Array", [Int])`, element exposed unboxed). A reference element is unchanged.
     let elem = lw
         .synth_array_elem(c.call)
         .map(|t| t.boxed_ref().unwrap_or(t))
         .filter(|t| t.is_reference())?;
-    let (params, body) = lw.synth_arg_lambda(c.args[1])?;
-    lw.build_fill_array(elem, c.args[0], params, body)
+    let (params, body) = lw.synth_arg_lambda(*init_arg)?;
+    lw.build_fill_array(elem, *size_arg, params, body)
 }
 
 /// `emptyArray<T>()` → an empty `Vararg` of the reified element (`new T[0]`).
@@ -201,14 +201,12 @@ fn b_empty(_syn: &'static Synthetic, lw: &mut Lower<'_>, c: &SynthCall<'_>) -> O
 /// `arrayOfNulls<T>(n)` → `new T[n]` (a reference array of nulls; a boxed primitive `Array<Int?>` =
 /// `Integer[]`).
 fn b_arr_nulls(_syn: &'static Synthetic, lw: &mut Lower<'_>, c: &SynthCall<'_>) -> Option<ExprId> {
-    if c.args.len() != 1 {
-        return None;
-    }
+    let [size_arg] = c.args else { return None };
     let elem = lw
         .synth_array_elem(c.call)
         .map(|t| t.boxed_ref().unwrap_or(t))
         .filter(|t| t.is_reference())?;
-    let size = lw.lower_arg(c.args[0], &ty_to_ir(Ty::Int))?;
+    let size = lw.lower_arg(*size_arg, &ty_to_ir(Ty::Int))?;
     Some(lw.emit(IrExpr::NewArray {
         array_type: ty_to_ir(Ty::array(elem)),
         size,
