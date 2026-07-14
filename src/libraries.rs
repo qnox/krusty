@@ -1179,21 +1179,7 @@ impl LibraryType {
         let widened: Vec<Ty> = args
             .iter()
             .map(|t| {
-                if t.is_reference()
-                    || matches!(
-                        t,
-                        Ty::Int
-                            | Ty::Byte
-                            | Ty::Short
-                            | Ty::Long
-                            | Ty::Float
-                            | Ty::Double
-                            | Ty::Boolean
-                            | Ty::Char
-                            | Ty::UInt
-                            | Ty::ULong
-                    )
-                {
+                if t.is_reference() || t.scalar_value_repr().is_some() {
                     Ty::obj("kotlin/Any")
                 } else {
                     *t
