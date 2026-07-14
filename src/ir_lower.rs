@@ -1504,6 +1504,12 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
     }
     // Pass 1c: assign top-level-property indices (initializers lowered in pass 2). Registered before
     // any body so a function may read a top-level property as `GetStatic`.
+    // A top-level property's `GetStatic` index must be its position in `ir.statics` (the vec the emitter
+    // indexes). Pass 1a already pushed companion/object `const val` backing fields onto that vec, so the
+    // per-property counter (`lo.statics.len()`) must be OFFSET by those pre-existing entries — otherwise a
+    // top-level property in a file that ALSO has a companion const reads the const's slot (a wrong-field
+    // `getstatic`). Only bites files with BOTH, which is why it long went unseen.
+    let static_base = lo.ir.statics.len() as u32;
     for &d in &file.decls {
         if let Decl::Property(p) = file.decl(d) {
             // A top-level delegated property (`val x: T by Del()`): register a `getX()` accessor so reads
@@ -1534,10 +1540,10 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 });
                 lo.computed_props.insert(p.name.clone(), (fid, ty));
                 let d_ty = p.delegate.map(|de| info.ty(de)).unwrap_or(Ty::Error);
-                let d_idx = lo.statics.len() as u32;
+                let d_idx = static_base + lo.statics.len() as u32;
                 lo.statics
                     .insert(format!("{}$delegate", p.name), (d_idx, d_ty));
-                let k_idx = lo.statics.len() as u32;
+                let k_idx = static_base + lo.statics.len() as u32;
                 lo.statics.insert(
                     format!("{}$kprop", p.name),
                     (k_idx, Ty::obj("kotlin/reflect/KProperty")),
@@ -1601,7 +1607,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 });
                 lo.computed_props.insert(p.name.clone(), (fid, ty));
             } else {
-                let idx = lo.statics.len() as u32;
+                let idx = static_base + lo.statics.len() as u32;
                 lo.statics.insert(p.name.clone(), (idx, ty));
                 // A top-level `const val` with a compile-time literal initializer: record its value so a
                 // same-file read inlines it (`ldc`), byte-identical to kotlinc, instead of `getstatic`.
