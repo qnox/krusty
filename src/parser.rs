@@ -2311,6 +2311,79 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// True when the cursor sits on a `context(a: A, …)` prefix that precedes a local `fun`
+    /// declaration (`context(s: String) fun f() = s`). `context` is a soft keyword, so a bare call
+    /// to a function *named* `context` must NOT be mistaken for a context-receiver prefix: we scan
+    /// past the balanced parens and any following modifiers/newlines and require a `fun` keyword.
+    fn context_prefix_precedes_fun(&self) -> bool {
+        if !(self.at(TokenKind::Ident)
+            && self.text() == "context"
+            && self
+                .t
+                .get(self.i + 1)
+                .is_some_and(|t| t.kind == TokenKind::LParen))
+        {
+            return false;
+        }
+        // Skip the balanced `( … )` group starting at i+1.
+        let mut j = self.i + 1;
+        let mut depth = 0usize;
+        loop {
+            match self.t.get(j).map(|t| t.kind) {
+                Some(TokenKind::LParen) => depth += 1,
+                Some(TokenKind::RParen) => {
+                    depth -= 1;
+                    if depth == 0 {
+                        j += 1;
+                        break;
+                    }
+                }
+                Some(TokenKind::Eof) | None => return false,
+                _ => {}
+            }
+            j += 1;
+        }
+        // Skip trailing newlines / declaration modifiers / annotations, then require `fun`.
+        loop {
+            match self.t.get(j) {
+                Some(t) if t.kind == TokenKind::Newline => j += 1,
+                Some(t) if t.kind == TokenKind::At => {
+                    // Skip an annotation and its optional `(...)` argument list.
+                    j += 1;
+                    while self.t.get(j).is_some_and(|t| t.kind == TokenKind::Ident) {
+                        j += 1;
+                        if self.t.get(j).is_some_and(|t| t.kind == TokenKind::Dot) {
+                            j += 1;
+                        } else {
+                            break;
+                        }
+                    }
+                    if self.t.get(j).is_some_and(|t| t.kind == TokenKind::LParen) {
+                        let mut d = 0usize;
+                        loop {
+                            match self.t.get(j).map(|t| t.kind) {
+                                Some(TokenKind::LParen) => d += 1,
+                                Some(TokenKind::RParen) => {
+                                    d -= 1;
+                                    if d == 0 {
+                                        j += 1;
+                                        break;
+                                    }
+                                }
+                                Some(TokenKind::Eof) | None => return false,
+                                _ => {}
+                            }
+                            j += 1;
+                        }
+                    }
+                }
+                Some(t) if t.kind == TokenKind::Ident && is_modifier(t.text(self.src)) => j += 1,
+                Some(t) => return t.kind == TokenKind::KwFun,
+                None => return false,
+            }
+        }
+    }
+
     fn parse_param_list(&mut self) -> Vec<Param> {
         let mut params = Vec::new();
         self.expect(TokenKind::LParen, "'('");
@@ -4242,6 +4315,17 @@ impl<'a> Parser<'a> {
             self.expect(TokenKind::Colon, "':'");
             let ty = self.parse_type();
             return self.finish_stmt(Stmt::LocalLateinit { name, ty }, start);
+        }
+        // Local function with context receivers: `context(s: String) fun f() = s`. Consume the
+        // context-parameter prefix (buffered into `pending_context_params`, prepended as leading
+        // value params by `parse_fun`) then parse the local declaration. Guarded so a plain call to
+        // a function named `context` is never misread as a prefix.
+        if self.context_prefix_precedes_fun() {
+            let start = self.tok().span;
+            let mods = self.maybe_parse_context_receivers();
+            let is_suspend = mods.iter().any(|m| m == "suspend");
+            let f = self.parse_fun(false, false, is_suspend, false, false);
+            return self.finish_stmt(Stmt::LocalFun(f), start);
         }
         let start = self.tok().span;
         match self.kind() {

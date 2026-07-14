@@ -18008,15 +18008,26 @@ impl<'a> Lower<'a> {
                         if let Some(&fid) = self.local_fun_ids.get(stmt_id) {
                             let params = self.ir.functions[fid as usize].params.clone();
                             let local_fun = self.info.local_fun(*stmt_id)?;
-                            if args.len() + local_fun.captures.len() == params.len() {
+                            let ncap = local_fun.captures.len();
+                            // Context parameters (`context(a: A) fun f() = a`): the checker resolved
+                            // each leading context parameter to an in-scope source. The lifted method's
+                            // params are [captures..., context params..., value params...]; load the
+                            // captures, then the context sources, then the explicit arguments.
+                            let ctx_sources = self.info.context_args.get(&e).cloned();
+                            let ctx_n = ctx_sources.as_ref().map_or(0, |s| s.len());
+                            if args.len() + ncap + ctx_n == params.len() {
                                 let mut a = Vec::new();
                                 for cap in &local_fun.captures {
                                     let (cv, _) = self.lookup(&cap.name)?;
                                     a.push(self.ir.add_expr(IrExpr::GetValue(cv)));
                                 }
-                                for (arg, pt) in
-                                    args.iter().zip(&params[local_fun.captures.len()..])
-                                {
+                                if let Some(sources) = &ctx_sources {
+                                    for src in sources {
+                                        let (v, _) = self.lookup(src)?;
+                                        a.push(self.ir.add_expr(IrExpr::GetValue(v)));
+                                    }
+                                }
+                                for (arg, pt) in args.iter().zip(&params[ncap + ctx_n..]) {
                                     a.push(self.lower_arg(*arg, pt)?);
                                 }
                                 return Some(self.ir.add_expr(IrExpr::Call {

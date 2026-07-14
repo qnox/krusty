@@ -11368,6 +11368,39 @@ impl<'a> Checker<'a> {
                 }
                 // Local function call — resolved before top-level funs and constructors.
                 if let Some((stmt_id, sig)) = self.lookup_local_fun(&fname) {
+                    // Context parameters on a local function (`context(a: A) fun f() = a`): the leading
+                    // `context_count` params are supplied implicitly from the enclosing context. When
+                    // the explicit args fill the remaining value params and every context param is
+                    // satisfied by an in-scope source, resolve them and record the sources for the
+                    // lowerer (mirrors the top-level context-parameter path).
+                    let ctx_count = match self.file.stmt(stmt_id) {
+                        Stmt::LocalFun(f) => f.context_count,
+                        _ => 0,
+                    };
+                    if ctx_count > 0
+                        && ctx_count <= sig.params.len()
+                        && args.len() == sig.params.len() - ctx_count
+                    {
+                        let ctx_types = &sig.params[..ctx_count];
+                        if let Some(sources) = self.resolve_context_args(ctx_types) {
+                            for (i, a) in args.iter().enumerate() {
+                                let p = sig.params[ctx_count + i];
+                                let aty = match p {
+                                    Ty::Fun(fs)
+                                        if matches!(self.file.expr(*a), Expr::Lambda { .. }) =>
+                                    {
+                                        let pts = fs.params.clone();
+                                        self.check_lambda_with_types(*a, &pts)
+                                    }
+                                    _ => self.expr(*a),
+                                };
+                                self.expect_assignable(p, aty, self.span(*a), "argument");
+                            }
+                            self.context_args.insert(call, sources);
+                            self.mark_local_function_expr(call, stmt_id);
+                            return sig.ret;
+                        }
+                    }
                     if args.len() != sig.params.len() {
                         let arg_tys = self.arg_tys(args); // still record types for lowering
                         self.diags.error(
