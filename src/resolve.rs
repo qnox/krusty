@@ -10433,13 +10433,14 @@ impl<'a> Checker<'a> {
                                                 .iter()
                                                 .map(|a| self.expr_types[a.0 as usize])
                                                 .collect();
-                                            if crate::symbol_resolver::resolve_constructor(
-                                                &*self.syms.libraries,
-                                                &internal,
-                                                &tys,
-                                            )
-                                            .is_some()
-                                            {
+                                            // Match the plain constructor OR a value-class-param synthetic
+                                            // (`<init>(<erased…>, DefaultConstructorMarker)`). `tys` are in
+                                            // PARAMETER order (reordered from the named args by
+                                            // `map_call_args`), so this succeeds even when the source names
+                                            // are written out of order — the positional fallback below only
+                                            // matches when the erased param types happen to be
+                                            // permutation-invariant.
+                                            if self.library_ctor_resolves(&internal, &tys) {
                                                 return Ty::obj(&internal);
                                             }
                                         } else if crate::symbol_resolver::synthetic_default_ctor(

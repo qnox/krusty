@@ -130,6 +130,8 @@ mod classpath_enum_regex_vc_e2e;
 mod classpath_function_reference_e2e;
 #[path = "classpath_is_smartcast_e2e.rs"]
 mod classpath_is_smartcast_e2e;
+#[path = "classpath_nested_ctor_reordered_named_valueclass_e2e.rs"]
+mod classpath_nested_ctor_reordered_named_valueclass_e2e;
 #[path = "classpath_object_member_import_e2e.rs"]
 mod classpath_object_member_import_e2e;
 #[path = "classpath_object_nested_e2e.rs"]
