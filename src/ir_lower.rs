@@ -427,8 +427,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     .and_then(|cs| {
                         cs.props
                             .iter()
-                            .find(|(n, _, _)| n == &p.name)
-                            .map(|(_, t, _)| *t)
+                            .find_map(|(n, t, _)| (n == &p.name).then_some(*t))
                     })
                     .unwrap_or(Ty::Error);
                 // A generic delegate's `getValue` returns the ERASED `Object` (`<T> getValue(): T`); the
@@ -932,8 +931,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     .and_then(|cs| {
                         cs.props
                             .iter()
-                            .find(|(n, _, _)| n == &p.name)
-                            .map(|(_, t, _)| *t)
+                            .find_map(|(n, t, _)| (n == &p.name).then_some(*t))
                     })
                     .unwrap_or(Ty::Error);
                 let gname = property_getter_name(&p.name);
@@ -7644,8 +7642,7 @@ impl<'a> Lower<'a> {
         self.scope
             .iter()
             .rev()
-            .find(|(n, _, _)| n == name)
-            .map(|(_, v, t)| (*v, *t))
+            .find_map(|(n, v, t)| (n == name).then_some((*v, *t)))
     }
 
     fn class_of(&self, ty: Ty) -> Option<&ClassInfo> {

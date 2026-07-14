@@ -3181,8 +3181,7 @@ fn infer_lit_ty_p(
         // never mistypes a plain class name (which isn't a value and stays `Error` → the file skips).
         Expr::Name(n) => props
             .iter()
-            .find(|(pn, _, _)| pn == n)
-            .map(|(_, t, _)| *t)
+            .find_map(|(pn, t, _)| (pn == n).then_some(*t))
             .or_else(|| {
                 class_names
                     .get(n.as_str())
@@ -4609,8 +4608,7 @@ pub fn check_file(file: &File, syms: &mut SymbolTable, diags: &mut DiagSink) -> 
                             c.syms.classes.get(&cl.name).and_then(|cs| {
                                 cs.props
                                     .iter()
-                                    .find(|(n, _, _)| n == &bp.name)
-                                    .map(|(_, t, _)| *t)
+                                    .find_map(|(n, t, _)| (n == &bp.name).then_some(*t))
                             })
                         })
                         .unwrap_or(Ty::Error);
@@ -8413,8 +8411,7 @@ impl<'a> Checker<'a> {
                                     self.syms.class_by_internal(&internal).and_then(|c| {
                                         c.props
                                             .iter()
-                                            .find(|(n, _, _)| *n == name)
-                                            .map(|(_, _, v)| *v)
+                                            .find_map(|(n, _, v)| (*n == name).then_some(*v))
                                     })
                                 {
                                     self.expr(r); // capture the receiver
@@ -8456,8 +8453,7 @@ impl<'a> Checker<'a> {
                                 if let Some(is_var) = cls
                                     .props
                                     .iter()
-                                    .find(|(n, _, _)| *n == name)
-                                    .map(|(_, _, v)| *v)
+                                    .find_map(|(n, _, v)| (*n == name).then_some(*v))
                                 {
                                     if let Some(ty) = self.property_ref_ty(1, is_var) {
                                         return self.set(e, ty);
@@ -8500,8 +8496,7 @@ impl<'a> Checker<'a> {
                         let immutable_prop = self.syms.class_by_internal(internal).and_then(|c| {
                             c.props
                                 .iter()
-                                .find(|(n, _, _)| *n == name)
-                                .map(|(_, _, v)| *v)
+                                .find_map(|(n, _, v)| (*n == name).then_some(*v))
                         }) == Some(false);
                         if immutable_prop {
                             if let Some(ty) = self.property_ref_ty(0, false) {
