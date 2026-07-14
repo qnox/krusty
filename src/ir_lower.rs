@@ -1409,19 +1409,12 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 });
                 lo.ext_fun_ids.insert((recv_key, f.name.clone()), id);
             } else {
-                // This declaration's own overload (matched by erased parameter descriptors when the
-                // name is overloaded).
-                let sigs = syms.funs.get(&f.name)?;
-                let sig = if sigs.len() == 1 {
-                    &sigs[0]
-                } else {
-                    let want: Vec<Ty> = f
-                        .params
-                        .iter()
-                        .map(|p| ty_of(file, &p.ty, &*syms.libraries))
-                        .collect();
-                    sigs.iter().find(|s| s.params == want)?
-                };
+                let want: Vec<Ty> = f
+                    .params
+                    .iter()
+                    .map(|p| ty_of(file, &p.ty, &*syms.libraries))
+                    .collect();
+                let sig = syms.fun_by_params(&f.name, &want)?;
                 let params: Vec<Ty> = sig
                     .params
                     .iter()
@@ -1672,17 +1665,12 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     lo.scope.push(("this".to_string(), this_v, recv_ty));
                     (fid, syms.ext_funs.get(&(recv_key, f.name.clone()))?)
                 } else {
-                    let sigs = syms.funs.get(&f.name)?;
-                    let sig = if sigs.len() == 1 {
-                        &sigs[0]
-                    } else {
-                        let want: Vec<Ty> = f
-                            .params
-                            .iter()
-                            .map(|p| ty_of(file, &p.ty, &*syms.libraries))
-                            .collect();
-                        sigs.iter().find(|s| s.params == want)?
-                    };
+                    let want: Vec<Ty> = f
+                        .params
+                        .iter()
+                        .map(|p| ty_of(file, &p.ty, &*syms.libraries))
+                        .collect();
+                    let sig = syms.fun_by_params(&f.name, &want)?;
                     let fid = *lo.fun_ids.get(&(f.name.clone(), sig.params.clone()))?;
                     (fid, sig)
                 };
@@ -14090,17 +14078,12 @@ impl<'a> Lower<'a> {
                 (ps, r)
             }
         } else {
-            let sigs = self.syms.funs.get(fname)?;
-            let s = if sigs.len() == 1 {
-                sigs[0].clone()
-            } else {
-                let want: Vec<Ty> = f
-                    .params
-                    .iter()
-                    .map(|p| ty_of(self.afile, &p.ty, &*self.syms.libraries))
-                    .collect();
-                sigs.iter().find(|s| s.params == want)?.clone()
-            };
+            let want: Vec<Ty> = f
+                .params
+                .iter()
+                .map(|p| ty_of(self.afile, &p.ty, &*self.syms.libraries))
+                .collect();
+            let s = self.syms.fun_by_params(fname, &want)?;
             (s.params.clone(), s.ret)
         };
         if sig_params.len() != pnames.len() {
