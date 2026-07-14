@@ -2317,12 +2317,7 @@ fn logical_value_params(
             }
             out
         }
-        None => o
-            .callable
-            .params
-            .get(1..)
-            .map(<[Ty]>::to_vec)
-            .unwrap_or_default(),
+        None => o.extension_value_params().to_vec(),
     }
 }
 
