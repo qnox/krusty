@@ -19463,7 +19463,6 @@ impl<'a> Lower<'a> {
                             }));
                         }
                     }
-                    // `EnumClass.values()` / `EnumClass.valueOf(s)` — static enum methods.
                     if let Expr::Name(rn) = self.afile.expr(receiver).clone() {
                         let internal = class_internal(self.afile, &rn);
                         if let Some(ci) = self.classes.get(&internal) {
@@ -19474,8 +19473,8 @@ impl<'a> Lower<'a> {
                                         self.ir.add_expr(IrExpr::EnumValues { class: cls }),
                                     );
                                 }
-                                if name == "valueOf" && args.len() == 1 {
-                                    let a = self.expr(args[0])?;
+                                if let ("valueOf", [arg]) = (name.as_str(), &args[..]) {
+                                    let a = self.expr(*arg)?;
                                     return Some(
                                         self.ir
                                             .add_expr(IrExpr::EnumValueOf { class: cls, arg: a }),

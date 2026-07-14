@@ -10101,9 +10101,9 @@ impl<'a> Checker<'a> {
                         if name == "values" && args.is_empty() {
                             return Ty::array(Ty::obj(&internal));
                         }
-                        if name == "valueOf" && args.len() == 1 {
-                            let at = self.expr(args[0]);
-                            self.expect_assignable(Ty::String, at, self.span(args[0]), "argument");
+                        if let ("valueOf", [arg]) = (name.as_str(), args) {
+                            let at = self.expr(*arg);
+                            self.expect_assignable(Ty::String, at, self.span(*arg), "argument");
                             return Ty::obj(&internal);
                         }
                     }
