@@ -3708,21 +3708,7 @@ impl<'a> Parser<'a> {
         // Optional parameter list ending in `->`: `it ->`, `x: T ->`, `a, b ->` (types discarded; the
         // parameter types come from the declared function type via `check_lambda_with_types`). Detect
         // by scanning for a top-level `->` before the lambda's closing `}`.
-        let has_params = {
-            let mut j = self.i;
-            let mut depth = 0i32;
-            loop {
-                match self.t.get(j).map(|t| t.kind) {
-                    None => break false,
-                    Some(TokenKind::Arrow) if depth == 0 => break true,
-                    Some(TokenKind::RBrace) if depth == 0 => break false,
-                    Some(TokenKind::LParen | TokenKind::LBracket | TokenKind::LBrace) => depth += 1,
-                    Some(TokenKind::RParen | TokenKind::RBracket | TokenKind::RBrace) => depth -= 1,
-                    _ => {}
-                }
-                j += 1;
-            }
-        };
+        let has_params = self.lambda_arrow_before_close(self.i);
         // Parameter type annotations, parallel to `params` — kept (in a side-table) so a bare-value
         // lambda `{ x: Int -> … }` types its own parameters even without an expected function type.
         let mut param_types: Vec<Option<TypeRef>> = Vec::new();
@@ -6340,11 +6326,36 @@ impl<'a> Parser<'a> {
     /// At a `{`, whether it opens a LAMBDA (a top-level `->` precedes the matching `}`) rather than a
     /// block. Used to disambiguate a lambda branch body from a statement block.
     fn at_lambda_brace(&self) -> bool {
-        let mut j = self.i + 1;
+        self.lambda_arrow_before_close(self.i + 1)
+    }
+
+    /// Whether a top-level `->` (a lambda's parameter arrow) precedes the matching `}`, scanning from
+    /// token index `from`. Distinguishes a lambda `{ p -> … }` from a statement block. A lambda's
+    /// parameter list (everything before its arrow) is only names, `:`, commas, destructuring parens,
+    /// and parameter TYPES — never a `val`/`var`/`=`/statement keyword. Hitting one at depth 0 before
+    /// any arrow means the arrow belongs to a nested function TYPE inside a statement
+    /// (`{ val u: (Int) -> Unit = … }`), so this is a BLOCK, not a lambda.
+    fn lambda_arrow_before_close(&self, from: usize) -> bool {
+        let mut j = from;
         let mut depth = 0i32;
         loop {
             match self.t.get(j).map(|t| t.kind) {
                 None => return false,
+                Some(
+                    TokenKind::KwVal
+                    | TokenKind::KwVar
+                    | TokenKind::KwReturn
+                    | TokenKind::KwWhile
+                    | TokenKind::KwFor
+                    | TokenKind::KwDo
+                    | TokenKind::KwIf
+                    | TokenKind::KwWhen
+                    | TokenKind::KwClass
+                    | TokenKind::KwFun
+                    | TokenKind::KwImport
+                    | TokenKind::KwPackage
+                    | TokenKind::Eq,
+                ) if depth == 0 => return false,
                 Some(TokenKind::Arrow) if depth == 0 => return true,
                 Some(TokenKind::RBrace) if depth == 0 => return false,
                 Some(TokenKind::LParen | TokenKind::LBracket | TokenKind::LBrace) => depth += 1,
