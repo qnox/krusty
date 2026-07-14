@@ -384,7 +384,7 @@ pub fn lower_value_classes(
             }
             if let Some(root) = f.body {
                 let mut reach = HashSet::new();
-                collect_reachable(&ir.exprs, root, &mut reach);
+                collect_reachable_scoped(&ir.exprs, &ir.inline_only_fns, root, &mut reach);
                 for id in reach {
                     if let IrExpr::Variable { index, ty, .. } = &ir.exprs[id as usize] {
                         m.insert(*index, ty.clone());
@@ -1258,7 +1258,7 @@ pub fn lower_value_classes(
             field_getters: &field_getters,
         };
         let mut reach = HashSet::new();
-        collect_reachable(&ir.exprs, root, &mut reach);
+        collect_reachable_scoped(&ir.exprs, &ir.inline_only_fns, root, &mut reach);
         for id in reach {
             if let IrExpr::NotNullAssert { operand } = &ir.exprs[id as usize] {
                 match repr_ctx.repr(*operand) {
@@ -3569,4 +3569,41 @@ fn collect_reachable(exprs: &[IrExpr], root: ExprId, out: &mut HashSet<ExprId>) 
         return;
     }
     crate::ir::for_each_child(exprs, root, &mut |c| collect_reachable(exprs, c, out));
+}
+
+/// Like [`collect_reachable], but does NOT descend into a REAL closure's lambda body — only its
+/// captures. A non-inline lambda's body is a separate function (`impl_fn`) with its OWN value-index
+/// numbering and slot types; reaching it from the enclosing function would let the enclosing scope's
+/// slot-typed repr analysis mis-read the lambda's value-indices (e.g. box a value at a slot the
+/// enclosing function happens to hold a value class in). An INLINE-only lambda IS spliced into this
+/// scope, so its body is still traversed. Used by the per-function slot-typed box/unbox passes.
+fn collect_reachable_scoped(
+    exprs: &[IrExpr],
+    inline_only: &HashSet<u32>,
+    root: ExprId,
+    out: &mut HashSet<ExprId>,
+) {
+    if !out.insert(root) {
+        return;
+    }
+    if let IrExpr::Lambda {
+        impl_fn,
+        captures,
+        inline_body,
+        ..
+    } = &exprs[root as usize]
+    {
+        for &c in captures {
+            collect_reachable_scoped(exprs, inline_only, c, out);
+        }
+        if inline_only.contains(impl_fn) {
+            if let Some(b) = inline_body {
+                collect_reachable_scoped(exprs, inline_only, *b, out);
+            }
+        }
+        return;
+    }
+    crate::ir::for_each_child(exprs, root, &mut |c| {
+        collect_reachable_scoped(exprs, inline_only, c, out)
+    });
 }
