@@ -12557,11 +12557,8 @@ impl<'a> Checker<'a> {
             .map(|sig| sig.ret)
     }
 
-    /// — when `target`'s type has a USER-defined `op`Assign operator (member, or extension). Detect that,
-    /// type-check the argument, and mark the statement for the lowerer (which emits `target.opAssign(rhs)`).
-    /// Returns true if handled (the caller must then skip the ordinary reassignment checks). Restricted to
-    /// USER operators so a classpath `+=` (e.g. `MutableList`, whose `plusAssign` is `@InlineOnly`) keeps
-    /// its existing `target = target + rhs` lowering.
+    /// Detect a USER-defined `op`Assign operator (member or extension), type-check its argument, and mark
+    /// it for lowerer emission. Classpath `+=` keeps the existing `target = target + rhs` lowering.
     fn try_user_plus_assign(&mut self, s: StmtId, value: ExprId) -> bool {
         let Expr::Binary { op, lhs, rhs } = self.file.expr(value).clone() else {
             return false;
