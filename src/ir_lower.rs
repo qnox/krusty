@@ -12016,9 +12016,7 @@ impl<'a> Lower<'a> {
         // A property of type `Unit` holds the `kotlin/Unit` singleton (its value), so its field, ctor
         // parameter, and getter return are the `kotlin/Unit` REFERENCE — not the 0-word `Ty::Unit` whose
         // descriptor `V` is illegal for a field/parameter. (Only a `Unit` *return position* erases to void.)
-        if base == Ty::Unit {
-            return Ty::obj("kotlin/Unit");
-        }
+        let base = stored_value_ty(base);
         if base == Ty::obj("kotlin/Any") {
             // Resolve the NON-nullable form (`ty_ref` bails on a nullable type); the caller re-applies
             // the field's nullability to the IrType, so `Uuid` and `Uuid?` recover the same base type.
@@ -12884,28 +12882,16 @@ impl<'a> Lower<'a> {
                     Some(r) if !r.fun_params.is_empty() || r.name == "<fun>" => {
                         ty_of(self.afile, r, &*self.syms.libraries)
                     }
-                    // A nullable primitive (`Char?`) is `Nullable(prim)`, a reference slot (consistent
-                    // with the checker), else a boxed value is stored raw.
+                    // Nullable builtin non-reference values (`Int?`, `Unit?`, `Nothing?`) use the shared
+                    // source `Nullable(T)` form; the JVM backend maps that to a reference slot.
                     Some(r)
                         if r.nullable
-                            && Ty::from_name(&r.name)
-                                .and_then(Ty::nullable_boxed)
-                                .is_some() =>
-                    {
-                        Ty::from_name(&r.name).unwrap().nullable_boxed().unwrap()
-                    }
-                    // `Unit?` is a nullable `kotlin/Unit` reference (1-slot), not the 0-slot `Ty::Unit`
-                    // — a `Ty::Unit` slot is untracked in frames, so a `val x: Unit? = null` local would
-                    // be dropped from a branch-target frame ("Bad local variable type"). Guard against a
-                    // file-local class also named `Unit` (it takes the class arm below).
-                    Some(r)
-                        if r.nullable
-                            && r.name == "Unit"
+                            && Ty::from_name(&r.name).is_some_and(|t| !t.is_reference())
                             && !self
                                 .classes
                                 .contains_key(&class_internal(self.afile, &r.name)) =>
                     {
-                        Ty::obj("kotlin/Unit")
+                        ty_of(self.afile, r, &*self.syms.libraries)
                     }
                     Some(r) if Ty::from_name(&r.name).is_some() => Ty::from_name(&r.name).unwrap(),
                     Some(r)
