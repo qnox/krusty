@@ -4,6 +4,12 @@ set -euo pipefail
 
 export PATH="$HOME/.cargo/bin:$PATH"
 
+# The `gate` profile is unoptimized, so a test thread's default (~2 MiB) stack can overflow
+# NON-DETERMINISTICALLY on legitimate deep recursion (e.g. multi-level inline splicing) — a frame-layout
+# shift is enough to tip a passing run into `stack overflow, aborting`, which fails the whole binary (and
+# the pre-push gate). Give the test threads a generous stack, matching `scripts/coverage.sh`.
+export RUST_MIN_STACK="${RUST_MIN_STACK:-134217728}" # 128 MiB
+
 cd "$(dirname "$0")"
 
 if command -v just >/dev/null 2>&1; then
