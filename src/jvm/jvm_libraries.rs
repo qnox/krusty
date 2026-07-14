@@ -1468,7 +1468,21 @@ impl SymbolSource for JvmLibraries {
                 if mf.is_suspend {
                     logical.push(Ty::obj("kotlin/coroutines/Continuation"));
                 }
-                let ret = metadata_return_info(mf.ret_class, mf.ret_nullable).apply(physical_ret);
+                // The bare `ret_class` recovery erases a parameterized return to its raw class
+                // (`List<Ws>` → `List`, whose element is `Any`), so a member access on an element of a
+                // value-class-param member's result (`repo.findByOrg(id).firstOrNull { it.name }`) fails to
+                // resolve. The metadata generic signature carries the full return (`List<Ws>`); prefer it
+                // when it has type arguments, applying return nullability, else keep the `ret_class` return.
+                let ret = match mf.generic_sig.as_ref() {
+                    Some(g) if !g.ret.type_args().is_empty() => {
+                        if mf.ret_nullable {
+                            Ty::nullable(g.ret)
+                        } else {
+                            g.ret
+                        }
+                    }
+                    _ => metadata_return_info(mf.ret_class, mf.ret_nullable).apply(physical_ret),
+                };
                 let mut member =
                     LibraryMember::new(mf.kotlin_name.clone(), logical, ret, desc.to_string());
                 member.physical_name = Some(mf.jvm_name.clone());

@@ -1831,7 +1831,24 @@ pub fn lower_value_classes(
         }
         if let Some(x) = boxed_vc(&orig_rets[fid], &under) {
             if let Some(body) = ir.functions[fid].body {
-                box_tail(ir, body, &x, &under);
+                // A nullable value-class return `X?` has the BOXED descriptor `LX;`, so a tail that is an
+                // UNBOXED `X` value must be boxed — not only the syntactic `constructor-impl`/`unbox-impl`
+                // forms `box_tail` handled, but also a value-class field read (`di.applicationId`) or a
+                // call returning the unboxed underlying (`byDep(): X`) flowing in via nullable widening.
+                // `box_nullable_vc_tail` boxes exactly the tails whose representation IS an unboxed `X`
+                // (leaving `null`, already-boxed, and unrelated values — e.g. a suspend continuation's
+                // `kotlin/Result` resume value that shares the boxed descriptor — untouched).
+                box_nullable_vc_tail(
+                    ir,
+                    body,
+                    &x,
+                    &under,
+                    &orig_rets,
+                    &orig_fields,
+                    &slot_types[fid],
+                    &field_getters,
+                    true,
+                );
             }
         } else if orig_rets[fid]
             .non_null()
@@ -2469,6 +2486,13 @@ fn is_boxed_vc(
             callee: Callee::Local(fid),
             ..
         } => funcs.get(*fid as usize).is_some_and(|f| is_x(&f.ret)),
+        // A cross-file call returning the value class `x` (or `x?`) hands back a BOXED `x` — the sibling
+        // facade/owner exposes the boxed wrapper across the file boundary (like a classpath member). So a
+        // nullable-VC-return tail that is such a call is already boxed and must NOT be re-boxed.
+        IrExpr::Call {
+            callee: Callee::CrossFile { ret, .. } | Callee::CrossFileVirtual { ret, .. },
+            ..
+        } => is_x(ret),
         // A function-value invocation (`fn.invoke(..)`) whose logical return is a value class `x`: the
         // generated `Function{N}.invoke` adapter returns a BOXED `x` (the underlying `box-impl`'d back —
         // a `Function`'s reference type argument is the box), so a `.field` on the result `unbox-impl`s it.
@@ -2712,6 +2736,121 @@ fn box_ref_tail(
                 x,
             ) {
                 box_wrap(ir, id, x, under);
+            }
+        }
+    }
+}
+
+/// Box the tail of a NULLABLE value-class return `X?` (boxed descriptor `LX;`). Recurses `when`/block/
+/// `return` tails like [`box_ref_tail`], but boxes ONLY a tail whose representation IS an unboxed `X`
+/// (a value-class field read, a call returning the unboxed underlying, a `constructor-impl`). A `null`
+/// tail, an already-boxed `X`, and any UNRELATED value — e.g. a suspend continuation's `kotlin/Result`
+/// resume value, which shares the boxed-`Result` return descriptor but is not itself an unboxed
+/// `Result` — are left untouched. The widening counterpart of the checker accepting `X` where `X?` is
+/// expected. Works for a classpath value class too (it is in `under`, so `box_wrap` emits its `box-impl`).
+#[allow(clippy::too_many_arguments)]
+fn box_nullable_vc_tail(
+    ir: &mut IrFile,
+    id: ExprId,
+    x: &str,
+    under: &HashMap<String, Ty>,
+    rets: &[Ty],
+    fields: &[Vec<Ty>],
+    slots: &HashMap<u32, Ty>,
+    field_getters: &FieldGetters,
+    is_tail: bool,
+) {
+    let recur = |ir: &mut IrFile, e: ExprId, t: bool| {
+        box_nullable_vc_tail(ir, e, x, under, rets, fields, slots, field_getters, t)
+    };
+    match ir.exprs[id as usize].clone() {
+        // Control flow whose branch RESULTS are tails (they inherit `is_tail`); a `when`/`if` CONDITION
+        // is a plain sub-expression that may itself contain a `return` to box.
+        IrExpr::When { branches } => {
+            for (cond, body) in branches {
+                if let Some(c) = cond {
+                    recur(ir, c, false);
+                }
+                recur(ir, body, is_tail);
+            }
+        }
+        IrExpr::Block { stmts, value } => {
+            let n = stmts.len();
+            for (i, s) in stmts.iter().enumerate() {
+                // With no explicit `value`, the LAST statement is the block's value (an implicit return).
+                let stmt_tail = is_tail && value.is_none() && i + 1 == n;
+                recur(ir, *s, stmt_tail);
+            }
+            if let Some(v) = value {
+                recur(ir, v, is_tail);
+            }
+        }
+        // An explicit `return <v>` (tail OR a guard clause) boxes its returned value uniformly.
+        IrExpr::Return(Some(v)) => recur(ir, v, true),
+        IrExpr::Return(None) => {}
+        // A loop is never a tail value, but a `return` inside its body still belongs to this function.
+        IrExpr::While {
+            cond, body, update, ..
+        } => {
+            recur(ir, cond, false);
+            recur(ir, body, false);
+            if let Some(u) = update {
+                recur(ir, u, false);
+            }
+        }
+        IrExpr::Try {
+            body,
+            catches,
+            finally,
+            ..
+        } => {
+            recur(ir, body, is_tail);
+            for c in &catches {
+                recur(ir, c.body, is_tail);
+            }
+            if let Some(f) = finally {
+                recur(ir, f, false);
+            }
+        }
+        // A lambda's `return`s are the LAMBDA's, not this function's — do not descend.
+        IrExpr::Lambda { .. } => {}
+        _ => {
+            // First descend into any nested `return` (e.g. one inside a call argument), never a tail.
+            let mut kids = Vec::new();
+            crate::ir::for_each_child(&ir.exprs, id, &mut |c| kids.push(c));
+            for c in kids {
+                recur(ir, c, false);
+            }
+            // Then, at a TAIL, box this value if it is a VC-`x` value not already boxed. A tail is a VC-`x`
+            // value when its logical (checker) type IS `x` — a member/local call returning `x`, an
+            // `x`-typed field read — or its repr is a syntactic unboxed `x` (a `constructor-impl`). A tail
+            // whose logical type is NOT `x` (a `null`, or an unrelated value that merely shares the boxed
+            // return descriptor — a suspend continuation's `kotlin/Result` resume value) is left untouched.
+            if is_tail {
+                let logical_is_x = ir
+                    .logical_types
+                    .get(&id)
+                    .and_then(|t| t.non_null().obj_internal())
+                    == Some(x);
+                let repr_unboxed_x = matches!(
+                    repr(&ir.exprs, rets, fields, slots, under, &ir.logical_types, field_getters, id),
+                    Repr::Unboxed(ref c) if c == x
+                );
+                let already_boxed = is_boxed_vc(
+                    &ir.exprs,
+                    &ir.functions,
+                    fields,
+                    rets,
+                    slots,
+                    under,
+                    &ir.logical_types,
+                    field_getters,
+                    id,
+                    x,
+                );
+                if (logical_is_x || repr_unboxed_x) && !already_boxed {
+                    box_wrap(ir, id, x, under);
+                }
             }
         }
     }

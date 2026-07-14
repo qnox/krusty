@@ -42,3 +42,34 @@ fun box(): String = if (Int.MAX_VALUE == 0) \"bad\" else \"bad\"\n";
         "user class Int must not fall through to kotlin.Int.MAX_VALUE"
     );
 }
+
+#[test]
+fn companion_const_read_unqualified_from_member() {
+    // A companion `const val` read UNQUALIFIED from a regular member (`fun f() = HEX`, not `C.HEX`).
+    // The checker only resolved companion consts inside a companion member; the IR backend only read
+    // them via the qualified `C.HEX` path — so the bare form failed to resolve and, once resolved,
+    // found no instance field/getter and bailed the whole file. Both paths now inline the literal.
+    const SRC: &str = "class C {\n\
+    companion object { private const val HEX = 16; private const val LEN = 8 }\n\
+    fun f(n: Int): String = n.toString(HEX).take(LEN)\n\
+}\n\
+fun box(): String = if (C().f(255) == \"ff\") \"OK\" else \"FAIL\"\n";
+    assert_eq!(
+        run(SRC).expect("bare companion const read compiles + runs"),
+        "OK"
+    );
+}
+
+#[test]
+fn companion_const_bare_and_qualified_agree() {
+    // The bare and qualified reads of the same companion const must produce the same value.
+    const SRC: &str = "class C {\n\
+    companion object { const val N = 42 }\n\
+    fun bare(): Int = N\n\
+}\n\
+fun box(): String = if (C().bare() == 42 && C.N == 42) \"OK\" else \"FAIL\"\n";
+    assert_eq!(
+        run(SRC).expect("bare vs qualified companion const agree"),
+        "OK"
+    );
+}

@@ -732,7 +732,17 @@ pub fn relocate_insns(insns: &mut [Insn], src_cp: &[C], cw: &mut ClassWriter) ->
         let new = relocate_const(src_cp, src_idx, cw)?;
         if width == 1 {
             if new > 0xff {
-                return None;
+                // `ldc` (0x12) is the only 1-byte-pool-index op; its relocated index overflowed a byte
+                // (the host class's pool is large — common when splicing a stdlib body like `require`'s
+                // into a big file). Widen to `ldc_w` (0x13), the identical-semantics 2-byte form. The
+                // assembler derives instruction length from the opcode, so the size change is handled
+                // downstream (see `old_offsets`). A non-`ldc` 1-byte op has no wide form → bail.
+                if *op != 0x12 {
+                    return None;
+                }
+                *op = 0x13;
+                *operands = vec![(new >> 8) as u8, (new & 0xff) as u8];
+                continue;
             }
             operands[o] = new as u8;
         } else {

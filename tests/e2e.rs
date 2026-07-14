@@ -248,6 +248,8 @@ mod duplicate_enum_entry_check_e2e;
 mod duplicate_param_check_e2e;
 #[path = "elvis_newline_continuation_e2e.rs"]
 mod elvis_newline_continuation_e2e;
+#[path = "elvis_nullability_join_e2e.rs"]
+mod elvis_nullability_join_e2e;
 #[path = "empty_loop_body_e2e.rs"]
 mod empty_loop_body_e2e;
 #[path = "enum_body_property_e2e.rs"]
@@ -376,6 +378,8 @@ mod inline_deep_coverage_e2e;
 mod inline_e2e;
 #[path = "inline_splice_e2e.rs"]
 mod inline_splice_e2e;
+#[path = "inline_splice_ldc_wide_e2e.rs"]
+mod inline_splice_ldc_wide_e2e;
 #[path = "inline_vc_suspend_coverage_e2e.rs"]
 mod inline_vc_suspend_coverage_e2e;
 #[path = "inner_class_construction_e2e.rs"]
@@ -434,6 +438,12 @@ mod local_class_e2e;
 mod local_class_scoping_e2e;
 #[path = "local_fun_ref_e2e.rs"]
 mod local_fun_ref_e2e;
+#[path = "mangled_member_concrete_class_e2e.rs"]
+mod mangled_member_concrete_class_e2e;
+#[path = "mangled_member_nested_param_e2e.rs"]
+mod mangled_member_nested_param_e2e;
+#[path = "mangled_member_null_arg_e2e.rs"]
+mod mangled_member_null_arg_e2e;
 #[path = "map_entry_destructure_e2e.rs"]
 mod map_entry_destructure_e2e;
 #[path = "map_get_nullable_elvis_e2e.rs"]
@@ -442,8 +452,12 @@ mod map_get_nullable_elvis_e2e;
 mod member_array_ctor_inference_e2e;
 #[path = "member_ctrl_inference_e2e.rs"]
 mod member_ctrl_inference_e2e;
+#[path = "member_default_implicit_receiver_e2e.rs"]
+mod member_default_implicit_receiver_e2e;
 #[path = "member_infix_inference_e2e.rs"]
 mod member_infix_inference_e2e;
+#[path = "member_read_on_nullable_call_result_e2e.rs"]
+mod member_read_on_nullable_call_result_e2e;
 #[path = "metadata_kept_params.rs"]
 mod metadata_kept_params;
 #[path = "metadata_reader_e2e.rs"]
@@ -496,6 +510,8 @@ mod nullable_cast_e2e;
 mod nullable_function_type_e2e;
 #[path = "nullable_primitive_box_e2e.rs"]
 mod nullable_primitive_box_e2e;
+#[path = "nullable_ref_arg_to_erased_param_e2e.rs"]
+mod nullable_ref_arg_to_erased_param_e2e;
 #[path = "nullable_unit_e2e.rs"]
 mod nullable_unit_e2e;
 #[path = "number_and_ctor_coverage_e2e.rs"]
@@ -576,6 +592,10 @@ mod run_noreceiver_e2e;
 mod safe_call_e2e;
 #[path = "safe_call_generic_field_e2e.rs"]
 mod safe_call_generic_field_e2e;
+#[path = "safe_call_let_destructure_e2e.rs"]
+mod safe_call_let_destructure_e2e;
+#[path = "safe_call_member_on_generic_result_e2e.rs"]
+mod safe_call_member_on_generic_result_e2e;
 #[path = "safe_call_prim_intrinsic_e2e.rs"]
 mod safe_call_prim_intrinsic_e2e;
 #[path = "safe_cast_elvis_e2e.rs"]
@@ -660,6 +680,8 @@ mod transitive_type_bound_e2e;
 mod trim_indent_e2e;
 #[path = "try_catch_e2e.rs"]
 mod try_catch_e2e;
+#[path = "try_catch_expr_generic_merge_e2e.rs"]
+mod try_catch_expr_generic_merge_e2e;
 #[path = "type_param_vararg_check_e2e.rs"]
 mod type_param_vararg_check_e2e;
 #[path = "typeparam_cast_e2e.rs"]
@@ -688,6 +710,10 @@ mod value_class_e2e;
 mod value_class_init_validate_e2e;
 #[path = "value_class_map_key_e2e.rs"]
 mod value_class_map_key_e2e;
+#[path = "value_class_nullable_widen_return_e2e.rs"]
+mod value_class_nullable_widen_return_e2e;
+#[path = "value_class_param_generic_return_e2e.rs"]
+mod value_class_param_generic_return_e2e;
 #[path = "var_extension_property_e2e.rs"]
 mod var_extension_property_e2e;
 #[path = "var_smartcast_after_assign_e2e.rs"]
