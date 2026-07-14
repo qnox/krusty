@@ -341,6 +341,12 @@ impl SymbolTable {
         })
     }
 
+    pub fn fun_by_params(&self, name: &str, params: &[Ty]) -> Option<&Signature> {
+        let sigs = self.funs.get(name)?;
+        sigs.iter()
+            .find(|sig| sigs.len() == 1 || sig.params == params)
+    }
+
     fn fun_ret_by_erased_params(&self, name: &str, params: &[ErasedTypeKey]) -> Option<Ty> {
         let overloads = self.funs.get(name)?;
         overloads
