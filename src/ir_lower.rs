@@ -17576,13 +17576,8 @@ impl<'a> Lower<'a> {
                 // A `Nothing`-typed arm (a `throw`/`return`, or a CALL to a `Nothing`-returning function)
                 // pushes nothing at the merge — it's exempt from the "mixes Unit with a value" bail. The
                 // checker represents semantic bottom as `Ty::Nothing`.
-                let is_diverging_arm = |t: &Ty| -> bool { *t == Ty::Nothing };
                 let any_unit = body_tys.iter().any(|t| *t == Ty::Unit);
-                if any_unit
-                    && !body_tys
-                        .iter()
-                        .all(|t| *t == Ty::Unit || is_diverging_arm(t))
-                {
+                if any_unit && !body_tys.iter().all(|t| *t == Ty::Unit || *t == Ty::Nothing) {
                     return None;
                 }
                 // An unsigned subject compares its arms with unsigned `==` (bit-equal, same as signed),
