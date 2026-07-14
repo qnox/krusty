@@ -560,6 +560,14 @@ impl ParamList {
 }
 
 impl CallSig {
+    pub fn has_default_params(&self) -> bool {
+        self.param_defaults.iter().any(|&d| d)
+    }
+
+    pub fn has_known_required_param(&self, mut range: std::ops::Range<usize>) -> bool {
+        !self.param_defaults.is_empty() && range.any(|i| !self.param_has_default(i))
+    }
+
     pub fn param_has_default(&self, idx: usize) -> bool {
         self.param_defaults.get(idx).copied().unwrap_or(false)
     }
