@@ -1448,6 +1448,12 @@ fn descriptor_arg_subtype_of_param(lib: &dyn CompilerPlatform, arg: Ty, param: T
     is_classpath_subtype(lib, arg_internal, param_internal, 0)
 }
 
+fn value_erased_args(lib: &dyn CompilerPlatform, args: &[Ty]) -> Vec<Ty> {
+    args.iter()
+        .map(|&a| lib.value_underlying(a).unwrap_or(a))
+        .collect()
+}
+
 /// Resolve a constructor on a library type by argument types (with the type's own widening).
 pub fn resolve_constructor(
     lib: &dyn CompilerPlatform,
@@ -1473,10 +1479,7 @@ pub fn resolve_constructor(
     // (`class Rec(val id: Vid, val n: Int)` → `<init>(Ljava/lang/String;I)V` for `Vid(String)`), but the
     // call passes the value-class type itself (`Rec(Vid("x"), 1)` → arg `Vid`). Retry with each value-class
     // argument erased to its underlying, mirroring the ABI the descriptor-read `ctor` params already carry.
-    let erased: Vec<Ty> = args
-        .iter()
-        .map(|a| lib.value_underlying(*a).unwrap_or(*a))
-        .collect();
+    let erased = value_erased_args(lib, args);
     if erased != args {
         if let Some(m) = t.ctor(&erased) {
             crate::trace_compiler!(
@@ -1659,11 +1662,7 @@ pub fn resolve_synthetic_constructor(
     args: &[Ty],
 ) -> Option<SyntheticCtorCall> {
     let t = lib.resolve_type(internal)?;
-    // A value-class argument is passed as its erased underlying (`Vid` arg → `String` param).
-    let erased: Vec<Ty> = args
-        .iter()
-        .map(|a| lib.value_underlying(*a).unwrap_or(*a))
-        .collect();
+    let erased = value_erased_args(lib, args);
     for m in &t.constructors {
         if m.params
             .last()
