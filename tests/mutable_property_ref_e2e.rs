@@ -199,3 +199,18 @@ fn object_property_ref() {
         }\n";
     assert_eq!(run(MAIN).expect("object property ref"), "OK");
 }
+
+#[test]
+fn inherited_member_property_ref() {
+    // `b::f` where f is a `var` on superclass A (inherited) — get/set dispatch through the inherited
+    // accessor on the receiver.
+    const MAIN: &str = "open class A { var f: String = \"x\" }\n\
+        class B : A()\n\
+        fun box(): String {\n\
+        \x20 val b = B()\n\
+        \x20 val r = b::f\n\
+        \x20 r.set(\"OK\")\n\
+        \x20 return if (r.get() == \"OK\" && b.f == \"OK\") r.get() else \"fail\"\n\
+        }\n";
+    assert_eq!(run(MAIN).expect("inherited member property ref"), "OK");
+}
