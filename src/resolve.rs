@@ -5170,15 +5170,11 @@ impl<'a> Checker<'a> {
                 if let Some((params, ret)) = member {
                     (params, ret, InvokeKind::Operator { receiver_ty })
                 } else {
-                    // An `operator fun Recv.invoke(...)` EXTENSION (`"a"(12)`): logical params are the
-                    // extension's own (`callable.params[0]` is the receiver). Lowered as a static call.
                     let fi = self
                         .resolver()
                         .exact_receiver_extensions(receiver_ty, CALLABLE_INVOKE_OPERATOR)
                         .find(|o| {
-                            // Select by arity (`callable.params[0]` is the receiver) so an overloaded
-                            // `invoke()` / `invoke(Int)` picks the right one.
-                            o.callable.params.len() == arg_tys.len() + 1
+                            o.extension_value_params().len() == arg_tys.len()
                                 // A `suspend operator fun …invoke` would need continuation threading the
                                 // ExtensionOperator lowering doesn't do — leave it unresolved (skip).
                                 && !o.flags.suspend
@@ -7561,7 +7557,7 @@ impl<'a> Checker<'a> {
                     self.resolver()
                         .receiver_extensions(rt.non_null(), &name)
                         .into_iter()
-                        .find(|o| o.callable.params.len() == arg_tys.len() + 1)
+                        .find(|o| o.extension_value_params().len() == arg_tys.len())
                         .map(|fi| fi.callable.ret)
                         .unwrap_or(Ty::Error)
                 } else {
@@ -7789,16 +7785,15 @@ impl<'a> Checker<'a> {
                         if let Some(fi) =
                             self.resolver().exact_receiver_extensions(lt, fname).next()
                         {
-                            // logical params (receiver is `callable.params[0]`) — operators take one arg.
                             // Only apply the extension when the RIGHT operand actually matches its
                             // parameter type; otherwise this is the builtin (`Int * Int` inside the body
                             // of a `Int.times(V)` extension must NOT re-pick that extension and infer `V`).
-                            if fi.callable.params.len() == 2 {
+                            if fi.extension_value_params().len() == 1 {
                                 // Match the lowerer's guard (ir_lower Binary extension path): an exact
                                 // operand/param match, or a reference subtype. No loose cross-numeric
                                 // clause — a numeric-param operator on a primitive is the builtin's job
                                 // (and `p == rt` already covers a same-type numeric param).
-                                let p = fi.callable.params[1];
+                                let p = fi.extension_value_params()[0];
                                 let arg_ok = p == rt
                                     || (p.is_reference()
                                         && rt.is_reference()
@@ -12755,7 +12750,7 @@ impl<'a> Checker<'a> {
                         .or_else(|| {
                             self.resolver()
                                 .exact_receiver_extensions(it, &comp)
-                                .find(|o| o.callable.params.len() == 1)
+                                .find(|o| o.extension_value_params().is_empty())
                                 .map(|o| o.callable.ret)
                         })
                         // An indexable type (`List`): `componentN` is the inline `get(N-1)` — use the
