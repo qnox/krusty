@@ -890,7 +890,9 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                         // marker so an omitted-arg call skips the file instead of miscompiling.
                         lo.ir.fn_params.remove(&fid);
                     } else {
-                        lo.ir.fn_params.insert(fid, FnParamInfo::defaults(names, defaults));
+                        lo.ir
+                            .fn_params
+                            .insert(fid, FnParamInfo::defaults(names, defaults));
                     }
                 }
                 // Tag a `suspend` member method for the coroutine pass (same as a top-level suspend fun).
