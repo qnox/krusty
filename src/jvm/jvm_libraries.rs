@@ -2238,6 +2238,7 @@ impl crate::libraries::TargetRuntime for JvmLibraries {
             (0, false) => "kotlin/jvm/internal/PropertyReference0Impl",
             (0, true) => "kotlin/jvm/internal/MutablePropertyReference0Impl",
             (1, false) => "kotlin/jvm/internal/PropertyReference1Impl",
+            (1, true) => "kotlin/jvm/internal/MutablePropertyReference1Impl",
             _ => return None,
         };
         Some(PlatformCtor {

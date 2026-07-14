@@ -3393,6 +3393,17 @@ fn infer_lit_ty_p(
     }
 }
 
+/// The `invoke` arity of a reflection property/function-reference type — a `KProperty{N}`,
+/// `KMutableProperty{N}`, or `KFunction{N}` extends `Function{N}`, so calling the reference invokes
+/// `Function{N}.invoke`. Returns `N` for those internal names, else `None`.
+fn callable_reference_invoke_arity(internal: &str) -> Option<usize> {
+    let digits = internal
+        .strip_prefix("kotlin/reflect/KProperty")
+        .or_else(|| internal.strip_prefix("kotlin/reflect/KMutableProperty"))
+        .or_else(|| internal.strip_prefix("kotlin/reflect/KFunction"))?;
+    digits.parse::<usize>().ok()
+}
+
 /// Generic type parameters in scope, each with its JVM erasure. A parameter with a wrappable standard
 /// primitive upper bound (`<T : Int>`) erases to that PRIMITIVE — kotlinc specializes it (descriptor
 /// `(I)I`, not `(Object)Object`); every other parameter erases to `java/lang/Object`.
@@ -5207,6 +5218,23 @@ impl<'a> Checker<'a> {
                     suspend: sig.suspend,
                 },
             ),
+            // A property/function REFERENCE value (`obj::p` → `KProperty0`, `Type::p` → `KProperty1`,
+            // `::foo` → `KFunctionN`) IS a `FunctionN` (invoke arity = the trailing digit), so invoking
+            // it goes through `Function{N}.invoke` — an `invokeinterface`, not the `operator fun invoke`
+            // member path (which would emit an `invokevirtual` on the interface method → ICCE). Args and
+            // result are the erased `Object` the reflection `invoke` uses.
+            Ty::Obj(internal, _) if callable_reference_invoke_arity(internal).is_some() => {
+                let arity = callable_reference_invoke_arity(internal).unwrap();
+                let obj = Ty::obj(crate::types::wk::any());
+                (
+                    vec![obj; arity],
+                    obj,
+                    InvokeKind::Function {
+                        ret: obj,
+                        suspend: false,
+                    },
+                )
+            }
             _ => {
                 // A member `operator fun invoke` (user class or a classpath/library type) → `Operator`.
                 let member = self
