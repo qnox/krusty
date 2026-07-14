@@ -11334,7 +11334,7 @@ impl<'a> Lower<'a> {
             .resolver()
             .instance_members(rt, name)
             .into_iter()
-            .find(|m| m.call_sig.required < m.params.len() && !m.call_sig.param_names.is_empty())?;
+            .find(|m| m.call_sig.can_map_omitted_args(m.params.len()))?;
         let cs = fi.call_sig;
         // The `@Metadata`/synthetic key on the JVM name: a value-class-param-MANGLED member (`copy` →
         // `copy-<hash>`, with `copy-<hash>$default`) is looked up by its physical name.
