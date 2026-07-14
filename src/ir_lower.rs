@@ -19659,7 +19659,7 @@ impl<'a> Lower<'a> {
                             .and_then(|cs| {
                                 cs.methods
                                     .get(&name)
-                                    .filter(|s| !s.vararg && s.required == s.params.len())
+                                    .filter(|s| s.requires_all_args())
                                     .map(|s| {
                                         (i.to_string(), s.params.clone(), s.ret, cs.is_interface)
                                     })
