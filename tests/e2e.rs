@@ -378,6 +378,8 @@ mod inline_deep_coverage_e2e;
 mod inline_e2e;
 #[path = "inline_splice_e2e.rs"]
 mod inline_splice_e2e;
+#[path = "inline_splice_ldc_wide_e2e.rs"]
+mod inline_splice_ldc_wide_e2e;
 #[path = "inline_vc_suspend_coverage_e2e.rs"]
 mod inline_vc_suspend_coverage_e2e;
 #[path = "inner_class_construction_e2e.rs"]
