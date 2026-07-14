@@ -55,7 +55,7 @@ impl crate::assignable::TypeOracle for PlatformOracle<'_> {
         self.0.value_underlying(ty)
     }
     fn canonical_class(&self, internal: &str) -> String {
-        nested_class_identity(
+        platform_class_identity(
             self.0
                 .jvm_descriptor_form(Ty::obj(internal))
                 .obj_internal()
@@ -64,7 +64,7 @@ impl crate::assignable::TypeOracle for PlatformOracle<'_> {
     }
 }
 
-fn nested_class_identity(internal: &str) -> String {
+pub(crate) fn platform_class_identity(internal: &str) -> String {
     match internal.rfind('/') {
         Some(i) => format!("{}{}", &internal[..=i], internal[i + 1..].replace('.', "$")),
         None => internal.replace('.', "$"),
