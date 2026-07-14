@@ -233,8 +233,7 @@ impl ClassSig {
     pub fn prop(&self, name: &str) -> Option<(Ty, bool)> {
         self.props
             .iter()
-            .find(|(n, _, _)| n == name)
-            .map(|(_, t, v)| (*t, *v))
+            .find_map(|(n, t, v)| (n == name).then_some((*t, *v)))
     }
 
     pub fn single_method(&self) -> Option<&Signature> {
