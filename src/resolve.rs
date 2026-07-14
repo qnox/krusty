@@ -5002,9 +5002,7 @@ impl<'a> Checker<'a> {
         if let Some(internal) = receiver.obj_internal() {
             if let Some(sig) = self.syms.method_of(internal, name) {
                 if sig.params.len() == arg_tys.len() {
-                    for (i, &pt) in sig.params.iter().enumerate() {
-                        self.expect_assignable(pt, arg_tys[i], self.span(arg_exprs[i]), "argument");
-                    }
+                    self.expect_call_args(&sig.params, false, arg_exprs, arg_tys);
                     return Some(sig.ret);
                 }
             }
@@ -5016,9 +5014,7 @@ impl<'a> Checker<'a> {
             .cloned()
         {
             if !sig.vararg && sig.params.len() == arg_tys.len() {
-                for (i, &pt) in sig.params.iter().enumerate() {
-                    self.expect_assignable(pt, arg_tys[i], self.span(arg_exprs[i]), "argument");
-                }
+                self.expect_call_args(&sig.params, false, arg_exprs, arg_tys);
                 return Some(sig.ret);
             }
         }
@@ -10906,9 +10902,7 @@ impl<'a> Checker<'a> {
                                 ),
                             );
                         } else {
-                            for (i, (p, a)) in params.iter().zip(&arg_tys).enumerate() {
-                                self.expect_assignable(*p, *a, self.span(args[i]), "argument");
-                            }
+                            self.expect_call_args(&params, false, args, &arg_tys);
                         }
                         // A generic higher-order member: the result is the method's `<R>` inferred from
                         // the lambda body (`box.map { it.length }` → `Int`), not the erased `Object`.
@@ -11233,9 +11227,7 @@ impl<'a> Checker<'a> {
                                 ),
                             );
                         } else {
-                            for (i, (p, a)) in logical.iter().zip(&arg_tys).enumerate() {
-                                self.expect_assignable(*p, *a, self.span(args[i]), "argument");
-                            }
+                            self.expect_call_args(&logical, false, args, &arg_tys);
                         }
                         return fi.callable.ret;
                     }
@@ -11276,9 +11268,7 @@ impl<'a> Checker<'a> {
                                         _ => None,
                                     })
                             {
-                                for (i, (p, a)) in logical.iter().zip(&arg_tys).enumerate() {
-                                    self.expect_assignable(*p, *a, self.span(args[i]), "argument");
-                                }
+                                self.expect_call_args(&logical, false, args, &arg_tys);
                                 let recv_tp = decl.receiver.as_ref().map(|r| r.name.clone());
                                 let ret = match &decl.ret {
                                     Some(r) if Some(&r.name) == recv_tp.as_ref() => rt,
@@ -11332,9 +11322,7 @@ impl<'a> Checker<'a> {
                         .cloned()
                     {
                         if inner.ctor_params.len() == arg_tys.len() {
-                            for (i, (p, a)) in inner.ctor_params.iter().zip(&arg_tys).enumerate() {
-                                self.expect_assignable(*p, *a, self.span(args[i]), "argument");
-                            }
+                            self.expect_call_args(&inner.ctor_params, false, args, &arg_tys);
                             return Ty::obj(&inner_internal);
                         }
                     }
@@ -11363,9 +11351,7 @@ impl<'a> Checker<'a> {
                     // miscompile the calling convention.
                     .filter(|m| !m.suspend)
                     {
-                        for (i, (p, a)) in m.params.iter().zip(&arg_tys).enumerate() {
-                            self.expect_assignable(*p, *a, self.span(args[i]), "argument");
-                        }
+                        self.expect_call_args(&m.params, false, args, &arg_tys);
                         // Record the resolved static member so the lowerer emits it without
                         // re-resolving (see [`TypeInfo::resolved_companions`]).
                         let ret = m.ret;
