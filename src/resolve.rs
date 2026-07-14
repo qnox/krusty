@@ -12637,6 +12637,32 @@ impl<'a> Checker<'a> {
                     self.resolved_calls.insert(call, ResolvedCall::TopLevel(c));
                     return Ty::Unit;
                 }
+                // A `Type(args)` FACTORY where `Type` is a classpath class/interface whose COMPANION
+                // carries an `operator fun invoke(args)`: evaluate `Type` as its companion INSTANCE (a
+                // `getstatic Type.Companion` value) and dispatch as an invoke-operator on it — exactly
+                // kotlinc's `Type.Companion.invoke(args)`. An interface has no constructor, so a factory
+                // `invoke` is the only way to "construct" it (`InstanceInternalId(uuid)` in mission-core).
+                if self.lookup(&fname).is_none() {
+                    if let Some(ct) = self.classpath_companion_ty(&fname) {
+                        let has_invoke = crate::symbol_resolver::resolve_instance_member(
+                            &*self.syms.libraries,
+                            ct,
+                            CALLABLE_INVOKE_OPERATOR,
+                            &arg_tys,
+                        )
+                        .is_some_and(|m| !m.member.suspend);
+                        if has_invoke {
+                            // Type the callee name as the companion instance so lowering reads it as the
+                            // `getstatic Type.Companion` receiver; `record_invoke` selects the operator.
+                            self.set(callee, ct);
+                            if let Some(t) =
+                                self.record_invoke(call, callee, ct, args, &arg_tys, span)
+                            {
+                                return t;
+                            }
+                        }
+                    }
+                }
                 self.diags
                     .error(span, format!("unresolved function '{fname}'"));
                 Ty::Error
