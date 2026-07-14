@@ -560,6 +560,10 @@ impl ParamList {
 }
 
 impl CallSig {
+    pub fn param_has_default(&self, idx: usize) -> bool {
+        self.param_defaults.get(idx).copied().unwrap_or(false)
+    }
+
     pub fn source(
         param_names: Vec<String>,
         param_defaults: Vec<bool>,
