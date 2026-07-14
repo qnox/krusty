@@ -1414,19 +1414,22 @@ fn params_match_descriptor_form(lib: &dyn CompilerPlatform, params: &[Ty], args:
             .all(|(p, a)| lib.jvm_descriptor_form(*p) == *a)
 }
 
-/// Whether a call argument `arg` fits a parameter `param` after both are reduced to their platform
-/// descriptor identity — accepting a reference argument that is a SUBTYPE of the parameter's descriptor
-/// interface (`java/util/List` argument → `java/util/Collection` parameter). Non-reference sides only
-/// match on identity. The supertype closure is walked through the symbol source; no collection
-/// relationships are hardcoded here.
-fn descriptor_arg_subtype_of_param(lib: &dyn CompilerPlatform, arg: Ty, param: Ty) -> bool {
-    let pj = lib.jvm_descriptor_form(param);
-    let aj = lib.jvm_descriptor_form(arg);
+fn platform_subtype(lib: &dyn CompilerPlatform, sub: Ty, sup: Ty) -> bool {
     crate::assignable::is_subtype(
         &crate::assignable::TyCtx::new(),
         &PlatformOracle(lib),
-        aj,
-        pj,
+        sub,
+        sup,
+    )
+}
+
+/// Whether `arg` fits `param` after both are reduced to platform descriptor identity. The shared subtype
+/// relation handles identity plus reference widening through the symbol source.
+fn descriptor_arg_subtype_of_param(lib: &dyn CompilerPlatform, arg: Ty, param: Ty) -> bool {
+    platform_subtype(
+        lib,
+        lib.jvm_descriptor_form(arg),
+        lib.jvm_descriptor_form(param),
     )
 }
 
@@ -2434,12 +2437,7 @@ fn fun_return_compatible(lib: &dyn CompilerPlatform, param: Ty, arg: Ty) -> bool
         ar.non_null().kotlin_class_internal(),
     ) {
         if pr.is_reference() && ar.is_reference() {
-            return crate::assignable::is_subtype(
-                &crate::assignable::TyCtx::new(),
-                &PlatformOracle(lib),
-                Ty::obj(a),
-                Ty::obj(p),
-            );
+            return platform_subtype(lib, Ty::obj(a), Ty::obj(p));
         }
     }
     false
