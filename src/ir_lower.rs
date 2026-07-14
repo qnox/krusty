@@ -12421,13 +12421,12 @@ impl<'a> Lower<'a> {
                 }));
             }
         }
-        // Member operator: `recv.plusAssign(arg)`.
         let internal = self.recv_ty(lhs).obj_internal().map(|s| s.to_string())?;
         if let Some((class, index, mfid, _)) = self.resolve_method(&internal, aname) {
             let params = self.ir.functions[mfid as usize].params.clone();
-            if params.len() == 1 {
+            if let [param] = params.as_slice() {
                 let r = self.expr(lhs)?;
-                let a = self.lower_arg(rhs, &params[0])?;
+                let a = self.lower_arg(rhs, param)?;
                 return Some(self.ir.add_expr(IrExpr::MethodCall {
                     class,
                     index,
@@ -16470,14 +16469,13 @@ impl<'a> Lower<'a> {
                             }));
                         }
                     }
-                    // A class MEMBER operator (`operator fun plus(o: V)`): `a + b` → `a.plus(b)`.
                     if let Some(internal) = self.recv_ty(lhs).obj_internal().map(|s| s.to_string())
                     {
                         if let Some((class, index, mfid, _)) = self.resolve_method(&internal, opn) {
                             let params = self.ir.functions[mfid as usize].params.clone();
-                            if params.len() == 1 {
+                            if let [param] = params.as_slice() {
                                 let l = self.expr(lhs)?;
-                                let r = self.lower_arg(rhs, &params[0])?;
+                                let r = self.lower_arg(rhs, param)?;
                                 return Some(self.ir.add_expr(IrExpr::MethodCall {
                                     class,
                                     index,
@@ -16488,8 +16486,7 @@ impl<'a> Lower<'a> {
                         }
                     }
                 }
-                // A class `operator fun compareTo(o): Int` drives a comparison: `a < b` →
-                // `a.compareTo(b) < 0`.
+                // A class `compareTo(o): Int` drives relational operators.
                 if matches!(op, BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge) {
                     if let Some(internal) = self.recv_ty(lhs).obj_internal().map(|s| s.to_string())
                     {
@@ -16497,9 +16494,9 @@ impl<'a> Lower<'a> {
                             self.resolve_method(&internal, "compareTo")
                         {
                             let params = self.ir.functions[mfid as usize].params.clone();
-                            if params.len() == 1 {
+                            if let [param] = params.as_slice() {
                                 let l = self.expr(lhs)?;
-                                let r = self.lower_arg(rhs, &params[0])?;
+                                let r = self.lower_arg(rhs, param)?;
                                 let cmp = self.ir.add_expr(IrExpr::MethodCall {
                                     class,
                                     index,
