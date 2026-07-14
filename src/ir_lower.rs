@@ -5242,17 +5242,16 @@ impl<'a> Lower<'a> {
         let arg_tys = self.arg_tys(args);
         // A classpath `@JvmInline value class` is constructed via its static `constructor-impl(U): U`,
         // which returns the UNBOXED underlying value — kotlinc's unboxed representation (the real `<init>`
-        // is private, so a plain `new`/`invokespecial` would be an IllegalAccessError). The value-classes
-        // pass holds the value as its underlying everywhere, so the result flows on as `U`.
+        // is private, so a plain `new`/`invokespecial` would be an IllegalAccessError).
         if let Some(under) = self
             .syms
             .libraries
             .resolve_type(internal)
             .and_then(|t| t.value_underlying)
         {
-            if args.len() == 1 {
+            if let [source_arg] = args {
                 let desc = self.syms.libraries.method_descriptor(&[under], under)?;
-                let arg = self.lower_arg(args[0], &ty_to_ir(under))?;
+                let arg = self.lower_arg(*source_arg, &ty_to_ir(under))?;
                 return Some(self.ir.add_expr(IrExpr::Call {
                     callee: Callee::Static {
                         owner: internal.to_string(),
