@@ -52,6 +52,10 @@ pub struct Signature {
 }
 
 impl Signature {
+    pub fn requires_all_args(&self) -> bool {
+        !self.vararg && self.params.len() == self.required
+    }
+
     pub fn call_sig(&self) -> CallSig {
         CallSig::source(
             self.param_names.clone(),
@@ -8254,7 +8258,7 @@ impl<'a> Checker<'a> {
                     // ref to the local fun's decl — the SAME map a local-fun CALL uses — so lowering can
                     // find the lifted static method and prepend its captures.
                     if let Some((stmt_id, sig)) = self.lookup_local_fun(&name) {
-                        if !sig.vararg && sig.params.len() == sig.required {
+                        if sig.requires_all_args() {
                             self.mark_local_function_expr(e, stmt_id);
                             return self.set(e, Ty::fun(sig.params.clone(), sig.ret));
                         }
@@ -8267,10 +8271,7 @@ impl<'a> Checker<'a> {
                     // the checker and lowerer in agreement).
                     if let Some(Ty::Obj(internal, _)) = self.this_ty.clone() {
                         if let Some(sig) = self.syms.method_of(&internal, &name) {
-                            if !sig.vararg
-                                && sig.params.len() == sig.required
-                                && sig.ret != Ty::Nothing
-                            {
+                            if sig.requires_all_args() && sig.ret != Ty::Nothing {
                                 return self.set(e, Ty::fun(sig.params.clone(), sig.ret));
                             }
                         }
@@ -8288,7 +8289,7 @@ impl<'a> Checker<'a> {
                         .get(&name)
                         .and_then(|v| (v.len() == 1).then(|| v[0].clone()))
                     {
-                        if !sig.vararg && sig.params.len() == sig.required {
+                        if sig.requires_all_args() {
                             return self.set(e, Ty::fun(sig.params.clone(), sig.ret));
                         }
                     }
@@ -8298,7 +8299,7 @@ impl<'a> Checker<'a> {
                     if !self.module_declares(&name) {
                         if let Some(internal) = self.object_member_import(&name) {
                             if let Some(sig) = self.syms.method_of(&internal, &name) {
-                                if !sig.vararg && sig.params.len() == sig.required {
+                                if sig.requires_all_args() {
                                     self.expr_lowers.insert(
                                         e,
                                         ExprLowering::ImportedObjectMemberRef { internal },
@@ -8351,7 +8352,7 @@ impl<'a> Checker<'a> {
                         if rn == "this" {
                             if let Some(Ty::Obj(internal, _)) = self.this_ty {
                                 if let Some(sig) = self.syms.method_of(internal, &name) {
-                                    if !sig.vararg && sig.params.len() == sig.required {
+                                    if sig.requires_all_args() {
                                         return self.set(e, Ty::fun(sig.params.clone(), sig.ret));
                                     }
                                 }
@@ -8366,7 +8367,7 @@ impl<'a> Checker<'a> {
                         if let Some(loc) = self.lookup(&rn) {
                             if let Some(internal) = loc.ty.obj_internal() {
                                 if let Some(sig) = self.syms.method_of(internal, &name) {
-                                    if !sig.vararg && sig.params.len() == sig.required {
+                                    if sig.requires_all_args() {
                                         self.expr(r); // capture the receiver
                                         return self.set(e, Ty::fun(sig.params.clone(), sig.ret));
                                     }
@@ -8393,7 +8394,7 @@ impl<'a> Checker<'a> {
                         if self.lookup(&rn).is_none() && !self.syms.objects.contains(&rn) {
                             if let Some(cls) = self.syms.classes.get(&rn).cloned() {
                                 if let Some(sig) = cls.methods.get(&name).cloned() {
-                                    if !sig.vararg && sig.params.len() == sig.required {
+                                    if sig.requires_all_args() {
                                         let mut params = vec![Ty::obj(&cls.internal)];
                                         params.extend(sig.params.iter().copied());
                                         return self.set(e, Ty::fun(params, sig.ret));
@@ -8410,10 +8411,7 @@ impl<'a> Checker<'a> {
                                     .get(&(recv_ty.erased_recv(), name.clone()))
                                     .cloned()
                                 {
-                                    if !sig.vararg
-                                        && sig.params.len() == sig.required
-                                        && sig.ret != Ty::Nothing
-                                    {
+                                    if sig.requires_all_args() && sig.ret != Ty::Nothing {
                                         let mut params = vec![recv_ty];
                                         params.extend(sig.params.iter().copied());
                                         return self.set(e, Ty::fun(params, sig.ret));
@@ -8438,7 +8436,7 @@ impl<'a> Checker<'a> {
                         if self.lookup(&rn).is_none() && self.syms.objects.contains(&rn) {
                             if let Some(cls) = self.syms.classes.get(&rn).cloned() {
                                 if let Some(sig) = cls.methods.get(&name).cloned() {
-                                    if !sig.vararg && sig.params.len() == sig.required {
+                                    if sig.requires_all_args() {
                                         return self.set(e, Ty::fun(sig.params.clone(), sig.ret));
                                     }
                                 }
@@ -8454,7 +8452,7 @@ impl<'a> Checker<'a> {
                     let rty = self.expr(r);
                     if let Some(internal) = rty.obj_internal() {
                         if let Some(sig) = self.syms.method_of(internal, &name) {
-                            if !sig.vararg && sig.params.len() == sig.required {
+                            if sig.requires_all_args() {
                                 return self.set(e, Ty::fun(sig.params.clone(), sig.ret));
                             }
                         }
@@ -8482,7 +8480,7 @@ impl<'a> Checker<'a> {
                         .get(&(rty.erased_recv(), name.clone()))
                         .cloned()
                     {
-                        if !sig.vararg && sig.params.len() == sig.required {
+                        if sig.requires_all_args() {
                             return self.set(e, Ty::fun(sig.params.clone(), sig.ret));
                         }
                     }
@@ -12436,10 +12434,7 @@ impl<'a> Checker<'a> {
                     // when the module does not declare `fname` itself.
                     if !self.module_declares(&fname) {
                         if let Some(sig) = self.syms.method_of(&internal, &fname) {
-                            if !sig.vararg
-                                && sig.params.len() == sig.required
-                                && args.len() == sig.params.len()
-                            {
+                            if sig.requires_all_args() && args.len() == sig.params.len() {
                                 for (i, &a) in args.iter().enumerate() {
                                     self.expect_assignable(
                                         sig.params[i],
