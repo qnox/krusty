@@ -2336,8 +2336,7 @@ fn best_by_args<'a>(
     // exact-arity subtype pass in `select_overload` applies — the exact/`Any`-widened passes above stay
     // stricter so an exact call still prefers its precise overload.
     let fits = |p: &Ty, a: &Ty| {
-        *p == *a
-            || fun_arg_matches(lib, p, a)
+        fun_arg_matches(lib, p, a)
             || platform_arg_assignable(lib, p, a)
             // A function-shaped argument that IS-A `FunctionN` by supertype (a `KProperty1` fits a
             // `(T) -> R` param) — matched by arity, since it is neither a `Ty::Fun` nor equal to the param.
