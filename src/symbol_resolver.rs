@@ -1682,10 +1682,9 @@ pub fn resolve_synthetic_constructor(
         }
         // A reference argument may be a NOMINAL SUBTYPE of its parameter (`Outer(id: Vid, a: A, b: B)`
         // constructed with `A.X(…)`/`B.Y(…)`, sealed subclasses) — the same widening `resolve_constructor`
-        // allows for a plain constructor, here composed with the value-class-erased synthetic-marker ctor
-        // (which a plain subtype pass skips because of the trailing marker parameter).
+        // allows for a plain constructor, composed with the value-class-erased synthetic-marker ctor.
         if !erased.iter().zip(real_params).all(|(a, p)| {
-            p == a || *p == Ty::obj("kotlin/Any") || descriptor_arg_subtype_of_param(lib, *a, *p)
+            *p == Ty::obj("kotlin/Any") || descriptor_arg_subtype_of_param(lib, *a, *p)
         }) {
             continue;
         }
