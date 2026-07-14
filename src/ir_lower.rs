@@ -671,9 +671,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                         }
                         _ => ir,
                     };
-                    // A field carries its declared nullability into the IrType (`Ty` drops it). The
-                    // JVM value-class pass keys boxing + null-check elision on a value class's
-                    // underlying `?` (`X(val v: Int?)` → nullable `Integer`).
+                    // Preserve declared field nullability in IR.
                     let ir = if c.props.iter().any(|p| p.name == *n && p.ty.nullable) {
                         mark_nullable(ir)
                     } else {
@@ -723,8 +721,6 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                         check: None,
                     })
                     .chain(c.props.iter().map(|p| {
-                        // Carry a declared `?` into the ctor-param IrType (like the field), so a nullable
-                        // value-class parameter erases to the boxed `X` consistently with its getter/field.
                         // Use `field_ty` so a classpath-typed param matches the field/getter (not erased `Any`).
                         let t = ty_to_ir(lo.field_ty(file, &p.ty));
                         let t = if p.ty.nullable { mark_nullable(t) } else { t };
@@ -1409,7 +1405,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 let recv_key = recv_ty.erased_recv();
                 let sig = syms.ext_funs.get(&(recv_key, f.name.clone()))?;
                 let mut params = vec![ty_to_ir(recv_ty)];
-                params.extend(sig.params.iter().map(|t| ty_to_ir(*t)));
+                params.extend(sig.params.iter().map(|t| stored_value_ty(*t)));
                 let ret = ty_to_ir(sig.ret);
                 let id = lo.ir.add_fun(IrFunction {
                     name: f.name.clone(),
@@ -1433,7 +1429,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     .iter()
                     .enumerate()
                     .map(|(i, t)| {
-                        let ir = ty_to_ir(*t);
+                        let ir = stored_value_ty(*t);
                         if f.params.get(i).is_some_and(|p| p.ty.nullable) {
                             mark_nullable(ir)
                         } else {
@@ -1491,7 +1487,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                         cap.shared_cell,
                     )?);
                 }
-                params.extend(local_fun.sig.params.iter().map(|t| ty_to_ir(*t)));
+                params.extend(local_fun.sig.params.iter().map(|t| stored_value_ty(*t)));
                 let ret = ty_to_ir(local_fun.sig.ret);
                 let id = lo.ir.add_fun(IrFunction {
                     name: local_fun.mangled.clone(),
@@ -4068,7 +4064,7 @@ fn body_prop_ty(
     p: &ast::PropDecl,
     plat: &dyn CompilerPlatform,
 ) -> Ty {
-    if let Some(r) = p.ty.as_ref() {
+    let ty = if let Some(r) = p.ty.as_ref() {
         let base = ty_of(file, r, plat);
         // `ty_of` resolves only file-local types + built-ins; a CLASSPATH type (`ArrayList<Int>`) erases to
         // `kotlin/Any`. When the declared annotation is NOT `Any` yet erased to it, recover the concrete
@@ -4076,10 +4072,10 @@ fn body_prop_ty(
         // resolved) — so a top-level `val prop: ArrayList<Int>` backing field is `ArrayList`, not `Object`.
         if base == Ty::obj("kotlin/Any") && r.name != "Any" && r.name != "kotlin/Any" {
             if let Some(FunBody::Expr(g) | FunBody::Block(g)) = p.getter {
-                return info.ty(g);
+                return stored_value_ty(info.ty(g));
             }
             if let Some(i) = p.init {
-                return info.ty(i);
+                return stored_value_ty(info.ty(i));
             }
         }
         base
@@ -4089,6 +4085,15 @@ fn body_prop_ty(
         info.ty(i)
     } else {
         Ty::Error
+    };
+    stored_value_ty(ty)
+}
+
+fn stored_value_ty(ty: Ty) -> Ty {
+    if ty == Ty::Unit {
+        Ty::obj("kotlin/Unit")
+    } else {
+        ty
     }
 }
 
@@ -6114,7 +6119,7 @@ impl<'a> Lower<'a> {
         // Impl parameters: captured variables first, then the lambda's own parameters.
         let mut params_ir: Vec<Ty> = captures.iter().map(|(_, _, t)| ty_to_ir(*t)).collect();
         let own_params_from = params_ir.len() as u32;
-        params_ir.extend(sig.params.iter().map(|t| ty_to_ir(*t)));
+        params_ir.extend(sig.params.iter().map(|t| stored_value_ty(*t)));
         let fid = self.ir.add_fun(IrFunction {
             name: impl_name,
             params: params_ir,
@@ -9683,7 +9688,7 @@ impl<'a> Lower<'a> {
         // OVERLOADED enclosing functions share `cur_fn_name`, so a seq-based name would clash.
         let impl_name = format!("{}$boundref${}", self.cur_fn_name, e.0);
         let mut impl_params: Vec<Ty> = vec![ty_to_ir(rty)];
-        impl_params.extend(params.iter().map(|t| ty_to_ir(*t)));
+        impl_params.extend(params.iter().map(|t| stored_value_ty(*t)));
         let bfid = self.ir.add_fun(IrFunction {
             name: impl_name,
             params: impl_params,
@@ -17628,8 +17633,14 @@ impl<'a> Lower<'a> {
                 // A `Nothing`-typed arm (a `throw`/`return`, or a CALL to a `Nothing`-returning function)
                 // pushes nothing at the merge — it's exempt from the "mixes Unit with a value" bail. The
                 // checker represents semantic bottom as `Ty::Nothing`.
-                let any_unit = body_tys.iter().any(|t| *t == Ty::Unit);
-                if any_unit && !body_tys.iter().all(|t| *t == Ty::Unit || *t == Ty::Nothing) {
+                let unit_value_ty = Ty::obj("kotlin/Unit");
+                let is_unit_body = |t: Ty| t == Ty::Unit || t == unit_value_ty;
+                let any_unit = body_tys.iter().any(|t| is_unit_body(*t));
+                let all_unit = any_unit
+                    && body_tys
+                        .iter()
+                        .all(|t| is_unit_body(*t) || *t == Ty::Nothing);
+                if any_unit && !all_unit {
                     return None;
                 }
                 // An unsigned subject compares its arms with unsigned `==` (bit-equal, same as signed),
@@ -17687,7 +17698,9 @@ impl<'a> Lower<'a> {
                 let res = self.info.ty(e);
                 let mut branches = Vec::new();
                 for (ai, arm) in arms.iter().enumerate() {
-                    let body = if res.is_reference() {
+                    let body = if all_unit {
+                        self.lower_arg(arm.body, &unit_value_ty)?
+                    } else if res.is_reference() {
                         self.lower_arg(arm.body, &ty_to_ir(res))?
                     } else {
                         self.expr(arm.body)?
@@ -21399,10 +21412,12 @@ fn field_ty_with_args(file: &ast::File, tr: &ast::TypeRef, plat: &dyn CompilerPl
 fn ty_of(file: &ast::File, r: &ast::TypeRef, plat: &dyn CompilerPlatform) -> Ty {
     // Function type, builtin scalar, or primitive array — the leaf shared by every type resolver.
     if let Some(t) = crate::resolve::typeref_leaf(r, &mut |x| ty_of(file, x, plat)) {
-        // A nullable primitive is `Nullable(prim)`, a reference slot consistent with the checker —
-        // otherwise a boxed value would be stored in a primitive field and unboxed wrong.
+        // Nullable primitives/Unit are reference slots consistent with the checker.
         if r.nullable && t == Ty::Nothing {
             return Ty::nullable(Ty::Nothing);
+        }
+        if r.nullable && t == Ty::Unit {
+            return Ty::nullable(Ty::Unit);
         }
         if r.nullable && !t.is_reference() {
             return t.nullable_boxed().unwrap_or(t);
@@ -21592,7 +21607,7 @@ pub(crate) fn ty_to_ir(t: Ty) -> Ty {
 }
 
 fn tys_to_ir(tys: &[Ty]) -> Vec<Ty> {
-    tys.to_vec()
+    tys.iter().copied().map(stored_value_ty).collect()
 }
 
 /// The IR element type of a captured mutable local's `Ref` holder — like [`ty_to_ir`], but PRESERVING a
