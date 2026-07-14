@@ -1527,9 +1527,8 @@ pub fn resolve_constructor(
         // `X(u)` over the single underlying value — reference (`RoleId(String)`) or scalar
         // (`Count(Int)`); both erase to the underlying through the value-classes pass. (`null` only fits a
         // reference underlying.)
-        let fits = args.len() == 1
-            && (args[0] == underlying
-                || (matches!(args[0], Ty::Null) && underlying.is_reference()));
+        let fits = matches!(args, [arg]
+            if *arg == underlying || (matches!(*arg, Ty::Null) && underlying.is_reference()));
         // A ZERO-arg construction `Id()` when the sole underlying param is DEFAULTED — kotlinc realizes
         // it through the `constructor-impl$default` synthetic (which fills the default itself). Accept it
         // ONLY when that synthetic exists on the classpath, AND the underlying is a REFERENCE: the lowering
