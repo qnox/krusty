@@ -2204,12 +2204,18 @@ impl<'a> Parser<'a> {
             None
         };
         self.parse_where_clause();
+        // A `=`-body or block body may sit on a following line (`fun f(): T\n{ … }`). Skip plain line
+        // breaks to find it, restoring the position if what follows is neither — an abstract/no-body
+        // function (no valid member/declaration begins with a bare `=` or `{`, so this is unambiguous).
+        let body_save = self.i;
+        self.skip_newlines();
         let body = if self.eat(TokenKind::Eq) {
             self.skip_newlines();
             FunBody::Expr(self.parse_expr())
         } else if self.at(TokenKind::LBrace) {
             FunBody::Block(self.parse_block_expr())
         } else {
+            self.i = body_save;
             FunBody::None
         };
         let end = self.t[self.i.saturating_sub(1)].span;
@@ -2848,6 +2854,8 @@ impl<'a> Parser<'a> {
             )
         };
         let (supertypes, _base, _base_args, _, _) = self.parse_supertypes();
+        // `interface I<T> where T : Bound` — generic constraints after the supertype list, before the body.
+        self.parse_where_clause();
         let mut methods = Vec::new();
         let mut body_props: Vec<PropDecl> = Vec::new();
         let mut companion_methods: Vec<FunDecl> = Vec::new();

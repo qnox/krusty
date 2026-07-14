@@ -210,6 +210,8 @@ mod data_class_param_check_e2e;
 mod data_copy_e2e;
 #[path = "dataclass_hash_and_sam_e2e.rs"]
 mod dataclass_hash_and_sam_e2e;
+#[path = "decl_body_on_next_line_e2e.rs"]
+mod decl_body_on_next_line_e2e;
 #[path = "default_args_member_e2e.rs"]
 mod default_args_member_e2e;
 #[path = "default_args_synthetic_e2e.rs"]
