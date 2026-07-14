@@ -8455,9 +8455,7 @@ impl<'a> Lower<'a> {
         let sets: Vec<Vec<String>> = self
             .resolver()
             .top_level_function_set(fname)
-            .overloads
-            .into_iter()
-            .filter(|o| o.is_top_level_with_param_names())
+            .into_top_level_with_param_names()
             .map(|o| o.call_sig.param_names)
             .collect();
         let [param_names] = sets.as_slice() else {
@@ -15624,9 +15622,7 @@ impl<'a> Lower<'a> {
                     || self
                         .resolver()
                         .top_level_function_set(&name)
-                        .overloads
-                        .iter()
-                        .any(|o| o.is_top_level());
+                        .has_top_level();
                 if !self.module_declares(&name) && !names_a_function {
                     let ci = self.class_of(sig.ret)?;
                     let class_id = ci.id;
