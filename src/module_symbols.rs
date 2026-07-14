@@ -7,8 +7,8 @@
 //! lowerer can pick the same-file / cross-file / library emit form from resolution alone.
 
 use crate::libraries::{
-    CallSig, FnFlags, FnKind, FunctionInfo, FunctionSet, InlineKind, LibraryCallable,
-    LibraryMember, LibraryType, Origin,
+    FnFlags, FnKind, FunctionInfo, FunctionSet, InlineKind, LibraryCallable, LibraryMember,
+    LibraryType, Origin,
 };
 use crate::resolve::{ClassSig, Signature, SymbolTable};
 use crate::symbol_source::SymbolSource;
@@ -162,14 +162,7 @@ fn lib_member(name: &str, sig: &Signature) -> LibraryMember {
     let mut m = LibraryMember::new(name.to_string(), sig.params.clone(), sig.ret, String::new());
     m.suspend = sig.is_suspend;
     m.inline = crate::libraries::InlineKind::from_flags(sig.is_inline, false);
-    m.call_sig = CallSig::source(
-        sig.param_names.clone(),
-        sig.param_defaults.clone(),
-        sig.lambda_param_types.clone(),
-        sig.lambda_recv.clone(),
-        sig.required,
-        sig.vararg,
-    );
+    m.call_sig = sig.call_sig();
     m
 }
 
@@ -208,14 +201,7 @@ fn fn_info(
     };
     FunctionInfo {
         receiver_rank: rank,
-        call_sig: CallSig::source(
-            sig.param_names.clone(),
-            sig.param_defaults.clone(),
-            sig.lambda_param_types.clone(),
-            sig.lambda_recv.clone(),
-            sig.required,
-            sig.vararg,
-        ),
+        call_sig: sig.call_sig(),
         flags: FnFlags {
             inline: InlineKind::from_flags(sig.is_inline, false),
             // Same-file `suspend fun` — flows from the AST via `Signature.is_suspend` so the resolver

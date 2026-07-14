@@ -51,6 +51,19 @@ pub struct Signature {
     pub is_suspend: bool,
 }
 
+impl Signature {
+    pub fn call_sig(&self) -> CallSig {
+        CallSig::source(
+            self.param_names.clone(),
+            self.param_defaults.clone(),
+            self.lambda_param_types.clone(),
+            self.lambda_recv.clone(),
+            self.required,
+            self.vararg,
+        )
+    }
+}
+
 /// A primary-constructor parameter's default value, captured in a FILE-INDEPENDENT form — NOT an
 /// `ExprId` (which indexes only the defining file's `expr_arena`, so a *different* file filling the
 /// default — a subclass/companion in another file, or a multi-file `// WITH_COROUTINES` test — would
