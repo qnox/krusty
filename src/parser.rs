@@ -3499,6 +3499,26 @@ impl<'a> Parser<'a> {
                 targs = self.parse_type_args(); // `Box<Int>` → carry `[Int]` (erased in descriptors)
                 None
             };
+            // A generic-qualified nested type `Outer<A>.Inner<B>.Innermost<C>`: the dotted-path loop
+            // above stops at the `<` after `Outer`, so continue consuming `.Nested` segments (each with
+            // its own erased type arguments) here. The dotted name (`Outer.Inner.Innermost`) resolves
+            // the nested class; the intermediate segments' arguments are erased in JVM descriptors, so
+            // only the last segment's arguments are retained (matching the plain `Outer.Inner` path).
+            while arg.is_none()
+                && self.at(TokenKind::Dot)
+                && self
+                    .t
+                    .get(self.i + 1)
+                    .is_some_and(|t| t.kind == TokenKind::Ident)
+            {
+                self.bump(); // '.'
+                name.push('.');
+                name.push_str(self.text());
+                self.bump(); // nested type name
+                if self.at(TokenKind::Lt) {
+                    targs = self.parse_type_args();
+                }
+            }
             let nullable = self.eat_type_nullable(); // `T?`
             let base = TypeRef {
                 name,
@@ -6786,6 +6806,31 @@ mod tests {
         assert_eq!(f.params[0].ty.name, "A");
         // `context` as an ordinary identifier (a function name / value) is unaffected.
         assert!(!tree("fun context(): Int = 1").is_empty());
+    }
+
+    #[test]
+    fn generic_qualified_nested_type_parses() {
+        // `Outer<A>.Inner<B>.Innermost<C>` — a nested type whose OUTER segments carry type arguments.
+        // The `<A>` breaks the plain dotted-path scan, so the parser must keep consuming `.Nested`
+        // segments (each with its own erased arguments), yielding the dotted name for resolution.
+        let mut d = DiagSink::new();
+        let src =
+            "fun foo(): Outer<Int, Number>.Inner<String, Float>.Innermost<Any, Any?> = null!!\n";
+        let toks = lex(src, &mut d);
+        let file = parse(src, &toks, &mut d);
+        assert!(!d.has_errors(), "unexpected: {}", d.render("t", src));
+        let f = file
+            .decls
+            .iter()
+            .find_map(|&id| match file.decl(id) {
+                Decl::Fun(f) if f.name == "foo" => Some(f),
+                _ => None,
+            })
+            .expect("fun foo parsed");
+        let ret = f.ret.as_ref().expect("return type");
+        assert_eq!(ret.name, "Outer.Inner.Innermost");
+        // Only the last segment's (erased) arguments are retained.
+        assert_eq!(ret.targs.len(), 2);
     }
 
     #[test]
