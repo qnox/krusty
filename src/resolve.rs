@@ -591,12 +591,12 @@ pub fn pick_overload(sigs: &[Signature], arg_tys: &[Ty]) -> Option<usize> {
         }
         Some(sc)
     };
-    let best = cands
+    cands
         .iter()
         .filter_map(|&i| score(&sigs[i]).map(|sc| (sc, i)))
         .max_by_key(|&(sc, _)| sc)
-        .map(|(_, i)| i);
-    best.or_else(|| cands.first().copied())
+        .map(|(_, i)| i)
+        .or_else(|| cands.first().copied())
 }
 
 /// The return type of a builtin bitwise/shift operator method on an `Int`/`Long` receiver — the named

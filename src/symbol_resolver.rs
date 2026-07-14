@@ -1888,18 +1888,16 @@ fn property_getter_via_query(
     recv: Ty,
     property: &str,
 ) -> Option<ResolvedMember> {
+    // A value-class-typed property's getter is `@JvmName`-mangled (`getId-<hash>`) and erases its return
+    // to the underlying type; resolving it as a plain member would type the read as the underlying, not
+    // the value class. Leave those to the value-class fallback, which recovers the logical type.
     let getter = lib
         .property_members(recv, property)
         .overloads
         .into_iter()
         .min_by_key(|p| p.receiver_rank)
-        .map(|p| p.getter.name)?;
-    // A value-class-typed property's getter is `@JvmName`-mangled (`getId-<hash>`) and erases its return
-    // to the underlying type; resolving it as a plain member would type the read as the underlying, not
-    // the value class. Leave those to the value-class fallback, which recovers the logical type.
-    if getter.contains('-') {
-        return None;
-    }
+        .map(|p| p.getter.name)
+        .filter(|getter| !getter.contains('-'))?;
     resolve_instance_member(lib, recv, &getter, &[]).filter(|m| m.ret.is_read_value_result())
 }
 
