@@ -1411,9 +1411,15 @@ impl<'a> Parser<'a> {
         if self.at(TokenKind::Lt) {
             self.parse_type_params();
         }
-        let first = self.ident_or_error("property name");
         // Optional extension receiver: `val Recv[<…>][?].name` (like an extension function).
-        let (receiver, name) =
+        let (receiver, name) = if self.at(TokenKind::LParen) {
+            // A PARENTHESIZED receiver type — `val (Int.() -> String).valProp` — an extension property
+            // on a function type. parse_type handles the grouping parens and folded receiver form.
+            let recv_ty = self.parse_type();
+            self.expect(TokenKind::Dot, "'.'");
+            (Some(recv_ty), self.ident_or_error("property name"))
+        } else {
+            let first = self.ident_or_error("property name");
             if self.at(TokenKind::Dot) || self.at(TokenKind::Lt) || self.at(TokenKind::Question) {
                 let span = self.tok().span;
                 if self.at(TokenKind::Lt) {
@@ -1434,7 +1440,8 @@ impl<'a> Parser<'a> {
                 (Some(recv), self.ident_or_error("property name"))
             } else {
                 (None, first)
-            };
+            }
+        };
         let ty = if self.eat(TokenKind::Colon) {
             Some(self.parse_type())
         } else {
@@ -2131,15 +2138,25 @@ impl<'a> Parser<'a> {
             self.push_lexical_type_params(&type_params, &type_param_bounds);
         // Parse either `Name` (regular function) or `ReceiverType . Name` (extension function).
         // Receiver type may itself be parameterized (`List<T>.foo`) or nullable (`String?.foo`).
-        let first_name = if self.at(TokenKind::Ident) {
-            let n = self.text().to_string();
-            self.bump();
-            n
+        let (receiver, name) = if self.at(TokenKind::LParen) {
+            // A PARENTHESIZED receiver type — `fun (Int.() -> String).foo(...)`, an extension on a
+            // function type. parse_type handles the grouping parens and the folded receiver form; the
+            // name follows the `.`.
+            let recv_ty = self.parse_type();
+            self.expect(TokenKind::Dot, "'.'");
+            (
+                Some(recv_ty),
+                self.ident_or_error("extension function name"),
+            )
         } else {
-            self.diags.error(self.tok().span, "expected function name");
-            "<error>".to_string()
-        };
-        let (receiver, name) =
+            let first_name = if self.at(TokenKind::Ident) {
+                let n = self.text().to_string();
+                self.bump();
+                n
+            } else {
+                self.diags.error(self.tok().span, "expected function name");
+                "<error>".to_string()
+            };
             if self.at(TokenKind::Dot) || self.at(TokenKind::Lt) || self.at(TokenKind::Question) {
                 // `fun RecvType<...>?.name(...)` — extension function.
                 let span = self.tok().span;
@@ -2187,7 +2204,8 @@ impl<'a> Parser<'a> {
                 (Some(recv_ty), fun_name)
             } else {
                 (None, first_name)
-            };
+            }
+        };
         let mut params = self.parse_param_list();
         // Context parameters (`context(a: A) fun f()`), parsed at the declaration site into
         // `pending_context_params`, become LEADING value parameters (kotlinc's ABI) — prepend them and
@@ -2335,7 +2353,13 @@ impl<'a> Parser<'a> {
         }
         self.skip_newlines();
         while !self.at(TokenKind::RParen) && !self.at(TokenKind::Eof) {
-            args.push(self.parse_expr());
+            // Spread `*expr` — an array spread into a `vararg` parameter (e.g. a `super(*x)` delegation).
+            let spread = self.eat(TokenKind::Star);
+            let arg = self.parse_expr();
+            if spread {
+                self.file.spread_arg_ids.insert(arg.0);
+            }
+            args.push(arg);
             self.skip_newlines();
             if !self.eat(TokenKind::Comma) {
                 break;
@@ -2803,7 +2827,13 @@ impl<'a> Parser<'a> {
                         } else {
                             arg_names.push(None);
                         }
-                        args.push(self.parse_expr());
+                        // Spread `*expr` — an array spread into the base ctor's `vararg` parameter.
+                        let spread = self.eat(TokenKind::Star);
+                        let arg = self.parse_expr();
+                        if spread {
+                            self.file.spread_arg_ids.insert(arg.0);
+                        }
+                        args.push(arg);
                         self.skip_newlines();
                         if !self.eat(TokenKind::Comma) {
                             break;
@@ -5008,6 +5038,9 @@ impl<'a> Parser<'a> {
                 | Some(TokenKind::Colon)
                 | Some(TokenKind::LParen)
                 | Some(TokenKind::RParen)
+                // `in` is the variance keyword in an argument projection (`Foo<in T>`); `out` is an
+                // ordinary ident and already covered above.
+                | Some(TokenKind::KwIn)
                 | Some(TokenKind::Arrow) => {
                     j += 1;
                 }
