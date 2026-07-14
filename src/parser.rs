@@ -1422,15 +1422,24 @@ impl<'a> Parser<'a> {
             let first = self.ident_or_error("property name");
             if self.at(TokenKind::Dot) || self.at(TokenKind::Lt) || self.at(TokenKind::Question) {
                 let span = self.tok().span;
-                if self.at(TokenKind::Lt) {
-                    self.parse_type_args(); // type args on the receiver — erased
-                }
+                // Type args on the receiver — erased, EXCEPT an `Array` element (kept in `arg` so the
+                // receiver isn't a raw `Array`; see the same handling in parse_fun).
+                let recv_targs = if self.at(TokenKind::Lt) {
+                    self.parse_type_args()
+                } else {
+                    Vec::new()
+                };
+                let recv_arg = if first == "Array" {
+                    recv_targs.into_iter().next().map(Box::new)
+                } else {
+                    None
+                };
                 let nullable = self.eat_type_nullable();
                 self.expect(TokenKind::Dot, "'.'");
                 let recv = TypeRef {
                     name: first,
                     nullable,
-                    arg: None,
+                    arg: recv_arg,
                     targs: vec![],
                     span,
                     fun_params: vec![],
@@ -2161,9 +2170,20 @@ impl<'a> Parser<'a> {
                 // `fun RecvType<...>?.name(...)` — extension function.
                 let span = self.tok().span;
                 let mut recv_nullable = false;
-                if self.at(TokenKind::Lt) {
-                    self.parse_type_args();
-                } // skip type args on receiver
+                // Type arguments on the receiver (`fun Array<String>.f()`, `fun List<T>.g()`). Erased
+                // in JVM descriptors EXCEPT an `Array` element, which forms the array descriptor
+                // (`[Ljava/lang/String;`) and must be carried in `arg` — otherwise the receiver reads as
+                // a raw `Array` (no element).
+                let recv_targs = if self.at(TokenKind::Lt) {
+                    self.parse_type_args()
+                } else {
+                    Vec::new()
+                };
+                let recv_arg = if first_name == "Array" {
+                    recv_targs.into_iter().next().map(Box::new)
+                } else {
+                    None
+                };
                 if self.eat(TokenKind::Question) {
                     recv_nullable = true;
                 }
@@ -2194,7 +2214,7 @@ impl<'a> Parser<'a> {
                 let recv_ty = TypeRef {
                     name: recv_name,
                     nullable: recv_nullable,
-                    arg: None,
+                    arg: recv_arg,
                     targs: vec![],
                     span,
                     fun_params: vec![],
