@@ -787,6 +787,10 @@ impl FunctionInfo {
         self.is_member() || self.is_extension()
     }
 
+    pub fn extension_value_params(&self) -> &[Ty] {
+        self.callable.params.get(1..).unwrap_or(&[])
+    }
+
     pub fn plain(kind: FnKind, receiver: Option<Ty>, callable: LibraryCallable) -> Self {
         FunctionInfo {
             kind,

@@ -5183,7 +5183,7 @@ impl<'a> Checker<'a> {
                                 // ExtensionOperator lowering doesn't do — leave it unresolved (skip).
                                 && !o.flags.suspend
                         })?;
-                    let params = fi.callable.params.get(1..).unwrap_or(&[]).to_vec();
+                    let params = fi.extension_value_params().to_vec();
                     (
                         params,
                         fi.callable.ret,
@@ -7444,7 +7444,7 @@ impl<'a> Checker<'a> {
                 // (primitives can never be null), so emit as a direct static call.
                 if !rt.is_reference() {
                     if let Some(fi) = self.resolver().exact_receiver_extensions(rt, &name).next() {
-                        let logical: Vec<Ty> = fi.callable.params[1..].to_vec();
+                        let logical = fi.extension_value_params().to_vec();
                         let arg_tys = args.as_deref().map_or_else(Vec::new, |a| self.arg_tys(a));
                         if logical.len() != arg_tys.len() {
                             self.diags.error(
@@ -11141,8 +11141,7 @@ impl<'a> Checker<'a> {
                 {
                     let module_ext = self.resolver().exact_receiver_extensions(rt, &name).next();
                     if let Some(fi) = module_ext {
-                        // Logical params (the receiver is `callable.params[0]`; the rest are the args).
-                        let logical: Vec<Ty> = fi.callable.params[1..].to_vec();
+                        let logical = fi.extension_value_params().to_vec();
                         let cs = &fi.call_sig;
                         if (arg_names.is_some() || arg_tys.len() != logical.len())
                             && cs.can_map_omitted_args(logical.len())
@@ -11193,7 +11192,7 @@ impl<'a> Checker<'a> {
                         .into_iter()
                         .find(|o| o.receiver_rank == 1);
                     if let Some(fi) = module_ext {
-                        let logical: Vec<Ty> = fi.callable.params[1..].to_vec();
+                        let logical = fi.extension_value_params().to_vec();
                         if logical.len() == arg_tys.len() {
                             if let Some(decl) =
                                 self.file
