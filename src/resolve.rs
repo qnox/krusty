@@ -13008,14 +13008,13 @@ impl<'a> Checker<'a> {
                 indices,
                 value,
             } => {
-                // `a[i] = v` (array element store) / `recv[i, j, …] = v` (the `set(i, j, …, v)` operator —
-                // a user member, a same-module extension, or a library member; `m[k] = v` on a Map is
-                // `put`). The value is the trailing `set` argument.
+                // `a[i] = v` stores an array element; `recv[i, j, …] = v` calls `set` (or Map `put`).
                 let at = self.expr(array);
                 let its: Vec<Ty> = indices.iter().map(|&i| self.expr(i)).collect();
                 let vt = self.expr(value);
                 let span = self.file.stmt_spans[s.0 as usize];
-                if indices.len() == 1 {
+                let single_index = matches!(indices.as_slice(), [_]);
+                if single_index {
                     if let Some(elem) = at.array_elem() {
                         self.expect_assignable(Ty::Int, its[0], span, "array index");
                         self.expect_assignable(elem, vt, span, "array element assignment");
@@ -13058,7 +13057,7 @@ impl<'a> Checker<'a> {
                         &set_args,
                     )
                     .is_some()
-                        || (indices.len() == 1
+                        || (single_index
                             && crate::symbol_resolver::resolve_instance_member(
                                 &*self.syms.libraries,
                                 at,
@@ -13070,7 +13069,7 @@ impl<'a> Checker<'a> {
                 if !ok && at != Ty::Error {
                     self.diags.error(
                         span,
-                        if indices.len() == 1 {
+                        if single_index {
                             format!("'{}' is not an array (cannot index-assign)", at.name())
                         } else {
                             format!(
