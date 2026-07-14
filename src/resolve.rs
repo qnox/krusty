@@ -11269,8 +11269,7 @@ impl<'a> Checker<'a> {
                                         .params
                                         .iter()
                                         .zip(&arg_tys)
-                                        .find(|(p, _)| p.ty.name == r.name)
-                                        .map(|(_, a)| *a)
+                                        .find_map(|(p, a)| (p.ty.name == r.name).then_some(*a))
                                         .unwrap_or(fi.callable.ret),
                                     None => Ty::Unit,
                                 };
