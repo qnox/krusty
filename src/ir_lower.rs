@@ -4393,8 +4393,8 @@ impl<'a> Lower<'a> {
     }
 
     fn scalar_one_const(&self, ty: Ty) -> Option<IrConst> {
-        Some(match self.scalar_value_repr(ty).unwrap_or(ty) {
-            t if t.int_arithmetic_repr() == Ty::Int => IrConst::Int(1),
+        Some(match self.scalar_value_repr(ty)?.int_arithmetic_repr() {
+            Ty::Int => IrConst::Int(1),
             Ty::Long => IrConst::Long(1),
             Ty::Double => IrConst::Double(1.0),
             Ty::Float => IrConst::Float(1.0),
@@ -10647,15 +10647,14 @@ impl<'a> Lower<'a> {
                 {
                     // Bind names: explicit, or the implicit single `it`, or none (arity 0).
                     let bind_names = ast::lambda_params_or_implicit(&lparams, params.len())?;
-                    // Parameter `Ty`s come from the lambda's checked type (the expected suspend type drives
-                    // them); fall back to the erased IR param types only if absent.
+                    // Parameter `Ty`s come from the checked lambda type; absent metadata falls back to `Any`.
                     let ty_params: Vec<Ty> = self
                         .info
                         .ty(arg)
                         .fun_params()
                         .map(|p| p.to_vec())
                         .filter(|p| p.len() == params.len())
-                        .unwrap_or_else(|| params.iter().map(|_| Ty::obj("kotlin/Any")).collect());
+                        .unwrap_or_else(|| vec![Ty::obj("kotlin/Any"); params.len()]);
                     if bind_names.len() == params.len() {
                         return self.lower_suspend_lambda(body, &ty_params, bind_names);
                     }
