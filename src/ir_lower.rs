@@ -2487,20 +2487,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                         lo.scope
                             .push((p.name.clone(), v, ty_of(file, &p.ty, &*syms.libraries)));
                     }
-                    let super_field_tys: Vec<Ty> = lo.classes[&internal]
-                        .super_internal
-                        .clone()
-                        .and_then(|s| lo.classes.get(&s).map(|sup| sup.id))
-                        .map(|sid| {
-                            let sup = &lo.ir.classes[sid as usize];
-                            if sup.ctor_args.is_empty() {
-                                let n = sup.ctor_param_count as usize;
-                                sup.fields[..n].iter().map(|f| f.ty.clone()).collect()
-                            } else {
-                                sup.ctor_args.iter().map(|a| a.ty).collect()
-                            }
-                        })
-                        .unwrap_or_default();
+                    let super_field_tys = lo.super_ctor_param_tys(&internal);
                     // The `super(…)` call must match the base's PRIMARY constructor exactly: same arity,
                     // and each argument assignable to the corresponding param (no narrowing/erasure). A
                     // mismatch means the call actually targets a base SECONDARY constructor (with
@@ -4650,10 +4637,8 @@ impl<'a> Lower<'a> {
     /// The parameter types of a class's superclass constructor (`super(args)` targets these). Empty for
     /// `java/lang/Object` or a base whose IR class isn't in this file (then we can't model the call).
     fn super_ctor_param_tys(&self, internal: &str) -> Vec<Ty> {
-        self.classes[internal]
-            .super_internal
-            .clone()
-            .and_then(|s| self.classes.get(&s).map(|sup| sup.id))
+        self.super_class(internal)
+            .map(|sup| sup.id)
             .map(|sid| {
                 let sup = &self.ir.classes[sid as usize];
                 if sup.ctor_args.is_empty() {
@@ -4671,11 +4656,7 @@ impl<'a> Lower<'a> {
     /// exposes only these). The caller matches the `super(...)` argument arity against these to pick
     /// the base `<init>` to call.
     fn super_ctor_candidate_tys(&self, internal: &str) -> Vec<Vec<Ty>> {
-        let Some(sid) = self.classes[internal]
-            .super_internal
-            .clone()
-            .and_then(|s| self.classes.get(&s).map(|sup| sup.id))
-        else {
+        let Some(sid) = self.super_class(internal).map(|sup| sup.id) else {
             return Vec::new();
         };
         let sup = &self.ir.classes[sid as usize];
@@ -4692,6 +4673,13 @@ impl<'a> Lower<'a> {
             out.push(sc.params.clone());
         }
         out
+    }
+
+    fn super_class(&self, internal: &str) -> Option<&ClassInfo> {
+        self.classes[internal]
+            .super_internal
+            .as_deref()
+            .and_then(|s| self.classes.get(s))
     }
 
     /// Lower a class's body-property initializers + `init {}` blocks (source order) into IR effect
