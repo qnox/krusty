@@ -11444,38 +11444,36 @@ impl<'a> Checker<'a> {
                         }
                     }
                 }
-                // `suspendCoroutineUninterceptedOrReturn { c -> … }` — a `kotlin.coroutines` inline
-                // intrinsic (recognized through the platform registry, not by name here). The lambda
-                // takes the current `Continuation<T>` and returns `Any?` (a resumed value, or
-                // `COROUTINE_SUSPENDED`); the call yields `T` — the enclosing suspend function's return
-                // type (`@Metadata` declares `<T>(block:(Continuation<T>)->Any?):T`; `T` binds from
-                // context). Lowering inlines the lambda body with the function's own continuation bound.
-                if args.len() == 1
-                    && self.lookup(&fname).is_none()
-                    && !self.module_declares(&fname)
-                    && matches!(self.file.expr(args[0]), Expr::Lambda { .. })
-                    && matches!(
-                        crate::libraries::coroutine_intrinsic(&fname),
-                        Some(
-                            crate::libraries::CoroutineIntrinsic::SuspendCoroutineUninterceptedOrReturn
-                                | crate::libraries::CoroutineIntrinsic::SuspendCoroutine
-                        )
+                // Coroutine intrinsics type their lambda with the current Continuation and yield the
+                // enclosing suspend function's return type.
+                let one_lambda_arg = match args {
+                    [arg] if matches!(self.file.expr(*arg), Expr::Lambda { .. }) => Some(*arg),
+                    _ => None,
+                };
+                let unshadowed_name = self.lookup(&fname).is_none();
+                let suspend_coroutine = matches!(
+                    crate::libraries::coroutine_intrinsic(&fname),
+                    Some(
+                        crate::libraries::CoroutineIntrinsic::SuspendCoroutineUninterceptedOrReturn
+                            | crate::libraries::CoroutineIntrinsic::SuspendCoroutine
                     )
-                {
+                );
+                if let (Some(lambda), true, true) = (
+                    one_lambda_arg,
+                    unshadowed_name,
+                    !self.module_declares(&fname) && suspend_coroutine,
+                ) {
                     let cont = Ty::obj("kotlin/coroutines/Continuation");
-                    self.check_lambda_with_types(args[0], &[cont]);
+                    self.check_lambda_with_types(lambda, &[cont]);
                     let r = self.ret_ty;
                     return self.set(call, r);
                 }
                 // SAM conversion `Pred { lambda }`: type the lambda from the SAM method parameters.
-                if args.len() == 1
-                    && matches!(self.file.expr(args[0]), Expr::Lambda { .. })
-                    && self.lookup(&fname).is_none()
-                {
+                if let (Some(lambda), true) = (one_lambda_arg, unshadowed_name) {
                     if let Some(cls) = self.syms.classes.get(&fname).cloned() {
                         if let Some(sig) = cls.single_method().filter(|_| cls.is_interface) {
                             let pts = sig.params.clone();
-                            self.check_lambda_with_types(args[0], &pts);
+                            self.check_lambda_with_types(lambda, &pts);
                             return self.set(call, Ty::obj(&cls.internal));
                         }
                     }
@@ -11487,7 +11485,7 @@ impl<'a> Checker<'a> {
                             .resolve_type(&internal)
                             .and_then(|t| t.sam_method)
                         {
-                            self.check_lambda_with_types(args[0], &sam.params);
+                            self.check_lambda_with_types(lambda, &sam.params);
                             return self.set(call, Ty::obj(&internal));
                         }
                     }
