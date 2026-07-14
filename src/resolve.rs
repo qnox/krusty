@@ -8874,6 +8874,23 @@ impl<'a> Checker<'a> {
         r
     }
 
+    fn mark_receiver_lambda_call(
+        &mut self,
+        call: ExprId,
+        receiver: ExprId,
+        body: ExprId,
+        returns_receiver: bool,
+    ) {
+        self.expr_lowers.insert(
+            call,
+            ExprLowering::InlineCall(InlineCall::ReceiverLambda(ReceiverLambda {
+                receiver,
+                body,
+                returns_receiver,
+            })),
+        );
+    }
+
     fn check_with_receiver_body(&mut self, recv: Ty, body: ExprId) -> Ty {
         self.push_scope();
         // A user class receiver's own properties are visible unqualified inside the body; for builtin
@@ -10317,16 +10334,7 @@ impl<'a> Checker<'a> {
                             let bt =
                                 self.check_with_receiver_labeled(rt, body, call_fn_name.as_deref());
                             let returns_receiver = name == "apply";
-                            self.expr_lowers.insert(
-                                call,
-                                ExprLowering::InlineCall(InlineCall::ReceiverLambda(
-                                    ReceiverLambda {
-                                        receiver,
-                                        body,
-                                        returns_receiver,
-                                    },
-                                )),
-                            );
+                            self.mark_receiver_lambda_call(call, receiver, body, returns_receiver);
                             return self.set(call, if returns_receiver { rt } else { bt });
                         }
                     }
@@ -11423,24 +11431,15 @@ impl<'a> Checker<'a> {
                     self.mark_local_function_expr(call, stmt_id);
                     return ret;
                 }
-                // `with(x) { … }` — `x` is the lambda body's implicit receiver (intercept before the
-                // args are evaluated, since the trailing lambda isn't a normal value).
-                if fname == "with" && args.len() == 2 && !self.module_declares(&fname) {
-                    if let Expr::Lambda { params, body } = self.file.expr(args[1]).clone() {
+                if let ("with", [receiver, lambda], false) =
+                    (fname.as_str(), args, self.module_declares(&fname))
+                {
+                    if let Expr::Lambda { params, body } = self.file.expr(*lambda).clone() {
                         if params.is_empty() {
-                            let rt = self.expr(args[0]);
+                            let rt = self.expr(*receiver);
                             let bt =
                                 self.check_with_receiver_labeled(rt, body, call_fn_name.as_deref());
-                            self.expr_lowers.insert(
-                                call,
-                                ExprLowering::InlineCall(InlineCall::ReceiverLambda(
-                                    ReceiverLambda {
-                                        receiver: args[0],
-                                        body,
-                                        returns_receiver: false,
-                                    },
-                                )),
-                            );
+                            self.mark_receiver_lambda_call(call, *receiver, body, false);
                             return self.set(call, bt);
                         }
                     }
