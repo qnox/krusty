@@ -1988,9 +1988,15 @@ impl Flat<'_> {
             {
                 if expr_calls_suspend(self.ir, stmt, self.suspend) {
                     let (body, catches, finally) = (*body, catches.clone(), *finally);
+                    // A BRANCH (`When`) in the catch body — a `?.`/elvis/`if` — introduces a temp/local
+                    // whose slot the state machine's exception-handler frame can't reconcile with the try
+                    // region (the handler range spans states where that slot is uninitialized), producing
+                    // a stack-map mismatch. Skip the file rather than miscompile; a straight-line catch
+                    // body (the common `catch (e) { log(e); default }` shape) is fine.
                     if finally.is_some()
                         || catches.len() != 1
                         || expr_calls_suspend(self.ir, catches[0].body, self.suspend)
+                        || expr_contains_when(self.ir, catches[0].body)
                     {
                         self.failed = true;
                         self.states[cur] = out;
@@ -2015,25 +2021,23 @@ impl Flat<'_> {
                     let a_body = std::mem::replace(&mut self.assigned, a_entry);
                     self.cur_handler = saved;
                     // Handler state: the stashed exception arrives in `result` (loaded into `r_v` at the
-                    // loop top, like a resume value); bind it to the catch variable, run the (non-
-                    // suspending) catch body, converge at `try_after`.
-                    let exc = self.gv(self.r_v);
-                    let bound = self.add(IrExpr::TypeOp {
-                        op: IrTypeOp::Cast,
-                        arg: exc,
-                        type_operand: Ty::obj(&catch.exc_internal),
-                    });
-                    let bind = self.add(IrExpr::Variable {
-                        index: catch.var,
-                        ty: Ty::obj(&catch.exc_internal),
-                        init: Some(bound),
-                    });
-                    // NB: do NOT mark `catch.var` assigned. The IR reuses value-indices across disjoint
-                    // scopes, so the catch variable may collide with a spilled body local (a different
-                    // type); marking it would spill that (ref) local's exceptional slot into the body
-                    // local's (e.g. int) field. The catch var is transient (a suspending catch is bailed
-                    // above), so it never needs spilling.
-                    self.states[handler] = vec![bind];
+                    // loop top, like a resume value). Rather than bind it to a catch-variable LOCAL —
+                    // which the IR's value-index reuse can alias with a body local of another type, and
+                    // which the emitter can slot-coalesce with an `int` temp (storing a ref into an int
+                    // slot → VerifyError) — replace each read of the catch variable in the catch body with
+                    // `(ExcType) r_v` directly. Valid because a suspending catch is bailed above, so `r_v`
+                    // still holds the exception throughout the (non-suspending) catch body.
+                    let exc_ty = Ty::obj(&catch.exc_internal);
+                    let mut reads: Vec<ExprId> = Vec::new();
+                    collect_getvalue(self.ir, catch.body, catch.var, &mut reads);
+                    for n in reads {
+                        let rv = self.gv(self.r_v);
+                        self.ir.exprs[n as usize] = IrExpr::TypeOp {
+                            op: IrTypeOp::Cast,
+                            arg: rv,
+                            type_operand: exc_ty,
+                        };
+                    }
                     let catch_stmts = self.block_stmts(catch.body);
                     self.flatten(&catch_stmts, handler, Some(try_after));
                     // `try_after` joins the body and handler paths: a spilled local is definitely
@@ -2818,6 +2822,48 @@ fn rewrite_subtree(ir: &mut IrFile, e: ExprId, f: &mut impl FnMut(&mut IrExpr)) 
     for c in kids {
         rewrite_subtree(ir, c, f);
     }
+}
+
+/// Whether `e`'s subtree contains a `When` (a branch — `if`/`when`/`?.`/elvis) in its OWN (directly
+/// flattened) flow. A branch in a suspend try's CATCH body creates a temp whose slot the exception-
+/// handler frame can't reconcile → skip. A `When` nested inside a `Lambda` is compiled to a SEPARATE
+/// method (not inlined into the handler state), so it is NOT a conflict — don't descend into lambdas.
+fn expr_contains_when(ir: &IrFile, e: ExprId) -> bool {
+    match &ir.exprs[e as usize] {
+        IrExpr::When { .. } => return true,
+        IrExpr::Lambda { .. } => return false,
+        _ => {}
+    }
+    let mut found = false;
+    for_each_child(&ir.exprs, e, &mut |c| {
+        if !found && expr_contains_when(ir, c) {
+            found = true;
+        }
+    });
+    found
+}
+
+/// Collect the node ids of every `GetValue(var)` in `e`'s subtree (a catch body) that means the catch
+/// variable, so each can be rewritten to read the exception from `r_v` instead of a catch-variable local.
+/// A `Lambda` has its OWN value numbering: its CAPTURES read the enclosing scope (so a captured catch var
+/// is collected), but its `inline_body`'s locals are numbered independently — do NOT descend into it, or a
+/// lambda-local that happens to reuse `var`'s index would be wrongly rewritten (mirrors `shift_value_indices`).
+fn collect_getvalue(ir: &IrFile, e: ExprId, var: u32, out: &mut Vec<ExprId>) {
+    match &ir.exprs[e as usize] {
+        IrExpr::GetValue(i) if *i == var => {
+            out.push(e);
+            return;
+        }
+        IrExpr::Lambda { captures, .. } => {
+            let caps = captures.clone();
+            for c in caps {
+                collect_getvalue(ir, c, var, out);
+            }
+            return;
+        }
+        _ => {}
+    }
+    for_each_child(&ir.exprs, e, &mut |c| collect_getvalue(ir, c, var, out));
 }
 
 /// Apply `f` to the node at `e` and every node in its subtree (pre-order), read-only. The single home

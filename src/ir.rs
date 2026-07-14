@@ -1233,6 +1233,16 @@ pub fn shift_value_indices(ir: &mut IrFile, e: ExprId, threshold: u32, by: u32) 
         IrExpr::GetValue(i) if *i >= threshold => *i += by,
         IrExpr::SetValue { var, .. } if *var >= threshold => *var += by,
         IrExpr::Variable { index, .. } if *index >= threshold => *index += by,
+        // A `catch (e) { … }` variable is DECLARED by the `IrCatch.var` field (not a `Variable` node); its
+        // uses inside the catch body are `GetValue`s shifted by the recursion below, so the field must
+        // shift too or the binding and its reads desync.
+        IrExpr::Try { catches, .. } => {
+            for c in catches.iter_mut() {
+                if c.var >= threshold {
+                    c.var += by;
+                }
+            }
+        }
         _ => {}
     }
     // A nested `Lambda`'s CAPTURES reference the ENCLOSING scope's value slots (shift them), but its

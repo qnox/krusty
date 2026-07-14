@@ -963,6 +963,21 @@ public class M {\n\
 }
 
 #[test]
+fn suspend_try_catch_with_branch_in_catch_is_skipped_not_miscompiled() {
+    // A BRANCH (`?.`/elvis/`if`) in a suspend try's CATCH body introduces a temp whose slot the state
+    // machine's exception-handler frame cannot reconcile with the try region (a stack-map mismatch → a
+    // load-time VerifyError). krusty must SKIP the file (emit nothing runnable) rather than miscompile.
+    // Assert it produces no `box()` result — i.e. the shape is rejected, not silently mis-lowered.
+    const SRC: &str = "suspend fun risky(fail: Boolean): Int { if (fail) throw IllegalStateException(\"boom\"); return 7 }\n\
+        suspend fun compute(fail: Boolean): Int = try { risky(fail) } catch (e: IllegalStateException) { e.message?.length ?: -1 }\n\
+        fun box(): String = \"OK\"\n";
+    assert!(
+        common::compile_and_run_with_stdlib(SRC, "Main").is_none(),
+        "a branchy suspend catch body must be SKIPPED (not miscompiled to a VerifyError)"
+    );
+}
+
+#[test]
 fn suspend_in_try_catch_with_spilled_locals() {
     // A `suspend fun` with a suspension point INSIDE a `try { … } catch { … }`, plus a suspension
     // BEFORE the try and locals spilled across both (the shape mission-core's MissionActionService
