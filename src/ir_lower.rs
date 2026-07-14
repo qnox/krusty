@@ -16104,35 +16104,31 @@ impl<'a> Lower<'a> {
                     }
                 }
             }
-            // `a[i]` read. User/library `get` operators resolve through their member metadata; arrays
-            // keep the IR intrinsic because the backend reads the element from the receiver type.
             Expr::Index { array, indices } => {
                 let at = self.info.ty(array);
-                // A single index into an actual array → the array-get intrinsic.
-                if indices.len() == 1 && at.array_elem().is_some() {
-                    let a = self.expr(array)?;
-                    let i = self.expr(indices[0])?;
-                    self.ir.add_expr(IrExpr::Call {
-                        callee: Callee::External("kotlin/Array.get".to_string()),
-                        dispatch_receiver: Some(a),
-                        args: vec![i],
-                    })
-                } else if indices.len() == 1 && at == Ty::String {
-                    // `str[i]` → the `String.get(Int)` member.
-                    let a = self.expr(array)?;
-                    let i = self.expr(indices[0])?;
-                    return self.lower_library_instance_call_on(a, at, "get", vec![i], &[Ty::Int]);
-                } else {
-                    // Any other receiver → the `get(i, j, …)` operator: a user member, a same-module
-                    // extension, or a library member (`lower_op_call` covers all three, single or multi
-                    // index). A library `get` with an erased generic return is coerced to the element type.
-                    let recv_v = self.expr(array)?;
-                    if let Some((v, ret)) = self.lower_op_call(recv_v, at, "get", &indices) {
-                        return Some(self.coerce_generic_read(v, e, ret));
+                if let [index] = indices.as_slice() {
+                    if at.array_elem().is_some() {
+                        let a = self.expr(array)?;
+                        let i = self.expr(*index)?;
+                        return Some(self.ir.add_expr(IrExpr::Call {
+                            callee: Callee::External("kotlin/Array.get".to_string()),
+                            dispatch_receiver: Some(a),
+                            args: vec![i],
+                        }));
                     }
-                    set_bail("expr Index");
-                    return None;
+                    if at == Ty::String {
+                        let a = self.expr(array)?;
+                        let i = self.expr(*index)?;
+                        let args = vec![i];
+                        return self.lower_library_instance_call_on(a, at, "get", args, &[Ty::Int]);
+                    }
                 }
+                let recv_v = self.expr(array)?;
+                if let Some((v, ret)) = self.lower_op_call(recv_v, at, "get", &indices) {
+                    return Some(self.coerce_generic_read(v, e, ret));
+                }
+                set_bail("expr Index");
+                return None;
             }
             Expr::Member { receiver, name } => {
                 // A classpath nested singleton object recorded by the checker (`PrimitiveKind.STRING`) →
