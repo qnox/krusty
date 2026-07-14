@@ -9404,6 +9404,48 @@ impl<'a> Lower<'a> {
                 None,
             );
         }
+        // The universal Object methods (`A::equals`, `obj::hashCode`, `x::toString`) are not user
+        // methods, so `resolve_method` finds nothing — reference them against `java/lang/Object`. The
+        // checker already types these with `Any` parameters and a `Boolean`/`Int`/`String` return, so
+        // the invoke's derived descriptor matches `equals(Object)Z` / `hashCode()I` / `toString()String`;
+        // `invokevirtual` on the (captured bound / first-parameter unbound) receiver dispatches any real
+        // override at runtime.
+        if matches!(name, "equals" | "hashCode" | "toString")
+            && self.resolve_method(&internal, name).is_none()
+            // A BOUND receiver that may be null (nullable, or an erased type-parameter/`Any`/`Object`)
+            // needs the null-safe intrinsic kotlinc uses (`x::toString` on `null` yields "null"); a
+            // plain `invokevirtual` on the captured null NPEs. Only handle a bound ref on a concrete
+            // non-null receiver; decline (skip) otherwise. Unbound refs take the receiver as a call arg.
+            && (capture.is_none()
+                || (!matches!(recv_ty, Ty::TyParam(..) | Ty::Nullable(..))
+                    && recv_ty.kotlin_class_internal().is_some_and(|i| {
+                        i != crate::types::wk::any() && i != crate::types::wk::java_object()
+                    })))
+        {
+            let bound = capture.is_some();
+            let dispatch = if bound {
+                crate::ir::FrDispatch::VirtualBound
+            } else {
+                crate::ir::FrDispatch::VirtualUnbound
+            };
+            let param_tys = tys_to_ir(params);
+            return self.make_func_ref(
+                e.0,
+                bound,
+                params.len() as u8,
+                "java/lang/Object".to_string(),
+                name.to_string(),
+                0,
+                dispatch,
+                "java/lang/Object".to_string(),
+                name.to_string(),
+                false,
+                param_tys,
+                ty_to_ir(ret),
+                capture,
+                None,
+            );
+        }
         // Only a user-class method is modeled (the invoke does `invokevirtual`/`invokeinterface
         // internal.name`); a classpath/library receiver fails here → bail (skip), never miscompile.
         let (_, _, target_fid, _) = self.resolve_method(&internal, name)?;

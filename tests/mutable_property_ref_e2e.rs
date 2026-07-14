@@ -214,3 +214,48 @@ fn inherited_member_property_ref() {
         }\n";
     assert_eq!(run(MAIN).expect("inherited member property ref"), "OK");
 }
+
+#[test]
+fn unbound_object_method_refs() {
+    // A::equals / A::hashCode / A::toString reference java/lang/Object methods.
+    const MAIN: &str = "class A\n\
+        fun box(): String {\n\
+        \x20 val a = A()\n\
+        \x20 val eq = A::equals\n\
+        \x20 if (eq(a, a) != true) return \"fail-eq-same\"\n\
+        \x20 if (eq(a, A()) != false) return \"fail-eq-diff\"\n\
+        \x20 val hc = A::hashCode\n\
+        \x20 if (hc(a) != a.hashCode()) return \"fail-hc\"\n\
+        \x20 val ts = A::toString\n\
+        \x20 if (ts(a) != a.toString()) return \"fail-ts\"\n\
+        \x20 return \"OK\"\n\
+        }\n";
+    assert_eq!(run(MAIN).expect("unbound object method refs"), "OK");
+}
+
+#[test]
+fn bound_object_method_ref() {
+    // obj::toString references Object.toString bound to the captured receiver (dispatches an override).
+    const MAIN: &str = "class A { override fun toString() = \"OK\" }\n\
+        fun box(): String {\n\
+        \x20 val a = A()\n\
+        \x20 val ts = a::toString\n\
+        \x20 return ts()\n\
+        }\n";
+    assert_eq!(run(MAIN).expect("bound object method ref"), "OK");
+}
+
+#[test]
+fn nullable_typeparam_tostring_ref_declines() {
+    // t::toString where t: T may be null needs kotlinc's null-safe intrinsic; krusty declines (skip)
+    // rather than NPE on the captured null.
+    const MAIN: &str = "fun <T> get(t: T): () -> String = t::toString\n\
+        fun box(): String {\n\
+        \x20 if (get(null).invoke() != \"null\") return \"Fail null\"\n\
+        \x20 return get(\"OK\").invoke()\n\
+        }\n";
+    assert!(
+        run(MAIN).is_none(),
+        "nullable-typeparam toString ref must decline, not NPE"
+    );
+}
