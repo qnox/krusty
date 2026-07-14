@@ -571,31 +571,10 @@ fun box(): String {\n\
 // SUSPEND.RS — rarer state-machine paths.
 // ############################################################################
 
-// A suspension inside a `while` loop (loop back-edge over a suspend state) is NOT yet lowered — the
-// backend must cleanly DECLINE it rather than miscompile. Covers the suspend.rs bail path.
-#[test]
-fn suspend_in_while_loop_rejected() {
-    let src = "suspend fun one(): Int = 1\n\
-suspend fun sumLoop(n: Int): Int {\n\
-    var s = 0\n\
-    var i = 0\n\
-    while (i < n) { s += one(); i++ }\n\
-    return s\n\
-}\n";
-    rejects_suspend("suspend_while", src);
-}
-
-// A suspension inside a `for` loop over a range — also declined by the backend.
-#[test]
-fn suspend_in_for_loop_rejected() {
-    let src = "suspend fun weight(i: Int): Int = i * 2\n\
-suspend fun total(n: Int): Int {\n\
-    var s = 0\n\
-    for (i in 0 until n) { s += weight(i) }\n\
-    return s\n\
-}\n";
-    rejects_suspend("suspend_for", src);
-}
+// NOTE: a suspension in a compound-assignment inside a `while`/`for` loop
+// (`while (i < n) { s += one(); i++ }`, `for (i in 0 until n) { s += weight(i) }`) is now LOWERED — the
+// coroutine pass hoists the suspension to a temp. Promoted to a round-trip test in
+// `suspend_loop_compound_assign_e2e.rs`.
 
 // A suspension inside a `when` arm — declined by the backend.
 #[test]

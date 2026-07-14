@@ -540,7 +540,23 @@ fn hoist_stmt(
             out.push(nr);
             return;
         }
-        IrExpr::While { .. } => {
+        IrExpr::While { body, .. } => {
+            // The loop CONDITION/update stay for the flattener; but a statement in the loop BODY with a
+            // suspension buried in a call argument (`list.addAll(repo.get())` in a `for`) must be hoisted
+            // to `val tmp = repo.get(); list.addAll(tmp)` — the flattener models a bound-local suspension,
+            // not one in an argument. Recurse into the body block (in place); nested loops recurse too.
+            let body = *body;
+            if matches!(ir.exprs[body as usize], IrExpr::Block { .. }) {
+                hoist_suspensions(ir, body, suspend_set, orig_rets);
+            }
+            out.push(stmt);
+            return;
+        }
+        // A `Block` STATEMENT — a `for` loop lowers to `{ val it = xs.iterator(); while(…){…} }`, a spliced
+        // scope block, etc. Recurse so a suspension buried in a call argument inside it (or its nested
+        // loops) is hoisted to a preceding bound temp before the flattener sees it.
+        IrExpr::Block { value: None, .. } => {
+            hoist_suspensions(ir, stmt, suspend_set, orig_rets);
             out.push(stmt);
             return;
         }

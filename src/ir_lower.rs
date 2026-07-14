@@ -13731,6 +13731,274 @@ impl<'a> Lower<'a> {
 
     /// Lower a `for (name in iterable) body` (also the inlined target of `iterable.forEach { … }`):
     /// dispatch to the counted range loop, the array/`String` index loop, or the iterator protocol.
+    /// Whether `e`'s AST subtree contains a SUSPEND call (a call the checker resolved to a suspend
+    /// member/function). Stops at a nested `Lambda` (its body is a separate scope). Used to gate the
+    /// suspend-only inline-HOF loop desugar below: a non-suspend HOF keeps its normal library call.
+    fn ast_subtree_suspends(&self, e: AstExprId) -> bool {
+        let call_suspends = self.info.resolved_member(e).is_some_and(|m| m.suspend)
+            || self.info.resolved_extension(e).is_some_and(|c| c.suspend)
+            || self.info.resolved_top_level(e).is_some_and(|c| c.suspend)
+            || self.info.resolved_companion(e).is_some_and(|m| m.suspend);
+        if call_suspends {
+            return true;
+        }
+        if matches!(self.afile.expr(e), Expr::Lambda { .. }) {
+            return false;
+        }
+        self.afile
+            .any_child_expr(e, &mut |c| self.ast_subtree_suspends(c), &mut |s| {
+                self.afile
+                    .any_child_stmt(s, &mut |c| self.ast_subtree_suspends(c))
+            })
+    }
+
+    /// Whether the classpath type `internal` is (or transitively extends) a `Collection` — so a value of
+    /// it can be passed to `java.util.Collection.addAll`. Used to gate the flatMap loop desugar.
+    fn type_is_collection(&self, internal: &str) -> bool {
+        let is_coll = |n: &str| {
+            matches!(
+                n,
+                "kotlin/collections/Collection"
+                    | "kotlin/collections/MutableCollection"
+                    | "kotlin/collections/List"
+                    | "kotlin/collections/MutableList"
+                    | "kotlin/collections/Set"
+                    | "kotlin/collections/MutableSet"
+                    | "java/util/Collection"
+                    | "java/util/List"
+                    | "java/util/Set"
+                    | "java/util/ArrayList"
+            )
+        };
+        let mut stack = vec![internal.to_string()];
+        let mut seen = std::collections::HashSet::new();
+        while let Some(i) = stack.pop() {
+            if !seen.insert(i.clone()) {
+                continue;
+            }
+            if is_coll(&i) {
+                return true;
+            }
+            if let Some(t) = self.syms.libraries.resolve_type(&i) {
+                stack.extend(t.supertypes.iter().cloned());
+            }
+        }
+        false
+    }
+
+    /// Desugar `recv.map { … }` / `recv.flatMap { … }` whose LAMBDA BODY suspends into an accumulating
+    /// loop — `val acc = ArrayList(); for (e in recv) acc.add/addAll(<body>); acc` — exactly kotlinc's
+    /// inline expansion. A stdlib collection HOF lowers its lambda to a separate `FunctionN` impl method,
+    /// which cannot suspend; inlining it into the loop puts the suspension in an ordinary for-loop the
+    /// coroutine pass already models. Gated to the suspend case only, so a non-suspend HOF keeps its
+    /// byte-identical library call. `is_flat` selects `addAll` (flatMap) vs `add` (map). `None` (decline)
+    /// when the receiver has no resolvable iterator (the caller falls back to the normal call path).
+    fn lower_suspend_accumulate_hof(
+        &mut self,
+        is_flat: bool,
+        param: &str,
+        receiver: AstExprId,
+        body: AstExprId,
+    ) -> Option<u32> {
+        let it_ty = self.info.ty(receiver);
+        let internal = it_ty.obj_internal()?;
+        let iter_m = crate::symbol_resolver::resolve_instance(
+            &*self.syms.libraries,
+            internal,
+            "iterator",
+            &[],
+        )?;
+        let iter_ty = iter_m.ret;
+        let iter_internal = iter_ty.obj_internal()?.to_string();
+        let hasnext_m = crate::symbol_resolver::resolve_instance(
+            &*self.syms.libraries,
+            &iter_internal,
+            "hasNext",
+            &[],
+        )?;
+        let next_m = crate::symbol_resolver::resolve_instance(
+            &*self.syms.libraries,
+            &iter_internal,
+            "next",
+            &[],
+        )?;
+        let elem = iter_ty
+            .type_args()
+            .first()
+            .copied()
+            .or_else(|| it_ty.type_args().first().copied())
+            .unwrap_or_else(|| Ty::obj("kotlin/Any"));
+        let it_iface = self.library_type_is_interface(internal);
+        let iter_iface = self.library_type_is_interface(&iter_internal);
+
+        // acc = new ArrayList()
+        let acc_new = self.ir.add_expr(IrExpr::NewExternal {
+            internal: "java/util/ArrayList".to_string(),
+            ctor_desc: "()V".to_string(),
+            args: vec![],
+        });
+        let acc_v = self.fresh_value();
+        let acc_ty = Ty::obj("java/util/ArrayList");
+        let var_acc = self.ir.add_expr(IrExpr::Variable {
+            index: acc_v,
+            ty: ty_to_ir(acc_ty),
+            init: Some(acc_new),
+        });
+
+        // it = recv.iterator()
+        let recv = self.expr(receiver)?;
+        let iter_call = self.ir.add_expr(IrExpr::Call {
+            callee: Callee::Virtual {
+                owner: internal.to_string(),
+                name: "iterator".to_string(),
+                descriptor: iter_m.descriptor,
+                interface: it_iface,
+            },
+            dispatch_receiver: Some(recv),
+            args: vec![],
+        });
+        let it_v = self.fresh_value();
+        let var_it = self.ir.add_expr(IrExpr::Variable {
+            index: it_v,
+            ty: ty_to_ir(iter_ty),
+            init: Some(iter_call),
+        });
+
+        // cond: it.hasNext()
+        let it_g = self.ir.add_expr(IrExpr::GetValue(it_v));
+        let cond = self.ir.add_expr(IrExpr::Call {
+            callee: Callee::Virtual {
+                owner: iter_internal.clone(),
+                name: "hasNext".to_string(),
+                descriptor: hasnext_m.descriptor,
+                interface: iter_iface,
+            },
+            dispatch_receiver: Some(it_g),
+            args: vec![],
+        });
+
+        // body: e = (elem) it.next(); acc.add/addAll(<inlined lambda body>)
+        let it_g2 = self.ir.add_expr(IrExpr::GetValue(it_v));
+        let next_call = self.ir.add_expr(IrExpr::Call {
+            callee: Callee::Virtual {
+                owner: iter_internal,
+                name: "next".to_string(),
+                descriptor: next_m.descriptor,
+                interface: iter_iface,
+            },
+            dispatch_receiver: Some(it_g2),
+            args: vec![],
+        });
+        // Coerce the `Object` iterator result to the element type — the SAME four-way split
+        // `lower_foreach_iterator` uses: unbox an unsigned/scalar-value-class element (a `checkcast` +
+        // `istore` would store a reference into a primitive slot → VerifyError), else `checkcast` a
+        // concrete reference, else leave `Any` as-is.
+        let elem_val = if elem.is_unsigned() {
+            self.unbox_unsigned(next_call, elem)?
+        } else if self.has_scalar_value_repr(elem) {
+            self.ir.add_expr(IrExpr::TypeOp {
+                op: IrTypeOp::ImplicitCoercion,
+                arg: next_call,
+                type_operand: ty_to_ir(elem),
+            })
+        } else if elem != Ty::obj("kotlin/Any") {
+            self.ir.add_expr(IrExpr::TypeOp {
+                op: IrTypeOp::Cast,
+                arg: next_call,
+                type_operand: ty_to_ir(elem),
+            })
+        } else {
+            next_call
+        };
+        // Bind the element to the lambda's parameter, then lower the lambda body and bind ITS value to a
+        // fresh local — as SEPARATE statements, not a bundled block. The body value can be a suspend call;
+        // the coroutine pass surfaces a suspension from a plain `Variable{ init: <suspend call> }` (in a
+        // loop body it already models), but NOT from a block-valued init inside a loop nor from a call
+        // argument. So `val e = next; val part = <body>; acc.add*(part)`.
+        let depth = self.scope.len();
+        let elem_bv = self.fresh_value();
+        self.scope.push((param.to_string(), elem_bv, elem));
+        let var_e = self.ir.add_expr(IrExpr::Variable {
+            index: elem_bv,
+            ty: ty_to_ir(elem),
+            init: Some(elem_val),
+        });
+        let body_val = self.expr(body);
+        self.scope.truncate(depth);
+        let body_val = body_val?;
+        // The lambda body lowers to a value-block (`{ stmts…; value }`). Splice its statements into the
+        // loop and bind `part` to the block's VALUE — a plain `Variable{ init: <value> }` the coroutine
+        // pass surfaces (a block-valued init inside a loop body isn't normalized).
+        let (mut loop_stmts, body_v) = match self.ir.exprs[body_val as usize].clone() {
+            IrExpr::Block {
+                stmts,
+                value: Some(v),
+            } => (stmts, v),
+            _ => (Vec::new(), body_val),
+        };
+        let part_ty = self.info.ty(body);
+        // flatMap emits `ArrayList.addAll(Collection)`, but kotlinc's flatMap accepts any `Iterable` and
+        // handles a non-`Collection` via an iterating extension we don't model here — so decline (the
+        // caller falls back / the file bails) when the element result isn't a `Collection` subtype.
+        if is_flat
+            && !part_ty
+                .obj_internal()
+                .is_some_and(|i| self.type_is_collection(i))
+        {
+            self.scope.truncate(depth);
+            return None;
+        }
+        let part_v = self.fresh_value();
+        let var_part = self.ir.add_expr(IrExpr::Variable {
+            index: part_v,
+            ty: ty_to_ir(part_ty),
+            init: Some(body_v),
+        });
+        let acc_g = self.ir.add_expr(IrExpr::GetValue(acc_v));
+        let part_g = self.ir.add_expr(IrExpr::GetValue(part_v));
+        let (add_name, add_desc, add_arg) = if is_flat {
+            ("addAll", "(Ljava/util/Collection;)Z", part_g)
+        } else {
+            // `add(Object)` takes a reference — box a value/primitive result.
+            let boxed = self.ir.add_expr(IrExpr::TypeOp {
+                op: IrTypeOp::ImplicitCoercion,
+                arg: part_g,
+                type_operand: ty_to_ir(Ty::obj("kotlin/Any")),
+            });
+            ("add", "(Ljava/lang/Object;)Z", boxed)
+        };
+        let add_call = self.ir.add_expr(IrExpr::Call {
+            callee: Callee::Virtual {
+                owner: "java/util/ArrayList".to_string(),
+                name: add_name.to_string(),
+                descriptor: add_desc.to_string(),
+                interface: false,
+            },
+            dispatch_receiver: Some(acc_g),
+            args: vec![add_arg],
+        });
+        let mut wstmts = vec![var_e];
+        wstmts.append(&mut loop_stmts);
+        wstmts.push(var_part);
+        wstmts.push(add_call);
+        let wbody = self.ir.add_expr(IrExpr::Block {
+            stmts: wstmts,
+            value: None,
+        });
+        let wh = self.ir.add_expr(IrExpr::While {
+            cond,
+            body: wbody,
+            update: None,
+            post_test: false,
+            label: None,
+        });
+        let acc_read = self.ir.add_expr(IrExpr::GetValue(acc_v));
+        Some(self.ir.add_expr(IrExpr::Block {
+            stmts: vec![var_acc, var_it, wh],
+            value: Some(acc_read),
+        }))
+    }
+
     fn lower_for_each(
         &mut self,
         name: &str,
@@ -19343,6 +19611,55 @@ impl<'a> Lower<'a> {
                         if iterable {
                             let param = ast::first_lambda_param_or_it(params);
                             return self.lower_for_each(&param, receiver, *lbody, None);
+                        }
+                    }
+                    // `iterable.map/flatMap { … }` WHERE THE LAMBDA BODY SUSPENDS: a stdlib collection HOF
+                    // lowers its lambda to a `FunctionN` impl that can't suspend, so inline it into an
+                    // accumulating loop (kotlinc's own inline expansion) — putting the suspension in an
+                    // ordinary for-loop the coroutine pass models. Only in a suspend fn and only when the
+                    // lambda actually suspends, so a non-suspend `map`/`flatMap` keeps its library call.
+                    // ABI guard: fire ONLY for the stdlib `Iterable.map`/`flatMap`, which return `List<R>`
+                    // — so materializing the loop into an `ArrayList` (a `List`) is signature-correct.
+                    // A lazy `Sequence.map` (returns `Sequence`) or a user overload returning another
+                    // container (`Set`, …) has a non-`List` result type and a NON-`kotlin/collections`
+                    // facade; gating on the `List` result type + a resolved stdlib-collections extension
+                    // excludes them, so we never hand back an `ArrayList` where the static type is
+                    // `Sequence`/`Set` (→ VerifyError / ClassCastException).
+                    let stdlib_list_hof = (name == "map" || name == "flatMap")
+                        && self.info.ty(e).obj_internal().is_some_and(|i| {
+                            i == "kotlin/collections/List" || i == "kotlin/collections/MutableList"
+                        })
+                        && self
+                            .info
+                            .resolved_extension(e)
+                            .is_some_and(|c| c.owner.starts_with("kotlin/collections/"));
+                    if self.cur_fn_suspend && stdlib_list_hof && args.len() == 1 {
+                        if let Expr::Lambda {
+                            params,
+                            body: lbody,
+                        } = self.afile.expr(args[0]).clone()
+                        {
+                            let rty = self.info.ty(receiver);
+                            let iterable = rty.obj_internal().is_some_and(|i| {
+                                crate::symbol_resolver::resolve_instance(
+                                    &*self.syms.libraries,
+                                    i,
+                                    "iterator",
+                                    &[],
+                                )
+                                .is_some()
+                            });
+                            if iterable && self.ast_subtree_suspends(lbody) {
+                                let param = ast::first_lambda_param_or_it(&params);
+                                if let Some(v) = self.lower_suspend_accumulate_hof(
+                                    name == "flatMap",
+                                    &param,
+                                    receiver,
+                                    lbody,
+                                ) {
+                                    return Some(v);
+                                }
+                            }
                         }
                     }
                     // `iterable.forEachIndexed { i, x -> body }` — the inline `forEachIndexed`, whose
