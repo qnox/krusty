@@ -1121,6 +1121,7 @@ fn build_state_machine(ir: &mut IrFile, facade: &str, fid: u32, b: ExprId, unit_
         // Value parameters are assigned on entry (captured at construction, restored at the loop top).
         assigned: param_caps.iter().map(|(l, _)| *l).collect(),
         next_local: flat_next_local,
+        loop_targets: Vec::new(),
         failed: false,
     };
     flat.flatten(&stmts, 0, None);
@@ -1425,6 +1426,7 @@ fn build_lambda_state_machine(
         // assigned on entry.
         assigned: std::collections::HashSet::new(),
         next_local: base + 3,
+        loop_targets: Vec::new(),
         failed: false,
     };
     for (n, &s) in stmts.iter().enumerate() {
@@ -1671,6 +1673,12 @@ struct Flat<'a> {
     /// loop-top restore is always type-correct — so gating on definite assignment is sound.
     assigned: std::collections::HashSet<u32>,
     next_local: u32,
+    /// Loop-target stack for a suspending loop whose body is flattened across states: each entry is
+    /// `(label, continue_state, break_state)`. A `Continue`/`Break` statement inside the body resolves to
+    /// the innermost frame (or the labeled one) and emits a `goto` to that state — the structured
+    /// `Continue`/`Break` node can't survive flattening (at emit it would target the dispatch `while(true)`
+    /// loop, not the user's logical loop). Pushed around the body in the `While`-suspending-body handler.
+    loop_targets: Vec<(Option<String>, usize, usize)>,
     failed: bool,
 }
 
@@ -1818,6 +1826,67 @@ impl Flat<'_> {
         }
     }
     /// If `stmt` is a (possibly result-discarding) direct suspension, return `(bound local, call ExprId)`.
+    /// Whether `e`'s subtree contains a `continue`/`break` for a loop currently being flattened — an
+    /// UNLABELED jump (targets the innermost loop, i.e. the one whose body is flattening), or a LABELED
+    /// jump matching an active `loop_targets` frame. Stops at a nested `While`/`Lambda`: an unlabeled jump
+    /// there belongs to that inner loop / closure, not this one. Drives the `When`-statement state-split so
+    /// a branch carrying such a jump gets its own state (where the jump becomes a tail `goto`).
+    fn expr_has_loop_jump(&self, e: ExprId) -> bool {
+        match &self.ir.exprs[e as usize] {
+            IrExpr::Break { label } | IrExpr::Continue { label } => match label {
+                None => true,
+                Some(l) => self
+                    .loop_targets
+                    .iter()
+                    .any(|(fl, _, _)| fl.as_deref() == Some(l.as_str())),
+            },
+            IrExpr::While { .. } | IrExpr::Lambda { .. } => false,
+            _ => {
+                let mut found = false;
+                crate::ir::for_each_child(&self.ir.exprs, e, &mut |c| {
+                    found = found || self.expr_has_loop_jump(c);
+                });
+                found
+            }
+        }
+    }
+    /// Whether `e`'s subtree contains a nested STRUCTURAL loop — a `While` whose own body does NOT
+    /// suspend (so the flattener leaves it intact rather than state-splitting it). Emitting such a loop
+    /// inside a flattened (state-split) body mis-allocates its iterator local, so the caller declines.
+    /// Stops at a `Lambda` (a separate scope). A nested SUSPENDING loop is not "structural" — it is itself
+    /// flattened — so recurse past it to look for a deeper structural one.
+    fn body_has_structural_loop(&self, e: ExprId) -> bool {
+        match &self.ir.exprs[e as usize] {
+            IrExpr::While { body, .. } if !expr_calls_suspend(self.ir, *body, self.suspend) => true,
+            // A real CLOSURE lambda's loop lives in a separate impl method (fine). A structural loop
+            // hidden in a lambda that the backend SPLICES inline (`run{}`/`let{}`/`forEach{}`) would land
+            // in the flattened body — but every such shape independently DECLINES in the flattener /
+            // collection-HOF path today, so this arm is safe. If a future change let a splice-hidden loop
+            // through, extend the guard to descend into `Lambda.inline_body`.
+            IrExpr::Lambda { .. } => false,
+            _ => {
+                let mut found = false;
+                crate::ir::for_each_child(&self.ir.exprs, e, &mut |c| {
+                    found = found || self.body_has_structural_loop(c);
+                });
+                found
+            }
+        }
+    }
+    /// The state a `continue`/`break` transfers to: the `cont`/`exit` of the innermost active loop frame,
+    /// or the frame whose label matches. `None` when no such loop is being flattened (a jump the caller
+    /// leaves structural).
+    fn loop_jump_target(&self, label: Option<&str>, is_break: bool) -> Option<usize> {
+        let frame = match label {
+            Some(l) => self
+                .loop_targets
+                .iter()
+                .rev()
+                .find(|(fl, _, _)| fl.as_deref() == Some(l)),
+            None => self.loop_targets.last(),
+        };
+        frame.map(|&(_, cont, exit)| if is_break { exit } else { cont })
+    }
     fn stmt_suspension(&self, stmt: ExprId) -> Option<Suspension> {
         match &self.ir.exprs[stmt as usize] {
             IrExpr::Variable {
@@ -1848,13 +1917,31 @@ impl Flat<'_> {
         let any_susp = branches
             .iter()
             .any(|(_, v)| is_suspend_call(self.ir, *v, self.suspend));
-        if !any_susp {
+        // `val v = expr ?: continue` lowers to `val v = when { c -> expr; else -> continue }` — a branch
+        // whose VALUE is a loop-jump binds nothing and diverges to the loop's cont/break state. Route the
+        // whole binding through `emit_cond` (state-split) so the jump becomes a tail `goto`; otherwise the
+        // structured `Continue`/`Break` sits in the merge's value slot → a stackmap/verify mismatch.
+        let any_jump = branches
+            .iter()
+            .any(|(_, v)| match &self.ir.exprs[*v as usize] {
+                IrExpr::Break { label } => self.loop_jump_target(label.as_deref(), true).is_some(),
+                IrExpr::Continue { label } => {
+                    self.loop_jump_target(label.as_deref(), false).is_some()
+                }
+                _ => false,
+            });
+        if !any_susp && !any_jump {
             return None;
         }
-        // A branch value must be either a direct suspension or suspension-free.
+        // A branch value must be either a direct suspension, a direct loop-jump, or free of both.
         for (_, v) in &branches {
+            let direct_jump = matches!(
+                self.ir.exprs[*v as usize],
+                IrExpr::Break { .. } | IrExpr::Continue { .. }
+            );
             if !is_suspend_call(self.ir, *v, self.suspend)
-                && expr_calls_suspend(self.ir, *v, self.suspend)
+                && !direct_jump
+                && (expr_calls_suspend(self.ir, *v, self.suspend) || self.expr_has_loop_jump(*v))
             {
                 self.failed = true;
                 return None;
@@ -1874,7 +1961,18 @@ impl Flat<'_> {
         let mut out_branches: Branches = Vec::new();
         for (cond, value) in branches {
             let mut bb: Vec<ExprId> = Vec::new();
-            if is_suspend_call(self.ir, *value, self.suspend) {
+            let jump = match &self.ir.exprs[*value as usize] {
+                IrExpr::Break { label } => Some((label.clone(), true)),
+                IrExpr::Continue { label } => Some((label.clone(), false)),
+                _ => None,
+            };
+            if let Some((label, is_break)) = jump {
+                // A loop-jump branch: transfer to the loop's cont/break state; bind nothing (it diverges).
+                let target = self
+                    .loop_jump_target(label.as_deref(), is_break)
+                    .unwrap_or(merge);
+                self.goto(&mut bb, target);
+            } else if is_suspend_call(self.ir, *value, self.suspend) {
                 let br_resume = self.new_state();
                 self.emit_call(&mut bb, *value, br_resume);
                 let mut rs: Vec<ExprId> = Vec::new();
@@ -1981,6 +2079,55 @@ impl Flat<'_> {
                 return;
             }
             let stmt = stmts[i];
+            // A `continue`/`break` inside a suspending loop's body: emit a `goto` to the loop's
+            // continue/break state (resolved from the loop-target stack — innermost, or the frame whose
+            // label matches). The structured node can't survive flattening; anything after it in this
+            // sequence is unreachable. Falls through to the plain path when no matching loop frame is in
+            // scope (e.g. a loop whose own body doesn't suspend, handled structurally by the emitter).
+            // A `Variable { init: Block { stmts, value } }` — an elvis / safe-call subject lowers its
+            // subject into the block's statements and the result `when` into the block's value
+            // (`val v = m[i] ?: continue` → `{ val t = m[i]; when { t != null -> t; else -> continue } }`).
+            // `normalize_block_inits` unwraps these only at the function-body top level, not inside a loop.
+            // When such an init carries a loop-jump (or suspension), splice it (`stmts…; val v = value;
+            // rest`) so the inner `when` reaches `stmt_cond_suspension` / the jump reaches its handler.
+            if let IrExpr::Variable {
+                index,
+                ty,
+                init: Some(init),
+            } = self.ir.exprs[stmt as usize].clone()
+            {
+                if let IrExpr::Block {
+                    stmts: bs,
+                    value: Some(bv),
+                } = self.ir.exprs[init as usize].clone()
+                {
+                    if self.expr_has_loop_jump(stmt)
+                        || expr_calls_suspend(self.ir, stmt, self.suspend)
+                    {
+                        let rebind = self.add(IrExpr::Variable {
+                            index,
+                            ty,
+                            init: Some(bv),
+                        });
+                        let mut spliced = bs;
+                        spliced.push(rebind);
+                        spliced.extend_from_slice(&stmts[i + 1..]);
+                        self.states[cur] = out;
+                        self.flatten(&spliced, cur, after);
+                        return;
+                    }
+                }
+            }
+            if let IrExpr::Break { label } | IrExpr::Continue { label } =
+                self.ir.exprs[stmt as usize].clone()
+            {
+                let is_break = matches!(self.ir.exprs[stmt as usize], IrExpr::Break { .. });
+                if let Some(target) = self.loop_jump_target(label.as_deref(), is_break) {
+                    self.goto(&mut out, target);
+                    self.states[cur] = out;
+                    return;
+                }
+            }
             if let Some((bind, call)) = self.stmt_suspension(stmt) {
                 let resume = self.new_state();
                 self.emit_call(&mut out, call, resume);
@@ -2026,8 +2173,13 @@ impl Flat<'_> {
             }
             // An `if`/`when` STATEMENT whose branch body suspends: route each branch through its own
             // entry state (which flattens the branch), all converging at `merge`.
+            // Also fire when a branch carries a `continue`/`break` for the enclosing suspending loop
+            // (`if (c) continue`): a loop-jump can only transfer control from a state via a tail `goto`, so
+            // the branch must live in its own state (where its `Continue`/`Break` becomes a `goto` to the
+            // loop's cont/break state) — exactly the state-split `emit_when_stmt` performs.
             if let IrExpr::When { branches } = &self.ir.exprs[stmt as usize] {
-                if expr_calls_suspend(self.ir, stmt, self.suspend) {
+                if expr_calls_suspend(self.ir, stmt, self.suspend) || self.expr_has_loop_jump(stmt)
+                {
                     let branches = branches.clone();
                     let merge = self.new_state();
                     let when = self.emit_when_stmt(branches, merge);
@@ -2044,11 +2196,21 @@ impl Flat<'_> {
                 body,
                 update,
                 post_test,
-                ..
+                label,
             } = &self.ir.exprs[stmt as usize]
             {
                 if expr_calls_suspend(self.ir, *body, self.suspend) {
-                    let (cond, body, update, post_test) = (*cond, *body, *update, *post_test);
+                    let (cond, body, update, post_test, label) =
+                        (*cond, *body, *update, *post_test, label.clone());
+                    // A STRUCTURAL (non-suspending) loop nested in this flattened body mis-numbers its
+                    // iterator local across the state split (the enclosing loop's iterator slot is
+                    // clobbered → a stackmap-inconsistent VerifyError). Not yet modeled — DECLINE rather
+                    // than miscompile. A nested SUSPENDING loop is fine (it is itself flattened).
+                    if self.body_has_structural_loop(body) {
+                        self.failed = true;
+                        self.states[cur] = out;
+                        return;
+                    }
                     let header = self.new_state();
                     let body_entry = self.new_state();
                     let cont = self.new_state();
@@ -2079,17 +2241,22 @@ impl Flat<'_> {
                     });
                     hs.push(hwhen);
                     self.states[header] = hs;
-                    // body → cont (back to header after the update)
+                    // body → cont (back to header after the update). A `continue` in the body targets
+                    // `cont` (the update+re-test), a `break` targets `exit`; push the frame so a
+                    // `Continue`/`Break` statement flattens to the right `goto` rather than surviving as a
+                    // structured node aimed at the dispatch loop.
                     let body_stmts = self.block_stmts(body);
+                    self.loop_targets.push((label, cont, exit));
                     self.flatten(&body_stmts, body_entry, Some(cont));
-                    // cont: run the loop update (a `for`-loop increment), then back to header
-                    let mut cs: Vec<ExprId> = Vec::new();
-                    if let Some(u) = update {
-                        let u2 = self.rewrite_plain(u);
-                        cs.push(u2);
-                    }
-                    self.goto(&mut cs, header);
-                    self.states[cont] = cs;
+                    // cont: run the loop update (a `for`-loop increment + the counted-loop bound-check
+                    // `break`), then back to header. FLATTEN it (with the loop frame still active) rather
+                    // than `rewrite_plain`, so a `break` in the update — the overflow-safe counted-loop
+                    // bound check `if (i == last) break` — routes to `exit` instead of surviving as a
+                    // structured node aimed at the dispatch loop.
+                    let update_stmts: Vec<ExprId> =
+                        update.map(|u| self.block_stmts(u)).unwrap_or_default();
+                    self.flatten(&update_stmts, cont, Some(header));
+                    self.loop_targets.pop();
                     // exit: the rest
                     self.flatten(&stmts[i + 1..], exit, after);
                     return;
