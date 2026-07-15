@@ -1235,6 +1235,7 @@ pub fn collect_signatures_with_cp(
                                     &fun_rets,
                                     &this_scope,
                                     &*libraries,
+                                    &|ci, cn| table.prop_of(ci, cn).map(|(pt, _)| pt),
                                 );
                                 if t != Ty::Error {
                                     t
@@ -1529,6 +1530,7 @@ pub fn collect_signatures_with_cp(
                                     &fun_rets,
                                     &init_scope,
                                     &*libraries,
+                                    &|ci, cn| table.prop_of(ci, cn).map(|(pt, _)| pt),
                                 )
                                 .obj_internal()
                                 .and_then(|i| table.method_of(i, "getValue"))
@@ -1555,6 +1557,7 @@ pub fn collect_signatures_with_cp(
                                             &fun_rets,
                                             &init_scope,
                                             &*libraries,
+                                            &|ci, cn| table.prop_of(ci, cn).map(|(pt, _)| pt),
                                         )
                                     })
                                     .unwrap_or(Ty::Error),
@@ -1638,6 +1641,7 @@ pub fn collect_signatures_with_cp(
                                             &fun_rets,
                                             &[],
                                             &*libraries,
+                                            &|ci, cn| table.prop_of(ci, cn).map(|(pt, _)| pt),
                                         )
                                     })
                                     .unwrap_or(Ty::Error),
@@ -1751,6 +1755,7 @@ pub fn collect_signatures_with_cp(
                                             &local_rets,
                                             &scope,
                                             &*libraries,
+                                            &|ci, cn| table.prop_of(ci, cn).map(|(pt, _)| pt),
                                         );
                                         if t != Ty::Error {
                                             return t;
@@ -3101,7 +3106,7 @@ fn infer_lit_ty(
     fun_rets: &HashMap<String, Ty>,
     src: &dyn CompilerPlatform,
 ) -> Ty {
-    infer_lit_ty_p(file, e, class_names, fun_rets, &[], src)
+    infer_lit_ty_p(file, e, class_names, fun_rets, &[], src, &|_, _| None)
 }
 
 /// The array type produced by a creation-builtin call in the lightweight inferer: a primitive
@@ -3158,6 +3163,10 @@ fn infer_lit_ty_p(
     fun_rets: &HashMap<String, Ty>,
     props: &[(String, Ty, bool)],
     src: &dyn CompilerPlatform,
+    // Resolve a property `name` of a USER class (by JVM internal) being collected — the classpath
+    // `src` can't see the module's own classes, so a `param.member` initializer (`var c = from.i`,
+    // `from: SomeUserClass`) needs this to infer its type. Returns `None` for a classpath/unknown type.
+    up: &dyn Fn(&str, &str) -> Option<Ty>,
 ) -> Ty {
     // Resolve the (single) return type of `name` applied to `receiver` (a method/extension when
     // `receiver` is `Some`, a top-level function when `None`) through the FEDERATED symbol source — the
@@ -3232,22 +3241,28 @@ fn infer_lit_ty_p(
             }
             // Property read (`s.length`, `list.size`, `vc.value`): resolve through the FEDERATED source —
             // the same path the full checker uses, no hardcoded property names.
-            let rt = infer_lit_ty_p(file, *receiver, class_names, fun_rets, props, src);
+            let rt = infer_lit_ty_p(file, *receiver, class_names, fun_rets, props, src, up);
             if let Some(m) = crate::symbol_resolver::resolve_property_member(src, rt, name) {
                 return m.ret;
+            }
+            // A property of a USER class being collected (invisible to the classpath `src`).
+            if let Some(internal) = rt.obj_internal() {
+                if let Some(t) = up(internal, name) {
+                    return t;
+                }
             }
             Ty::Error
         }
         Expr::Unary { op, operand } => match op {
             UnOp::Not => Ty::Boolean,
             UnOp::Neg | UnOp::Plus => {
-                infer_lit_ty_p(file, *operand, class_names, fun_rets, props, src)
+                infer_lit_ty_p(file, *operand, class_names, fun_rets, props, src, up)
             }
         },
         Expr::Binary { op, lhs, rhs } => {
             let (lt, rt) = (
-                infer_lit_ty_p(file, *lhs, class_names, fun_rets, props, src),
-                infer_lit_ty_p(file, *rhs, class_names, fun_rets, props, src),
+                infer_lit_ty_p(file, *lhs, class_names, fun_rets, props, src, up),
+                infer_lit_ty_p(file, *rhs, class_names, fun_rets, props, src, up),
             );
             match op {
                 BinOp::Lt
@@ -3318,7 +3333,7 @@ fn infer_lit_ty_p(
                     // reached when the simpler probe returned `None`, so it never overrides an inference.
                     let arg_tys: Vec<Ty> = args
                         .iter()
-                        .map(|a| infer_lit_ty_p(file, *a, class_names, fun_rets, props, src))
+                        .map(|a| infer_lit_ty_p(file, *a, class_names, fun_rets, props, src, up))
                         .collect();
                     // Array-creation builtins (`arrayOf`, `intArrayOf`, …) are `@InlineOnly` intrinsics
                     // the federated probe doesn't surface as a return type — infer the element here,
@@ -3345,7 +3360,7 @@ fn infer_lit_ty_p(
                         }
                     }
                     let recv_ty =
-                        infer_lit_ty_p(file, *receiver, class_names, fun_rets, props, src);
+                        infer_lit_ty_p(file, *receiver, class_names, fun_rets, props, src, up);
                     if recv_ty != Ty::Error {
                         if let Some(t) = builtin_bitwise_ret(recv_ty, name, args.len()) {
                             return t;
@@ -3377,8 +3392,8 @@ fn infer_lit_ty_p(
             else_branch: Some(eb),
             ..
         } => {
-            let t = infer_lit_ty_p(file, *then_branch, class_names, fun_rets, props, src);
-            let e = infer_lit_ty_p(file, *eb, class_names, fun_rets, props, src);
+            let t = infer_lit_ty_p(file, *then_branch, class_names, fun_rets, props, src, up);
+            let e = infer_lit_ty_p(file, *eb, class_names, fun_rets, props, src, up);
             common_lit_ty(t, e)
         }
         // A `when` expression body — the common type of all arm bodies. Requires an explicit `else` arm
@@ -3389,7 +3404,7 @@ fn infer_lit_ty_p(
             }
             let mut acc: Option<Ty> = None;
             for a in arms {
-                let bt = infer_lit_ty_p(file, a.body, class_names, fun_rets, props, src);
+                let bt = infer_lit_ty_p(file, a.body, class_names, fun_rets, props, src, up);
                 if bt == Ty::Error {
                     return Ty::Error;
                 }
@@ -3404,12 +3419,12 @@ fn infer_lit_ty_p(
         // tracked here, so a trailing referring to a local infers `Error` (safe skip).
         Expr::Block {
             trailing: Some(t), ..
-        } => infer_lit_ty_p(file, *t, class_names, fun_rets, props, src),
+        } => infer_lit_ty_p(file, *t, class_names, fun_rets, props, src, up),
         // A range value (`val r = 1..10`, `0 until n`, `4 downTo 1`) — the matching stdlib range type
         // (mirrors the checker's `RangeTo` typing), so a range-typed property's type infers.
         Expr::RangeTo { lo, hi, .. } => {
-            let lt = infer_lit_ty_p(file, *lo, class_names, fun_rets, props, src);
-            let rt = infer_lit_ty_p(file, *hi, class_names, fun_rets, props, src);
+            let lt = infer_lit_ty_p(file, *lo, class_names, fun_rets, props, src, up);
+            let rt = infer_lit_ty_p(file, *hi, class_names, fun_rets, props, src, up);
             Ty::range_value_type(lt, rt).unwrap_or(Ty::Error)
         }
         // A top-level property initialized from an unambiguous classpath function reference.
