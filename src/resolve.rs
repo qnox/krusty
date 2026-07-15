@@ -3811,6 +3811,11 @@ pub struct TypeInfo {
     /// to drive the bytecode splicer's reified specialization. Recorded only where an explicit `<…>` is
     /// present on a call.
     pub resolved_call_type_args: HashMap<ExprId, Vec<Ty>>,
+    /// A bare-member read (`Expr::Name`) or unqualified call that resolved against a FLOW-NARROWED
+    /// implicit receiver (`if (this is B) … a …`, where `a`/`m()` is a member of `B` but not of the
+    /// declared receiver). Maps the read/call `ExprId` to the narrowed receiver's internal name so the
+    /// lowerer emits a `checkcast` on the loaded `this` before the field read / method call.
+    pub narrowed_this_member: HashMap<ExprId, String>,
     /// Calls the checker already resolved, keyed by the `Expr::Call` (or member-read) `ExprId`. The
     /// lowerer reads the resolved target here instead of re-running `symbol_resolver`, so a source call
     /// is resolved exactly once and the two passes cannot select different overloads. Absent for calls
@@ -4140,6 +4145,7 @@ fn make_checker<'a>(file: &'a File, syms: &'a SymbolTable, diags: &'a mut DiagSi
         tparams: Default::default(),
         reified_tparams: std::collections::HashSet::new(),
         this_ty: None,
+        this_narrow: None,
         this_labels: Vec::new(),
         field_ty: None,
         companion_of: None,
@@ -4151,6 +4157,7 @@ fn make_checker<'a>(file: &'a File, syms: &'a SymbolTable, diags: &'a mut DiagSi
         stmt_lowers: HashMap::new(),
         local_decl_types: HashMap::new(),
         resolved_call_type_args: HashMap::new(),
+        narrowed_this_member: HashMap::new(),
         resolved_calls: HashMap::new(),
         synthetic_ext_calls: HashMap::new(),
         context_args: HashMap::new(),
@@ -4884,6 +4891,7 @@ pub fn check_file(file: &File, syms: &mut SymbolTable, diags: &mut DiagSink) -> 
         stmt_lowers,
         local_decl_types,
         resolved_call_type_args,
+        narrowed_this_member,
         resolved_calls,
         synthetic_ext_calls,
         context_args,
@@ -4918,6 +4926,7 @@ pub fn check_file(file: &File, syms: &mut SymbolTable, diags: &mut DiagSink) -> 
         stmt_lowers,
         local_decl_types,
         resolved_call_type_args,
+        narrowed_this_member,
         resolved_calls,
         synthetic_ext_calls,
         context_args,
@@ -4949,6 +4958,12 @@ struct Checker<'a> {
     reified_tparams: std::collections::HashSet<String>,
     /// The type of `this` when checking class members (`None` at top level).
     this_ty: Option<Ty>,
+    /// A flow-narrowing of the implicit receiver established by `if (this is B)`: `this` is known to
+    /// be `B` (a subtype of `this_ty`) inside the guarded branch, so a bare member of `B` resolves.
+    /// Separate from `this_ty` (which stays the DECLARED receiver type so `this` still types as it,
+    /// and the lowerer inserts a `checkcast` only where the narrowing was actually used). Cleared at
+    /// every scope boundary, like local flow-narrowings.
+    this_narrow: Option<Ty>,
     /// Stack of labeled receivers in scope, innermost LAST. Each entry is `(label, ty, is_class)`:
     /// a class body pushes `(ClassName, ty, true)`; a receiver lambda / scope function pushes
     /// `(fnName, receiverTy, false)`. Resolves `this@Label`. The innermost entry is the current `this`
@@ -4974,6 +4989,7 @@ struct Checker<'a> {
     stmt_lowers: HashMap<StmtId, StmtLowering>,
     local_decl_types: HashMap<StmtId, Ty>,
     resolved_call_type_args: HashMap<ExprId, Vec<Ty>>,
+    narrowed_this_member: HashMap<ExprId, String>,
     /// Calls resolved during checking, keyed by the `Expr::Call` `ExprId` (moved into
     /// [`TypeInfo::resolved_calls`] so the lowerer reads them instead of re-resolving). See
     /// [`ResolvedCall`] for the variants.
@@ -6069,6 +6085,32 @@ impl<'a> Checker<'a> {
 
     /// If `cond` is `x is T` (or `x !is T` when `for_else`) and `x` is a stable local/parameter and
     /// `T` a non-nullable known reference type, return the smart-cast binding `(x, T)`.
+    /// The narrowed implicit-receiver type established by `if (this is B)` (`this !is B` in the
+    /// else-branch): `this` is a subtype `B` of the declared receiver. `this` is immutable, so the
+    /// narrowing is sound across nested scopes. Only a KNOWN reference subtype narrows (a primitive /
+    /// nullable / unresolved target is left un-narrowed, so the file skips rather than miscompiles).
+    fn this_is_narrowing(&self, cond: ExprId, for_else: bool) -> Option<Ty> {
+        let Expr::Is {
+            operand,
+            ty,
+            negated,
+        } = self.file.expr(cond).clone()
+        else {
+            return None;
+        };
+        if negated != for_else {
+            return None;
+        }
+        if !matches!(self.file.expr(operand), Expr::Name(n) if n == "this") {
+            return None;
+        }
+        if ty.nullable {
+            return None;
+        }
+        let tt = self.resolve_ty_no_diag(&ty);
+        tt.is_reference().then_some(tt)
+    }
+
     fn smartcast_binding(&self, cond: ExprId, for_else: bool) -> Option<(String, Ty)> {
         // `x != null` (then-branch) / `x == null` (else-branch) narrows a nullable-primitive wrapper to
         // its unboxed primitive — the only null-narrowing krusty needs (a nullable reference is already
@@ -7764,6 +7806,19 @@ impl<'a> Checker<'a> {
                             return self.set(e, ty);
                         }
                     }
+                    // The bare name is not a member of the DECLARED receiver — try the flow-narrowed
+                    // receiver from an enclosing `if (this is B)`. A member found only on `B` records
+                    // the narrowing so the lowerer inserts a `checkcast` on `this` before the read.
+                    if let Some(bt) = self.this_narrow {
+                        if let Some((ty, _)) =
+                            bt.obj_internal().and_then(|i| self.lookup_prop(i, &n))
+                        {
+                            if let Some(bi) = bt.obj_internal() {
+                                self.narrowed_this_member.insert(e, bi.to_string());
+                            }
+                            return self.set(e, ty);
+                        }
+                    }
                     if self.syms.objects.contains(&n) {
                         // A bare `object` name used as a value (`val x = Foo`, or a self-reference
                         // `object Foo { … Foo … }`) — its type is the singleton, read as `Foo.INSTANCE`
@@ -8116,7 +8171,15 @@ impl<'a> Checker<'a> {
                     }
                     self.declare(n, *t, false);
                 }
+                // `if (this is B)` narrows the implicit receiver to `B` in the then-branch, so a bare
+                // member of `B` resolves. Saved/restored around the branch (not stored per-scope):
+                // `this` is immutable, so the narrowing holds across any nested scopes of the branch.
+                let prev_narrow = self.this_narrow;
+                if let Some(bt) = self.this_is_narrowing(cond, false) {
+                    self.this_narrow = Some(bt);
+                }
                 let tt = self.expr(then_branch);
+                self.this_narrow = prev_narrow;
                 self.pop_scope();
                 match else_branch {
                     Some(eb) => {
@@ -8125,7 +8188,12 @@ impl<'a> Checker<'a> {
                         if let Some((n, t)) = &else_cast {
                             self.declare(n, *t, false);
                         }
+                        let prev_narrow = self.this_narrow;
+                        if let Some(bt) = self.this_is_narrowing(cond, true) {
+                            self.this_narrow = Some(bt);
+                        }
                         let et = self.expr(eb);
+                        self.this_narrow = prev_narrow;
                         self.pop_scope();
                         self.join(tt, et, self.span(e))
                     }

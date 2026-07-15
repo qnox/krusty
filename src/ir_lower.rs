@@ -16161,6 +16161,36 @@ impl<'a> Lower<'a> {
                     // computed property (`this.getX()`).
                     let (this_v, this_ty) = self.lookup("this")?;
                     let recv = self.ir.add_expr(IrExpr::GetValue(this_v));
+                    // `this` was flow-narrowed to a subtype by an enclosing `if (this is B)`, and this
+                    // member exists only on `B` — `checkcast` the receiver to `B`, then read the member
+                    // (backing field or getter) on `B`.
+                    if let Some(bi) = self.info.narrowed_this_member.get(&e).cloned() {
+                        let cast = self.ir.add_expr(IrExpr::TypeOp {
+                            op: IrTypeOp::Cast,
+                            arg: recv,
+                            type_operand: ty_to_ir(Ty::obj(&bi)),
+                        });
+                        // `B`'s backing field is private, and `this` is the ENCLOSING class (a
+                        // different class), so read through the property getter — a direct `getfield`
+                        // would be an `IllegalAccessError`. Fall back to a direct field read only when
+                        // there is no getter (a public/platform field).
+                        if let Some((class, index, _, _)) =
+                            self.resolve_method(&bi, &property_getter_name(&n))
+                        {
+                            return Some(self.ir.add_expr(IrExpr::MethodCall {
+                                class,
+                                index,
+                                receiver: cast,
+                                args: vec![],
+                            }));
+                        }
+                        let (fclass, idx, _) = self.resolve_field(&bi, &n)?;
+                        return Some(self.ir.add_expr(IrExpr::GetField {
+                            receiver: cast,
+                            class: fclass,
+                            index: idx,
+                        }));
+                    }
                     let read = if let Some(cur) = self.cur_class.clone() {
                         // An interface has no backing fields — its properties are abstract getters, so
                         // an unqualified property read in a default method routes through the getter

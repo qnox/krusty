@@ -682,6 +682,8 @@ mod synthetic_accessor_e2e;
 mod tailrec_e2e;
 #[path = "this_callable_ref_e2e.rs"]
 mod this_callable_ref_e2e;
+#[path = "this_smartcast_e2e.rs"]
+mod this_smartcast_e2e;
 #[path = "throw_e2e.rs"]
 mod throw_e2e;
 #[path = "top_level_custom_accessor_e2e.rs"]
