@@ -262,6 +262,8 @@ mod empty_loop_body_e2e;
 mod enum_body_property_e2e;
 #[path = "enum_class_signature_e2e.rs"]
 mod enum_class_signature_e2e;
+#[path = "enum_constant_annotation_e2e.rs"]
+mod enum_constant_annotation_e2e;
 #[path = "enum_ctor_default_arg_e2e.rs"]
 mod enum_ctor_default_arg_e2e;
 #[path = "enum_entries_e2e.rs"]
