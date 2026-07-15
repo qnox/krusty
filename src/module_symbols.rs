@@ -376,6 +376,7 @@ mod tests {
             lateinit_props: HashSet::new(),
             interfaces: vec![],
             super_internal: None,
+            super_ctor_params: Vec::new(),
             is_annotation: false,
             ctor_defaults: vec![],
             secondary_ctors: vec![],
