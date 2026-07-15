@@ -10141,7 +10141,8 @@ impl<'a> Checker<'a> {
                         || self
                             .resolver()
                             .top_level_function_set(n)
-                            .has_top_level_with_param_names()
+                            .top_level()
+                            .any(|o| o.call_sig.has_param_names())
                         // A CLASSPATH CONSTRUCTOR whose `@Metadata` records parameter names
                         // (`Point(y = 2, x = 1)`, or `Cfg(a = 1, c = "x")` omitting a defaulted `b`,
                         // against a data/plain class from a dependency). `constructor_named_params` returns
