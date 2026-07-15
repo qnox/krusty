@@ -268,6 +268,14 @@ pub(crate) fn arg_fits(p: &Ty, a: &Ty) -> bool {
         || matches!((p, a), (Ty::Obj(pi, _), Ty::Obj(ai, _)) if pi == ai)
 }
 
+fn arg_fits_platform(lib: &dyn CompilerPlatform, param: &Ty, arg: &Ty) -> bool {
+    arg_fits(param, arg)
+        || param
+            .fun_arity()
+            .zip(lib.function_like_arity(*arg))
+            .is_some_and(|(p, a)| usize::from(p) == a)
+}
+
 /// Extension overloads of a receiver-filtered set, ordered most-specific-first by the SOURCE receiver rank
 /// (the same `source_receiver_rank` the overload selector uses) rather than the provider's baked
 /// `receiver_rank`. The provider ranks a primitive-array family by enumeration order — every `IntArray`/
@@ -585,12 +593,12 @@ impl<'a> SymbolResolver<'a> {
             .filter(|o| o.public())
             .map(|o| (o, o.callable.params.clone(), o.callable.ret))
             .collect();
+        let fits = |p: &Ty, a: &Ty| arg_fits_platform(self.lib, p, a);
 
         let pick = parsed
             .iter()
             .find(|(_, params, _)| {
-                params.len() == args.len()
-                    && params.iter().zip(args).all(|(p, a)| self.arg_fits(p, a))
+                params.len() == args.len() && params.iter().zip(args).all(|(p, a)| fits(p, a))
             })
             .or_else(|| {
                 parsed.iter().find(|(_, params, _)| {
@@ -602,11 +610,8 @@ impl<'a> SymbolResolver<'a> {
                         return false;
                     };
                     args.len() >= fixed
-                        && params[..fixed]
-                            .iter()
-                            .zip(args)
-                            .all(|(p, a)| self.arg_fits(p, a))
-                        && args[fixed..].iter().all(|a| self.arg_fits(&elem, a))
+                        && params[..fixed].iter().zip(args).all(|(p, a)| fits(p, a))
+                        && args[fixed..].iter().all(|a| fits(&elem, a))
                 })
             });
 
@@ -927,21 +932,13 @@ impl<'a> SymbolResolver<'a> {
     }
 
     fn arg_fits_or_subtype(&self, param: &Ty, arg: &Ty) -> bool {
-        self.arg_fits(param, arg)
+        arg_fits_platform(self.lib, param, arg)
             || crate::assignable::is_assignable(
                 &crate::assignable::TyCtx::new(),
                 &SourceOracle(&self.src),
                 *arg,
                 *param,
             )
-    }
-
-    fn arg_fits(&self, param: &Ty, arg: &Ty) -> bool {
-        arg_fits(param, arg)
-            || param
-                .fun_arity()
-                .zip(self.lib.function_like_arity(*arg))
-                .is_some_and(|(p, a)| usize::from(p) == a)
     }
 
     fn default_arg_mapping(
@@ -955,17 +952,18 @@ impl<'a> SymbolResolver<'a> {
         if args.len() > real_count {
             return None;
         }
+        let fits = |p: &Ty, a: &Ty| arg_fits_platform(self.lib, p, a);
         let trailing_lambda = args.last().is_some_and(|a| matches!(a, Ty::Fun(_)));
         if trailing_lambda && args.len() < real_count {
             let last_param = real_count.checked_sub(1)?;
-            if !self.arg_fits(&params[last_param], args.last().unwrap()) {
+            if !fits(&params[last_param], args.last().unwrap()) {
                 return None;
             }
             let prefix_len = args.len() - 1;
             if !params[..prefix_len]
                 .iter()
                 .zip(&args[..prefix_len])
-                .all(|(p, a)| self.arg_fits(p, a))
+                .all(|(p, a)| fits(p, a))
             {
                 return None;
             }
@@ -979,7 +977,7 @@ impl<'a> SymbolResolver<'a> {
         if !params[..args.len()]
             .iter()
             .zip(args)
-            .all(|(p, a)| self.arg_fits(p, a))
+            .all(|(p, a)| fits(p, a))
         {
             return None;
         }
