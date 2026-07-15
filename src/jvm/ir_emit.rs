@@ -2844,6 +2844,14 @@ fn emit_method(
             0x0019 // PUBLIC | STATIC | FINAL
         }
     };
+    // A value class's `box-impl`/`unbox-impl` are compiler-manufactured box adapters — kotlinc marks them
+    // `ACC_SYNTHETIC`.
+    let access = access
+        | if ir.synthetic_methods.contains(&fid) {
+            0x1000
+        } else {
+            0
+        };
     let signature = ir
         .signatures
         .get(&fid)
