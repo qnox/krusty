@@ -3198,3 +3198,11 @@ calls now emit selected `LibraryCallable` records through one `emit_library_stat
 branches still own their argument mapping, reified substitutions, and source-receiver metadata, but
 owner/name/descriptor/inline and suspend-call registration now come from the selected callable in one
 place instead of being reconstructed at every static call site.
+
+### Synthetic Static Extension Emitter Merge
+
+The next lowerer cleanup routed the remaining selected static extension operators through
+`emit_library_static_call`: destructuring `componentN` extensions, synthetic `plusAssign`, and
+reference-receiver binary operator extensions. These paths already had `LibraryCallable` handles from
+the checker, so lowering now keeps only their argument coercion locally and lets the shared emitter own
+owner/name/descriptor/inline construction.

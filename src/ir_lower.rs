@@ -6151,17 +6151,10 @@ impl<'a> Lower<'a> {
                 // `@InlineOnly` one (`Map.Entry.component1` → `getKey()`). The CHECKER resolved and
                 // recorded it (keyed by the initializer + name); `c.inline` drives whether the emit
                 // splices the `invokestatic` or calls it.
-                let call = self.ir.add_expr(IrExpr::Call {
-                    callee: Callee::Static {
-                        owner: c.owner,
-                        name: c.name,
-                        descriptor: c.descriptor,
-                        inline: c.inline,
-                    },
-                    dispatch_receiver: None,
-                    args: vec![recv],
-                });
-                (self.coerce_to_static(call, c.ret, c.physical_ret), c.ret)
+                let ret = c.ret;
+                let physical_ret = c.physical_ret;
+                let call = self.emit_library_static_call(c, vec![recv], false);
+                (self.coerce_to_static(call, ret, physical_ret), ret)
             } else if let Some(&fid) = self.ext_fun_ids.get(&(it_ty.erased_recv(), comp.clone())) {
                 // A USER-defined `operator fun Recv.componentN()` extension → `invokestatic` it with
                 // the receiver as the sole argument (its lowered first param).
@@ -12998,16 +12991,7 @@ impl<'a> Lower<'a> {
         if c.params.len() == 2 {
             let r = self.lower_arg(lhs, &ty_to_ir(c.params[0]))?;
             let a = self.lower_arg(rhs, &ty_to_ir(c.params[1]))?;
-            return Some(self.ir.add_expr(IrExpr::Call {
-                callee: Callee::Static {
-                    owner: c.owner,
-                    name: c.name,
-                    descriptor: c.descriptor,
-                    inline: c.inline,
-                },
-                dispatch_receiver: None,
-                args: vec![r, a],
-            }));
+            return Some(self.emit_library_static_call(c, vec![r, a], false));
         }
         None
     }
@@ -17654,16 +17638,7 @@ impl<'a> Lower<'a> {
                             if c.params.len() == 2 {
                                 let l = self.lower_arg(lhs, &ty_to_ir(c.params[0]))?;
                                 let r = self.lower_arg(rhs, &ty_to_ir(c.params[1]))?;
-                                return Some(self.ir.add_expr(IrExpr::Call {
-                                    callee: Callee::Static {
-                                        owner: c.owner,
-                                        name: c.name,
-                                        descriptor: c.descriptor,
-                                        inline: c.inline,
-                                    },
-                                    dispatch_receiver: None,
-                                    args: vec![l, r],
-                                }));
+                                return Some(self.emit_library_static_call(c, vec![l, r], false));
                             }
                         }
                     }
