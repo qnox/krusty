@@ -5240,10 +5240,15 @@ impl<'a> Parser<'a> {
                 _ => return false,
             }
         }
-        // After `>`, must be followed by `(`, `{`, or `.` to be a generic call.
+        // After `>`, must be followed by `(`, `{`, `.`, or `::` to be a generic call / a callable
+        // reference on a generic type (`A<String>::foo` — the type arguments erase, so it references
+        // `A::foo`). Anything else means the `<` was a less-than operator.
         matches!(
             self.t.get(j).map(|t| t.kind),
-            Some(TokenKind::LParen) | Some(TokenKind::LBrace) | Some(TokenKind::Dot)
+            Some(TokenKind::LParen)
+                | Some(TokenKind::LBrace)
+                | Some(TokenKind::Dot)
+                | Some(TokenKind::ColonColon)
         )
     }
 
@@ -5784,6 +5789,9 @@ impl<'a> Parser<'a> {
                         "<error>".to_string()
                     };
                     let end = self.t[self.i.saturating_sub(1)].span;
+                    // Type arguments on the referenced type (`A<String>::foo`) ERASE — drop any pending
+                    // ones so they don't leak onto a following invoke (`A<String>::foo(x)`).
+                    pending_targs = Vec::new();
                     lhs = self.file.add_expr(
                         Expr::CallableRef {
                             receiver: Some(lhs),
@@ -5820,6 +5828,9 @@ impl<'a> Parser<'a> {
                         "<error>".to_string()
                     };
                     let end = self.t[self.i.saturating_sub(1)].span;
+                    // Type arguments on the referenced type (`A<String>::foo`) ERASE — drop any pending
+                    // ones so they don't leak onto a following invoke (`A<String>::foo(x)`).
+                    pending_targs = Vec::new();
                     lhs = self.file.add_expr(
                         Expr::CallableRef {
                             receiver: Some(lhs),

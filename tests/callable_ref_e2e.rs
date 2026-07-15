@@ -76,3 +76,13 @@ fun box(): String {\n\
 }\n";
     common::expect_box_ok_with_stdlib(SRC, "CR");
 }
+
+/// An unbound member reference on a GENERIC class with explicit type arguments (`A<String>::foo`).
+/// The type arguments erase, so it references `A::foo`. Previously the parser misread `A<String>` as a
+/// less-than comparison chain and reported `unresolved reference 'A'`.
+#[test]
+fn generic_class_unbound_member_ref_runs() {
+    const SRC: &str = "class A<T>(val t: T) { fun foo(): T = t }\n\
+fun box(): String = (A<String>::foo).let { it(A(\"OK\")) }\n";
+    common::expect_box_ok_with_stdlib(SRC, "CR");
+}
