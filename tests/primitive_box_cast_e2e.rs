@@ -5,6 +5,22 @@
 use super::common;
 
 #[test]
+fn is_check_on_primitive_operand_boxes() {
+    // `x is Number` where an inline function's generic type parameter is specialized to a primitive
+    // (`x: T`, `T = Int`): the operand is a raw `int` in the slot, so it must be BOXED before
+    // `instanceof` (a raw scalar there VerifyErrors).
+    const SRC: &str = "// WITH_STDLIB\n\
+inline fun <T> isNum(x: T): Boolean = x is Number\n\
+fun box(): String {\n\
+    if (!isNum(1)) return \"fail int\"\n\
+    if (!isNum(2.0)) return \"fail double\"\n\
+    if (isNum(\"s\")) return \"fail str\"\n\
+    return \"OK\"\n\
+}\n";
+    common::expect_box_ok_with_stdlib(SRC, "P");
+}
+
+#[test]
 fn primitive_to_reference_cast_boxes() {
     const SRC: &str = "// WITH_STDLIB\n\
 fun box(): String {\n\

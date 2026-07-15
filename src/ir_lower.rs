@@ -4704,6 +4704,30 @@ impl<'a> Lower<'a> {
         self.scalar_value_repr(ty).is_some()
     }
 
+    /// Box `arg` (the lowered value of `operand`) when the operand is a PRIMITIVE, so it can feed a
+    /// JVM `instanceof` (which needs a reference; a raw scalar VerifyErrors). Uses the operand's ACTUAL
+    /// representation — an inline body specializes a generic type parameter to a primitive in its SLOT
+    /// even though the checker's `info.ty` still reports the erased reference — so a bare name consults
+    /// its scope slot type. A reference operand is returned unchanged.
+    fn box_operand_for_instanceof(&mut self, operand: AstExprId, arg: u32) -> u32 {
+        let operand_repr = match self.afile.expr(operand) {
+            Expr::Name(n) => self
+                .lookup(n)
+                .map(|(_, t)| t)
+                .unwrap_or(self.info.ty(operand)),
+            _ => self.info.ty(operand),
+        };
+        if self.has_scalar_value_repr(operand_repr) && !operand_repr.is_reference() {
+            self.ir.add_expr(IrExpr::TypeOp {
+                op: IrTypeOp::ImplicitCoercion,
+                arg,
+                type_operand: ty_to_ir(Ty::obj("kotlin/Any")),
+            })
+        } else {
+            arg
+        }
+    }
+
     fn unsigned_integer_box_type(&self, ty: Ty) -> Option<Ty> {
         self.syms.libraries.unsigned_integer_box_type(ty)
     }
@@ -17881,7 +17905,10 @@ impl<'a> Lower<'a> {
                     });
                     if let Some(target) = base {
                         let inst_operand = ty_to_ir(target);
-                        let arg = self.expr(operand)?;
+                        // The operand is stored into an `Any` slot (below); a PRIMITIVE operand must be
+                        // BOXED first (see `box_operand_for_instanceof`).
+                        let raw = self.expr(operand)?;
+                        let arg = self.box_operand_for_instanceof(operand, raw);
                         let v = self.fresh_value();
                         // The temp only feeds `== null` and `instanceof`, so an `Object` slot always
                         // holds it — a precise operand type (or `null`/`Nothing`) could be an invalid
@@ -17924,7 +17951,8 @@ impl<'a> Lower<'a> {
                         }));
                     }
                 }
-                let arg = self.expr(operand)?;
+                let raw = self.expr(operand)?;
+                let arg = self.box_operand_for_instanceof(operand, raw);
                 let op = if negated {
                     IrTypeOp::NotInstanceOf
                 } else {
