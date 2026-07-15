@@ -2386,16 +2386,14 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                             vec![dele, this_arg, pref],
                         )
                     } else {
-                        lo.ir.add_expr(IrExpr::Call {
-                            callee: crate::ir::Callee::Virtual {
-                                owner: gv_owner,
-                                name: "getValue".to_string(),
-                                descriptor: gv_desc,
-                                interface: false,
-                            },
-                            dispatch_receiver: Some(dele),
-                            args: vec![this_arg, pref],
-                        })
+                        lo.emit_virtual_call(
+                            gv_owner,
+                            "getValue".to_string(),
+                            gv_desc,
+                            false,
+                            dele,
+                            vec![this_arg, pref],
+                        )
                     };
                     // A generic delegate's `getValue` returns the erased `Object`; coerce to the property
                     // type (`checkcast`/unbox), exactly as kotlinc does.
@@ -4703,20 +4701,33 @@ impl<'a> Lower<'a> {
     ) -> u32 {
         let owner = member.owner.unwrap_or(owner_fallback);
         let interface = member.is_interface || self.library_type_is_interface(&owner);
-        let call = self.ir.add_expr(IrExpr::Call {
-            callee: Callee::Virtual {
-                owner,
-                name: member.name,
-                descriptor: member.descriptor,
-                interface,
-            },
-            dispatch_receiver: Some(recv),
-            args,
-        });
+        let call =
+            self.emit_virtual_call(owner, member.name, member.descriptor, interface, recv, args);
         if suspend {
             self.ir.suspend_calls.insert(call, ty_to_ir(logical_ret));
         }
         call
+    }
+
+    fn emit_virtual_call(
+        &mut self,
+        owner: String,
+        name: String,
+        descriptor: String,
+        interface: bool,
+        recv: u32,
+        args: Vec<u32>,
+    ) -> u32 {
+        self.ir.add_expr(IrExpr::Call {
+            callee: Callee::Virtual {
+                owner,
+                name,
+                descriptor,
+                interface,
+            },
+            dispatch_receiver: Some(recv),
+            args,
+        })
     }
 
     fn emit_library_static_call(
@@ -5332,16 +5343,14 @@ impl<'a> Lower<'a> {
                 .class_by_internal(&delegate_internal)
                 .map(|c| c.is_interface)
                 .unwrap_or(false);
-            self.ir.add_expr(IrExpr::Call {
-                callee: crate::ir::Callee::Virtual {
-                    owner: gv_owner,
-                    name: "getValue".to_string(),
-                    descriptor: gv_desc,
-                    interface: is_iface,
-                },
-                dispatch_receiver: Some(get_d),
-                args: vec![null_a, get_p],
-            })
+            self.emit_virtual_call(
+                gv_owner,
+                "getValue".to_string(),
+                gv_desc,
+                is_iface,
+                get_d,
+                vec![null_a, get_p],
+            )
         };
         let ret = self.ir.add_expr(IrExpr::Return(Some(call)));
         let body = self.ir.add_expr(IrExpr::Block {
@@ -7588,16 +7597,14 @@ impl<'a> Lower<'a> {
             let args: Vec<u32> = (0..params.len())
                 .map(|i| self.ir.add_expr(IrExpr::GetValue(i as u32 + 1)))
                 .collect();
-            let call = self.ir.add_expr(IrExpr::Call {
-                callee: Callee::Virtual {
-                    owner: iface_internal.clone(),
-                    name: mname.clone(),
-                    descriptor,
-                    interface: true,
-                },
-                dispatch_receiver: Some(field),
+            let call = self.emit_virtual_call(
+                iface_internal.clone(),
+                mname.clone(),
+                descriptor,
+                true,
+                field,
                 args,
-            });
+            );
             let body = if ret == Ty::Unit {
                 self.ir.add_expr(IrExpr::Block {
                     stmts: vec![call],
@@ -7635,16 +7642,7 @@ impl<'a> Lower<'a> {
             arg: val,
             type_operand: ty_to_ir(owner_ty),
         });
-        Some(self.ir.add_expr(IrExpr::Call {
-            callee: Callee::Virtual {
-                owner: owner.to_string(),
-                name: c.name,
-                descriptor: c.descriptor,
-                interface: false,
-            },
-            dispatch_receiver: Some(cast),
-            args: vec![],
-        }))
+        Some(self.emit_virtual_call(owner.to_string(), c.name, c.descriptor, false, cast, vec![]))
     }
 
     fn unsigned_to_string(&mut self, val: u32, ty: Ty) -> Option<u32> {
@@ -7688,16 +7686,14 @@ impl<'a> Lower<'a> {
                     .resolve_instance_member(t.non_null(), "hashCode", &[])?
                     .member;
                 let owner = m.owner.clone()?;
-                Some(self.ir.add_expr(IrExpr::Call {
-                    callee: Callee::Virtual {
-                        owner: owner.clone(),
-                        name: m.name,
-                        descriptor: m.descriptor,
-                        interface: self.library_type_is_interface(&owner),
-                    },
-                    dispatch_receiver: Some(v),
-                    args: vec![],
-                }))
+                Some(self.emit_virtual_call(
+                    owner.clone(),
+                    m.name,
+                    m.descriptor,
+                    self.library_type_is_interface(&owner),
+                    v,
+                    vec![],
+                ))
             }
             Ty::Long | Ty::Double | Ty::Float => self.runtime_call(RuntimeOp::HashCode, t, vec![v]),
             // An array/reference property hashes by reference identity/null-safe object hash, matching
@@ -11401,16 +11397,14 @@ impl<'a> Lower<'a> {
         let cls = self.ir.add_expr(IrExpr::ClassConst {
             internal: String::new(),
         });
-        let enabled = self.ir.add_expr(IrExpr::Call {
-            callee: Callee::Virtual {
-                owner: "java/lang/Class".to_string(),
-                name: "desiredAssertionStatus".to_string(),
-                descriptor: "()Z".to_string(),
-                interface: false,
-            },
-            dispatch_receiver: Some(cls),
-            args: vec![],
-        });
+        let enabled = self.emit_virtual_call(
+            "java/lang/Class".to_string(),
+            "desiredAssertionStatus".to_string(),
+            "()Z".to_string(),
+            false,
+            cls,
+            vec![],
+        );
         // `if (enabled) { <check> }` — no else; the whole `assert` is a `Unit` statement.
         Some(self.ir.add_expr(IrExpr::When {
             branches: vec![(Some(enabled), check)],
@@ -11449,16 +11443,14 @@ impl<'a> Lower<'a> {
                 .unwrap_or_else(|| Ty::obj("kotlin/Any"));
             a.push(self.lower_arg(arg, &ty_to_ir(pty))?);
         }
-        Some(self.ir.add_expr(IrExpr::Call {
-            callee: Callee::Virtual {
-                owner: "java/io/PrintStream".to_string(),
-                name: callable.name.clone(),
-                descriptor,
-                interface: false,
-            },
-            dispatch_receiver: Some(out),
-            args: a,
-        }))
+        Some(self.emit_virtual_call(
+            "java/io/PrintStream".to_string(),
+            callable.name.clone(),
+            descriptor,
+            false,
+            out,
+            a,
+        ))
     }
 
     /// `a == b` / `a != b` where BOTH operands are nullable boxed numbers (`Double?`, `Int?`, … — e.g.
@@ -14169,16 +14161,14 @@ impl<'a> Lower<'a> {
         });
         let m1 = self.ir.add_expr(IrExpr::GetValue(mutex_slot));
         let null1 = self.ir.add_expr(IrExpr::Const(IrConst::Null));
-        let lock_call = self.ir.add_expr(IrExpr::Call {
-            callee: Callee::Virtual {
-                owner: lock_owner,
-                name: lock_m.name.clone(),
-                descriptor: lock_m.descriptor.clone(),
-                interface: is_iface,
-            },
-            dispatch_receiver: Some(m1),
-            args: vec![null1],
-        });
+        let lock_call = self.emit_virtual_call(
+            lock_owner,
+            lock_m.name.clone(),
+            lock_m.descriptor.clone(),
+            is_iface,
+            m1,
+            vec![null1],
+        );
         if lock_m.suspend {
             self.ir
                 .suspend_calls
@@ -14224,16 +14214,14 @@ impl<'a> Lower<'a> {
         });
         let m2 = self.ir.add_expr(IrExpr::GetValue(mutex_slot));
         let null2 = self.ir.add_expr(IrExpr::Const(IrConst::Null));
-        let unlock_call = self.ir.add_expr(IrExpr::Call {
-            callee: Callee::Virtual {
-                owner: unlock_owner,
-                name: unlock_m.name.clone(),
-                descriptor: unlock_m.descriptor.clone(),
-                interface: is_iface,
-            },
-            dispatch_receiver: Some(m2),
-            args: vec![null2],
-        });
+        let unlock_call = self.emit_virtual_call(
+            unlock_owner,
+            unlock_m.name.clone(),
+            unlock_m.descriptor.clone(),
+            is_iface,
+            m2,
+            vec![null2],
+        );
         let try_body = self.ir.add_expr(IrExpr::Block {
             stmts: vec![whilew],
             value: None,
@@ -14294,16 +14282,14 @@ impl<'a> Lower<'a> {
 
         // it = recv.iterator()
         let recv = self.expr(receiver)?;
-        let iter_call = self.ir.add_expr(IrExpr::Call {
-            callee: Callee::Virtual {
-                owner: internal.to_string(),
-                name: "iterator".to_string(),
-                descriptor: iter_m.descriptor,
-                interface: it_iface,
-            },
-            dispatch_receiver: Some(recv),
-            args: vec![],
-        });
+        let iter_call = self.emit_virtual_call(
+            internal.to_string(),
+            "iterator".to_string(),
+            iter_m.descriptor,
+            it_iface,
+            recv,
+            vec![],
+        );
         let it_v = self.fresh_value();
         let var_it = self.ir.add_expr(IrExpr::Variable {
             index: it_v,
@@ -14313,29 +14299,25 @@ impl<'a> Lower<'a> {
 
         // cond: it.hasNext()
         let it_g = self.ir.add_expr(IrExpr::GetValue(it_v));
-        let cond = self.ir.add_expr(IrExpr::Call {
-            callee: Callee::Virtual {
-                owner: iter_internal.clone(),
-                name: "hasNext".to_string(),
-                descriptor: hasnext_m.descriptor,
-                interface: iter_iface,
-            },
-            dispatch_receiver: Some(it_g),
-            args: vec![],
-        });
+        let cond = self.emit_virtual_call(
+            iter_internal.clone(),
+            "hasNext".to_string(),
+            hasnext_m.descriptor,
+            iter_iface,
+            it_g,
+            vec![],
+        );
 
         // body: e = (elem) it.next(); acc.add/addAll(<inlined lambda body>)
         let it_g2 = self.ir.add_expr(IrExpr::GetValue(it_v));
-        let next_call = self.ir.add_expr(IrExpr::Call {
-            callee: Callee::Virtual {
-                owner: iter_internal,
-                name: "next".to_string(),
-                descriptor: next_m.descriptor,
-                interface: iter_iface,
-            },
-            dispatch_receiver: Some(it_g2),
-            args: vec![],
-        });
+        let next_call = self.emit_virtual_call(
+            iter_internal,
+            "next".to_string(),
+            next_m.descriptor,
+            iter_iface,
+            it_g2,
+            vec![],
+        );
         // Coerce the `Object` iterator result to the element type — the SAME four-way split
         // `lower_foreach_iterator` uses: unbox an unsigned/scalar-value-class element (a `checkcast` +
         // `istore` would store a reference into a primitive slot → VerifyError), else `checkcast` a
@@ -14414,16 +14396,14 @@ impl<'a> Lower<'a> {
             });
             ("add", "(Ljava/lang/Object;)Z", boxed)
         };
-        let add_call = self.ir.add_expr(IrExpr::Call {
-            callee: Callee::Virtual {
-                owner: "java/util/ArrayList".to_string(),
-                name: add_name.to_string(),
-                descriptor: add_desc.to_string(),
-                interface: false,
-            },
-            dispatch_receiver: Some(acc_g),
-            args: vec![add_arg],
-        });
+        let add_call = self.emit_virtual_call(
+            "java/util/ArrayList".to_string(),
+            add_name.to_string(),
+            add_desc.to_string(),
+            false,
+            acc_g,
+            vec![add_arg],
+        );
         let mut wstmts = vec![var_e];
         wstmts.append(&mut loop_stmts);
         wstmts.push(var_part);

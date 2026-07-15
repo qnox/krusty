@@ -3229,3 +3229,11 @@ The next static-call cleanup put the remaining raw `Callee::Static` assembly beh
 getters, value-class constructor helpers, classpath `$default` member calls, companion static members,
 inline receiver-lambda hosts, extension property getters, and range factory callables now share the
 same static-call construction instead of rebuilding owner/name/descriptor/inline call IR locally.
+
+### Raw Virtual Call Emitter Merge
+
+The next virtual-call cleanup added the matching `emit_virtual_call` helper and routed selected
+metadata/member paths through it. Library member emission, delegated `getValue` calls, unsigned
+unboxing, `withLock` lock/unlock, interface delegation forwarding, inline collection iterator/add
+calls, String `hashCode`, assertion-status reads, and console printing now share owner/name/
+descriptor/interface call construction instead of rebuilding `Callee::Virtual` locally.
