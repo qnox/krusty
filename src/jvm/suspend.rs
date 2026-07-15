@@ -1123,7 +1123,15 @@ fn build_state_machine(ir: &mut IrFile, facade: &str, fid: u32, b: ExprId, unit_
     );
 
     let fname = ir.functions[fid as usize].name.clone();
-    let cont_internal = format!("{facade}${fname}$1");
+    // kotlinc nests a suspend method's continuation class under its ENCLOSING class
+    // (`Svc$work$1`), and a top-level suspend fun's under the file facade (`FooKt$foo$1`). The
+    // dispatch receiver is the enclosing class internal name; a top-level/extension fun has none.
+    let cont_owner = receiver.as_deref().unwrap_or(facade);
+    // The continuation class uses the SOURCE method name, never the value-class-mangled JVM name:
+    // kotlinc names `create-SCm-oBs`'s continuation `<Owner>$create$1`. `-` can't occur in a Kotlin
+    // identifier, so it only ever separates the mangle hash — strip from the first `-`.
+    let cont_fname = fname.split('-').next().unwrap_or(&fname);
+    let cont_internal = format!("{cont_owner}${cont_fname}$1");
     let cont_ty = Ty::obj(&cont_internal);
 
     let base = max_value_index(ir) + 1;
