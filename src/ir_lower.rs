@@ -1402,7 +1402,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 if c.inner_of.is_some() {
                     return None;
                 }
-                lo.synth_data_members(&internal, id, ctor_param_count as usize)?;
+                lo.synth_data_members(&internal, id, ctor_param_count as usize, c.is_object())?;
             }
             // A `@JvmInline value class` is emitted as a plain single-field class here (field, `<init>`,
             // getter); the JVM `value_classes` pass synthesizes its unboxed-support members
@@ -7438,7 +7438,13 @@ impl<'a> Lower<'a> {
 
     /// Synthesize a `data class`'s `componentN`/`toString`/`hashCode`/`equals` as IR methods over the
     /// first `n` (primary-constructor) fields.
-    fn synth_data_members(&mut self, internal: &str, class_id: ClassId, n: usize) -> Option<()> {
+    fn synth_data_members(
+        &mut self,
+        internal: &str,
+        class_id: ClassId,
+        n: usize,
+        is_object: bool,
+    ) -> Option<()> {
         let fields: Vec<(String, Ty)> = self.classes[internal].fields[..n].to_vec();
 
         // componentN(): `return this.fieldN`.
@@ -7462,7 +7468,8 @@ impl<'a> Lower<'a> {
 
         // copy(f1, f2, …): `return P(f1, f2, …)`. Emitted BEFORE toString/hashCode/equals to match
         // kotlinc's data-class member order (componentN, copy, copy$default, toString, hashCode, equals).
-        {
+        // A `data object` (a singleton) has NO componentN/copy — kotlinc emits only equals/hashCode/toString.
+        if !is_object {
             let params: Vec<Ty> = fields.iter().map(|(_, t)| ty_to_ir(*t)).collect();
             let args: Vec<u32> = (0..fields.len())
                 .map(|i| self.ir.add_expr(IrExpr::GetValue(i as u32 + 1)))

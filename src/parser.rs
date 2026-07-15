@@ -1266,6 +1266,22 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// Parse a type declared in an INTERFACE body and, if it implements the enclosing interface `iface`,
+    /// hoist it to a top-level `Iface.Sub` class (a sealed interface's subclasses). A nested type that
+    /// does NOT implement the interface (a plain helper that may reach a private interface member via a
+    /// synthetic accessor krusty doesn't emit) is parsed and dropped, so the file skips rather than
+    /// miscompiles.
+    fn register_interface_nested(&mut self, iface: &str) {
+        let mut nested = self.parse_nested_type_decl();
+        let implements = nested.supertypes.iter().any(|s| s.name == iface)
+            || nested.base_class.as_deref() == Some(iface);
+        if implements {
+            nested.name = format!("{iface}.{}", nested.name);
+            let id = self.file.add_decl(Decl::Class(nested));
+            self.file.decls.push(id);
+        }
+    }
+
     fn parse_nested_type_decl(&mut self) -> ClassDecl {
         match self.kind() {
             TokenKind::KwClass => self.parse_class(),
@@ -3094,18 +3110,27 @@ impl<'a> Parser<'a> {
                         }
                         body_props.push(p);
                     }
+                    // A sealed interface's nested SUBCLASSES (`sealed interface I { data object O : I;
+                    // data class C(…) : I }`) — hoist each to a top-level `I.O`/`I.C` (internal `I$O`/`I$C`),
+                    // like a nested type in a class body. Only a nested type that IMPLEMENTS the enclosing
+                    // interface is hoisted: a plain nested helper (`interface B { class Z { … b.priv() } }`)
+                    // may call a private interface member through a synthetic accessor krusty doesn't
+                    // synthesize, so those are still dropped (the file skips) rather than miscompiled.
                     TokenKind::KwClass => {
-                        let _ = self.parse_nested_type_decl();
+                        self.register_interface_nested(&name);
                     }
                     TokenKind::Ident
                         if matches!(self.text(), "object" | "interface")
-                            || (matches!(self.text(), "data" | "enum" | "annotation")
-                                && self
-                                    .t
-                                    .get(self.i + 1)
-                                    .map_or(false, |t| t.kind == TokenKind::KwClass)) =>
+                            || (matches!(
+                                self.text(),
+                                "data" | "enum" | "annotation" | "value"
+                            ) && self.t.get(self.i + 1).map_or(false, |t| {
+                                // `data class` / `enum class` / … and also `data object` (Kotlin 1.9).
+                                t.kind == TokenKind::KwClass
+                                    || (t.kind == TokenKind::Ident && t.text(self.src) == "object")
+                            })) =>
                     {
-                        let _ = self.parse_nested_type_decl();
+                        self.register_interface_nested(&name);
                     }
                     TokenKind::Ident if self.text() == "typealias" => {
                         while !self.at(TokenKind::Newline) && !self.at(TokenKind::Eof) {
@@ -3231,11 +3256,14 @@ impl<'a> Parser<'a> {
                     }
                     TokenKind::Ident
                         if matches!(self.text(), "object" | "interface")
-                            || (matches!(self.text(), "data" | "enum" | "annotation")
-                                && self
-                                    .t
-                                    .get(self.i + 1)
-                                    .map_or(false, |t| t.kind == TokenKind::KwClass)) =>
+                            || (matches!(
+                                self.text(),
+                                "data" | "enum" | "annotation" | "value"
+                            ) && self.t.get(self.i + 1).map_or(false, |t| {
+                                // `data class` / `enum class` / … and also `data object` (Kotlin 1.9).
+                                t.kind == TokenKind::KwClass
+                                    || (t.kind == TokenKind::Ident && t.text(self.src) == "object")
+                            })) =>
                     {
                         let _ = self.parse_nested_type_decl();
                     }
