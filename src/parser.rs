@@ -1800,7 +1800,17 @@ impl<'a> Parser<'a> {
         self.skip_newlines();
         if self.eat(TokenKind::LBrace) {
             self.skip_newlines();
-            while self.at(TokenKind::Ident) {
+            loop {
+                // Enum constants may carry annotations (`@SerialName("system") SYSTEM(...)` — common
+                // in kotlinx.serialization enums). Parse-and-discard the annotation prefix; the ABI
+                // (the constant's field name/descriptor/access) is unaffected.
+                while self.at(TokenKind::At) {
+                    self.skip_annotation();
+                    self.skip_newlines();
+                }
+                if !self.at(TokenKind::Ident) {
+                    break;
+                }
                 let entry_name = self.text().to_string();
                 self.bump();
                 // Optional constructor arguments: `RED(0xFF0000)`, incl. named `RED(rgb = 0xFF0000)`.
