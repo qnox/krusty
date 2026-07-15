@@ -2595,20 +2595,31 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                         lo.scope
                             .push((p.name.clone(), v, ty_of(file, &p.ty, &*syms.libraries)));
                     }
+                    // A same-file / module base is an IR class: read its constructor's parameter types
+                    // (handles named-reordered args and a parameterized base). A CLASSPATH base has no IR
+                    // class — use the parameter types the CHECKER resolved through the symbol source
+                    // (`Checker::resolve_super_ctor_params`), so the resolution lives in the resolver, not
+                    // here. Empty for a classpath base the checker couldn't resolve → bail.
                     let super_field_tys = lo.super_ctor_param_tys(&internal);
-                    // The `super(…)` call must match the base's PRIMARY constructor exactly: same arity,
-                    // and each argument assignable to the corresponding param (no narrowing/erasure). A
-                    // mismatch means the call actually targets a base SECONDARY constructor (with
-                    // defaults) — which krusty doesn't resolve — so bail rather than emit a `<init>` call
-                    // whose stack shape won't verify. A branchy super argument (`Base("O" + if(…))`) emits
-                    // merge frames in the pre-`super()` region the flat ctor emitter can't reconcile — bail.
+                    let super_field_tys = if super_field_tys.is_empty() && !base_args.is_empty() {
+                        match syms.class_by_internal(&internal) {
+                            Some(cs) if !cs.super_ctor_params.is_empty() => {
+                                cs.super_ctor_params.clone()
+                            }
+                            _ => return None,
+                        }
+                    } else {
+                        super_field_tys
+                    };
+                    // The `super(…)` call must match the resolved constructor: same arity, and each argument
+                    // assignable to its param (exact, or reference-into-reference for an erased generic /
+                    // `Any`). A mismatch means a base SECONDARY constructor krusty doesn't resolve — bail
+                    // rather than emit an `<init>` call that won't verify. A branchy super argument
+                    // (`Base("O" + if(…))`) emits merge frames the flat constructor emitter can't reconcile.
                     if base_args.len() != super_field_tys.len()
                         || base_args.iter().any(|&a| body_contains_branch(file, a))
                         || base_args.iter().zip(&super_field_tys).any(|(&a, ft)| {
                             let at = info.ty(a);
-                            // Exact IR-type match is fine; a reference arg into a reference param (erased
-                            // generic / `Any`) is fine; anything else (e.g. an `Int` arg into a `String`
-                            // param — the call really targets a secondary ctor) is a mis-target → bail.
                             &ty_to_ir(at) != ft
                                 && !(at.is_reference() && ir_type_is_reference(ft))
                                 && at != Ty::Error
