@@ -4070,7 +4070,7 @@ fn body_prop_ty(
         // `kotlin/Any`. When the declared annotation is NOT `Any` yet erased to it, recover the concrete
         // type the checker resolved the initializer/getter against (which IS this annotation, classpath-
         // resolved) — so a top-level `val prop: ArrayList<Int>` backing field is `ArrayList`, not `Object`.
-        if base == Ty::obj("kotlin/Any") && r.name != "Any" && r.name != "kotlin/Any" {
+        if base.is_erased_top() && r.name != "Any" && r.name != "kotlin/Any" {
             if let Some(FunBody::Expr(g) | FunBody::Block(g)) = p.getter {
                 return stored_value_ty(info.ty(g));
             }
@@ -10569,7 +10569,7 @@ impl<'a> Lower<'a> {
                 arg: next_call,
                 type_operand: ty_to_ir(elem),
             })
-        } else if elem != Ty::obj("kotlin/Any") {
+        } else if !elem.is_erased_top() {
             self.ir.add_expr(IrExpr::TypeOp {
                 op: IrTypeOp::Cast,
                 arg: next_call,
@@ -15023,7 +15023,7 @@ impl<'a> Lower<'a> {
                 // Throwing an erased generic value (`throw id(e)`, where `id` returns a type parameter
                 // and is physically `Object`) needs the `checkcast Throwable` kotlinc inserts — the JVM
                 // `athrow` requires a `Throwable` on the stack.
-                let v = if self.info.ty(operand) == Ty::obj("kotlin/Any") {
+                let v = if self.info.ty(operand).is_erased_top() {
                     self.ir.add_expr(IrExpr::TypeOp {
                         op: IrTypeOp::Cast,
                         arg: v,
@@ -18217,7 +18217,7 @@ impl<'a> Lower<'a> {
                             // primitive argument would box to its own wrapper (`-1` → `Integer`). When the
                             // call supplies a primitive type argument (`mk<Long>(-1)`), coerce each element
                             // to that primitive first (`Int`→`Long`), then box — matching kotlinc.
-                            let targ_prim = if elem_ty == Ty::obj("kotlin/Any") {
+                            let targ_prim = if elem_ty.is_erased_top() {
                                 self.afile
                                     .call_type_args
                                     .get(&e.0)

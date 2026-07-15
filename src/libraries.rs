@@ -1136,7 +1136,7 @@ pub(crate) fn best_overload<'a>(
                     && m.params
                         .iter()
                         .zip(args)
-                        .all(|(p, a)| p == a || *p == Ty::obj("kotlin/Any"))
+                        .all(|(p, a)| p == a || p.is_erased_top())
             })
         })
         .or_else(|| {

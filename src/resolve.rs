@@ -563,9 +563,8 @@ pub fn pick_overload(sigs: &[Signature], arg_tys: &[Ty]) -> Option<usize> {
     // is the erased `Any` at a position where the candidates' parameter types DIFFER, krusty cannot
     // reproduce kotlinc's precise-type overload selection (kotlinc may see a concrete type there). Bail
     // (`None`) so the call is left unresolved and the file is skipped rather than dispatched wrongly.
-    let any = Ty::obj("kotlin/Any");
     for (i, &a) in arg_tys.iter().enumerate() {
-        if a == any {
+        if a.is_erased_top() {
             let mut params_here = cands.iter().filter_map(|&c| sigs[c].params.get(i));
             if let Some(first) = params_here.next() {
                 if params_here.any(|p| p != first) {
@@ -6633,8 +6632,8 @@ impl<'a> Checker<'a> {
                     || a == Ty::Error
                     || a == Ty::Nothing
                     || (a == Ty::Null && p.is_reference())
-                    || p == Ty::obj("kotlin/Any")
-                    || a == Ty::obj("kotlin/Any")
+                    || p.is_erased_top()
+                    || a.is_erased_top()
                     || matches!((p, a), (Ty::Obj(e, _), Ty::Obj(x, _)) if self.obj_is_subtype(x, e))
                     || p.accepts_numeric(a)
             })
@@ -6767,7 +6766,7 @@ impl<'a> Checker<'a> {
         // assignable to any specific reference array — `Array` is invariant, but the erased value
         // really is the target type at runtime, so kotlinc inserts a `checkcast` at the use site.
         if let (Some(ae), Some(ee)) = (actual.array_elem(), expected.array_elem()) {
-            if ae == Ty::obj("kotlin/Any") && ee.is_reference() {
+            if ae.is_erased_top() && ee.is_reference() {
                 return;
             }
         }
@@ -6971,7 +6970,7 @@ impl<'a> Checker<'a> {
                 && sig.params[fixed].array_elem().is_some_and(|elem| {
                     exp.params[fixed..]
                         .iter()
-                        .all(|&p| elem == Ty::obj("kotlin/Any") || p == elem)
+                        .all(|&p| elem.is_erased_top() || p == elem)
                 })
             {
                 self.expr_lowers.insert(
@@ -9768,7 +9767,7 @@ impl<'a> Checker<'a> {
                 .resolve_type(internal)
                 .and_then(|t| crate::symbol_resolver::infer_constructor_type_args(&t, &arg_tys))
             {
-                if inferred.iter().any(|t| *t != Ty::obj("kotlin/Any")) {
+                if inferred.iter().any(|t| !t.is_erased_top()) {
                     return Ty::obj_args(internal, &inferred);
                 }
             }
@@ -10637,7 +10636,7 @@ impl<'a> Checker<'a> {
                                             // Only when erased — a concrete return (`encodeToString: String`)
                                             // keeps the canonical `m.ret` (the recovered form would be a
                                             // non-canonical `Obj("kotlin/String")`).
-                                            if m.member.physical_ret == Ty::obj("kotlin/Any") {
+                                            if m.member.physical_ret.is_erased_top() {
                                                 // A reified member (`<T> T decodeFromString(…)`) called
                                                 // with an explicit type argument (`decodeFromString<C>`)
                                                 // returns that type; else recover it from the arguments.
@@ -10801,7 +10800,6 @@ impl<'a> Checker<'a> {
                             }
                             _ => None,
                         });
-                    let any = Ty::obj("kotlin/Any");
                     Some(
                         fi.call_sig
                             .lambda_param_types
@@ -10809,7 +10807,7 @@ impl<'a> Checker<'a> {
                             .map(|v| {
                                 v.iter()
                                     .map(|t| {
-                                        if recv_tp.is_some() && *t == any {
+                                        if recv_tp.is_some() && t.is_erased_top() {
                                             rt
                                         } else {
                                             *t
