@@ -3929,13 +3929,6 @@ impl TypeInfo {
             _ => None,
         }
     }
-    /// The resolved lambda-return-selected INSTANCE MEMBER callable at call `e` (emits `invokevirtual`).
-    pub fn resolved_lambda_member(&self, e: ExprId) -> Option<&crate::libraries::LibraryCallable> {
-        match self.resolved_calls.get(&e) {
-            Some(ResolvedCall::LambdaReturnMember(c)) => Some(c),
-            _ => None,
-        }
-    }
     /// The extension callable the checker resolved for a SYNTHESIZED operator (`componentN`/`iterator`/
     /// `plusAssign`) on the receiver expression `recv`, if any.
     pub fn synthetic_ext(
