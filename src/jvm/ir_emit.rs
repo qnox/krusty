@@ -649,6 +649,18 @@ fn emit_class(
                     }
                 }
             }
+            // An inner class stores its captured outer instance (`this$0`, field 0) BEFORE `super(…)`,
+            // so a super-constructor argument can read the outer instance (`inner class Inner :
+            // Base(run { outerProp })`) — kotlinc emits the same. A `putfield` of the current class's own
+            // field on the still-uninitialized `this` is legal per JVMS 4.10.2.4.
+            let stores_this0 = c.fields.first().is_some_and(|f0| f0.name == "this$0");
+            if stores_this0 {
+                let f0 = &c.fields[0];
+                ctor.aload(0);
+                ctor.aload(1); // the outer instance = first constructor parameter
+                let fref = e.cw.fieldref(&c.fq_name, "this$0", &type_descriptor(f0.ty));
+                ctor.putfield(fref, slot_words(f0.ty) as i32);
+            }
             // `super(args)` — `this` is loaded first, so spill any branchy arg to temps before it.
             let super_args = c.super_args.clone();
             if super_args.iter().any(|&a| e.records_frame(a)) {
@@ -690,10 +702,13 @@ fn emit_class(
                 for (i, t) in param_tys.iter().enumerate() {
                     if is_field.get(i).copied().unwrap_or(true) {
                         let name = &c.fields[field_i].name;
-                        ctor.aload(0);
-                        load(*t, slot, &mut ctor);
-                        let fref = e.cw.fieldref(&c.fq_name, name, &type_descriptor(*t));
-                        ctor.putfield(fref, slot_words(*t) as i32);
+                        // `this$0` is already stored BEFORE `super(…)` above — don't store it again.
+                        if name != "this$0" {
+                            ctor.aload(0);
+                            load(*t, slot, &mut ctor);
+                            let fref = e.cw.fieldref(&c.fq_name, name, &type_descriptor(*t));
+                            ctor.putfield(fref, slot_words(*t) as i32);
+                        }
                         field_i += 1;
                     }
                     slot += slot_words(*t);

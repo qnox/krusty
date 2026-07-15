@@ -3153,3 +3153,12 @@ when the receiver's `invoke` comes from provider data; same-file user classes st
 receiver type because their IR method id is created during lowering. `lower_invoke` emits the recorded
 member directly, including its physical return and suspend flag, while retaining the existing user-class
 method-id path. This closes the remaining classpath member re-resolution in the invoke-convention family.
+
+### Function-Typed Constructor And Property Shape
+
+The next call-shape cleanup reused declared function types for two places that previously erased lambda
+parameters too early. Same-file constructor and enum-entry arguments now type lambda bodies from the
+matching `Ty::Fun` constructor parameter, like ordinary function calls already do. A call to a
+function-typed member property (`obj.f(args)`) reads the property type and feeds it into the existing
+`record_invoke` convention instead of requiring a real method named `f`. This keeps constructor/property
+function values on the same invoke path as locals and top-level function-typed values.

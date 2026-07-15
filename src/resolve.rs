@@ -4826,10 +4826,22 @@ pub fn check_file(file: &File, syms: &mut SymbolTable, diags: &mut DiagSink) -> 
                                     Some(p)
                                 }
                             };
-                            let at = c.expr(*a);
-                            if let Some(expected_ty) = idx.and_then(|i| ctor_tys.get(i)) {
+                            let expected = idx.and_then(|i| ctor_tys.get(i)).copied();
+                            // A lambda passed to a function-typed enum-ctor parameter (`plus("+",
+                            // { x, y -> x + y })`) binds its parameter types from that parameter's
+                            // `Ty::Fun` — like a constructor/function call — so the body sees real types.
+                            let at = match expected {
+                                Some(Ty::Fun(s))
+                                    if matches!(c.file.expr(*a), Expr::Lambda { .. }) =>
+                                {
+                                    let pts = s.params.clone();
+                                    c.check_lambda_with_types(*a, &pts)
+                                }
+                                _ => c.expr(*a),
+                            };
+                            if let Some(expected_ty) = expected {
                                 c.expect_assignable(
-                                    *expected_ty,
+                                    expected_ty,
                                     at,
                                     c.span(*a),
                                     "enum entry argument",
@@ -11697,6 +11709,23 @@ impl<'a> Checker<'a> {
                         return ret;
                     }
                 }
+                // Invoking a function-typed MEMBER PROPERTY: `obj.func(args)` where `func` is a
+                // `val func: (…) -> R` property (e.g. an enum entry's `func`). No method `func` exists;
+                // read the property (its type is `Ty::Fun`) and invoke it through the one invoke
+                // convention, exactly like a local/top-level function-typed value.
+                let prop_fun_ty = rt
+                    .obj_internal()
+                    .and_then(|internal| self.lookup_prop(internal, &name))
+                    .map(|(t, _)| t)
+                    .or_else(|| self.resolve_property_member(rt, &name).map(|m| m.ret))
+                    .filter(|t| matches!(t, Ty::Fun(_)));
+                if let Some(fun_ty) = prop_fun_ty {
+                    if let Some(ret) =
+                        self.record_invoke(call, callee, fun_ty, args, &arg_tys, span)
+                    {
+                        return ret;
+                    }
+                }
                 self.diags.error(
                     span,
                     format!("unresolved method '{name}' on '{}'", rt.name()),
@@ -11964,12 +11993,43 @@ impl<'a> Checker<'a> {
                 } else {
                     None
                 };
+                // A same-file class CONSTRUCTOR call (`C({ x, y -> x + y })`, an `enum` entry
+                // `plus({ x, y -> … })`): a lambda passed to a function-typed primary-ctor parameter
+                // binds its parameter types from that parameter's `Ty::Fun`, exactly like a top-level
+                // function call — without this the lambda parameters erase to `Any` and the body fails
+                // (`x + y` → "operator cannot be applied to Any and Any").
+                let ctor_lambda_pts: Option<Vec<Vec<Ty>>> = if self.lookup(&fname).is_none()
+                    && args
+                        .iter()
+                        .any(|&a| matches!(self.file.expr(a), Expr::Lambda { .. }))
+                {
+                    self.syms.classes.get(&fname).map(|cls| {
+                        cls.ctor_params
+                            .iter()
+                            .map(|p| match p {
+                                Ty::Fun(s) => s.params.clone(),
+                                _ => Vec::new(),
+                            })
+                            .collect()
+                    })
+                } else {
+                    None
+                };
                 let arg_tys: Vec<Ty> = args
                     .iter()
                     .enumerate()
                     .map(|(i, &a)| {
                         if array_init_lambda && i == 1 {
                             return self.check_lambda_with_types(a, &[Ty::Int]);
+                        }
+                        // Constructor lambda argument → typed from the ctor parameter's function type.
+                        if let Some(ref pts) = ctor_lambda_pts {
+                            if pts.get(i).is_some_and(|v| !v.is_empty())
+                                && matches!(self.file.expr(a), Expr::Lambda { .. })
+                            {
+                                let pt = pts[i].clone();
+                                return self.check_lambda_with_types(a, &pt);
+                            }
                         }
                         // Implicit-`this` member HOF: pre-type the lambda from the member's declared
                         // function-type parameter (see `this_member_lambda_pts`).

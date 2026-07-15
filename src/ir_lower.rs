@@ -2697,7 +2697,10 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                         let mut targets: Vec<(String, u32)> = Vec::new();
                         let mut field_i = 0u32;
                         if c.inner_of.is_some() {
-                            targets.push(("this$0".to_string(), field_i));
+                            // The synthetic `this$0` (field 0) is stored BEFORE `super(…)` in the backend
+                            // (`ir_emit`), not here — a `super(…)` argument may read the outer instance
+                            // (`inner class Inner : Base(run { outerProp })`), and kotlinc stores it first.
+                            // Reserve its field index but don't emit the (post-super) store.
                             field_i += 1;
                         }
                         for p in c.props.iter().filter(|p| p.is_property) {
@@ -6214,9 +6217,17 @@ impl<'a> Lower<'a> {
         let captures_this = self.cur_class.is_some()
             && recv_ty.is_none()
             && self.lambda_uses_enclosing_this(body, &bind_names, deep);
+        let captures_outer_this = !captures_this
+            && recv_ty.is_none()
+            && self.cur_class.is_some()
+            && self.lookup("this$0").is_some()
+            && self.lambda_uses_outer_this_param(body, &bind_names, deep);
         if captures_this {
             let tty = Ty::obj(self.cur_class.as_deref().unwrap());
             captures.insert(0, ("this".to_string(), 0, tty));
+        } else if captures_outer_this {
+            let (v, tty) = self.lookup("this$0")?;
+            captures.insert(0, ("this".to_string(), v, tty));
         }
         // The capture values are read in the *enclosing* scope before it's swapped out.
         let capture_vals: Vec<u32> = captures
@@ -6276,7 +6287,16 @@ impl<'a> Lower<'a> {
         } else {
             None
         };
+        // A `var` declared INSIDE this lambda's body and mutated by a further (non-inline) closure
+        // (`{ var v = …; call { v = … }; v }`) needs a `Ref` holder so the nested write is observed.
+        // UNION the body-local shared cells with the inherited set (captured enclosing cells stay boxed)
+        // for the duration of body lowering.
+        let saved_cells = self.shared_cell_vars.clone();
+        for n in shared_cell_vars_for_expr(self.afile, body, self.info) {
+            self.shared_cell_vars.insert(n);
+        }
         let ve = self.expr(body);
+        self.shared_cell_vars = saved_cells;
         if let Some(rt) = saved_ret_ty {
             self.cur_ret_ty = rt;
         }
@@ -6431,6 +6451,38 @@ impl<'a> Lower<'a> {
                 })
         }
         scan(self, &cur, bound, body, deep)
+    }
+
+    /// In an inner-class constructor prelude (`super(...)` arguments), the captured outer instance is a
+    /// constructor parameter (`this$0`) and the inner `this` is still uninitialized. A lambda that only
+    /// needs an outer member should capture that parameter as its implicit receiver instead of capturing
+    /// the inner `this` and reading `this.this$0` before `super()`.
+    fn lambda_uses_outer_this_param(&self, body: AstExprId, bound: &[String], deep: bool) -> bool {
+        let Some((_, outer_ty)) = self.lookup("this$0") else {
+            return false;
+        };
+        let Some(outer) = outer_ty.obj_internal() else {
+            return false;
+        };
+        fn scan(lo: &Lower, outer: &str, bound: &[String], e: AstExprId, deep: bool) -> bool {
+            if let Expr::Name(n) = lo.afile.expr(e) {
+                if !bound.contains(n)
+                    && (lo.resolve_field(outer, n).is_some()
+                        || lo.resolve_method(outer, n).is_some())
+                {
+                    return true;
+                }
+            }
+            if !deep && matches!(lo.afile.expr(e), Expr::Lambda { .. }) {
+                return false;
+            }
+            lo.afile
+                .any_child_expr(e, &mut |c| scan(lo, outer, bound, c, deep), &mut |s| {
+                    lo.afile
+                        .any_child_stmt(s, &mut |c| scan(lo, outer, bound, c, deep))
+                })
+        }
+        scan(self, outer, bound, body, deep)
     }
 
     /// Does the AST expression `body` (a lambda body, function body, …) contain a SUSPENSION point — a
@@ -16710,6 +16762,9 @@ impl<'a> Lower<'a> {
                         Some(ExprLowering::LabeledThisOuter) => {
                             let internal = self.cur_class.clone()?;
                             let class = self.classes.get(&internal)?.id;
+                            if let Some((v, _)) = self.lookup("this$0") {
+                                return Some(self.ir.add_expr(IrExpr::GetValue(v)));
+                            }
                             let this0 = self.ir.add_expr(IrExpr::GetValue(0));
                             return Some(self.ir.add_expr(IrExpr::GetField {
                                 receiver: this0,
@@ -17037,11 +17092,18 @@ impl<'a> Lower<'a> {
                                 }
                                 _ => return None,
                             };
-                            let this0 = self.ir.add_expr(IrExpr::GetField {
-                                receiver: recv,
-                                class: cur_id,
-                                index: 0,
-                            });
+                            let this0 = if let Some((v, vty)) = self.lookup("this$0") {
+                                if vty.obj_internal() != Some(outer.as_str()) {
+                                    return None;
+                                }
+                                self.ir.add_expr(IrExpr::GetValue(v))
+                            } else {
+                                self.ir.add_expr(IrExpr::GetField {
+                                    receiver: recv,
+                                    class: cur_id,
+                                    index: 0,
+                                })
+                            };
                             // The outer backing field is private — read it through its synthesized getter.
                             let (class, index, _, _) =
                                 self.resolve_method(&outer, &property_getter_name(&n))?;
