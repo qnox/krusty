@@ -3237,3 +3237,10 @@ metadata/member paths through it. Library member emission, delegated `getValue` 
 unboxing, `withLock` lock/unlock, interface delegation forwarding, inline collection iterator/add
 calls, String `hashCode`, assertion-status reads, and console printing now share owner/name/
 descriptor/interface call construction instead of rebuilding `Callee::Virtual` locally.
+
+### Default Argument Packing Merge
+
+The next default-call cleanup merged the repeated `$default` argument packing logic into
+`append_default_call_args`. Fully-qualified top-level calls, receiver-less top-level calls, and
+extension calls now share the same prefix/trailing-lambda/placeholder/mask/marker construction; the
+call sites keep only their selection-specific guards and receiver/context argument setup.

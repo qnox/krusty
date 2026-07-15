@@ -5566,35 +5566,7 @@ impl<'a> Lower<'a> {
             // A `name$default` FQ call: fill the provided prefix, place a TRAILING LAMBDA in the last slot
             // (middle parameters default) or append trailing placeholders, then an `int` bit-mask (a bit
             // per omitted parameter) and a `null` marker. Mirrors the bare-name top-level `$default` path.
-            if has_trailing_lambda && args.len() < c.params.len() {
-                let prefix_len = args.len() - 1;
-                let last = c.params.len() - 1;
-                for j in 0..c.params.len() {
-                    let pj = ty_to_ir(c.params[j]);
-                    if j < prefix_len {
-                        a.push(self.lower_arg(args[j], &pj)?);
-                    } else if j == last {
-                        a.push(self.lower_arg(args[prefix_len], &pj)?);
-                    } else {
-                        a.push(self.zero_placeholder(c.params[j]));
-                    }
-                }
-                let mask: i32 = (prefix_len..last).map(|j| 1i32 << j).sum();
-                a.push(self.ir.add_expr(IrExpr::Const(IrConst::Int(mask))));
-                a.push(self.ir.add_expr(IrExpr::Const(IrConst::Null)));
-            } else if args.len() <= c.params.len() {
-                for (i, &arg) in args.iter().enumerate() {
-                    a.push(self.lower_arg(arg, &ty_to_ir(c.params[i]))?);
-                }
-                for j in args.len()..c.params.len() {
-                    a.push(self.zero_placeholder(c.params[j]));
-                }
-                let mask: i32 = (args.len()..c.params.len()).map(|j| 1i32 << j).sum();
-                a.push(self.ir.add_expr(IrExpr::Const(IrConst::Int(mask))));
-                a.push(self.ir.add_expr(IrExpr::Const(IrConst::Null)));
-            } else {
-                return None;
-            }
+            self.append_default_call_args(&mut a, &c.params, args, has_trailing_lambda)?;
         } else {
             if c.params.len() != args.len() {
                 return None;
@@ -11260,6 +11232,44 @@ impl<'a> Lower<'a> {
             _ => IrConst::Null,
         };
         self.ir.add_expr(IrExpr::Const(c))
+    }
+
+    fn append_default_call_args(
+        &mut self,
+        out: &mut Vec<u32>,
+        params: &[Ty],
+        args: &[AstExprId],
+        trailing_lambda: bool,
+    ) -> Option<()> {
+        if trailing_lambda && args.len() < params.len() {
+            let prefix_len = args.len().checked_sub(1)?;
+            let last = params.len() - 1;
+            for j in 0..params.len() {
+                let pj = ty_to_ir(params[j]);
+                if j < prefix_len {
+                    out.push(self.lower_arg(args[j], &pj)?);
+                } else if j == last {
+                    out.push(self.lower_arg(args[prefix_len], &pj)?);
+                } else {
+                    out.push(self.zero_placeholder(params[j]));
+                }
+            }
+            let mask: i32 = (prefix_len..last).map(|j| 1i32 << j).sum();
+            out.push(self.ir.add_expr(IrExpr::Const(IrConst::Int(mask))));
+        } else if args.len() <= params.len() {
+            for (i, &arg) in args.iter().enumerate() {
+                out.push(self.lower_arg(arg, &ty_to_ir(params[i]))?);
+            }
+            for &param in &params[args.len()..] {
+                out.push(self.zero_placeholder(param));
+            }
+            let mask: i32 = (args.len()..params.len()).map(|j| 1i32 << j).sum();
+            out.push(self.ir.add_expr(IrExpr::Const(IrConst::Int(mask))));
+        } else {
+            return None;
+        }
+        out.push(self.ir.add_expr(IrExpr::Const(IrConst::Null)));
+        Some(())
     }
 
     fn lower_assert_fails_with_default(
@@ -19436,35 +19446,12 @@ impl<'a> Lower<'a> {
                             let trailing_lambda = args
                                 .last()
                                 .is_some_and(|&x| matches!(self.info.ty(x), Ty::Fun(_)));
-                            if trailing_lambda && args.len() < c.params.len() {
-                                let prefix_len = args.len() - 1;
-                                let last = c.params.len() - 1;
-                                for j in 0..c.params.len() {
-                                    let pj = ty_to_ir(c.params[j]);
-                                    if j < prefix_len {
-                                        a.push(self.lower_arg(args[j], &pj)?);
-                                    } else if j == last {
-                                        a.push(self.lower_arg(args[prefix_len], &pj)?);
-                                    } else {
-                                        a.push(self.zero_placeholder(c.params[j]));
-                                    }
-                                }
-                                let mask: i32 = (prefix_len..last).map(|j| 1i32 << j).sum();
-                                a.push(self.ir.add_expr(IrExpr::Const(IrConst::Int(mask))));
-                                a.push(self.ir.add_expr(IrExpr::Const(IrConst::Null)));
-                            } else {
-                                for (i, &arg) in args.iter().enumerate() {
-                                    a.push(self.lower_arg(arg, &ty_to_ir(c.params[i]))?);
-                                }
-                                for j in args.len()..c.params.len() {
-                                    let ph = self.zero_placeholder(c.params[j]);
-                                    a.push(ph);
-                                }
-                                let mask: i32 =
-                                    (args.len()..c.params.len()).map(|j| 1i32 << j).sum();
-                                a.push(self.ir.add_expr(IrExpr::Const(IrConst::Int(mask))));
-                                a.push(self.ir.add_expr(IrExpr::Const(IrConst::Null)));
-                            }
+                            self.append_default_call_args(
+                                &mut a,
+                                &c.params,
+                                &args,
+                                trailing_lambda,
+                            )?;
                         } else {
                             // `ctx_n` leading context arguments are already in `a`; the explicit source
                             // arguments fill the remaining parameters `c.params[ctx_n..]`.
@@ -20975,50 +20962,26 @@ impl<'a> Lower<'a> {
                         let p0 = *c.params.first().unwrap_or(&rt);
                         let recv = self.lower_arg(receiver, &ty_to_ir(p0))?;
                         let mut a = vec![recv];
+                        let explicit_params = c.params.get(1..)?;
                         // A `$default` call with a TRAILING LAMBDA: the lambda fills the LAST real parameter
-                        // (`transform`), the leading args a prefix, the MIDDLE parameters default. Place the
-                        // lambda in the last slot, zero-placeholders for the defaulted middle, and a mask
-                        // with a bit set for each defaulted middle parameter (not the prefix, not the lambda).
+                        // (`transform`), the leading args a prefix, the MIDDLE parameters default.
                         let trailing_lambda = c.default_call
                             && args
                                 .last()
                                 .is_some_and(|&x| matches!(self.info.ty(x), Ty::Fun(_)));
-                        if trailing_lambda {
-                            let real_count = c.params.len() - 1; // exclude the receiver
-                            let prefix_len = args.len() - 1;
-                            let last = real_count - 1;
-                            for j in 0..real_count {
-                                let pj = ty_to_ir(c.params[j + 1]);
-                                if j < prefix_len {
-                                    a.push(self.lower_arg(args[j], &pj)?);
-                                } else if j == last {
-                                    a.push(self.lower_arg(args[prefix_len], &pj)?);
-                                // the trailing lambda
-                                } else {
-                                    a.push(self.zero_placeholder(c.params[j + 1]));
-                                }
-                            }
-                            let mask: i32 = (prefix_len..last).map(|j| 1i32 << j).sum();
-                            a.push(self.ir.add_expr(IrExpr::Const(IrConst::Int(mask))));
-                            a.push(self.ir.add_expr(IrExpr::Const(IrConst::Null)));
+                        if c.default_call {
+                            self.append_default_call_args(
+                                &mut a,
+                                explicit_params,
+                                &args,
+                                trailing_lambda,
+                            )?;
                         } else {
                             for (i, &arg) in args.iter().enumerate() {
-                                match c.params.get(i + 1) {
+                                match explicit_params.get(i) {
                                     Some(p) => a.push(self.lower_arg(arg, &ty_to_ir(*p))?),
                                     None => a.push(self.expr(arg)?),
                                 }
-                            }
-                            // A `name$default` call appends a placeholder per omitted trailing parameter,
-                            // an `int` bit-mask (a bit per omitted parameter), and a `null` marker.
-                            if c.default_call {
-                                let real_count = c.params.len() - 1; // exclude the receiver
-                                for j in args.len()..real_count {
-                                    let ph = self.zero_placeholder(c.params[j + 1]);
-                                    a.push(ph);
-                                }
-                                let mask: i32 = (args.len()..real_count).map(|j| 1i32 << j).sum();
-                                a.push(self.ir.add_expr(IrExpr::Const(IrConst::Int(mask))));
-                                a.push(self.ir.add_expr(IrExpr::Const(IrConst::Null)));
                             }
                         }
                         // A suspend EXTENSION resolved to its `name$default` synthetic (`m.withLock { … }`
