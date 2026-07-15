@@ -803,13 +803,6 @@ fn parse_method_gsig(sig: &str) -> Option<GenericSig> {
     })
 }
 
-/// A type's simple (unqualified) source name, from its canonical internal name's last segment
-/// (`kotlin/Int` → `Int`, `kotlin/UInt` → `UInt`, `app/Foo` → `Foo`). Generic — no per-type list.
-fn ty_simple_name(t: Ty) -> Option<&'static str> {
-    t.kotlin_class_internal()
-        .map(|i| i.rsplit('/').next().unwrap_or(i))
-}
-
 /// A member's return type recovered from its generic signature ONLY when it is fully CONCRETE (carries
 /// type arguments, none of which is a free type variable) — `all(): List<Item>` → `List<Item>`. This lets
 /// a member of a NON-generic receiver still carry its return's type arguments (which `member_return`
@@ -1726,7 +1719,8 @@ impl SymbolSource for JvmLibraries {
                     .type_args()
                     .first()
                     .copied()
-                    .and_then(ty_simple_name)
+                    .and_then(Ty::kotlin_class_internal)
+                    .map(|i| i.rsplit('/').next().unwrap_or(i))
                     .map(|s| format!("{}Of{s}", mf.jvm_name));
                 // The receiver's erased descriptor disambiguates same-named overloads on the facade
                 // (`maxOrNull([I)` vs `maxOrNull([D)`); the return descriptor disambiguates same-receiver
