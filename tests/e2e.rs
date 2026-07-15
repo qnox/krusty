@@ -368,6 +368,8 @@ mod front_end_errors_more_e2e;
 mod full_form_destructuring_e2e;
 #[path = "function_type_supertype_e2e.rs"]
 mod function_type_supertype_e2e;
+#[path = "function_typed_property_e2e.rs"]
+mod function_typed_property_e2e;
 #[path = "generic_base_member_type_e2e.rs"]
 mod generic_base_member_type_e2e;
 #[path = "generic_delegate_e2e.rs"]
