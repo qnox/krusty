@@ -646,6 +646,8 @@ mod sam_conversion_e2e;
 mod same_package_classpath_e2e;
 #[path = "scope_function_value_arg_e2e.rs"]
 mod scope_function_value_arg_e2e;
+#[path = "sealed_interface_nested_e2e.rs"]
+mod sealed_interface_nested_e2e;
 #[path = "sealed_object_value_match_e2e.rs"]
 mod sealed_object_value_match_e2e;
 #[path = "secondary_ctor_noprimary_e2e.rs"]
