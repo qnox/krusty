@@ -548,14 +548,6 @@ pub struct ParamList {
     pub defaults: Vec<bool>,
 }
 
-impl ParamList {
-    pub fn named_usable(&self, min_arity: usize) -> bool {
-        self.names.len() >= min_arity
-            && self.names.len() == self.defaults.len()
-            && !self.names.iter().any(String::is_empty)
-    }
-}
-
 impl CallSig {
     pub fn has_param_names(&self) -> bool {
         !self.param_names.is_empty()
@@ -1082,7 +1074,11 @@ impl LibraryType {
     pub fn constructor_named_params(&self, min_arity: usize) -> Option<ParamList> {
         self.ctor_named_params
             .iter()
-            .find(|params| params.named_usable(min_arity))
+            .find(|params| {
+                params.names.len() >= min_arity
+                    && params.names.len() == params.defaults.len()
+                    && !params.names.iter().any(String::is_empty)
+            })
             .cloned()
     }
 
@@ -1183,8 +1179,6 @@ impl LibraryType {
     }
 }
 
-/// A primitive constant value read from a library (a `const`/`static final` field's compile-time
-/// value), platform-agnostic so the front end can inline it like the reference compiler does.
 /// A primitive constant value read from a library (a `const`/`static final` field's compile-time
 /// value), platform-agnostic so the front end can inline it like the reference compiler does.
 #[derive(Clone, Copy, Debug, PartialEq)]
