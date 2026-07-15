@@ -797,6 +797,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 secondary_ctors: vec![],
                 has_primary_ctor: c.has_primary_ctor,
                 applied_annotations: class_applied_annotations(file, c),
+                field_annotations: class_field_annotations(file, c),
                 // A Kotlin `annotation class` is RUNTIME-retained unless it opts out — emit the
                 // `@Retention(RUNTIME)` meta-annotation so its uses stay visible to reflection.
                 runtime_retained: c.kind == ast::ClassKind::Annotation
@@ -1352,6 +1353,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     secondary_ctors: vec![],
                     has_primary_ctor: true,
                     applied_annotations: Vec::new(),
+                    field_annotations: Vec::new(),
                     runtime_retained: false,
                 });
                 let csig = syms.classes.get(&c.name)?;
@@ -3245,6 +3247,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                             secondary_ctors: vec![],
                             has_primary_ctor: true,
                             applied_annotations: Vec::new(),
+                            field_annotations: Vec::new(),
                             runtime_retained: false,
                         });
                         // Register the subclass so an override body resolves a prop as `this.<field>` and
@@ -6520,6 +6523,7 @@ impl<'a> Lower<'a> {
             secondary_ctors: vec![],
             has_primary_ctor: true,
             applied_annotations: Vec::new(),
+            field_annotations: Vec::new(),
             runtime_retained: false,
         };
         let class_id = self.ir.add_class(class);
@@ -9030,6 +9034,7 @@ impl<'a> Lower<'a> {
             secondary_ctors: vec![],
             has_primary_ctor: true,
             applied_annotations: Vec::new(),
+            field_annotations: Vec::new(),
             runtime_retained: false,
         });
         if let Some(recv_e) = capture {
@@ -9124,6 +9129,7 @@ impl<'a> Lower<'a> {
             secondary_ctors: vec![],
             has_primary_ctor: true,
             applied_annotations: Vec::new(),
+            field_annotations: Vec::new(),
             runtime_retained: false,
         });
         Some(self.ir.add_expr(IrExpr::New {
@@ -9428,6 +9434,7 @@ impl<'a> Lower<'a> {
             secondary_ctors: vec![],
             has_primary_ctor: true,
             applied_annotations: Vec::new(),
+            field_annotations: Vec::new(),
             runtime_retained: false,
         });
         let _ = e;
@@ -10026,6 +10033,7 @@ impl<'a> Lower<'a> {
             secondary_ctors: vec![],
             has_primary_ctor: true,
             applied_annotations: Vec::new(),
+            field_annotations: Vec::new(),
             runtime_retained: false,
         });
         match capture {
@@ -22062,6 +22070,38 @@ fn build_applied_annotation(
         internal: class_internal(file, name),
         values,
     })
+}
+
+/// User annotations on a class's ENUM-CONSTANT fields, folded for each field's
+/// `RuntimeVisibleAnnotations`. An enum constant `@Ann RED` unambiguously targets the static field
+/// (unlike a constructor `val` property, whose no-use-site annotation defaults to the CONSTRUCTOR
+/// PARAMETER — handled separately when param-annotation emission lands).
+///
+/// Currently resolves SAME-FILE, RUNTIME-retained annotations (via [`build_applied_annotation`]); a
+/// classpath annotation (e.g. `@SerialName`) whose retention/elements live in a compiled class is not
+/// yet resolved (a follow-up), so it is skipped rather than emitted wrong. BINARY-retained (invisible)
+/// support is likewise a follow-up.
+fn class_field_annotations(
+    file: &ast::File,
+    c: &ast::ClassDecl,
+) -> Vec<crate::ir::FieldAnnotations> {
+    let mut out = Vec::new();
+    for e in &c.enum_entries {
+        let visible: Vec<_> = e
+            .annotations
+            .iter()
+            .zip(e.annotation_args.iter())
+            .filter_map(|(n, a)| build_applied_annotation(file, n, a))
+            .collect();
+        if !visible.is_empty() {
+            out.push(crate::ir::FieldAnnotations {
+                field: e.name.clone(),
+                visible,
+                invisible: Vec::new(),
+            });
+        }
+    }
+    out
 }
 
 /// The RUNTIME-retained applied annotations on a class declaration, folded for `RuntimeVisibleAnnotations`.

@@ -684,6 +684,10 @@ pub struct IrClass {
     /// RUNTIME-retained annotations applied to this class (`@Anno(...) class TTT`), emitted into the
     /// class's `RuntimeVisibleAnnotations` attribute. Empty for a class with none.
     pub applied_annotations: Vec<AppliedAnnotation>,
+    /// User annotations applied to this class's fields (property backing fields and enum-constant
+    /// fields), by field name — emitted into each field's `Runtime[In]VisibleAnnotations`. Empty for a
+    /// class whose fields carry none.
+    pub field_annotations: Vec<FieldAnnotations>,
     /// For an `annotation class`: `true` when its Kotlin retention is RUNTIME (the default) — the emitter
     /// then writes a `@java.lang.annotation.Retention(RUNTIME)` meta-annotation on the annotation interface
     /// so the JVM keeps the annotation's uses visible to reflection.
@@ -704,6 +708,15 @@ pub enum AnnoValue {
     Annotation(AppliedAnnotation),
     /// An array `[…]` — tag `[`.
     Array(Vec<AnnoValue>),
+}
+
+/// User annotations on one field, split by JVM retention: RUNTIME → `RuntimeVisibleAnnotations`,
+/// BINARY → `RuntimeInvisibleAnnotations` (SOURCE-retained ones are dropped during lowering).
+#[derive(Clone, Debug)]
+pub struct FieldAnnotations {
+    pub field: String,
+    pub visible: Vec<AppliedAnnotation>,
+    pub invisible: Vec<AppliedAnnotation>,
 }
 
 /// An applied annotation (`@Anno(...)`) to encode into a `RuntimeVisibleAnnotations` attribute.
@@ -1418,6 +1431,7 @@ mod tests {
             custom_serializer: None,
             field_serializers: Vec::new(),
             contextual_fields: Vec::new(),
+            field_annotations: Vec::new(),
             ctor_param_count: 0,
             ctor_args: Vec::new(),
             init_body: None,

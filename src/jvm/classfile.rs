@@ -253,6 +253,10 @@ struct FieldInfo {
     /// `None`. kotlinc emits this on a `const val` field (and leaves `<clinit>` empty); the JVM
     /// initializes the field from it.
     const_value: Option<u16>,
+    /// Encoded `annotation` structures (each type_index + element_value_pairs) for this field's
+    /// `RuntimeVisibleAnnotations` (RUNTIME retention) and `RuntimeInvisibleAnnotations` (BINARY).
+    visible_anns: Vec<Vec<u8>>,
+    invisible_anns: Vec<Vec<u8>>,
 }
 
 pub struct ClassWriter {
@@ -348,6 +352,8 @@ impl ClassWriter {
             desc: d,
             signature: sig,
             const_value: None,
+            visible_anns: Vec::new(),
+            invisible_anns: Vec::new(),
         });
     }
 
@@ -363,7 +369,34 @@ impl ClassWriter {
             desc: d,
             signature: None,
             const_value: Some(const_idx),
+            visible_anns: Vec::new(),
+            invisible_anns: Vec::new(),
         });
+    }
+
+    /// Attach user annotations to the most recently added field. RUNTIME-retained annotations go to
+    /// `RuntimeVisibleAnnotations`, BINARY-retained to `RuntimeInvisibleAnnotations` — matching kotlinc.
+    pub fn set_last_field_annotations(
+        &mut self,
+        visible: &[crate::ir::AppliedAnnotation],
+        invisible: &[crate::ir::AppliedAnnotation],
+    ) {
+        let vis: Vec<Vec<u8>> = visible.iter().map(|a| self.encode_annotation(a)).collect();
+        let invis: Vec<Vec<u8>> = invisible
+            .iter()
+            .map(|a| self.encode_annotation(a))
+            .collect();
+        if let Some(f) = self.fields.last_mut() {
+            f.visible_anns = vis;
+            f.invisible_anns = invis;
+        }
+    }
+
+    /// Encode one `annotation` structure (type_index + element_value_pairs) to a fresh byte buffer.
+    fn encode_annotation(&mut self, a: &crate::ir::AppliedAnnotation) -> Vec<u8> {
+        let mut body = Vec::new();
+        self.ev_annotation(&mut body, a);
+        body
     }
 
     /// Attach a `@kotlin.Metadata` annotation (RuntimeVisibleAnnotations) describing the file facade.
@@ -630,6 +663,17 @@ impl ClassWriter {
         } else {
             None
         };
+        // Field annotation attribute names, interned only when a field actually carries them.
+        let field_vis_ann_name = if self.fields.iter().any(|f| !f.visible_anns.is_empty()) {
+            Some(self.cp.utf8("RuntimeVisibleAnnotations"))
+        } else {
+            None
+        };
+        let field_invis_ann_name = if self.fields.iter().any(|f| !f.invisible_anns.is_empty()) {
+            Some(self.cp.utf8("RuntimeInvisibleAnnotations"))
+        } else {
+            None
+        };
         // Build the `BootstrapMethods` attribute body before serializing the pool (its name + any
         // remaining indices must already be interned). All handle/argument indices were interned
         // when `add_bootstrap` ran during code emission.
@@ -673,7 +717,10 @@ impl ClassWriter {
             u2(&mut out, f.access);
             u2(&mut out, f.name);
             u2(&mut out, f.desc);
-            let nattr = f.signature.is_some() as u16 + f.const_value.is_some() as u16;
+            let nattr = f.signature.is_some() as u16
+                + f.const_value.is_some() as u16
+                + (!f.visible_anns.is_empty()) as u16
+                + (!f.invisible_anns.is_empty()) as u16;
             u2(&mut out, nattr);
             // `ConstantValue` first (kotlinc's field-attribute order on a `const val`).
             if let Some(cv) = f.const_value {
@@ -686,6 +733,8 @@ impl ClassWriter {
                 u4(&mut out, 2);
                 u2(&mut out, si);
             }
+            write_annotation_attr(&mut out, field_vis_ann_name, &f.visible_anns);
+            write_annotation_attr(&mut out, field_invis_ann_name, &f.invisible_anns);
         }
         u2(&mut out, self.methods.len() as u16);
         for m in &self.methods {
@@ -749,6 +798,24 @@ fn u2(out: &mut Vec<u8>, v: u16) {
 }
 fn u4(out: &mut Vec<u8>, v: u32) {
     out.extend_from_slice(&v.to_be_bytes());
+}
+
+/// Write a `Runtime[In]VisibleAnnotations` attribute: `name_index`, `length`, `num_annotations`, then
+/// the pre-encoded `annotation` structures. No-op when there are no annotations.
+fn write_annotation_attr(out: &mut Vec<u8>, name_index: Option<u16>, anns: &[Vec<u8>]) {
+    if anns.is_empty() {
+        return;
+    }
+    u2(
+        out,
+        name_index.expect("annotation attr name interned when a field carries annotations"),
+    );
+    let body_len = 2 + anns.iter().map(|a| a.len()).sum::<usize>();
+    u4(out, body_len as u32);
+    u2(out, anns.len() as u16);
+    for a in anns {
+        out.extend_from_slice(a);
+    }
 }
 
 // ---- CodeBuilder: opcode emission with automatic max_stack/max_locals tracking ----------------

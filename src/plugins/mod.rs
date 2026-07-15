@@ -228,6 +228,7 @@ pub(crate) fn synthetic_class(fq_name: impl Into<String>) -> crate::ir::IrClass 
         secondary_ctors: Vec::new(),
         has_primary_ctor: true,
         applied_annotations: Vec::new(),
+        field_annotations: Vec::new(),
         runtime_retained: false,
     }
 }

@@ -157,6 +157,13 @@ fn collect_var_types(ir: &IrFile) -> HashMap<u32, Ty> {
     m
 }
 
+/// Attach any user annotations recorded for `field` (by name) to the most recently added field.
+fn apply_field_annotations(cw: &mut ClassWriter, c: &crate::ir::IrClass, field: &str) {
+    if let Some(fa) = c.field_annotations.iter().find(|fa| fa.field == field) {
+        cw.set_last_field_annotations(&fa.visible, &fa.invisible);
+    }
+}
+
 pub(crate) fn jvm_can_emit(ir: &IrFile) -> bool {
     const UNSUPPORTED_STDLIB_VALUE_CLASSES: &[&str] = &["kotlin/UByte", "kotlin/UShort"];
 
@@ -2413,6 +2420,7 @@ fn emit_enum_class(
     // One static-final constant per entry, plus the private `$VALUES` array.
     for entry in &c.enum_entries {
         cw.add_field(0x0001 | 0x0008 | 0x0010 | ACC_ENUM, &entry.name, &self_desc);
+        apply_field_annotations(&mut cw, c, &entry.name);
     }
     cw.add_field(
         0x0002 | 0x0008 | 0x0010 | ACC_SYNTHETIC,

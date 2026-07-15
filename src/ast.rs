@@ -514,6 +514,11 @@ pub struct PropParam {
 pub struct AstEnumEntry {
     /// Entry name (`RED`).
     pub name: String,
+    /// Simple names of annotations on this constant (`@SerialName("x") RED` → `["SerialName"]`),
+    /// parallel to `annotation_args`. Emitted onto the enum's static field (per JVM retention).
+    pub annotations: Vec<String>,
+    /// The argument expressions of each annotation in `annotations` (same order/length).
+    pub annotation_args: Vec<Vec<ExprId>>,
     /// Constructor arguments (`RED(0xFF0000)` → the two arg expr ids); empty for `RED` with no args.
     pub args: Vec<ExprId>,
     /// Per-argument name for a NAMED argument (`RED(rgb = 0xFF0000)`), parallel to `args`; `None` for

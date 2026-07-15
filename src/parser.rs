@@ -1802,10 +1802,16 @@ impl<'a> Parser<'a> {
             self.skip_newlines();
             loop {
                 // Enum constants may carry annotations (`@SerialName("system") SYSTEM(...)` — common
-                // in kotlinx.serialization enums). Parse-and-discard the annotation prefix; the ABI
-                // (the constant's field name/descriptor/access) is unaffected.
+                // in kotlinx.serialization enums). Capture them so they can be emitted onto the enum's
+                // static field (per JVM retention), matching kotlinc.
+                let mut entry_ann_names: Vec<String> = Vec::new();
+                let mut entry_ann_args: Vec<Vec<ExprId>> = Vec::new();
                 while self.at(TokenKind::At) {
-                    self.skip_annotation();
+                    let (name, args) = self.skip_annotation();
+                    if let Some(n) = name {
+                        entry_ann_names.push(n);
+                        entry_ann_args.push(args);
+                    }
                     self.skip_newlines();
                 }
                 if !self.at(TokenKind::Ident) {
@@ -1885,6 +1891,8 @@ impl<'a> Parser<'a> {
                 }
                 entries.push(AstEnumEntry {
                     name: entry_name,
+                    annotations: entry_ann_names,
+                    annotation_args: entry_ann_args,
                     args,
                     arg_names,
                     methods: body,
