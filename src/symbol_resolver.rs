@@ -2286,7 +2286,9 @@ fn best_by_args<'a>(
         .or_else(|| {
             cands.iter().find(|(o, lp)| {
                 lp.len() >= args.len()
-                    && (lp.len() == args.len() || o.call_sig.supplied_required_args(args.len()))
+                    && (lp.len() == args.len()
+                        || o.call_sig.required == 0
+                        || o.call_sig.required <= args.len())
                     && lp[..args.len()].iter().zip(args).all(|(p, a)| fits(p, a))
             })
         })
@@ -2303,7 +2305,8 @@ fn best_by_args<'a>(
                 let prefix = args.len() - 1;
                 prefix <= last
                     && fun_arg_matches(lib, &lp[last], args.last().unwrap())
-                    && o.call_sig.omitted_middle_params_optional(prefix, last)
+                    && ((prefix..last).all(|i| o.call_sig.param_has_default(i))
+                        || o.call_sig.required <= prefix)
                     && lp[..prefix.min(lp.len())]
                         .iter()
                         .zip(&args[..prefix])

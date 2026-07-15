@@ -569,14 +569,6 @@ impl CallSig {
         !self.vararg && self.required == param_count
     }
 
-    pub fn supplied_required_args(&self, supplied: usize) -> bool {
-        self.required == 0 || self.required <= supplied
-    }
-
-    pub fn omitted_middle_params_optional(&self, prefix: usize, last: usize) -> bool {
-        (prefix..last).all(|i| self.param_has_default(i)) || self.required <= prefix
-    }
-
     pub fn source(
         param_names: Vec<String>,
         param_defaults: Vec<bool>,
