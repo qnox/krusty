@@ -7065,7 +7065,10 @@ impl<'a> Checker<'a> {
         // parameter (`vararg_tail`) is a plain call; a vararg preceded by dropped defaults routes through
         // `$default` with an empty array for the vararg slot.
         let vararg_tail = sig.vararg && n == m - 1;
-        if n < m && !vararg_tail && !(n..m).all(|k| call_sig.param_droppable(k, m)) {
+        if n < m
+            && !vararg_tail
+            && !(n..m).all(|k| call_sig.param_has_default(k) || (call_sig.vararg && k + 1 == m))
+        {
             return None;
         }
         self.expr_lowers.insert(
