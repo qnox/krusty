@@ -433,12 +433,9 @@ impl<'a> SymbolResolver<'a> {
                     .and_then(|dr| source_receiver_rank(&self.src, recv, dr))
                     .is_some()
         };
-        self.symbols_in_scope(name)
+        self.top_level_function_set(name)
+            .overloads
             .into_iter()
-            .flat_map(|(_, r)| match r.callables {
-                crate::libraries::Callables::Functions(f) => f.overloads,
-                _ => Vec::new(),
-            })
             .filter(|o| applies(o))
             .collect()
     }
@@ -484,16 +481,7 @@ impl<'a> SymbolResolver<'a> {
     /// `resolve_symbols` seam over this resolver's import scope (empty when there is no scope). Callers
     /// filter by [`FnKind`] as they need (`TopLevel` for a plain call, etc.).
     pub(crate) fn top_level_function_set(&self, name: &str) -> FunctionSet {
-        FunctionSet {
-            overloads: self
-                .symbols_in_scope(name)
-                .into_iter()
-                .flat_map(|(_, r)| match r.callables {
-                    crate::libraries::Callables::Functions(f) => f.overloads,
-                    _ => Vec::new(),
-                })
-                .collect(),
-        }
+        function_set_from_symbols(self.symbols_in_scope(name))
     }
 
     pub(crate) fn exact_receiver_extensions(
@@ -549,15 +537,8 @@ impl<'a> SymbolResolver<'a> {
         args: &[Ty],
         type_args: &[Ty],
     ) -> Option<LibraryCallable> {
-        let fs = FunctionSet {
-            overloads: resolve_symbols_in_scope(&self.src, name, &[pkg.to_string()])
-                .into_iter()
-                .flat_map(|(_, r)| match r.callables {
-                    crate::libraries::Callables::Functions(f) => f.overloads,
-                    _ => Vec::new(),
-                })
-                .collect(),
-        };
+        let scope = [pkg.to_string()];
+        let fs = function_set_from_symbols(resolve_symbols_in_scope(&self.src, name, &scope));
         self.pick_top_level(name, &fs, args, type_args)
     }
 
@@ -2040,6 +2021,20 @@ pub(crate) fn resolve_symbols_in_scope(
         .collect()
 }
 
+fn function_set_from_symbols(
+    symbols: impl IntoIterator<Item = (String, crate::libraries::ResolvedSymbols)>,
+) -> FunctionSet {
+    FunctionSet {
+        overloads: symbols
+            .into_iter()
+            .flat_map(|(_, r)| match r.callables {
+                crate::libraries::Callables::Functions(f) => f.overloads,
+                _ => Vec::new(),
+            })
+            .collect(),
+    }
+}
+
 /// Whether callable overload `o` is visible for an UNQUALIFIED (top-level or extension) call given the
 /// in-scope packages `fn_scope`. A same-module callable ([`Origin::Module`]) is always visible — module
 /// visibility is resolved separately, and its facade owner may be package-less. Only a CLASSPATH
@@ -2092,10 +2087,6 @@ fn select_overload(
         }
     }
     let allow_must_inline = ext.allow_must_inline;
-    // EXTENSION candidates come from the shared FQN seam — union `resolve_symbols` over the in-scope
-    // packages (the spec's scope-pruned, tree-driven extension lookup) — so an unqualified extension binds
-    // only when its facade's package is imported, without the whole-classpath eager index. MEMBERS are
-    // always visible on their type (no scope), so they keep the direct `functions(name, receiver)` walk.
     // EXTENSION candidates come from the ONE query — union `resolve_symbols`' function callables over the
     // in-scope packages (scope-pruned, tree-driven), so an unqualified extension binds only when its
     // facade's package is imported. No import scope → the legacy whole-classpath `functions()` fallback
@@ -2106,18 +2097,10 @@ fn select_overload(
         // do — so member candidates come from the platform's receiver-aware member query. EXTENSIONS come
         // from the scope-pruned `resolve_symbols` seam (empty when there is no import scope).
         FnKind::Member => lib.member_overloads(recv, name),
-        FnKind::Extension => match ext.fn_scope {
-            Some(scope) => FunctionSet {
-                overloads: resolve_symbols_in_scope(lib, name, scope)
-                    .into_iter()
-                    .flat_map(|(_, r)| match r.callables {
-                        crate::libraries::Callables::Functions(f) => f.overloads,
-                        _ => Vec::new(),
-                    })
-                    .collect(),
-            },
-            None => FunctionSet::default(),
-        },
+        FnKind::Extension => ext
+            .fn_scope
+            .map(|scope| function_set_from_symbols(resolve_symbols_in_scope(lib, name, scope)))
+            .unwrap_or_default(),
         FnKind::TopLevel => FunctionSet::default(),
     };
     // Candidates from the scoped query are IN-SCOPE by construction: each came from a `resolve_symbols`
