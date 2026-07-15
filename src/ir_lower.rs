@@ -12003,17 +12003,11 @@ impl<'a> Lower<'a> {
         // parameter, and getter return are the `kotlin/Unit` REFERENCE — not the 0-word `Ty::Unit` whose
         // descriptor `V` is illegal for a field/parameter. (Only a `Unit` *return position* erases to void.)
         let base = stored_value_ty(base);
-        if base == Ty::obj("kotlin/Any") {
+        if ty_is_erased_top(&base) {
             // Resolve the NON-nullable form (`ty_ref` bails on a nullable type); the caller re-applies
             // the field's nullability to the IrType, so `Uuid` and `Uuid?` recover the same base type.
-            let nn = ast::TypeRef {
-                nullable: false,
-                ..r.clone()
-            };
-            if let Some(rt) = self.ty_ref(&nn) {
-                if rt != Ty::obj("kotlin/Any") {
-                    return rt;
-                }
+            if let Some(rt) = self.classpath_ty_ref(r) {
+                return rt;
             }
         }
         base
@@ -12025,18 +12019,21 @@ impl<'a> Lower<'a> {
     /// registration and body-lowering of the extension must agree with the checker's receiver descriptor.
     fn ext_receiver_ty(&self, file: &ast::File, r: &ast::TypeRef) -> Ty {
         let base = ty_of(file, r, &*self.syms.libraries);
-        if base == Ty::Error || base == Ty::obj("kotlin/Any") {
-            let nn = ast::TypeRef {
-                nullable: false,
-                ..r.clone()
-            };
-            if let Some(rt) = self.ty_ref(&nn) {
-                if rt != Ty::Error && rt != Ty::obj("kotlin/Any") {
-                    return rt;
-                }
+        if base == Ty::Error || ty_is_erased_top(&base) {
+            if let Some(rt) = self.classpath_ty_ref(r) {
+                return rt;
             }
         }
         base
+    }
+
+    fn classpath_ty_ref(&self, r: &ast::TypeRef) -> Option<Ty> {
+        let nn = ast::TypeRef {
+            nullable: false,
+            ..r.clone()
+        };
+        self.ty_ref(&nn)
+            .filter(|t| *t != Ty::Error && !ty_is_erased_top(t))
     }
 
     /// Resolve a dotted CLASSPATH nested type/qualifier (`Subject.User` → `lib/Subject$User`) — the
