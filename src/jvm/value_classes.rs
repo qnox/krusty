@@ -520,6 +520,9 @@ pub fn lower_value_classes(
                 | "unbox-impl"
                 | "constructor-impl"
                 | "equals-impl0"
+                | "equals-impl"
+                | "hashCode-impl"
+                | "toString-impl"
                 | "equals"
                 | "hashCode"
                 | "toString"
@@ -1053,6 +1056,12 @@ pub fn lower_value_classes(
             s4_bodies.push((a, body_slot_map(&ir.exprs, a, &orig_ctor_args[cidx]), None));
         }
     }
+    // Top-level property initializers run in the facade `<clinit>` (static, no params). A value-class
+    // construction here (`val p = arrayListOf(X(0))`) must rewrite `new X` → `constructor-impl` too;
+    // otherwise a private `<init>` leaks an `IllegalAccessError` from `<clinit>`.
+    for s in &ir.statics {
+        s4_bodies.push((s.init, HashMap::new(), None));
+    }
     // Map each reachable target expr to its body's slot map (first body wins; bodies don't overlap).
     let mut target_slots: HashMap<ExprId, usize> = HashMap::new();
     for (bi, (root, _, _)) in s4_bodies.iter().enumerate() {
@@ -1245,6 +1254,11 @@ pub fn lower_value_classes(
         for &a in &c.super_args {
             bodies.push((a, body_slot_map(&ir.exprs, a, &orig_ctor_args[cidx])));
         }
+    }
+    // Top-level property initializers (facade `<clinit>`, static) — box/unbox their value-class accesses
+    // and boundary constructions just like any function body.
+    for s in &ir.statics {
+        bodies.push((s.init, HashMap::new()));
     }
     for (root, slots) in &bodies {
         let root = *root;
@@ -1829,6 +1843,24 @@ pub fn lower_value_classes(
                 fresh += 1;
             }
             BoxOp::Unbox(x) => unbox_wrap(ir, id, &x, &under),
+        }
+    }
+
+    // A top-level / companion property backing field of value-class type is stored BOXED (`LX;`); its
+    // initializer — which step 4 rewrote to `constructor-impl(…)` (the unboxed underlying) — must be
+    // `box-impl`'d to match the field's boxed slot, exactly like a function boxing a value-class return.
+    // `box_tail` only boxes an unboxed `constructor-impl`/`unbox-impl` tail, so an already-boxed init is
+    // left untouched.
+    for si in 0..ir.statics.len() {
+        if let Some(x) = ir.statics[si]
+            .ty
+            .non_null()
+            .obj_internal()
+            .filter(|fq| under.contains_key(*fq))
+            .map(str::to_string)
+        {
+            let root = ir.statics[si].init;
+            box_tail(ir, root, &x, &under);
         }
     }
 
@@ -3073,13 +3105,21 @@ fn synth_value_members(
     let internal = ir.classes[class_id as usize].fq_name.clone();
     let fname = ir.classes[class_id as usize].fields[0].name.clone();
     let u_ir = under.get(&internal).copied().unwrap_or(Ty::Error);
+    // The FULLY-ERASED underlying: a NESTED value class erases through its chain to the first type that
+    // stops unboxing — `NZ2(NZ1)` where `NZ1(Z?)` erases to a BOXED `Z` (`LZ;`), not `LNZ1;`. The static
+    // `-impl` members take this erased type (matching kotlinc), so their hardcoded delegation descriptors
+    // must use it too, or the operand-stack type won't match the actual method signature (a VerifyError).
+    let eu = erase(&u_ir, under);
+    // The underlying JVM descriptor (`Ljava/lang/String;`, `I`, `LZ;`, …) — the argument type of the
+    // static `-impl` members, which the instance methods delegate to (matching kotlinc's value-class shape).
+    let udesc = type_descriptor(ir_ty_to_jvm(&eu));
     let x_ir = Ty::obj(&internal);
     let bool_ir = Ty::obj("kotlin/Boolean");
     let int_ir = Ty::obj("kotlin/Int");
     let str_ir = Ty::obj("kotlin/String");
     let any_ir = Ty::obj("kotlin/Any");
 
-    let add_static = |ir: &mut IrFile, name: &str, params: Vec<Ty>, ret: Ty, body: ExprId| {
+    let add_static = |ir: &mut IrFile, name: &str, params: Vec<Ty>, ret: Ty, body: ExprId| -> u32 {
         let fid = ir.add_fun(crate::ir::IrFunction {
             name: name.to_string(),
             params,
@@ -3090,27 +3130,30 @@ fn synth_value_members(
             param_checks: Vec::new(),
         });
         ir.classes[class_id as usize].methods.push(fid);
+        fid
     };
-    let add_inst = |ir: &mut IrFile, name: &str, params: Vec<Ty>, ret: Ty, body: ExprId| {
-        // Don't synthesize over a user-defined member of the same name.
-        let exists = ir.classes[class_id as usize]
-            .methods
-            .iter()
-            .any(|&m| ir.functions.get(m as usize).is_some_and(|f| f.name == name));
-        if exists {
-            return;
-        }
-        let fid = ir.add_fun(crate::ir::IrFunction {
-            name: name.to_string(),
-            params,
-            ret,
-            body: Some(body),
-            is_static: false,
-            dispatch_receiver: Some(internal.clone()),
-            param_checks: Vec::new(),
-        });
-        ir.classes[class_id as usize].methods.push(fid);
-    };
+    let add_inst =
+        |ir: &mut IrFile, name: &str, params: Vec<Ty>, ret: Ty, body: ExprId| -> Option<u32> {
+            // Don't synthesize over a user-defined member of the same name.
+            let exists = ir.classes[class_id as usize]
+                .methods
+                .iter()
+                .any(|&m| ir.functions.get(m as usize).is_some_and(|f| f.name == name));
+            if exists {
+                return None;
+            }
+            let fid = ir.add_fun(crate::ir::IrFunction {
+                name: name.to_string(),
+                params,
+                ret,
+                body: Some(body),
+                is_static: false,
+                dispatch_receiver: Some(internal.clone()),
+                param_checks: Vec::new(),
+            });
+            ir.classes[class_id as usize].methods.push(fid);
+            Some(fid)
+        };
     let this_field = |ir: &mut IrFile| {
         let recv = ir.add_expr(IrExpr::GetValue(0));
         ir.add_expr(IrExpr::GetField {
@@ -3140,7 +3183,7 @@ fn synth_value_members(
     {
         let g = this_field(ir);
         let body = ret_block(ir, g);
-        add_inst(ir, "unbox-impl", vec![], u_ir.clone(), body);
+        add_inst(ir, "unbox-impl", vec![], u_ir, body);
     }
     // box-impl(U): X  — `new X(u)`
     {
@@ -3148,10 +3191,10 @@ fn synth_value_members(
         let new = ir.add_expr(IrExpr::New {
             class: class_id,
             args: vec![arg],
-            ctor_params: Some(vec![u_ir.clone()]),
+            ctor_params: Some(vec![u_ir]),
         });
         let body = ret_block(ir, new);
-        add_static(ir, "box-impl", vec![u_ir.clone()], x_ir.clone(), body);
+        add_static(ir, "box-impl", vec![u_ir], x_ir, body);
     }
     // constructor-impl(U): U  — runs the `init { … }` block (side effects/validation), then returns the
     // arg. The init runs HERE, not in `box-impl`/`<init>`: `box-impl` only wraps an already-built value, so
@@ -3187,18 +3230,12 @@ fn synth_value_members(
         let arg = ir.add_expr(IrExpr::GetValue(0));
         stmts.push(ir.add_expr(IrExpr::Return(Some(arg))));
         let body = ir.add_expr(IrExpr::Block { stmts, value: None });
-        add_static(
-            ir,
-            "constructor-impl",
-            vec![u_ir.clone()],
-            u_ir.clone(),
-            body,
-        );
+        let cfid = add_static(ir, "constructor-impl", vec![u_ir], u_ir, body);
+        ir.open_methods.insert(cfid); // kotlinc emits `constructor-impl` `public static` (non-final)
     }
     // hashCode/equals/toString operate on the value class's IMMEDIATE erased underlying, NOT the final
     // primitive of a nested chain: `ZN(val z: Z1?)` erases to a BOXED `Z1` (`LZ1;`), so it hashes/compares
     // as a reference (`Objects.hashCode`/`areEqual` → `Z1`'s own members), not as the final `Int`.
-    let eu = erase(&u_ir, under);
     let is_ref_under = is_ref(&eu);
     // The internal name that drives `hashCode`/`equals` over the field. A NULLABLE-primitive underlying
     // (`InlineNullablePrimitive(val x: Int?)`) is stored BOXED (`Integer`, null-capable) — it is a
@@ -3262,64 +3299,125 @@ fn synth_value_members(
             })
         };
         let body = ret_block(ir, cmp);
-        add_static(
-            ir,
-            "equals-impl0",
-            vec![u_ir.clone(), u_ir.clone()],
-            bool_ir.clone(),
-            body,
-        );
+        add_static(ir, "equals-impl0", vec![u_ir, u_ir], bool_ir, body);
     }
-    // toString(): "X(field=" + field + ")"
+    // kotlinc emits the logic in a static `<name>-impl(U)` operating on the unboxed value, and the
+    // instance method delegates to it (`toString()` → `toString-impl(this.field)`). The instance methods
+    // and the `-impl` statics are all `open` (non-`final`).
+    // toString-impl(U v): "X(field=" + v + ")" ; toString(): return toString-impl(this.field)
     {
         let simple = internal
             .rsplit('/')
             .next()
             .unwrap_or(&internal)
             .replace('$', ".");
+        let v = ir.add_expr(IrExpr::GetValue(0));
         let mut acc = str_const(ir, format!("{simple}({fname}="));
-        let fv = this_field(ir);
-        acc = str_plus(ir, acc, fv);
+        acc = str_plus(ir, acc, v);
         let close = str_const(ir, ")".to_string());
         acc = str_plus(ir, acc, close);
-        let body = ret_block(ir, acc);
-        add_inst(ir, "toString", vec![], str_ir.clone(), body);
-    }
-    // hashCode(): field.hashCode() (structural over the final underlying)
-    {
+        let sbody = ret_block(ir, acc);
+        let impl_fid = add_static(ir, "toString-impl", vec![u_ir], str_ir, sbody);
+        ir.open_methods.insert(impl_fid);
         let fv = this_field(ir);
-        let h = field_hash_ir(ir, fv, &final_fq);
-        let body = ret_block(ir, h);
-        add_inst(ir, "hashCode", vec![], int_ir.clone(), body);
+        let call = ir.add_expr(IrExpr::Call {
+            callee: Callee::Static {
+                owner: internal.clone(),
+                name: "toString-impl".to_string(),
+                descriptor: format!("({udesc})Ljava/lang/String;"),
+                inline: InlineKind::None,
+            },
+            dispatch_receiver: None,
+            args: vec![fv],
+        });
+        let ibody = ret_block(ir, call);
+        if let Some(fid) = add_inst(ir, "toString", vec![], str_ir, ibody) {
+            ir.open_methods.insert(fid);
+        }
     }
-    // equals(other): other is X && this.field == other.field
+    // hashCode-impl(U v): v.hashCode() ; hashCode(): return hashCode-impl(this.field)
     {
+        let v = ir.add_expr(IrExpr::GetValue(0));
+        let h = field_hash_ir(ir, v, &final_fq);
+        let sbody = ret_block(ir, h);
+        let impl_fid = add_static(ir, "hashCode-impl", vec![u_ir], int_ir, sbody);
+        ir.open_methods.insert(impl_fid);
+        let fv = this_field(ir);
+        let call = ir.add_expr(IrExpr::Call {
+            callee: Callee::Static {
+                owner: internal.clone(),
+                name: "hashCode-impl".to_string(),
+                descriptor: format!("({udesc})I"),
+                inline: InlineKind::None,
+            },
+            dispatch_receiver: None,
+            args: vec![fv],
+        });
+        let ibody = ret_block(ir, call);
+        if let Some(fid) = add_inst(ir, "hashCode", vec![], int_ir, ibody) {
+            ir.open_methods.insert(fid);
+        }
+    }
+    // equals-impl(U v, Object other): other is X && equals-impl0(v, other.unbox-impl())
+    // equals(other): return equals-impl(this.field, other)
+    {
+        // static: v = slot 0, other = slot 1.
         let mut stmts = Vec::new();
         let other = ir.add_expr(IrExpr::GetValue(1));
         let not_inst = ir.add_expr(IrExpr::TypeOp {
             op: crate::ir::IrTypeOp::NotInstanceOf,
             arg: other,
-            type_operand: x_ir.clone(),
+            type_operand: x_ir,
         });
         stmts.push(guard_false(ir, not_inst));
-        let af = this_field(ir);
         let other_v = ir.add_expr(IrExpr::GetValue(1));
         let ocast = ir.add_expr(IrExpr::TypeOp {
             op: crate::ir::IrTypeOp::Cast,
             arg: other_v,
-            type_operand: x_ir.clone(),
+            type_operand: x_ir,
         });
-        let bf = ir.add_expr(IrExpr::GetField {
-            receiver: ocast,
-            class: class_id,
-            index: 0,
+        let ounbox = ir.add_expr(IrExpr::Call {
+            callee: Callee::Virtual {
+                owner: internal.clone(),
+                name: "unbox-impl".to_string(),
+                descriptor: format!("(){udesc}"),
+                interface: false,
+            },
+            dispatch_receiver: Some(ocast),
+            args: vec![],
         });
-        let ne = field_ne_ir(ir, af, bf, &final_fq);
-        stmts.push(guard_false(ir, ne));
-        let t = ir.add_expr(IrExpr::Const(crate::ir::IrConst::Boolean(true)));
-        stmts.push(ir.add_expr(IrExpr::Return(Some(t))));
-        let body = ir.add_expr(IrExpr::Block { stmts, value: None });
-        add_inst(ir, "equals", vec![any_ir.clone()], bool_ir.clone(), body);
+        let v = ir.add_expr(IrExpr::GetValue(0));
+        let eq0 = ir.add_expr(IrExpr::Call {
+            callee: Callee::Static {
+                owner: internal.clone(),
+                name: "equals-impl0".to_string(),
+                descriptor: format!("({udesc}{udesc})Z"),
+                inline: InlineKind::None,
+            },
+            dispatch_receiver: None,
+            args: vec![v, ounbox],
+        });
+        stmts.push(ir.add_expr(IrExpr::Return(Some(eq0))));
+        let sbody = ir.add_expr(IrExpr::Block { stmts, value: None });
+        let impl_fid = add_static(ir, "equals-impl", vec![u_ir, any_ir], bool_ir, sbody);
+        ir.open_methods.insert(impl_fid);
+        // instance equals(other) → return equals-impl(this.field, other)
+        let fv = this_field(ir);
+        let other_i = ir.add_expr(IrExpr::GetValue(1));
+        let call = ir.add_expr(IrExpr::Call {
+            callee: Callee::Static {
+                owner: internal.clone(),
+                name: "equals-impl".to_string(),
+                descriptor: format!("({udesc}Ljava/lang/Object;)Z"),
+                inline: InlineKind::None,
+            },
+            dispatch_receiver: None,
+            args: vec![fv, other_i],
+        });
+        let ibody = ret_block(ir, call);
+        if let Some(fid) = add_inst(ir, "equals", vec![any_ir], bool_ir, ibody) {
+            ir.open_methods.insert(fid);
+        }
     }
 
     // A secondary constructor becomes a static `constructor-impl` OVERLOAD (the unboxed model has no
@@ -3361,13 +3459,7 @@ fn synth_value_members(
             });
             stmts.push(ir.add_expr(IrExpr::Return(Some(call))));
             let body = ir.add_expr(IrExpr::Block { stmts, value: None });
-            add_static(
-                ir,
-                "constructor-impl",
-                sc.params.clone(),
-                u_ir.clone(),
-                body,
-            );
+            add_static(ir, "constructor-impl", sc.params.clone(), u_ir, body);
         }
     }
 }
@@ -3426,38 +3518,6 @@ fn field_hash_ir(ir: &mut IrFile, v: ExprId, fq: &str) -> ExprId {
         "kotlin/Float" => call(ir, "java/lang/Float", "(F)I", v),
         _ => call(ir, "java/util/Objects", "(Ljava/lang/Object;)I", v),
     }
-}
-
-/// `a != b` for an underlying fq name (float/double → total-order `compare != 0`; else `PrimitiveBinOp`).
-fn field_ne_ir(ir: &mut IrFile, a: ExprId, b: ExprId, fq: &str) -> ExprId {
-    if is_ieee_fp(fq) {
-        let (owner, desc) = if fq == "kotlin/Double" {
-            ("java/lang/Double", "(DD)I")
-        } else {
-            ("java/lang/Float", "(FF)I")
-        };
-        let cmp = ir.add_expr(IrExpr::Call {
-            callee: Callee::Static {
-                owner: owner.into(),
-                name: "compare".into(),
-                descriptor: desc.into(),
-                inline: InlineKind::None,
-            },
-            dispatch_receiver: None,
-            args: vec![a, b],
-        });
-        let z = ir.add_expr(IrExpr::Const(crate::ir::IrConst::Int(0)));
-        return ir.add_expr(IrExpr::PrimitiveBinOp {
-            op: crate::ir::IrBinOp::Ne,
-            lhs: cmp,
-            rhs: z,
-        });
-    }
-    ir.add_expr(IrExpr::PrimitiveBinOp {
-        op: crate::ir::IrBinOp::Ne,
-        lhs: a,
-        rhs: b,
-    })
 }
 
 /// kotlinc's inline-class mangling info for an IR type, against the value classes in `under`.
