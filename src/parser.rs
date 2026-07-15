@@ -1423,10 +1423,14 @@ impl<'a> Parser<'a> {
         let start = self.tok().span;
         let is_var = self.at(TokenKind::KwVar);
         self.bump(); // val/var
-                     // Optional generic type parameters on an extension property (`val <T> T.foo: T`) — erased.
-        if self.at(TokenKind::Lt) {
-            self.parse_type_params();
-        }
+                     // Optional generic type parameters on an extension property (`val <T> T.foo: T`) —
+                     // erased, but retained so they scope over the receiver, type, and accessor bodies.
+        let (type_params, _tp_non_null, _tp_reified, type_param_bounds) = if self.at(TokenKind::Lt)
+        {
+            self.parse_type_params()
+        } else {
+            Default::default()
+        };
         // Optional extension receiver: `val Recv[<…>][?].name` (like an extension function).
         let (receiver, name) = if self.at(TokenKind::LParen) {
             // A PARENTHESIZED receiver type — `val (Int.() -> String).valProp` — an extension property
@@ -1593,6 +1597,8 @@ impl<'a> Parser<'a> {
         PropDecl {
             name,
             visibility: Visibility::Public,
+            type_params,
+            type_param_bounds,
             receiver,
             ty,
             is_var,

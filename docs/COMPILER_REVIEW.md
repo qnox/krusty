@@ -3134,3 +3134,13 @@ for lambda parameter types, receiver-function receivers, and materialization fla
 `FunctionSet`; those facts now travel together from the selected overload data. This removed the
 three single-fact top-level lambda probe methods and kept fully-qualified trailing-lambda recovery on
 the same shape path as ordinary imported top-level calls.
+
+### Generic Extension Property Scope
+
+The next extension-property cleanup stopped discarding generic type parameters parsed on property
+declarations. `PropDecl` now carries its own type-parameter names and bounds, and signature collection
+plus accessor checking bind them through the same `TParams` path used by functions. Generic receivers
+such as `val <T> T.p` and `val <T> Array<T>.p` resolve through one erased-receiver candidate helper on
+`Ty`, shared by checker and lowerer. Local getter/setter calls now coerce the receiver against the
+selected accessor parameter, so a primitive receiver to an erased `Any` property boxes through the
+normal call-argument path instead of VerifyErroring.

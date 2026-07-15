@@ -4483,6 +4483,29 @@ impl<'a> Lower<'a> {
         args.iter().map(|&a| self.info.ty(a)).collect()
     }
 
+    /// Candidate `(erased receiver, name)` keys for an extension-property lookup, most-specific first.
+    /// A property with a type-parameter receiver (`val <T> T.p` / `val <T> Array<T>.p`) is registered
+    /// under an `Any`-erased receiver, so a concrete receiver must fall back through the generalized
+    /// keys to find it — mirroring [`SymbolTable::ext_prop`] so the checker and lowerer agree.
+    fn ext_prop_keys(recv: Ty, name: &str) -> Vec<(Ty, String)> {
+        recv.erased_recv_candidates()
+            .into_iter()
+            .map(|k| (k, name.to_string()))
+            .collect()
+    }
+
+    fn ext_prop_get_id(&self, recv: Ty, name: &str) -> Option<u32> {
+        Self::ext_prop_keys(recv, name)
+            .into_iter()
+            .find_map(|k| self.ext_prop_get_ids.get(&k).copied())
+    }
+
+    fn ext_prop_set_id(&self, recv: Ty, name: &str) -> Option<u32> {
+        Self::ext_prop_keys(recv, name)
+            .into_iter()
+            .find_map(|k| self.ext_prop_set_ids.get(&k).copied())
+    }
+
     /// The import-scoped [`SymbolResolver`] — the ONE seam the lowerer uses to look up library callables
     /// (top-level, extension, member) instead of the raw receiver-indexed `functions()` query.
     fn resolver(&self) -> crate::symbol_resolver::SymbolResolver<'_> {
@@ -9096,9 +9119,8 @@ impl<'a> Lower<'a> {
             if let Some((pty, is_var)) = field {
                 (pty, is_var, None)
             } else {
-                let key = (Ty::obj(&owner).erased_recv(), name.to_string());
-                let gfid = *self.ext_prop_get_ids.get(&key)?;
-                let is_var = self.ext_prop_set_ids.contains_key(&key);
+                let gfid = self.ext_prop_get_id(Ty::obj(&owner), name)?;
+                let is_var = self.ext_prop_set_id(Ty::obj(&owner), name).is_some();
                 (
                     self.ir.functions[gfid as usize].ret,
                     is_var,
@@ -14579,16 +14601,18 @@ impl<'a> Lower<'a> {
     ) -> Option<u32> {
         let rt = self.info.ty(receiver);
         // A `var` extension property write (`x.name = v`) → its static setter `setName(x, v)`.
-        if let Some(&sfid) = self
-            .ext_prop_set_ids
-            .get(&(rt.erased_recv(), name.to_string()))
-        {
+        if let Some(sfid) = self.ext_prop_set_id(rt, name) {
+            let rty = self.ir.functions[sfid as usize]
+                .params
+                .first()
+                .cloned()
+                .unwrap_or_else(|| ty_to_ir(rt));
             let pty = self.ir.functions[sfid as usize]
                 .params
                 .get(1)
                 .cloned()
                 .unwrap_or_else(|| ty_to_ir(self.info.ty(value)));
-            let r = self.expr(receiver)?;
+            let r = self.lower_arg(receiver, &rty)?;
             let v = self.lower_arg(value, &pty)?;
             return Some(self.ir.add_expr(IrExpr::Call {
                 callee: Callee::Local(sfid),
@@ -17152,11 +17176,13 @@ impl<'a> Lower<'a> {
                 }
                 // A `val` extension property read (`x.doubled`) → its static getter `getDoubled(x)`.
                 let rty = self.info.ty(receiver);
-                if let Some(&gfid) = self
-                    .ext_prop_get_ids
-                    .get(&(rty.erased_recv(), name.clone()))
-                {
-                    let a = self.expr(receiver)?;
+                if let Some(gfid) = self.ext_prop_get_id(rty, &name) {
+                    let target = self.ir.functions[gfid as usize]
+                        .params
+                        .first()
+                        .cloned()
+                        .unwrap_or_else(|| ty_to_ir(rty));
+                    let a = self.lower_arg(receiver, &target)?;
                     return Some(self.ir.add_expr(IrExpr::Call {
                         callee: Callee::Local(gfid),
                         dispatch_receiver: None,
