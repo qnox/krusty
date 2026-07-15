@@ -5076,7 +5076,7 @@ impl crate::assignable::TypeOracle for Checker<'_> {
             crate::symbol_resolver::platform_class_identity(
                 self.syms
                     .libraries
-                    .jvm_descriptor_form(Ty::obj(internal))
+                    .abi_value_form(Ty::obj(internal))
                     .obj_internal()
                     .unwrap_or(internal),
             )

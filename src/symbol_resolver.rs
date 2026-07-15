@@ -40,8 +40,7 @@ impl crate::assignable::TypeOracle for SourceOracle<'_> {
 }
 
 /// [`crate::assignable::TypeOracle`] over a [`CompilerPlatform`]: adds value-class underlying and the
-/// collection JVM-identity canonicalization (`kotlin/collections/List` ≡ `java/util/List`) the classpath
-/// subtype checks rely on.
+/// target ABI class identity that library subtype checks rely on.
 pub(crate) struct PlatformOracle<'a>(pub &'a dyn CompilerPlatform);
 
 impl crate::assignable::TypeOracle for PlatformOracle<'_> {
@@ -57,7 +56,7 @@ impl crate::assignable::TypeOracle for PlatformOracle<'_> {
     fn canonical_class(&self, internal: &str) -> String {
         platform_class_identity(
             self.0
-                .jvm_descriptor_form(Ty::obj(internal))
+                .abi_value_form(Ty::obj(internal))
                 .obj_internal()
                 .unwrap_or(internal),
         )
@@ -1382,17 +1381,17 @@ impl<'a> SymbolResolver<'a> {
 // The inherited-member walk over a library type's hierarchy — arg-dependent binding, so it lives in
 // this layer (not the oracle). `resolve` and `ir_lower` share one implementation, backend-agnostic.
 
-fn descriptor_form_args(lib: &dyn CompilerPlatform, args: &[Ty]) -> Option<Vec<Ty>> {
-    let out: Vec<Ty> = args.iter().map(|a| lib.jvm_descriptor_form(*a)).collect();
+fn abi_form_args(lib: &dyn CompilerPlatform, args: &[Ty]) -> Option<Vec<Ty>> {
+    let out: Vec<Ty> = args.iter().map(|a| lib.abi_value_form(*a)).collect();
     (out.as_slice() != args).then_some(out)
 }
 
-fn params_match_descriptor_form(lib: &dyn CompilerPlatform, params: &[Ty], args: &[Ty]) -> bool {
+fn params_match_abi_form(lib: &dyn CompilerPlatform, params: &[Ty], args: &[Ty]) -> bool {
     params.len() == args.len()
         && params
             .iter()
             .zip(args)
-            .all(|(p, a)| lib.jvm_descriptor_form(*p) == *a)
+            .all(|(p, a)| lib.abi_value_form(*p) == *a)
 }
 
 fn platform_subtype(lib: &dyn CompilerPlatform, sub: Ty, sup: Ty) -> bool {
@@ -1404,14 +1403,10 @@ fn platform_subtype(lib: &dyn CompilerPlatform, sub: Ty, sup: Ty) -> bool {
     )
 }
 
-/// Whether `arg` fits `param` after both are reduced to platform descriptor identity. The shared subtype
+/// Whether `arg` fits `param` after both are reduced to target ABI identity. The shared subtype
 /// relation handles identity plus reference widening through the symbol source.
-fn descriptor_arg_subtype_of_param(lib: &dyn CompilerPlatform, arg: Ty, param: Ty) -> bool {
-    platform_subtype(
-        lib,
-        lib.jvm_descriptor_form(arg),
-        lib.jvm_descriptor_form(param),
-    )
+fn abi_arg_subtype_of_param(lib: &dyn CompilerPlatform, arg: Ty, param: Ty) -> bool {
+    platform_subtype(lib, lib.abi_value_form(arg), lib.abi_value_form(param))
 }
 
 fn value_erased_args(lib: &dyn CompilerPlatform, args: &[Ty]) -> Vec<Ty> {
@@ -1455,19 +1450,19 @@ pub fn resolve_constructor(
             return Some(m.clone());
         }
     }
-    // Descriptor-form matching bridges Kotlin collection identity and drops type arguments without
-    // hardcoding collection relationships. Exact descriptor identity runs before subtype widening so the
+    // ABI-form matching bridges target collection identity and drops type arguments without
+    // hardcoding collection relationships. Exact ABI identity runs before subtype widening so the
     // most-specific overload still wins.
-    let jvm_args = descriptor_form_args(lib, args);
-    if let Some(jvm_args) = &jvm_args {
+    let abi_args = abi_form_args(lib, args);
+    if let Some(abi_args) = &abi_args {
         if let Some(m) = t
             .constructors
             .iter()
-            .find(|m| params_match_descriptor_form(lib, &m.params, jvm_args))
+            .find(|m| params_match_abi_form(lib, &m.params, abi_args))
         {
             crate::trace_compiler!(
                 "value_classes",
-                "resolve_constructor {internal} matched via jvm-descriptor-form args {args:?} -> {jvm_args:?}"
+                "resolve_constructor {internal} matched via abi-form args {args:?} -> {abi_args:?}"
             );
             return Some(m.clone());
         }
@@ -1477,11 +1472,11 @@ pub fn resolve_constructor(
             && m.params
                 .iter()
                 .zip(args)
-                .all(|(p, a)| descriptor_arg_subtype_of_param(lib, *a, *p))
+                .all(|(p, a)| abi_arg_subtype_of_param(lib, *a, *p))
     }) {
-        let mode = jvm_args
+        let mode = abi_args
             .as_ref()
-            .map_or("nominal-subtype", |_| "jvm-subtype");
+            .map_or("nominal-subtype", |_| "abi-subtype");
         crate::trace_compiler!(
             "value_classes",
             "resolve_constructor {internal} matched via {mode} args {args:?}"
@@ -1664,9 +1659,11 @@ pub fn resolve_synthetic_constructor(
         // A reference argument may be a NOMINAL SUBTYPE of its parameter (`Outer(id: Vid, a: A, b: B)`
         // constructed with `A.X(…)`/`B.Y(…)`, sealed subclasses) — the same widening `resolve_constructor`
         // allows for a plain constructor, composed with the value-class-erased synthetic-marker ctor.
-        if !erased.iter().zip(real_params).all(|(a, p)| {
-            *p == Ty::obj("kotlin/Any") || descriptor_arg_subtype_of_param(lib, *a, *p)
-        }) {
+        if !erased
+            .iter()
+            .zip(real_params)
+            .all(|(a, p)| *p == Ty::obj("kotlin/Any") || abi_arg_subtype_of_param(lib, *a, *p))
+        {
             continue;
         }
         let mask = has_mask.then(|| (erased.len()..real_params.len()).map(|j| 1i32 << j).sum());
@@ -2238,17 +2235,17 @@ fn select_overload(
             return Some((*o).clone());
         }
     }
-    // Descriptor-form pass, shared with constructor resolution: bridge Kotlin collection identity and
+    // ABI-form pass, shared with constructor resolution: bridge target collection identity and
     // erase type arguments after exact, widened, and source-level subtype matching have failed.
-    if let Some(jvm_args) = descriptor_form_args(lib, args) {
+    if let Some(abi_args) = abi_form_args(lib, args) {
         for cands in by_rank.values() {
             if let Some((o, _)) = cands
                 .iter()
-                .find(|(_, lp)| params_match_descriptor_form(lib, lp, &jvm_args))
+                .find(|(_, lp)| params_match_abi_form(lib, lp, &abi_args))
             {
                 crate::trace_compiler!(
                     "resolve",
-                    "select_overload {} matched via jvm-descriptor-form args {args:?} -> {jvm_args:?}",
+                    "select_overload {} matched via abi-form args {args:?} -> {abi_args:?}",
                     o.callable.name
                 );
                 return Some((*o).clone());
