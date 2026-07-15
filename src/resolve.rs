@@ -5439,6 +5439,19 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Flatten a pure `Name`/`Member` chain into its dotted path (`A.E` for `Member{Name("A"),"E"}`),
+    /// or `None` if any link is not a plain name access. Used to recover the hoisted key of a nested
+    /// type referenced through its enclosing type name (`Outer.Nested`).
+    fn dotted_full_path(&self, e: ExprId) -> Option<String> {
+        match self.file.expr(e) {
+            Expr::Name(n) => Some(n.clone()),
+            Expr::Member { receiver, name } => {
+                Some(format!("{}.{}", self.dotted_full_path(*receiver)?, name))
+            }
+            _ => None,
+        }
+    }
+
     fn qualified_nested_ctor_internal(&self, receiver: ExprId, name: &str) -> Option<String> {
         // The receiver's leftmost segment must be a TYPE/PACKAGE, not a value in scope.
         let root = self.dotted_root(receiver)?;
@@ -7970,6 +7983,29 @@ impl<'a> Checker<'a> {
                             &name,
                         ) {
                             return self.set(e, c.ty);
+                        }
+                    }
+                }
+                // `Outer.NestedEnum.ENTRY` — a nested enum accessed through its enclosing type name.
+                // The receiver `Outer.NestedEnum` is a `Member` chain (not a bare `Name`); flatten it
+                // to the hoisted dotted key (`A.E`) under which the nested enum's entries register.
+                if matches!(self.file.expr(receiver), Expr::Member { .. }) {
+                    if let Some(path) = self.dotted_full_path(receiver) {
+                        if self
+                            .dotted_root(receiver)
+                            .is_some_and(|r| self.lookup(&r).is_none())
+                        {
+                            if let Some(entries) = self.syms.enums.get(&path) {
+                                if entries.iter().any(|en| en == &name) {
+                                    let internal = self
+                                        .syms
+                                        .classes
+                                        .get(&path)
+                                        .map(|c| c.internal.clone())
+                                        .unwrap_or_else(|| path.replace('.', "$"));
+                                    return self.set(e, Ty::obj(&internal));
+                                }
+                            }
                         }
                     }
                 }
