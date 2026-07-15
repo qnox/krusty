@@ -90,6 +90,7 @@ pub fn emit_all_with_class_meta(
         .flat_map(|c| c.methods.iter().copied())
         .collect();
     let mut cw = ClassWriter::new(facade, "java/lang/Object");
+    let mut facade_has_method = false;
     for (i, f) in ir.functions.iter().enumerate() {
         if class_member_fids.contains(&(i as u32)) {
             continue;
@@ -98,6 +99,7 @@ pub fn emit_all_with_class_meta(
             continue;
         }
         emit_method(ir, i as u32, facade, facade, &mut cw, false, bodies);
+        facade_has_method = true;
         // A top-level function (or extension) with SIMPLE parameter defaults gets kotlinc's
         // `foo$default(params…, int mask, Object marker)` synthetic (dispatches to the real method,
         // filling the masked slots from the defaults), so an omitted-argument caller — same-file or
@@ -109,10 +111,17 @@ pub fn emit_all_with_class_meta(
         }
     }
     emit_statics(ir, facade, &mut cw, bodies);
-    if let Some(m) = metadata {
-        cw.set_kotlin_metadata(m.k, &m.mv, m.xi, &m.d1, &m.d2);
+    // kotlinc emits the `<File>Kt` facade class ONLY when the file has top-level callables/properties
+    // (or a facade `@Metadata` payload). A file of only classes/objects gets no facade — emitting an
+    // empty one is an ABI divergence (spurious extra class). A facade static is owner-less.
+    let facade_has_static = ir.statics.iter().any(|s| s.owner.is_none());
+    let facade_needed = facade_has_method || facade_has_static || metadata.is_some();
+    if facade_needed {
+        if let Some(m) = metadata {
+            cw.set_kotlin_metadata(m.k, &m.mv, m.xi, &m.d1, &m.d2);
+        }
+        out.push((facade.to_string(), cw.finish()));
     }
-    out.push((facade.to_string(), cw.finish()));
     // Each class — with its optional `@Metadata` (the provider returns `None` for the default emit).
     for c in &ir.classes {
         let cm = class_meta(&c.fq_name);

@@ -292,6 +292,8 @@ mod extension_default_args_e2e;
 mod extension_fun_e2e;
 #[path = "extension_property_e2e.rs"]
 mod extension_property_e2e;
+#[path = "facade_emission_e2e.rs"]
+mod facade_emission_e2e;
 #[path = "feature_box_e2e.rs"]
 mod feature_box_e2e;
 #[path = "feature_coverage_a_e2e.rs"]
