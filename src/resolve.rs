@@ -51,6 +51,17 @@ pub struct Signature {
     pub is_suspend: bool,
 }
 
+/// The minimum arity of an ADAPTED callable reference to a signature — the parameters a reference must
+/// supply, with trailing defaults and an optional trailing vararg omitted. `required` counts the vararg
+/// (it has no default), so drop it when the required prefix reaches the vararg's position.
+pub fn adapted_ref_arity(vararg: bool, required: usize, param_count: usize) -> usize {
+    if vararg && required == param_count {
+        required - 1
+    } else {
+        required
+    }
+}
+
 impl Signature {
     pub fn requires_all_args(&self) -> bool {
         !self.vararg && self.params.len() == self.required
@@ -8971,6 +8982,16 @@ impl<'a> Checker<'a> {
                             if sig.requires_all_args() {
                                 return self.set(e, Ty::fun(sig.params.clone(), sig.ret));
                             }
+                            // ADAPTED bound member reference: the target has trailing default/vararg
+                            // parameters the reference omits (`C(..)::memberVararg` → `(Int) -> Unit`).
+                            // Expose the minimum-arity prefix; the lowerer's synthesized adapter fills the
+                            // omitted parameters via the target's `$default` stub.
+                            let min_arity =
+                                adapted_ref_arity(sig.vararg, sig.required, sig.params.len());
+                            if min_arity < sig.params.len() && sig.params.len() <= 31 {
+                                let adapted: Vec<Ty> = sig.params[..min_arity].to_vec();
+                                return self.set(e, Ty::fun(adapted, sig.ret));
+                            }
                         }
                         // Bound property reference on an arbitrary-expression USER-class receiver
                         // (`A(..)::p`): the receiver is evaluated once and captured; the ref is a
@@ -8992,6 +9013,15 @@ impl<'a> Checker<'a> {
                     if let Some(sig) = self.syms.ext_fun(rty, &name).cloned() {
                         if sig.requires_all_args() {
                             return self.set(e, Ty::fun(sig.params.clone(), sig.ret));
+                        }
+                        // ADAPTED bound extension reference (`C(..)::extensionVararg` → `(Int) -> Unit`):
+                        // expose the minimum-arity prefix; the lowerer synthesizes an adapter that fills
+                        // the omitted default/vararg parameters via the extension's `$default` stub.
+                        let min_arity =
+                            adapted_ref_arity(sig.vararg, sig.required, sig.params.len());
+                        if min_arity < sig.params.len() && sig.params.len() <= 31 {
+                            let adapted: Vec<Ty> = sig.params[..min_arity].to_vec();
+                            return self.set(e, Ty::fun(adapted, sig.ret));
                         }
                     }
                     // Bound member on a LIBRARY-type receiver (`"KOTLIN"::get`): resolve the classpath

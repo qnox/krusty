@@ -86,3 +86,24 @@ fn generic_class_unbound_member_ref_runs() {
 fun box(): String = (A<String>::foo).let { it(A(\"OK\")) }\n";
     common::expect_box_ok_with_stdlib(SRC, "CR");
 }
+
+/// ADAPTED bound member references: a reference to a member with a trailing `vararg` and/or a default
+/// parameter, used where a lower-arity functional type is expected (`C(7)::mv` as `(Int) -> String`).
+/// The lowerer's synthesized adapter fills the empty vararg / default via the member's `$default` stub.
+#[test]
+fn adapted_bound_member_ref_runs() {
+    const SRC: &str = "// WITH_STDLIB\n\
+class C(val e: Int) {\n\
+    fun mv(i: Int, vararg s: String): String = if (i == e && s.isEmpty()) \"\" else \"bad\"\n\
+    fun md(i: Int, s: String = \"d\"): String = if (i == e && s == \"d\") \"\" else \"bad\"\n\
+    fun mb(i: Int, s: String = \"d\", vararg t: String): String = if (i == e && s == \"d\" && t.isEmpty()) \"\" else \"bad\"\n\
+}\n\
+fun test(f: (Int) -> String, p: Int): String = f(p)\n\
+fun box(): String {\n\
+    if (test(C(7)::mv, 7) != \"\") return \"f1\"\n\
+    if (test(C(7)::md, 7) != \"\") return \"f2\"\n\
+    if (test(C(7)::mb, 7) != \"\") return \"f3\"\n\
+    return \"OK\"\n\
+}\n";
+    common::expect_box_ok_with_stdlib(SRC, "CR");
+}
