@@ -3162,3 +3162,12 @@ matching `Ty::Fun` constructor parameter, like ordinary function calls already d
 function-typed member property (`obj.f(args)`) reads the property type and feeds it into the existing
 `record_invoke` convention instead of requiring a real method named `f`. This keeps constructor/property
 function values on the same invoke path as locals and top-level function-typed values.
+
+### Synthetic Property Read Lowering Merge
+
+The next lowerer cleanup deleted the synthetic-only `lower_library_property_read_on` path. Source
+property reads and synthetic reads (`String` loop length, safe-call property reads, nullable-member
+guards) now share `lower_member_read_on`; source reads still reuse checker-selected property handles
+and generic coercions, while synthetic reads pass no source `ExprId` and resolve through the same
+semantic property getter path. This removes a duplicate classpath-property call emitter and keeps
+future property-shape work on one lowering path.

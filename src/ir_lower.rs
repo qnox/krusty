@@ -11600,8 +11600,16 @@ impl<'a> Lower<'a> {
     /// resolved generically through the library/stdlib classpath reader by its own name, its `getX()`
     /// accessor form, or a collection-mapped name (no per-member hardcode — `String.length` resolves as
     /// `java/lang/String.length()` just like `uppercase()`). `recv` is the already-lowered receiver
-    /// value. Returns `None` when the type exposes no such member.
-    fn lower_member_read_on(&mut self, recv: u32, rt: Ty, name: &str, e: AstExprId) -> Option<u32> {
+    /// value. `e` is present for a source property read, so lowering can reuse checker-selected handles
+    /// and apply expression-specific generic coercions; synthetic reads resolve through the same path
+    /// without a source expression id. Returns `None` when the type exposes no such member.
+    fn lower_member_read_on(
+        &mut self,
+        recv: u32,
+        rt: Ty,
+        name: &str,
+        e: Option<AstExprId>,
+    ) -> Option<u32> {
         // Resolve against the NON-NULL type. A receiver whose static type keeps its `?` (a smart-cast /
         // `!!` value bound to a call-result local, whose narrowing krusty doesn't propagate to the read
         // site) is a valid reference at runtime — the getter dispatches the same, and krusty does not
@@ -11642,10 +11650,8 @@ impl<'a> Lower<'a> {
             Ty::Obj(i, _) => i.to_string(),
             _ => return None,
         };
-        let resolved = self
-            .info
-            .resolved_member(e)
-            .cloned()
+        let resolved = e
+            .and_then(|e| self.info.resolved_member(e).cloned())
             // Reuse the getter the checker resolved for this property read (keyed by the access
             // ExprId); resolve only when it was recorded through a different path.
             .or_else(|| self.resolve_property_member(rt, name))
@@ -11668,30 +11674,12 @@ impl<'a> Lower<'a> {
                 dispatch_receiver: Some(recv),
                 args: vec![],
             });
-            return Some(self.coerce_generic_read(read, e, physical_ret));
+            return Some(match e {
+                Some(e) => self.coerce_generic_read(read, e, physical_ret),
+                None => read,
+            });
         }
         None
-    }
-
-    fn lower_library_property_read_on(&mut self, recv: u32, rt: Ty, name: &str) -> Option<u32> {
-        let resolved = self.resolve_property_member(rt, name)?;
-        let m = resolved.member;
-        let owner = m.owner.clone().unwrap_or_else(|| {
-            rt.kotlin_class_internal()
-                .unwrap_or("kotlin/Any")
-                .to_string()
-        });
-        let is_iface = self.library_type_is_interface(&owner);
-        Some(self.ir.add_expr(IrExpr::Call {
-            callee: Callee::Virtual {
-                owner,
-                name: m.name,
-                descriptor: m.descriptor,
-                interface: is_iface,
-            },
-            dispatch_receiver: Some(recv),
-            args: vec![],
-        }))
     }
 
     fn lower_library_instance_call_on(
@@ -14535,7 +14523,7 @@ impl<'a> Lower<'a> {
         let n_v = self.fresh_value();
         let arr_g = self.ir.add_expr(IrExpr::GetValue(arr_v));
         let size = if it_ty == Ty::String {
-            self.lower_library_property_read_on(arr_g, it_ty, "length")?
+            self.lower_member_read_on(arr_g, it_ty, "length", None)?
         } else {
             self.ir.add_expr(IrExpr::Call {
                 callee: Callee::External("kotlin/Array.size".to_string()),
@@ -15804,7 +15792,7 @@ impl<'a> Lower<'a> {
                 })
             }
         } else {
-            self.lower_library_property_read_on(recv2, recv_ty, name)?
+            self.lower_member_read_on(recv2, recv_ty, name, None)?
         };
         Some((var, cond, member))
     }
@@ -16211,7 +16199,7 @@ impl<'a> Lower<'a> {
                                 read
                             } else {
                                 // A classpath property (`list?.size`) — a zero-arg accessor.
-                                self.lower_library_property_read_on(recv2, nn, &name)?
+                                self.lower_member_read_on(recv2, nn, &name, None)?
                             }
                         }
                     }
@@ -17139,10 +17127,10 @@ impl<'a> Lower<'a> {
                                     index: idx,
                                 })
                             } else {
-                                self.lower_member_read_on(recv, this_ty, &n, e)?
+                                self.lower_member_read_on(recv, this_ty, &n, Some(e))?
                             }
                         } else {
-                            self.lower_member_read_on(recv, this_ty, &n, e)?
+                            self.lower_member_read_on(recv, this_ty, &n, Some(e))?
                         }
                     };
                     // Smart-cast narrowing: a nullable-primitive *field* read narrowed to its primitive
@@ -17460,7 +17448,7 @@ impl<'a> Lower<'a> {
                     } else {
                         recv
                     };
-                    self.lower_member_read_on(recv, rt, &name, e)?
+                    self.lower_member_read_on(recv, rt, &name, Some(e))?
                 }
             }
             Expr::Binary { op, lhs, rhs } => {
