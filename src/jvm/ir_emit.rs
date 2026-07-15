@@ -7238,15 +7238,13 @@ pub fn ir_ty_to_jvm(t: &Ty) -> Ty {
     }
 }
 
-fn ir_param_ty_to_jvm(t: &Ty) -> Ty {
-    match ir_ty_to_jvm(t) {
-        Ty::Nothing => Ty::obj("kotlin/Any"),
-        other => other,
-    }
-}
-
 pub(crate) fn jvm_tys(tys: &[Ty]) -> Vec<Ty> {
-    tys.iter().map(ir_param_ty_to_jvm).collect()
+    tys.iter()
+        .map(|t| match ir_ty_to_jvm(t) {
+            Ty::Nothing => Ty::obj("kotlin/Any"),
+            other => other,
+        })
+        .collect()
 }
 
 /// Whether a JVM type is an ERASED TOP reference — the `java/lang/Object` a type parameter erases to, or
