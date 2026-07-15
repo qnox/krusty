@@ -4803,6 +4803,14 @@ impl<'a> Lower<'a> {
         })
     }
 
+    fn emit_local_call(&mut self, fid: u32, args: Vec<u32>) -> u32 {
+        self.ir.add_expr(IrExpr::Call {
+            callee: Callee::Local(fid),
+            dispatch_receiver: None,
+            args,
+        })
+    }
+
     /// Resolve a delegate's `getValue` operator — a MEMBER on the delegate type, or a classpath
     /// EXTENSION (`Lazy.getValue` in `LazyKt`). Returns `(owner, descriptor, ret, inline, is_ext)`:
     /// a member is emitted `delegate.getValue(thisRef, prop)`; an extension is the static
@@ -4916,11 +4924,7 @@ impl<'a> Lower<'a> {
         if ty.erased_recv().is_reference() {
             if let Some(&fid) = self.ext_fun_ids.get(&(ty.erased_recv(), op.to_string())) {
                 let recv = self.ir.add_expr(IrExpr::GetValue(var_slot));
-                return Some(self.ir.add_expr(IrExpr::Call {
-                    callee: Callee::Local(fid),
-                    dispatch_receiver: None,
-                    args: vec![recv],
-                }));
+                return Some(self.emit_local_call(fid, vec![recv]));
             }
         }
         None
@@ -6053,11 +6057,7 @@ impl<'a> Lower<'a> {
                 type_operand: array_ir,
             })
         };
-        Some(self.ir.add_expr(IrExpr::Call {
-            callee: Callee::Local(fid),
-            dispatch_receiver: None,
-            args: vec![arg],
-        }))
+        Some(self.emit_local_call(fid, vec![arg]))
     }
 
     fn lower_destructure(
@@ -6183,11 +6183,7 @@ impl<'a> Lower<'a> {
                 // A USER-defined `operator fun Recv.componentN()` extension → `invokestatic` it with
                 // the receiver as the sole argument (its lowered first param).
                 let ret = self.ir.functions[fid as usize].ret;
-                let c = self.ir.add_expr(IrExpr::Call {
-                    callee: Callee::Local(fid),
-                    dispatch_receiver: None,
-                    args: vec![recv],
-                });
+                let c = self.emit_local_call(fid, vec![recv]);
                 (c, ret)
             } else {
                 // An indexable type: `componentN` is the inline `get(N-1)`.
@@ -8793,11 +8789,7 @@ impl<'a> Lower<'a> {
             let tmp = (*slot)?;
             a.push(self.ir.add_expr(IrExpr::GetValue(tmp)));
         }
-        let ecall = self.ir.add_expr(IrExpr::Call {
-            callee: Callee::Local(fid),
-            dispatch_receiver: None,
-            args: a,
-        });
+        let ecall = self.emit_local_call(fid, a);
         Some(self.ir.add_expr(IrExpr::Block {
             stmts: prelude,
             value: Some(ecall),
@@ -9512,11 +9504,7 @@ impl<'a> Lower<'a> {
                 .map(|k| self.ir.add_expr(IrExpr::GetValue(k)))
                 .collect();
             a.push(arr);
-            self.ir.add_expr(IrExpr::Call {
-                callee: Callee::Local(fid),
-                dispatch_receiver: None,
-                args: a,
-            })
+            self.emit_local_call(fid, a)
         };
         let unit_return = ret == Ty::Unit;
         let body = if unit_return {
@@ -9574,11 +9562,7 @@ impl<'a> Lower<'a> {
         }
         let dcall = if n == m {
             // No dropped parameters (a pure return coercion): a plain full-arity call.
-            self.ir.add_expr(IrExpr::Call {
-                callee: Callee::Local(fid),
-                dispatch_receiver: None,
-                args: a,
-            })
+            self.emit_local_call(fid, a)
         } else if vararg_tail {
             // A single dropped trailing `vararg`: pass an EMPTY array of its element type and call the
             // target directly (no `$default`). `target_params[m-1]` is the vararg's ARRAY type.
@@ -9587,11 +9571,7 @@ impl<'a> Lower<'a> {
                 array_type: ty_to_ir(target_params[m - 1]),
                 size: zero,
             }));
-            self.ir.add_expr(IrExpr::Call {
-                callee: Callee::Local(fid),
-                dispatch_receiver: None,
-                args: a,
-            })
+            self.emit_local_call(fid, a)
         } else {
             // Trailing DEFAULTS: `foo$default(retained…, <placeholder>…, mask, null)` — each dropped slot
             // gets a zero placeholder and its mask bit; the marker is null.
@@ -9768,11 +9748,7 @@ impl<'a> Lower<'a> {
         let argvals: Vec<u32> = (0..params.len() as u32)
             .map(|i| self.ir.add_expr(IrExpr::GetValue(i)))
             .collect();
-        let call = self.ir.add_expr(IrExpr::Call {
-            callee: Callee::Local(target_fid),
-            dispatch_receiver: None,
-            args: argvals,
-        });
+        let call = self.emit_local_call(target_fid, argvals);
         let unit = self.ir.add_expr(IrExpr::UnitInstance);
         let ret_e = self.ir.add_expr(IrExpr::Return(Some(unit)));
         let block = self.ir.add_expr(IrExpr::Block {
@@ -10437,11 +10413,7 @@ impl<'a> Lower<'a> {
                 for (k, &arg) in args.iter().enumerate() {
                     a.push(self.lower_arg(arg, &params[k + 1])?);
                 }
-                let call = self.ir.add_expr(IrExpr::Call {
-                    callee: Callee::Local(fid),
-                    dispatch_receiver: None,
-                    args: a,
-                });
+                let call = self.emit_local_call(fid, a);
                 return Some((call, ret));
             }
         }
@@ -12228,11 +12200,7 @@ impl<'a> Lower<'a> {
                 for (arg, pt) in args.iter().zip(&params[1..]) {
                     a.push(self.lower_arg(*arg, pt)?);
                 }
-                return Some(self.ir.add_expr(IrExpr::Call {
-                    callee: Callee::Local(fid),
-                    dispatch_receiver: None,
-                    args: a,
-                }));
+                return Some(self.emit_local_call(fid, a));
             }
         }
         // A stdlib/library EXTENSION on the receiver (`uppercase`/`reversed`).
@@ -12978,11 +12946,7 @@ impl<'a> Lower<'a> {
             if params.len() == 2 {
                 let r = self.lower_arg(lhs, &params[0])?;
                 let a = self.lower_arg(rhs, &params[1])?;
-                return Some(self.ir.add_expr(IrExpr::Call {
-                    callee: Callee::Local(fid),
-                    dispatch_receiver: None,
-                    args: vec![r, a],
-                }));
+                return Some(self.emit_local_call(fid, vec![r, a]));
             }
         }
         let internal = self.recv_ty(lhs).obj_internal().map(|s| s.to_string())?;
@@ -13565,11 +13529,7 @@ impl<'a> Lower<'a> {
                         .map(|&(_, t)| t)
                         .unwrap_or(Ty::Error);
                     let val = self.lower_arg(value, &ty_to_ir(ty))?;
-                    Some(self.ir.add_expr(IrExpr::Call {
-                        callee: Callee::Local(sfid),
-                        dispatch_receiver: None,
-                        args: vec![val],
-                    }))
+                    Some(self.emit_local_call(sfid, vec![val]))
                 } else if let Some((idx, ty)) = self.statics.get(&name).cloned() {
                     let val = self.lower_arg(value, &ty_to_ir(ty))?;
                     Some(self.ir.add_expr(IrExpr::SetStatic {
@@ -14685,11 +14645,7 @@ impl<'a> Lower<'a> {
                 .unwrap_or_else(|| ty_to_ir(self.info.ty(value)));
             let r = self.lower_arg(receiver, &rty)?;
             let v = self.lower_arg(value, &pty)?;
-            return Some(self.ir.add_expr(IrExpr::Call {
-                callee: Callee::Local(sfid),
-                dispatch_receiver: None,
-                args: vec![r, v],
-            }));
+            return Some(self.emit_local_call(sfid, vec![r, v]));
         }
         // A property write on a `var` of a class defined in ANOTHER file → its `setX(v)` accessor
         // (the backing field is private). A cross-file `val` write bails.
@@ -15633,11 +15589,7 @@ impl<'a> Lower<'a> {
                         .unwrap_or(ty_to_ir(Ty::obj("kotlin/Any")));
                     a.push(self.lower_arg(arg, &pt)?);
                 }
-                Some(self.ir.add_expr(IrExpr::Call {
-                    callee: Callee::Local(fid),
-                    dispatch_receiver: None,
-                    args: a,
-                }))
+                Some(self.emit_local_call(fid, a))
             }
         }
     }
@@ -16196,11 +16148,7 @@ impl<'a> Lower<'a> {
                                 for (arg, pt) in args.iter().zip(&params[1..]) {
                                     a.push(self.lower_arg(*arg, pt)?);
                                 }
-                                self.ir.add_expr(IrExpr::Call {
-                                    callee: Callee::Local(fid),
-                                    dispatch_receiver: None,
-                                    args: a,
-                                })
+                                self.emit_local_call(fid, a)
                             } else {
                                 // A classpath instance method (`s?.substring(1)`).
                                 let arg_tys = self.arg_tys(&args);
@@ -16933,11 +16881,7 @@ impl<'a> Lower<'a> {
                     }
                 } else if let Some(&(fid, _)) = self.computed_props.get(&n) {
                     // A computed top-level property → call its `getX()` accessor.
-                    self.ir.add_expr(IrExpr::Call {
-                        callee: Callee::Local(fid),
-                        dispatch_receiver: None,
-                        args: vec![],
-                    })
+                    self.emit_local_call(fid, vec![])
                 } else if let Some(c) = self.const_lits.get(&n).cloned() {
                     // A same-file `const val` read → inline its literal (`ldc`), like kotlinc.
                     self.ir.add_expr(IrExpr::Const(c))
@@ -17273,11 +17217,7 @@ impl<'a> Lower<'a> {
                         .cloned()
                         .unwrap_or_else(|| ty_to_ir(rty));
                     let a = self.lower_arg(receiver, &target)?;
-                    return Some(self.ir.add_expr(IrExpr::Call {
-                        callee: Callee::Local(gfid),
-                        dispatch_receiver: None,
-                        args: vec![a],
-                    }));
+                    return Some(self.emit_local_call(gfid, vec![a]));
                 }
                 // Primitive companion constant `Int.MAX_VALUE` / `Double.NaN` / … — inline the
                 // compile-time value read from the library (kotlinc emits the same `ldc`).
@@ -17561,11 +17501,7 @@ impl<'a> Lower<'a> {
                         if arg_ok {
                             let l = self.lower_arg(lhs, &params[0])?;
                             let r = self.lower_arg(rhs, &params[1])?;
-                            return Some(self.ir.add_expr(IrExpr::Call {
-                                callee: Callee::Local(fid),
-                                dispatch_receiver: None,
-                                args: vec![l, r],
-                            }));
+                            return Some(self.emit_local_call(fid, vec![l, r]));
                         }
                     }
                     if let Some(internal) = self.recv_ty(lhs).obj_internal().map(|s| s.to_string())
@@ -18980,11 +18916,7 @@ impl<'a> Lower<'a> {
                                 for (arg, pt) in args.iter().zip(&params[ncap + ctx_n..]) {
                                     a.push(self.lower_arg(*arg, pt)?);
                                 }
-                                return Some(self.ir.add_expr(IrExpr::Call {
-                                    callee: Callee::Local(fid),
-                                    dispatch_receiver: None,
-                                    args: a,
-                                }));
+                                return Some(self.emit_local_call(fid, a));
                             }
                         }
                     }
@@ -19156,11 +19088,7 @@ impl<'a> Lower<'a> {
                                 elements,
                             });
                             a.push(arr);
-                            return Some(self.ir.add_expr(IrExpr::Call {
-                                callee: Callee::Local(fid),
-                                dispatch_receiver: None,
-                                args: a,
-                            }));
+                            return Some(self.emit_local_call(fid, a));
                         }
                         let params = self.ir.functions[fid as usize].params.clone();
                         // Context parameters (`context(a: A) fun f()`): the checker resolved each leading
@@ -19178,11 +19106,7 @@ impl<'a> Lower<'a> {
                                 for (i, &arg) in args.iter().enumerate() {
                                     a.push(self.lower_arg(arg, &params[ctx_n + i])?);
                                 }
-                                return Some(self.ir.add_expr(IrExpr::Call {
-                                    callee: Callee::Local(fid),
-                                    dispatch_receiver: None,
-                                    args: a,
-                                }));
+                                return Some(self.emit_local_call(fid, a));
                             }
                         }
                         // Omitted trailing args are filled from constant-literal defaults.
@@ -19204,11 +19128,7 @@ impl<'a> Lower<'a> {
                         let call = if let Some((a, prelude)) =
                             self.lower_args_defaulted(e, &meta, &args, &params)
                         {
-                            let call = self.ir.add_expr(IrExpr::Call {
-                                callee: Callee::Local(fid),
-                                dispatch_receiver: None,
-                                args: a,
-                            });
+                            let call = self.emit_local_call(fid, a);
                             self.wrap_arg_prelude(call, prelude)
                         } else {
                             // `fi.call_sig.vararg` is the authoritative vararg flag (a vararg callee was
@@ -20452,11 +20372,7 @@ impl<'a> Lower<'a> {
                                 for (arg, pt) in args.iter().zip(&params[1..]) {
                                     a.push(self.lower_arg(*arg, pt)?);
                                 }
-                                return Some(self.ir.add_expr(IrExpr::Call {
-                                    callee: Callee::Local(fid),
-                                    dispatch_receiver: None,
-                                    args: a,
-                                }));
+                                return Some(self.emit_local_call(fid, a));
                             }
                             // Omitted extension arguments are filled from constant defaults.
                             if let Some(param_info) = self.ir.fn_params.get(&fid).cloned() {
@@ -20517,11 +20433,7 @@ impl<'a> Lower<'a> {
                                         let _ = k;
                                     }
                                     if ok && a.len() == n {
-                                        return Some(self.ir.add_expr(IrExpr::Call {
-                                            callee: Callee::Local(fid),
-                                            dispatch_receiver: None,
-                                            args: a,
-                                        }));
+                                        return Some(self.emit_local_call(fid, a));
                                     }
                                 }
                             }

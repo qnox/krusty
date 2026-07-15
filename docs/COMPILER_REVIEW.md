@@ -3244,3 +3244,10 @@ The next default-call cleanup merged the repeated `$default` argument packing lo
 `append_default_call_args`. Fully-qualified top-level calls, receiver-less top-level calls, and
 extension calls now share the same prefix/trailing-lambda/placeholder/mask/marker construction; the
 call sites keep only their selection-specific guards and receiver/context argument setup.
+
+### Local Call Emitter Merge
+
+The next neutral-IR cleanup added `emit_local_call` for same-file function calls and routed local
+function captures, destructuring components, generated wrappers, property accessors, operator
+extensions, and same-file extension calls through it. The lowerer now has one place for the
+`Callee::Local`/no-dispatch call shape instead of rebuilding that IR node in each feature branch.
