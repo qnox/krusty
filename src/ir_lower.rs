@@ -318,14 +318,56 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 }
             }
         }
-        // A member `suspend fn` on a class that IMPLEMENTS a supertype (an interface/class → the JVM emits
-        // BRIDGE methods) isn't modeled: the CPS-signature method and the generic bridge disagree on shape.
-        // Skip rather than miscompile (`SuspendingMutableMap : Map` with a `suspend fun clear()`). A suspend
-        // member on a plain class (no supertype, no bridges — the coroutine-intrinsics operator `invoke`)
-        // stays supported.
+        // A member `suspend fn` overriding a supertype method may need a generic-erasure BRIDGE (the CPS
+        // override's descriptor vs the supertype's erased one), which the coroutine lowering does not
+        // synthesize — that mismatch would miscompile (`SuspendingMutableMap : Map<K,V>`). But a bridge is
+        // needed ONLY when generics are involved: if the class has NO type parameters AND every supertype
+        // is a RAW (non-parameterized) type, the override's erased signature equals the supertype method's,
+        // so the single CPS method directly implements it — no bridge (the common suspend-decorator /
+        // interface-impl shape, e.g. `ChangeAwareEngine : ThrusterEngine`). Bail only for the generic
+        // shape, which still can't be modeled.
+        // Whether a CLASSPATH supertype's transitive closure contains a GENERIC type — a generic ancestor
+        // could carry a suspend method that, when overridden concretely, needs an erasure bridge the
+        // coroutine pass can't fix up. Pass-2's bridge check only walks SAME-FILE super-interfaces
+        // (`collect_iface_methods`) and a classpath SAM, so a classpath NON-SAM interface with a generic
+        // suspend ancestor would slip — catch that here. (A raw `s.targs`/`s.arg` at THIS class is the
+        // direct-generic case; this closes the transitive-classpath one.)
+        let classpath_super_has_generic = |name: &str| -> bool {
+            let start = syms
+                .class_names
+                .get(name)
+                .cloned()
+                .unwrap_or_else(|| name.to_string());
+            let mut stack = vec![start];
+            let mut seen = std::collections::HashSet::new();
+            while let Some(i) = stack.pop() {
+                if !seen.insert(i.clone()) {
+                    continue;
+                }
+                if let Some(t) = syms.libraries.resolve_type(&i) {
+                    if !t.type_params.is_empty() {
+                        return true;
+                    }
+                    stack.extend(t.supertypes.iter().cloned());
+                }
+            }
+            false
+        };
         let suspend_member_needs_bridge = file.decls.iter().any(|&d| {
             matches!(file.decl(d), Decl::Class(c)
-                if !c.supertypes.is_empty() && c.methods.iter().any(|m| m.is_suspend))
+                if (!c.supertypes.is_empty() || c.base_class.is_some())
+                    && c.methods.iter().any(|m| m.is_suspend)
+                    && (!c.type_params.is_empty()
+                        || c.supertypes.iter().any(|s| {
+                            !s.targs.is_empty()
+                                || s.arg.is_some()
+                                || classpath_super_has_generic(&s.name)
+                        })
+                        // A GENERIC classpath BASE CLASS with an open suspend fn overridden concretely
+                        // needs an erasure bridge the superclass loop can't build (a classpath base breaks
+                        // `resolve_method`), so guard it here too. `c.base_class` drops the type args, so
+                        // check the base's own genericity (and its closure) directly.
+                        || c.base_class.as_deref().is_some_and(classpath_super_has_generic)))
         });
         if suspend_member_needs_bridge {
             return None;
@@ -1143,6 +1185,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 let cty = body_prop_ty(file, info, cp, &*syms.libraries);
                 lo.cur_class = None;
                 lo.scope.clear();
+                lo.boxed_elem.clear();
                 lo.next_value = 0;
                 // `companion_props_lowerable` admitted this companion, so its initializer MUST lower —
                 // if it doesn't (or its type is `Error`), bail the whole file rather than silently drop
@@ -1175,6 +1218,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     let cty = body_prop_ty(file, info, bp, &*syms.libraries);
                     lo.cur_class = None;
                     lo.scope.clear();
+                    lo.boxed_elem.clear();
                     lo.next_value = 0;
                     if let (Some(initx), false) = (bp.init, cty == Ty::Error) {
                         if let Some(init) = lo.lower_arg(initx, &ty_to_ir(cty)) {
@@ -1504,6 +1548,12 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
     }
     // Pass 1c: assign top-level-property indices (initializers lowered in pass 2). Registered before
     // any body so a function may read a top-level property as `GetStatic`.
+    // A top-level property's `GetStatic` index must be its position in `ir.statics` (the vec the emitter
+    // indexes). Pass 1a already pushed companion/object `const val` backing fields onto that vec, so the
+    // per-property counter (`lo.statics.len()`) must be OFFSET by those pre-existing entries — otherwise a
+    // top-level property in a file that ALSO has a companion const reads the const's slot (a wrong-field
+    // `getstatic`). Only bites files with BOTH, which is why it long went unseen.
+    let static_base = lo.ir.statics.len() as u32;
     for &d in &file.decls {
         if let Decl::Property(p) = file.decl(d) {
             // A top-level delegated property (`val x: T by Del()`): register a `getX()` accessor so reads
@@ -1534,10 +1584,10 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 });
                 lo.computed_props.insert(p.name.clone(), (fid, ty));
                 let d_ty = p.delegate.map(|de| info.ty(de)).unwrap_or(Ty::Error);
-                let d_idx = lo.statics.len() as u32;
+                let d_idx = static_base + lo.statics.len() as u32;
                 lo.statics
                     .insert(format!("{}$delegate", p.name), (d_idx, d_ty));
-                let k_idx = lo.statics.len() as u32;
+                let k_idx = static_base + lo.statics.len() as u32;
                 lo.statics.insert(
                     format!("{}$kprop", p.name),
                     (k_idx, Ty::obj("kotlin/reflect/KProperty")),
@@ -1601,7 +1651,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 });
                 lo.computed_props.insert(p.name.clone(), (fid, ty));
             } else {
-                let idx = lo.statics.len() as u32;
+                let idx = static_base + lo.statics.len() as u32;
                 lo.statics.insert(p.name.clone(), (idx, ty));
                 // A top-level `const val` with a compile-time literal initializer: record its value so a
                 // same-file read inlines it (`ldc`), byte-identical to kotlinc, instead of `getstatic`.
@@ -1649,6 +1699,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
             Decl::Fun(f) => {
                 set_bail("deep:fun");
                 lo.scope.clear();
+                lo.boxed_elem.clear();
                 lo.next_value = 0;
                 lo.cur_class = None;
                 lo.cur_fn_name = f.name.clone();
@@ -1789,6 +1840,12 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                             let op = lo.ir.functions[own_fid as usize].params.clone();
                             let or = lo.ir.functions[own_fid as usize].ret.clone();
                             if bp != op || br != or {
+                                // A suspend override needing an erasure bridge can't be modeled (the
+                                // coroutine pass rewrites the concrete method to CPS afterwards but never
+                                // fixes up the bridge) — skip the file rather than emit a broken bridge.
+                                if m.is_suspend {
+                                    return None;
+                                }
                                 // Generic/covariant override → synthesize an `ACC_BRIDGE` method with
                                 // the supertype's erased descriptor that delegates to the concrete one.
                                 let cid = lo.classes[&internal].id;
@@ -1987,6 +2044,18 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                                 let ir_ = lo.ir.functions[ifid as usize].ret.clone();
                                 let cp = lo.ir.functions[impl_fid as usize].params.clone();
                                 let cr = lo.ir.functions[impl_fid as usize].ret.clone();
+                                if ip != cp || ir_ != cr {
+                                    // A generic-erasure bridge for a SUSPEND override can't be modeled: the
+                                    // coroutine pass rewrites the concrete method to CPS (a trailing
+                                    // `Continuation`, `Object` return) AFTER this, but never fixes up the
+                                    // bridge — so the emitted bridge and its target would both lack the
+                                    // continuation. Skip the file rather than emit a broken bridge. (The
+                                    // early bail already lets the no-bridge case through; this catches a
+                                    // mismatch reached transitively through a raw-looking super-interface.)
+                                    if lo.ir.suspend_funs.contains(&impl_fid) {
+                                        return None;
+                                    }
+                                }
                                 if (ip != cp || ir_ != cr)
                                     && seen.insert(format!("{}{:?}{:?}", mname, ip, ir_))
                                 {
@@ -2023,6 +2092,13 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                                     let ir_ = ty_to_ir(m.ret);
                                     let cp = lo.ir.functions[impl_fid as usize].params.clone();
                                     let cr = lo.ir.functions[impl_fid as usize].ret.clone();
+                                    // A suspend override needing an erasure bridge can't be modeled (the
+                                    // bridge isn't CPS-fixed-up) — skip the file. See the same guard above.
+                                    if (ip != cp || ir_ != cr)
+                                        && lo.ir.suspend_funs.contains(&impl_fid)
+                                    {
+                                        return None;
+                                    }
                                     if (ip != cp || ir_ != cr)
                                         && seen.insert(format!("{}{:?}{:?}", m.name, ip, ir_))
                                     {
@@ -2067,6 +2143,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     }
                     let (_, fid, _) = lo.classes[&internal].methods[&m.name];
                     lo.scope.clear();
+                    lo.boxed_elem.clear();
                     lo.next_value = 0;
                     lo.cur_class = Some(internal.clone());
                     lo.cur_fn_name = m.name.clone();
@@ -2136,6 +2213,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     let gname = property_getter_name(&p.name);
                     let (_, fid, _) = lo.classes[&internal].methods[&gname];
                     lo.scope.clear();
+                    lo.boxed_elem.clear();
                     lo.next_value = 0;
                     lo.cur_class = Some(internal.clone());
                     lo.cur_fn_name = gname;
@@ -2164,6 +2242,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                         let gname = property_getter_name(&p.name);
                         let (_, fid, _) = lo.classes[&internal].methods[&gname];
                         lo.scope.clear();
+                        lo.boxed_elem.clear();
                         lo.next_value = 0;
                         lo.cur_class = Some(internal.clone());
                         lo.cur_field = Some((class_id, fidx, fty_ir.clone()));
@@ -2185,6 +2264,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                             let (_, fid, _) = lo.classes[&internal].methods[&sname];
                             let pty = body_prop_ty(file, info, p, &*syms.libraries);
                             lo.scope.clear();
+                            lo.boxed_elem.clear();
                             lo.next_value = 0;
                             lo.cur_class = Some(internal.clone());
                             lo.cur_field = Some((class_id, fidx, fty_ir.clone()));
@@ -2347,6 +2427,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                         }
                         let (_, fid, _) = lo.classes[&comp_fq].methods[&m.name];
                         lo.scope.clear();
+                        lo.boxed_elem.clear();
                         lo.next_value = 0;
                         lo.cur_class = Some(comp_fq.clone());
                         lo.cur_fn_name = m.name.clone();
@@ -2460,6 +2541,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 if !base_args.is_empty() {
                     let class_id = lo.classes[&internal].id;
                     lo.scope.clear();
+                    lo.boxed_elem.clear();
                     lo.next_value = 0;
                     lo.cur_class = Some(internal.clone());
                     let this_v = lo.fresh_value();
@@ -2536,6 +2618,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     let ctor_count = lo.ir.classes[class_id as usize].ctor_param_count;
                     let _ = ctor_count;
                     lo.scope.clear();
+                    lo.boxed_elem.clear();
                     lo.next_value = 0;
                     lo.cur_class = Some(internal.clone());
                     // Property initializers run here (`var s: T = x as T`), so class type params are
@@ -2785,6 +2868,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     let mut secs = Vec::new();
                     for (sc_idx, sc) in c.secondary_ctors.iter().enumerate() {
                         lo.scope.clear();
+                        lo.boxed_elem.clear();
                         lo.next_value = 0;
                         lo.cur_class = Some(internal.clone());
                         lo.cur_tparams = class_tparams(file, c, &*syms.libraries);
@@ -3057,6 +3141,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                         .collect();
                     for (ei, entry) in c.enum_entries.iter().enumerate() {
                         lo.scope.clear();
+                        lo.boxed_elem.clear();
                         lo.next_value = 0;
                         lo.cur_class = None;
                         // Resolve the entry's (possibly named / reordered / omitted) arguments to one
@@ -3205,6 +3290,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                         // Subclass ctor init: `this.<prop> = <init>` for each property (run after super()).
                         if !prop_fields.is_empty() {
                             lo.scope.clear();
+                            lo.boxed_elem.clear();
                             lo.next_value = 0;
                             lo.cur_class = Some(sub_fq.clone());
                             lo.cur_fn_name = "<init>".to_string();
@@ -3255,6 +3341,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                                 param_checks: vec![],
                             });
                             lo.scope.clear();
+                            lo.boxed_elem.clear();
                             lo.next_value = 0;
                             lo.cur_class = Some(body_cur.clone());
                             lo.cur_fn_name = bm.name.clone();
@@ -3298,6 +3385,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
             Decl::Property(p) => {
                 set_bail("deep:property");
                 lo.scope.clear();
+                lo.boxed_elem.clear();
                 lo.next_value = 0;
                 lo.cur_class = None;
                 if let Some(recv_ref) = &p.receiver {
@@ -3319,6 +3407,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                         let sfid = *lo.ext_prop_set_ids.get(&(recv_key, p.name.clone()))?;
                         let setter = p.setter.as_ref().unwrap();
                         lo.scope.clear();
+                        lo.boxed_elem.clear();
                         lo.next_value = 0;
                         lo.cur_fn_name = property_setter_name(&p.name);
                         lo.lambda_seq = 0;
@@ -3350,6 +3439,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     });
                     if let Some(&(gfid, _)) = lo.computed_props.get(&p.name) {
                         lo.scope.clear();
+                        lo.boxed_elem.clear();
                         lo.next_value = 0;
                         lo.cur_fn_name = property_getter_name(&p.name);
                         lo.lambda_seq = 0;
@@ -3370,6 +3460,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     }
                     if let Some(&sfid) = lo.computed_setters.get(&p.name) {
                         lo.scope.clear();
+                        lo.boxed_elem.clear();
                         lo.next_value = 0;
                         lo.cur_fn_name = property_setter_name(&p.name);
                         lo.lambda_seq = 0;
@@ -3439,6 +3530,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
             continue;
         };
         lo.scope.clear();
+        lo.boxed_elem.clear();
         lo.next_value = 0;
         lo.cur_class = None;
         lo.cur_fn_name = lo.ir.functions[fid as usize].name.clone();
@@ -5945,7 +6037,12 @@ impl<'a> Lower<'a> {
         // innermost binding (the last in the scope stack). A real CLOSURE also captures a name used in a
         // NESTED lambda (`f { g { use(outer) } }`); an INLINE-spliced lambda accesses it directly, so its
         // captures must NOT be inflated by nested uses (the splice's stack frames would break).
-        let deep = lambda_info.capture != LambdaCapture::InlineSplice;
+        // Descend into nested lambdas to detect TRANSITIVE captures for EVERY lambda, including an
+        // inline-splice one: a nested closure inside a block-bodied splice (`xs.map { x -> val r =
+        // ys.map { y -> outer } }`) captures `outer` from the enclosing frame, so the splice must keep
+        // `outer` in scope for it. (A splice accesses its OWN direct captures inline; a deeper name it
+        // only threads through for the nested closure.)
+        let deep = true;
         let mut captures: Vec<(String, u32, Ty)> = Vec::new();
         for (name, v, ty) in self.scope.iter().rev() {
             let used = if deep {
@@ -12700,7 +12797,7 @@ impl<'a> Lower<'a> {
                 // labeled return with no matching frame is a `return@enclosingFn` — fall through to the
                 // normal function-return handling below (the label names the enclosing function).
                 if let Some(lbl) = &ret_label {
-                    if let Some((_, _, brk, _)) = self
+                    if let Some((_, slot, brk, rty)) = self
                         .inline_lambda_ret
                         .iter()
                         .rev()
@@ -12709,7 +12806,49 @@ impl<'a> Lower<'a> {
                     {
                         let mut stmts = Vec::new();
                         if let Some(e) = e {
-                            stmts.push(self.expr(e)?);
+                            // A VALUE-result labeled return (`x.let { return@let v }`) assigns `v` to the
+                            // frame's result slot; the wrapper loop's value is read from it afterward. A
+                            // `Unit` result just runs the (side-effecting) expression for effect.
+                            if rty != Ty::Unit && rty != Ty::Nothing {
+                                let val = self.lower_arg(e, &rty)?;
+                                // A SUSPENDING result (`return@withLock create(...)`): the coroutine
+                                // flattener splits a suspension out of a `Variable` initializer but not out
+                                // of a `SetValue`. Hoist it into a fresh temp first so the suspension sits
+                                // in a `Variable` init the state machine can flatten, then store the temp.
+                                // Detect a suspend call the same way the flattener does — a same-file
+                                // `Call`/`MethodCall` to a `suspend_funs` target, or a recorded
+                                // cross-unit `suspend_calls` entry.
+                                let val_suspends = self.ir.suspend_calls.contains_key(&val)
+                                    || match &self.ir.exprs[val as usize] {
+                                        IrExpr::Call {
+                                            callee: Callee::Local(fid),
+                                            ..
+                                        } => self.ir.suspend_funs.contains(fid),
+                                        IrExpr::MethodCall { class, index, .. } => self.ir.classes
+                                            [*class as usize]
+                                            .methods
+                                            .get(*index as usize)
+                                            .is_some_and(|fid| self.ir.suspend_funs.contains(fid)),
+                                        _ => false,
+                                    };
+                                let val = if val_suspends {
+                                    let tmp = self.fresh_value();
+                                    stmts.push(self.ir.add_expr(IrExpr::Variable {
+                                        index: tmp,
+                                        ty: ty_to_ir(rty),
+                                        init: Some(val),
+                                    }));
+                                    self.ir.add_expr(IrExpr::GetValue(tmp))
+                                } else {
+                                    val
+                                };
+                                stmts.push(self.ir.add_expr(IrExpr::SetValue {
+                                    var: slot,
+                                    value: val,
+                                }));
+                            } else {
+                                stmts.push(self.expr(e)?);
+                            }
                         }
                         stmts.push(self.ir.add_expr(IrExpr::Break { label: Some(brk) }));
                         return Some(self.ir.add_expr(IrExpr::Block { stmts, value: None }));
@@ -13658,6 +13797,466 @@ impl<'a> Lower<'a> {
 
     /// Lower a `for (name in iterable) body` (also the inlined target of `iterable.forEach { … }`):
     /// dispatch to the counted range loop, the array/`String` index loop, or the iterator protocol.
+    /// Whether `e`'s AST subtree contains a SUSPEND call (a call the checker resolved to a suspend
+    /// member/function). Stops at a nested `Lambda` (its body is a separate scope). Used to gate the
+    /// suspend-only inline-HOF loop desugar below: a non-suspend HOF keeps its normal library call.
+    fn ast_subtree_suspends(&self, e: AstExprId) -> bool {
+        let call_suspends = self.info.resolved_member(e).is_some_and(|m| m.suspend)
+            || self.info.resolved_extension(e).is_some_and(|c| c.suspend)
+            || self.info.resolved_top_level(e).is_some_and(|c| c.suspend)
+            || self.info.resolved_companion(e).is_some_and(|m| m.suspend);
+        if call_suspends {
+            return true;
+        }
+        if matches!(self.afile.expr(e), Expr::Lambda { .. }) {
+            return false;
+        }
+        self.afile
+            .any_child_expr(e, &mut |c| self.ast_subtree_suspends(c), &mut |s| {
+                self.afile
+                    .any_child_stmt(s, &mut |c| self.ast_subtree_suspends(c))
+            })
+    }
+
+    /// Whether the classpath type `internal` is (or transitively extends) a `Collection` — so a value of
+    /// it can be passed to `java.util.Collection.addAll`. Used to gate the flatMap loop desugar.
+    fn type_is_collection(&self, internal: &str) -> bool {
+        let is_coll = |n: &str| {
+            matches!(
+                n,
+                "kotlin/collections/Collection"
+                    | "kotlin/collections/MutableCollection"
+                    | "kotlin/collections/List"
+                    | "kotlin/collections/MutableList"
+                    | "kotlin/collections/Set"
+                    | "kotlin/collections/MutableSet"
+                    | "java/util/Collection"
+                    | "java/util/List"
+                    | "java/util/Set"
+                    | "java/util/ArrayList"
+            )
+        };
+        let mut stack = vec![internal.to_string()];
+        let mut seen = std::collections::HashSet::new();
+        while let Some(i) = stack.pop() {
+            if !seen.insert(i.clone()) {
+                continue;
+            }
+            if is_coll(&i) {
+                return true;
+            }
+            if let Some(t) = self.syms.libraries.resolve_type(&i) {
+                stack.extend(t.supertypes.iter().cloned());
+            }
+        }
+        false
+    }
+
+    /// Desugar `recv.map { … }` / `recv.flatMap { … }` whose LAMBDA BODY suspends into an accumulating
+    /// loop — `val acc = ArrayList(); for (e in recv) acc.add/addAll(<body>); acc` — exactly kotlinc's
+    /// inline expansion. A stdlib collection HOF lowers its lambda to a separate `FunctionN` impl method,
+    /// which cannot suspend; inlining it into the loop puts the suspension in an ordinary for-loop the
+    /// coroutine pass already models. Gated to the suspend case only, so a non-suspend HOF keeps its
+    /// byte-identical library call. `is_flat` selects `addAll` (flatMap) vs `add` (map). `None` (decline)
+    /// when the receiver has no resolvable iterator (the caller falls back to the normal call path).
+    /// The common concrete (non-`Nothing`/`Unit`) type of EVERY `return@<label>` value expression in
+    /// `e`'s subtree — used to recover a `withLock`/inline-lambda result type that inference collapsed to
+    /// `Nothing` because every path is a non-local return. Recurses into both `Stmt::Return` and
+    /// `Expr::Return` forms and their surrounding constructs (a `?.let { return@label v }` nests the
+    /// return under a safe-call/lambda). Returns `None` when there is no such return OR the returns
+    /// disagree: a heterogeneous set has no single result-slot type, so the caller must DECLINE rather
+    /// than coerce every value to one arbitrarily-picked type (a wrong `checkcast` / narrowed slot).
+    fn labeled_return_ty(&self, e: AstExprId, label: &str) -> Option<Ty> {
+        let tys: std::cell::RefCell<Vec<Ty>> = std::cell::RefCell::new(Vec::new());
+        self.collect_labeled_return_tys(e, label, &tys);
+        let tys = tys.into_inner();
+        let first = *tys.first()?;
+        tys.iter().all(|t| *t == first).then_some(first)
+    }
+
+    fn collect_labeled_return_tys(
+        &self,
+        e: AstExprId,
+        label: &str,
+        out: &std::cell::RefCell<Vec<Ty>>,
+    ) {
+        if let Expr::Return {
+            value: Some(v),
+            label: Some(l),
+        } = self.afile.expr(e)
+        {
+            if l == label {
+                let t = self.info.ty(*v);
+                if !matches!(t, Ty::Nothing | Ty::Unit) {
+                    out.borrow_mut().push(t);
+                }
+            }
+        }
+        self.afile.any_child_expr(
+            e,
+            &mut |c| {
+                self.collect_labeled_return_tys(c, label, out);
+                false
+            },
+            &mut |s| {
+                if let Stmt::Return(Some(v), Some(l)) = self.afile.stmt(s) {
+                    if l == label {
+                        let t = self.info.ty(*v);
+                        if !matches!(t, Ty::Nothing | Ty::Unit) {
+                            out.borrow_mut().push(t);
+                        }
+                    }
+                }
+                self.afile.any_child_stmt(s, &mut |c| {
+                    self.collect_labeled_return_tys(c, label, out);
+                    false
+                });
+                false
+            },
+        );
+    }
+
+    fn lower_suspend_withlock(
+        &mut self,
+        call: AstExprId,
+        receiver: AstExprId,
+        lbody: AstExprId,
+    ) -> Option<u32> {
+        let mutex_ty = self.info.ty(receiver);
+        let mutex_internal = mutex_ty.obj_internal()?.to_string();
+        let any = Ty::obj("kotlin/Any");
+        let lock_m = crate::symbol_resolver::resolve_instance(
+            &*self.syms.libraries,
+            &mutex_internal,
+            "lock",
+            &[any],
+        )?;
+        let unlock_m = crate::symbol_resolver::resolve_instance(
+            &*self.syms.libraries,
+            &mutex_internal,
+            "unlock",
+            &[any],
+        )?;
+        let lock_owner = lock_m
+            .owner
+            .clone()
+            .unwrap_or_else(|| mutex_internal.clone());
+        let unlock_owner = unlock_m
+            .owner
+            .clone()
+            .unwrap_or_else(|| mutex_internal.clone());
+        let is_iface = self.library_type_is_interface(&mutex_internal);
+        // The withLock result type. When EVERY path of the lambda is a non-local `return@withLock`, type
+        // inference gives the call (and the lambda body) `Nothing` — all paths diverge. A `Nothing`/`Unit`
+        // result slot is wrong: it would carry zero JVM-slot words (colliding with the next local) and the
+        // `return@withLock` handler would discard the returned value rather than store it. Recover the real
+        // type from the returned expressions; DECLINE (`?`) when they have no single common type rather
+        // than pick one arbitrarily and coerce the others to it.
+        let rty = match self.info.ty(call) {
+            Ty::Nothing | Ty::Unit => self.labeled_return_ty(lbody, "withLock")?,
+            t => t,
+        };
+        let mutex_slot = self.fresh_value();
+        let recv = self.expr(receiver)?;
+        let var_mutex = self.ir.add_expr(IrExpr::Variable {
+            index: mutex_slot,
+            ty: ty_to_ir(mutex_ty),
+            init: Some(recv),
+        });
+        let m1 = self.ir.add_expr(IrExpr::GetValue(mutex_slot));
+        let null1 = self.ir.add_expr(IrExpr::Const(IrConst::Null));
+        let lock_call = self.ir.add_expr(IrExpr::Call {
+            callee: Callee::Virtual {
+                owner: lock_owner,
+                name: lock_m.name.clone(),
+                descriptor: lock_m.descriptor.clone(),
+                interface: is_iface,
+            },
+            dispatch_receiver: Some(m1),
+            args: vec![null1],
+        });
+        if lock_m.suspend {
+            self.ir
+                .suspend_calls
+                .insert(lock_call, ty_to_ir(lock_m.ret));
+        }
+        let result_slot = self.fresh_value();
+        let dflt = crate::jvm::suspend::zero_value(&mut self.ir, &rty);
+        let var_result = self.ir.add_expr(IrExpr::Variable {
+            index: result_slot,
+            ty: ty_to_ir(rty),
+            init: Some(dflt),
+        });
+        let brk = format!("$withlock${}", self.fresh_value());
+        self.inline_lambda_ret
+            .push(("withLock".to_string(), result_slot, brk.clone(), rty));
+        let depth = self.scope.len();
+        let body_val = self.expr(lbody);
+        self.inline_lambda_ret.pop();
+        self.scope.truncate(depth);
+        let body_val = body_val?;
+        let body_stmt = if self.info.ty(lbody) == Ty::Nothing {
+            body_val
+        } else {
+            self.ir.add_expr(IrExpr::SetValue {
+                var: result_slot,
+                value: body_val,
+            })
+        };
+        let brk_stmt = self.ir.add_expr(IrExpr::Break {
+            label: Some(brk.clone()),
+        });
+        let loop_body = self.ir.add_expr(IrExpr::Block {
+            stmts: vec![body_stmt, brk_stmt],
+            value: None,
+        });
+        let cond = self.ir.add_expr(IrExpr::Const(IrConst::Boolean(true)));
+        let whilew = self.ir.add_expr(IrExpr::While {
+            cond,
+            body: loop_body,
+            update: None,
+            post_test: false,
+            label: Some(brk),
+        });
+        let m2 = self.ir.add_expr(IrExpr::GetValue(mutex_slot));
+        let null2 = self.ir.add_expr(IrExpr::Const(IrConst::Null));
+        let unlock_call = self.ir.add_expr(IrExpr::Call {
+            callee: Callee::Virtual {
+                owner: unlock_owner,
+                name: unlock_m.name.clone(),
+                descriptor: unlock_m.descriptor.clone(),
+                interface: is_iface,
+            },
+            dispatch_receiver: Some(m2),
+            args: vec![null2],
+        });
+        let try_body = self.ir.add_expr(IrExpr::Block {
+            stmts: vec![whilew],
+            value: None,
+        });
+        let fin = self.ir.add_expr(IrExpr::Block {
+            stmts: vec![unlock_call],
+            value: None,
+        });
+        let tryf = self.ir.add_expr(IrExpr::Try {
+            body: try_body,
+            catches: vec![],
+            finally: Some(fin),
+            result: Ty::Unit,
+        });
+        let get = self.ir.add_expr(IrExpr::GetValue(result_slot));
+        Some(self.ir.add_expr(IrExpr::Block {
+            stmts: vec![var_mutex, lock_call, var_result, tryf],
+            value: Some(get),
+        }))
+    }
+
+    fn lower_suspend_accumulate_hof(
+        &mut self,
+        is_flat: bool,
+        param: &str,
+        receiver: AstExprId,
+        body: AstExprId,
+    ) -> Option<u32> {
+        let it_ty = self.info.ty(receiver);
+        let internal = it_ty.obj_internal()?;
+        let iter_m = crate::symbol_resolver::resolve_instance(
+            &*self.syms.libraries,
+            internal,
+            "iterator",
+            &[],
+        )?;
+        let iter_ty = iter_m.ret;
+        let iter_internal = iter_ty.obj_internal()?.to_string();
+        let hasnext_m = crate::symbol_resolver::resolve_instance(
+            &*self.syms.libraries,
+            &iter_internal,
+            "hasNext",
+            &[],
+        )?;
+        let next_m = crate::symbol_resolver::resolve_instance(
+            &*self.syms.libraries,
+            &iter_internal,
+            "next",
+            &[],
+        )?;
+        let elem = iter_ty
+            .type_args()
+            .first()
+            .copied()
+            .or_else(|| it_ty.type_args().first().copied())
+            .unwrap_or_else(|| Ty::obj("kotlin/Any"));
+        let it_iface = self.library_type_is_interface(internal);
+        let iter_iface = self.library_type_is_interface(&iter_internal);
+
+        // acc = new ArrayList()
+        let acc_new = self.ir.add_expr(IrExpr::NewExternal {
+            internal: "java/util/ArrayList".to_string(),
+            ctor_desc: "()V".to_string(),
+            args: vec![],
+        });
+        let acc_v = self.fresh_value();
+        let acc_ty = Ty::obj("java/util/ArrayList");
+        let var_acc = self.ir.add_expr(IrExpr::Variable {
+            index: acc_v,
+            ty: ty_to_ir(acc_ty),
+            init: Some(acc_new),
+        });
+
+        // it = recv.iterator()
+        let recv = self.expr(receiver)?;
+        let iter_call = self.ir.add_expr(IrExpr::Call {
+            callee: Callee::Virtual {
+                owner: internal.to_string(),
+                name: "iterator".to_string(),
+                descriptor: iter_m.descriptor,
+                interface: it_iface,
+            },
+            dispatch_receiver: Some(recv),
+            args: vec![],
+        });
+        let it_v = self.fresh_value();
+        let var_it = self.ir.add_expr(IrExpr::Variable {
+            index: it_v,
+            ty: ty_to_ir(iter_ty),
+            init: Some(iter_call),
+        });
+
+        // cond: it.hasNext()
+        let it_g = self.ir.add_expr(IrExpr::GetValue(it_v));
+        let cond = self.ir.add_expr(IrExpr::Call {
+            callee: Callee::Virtual {
+                owner: iter_internal.clone(),
+                name: "hasNext".to_string(),
+                descriptor: hasnext_m.descriptor,
+                interface: iter_iface,
+            },
+            dispatch_receiver: Some(it_g),
+            args: vec![],
+        });
+
+        // body: e = (elem) it.next(); acc.add/addAll(<inlined lambda body>)
+        let it_g2 = self.ir.add_expr(IrExpr::GetValue(it_v));
+        let next_call = self.ir.add_expr(IrExpr::Call {
+            callee: Callee::Virtual {
+                owner: iter_internal,
+                name: "next".to_string(),
+                descriptor: next_m.descriptor,
+                interface: iter_iface,
+            },
+            dispatch_receiver: Some(it_g2),
+            args: vec![],
+        });
+        // Coerce the `Object` iterator result to the element type — the SAME four-way split
+        // `lower_foreach_iterator` uses: unbox an unsigned/scalar-value-class element (a `checkcast` +
+        // `istore` would store a reference into a primitive slot → VerifyError), else `checkcast` a
+        // concrete reference, else leave `Any` as-is.
+        let elem_val = if elem.is_unsigned() {
+            self.unbox_unsigned(next_call, elem)?
+        } else if self.has_scalar_value_repr(elem) {
+            self.ir.add_expr(IrExpr::TypeOp {
+                op: IrTypeOp::ImplicitCoercion,
+                arg: next_call,
+                type_operand: ty_to_ir(elem),
+            })
+        } else if elem != Ty::obj("kotlin/Any") {
+            self.ir.add_expr(IrExpr::TypeOp {
+                op: IrTypeOp::Cast,
+                arg: next_call,
+                type_operand: ty_to_ir(elem),
+            })
+        } else {
+            next_call
+        };
+        // Bind the element to the lambda's parameter, then lower the lambda body and bind ITS value to a
+        // fresh local — as SEPARATE statements, not a bundled block. The body value can be a suspend call;
+        // the coroutine pass surfaces a suspension from a plain `Variable{ init: <suspend call> }` (in a
+        // loop body it already models), but NOT from a block-valued init inside a loop nor from a call
+        // argument. So `val e = next; val part = <body>; acc.add*(part)`.
+        let depth = self.scope.len();
+        let elem_bv = self.fresh_value();
+        self.scope.push((param.to_string(), elem_bv, elem));
+        let var_e = self.ir.add_expr(IrExpr::Variable {
+            index: elem_bv,
+            ty: ty_to_ir(elem),
+            init: Some(elem_val),
+        });
+        let body_val = self.expr(body);
+        self.scope.truncate(depth);
+        let body_val = body_val?;
+        // The lambda body lowers to a value-block (`{ stmts…; value }`). Splice its statements into the
+        // loop and bind `part` to the block's VALUE — a plain `Variable{ init: <value> }` the coroutine
+        // pass surfaces (a block-valued init inside a loop body isn't normalized).
+        let (mut loop_stmts, body_v) = match self.ir.exprs[body_val as usize].clone() {
+            IrExpr::Block {
+                stmts,
+                value: Some(v),
+            } => (stmts, v),
+            _ => (Vec::new(), body_val),
+        };
+        let part_ty = self.info.ty(body);
+        // flatMap emits `ArrayList.addAll(Collection)`, but kotlinc's flatMap accepts any `Iterable` and
+        // handles a non-`Collection` via an iterating extension we don't model here — so decline (the
+        // caller falls back / the file bails) when the element result isn't a `Collection` subtype.
+        if is_flat
+            && !part_ty
+                .obj_internal()
+                .is_some_and(|i| self.type_is_collection(i))
+        {
+            self.scope.truncate(depth);
+            return None;
+        }
+        let part_v = self.fresh_value();
+        let var_part = self.ir.add_expr(IrExpr::Variable {
+            index: part_v,
+            ty: ty_to_ir(part_ty),
+            init: Some(body_v),
+        });
+        let acc_g = self.ir.add_expr(IrExpr::GetValue(acc_v));
+        let part_g = self.ir.add_expr(IrExpr::GetValue(part_v));
+        let (add_name, add_desc, add_arg) = if is_flat {
+            ("addAll", "(Ljava/util/Collection;)Z", part_g)
+        } else {
+            // `add(Object)` takes a reference — box a value/primitive result.
+            let boxed = self.ir.add_expr(IrExpr::TypeOp {
+                op: IrTypeOp::ImplicitCoercion,
+                arg: part_g,
+                type_operand: ty_to_ir(Ty::obj("kotlin/Any")),
+            });
+            ("add", "(Ljava/lang/Object;)Z", boxed)
+        };
+        let add_call = self.ir.add_expr(IrExpr::Call {
+            callee: Callee::Virtual {
+                owner: "java/util/ArrayList".to_string(),
+                name: add_name.to_string(),
+                descriptor: add_desc.to_string(),
+                interface: false,
+            },
+            dispatch_receiver: Some(acc_g),
+            args: vec![add_arg],
+        });
+        let mut wstmts = vec![var_e];
+        wstmts.append(&mut loop_stmts);
+        wstmts.push(var_part);
+        wstmts.push(add_call);
+        let wbody = self.ir.add_expr(IrExpr::Block {
+            stmts: wstmts,
+            value: None,
+        });
+        let wh = self.ir.add_expr(IrExpr::While {
+            cond,
+            body: wbody,
+            update: None,
+            post_test: false,
+            label: None,
+        });
+        let acc_read = self.ir.add_expr(IrExpr::GetValue(acc_v));
+        Some(self.ir.add_expr(IrExpr::Block {
+            stmts: vec![var_acc, var_it, wh],
+            value: Some(acc_read),
+        }))
+    }
+
     fn lower_for_each(
         &mut self,
         name: &str,
@@ -14833,9 +15432,53 @@ impl<'a> Lower<'a> {
         // (a `let { return@let v }`) is not yet — bail rather than miscompile.
         if body_has_labeled_return(self.afile, lam_body, &lam_label) {
             let lam_ret = self.info.ty(lam_body);
+            // VALUE-result labeled return (`x.let { if (c) return@let a; b }`): bind a result slot,
+            // wrap the body in a `while(true){ result = <fall-through value>; break@brk }` (a
+            // `return@let v` inside assigns `result = v` then breaks — see the handler above), and yield
+            // the slot. A body that always diverges (every path a `return@let`) has a `Nothing`
+            // fall-through with no result type here — leave that (rarer) shape to the Unit path / skip.
             if lam_ret != Ty::Unit && lam_ret != Ty::Nothing {
+                let brk = format!("$lamret${}", self.fresh_value());
+                let result_slot = self.fresh_value();
+                let dflt = crate::jvm::suspend::zero_value(&mut self.ir, &lam_ret);
+                let decl = self.ir.add_expr(IrExpr::Variable {
+                    index: result_slot,
+                    ty: ty_to_ir(lam_ret),
+                    init: Some(dflt),
+                });
+                stmts.push(decl);
+                self.inline_lambda_ret
+                    .push((lam_label.clone(), result_slot, brk.clone(), lam_ret));
+                let body_val = self.expr(lam_body);
+                self.inline_lambda_ret.pop();
                 self.scope.truncate(depth);
-                return None;
+                let body_val = body_val?;
+                // Normal fall-through: the body's own value is the result.
+                let assign = self.ir.add_expr(IrExpr::SetValue {
+                    var: result_slot,
+                    value: body_val,
+                });
+                let brk_stmt = self.ir.add_expr(IrExpr::Break {
+                    label: Some(brk.clone()),
+                });
+                let loop_body = self.ir.add_expr(IrExpr::Block {
+                    stmts: vec![assign, brk_stmt],
+                    value: None,
+                });
+                let cond = self.ir.add_expr(IrExpr::Const(IrConst::Boolean(true)));
+                let loopw = self.ir.add_expr(IrExpr::While {
+                    cond,
+                    body: loop_body,
+                    update: None,
+                    post_test: false,
+                    label: Some(brk),
+                });
+                stmts.push(loopw);
+                let get = self.ir.add_expr(IrExpr::GetValue(result_slot));
+                return Some(self.ir.add_expr(IrExpr::Block {
+                    stmts,
+                    value: Some(get),
+                }));
             }
             let brk = format!("$lamret${}", self.fresh_value());
             self.inline_lambda_ret
@@ -19302,6 +19945,72 @@ impl<'a> Lower<'a> {
                         if iterable {
                             let param = ast::first_lambda_param_or_it(params);
                             return self.lower_for_each(&param, receiver, *lbody, None);
+                        }
+                    }
+                    // `iterable.map/flatMap { … }` WHERE THE LAMBDA BODY SUSPENDS: a stdlib collection HOF
+                    // lowers its lambda to a `FunctionN` impl that can't suspend, so inline it into an
+                    // accumulating loop (kotlinc's own inline expansion) — putting the suspension in an
+                    // ordinary for-loop the coroutine pass models. Only in a suspend fn and only when the
+                    // lambda actually suspends, so a non-suspend `map`/`flatMap` keeps its library call.
+                    // ABI guard: fire ONLY for the stdlib `Iterable.map`/`flatMap`, which return `List<R>`
+                    // — so materializing the loop into an `ArrayList` (a `List`) is signature-correct.
+                    // A lazy `Sequence.map` (returns `Sequence`) or a user overload returning another
+                    // container (`Set`, …) has a non-`List` result type and a NON-`kotlin/collections`
+                    // facade; gating on the `List` result type + a resolved stdlib-collections extension
+                    // excludes them, so we never hand back an `ArrayList` where the static type is
+                    // `Sequence`/`Set` (→ VerifyError / ClassCastException).
+                    let stdlib_list_hof = (name == "map" || name == "flatMap")
+                        && self.info.ty(e).obj_internal().is_some_and(|i| {
+                            i == "kotlin/collections/List" || i == "kotlin/collections/MutableList"
+                        })
+                        && self
+                            .info
+                            .resolved_extension(e)
+                            .is_some_and(|c| c.owner.starts_with("kotlin/collections/"));
+                    if self.cur_fn_suspend && stdlib_list_hof && args.len() == 1 {
+                        if let Expr::Lambda {
+                            params,
+                            body: lbody,
+                        } = self.afile.expr(args[0]).clone()
+                        {
+                            let rty = self.info.ty(receiver);
+                            let iterable = rty.obj_internal().is_some_and(|i| {
+                                crate::symbol_resolver::resolve_instance(
+                                    &*self.syms.libraries,
+                                    i,
+                                    "iterator",
+                                    &[],
+                                )
+                                .is_some()
+                            });
+                            if iterable && self.ast_subtree_suspends(lbody) {
+                                let param = ast::first_lambda_param_or_it(&params);
+                                if let Some(v) = self.lower_suspend_accumulate_hof(
+                                    name == "flatMap",
+                                    &param,
+                                    receiver,
+                                    lbody,
+                                ) {
+                                    return Some(v);
+                                }
+                            }
+                        }
+                    }
+                    // `mutex.withLock { body }` (a `suspend inline fun`) WHERE THE BODY SUSPENDS.
+                    if self.cur_fn_suspend
+                        && name == "withLock"
+                        && args.len() == 1
+                        && self
+                            .info
+                            .resolved_extension(e)
+                            .is_some_and(|c| c.owner.starts_with("kotlinx/coroutines/sync/"))
+                    {
+                        if let Expr::Lambda { body: lbody, .. } = self.afile.expr(args[0]).clone() {
+                            if self.ast_body_suspends(lbody) {
+                                if let Some(v) = self.lower_suspend_withlock(e, receiver, lbody) {
+                                    return Some(v);
+                                }
+                            }
                         }
                     }
                     // `iterable.forEachIndexed { i, x -> body }` — the inline `forEachIndexed`, whose

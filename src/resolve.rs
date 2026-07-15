@@ -2372,17 +2372,29 @@ pub fn expr_uses_name_pub(file: &File, e: ExprId, name: &str) -> bool {
     expr_uses_name(file, e, name)
 }
 
-fn stmt_refs_param(file: &File, s: StmtId, names: &std::collections::HashSet<&str>) -> bool {
+fn stmt_refs_param(
+    file: &File,
+    s: StmtId,
+    names: &std::collections::HashSet<&str>,
+    into_lambdas: bool,
+) -> bool {
     match file.stmt(s) {
         // `name++`/`name = …` reference `name` (a write-only capture still binds it); a local function
         // is a separate scope (stop). The assigned `value` is still visited via the fall-through below
         // for `Assign`, so a `name = name + 1` is covered too.
         Stmt::IncDec { name, .. } => names.contains(name.as_str()),
         Stmt::Assign { name, value } => {
-            names.contains(name.as_str()) || expr_refs_param(file, *value, names)
+            names.contains(name.as_str())
+                || expr_refs_param_inner(file, *value, names, into_lambdas)
         }
         Stmt::LocalFun(_) => false,
-        _ => file.any_child_stmt(s, &mut |c| expr_refs_param(file, c, names)),
+        // Carry `into_lambdas` across the statement boundary: a DEEP scan must keep descending into a
+        // nested lambda that lives inside a block statement (`val r = xs.map { … outer … }`), else a
+        // transitive capture in a block-bodied lambda is missed and the nested closure fails to resolve
+        // the outer name.
+        _ => file.any_child_stmt(s, &mut |c| {
+            expr_refs_param_inner(file, c, names, into_lambdas)
+        }),
     }
 }
 
@@ -2633,7 +2645,7 @@ fn expr_refs_param_inner(
         _ => file.any_child_expr(
             e,
             &mut |c| expr_refs_param_inner(file, c, names, into_lambdas),
-            &mut |s| stmt_refs_param(file, s, names),
+            &mut |s| stmt_refs_param(file, s, names, into_lambdas),
         ),
     }
 }
@@ -10433,13 +10445,14 @@ impl<'a> Checker<'a> {
                                                 .iter()
                                                 .map(|a| self.expr_types[a.0 as usize])
                                                 .collect();
-                                            if crate::symbol_resolver::resolve_constructor(
-                                                &*self.syms.libraries,
-                                                &internal,
-                                                &tys,
-                                            )
-                                            .is_some()
-                                            {
+                                            // Match the plain constructor OR a value-class-param synthetic
+                                            // (`<init>(<erased…>, DefaultConstructorMarker)`). `tys` are in
+                                            // PARAMETER order (reordered from the named args by
+                                            // `map_call_args`), so this succeeds even when the source names
+                                            // are written out of order — the positional fallback below only
+                                            // matches when the erased param types happen to be
+                                            // permutation-invariant.
+                                            if self.library_ctor_resolves(&internal, &tys) {
                                                 return Ty::obj(&internal);
                                             }
                                         } else if crate::symbol_resolver::synthetic_default_ctor(
@@ -12691,6 +12704,32 @@ impl<'a> Checker<'a> {
                     );
                     self.resolved_calls.insert(call, ResolvedCall::TopLevel(c));
                     return Ty::Unit;
+                }
+                // A `Type(args)` FACTORY where `Type` is a classpath class/interface whose COMPANION
+                // carries an `operator fun invoke(args)`: evaluate `Type` as its companion INSTANCE (a
+                // `getstatic Type.Companion` value) and dispatch as an invoke-operator on it — exactly
+                // kotlinc's `Type.Companion.invoke(args)`. An interface has no constructor, so a factory
+                // `invoke` is the only way to "construct" it (`InstanceInternalId(uuid)` in mission-core).
+                if self.lookup(&fname).is_none() {
+                    if let Some(ct) = self.classpath_companion_ty(&fname) {
+                        let has_invoke = crate::symbol_resolver::resolve_instance_member(
+                            &*self.syms.libraries,
+                            ct,
+                            CALLABLE_INVOKE_OPERATOR,
+                            &arg_tys,
+                        )
+                        .is_some_and(|m| !m.member.suspend);
+                        if has_invoke {
+                            // Type the callee name as the companion instance so lowering reads it as the
+                            // `getstatic Type.Companion` receiver; `record_invoke` selects the operator.
+                            self.set(callee, ct);
+                            if let Some(t) =
+                                self.record_invoke(call, callee, ct, args, &arg_tys, span)
+                            {
+                                return t;
+                            }
+                        }
+                    }
                 }
                 self.diags
                     .error(span, format!("unresolved function '{fname}'"));

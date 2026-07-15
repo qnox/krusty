@@ -1040,6 +1040,133 @@ public class M {\n\
     assert_eq!(out.trim(), "OK", "suspend in try/catch");
 }
 
+/// Compile a suspend snippet with krusty (stdlib + coroutines + JDK modules) and run its
+/// `fun box(): String = runBlocking { … }` on the shared box runner — the same harness the other
+/// `suspend … runBlocking { }` behavioural tests use. `None` if the toolchain isn't provisioned.
+fn run_suspend_box(src: &str, tag: &str) -> Option<String> {
+    let sl = common::stdlib_jar()?;
+    let coro = common::coroutines_jar()?;
+    let jdk = common::jdk_modules()?;
+    common::compile_and_run_box(src, tag, &[sl, coro, jdk.clone()], Some(&jdk))
+}
+
+#[test]
+fn suspend_unit_fn_bare_early_return() {
+    // A `suspend fun` returning Unit with an EARLY BARE `return` (a guard `if (skip) return`) BEFORE a
+    // later suspension point. In the CPS state machine the method returns `Object`, so a bare `return`
+    // must `areturn Unit.INSTANCE` — emitting a void `return` (as the bare `Return(None)` did) yields
+    // "Method expects a return value" at load. Mission-core hit: `UserManagementService.acceptInvitation`
+    // (`… ?: return`, `if (status != PENDING) return`). proc(b,true) leaves v=0; proc(b,false) sets v=1.
+    if common::stdlib_jar().is_none()
+        || common::coroutines_jar().is_none()
+        || common::jdk_modules().is_none()
+    {
+        return;
+    }
+    const SRC: &str = "import kotlinx.coroutines.runBlocking\n\
+        class B { var v: Int = 0 }\n\
+        suspend fun leaf(): Int = 1\n\
+        suspend fun proc(b: B, skip: Boolean) {\n\
+            if (skip) return\n\
+            val x = leaf()\n\
+            b.v = x\n\
+        }\n\
+        fun box(): String = runBlocking {\n\
+            val b1 = B(); proc(b1, true)\n\
+            val b2 = B(); proc(b2, false)\n\
+            if (b1.v == 0 && b2.v == 1) \"OK\" else \"F b1=\" + b1.v + \" b2=\" + b2.v\n\
+        }\n";
+    assert_eq!(
+        run_suspend_box(SRC, "Main").expect("suspend bare-return compile+run"),
+        "OK"
+    );
+}
+
+#[test]
+fn suspend_in_catch_body_spills_exception() {
+    // A `suspend fun` whose CATCH body itself contains a suspension point AND reads the caught
+    // exception both BEFORE and AFTER that suspension (mission-core's MissionChangeService.approveChange
+    // shape: `catch (e) { log(e); repo.updateStatus(...); throw e }`). The exception cannot be read from
+    // `r_v` after the catch's own suspend call clobbers it — so it is spilled to a dedicated continuation
+    // field and restored per-state, exactly like any local live across a suspension. compute(sb,false) =
+    // risky(7) + "cfg".length(3) = 10 with sb "R"; compute(sb,true) rethrows the original
+    // IllegalStateException("boom") after running the catch's suspend, with sb "R[boomC]".
+    if common::stdlib_jar().is_none()
+        || common::coroutines_jar().is_none()
+        || common::jdk_modules().is_none()
+    {
+        return; // toolchain not provisioned
+    }
+    const SRC: &str = "import kotlinx.coroutines.runBlocking\n\
+        suspend fun setup(): String = \"cfg\"\n\
+        suspend fun tick(sb: StringBuilder, t: String): Int { sb.append(t); return t.length }\n\
+        suspend fun risky(sb: StringBuilder, fail: Boolean): Int {\n\
+            tick(sb, \"R\")\n\
+            if (fail) throw IllegalStateException(\"boom\")\n\
+            return 7\n\
+        }\n\
+        suspend fun compute(sb: StringBuilder, fail: Boolean): Int {\n\
+            val cfg = setup()\n\
+            try {\n\
+                val r = risky(sb, fail)\n\
+                return r + cfg.length\n\
+            } catch (e: Exception) {\n\
+                sb.append(\"[\").append(e.message)\n\
+                tick(sb, \"C\")\n\
+                sb.append(\"]\")\n\
+                throw e\n\
+            }\n\
+        }\n\
+        fun box(): String = runBlocking {\n\
+            val s1 = StringBuilder(); val r1 = compute(s1, false)\n\
+            val s2 = StringBuilder(); var caught = \"none\"\n\
+            try { compute(s2, true) } catch (e: Exception) { caught = e.message.toString() }\n\
+            if (r1 == 10 && s1.toString() == \"R\" && caught == \"boom\" && s2.toString() == \"R[boomC]\") \"OK\"\n\
+            else \"F r1=$r1 s1=$s1 caught=$caught s2=$s2\"\n\
+        }\n";
+    assert_eq!(
+        run_suspend_box(SRC, "Main").expect("suspend-in-catch compile+run"),
+        "OK"
+    );
+}
+
+#[test]
+fn suspend_return_when_with_suspending_branches() {
+    // A `suspend fun` whose EXPRESSION body is `= when (k) { … }` with suspensions in the BRANCH
+    // VALUES/bodies (not the condition) — mission-core's MissionChangeService.applyOperation shape,
+    // including an `else -> throw` divergent arm. Desugars to `val tmp; when (k) { … tmp = v }; return
+    // tmp`, each branch flattened as a suspending `when`-statement arm. handle(0) = "a5" with sb "A!";
+    // handle(1) = null with sb "B"; handle(2) = "c" with sb "C".
+    if common::stdlib_jar().is_none()
+        || common::coroutines_jar().is_none()
+        || common::jdk_modules().is_none()
+    {
+        return; // toolchain not provisioned
+    }
+    const SRC: &str = "import kotlinx.coroutines.runBlocking\n\
+        suspend fun leafA(sb: StringBuilder, n: Int): String { sb.append(\"A\"); return \"a\" + n }\n\
+        suspend fun leafB(sb: StringBuilder): String? { sb.append(\"B\"); return null }\n\
+        suspend fun handle(sb: StringBuilder, k: Int): String? =\n\
+            when (k) {\n\
+                0 -> { val r = leafA(sb, 5); sb.append(\"!\"); r }\n\
+                1 -> leafB(sb)\n\
+                2 -> { sb.append(\"C\"); \"c\" }\n\
+                else -> throw IllegalStateException(\"no\")\n\
+            }\n\
+        fun box(): String = runBlocking {\n\
+            val s1 = StringBuilder(); val r1 = handle(s1, 0)\n\
+            val s2 = StringBuilder(); val r2 = handle(s2, 1)\n\
+            val s3 = StringBuilder(); val r3 = handle(s3, 2)\n\
+            if (r1 == \"a5\" && s1.toString() == \"A!\" && r2 == null && s2.toString() == \"B\"\n\
+                && r3 == \"c\" && s3.toString() == \"C\") \"OK\"\n\
+            else \"F r1=$r1 s1=$s1 r2=$r2 s2=$s2 r3=$r3 s3=$s3\"\n\
+        }\n";
+    assert_eq!(
+        run_suspend_box(SRC, "Main").expect("return-when compile+run"),
+        "OK"
+    );
+}
+
 #[test]
 fn leaf_suspend_fun_has_cps_signature() {
     // `suspend fun foo(): Int = 42` has no suspension point, so kotlinc emits no state machine — just
