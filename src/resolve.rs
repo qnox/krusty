@@ -577,13 +577,10 @@ pub fn pick_overload(sigs: &[Signature], arg_tys: &[Ty]) -> Option<usize> {
     let score = |s: &Signature| -> Option<usize> {
         let mut sc = 0;
         for (&p, &a) in s.params.iter().zip(arg_tys.iter()) {
-            if p == a {
-                sc += 2;
-            } else if arg_assignable_simple(p, a) {
-                sc += 1;
-            } else {
+            if !arg_assignable_simple(p, a) {
                 return None;
             }
+            sc += if p == a { 2 } else { 1 };
         }
         Some(sc)
     };
