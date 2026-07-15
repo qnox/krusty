@@ -5206,8 +5206,7 @@ impl<'a> Lower<'a> {
         // Inline calls and non-inline FQ calls with an ERASED generic return (`Object`) both need the
         // substituted static result type the checker inferred, mirroring the bare-name path.
         Some(
-            if c.inline.can_inline()
-                || (ty_is_erased_top(&c.physical_ret) && c.ret != c.physical_ret)
+            if c.inline.can_inline() || (c.physical_ret.is_erased_top() && c.ret != c.physical_ret)
             {
                 self.coerce_erased_call_result(e, call, &c.physical_ret, true)
             } else {
@@ -5463,7 +5462,7 @@ impl<'a> Lower<'a> {
         // type refine it; a concrete reference return (a value class, a bridge result) must NOT be cast,
         // or codegen inserts a spurious `checkcast` that breaks verification.
         let phys = ret.non_null();
-        if !(ret_is_tparam || ty_is_erased_top(&phys)) {
+        if !(ret_is_tparam || phys.is_erased_top()) {
             return call;
         }
         // When the substituted static type is a strictly more specific reference than the erased return
@@ -5476,14 +5475,14 @@ impl<'a> Lower<'a> {
         if st != Ty::Error {
             self.ir.logical_types.insert(call, ty_to_ir(st));
         }
-        if self.has_scalar_value_repr(st) && ty_is_erased_top(&phys) {
+        if self.has_scalar_value_repr(st) && phys.is_erased_top() {
             return self.ir.add_expr(IrExpr::TypeOp {
                 op: IrTypeOp::ImplicitCoercion,
                 arg: call,
                 type_operand: ty_to_ir(st),
             });
         }
-        if st.is_reference() && !ty_is_erased_top(&st) && st != Ty::Null && st.non_null() != phys {
+        if st.is_reference() && !st.is_erased_top() && st != Ty::Null && st.non_null() != phys {
             return self.ir.add_expr(IrExpr::TypeOp {
                 op: IrTypeOp::Cast,
                 arg: call,
@@ -6091,7 +6090,7 @@ impl<'a> Lower<'a> {
         } else {
             let ret_val = if sig.ret.is_reference()
                 && !matches!(sig.ret, Ty::Null)
-                && !ty_is_erased_top(&sig.ret)
+                && !sig.ret.is_erased_top()
             {
                 self.ir.add_expr(IrExpr::TypeOp {
                     op: IrTypeOp::Cast,
@@ -10820,7 +10819,7 @@ impl<'a> Lower<'a> {
                 arg: e,
                 type_operand: target.clone(),
             }))
-        } else if ty_is_erased_top(&at) && target_ref && !ir_type_is_object(target) {
+        } else if at.is_erased_top() && target_ref && !ir_type_is_object(target) {
             // A generic type-parameter return is erased to `Object` in the JVM signature; flowing it
             // into a more specific reference target needs a `checkcast` (kotlinc inserts one — the
             // value really is the target type at runtime). `as`-style, but never null here.
@@ -12005,7 +12004,7 @@ impl<'a> Lower<'a> {
         // parameter, and getter return are the `kotlin/Unit` REFERENCE — not the 0-word `Ty::Unit` whose
         // descriptor `V` is illegal for a field/parameter. (Only a `Unit` *return position* erases to void.)
         let base = stored_value_ty(base);
-        if ty_is_erased_top(&base) {
+        if base.is_erased_top() {
             // Resolve the NON-nullable form (`ty_ref` bails on a nullable type); the caller re-applies
             // the field's nullability to the IrType, so `Uuid` and `Uuid?` recover the same base type.
             if let Some(rt) = self.classpath_ty_ref(r) {
@@ -12021,7 +12020,7 @@ impl<'a> Lower<'a> {
     /// registration and body-lowering of the extension must agree with the checker's receiver descriptor.
     fn ext_receiver_ty(&self, file: &ast::File, r: &ast::TypeRef) -> Ty {
         let base = ty_of(file, r, &*self.syms.libraries);
-        if base == Ty::Error || ty_is_erased_top(&base) {
+        if base == Ty::Error || base.is_erased_top() {
             if let Some(rt) = self.classpath_ty_ref(r) {
                 return rt;
             }
@@ -12035,7 +12034,7 @@ impl<'a> Lower<'a> {
             ..r.clone()
         };
         self.ty_ref(&nn)
-            .filter(|t| *t != Ty::Error && !ty_is_erased_top(t))
+            .filter(|t| *t != Ty::Error && !t.is_erased_top())
     }
 
     /// Resolve a dotted CLASSPATH nested type/qualifier (`Subject.User` → `lib/Subject$User`) — the
@@ -18524,7 +18523,7 @@ impl<'a> Lower<'a> {
                                 .filter(|t| self.has_scalar_value_repr(*t))
                                 .collect();
                             let generic_provided =
-                                c.params.iter().take(args.len()).all(ty_is_erased_top);
+                                c.params.iter().take(args.len()).all(|p| p.is_erased_top());
                             if generic_provided && prim_args.windows(2).any(|w| w[0] != w[1]) {
                                 return None;
                             }
@@ -18589,7 +18588,7 @@ impl<'a> Lower<'a> {
                         // null must stay a legal value until a primitive/non-null use site demands it.
                         if call_inline {
                             self.coerce_erased_call_result(e, call, &call_phys, true)
-                        } else if ty_is_erased_top(&call_phys) && call_log != call_phys {
+                        } else if call_phys.is_erased_top() && call_log != call_phys {
                             // A NON-inline classpath top-level fn with an ERASED generic return
                             // (`runBlocking<T> { … }`, whose `$default` returns `Object`): the checker
                             // substituted the concrete result type (`T = Ch`/`Int`), so `checkcast`/unbox
@@ -19927,7 +19926,7 @@ impl<'a> Lower<'a> {
                         for (i, &arg) in args.iter().enumerate() {
                             match mparams.get(i) {
                                 Some(p)
-                                    if ty_is_erased_top(p)
+                                    if p.is_erased_top()
                                         && elem_prim.is_some_and(|e| {
                                             let a = self.info.ty(arg);
                                             self.has_scalar_value_repr(a) && a != e
@@ -21541,18 +21540,9 @@ fn ir_type_is_reference(t: &Ty) -> bool {
             .is_some_and(|_| t.unboxed_primitive().is_none())
 }
 
-/// Whether `t` is exactly the erased top type. Some classpath/library metadata still reports the
-/// physical JVM spelling, but common lowering treats it as Kotlin's semantic top type.
-fn ty_is_erased_top(t: &Ty) -> bool {
-    matches!(
-        t.non_null().obj_internal(),
-        Some("kotlin/Any" | "java/lang/Object")
-    )
-}
-
 /// Whether `t` is exactly the erased top type (no `checkcast` to it).
 fn ir_type_is_object(t: &Ty) -> bool {
-    ty_is_erased_top(t)
+    t.is_erased_top()
 }
 
 /// Conservative "is `arg` assignable to `param`" for constructor-overload selection: an exact match,

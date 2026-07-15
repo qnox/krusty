@@ -317,6 +317,14 @@ impl Ty {
         }
     }
 
+    /// Whether this is Kotlin's semantic top reference type, including a physical JVM spelling that may
+    /// arrive from classpath metadata.
+    pub fn is_erased_top(self) -> bool {
+        self.non_null()
+            .obj_internal()
+            .is_some_and(|n| same(n, wk::any()) || same(n, wk::java_object()))
+    }
+
     /// The JVM functional-interface internal name (`kotlin/jvm/functions/FunctionN`) a function type
     /// implements — used for subtype/assignability tests against a user class that declares a
     /// function-type supertype. Kept SEPARATE from [`kotlin_class_internal`] (which returns `None` for a

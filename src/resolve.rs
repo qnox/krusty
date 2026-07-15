@@ -6743,10 +6743,10 @@ impl<'a> Checker<'a> {
         // *representation* (and any box/unbox or checkcast) is the backend's concern, decided at the
         // emit coercion site — not the type checker's. `Unit` IS a subtype of `Any` (`Unit.INSTANCE`);
         // the lowerer's arg/return coercion materializes the singleton.
-        if expected == Ty::obj("kotlin/Any") {
+        if expected.is_erased_top() {
             return;
         }
-        if actual == Ty::obj("kotlin/Any") && expected != Ty::Unit {
+        if actual.is_erased_top() && expected != Ty::Unit {
             return;
         }
         // A primitive flowing into a reference supertype is checked through its boxed source type; the
@@ -7318,11 +7318,8 @@ impl<'a> Checker<'a> {
                         // class (`Int` → `kotlin/Int`). Subtyping resolves the JVM wrapper hierarchy
                         // (`kotlin/Int` <: `Number` <: `Any`); the wrapper realization is the backend's.
                         || ot.boxed_ref().and_then(|b| b.obj_internal()).is_some_and(|bw| {
-                            tt.obj_internal()
-                                .is_some_and(|t| {
-                                    matches!(t, "kotlin/Any" | "java/lang/Object")
-                                        || self.obj_is_subtype(bw, t)
-                                })
+                            tt.is_erased_top()
+                                || tt.obj_internal().is_some_and(|t| self.obj_is_subtype(bw, t))
                         }));
                 // A SAFE cast of a PRIMITIVE operand (`1 as? Byte`, `1.0 as? Int`): box the operand to its
                 // wrapper, then `instanceof` the target wrapper/class — `null` on a mismatch (an `Int` box
@@ -8705,13 +8702,11 @@ impl<'a> Checker<'a> {
                 // Structural equality accepts reference-vs-value comparisons: Kotlin boxes the value
                 // operand and calls null-safe equality (`Any? == 5`, `x.getOrNull() == 42`). Ordering and
                 // arithmetic remain stricter.
-                let any = Ty::obj("kotlin/Any");
                 // A nullable-primitive wrapper (`Int?`/`Double?`) compares with its primitive (`a == 5.0`):
                 // the lowerer null-checks the wrapper, then UNBOXES it and does a primitive `==` (`dcmp`/
                 // `fcmp` for Float/Double — IEEE-754, so `-0.0 == 0.0`, `NaN != NaN`), never boxed `equals`.
                 let wrapper_vs_prim =
                     |w: Ty, p: Ty| w.nullable_primitive().map_or(false, |pw| pw == p);
-                let is_any_ref = |t: Ty| t.non_null() == Ty::obj("kotlin/Any");
                 let is_unit = |t: Ty| t.non_null() == Ty::Unit;
                 let has_boxable_value_equality = |t: Ty| {
                     matches!(
@@ -8729,10 +8724,10 @@ impl<'a> Checker<'a> {
                 if lt == rt
                     || Ty::promote(lt, rt).is_some()
                     || (lt.is_reference() && rt.is_reference())
-                    || (is_any_ref(lt) && has_boxable_value_equality(rt))
-                    || (is_any_ref(rt) && has_boxable_value_equality(lt))
-                    || lt == any
-                    || rt == any
+                    || (lt.is_erased_top() && has_boxable_value_equality(rt))
+                    || (rt.is_erased_top() && has_boxable_value_equality(lt))
+                    || lt.is_erased_top()
+                    || rt.is_erased_top()
                     || wrapper_vs_prim(lt, rt)
                     || wrapper_vs_prim(rt, lt)
                     || (is_unit(lt) && is_unit(rt))
