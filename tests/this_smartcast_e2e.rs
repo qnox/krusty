@@ -13,6 +13,14 @@ fn this_smartcast_implicit_receiver() {
 }
 
 #[test]
+fn this_smartcast_implicit_receiver_in_when() {
+    match common::run_box_corpus_case("smartCasts/implicitReceiverInWhen.kt") {
+        Some(s) => assert_eq!(s, "OK"),
+        None => panic!("unexpectedly skipped"),
+    }
+}
+
+#[test]
 fn this_smartcast_member_property() {
     let src = r#"
 open class Shape {
