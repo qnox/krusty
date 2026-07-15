@@ -3180,3 +3180,12 @@ member calls, and qualified member calls now emit selected `LibraryMember` recor
 owner/name/descriptor/interface/suspend path instead of each branch unpacking those backend facts by
 hand. This keeps checker-carried `ResolvedMember` payloads and fallback resolver selections on one
 emission path, while preserving each branch's existing overload/default-argument selection order.
+
+### Synthetic Member Call Emitter Merge
+
+The next lowerer cleanup extended the shared member-call emitter to synthesized member paths:
+destructuring getter/component/get calls, object singleton member calls, operator helper calls,
+foreach iterator `hasNext`/`next`, and indexed collection stores. Those paths already had selected
+`LibraryMember` records, but still rebuilt `Callee::Virtual` locally and carried parallel method-name
+or interface facts. They now treat the selected member payload as authoritative for owner/name/
+descriptor/interface/suspend emission, leaving only the branch-specific argument construction in place.

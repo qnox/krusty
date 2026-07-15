@@ -4871,8 +4871,6 @@ impl<'a> Lower<'a> {
             return Some(self.coerce_generic_read(mc, call_expr, ret));
         }
         let m = self.resolve_instance(&internal, name, &self.arg_tys(args))?;
-        let owner = m.owner.clone().unwrap_or_else(|| internal.clone());
-        let is_iface = self.library_type_is_interface(&owner);
         let field = self.syms.libraries.object_instance_field(&internal)?;
         let recv = self.platform_static_field(field);
         let mut a = Vec::new();
@@ -4882,20 +4880,10 @@ impl<'a> Lower<'a> {
                 None => a.push(self.expr(arg)?),
             }
         }
-        let call = self.ir.add_expr(IrExpr::Call {
-            callee: Callee::Virtual {
-                owner,
-                name: m.name,
-                descriptor: m.descriptor,
-                interface: is_iface,
-            },
-            dispatch_receiver: Some(recv),
-            args: a,
-        });
-        if m.suspend {
-            self.ir.suspend_calls.insert(call, ty_to_ir(m.ret));
-        }
-        Some(self.coerce_generic_read(call, call_expr, m.ret))
+        let ret = m.ret;
+        let suspend = m.suspend;
+        let call = self.emit_library_member_call(recv, internal, m, ret, suspend, a);
+        Some(self.coerce_generic_read(call, call_expr, ret))
     }
 
     fn mutable_local_ref_type(&self, elem: Ty) -> Option<Ty> {
@@ -6007,21 +5995,16 @@ impl<'a> Lower<'a> {
                     } else {
                         // A library member read through its getter (`IndexedValue.value` → `getValue()`).
                         let m = self.resolve_instance_member(it_ty, &getter, &[])?;
-                        let is_iface = self.library_type_is_interface(&internal);
-                        let c = self.ir.add_expr(IrExpr::Call {
-                            callee: Callee::Virtual {
-                                owner: internal.clone(),
-                                name: getter.clone(),
-                                descriptor: m.member.descriptor.clone(),
-                                interface: is_iface,
-                            },
-                            dispatch_receiver: Some(recv),
-                            args: vec![],
-                        });
-                        (
-                            self.coerce_to_static(c, m.ret, m.member.physical_ret),
+                        let physical_ret = m.member.physical_ret;
+                        let c = self.emit_library_member_call(
+                            recv,
+                            internal.clone(),
+                            m.member,
                             m.ret,
-                        )
+                            m.suspend,
+                            vec![],
+                        );
+                        (self.coerce_to_static(c, m.ret, physical_ret), m.ret)
                     };
                 self.bind_destructure_component(name, call, log_ty, out)?;
                 continue;
@@ -6069,21 +6052,16 @@ impl<'a> Lower<'a> {
                 });
                 (c, ret)
             } else if let Some(m) = self.resolve_instance_member(it_ty, &comp, &[]) {
-                let is_iface = self.library_type_is_interface(&internal);
-                let c = self.ir.add_expr(IrExpr::Call {
-                    callee: Callee::Virtual {
-                        owner: internal.clone(),
-                        name: comp.clone(),
-                        descriptor: m.member.descriptor.clone(),
-                        interface: is_iface,
-                    },
-                    dispatch_receiver: Some(recv),
-                    args: vec![],
-                });
-                (
-                    self.coerce_to_static(c, m.ret, m.member.physical_ret),
+                let physical_ret = m.member.physical_ret;
+                let c = self.emit_library_member_call(
+                    recv,
+                    internal.clone(),
+                    m.member,
                     m.ret,
-                )
+                    m.suspend,
+                    vec![],
+                );
+                (self.coerce_to_static(c, m.ret, physical_ret), m.ret)
             } else if let Some(c) = self.info.synthetic_ext(init, &comp).cloned() {
                 // `componentN` as a stdlib extension: a public one (`List.component1()`) or an
                 // `@InlineOnly` one (`Map.Entry.component1` → `getKey()`). The CHECKER resolved and
@@ -6113,22 +6091,17 @@ impl<'a> Lower<'a> {
             } else {
                 // An indexable type: `componentN` is the inline `get(N-1)`.
                 let m = self.resolve_instance_member(it_ty, "get", &[Ty::Int])?;
-                let is_iface = self.library_type_is_interface(&internal);
                 let i = self.ir.add_expr(IrExpr::Const(IrConst::Int(idx as i32)));
-                let c = self.ir.add_expr(IrExpr::Call {
-                    callee: Callee::Virtual {
-                        owner: internal.clone(),
-                        name: "get".to_string(),
-                        descriptor: m.member.descriptor.clone(),
-                        interface: is_iface,
-                    },
-                    dispatch_receiver: Some(recv),
-                    args: vec![i],
-                });
-                (
-                    self.coerce_to_static(c, m.ret, m.member.physical_ret),
+                let physical_ret = m.member.physical_ret;
+                let c = self.emit_library_member_call(
+                    recv,
+                    internal.clone(),
+                    m.member,
                     m.ret,
-                )
+                    m.suspend,
+                    vec![i],
+                );
+                (self.coerce_to_static(c, m.ret, physical_ret), m.ret)
             };
             self.bind_destructure_component(name, call, log_ty, out)?;
         }
@@ -10390,22 +10363,15 @@ impl<'a> Lower<'a> {
         let arg_tys: Vec<Ty> = args.iter().map(|&a| self.info.ty(a)).collect();
         if let Some(m) = self.resolve_instance(&internal, name, &arg_tys) {
             if m.params.len() == args.len() {
-                let is_iface = self.library_type_is_interface(&internal);
                 let mut a = Vec::new();
                 for (k, &arg) in args.iter().enumerate() {
                     a.push(self.lower_arg(arg, &ty_to_ir(m.params[k]))?);
                 }
-                let call = self.ir.add_expr(IrExpr::Call {
-                    callee: Callee::Virtual {
-                        owner: internal.clone(),
-                        name: name.to_string(),
-                        descriptor: m.descriptor.clone(),
-                        interface: is_iface,
-                    },
-                    dispatch_receiver: Some(recv_v),
-                    args: a,
-                });
-                return Some((call, m.ret));
+                let ret = m.ret;
+                let suspend = m.suspend;
+                let call =
+                    self.emit_library_member_call(recv_v, internal.clone(), m, ret, suspend, a);
+                return Some((call, ret));
             }
         }
         None
@@ -10883,7 +10849,6 @@ impl<'a> Lower<'a> {
             .or_else(|| it_ty.type_args().first().copied())
             .unwrap_or_else(|| Ty::obj("kotlin/Any"));
         let it_iface = self.library_type_is_interface(internal);
-        let iter_iface = self.library_type_is_interface(&iter_internal);
         let depth = self.scope.len();
         // `forEachIndexed`: an `Int` index counter, declared before the loop and bound to the lambda's
         // first parameter, incremented at the end of each iteration.
@@ -10934,29 +10899,29 @@ impl<'a> Lower<'a> {
 
         // cond: it.hasNext()
         let it_g = self.ir.add_expr(IrExpr::GetValue(it_v));
-        let cond = self.ir.add_expr(IrExpr::Call {
-            callee: Callee::Virtual {
-                owner: iter_internal.clone(),
-                name: "hasNext".to_string(),
-                descriptor: hasnext_m.descriptor,
-                interface: iter_iface,
-            },
-            dispatch_receiver: Some(it_g),
-            args: vec![],
-        });
+        let hasnext_ret = hasnext_m.ret;
+        let hasnext_suspend = hasnext_m.suspend;
+        let cond = self.emit_library_member_call(
+            it_g,
+            iter_internal.clone(),
+            hasnext_m,
+            hasnext_ret,
+            hasnext_suspend,
+            vec![],
+        );
 
         // x = (elem) it.next()  — unbox a primitive element, checkcast a specific reference.
         let it_g2 = self.ir.add_expr(IrExpr::GetValue(it_v));
-        let next_call = self.ir.add_expr(IrExpr::Call {
-            callee: Callee::Virtual {
-                owner: iter_internal.clone(),
-                name: "next".to_string(),
-                descriptor: next_m.descriptor,
-                interface: iter_iface,
-            },
-            dispatch_receiver: Some(it_g2),
-            args: vec![],
-        });
+        let next_ret = next_m.ret;
+        let next_suspend = next_m.suspend;
+        let next_call = self.emit_library_member_call(
+            it_g2,
+            iter_internal.clone(),
+            next_m,
+            next_ret,
+            next_suspend,
+            vec![],
+        );
         let x_init = if elem.is_unsigned() {
             // The element is a boxed `kotlin/UInt`/`ULong` — checkcast + `unbox-impl`, not the
             // `Integer` unbox a plain JVM-scalar coercion would emit.
@@ -14852,12 +14817,8 @@ impl<'a> Lower<'a> {
                 // operator maps to `put` on a map.
                 let resolved = self
                     .resolve_instance(internal, "set", &[it, vt])
-                    .map(|m| ("set", m))
-                    .or_else(|| {
-                        self.resolve_instance(internal, "put", &[it, vt])
-                            .map(|m| ("put", m))
-                    });
-                if let Some((mname, m)) = resolved {
+                    .or_else(|| self.resolve_instance(internal, "put", &[it, vt]));
+                if let Some(m) = resolved {
                     // A narrowing store into a primitive-element collection (`List<Byte>[i] = intVal`)
                     // needs `(value).toByte()` before boxing as the element wrapper — not yet modeled.
                     // Bail (skip the file) rather than box the wrong wrapper type.
@@ -14869,22 +14830,21 @@ impl<'a> Lower<'a> {
                             return None;
                         }
                     }
-                    let is_iface = self.library_type_is_interface(internal);
                     let a = self.expr(array)?;
                     let i =
                         self.lower_arg(index, &ty_to_ir(m.params.first().copied().unwrap_or(it)))?;
                     let v =
                         self.lower_arg(value, &ty_to_ir(m.params.get(1).copied().unwrap_or(vt)))?;
-                    return Some(self.ir.add_expr(IrExpr::Call {
-                        callee: Callee::Virtual {
-                            owner: internal.to_string(),
-                            name: mname.to_string(),
-                            descriptor: m.descriptor.clone(),
-                            interface: is_iface,
-                        },
-                        dispatch_receiver: Some(a),
-                        args: vec![i, v],
-                    }));
+                    let ret = m.ret;
+                    let suspend = m.suspend;
+                    return Some(self.emit_library_member_call(
+                        a,
+                        internal.to_string(),
+                        m,
+                        ret,
+                        suspend,
+                        vec![i, v],
+                    ));
                 }
             }
         }
