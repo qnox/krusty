@@ -118,6 +118,8 @@ mod classpath_collection_and_nested_named_e2e;
 mod classpath_collection_param_member_e2e;
 #[path = "classpath_companion.rs"]
 mod classpath_companion;
+#[path = "classpath_companion_invoke_e2e.rs"]
+mod classpath_companion_invoke_e2e;
 #[path = "classpath_data_copy_e2e.rs"]
 mod classpath_data_copy_e2e;
 #[path = "classpath_default_args_e2e.rs"]
@@ -128,6 +130,8 @@ mod classpath_enum_regex_vc_e2e;
 mod classpath_function_reference_e2e;
 #[path = "classpath_is_smartcast_e2e.rs"]
 mod classpath_is_smartcast_e2e;
+#[path = "classpath_nested_ctor_reordered_named_valueclass_e2e.rs"]
+mod classpath_nested_ctor_reordered_named_valueclass_e2e;
 #[path = "classpath_object_member_import_e2e.rs"]
 mod classpath_object_member_import_e2e;
 #[path = "classpath_object_nested_e2e.rs"]
@@ -390,6 +394,8 @@ mod inheritance_e2e;
 mod inline_deep_coverage_e2e;
 #[path = "inline_e2e.rs"]
 mod inline_e2e;
+#[path = "inline_lambda_value_return_e2e.rs"]
+mod inline_lambda_value_return_e2e;
 #[path = "inline_splice_e2e.rs"]
 mod inline_splice_e2e;
 #[path = "inline_splice_ldc_wide_e2e.rs"]
@@ -512,6 +518,8 @@ mod nested_class_unqualified_e2e;
 mod nested_decls_in_object_e2e;
 #[path = "nested_enum_access_e2e.rs"]
 mod nested_enum_access_e2e;
+#[path = "nested_hof_capture_e2e.rs"]
+mod nested_hof_capture_e2e;
 #[path = "nested_lambda_capture_e2e.rs"]
 mod nested_lambda_capture_e2e;
 #[path = "nested_string_template_e2e.rs"]
@@ -670,20 +678,34 @@ mod super_interface_default_e2e;
 mod super_to_base_secondary_ctor_e2e;
 #[path = "supertype_scan_arrow_e2e.rs"]
 mod supertype_scan_arrow_e2e;
+#[path = "suspend_class_implements_interface_e2e.rs"]
+mod suspend_class_implements_interface_e2e;
 #[path = "suspend_collection_hof_e2e.rs"]
 mod suspend_collection_hof_e2e;
+#[path = "suspend_collection_hof_suspend_lambda_e2e.rs"]
+mod suspend_collection_hof_suspend_lambda_e2e;
 #[path = "suspend_default_param_e2e.rs"]
 mod suspend_default_param_e2e;
 #[path = "suspend_e2e.rs"]
 mod suspend_e2e;
 #[path = "suspend_inline_hof_suspending_lambda_reject_e2e.rs"]
 mod suspend_inline_hof_suspending_lambda_reject_e2e;
+#[path = "suspend_loop_compound_assign_e2e.rs"]
+mod suspend_loop_compound_assign_e2e;
+#[path = "suspend_loop_continue_break_e2e.rs"]
+mod suspend_loop_continue_break_e2e;
 #[path = "suspend_member_after_call_e2e.rs"]
 mod suspend_member_after_call_e2e;
 #[path = "suspend_return_type_recovery_e2e.rs"]
 mod suspend_return_type_recovery_e2e;
+#[path = "suspend_spill_slot_reuse_e2e.rs"]
+mod suspend_spill_slot_reuse_e2e;
+#[path = "suspend_try_finally_body_e2e.rs"]
+mod suspend_try_finally_body_e2e;
 #[path = "suspend_try_finally_e2e.rs"]
 mod suspend_try_finally_e2e;
+#[path = "suspend_withlock_nonlocal_return_e2e.rs"]
+mod suspend_withlock_nonlocal_return_e2e;
 #[path = "synthetic_accessor_e2e.rs"]
 mod synthetic_accessor_e2e;
 #[path = "tailrec_e2e.rs"]
@@ -702,6 +724,8 @@ mod top_level_generic_property_inference_e2e;
 mod top_level_property_e2e;
 #[path = "toplevel_array_inference_e2e.rs"]
 mod toplevel_array_inference_e2e;
+#[path = "toplevel_prop_with_companion_const_e2e.rs"]
+mod toplevel_prop_with_companion_const_e2e;
 #[path = "toplevel_property_ref_e2e.rs"]
 mod toplevel_property_ref_e2e;
 #[path = "trailing_lambda_default_e2e.rs"]
@@ -748,6 +772,8 @@ mod value_class_map_key_e2e;
 mod value_class_nullable_widen_return_e2e;
 #[path = "value_class_param_generic_return_e2e.rs"]
 mod value_class_param_generic_return_e2e;
+#[path = "value_class_template_lambda_e2e.rs"]
+mod value_class_template_lambda_e2e;
 #[path = "var_extension_property_e2e.rs"]
 mod var_extension_property_e2e;
 #[path = "var_smartcast_after_assign_e2e.rs"]

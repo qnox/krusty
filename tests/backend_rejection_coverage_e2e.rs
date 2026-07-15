@@ -108,9 +108,12 @@ fn delegated_property_map_accepted() {
 
 #[test]
 fn suspend_try_finally_rejected() {
+    // A NON-suspending finally around a suspending try body IS supported (see
+    // suspend_try_finally_body_e2e). A SUSPENDING finally would itself span coroutine states — still
+    // unmodeled, so it must bail rather than miscompile.
     assert!(rejects(
         "suspend fun d() {}\n\
-         suspend fun f() { try { d() } finally { println(\"x\") }; d() }\n"
+         suspend fun f() { try { d() } finally { d() }; d() }\n"
     ));
 }
 
@@ -138,35 +141,28 @@ fn suspend_try_as_expression_rejected() {
     ));
 }
 
-#[test]
-fn suspend_while_loop_rejected() {
-    assert!(rejects(
-        "suspend fun d(): Int = 1\n\
-         suspend fun f(): Int { var s = 0; while (s < 3) { s += d() }; return s }\n"
-    ));
-}
-
-#[test]
-fn suspend_do_while_loop_rejected() {
-    assert!(rejects(
-        "suspend fun d(): Int = 1\n\
-         suspend fun f(): Int { var i = 0; do { i += d() } while (i < 3); return i }\n"
-    ));
-}
-
-#[test]
-fn suspend_for_loop_rejected() {
-    assert!(rejects(
-        "suspend fun d(): Int = 1\n\
-         suspend fun f(): Int { var s = 0; for (i in 0..2) { s += d() }; return s }\n"
-    ));
-}
+// NOTE: a suspend call in a compound-assignment inside a `while`/`do-while`/`for` loop
+// (`while (s < 3) { s += d() }`) is now LOWERED (the coroutine pass hoists the suspension to a temp).
+// Promoted to a round-trip test in `suspend_loop_compound_assign_e2e.rs`.
 
 #[test]
 fn suspend_when_with_multiple_suspensions_rejected() {
     assert!(rejects(
         "suspend fun d(): Int = 1\n\
          suspend fun f(x: Int): Int = when (x) { 0 -> d(); else -> d() + d() }\n"
+    ));
+}
+
+// A suspend lambda body on a LAZY `Sequence.map` (returns `Sequence`, not `List`) must NOT be inlined
+// into the `List`-materializing accumulate-loop desugar (that would hand back an `ArrayList` where the
+// static type is `Sequence` → VerifyError). The `List`-result + `kotlin/collections` facade guard
+// excludes it, so it falls through to the `FunctionN` path and the backend cleanly DECLINES. (kotlinc
+// also rejects this outright — "suspension functions can only be called within coroutine body".)
+#[test]
+fn suspend_sequence_map_not_inlined_rejected() {
+    assert!(rejects(
+        "interface R { suspend fun g(x: Int): Int }\n\
+         suspend fun f(s: Sequence<Int>, r: R): Sequence<Int> = s.map { r.g(it) }\n"
     ));
 }
 
