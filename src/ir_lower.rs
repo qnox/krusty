@@ -4478,6 +4478,103 @@ impl<'a> Lower<'a> {
         crate::symbol_resolver::SymbolResolver::new_scoped(&*self.syms.libraries, &self.fn_scope)
     }
 
+    // Call-site sugar over the ONE resolution entry point [`SymbolResolver::resolve_symbol`]: the
+    // lowerer states only the syntax (a value/type receiver + name + args + a call/read/ref form) and
+    // reads the discovered [`Symbol`] variant it expects. Resolution lives in `resolve_symbol`.
+    fn resolve_instance_member(
+        &self,
+        recv: Ty,
+        name: &str,
+        args: &[Ty],
+    ) -> Option<crate::symbol_resolver::ResolvedMember> {
+        use crate::symbol_resolver::{SymRecv, Symbol};
+        self.resolver()
+            .resolve_symbol(SymRecv::Value(recv), name, args)
+            .and_then(Symbol::call)
+    }
+    fn resolve_property_member(
+        &self,
+        recv: Ty,
+        name: &str,
+    ) -> Option<crate::symbol_resolver::ResolvedMember> {
+        use crate::symbol_resolver::{SymRecv, Symbol};
+        self.resolver()
+            .resolve_symbol(SymRecv::Value(recv), name, &[])
+            .and_then(Symbol::property)
+    }
+    fn resolve_property_ref(
+        &self,
+        recv: Ty,
+        name: &str,
+    ) -> Option<crate::symbol_resolver::BoundPropertyRef> {
+        use crate::symbol_resolver::{SymRecv, Symbol};
+        self.resolver()
+            .resolve_symbol(SymRecv::Value(recv), name, &[])
+            .and_then(Symbol::property_ref)
+    }
+    fn resolve_instance_ref(
+        &self,
+        recv: Ty,
+        name: &str,
+    ) -> Option<crate::libraries::LibraryMember> {
+        use crate::symbol_resolver::{SymRecv, Symbol};
+        self.resolver()
+            .resolve_symbol(SymRecv::Value(recv), name, &[])
+            .and_then(Symbol::method_ref)
+    }
+    fn resolve_property_setter(
+        &self,
+        recv: Ty,
+        name: &str,
+    ) -> Option<crate::libraries::LibraryCallable> {
+        use crate::symbol_resolver::{SymRecv, Symbol};
+        self.resolver()
+            .resolve_symbol(SymRecv::Value(recv), name, &[])
+            .and_then(Symbol::property_setter)
+    }
+    fn resolve_instance(
+        &self,
+        internal: &str,
+        name: &str,
+        args: &[Ty],
+    ) -> Option<crate::libraries::LibraryMember> {
+        use crate::symbol_resolver::{SymRecv, Symbol};
+        self.resolver()
+            .resolve_symbol(SymRecv::Type(internal), name, args)
+            .and_then(Symbol::instance)
+    }
+    fn resolve_companion(
+        &self,
+        internal: &str,
+        name: &str,
+        args: &[Ty],
+    ) -> Option<crate::libraries::LibraryMember> {
+        use crate::symbol_resolver::{SymRecv, Symbol};
+        self.resolver()
+            .resolve_symbol(SymRecv::Type(internal), name, args)
+            .and_then(Symbol::companion)
+    }
+    fn resolve_constructor(
+        &self,
+        internal: &str,
+        args: &[Ty],
+    ) -> Option<crate::libraries::LibraryMember> {
+        use crate::symbol_resolver::{SymRecv, Symbol};
+        self.resolver()
+            .resolve_symbol(SymRecv::Type(internal), "", args)
+            .and_then(Symbol::constructor)
+    }
+    fn resolve_synthetic_constructor(
+        &self,
+        internal: &str,
+        args: &[Ty],
+    ) -> Option<crate::symbol_resolver::SyntheticCtorCall> {
+        use crate::symbol_resolver::{SymRecv, Symbol};
+        self.resolver()
+            .resolve_symbol(SymRecv::Type(internal), "", args)
+            .and_then(Symbol::synthetic_constructor)
+    }
+
     /// Resolve a delegate's `getValue` operator — a MEMBER on the delegate type, or a classpath
     /// EXTENSION (`Lazy.getValue` in `LazyKt`). Returns `(owner, descriptor, ret, inline, is_ext)`:
     /// a member is emitted `delegate.getValue(thisRef, prop)`; an extension is the static
@@ -4687,12 +4784,7 @@ impl<'a> Lower<'a> {
             });
             return Some(self.coerce_generic_read(mc, call_expr, ret));
         }
-        let m = crate::symbol_resolver::resolve_instance(
-            &*self.syms.libraries,
-            &internal,
-            name,
-            &self.arg_tys(args),
-        )?;
+        let m = self.resolve_instance(&internal, name, &self.arg_tys(args))?;
         let owner = m.owner.clone().unwrap_or_else(|| internal.clone());
         let is_iface = self.library_type_is_interface(&owner);
         let field = self.syms.libraries.object_instance_field(&internal)?;
@@ -5424,9 +5516,9 @@ impl<'a> Lower<'a> {
                 }));
             }
         }
-        if let Some(ctor) =
-            crate::symbol_resolver::resolve_constructor(&*self.syms.libraries, internal, &arg_tys)
-                .filter(|c| c.params.len() == args.len())
+        if let Some(ctor) = self
+            .resolve_constructor(internal, &arg_tys)
+            .filter(|c| c.params.len() == args.len())
         {
             let mut a = Vec::new();
             for (arg, pty) in args.iter().zip(&ctor.params) {
@@ -5443,11 +5535,7 @@ impl<'a> Lower<'a> {
         // parameter (`Rec(id: Vid, …)` → `<init>(String, …, marker)`, caller appends `null`), or omitted
         // DEFAULTS (`Cfg(1)` for `Cfg(a, b = 9)` → `<init>(int, int, int mask, marker)`, caller appends a
         // placeholder per omitted param + the bitmask + `null`). See `resolve_synthetic_constructor`.
-        if let Some(sc) = crate::symbol_resolver::resolve_synthetic_constructor(
-            &*self.syms.libraries,
-            internal,
-            &arg_tys,
-        ) {
+        if let Some(sc) = self.resolve_synthetic_constructor(internal, &arg_tys) {
             let mut a = Vec::new();
             for (i, pty) in sc.real_params.iter().enumerate() {
                 if i < sc.provided {
@@ -5832,12 +5920,7 @@ impl<'a> Lower<'a> {
                         )
                     } else {
                         // A library member read through its getter (`IndexedValue.value` → `getValue()`).
-                        let m = crate::symbol_resolver::resolve_instance_member(
-                            &*self.syms.libraries,
-                            it_ty,
-                            &getter,
-                            &[],
-                        )?;
+                        let m = self.resolve_instance_member(it_ty, &getter, &[])?;
                         let is_iface = self.library_type_is_interface(&internal);
                         let c = self.ir.add_expr(IrExpr::Call {
                             callee: Callee::Virtual {
@@ -5899,12 +5982,7 @@ impl<'a> Lower<'a> {
                     args: vec![],
                 });
                 (c, ret)
-            } else if let Some(m) = crate::symbol_resolver::resolve_instance_member(
-                &*self.syms.libraries,
-                it_ty,
-                &comp,
-                &[],
-            ) {
+            } else if let Some(m) = self.resolve_instance_member(it_ty, &comp, &[]) {
                 let is_iface = self.library_type_is_interface(&internal);
                 let c = self.ir.add_expr(IrExpr::Call {
                     callee: Callee::Virtual {
@@ -5948,12 +6026,7 @@ impl<'a> Lower<'a> {
                 (c, ret)
             } else {
                 // An indexable type: `componentN` is the inline `get(N-1)`.
-                let m = crate::symbol_resolver::resolve_instance_member(
-                    &*self.syms.libraries,
-                    it_ty,
-                    "get",
-                    &[Ty::Int],
-                )?;
+                let m = self.resolve_instance_member(it_ty, "get", &[Ty::Int])?;
                 let is_iface = self.library_type_is_interface(&internal);
                 let i = self.ir.add_expr(IrExpr::Const(IrConst::Int(idx as i32)));
                 let c = self.ir.add_expr(IrExpr::Call {
@@ -7423,13 +7496,9 @@ impl<'a> Lower<'a> {
             // returning 0 for `null`) — the null-guarded-ternary form is a future parity item. The member's
             // JVM owner/descriptor come from the provider (mapped builtin), not a `java/lang/*` core literal.
             t if !nullable && t.non_null().kotlin_class_internal() == Some("kotlin/String") => {
-                let m = crate::symbol_resolver::resolve_instance_member(
-                    &*self.syms.libraries,
-                    t.non_null(),
-                    "hashCode",
-                    &[],
-                )?
-                .member;
+                let m = self
+                    .resolve_instance_member(t.non_null(), "hashCode", &[])?
+                    .member;
                 let owner = m.owner.clone()?;
                 Some(self.ir.add_expr(IrExpr::Call {
                     callee: Callee::Virtual {
@@ -8030,8 +8099,7 @@ impl<'a> Lower<'a> {
     /// Whether classpath type `internal` is a kotlinx `StringFormat` — detected structurally by the
     /// presence of the 2-arg `encodeToString(SerializationStrategy, Any)` member (no hardcoded subtype).
     fn is_string_format(&self, internal: &str) -> bool {
-        crate::symbol_resolver::resolve_instance(
-            &*self.syms.libraries,
+        self.resolve_instance(
             internal,
             "encodeToString",
             &[
@@ -9138,7 +9206,7 @@ impl<'a> Lower<'a> {
         }
         // The resolver fully decides property-vs-method, null-safety, and emittability and hands back the
         // getter's owner/name + the property type — the lowerer just emits it.
-        let p = crate::symbol_resolver::resolve_property_ref(&*self.syms.libraries, rty, name)?;
+        let p = self.resolve_property_ref(rty, name)?;
         let owner = p.owner;
         let prop_ty = ty_to_ir(p.prop_ty);
         let cap = self.expr(recv)?;
@@ -9873,7 +9941,7 @@ impl<'a> Lower<'a> {
             {
                 return None;
             }
-            let m = crate::symbol_resolver::resolve_instance_ref(&*self.syms.libraries, rty, name)?;
+            let m = self.resolve_instance_ref(rty, name)?;
             if m.suspend {
                 return None;
             }
@@ -10180,12 +10248,7 @@ impl<'a> Lower<'a> {
             }
         }
         let arg_tys: Vec<Ty> = args.iter().map(|&a| self.info.ty(a)).collect();
-        if let Some(m) = crate::symbol_resolver::resolve_instance(
-            &*self.syms.libraries,
-            &internal,
-            name,
-            &arg_tys,
-        ) {
+        if let Some(m) = self.resolve_instance(&internal, name, &arg_tys) {
             if m.params.len() == args.len() {
                 let is_iface = self.library_type_is_interface(&internal);
                 let mut a = Vec::new();
@@ -10649,42 +10712,27 @@ impl<'a> Lower<'a> {
         // The iterator comes from a member `iterator()` (`List`), or — when there is none — the stdlib
         // `iterator` *extension* (`for (e in map)` uses `Map.iterator()` → `Iterator<Map.Entry<K,V>>`).
         // `iter_ret` is the (possibly parameterized) iterator type; `ext_iter` flags the static call.
-        let (iter_ret, iter_desc, iter_owner, iter_ext, iter_inline) = if let Some(m) =
-            crate::symbol_resolver::resolve_instance(
-                &*self.syms.libraries,
-                internal,
-                "iterator",
-                &[],
-            ) {
-            (
-                m.ret,
-                m.descriptor,
-                internal.to_string(),
-                false,
-                InlineKind::None,
-            )
-        } else if let Some(c) = self.info.synthetic_ext(iterable, "iterator").cloned() {
-            // `iterator` is an EXTENSION — public (an `Iterable`-shaped receiver) or `@InlineOnly`
-            // (`Map<K,V>.iterator()` inlines to `entries.iterator()`). The CHECKER resolved and recorded
-            // it (keyed by the iterable expr); `c.inline` drives whether the emit splices it or calls it.
-            (c.ret, c.descriptor, c.owner, true, c.inline)
-        } else {
-            return None;
-        };
+        let (iter_ret, iter_desc, iter_owner, iter_ext, iter_inline) =
+            if let Some(m) = self.resolve_instance(internal, "iterator", &[]) {
+                (
+                    m.ret,
+                    m.descriptor,
+                    internal.to_string(),
+                    false,
+                    InlineKind::None,
+                )
+            } else if let Some(c) = self.info.synthetic_ext(iterable, "iterator").cloned() {
+                // `iterator` is an EXTENSION — public (an `Iterable`-shaped receiver) or `@InlineOnly`
+                // (`Map<K,V>.iterator()` inlines to `entries.iterator()`). The CHECKER resolved and recorded
+                // it (keyed by the iterable expr); `c.inline` drives whether the emit splices it or calls it.
+                (c.ret, c.descriptor, c.owner, true, c.inline)
+            } else {
+                return None;
+            };
         let iter_ty = iter_ret;
         let iter_internal = iter_ty.obj_internal()?.to_string();
-        let hasnext_m = crate::symbol_resolver::resolve_instance(
-            &*self.syms.libraries,
-            &iter_internal,
-            "hasNext",
-            &[],
-        )?;
-        let next_m = crate::symbol_resolver::resolve_instance(
-            &*self.syms.libraries,
-            &iter_internal,
-            "next",
-            &[],
-        )?;
+        let hasnext_m = self.resolve_instance(&iter_internal, "hasNext", &[])?;
+        let next_m = self.resolve_instance(&iter_internal, "next", &[])?;
         // The element is the iterator's type argument (`Iterator<Map.Entry<K,V>>`), else the iterable's
         // own (`List<Int>` → `Int`), else the type parameter's upper bound (`Any`). The JVM `Object`
         // realization + checkcast are the backend's concern, applied at the Ty→bytecode boundary.
@@ -11509,9 +11557,7 @@ impl<'a> Lower<'a> {
             .cloned()
             // Reuse the getter the checker resolved for this property read (keyed by the access
             // ExprId); resolve only when it was recorded through a different path.
-            .or_else(|| {
-                crate::symbol_resolver::resolve_property_member(&*self.syms.libraries, rt, name)
-            })
+            .or_else(|| self.resolve_property_member(rt, name))
             .map(|r| {
                 let m = r.member;
                 let physical_ret = m.physical_ret;
@@ -11537,8 +11583,7 @@ impl<'a> Lower<'a> {
     }
 
     fn lower_library_property_read_on(&mut self, recv: u32, rt: Ty, name: &str) -> Option<u32> {
-        let resolved =
-            crate::symbol_resolver::resolve_property_member(&*self.syms.libraries, rt, name)?;
+        let resolved = self.resolve_property_member(rt, name)?;
         let m = resolved.member;
         let owner = m.owner.clone().unwrap_or_else(|| {
             rt.kotlin_class_internal()
@@ -11566,12 +11611,7 @@ impl<'a> Lower<'a> {
         arg_exprs: Vec<u32>,
         arg_tys: &[Ty],
     ) -> Option<u32> {
-        let resolved = crate::symbol_resolver::resolve_instance_member(
-            &*self.syms.libraries,
-            rt,
-            name,
-            arg_tys,
-        )?;
+        let resolved = self.resolve_instance_member(rt, name, arg_tys)?;
         let ret = resolved.ret;
         let suspend = resolved.suspend;
         let m = resolved.member;
@@ -11983,12 +12023,7 @@ impl<'a> Lower<'a> {
             _ => None,
         };
         if let Some(internal) = &lib_owner {
-            if let Some(m) = crate::symbol_resolver::resolve_instance(
-                &*self.syms.libraries,
-                internal,
-                name,
-                &arg_tys,
-            ) {
+            if let Some(m) = self.resolve_instance(internal, name, &arg_tys) {
                 if m.params.len() == args.len() {
                     let owner = m.owner.clone().unwrap_or_else(|| internal.clone());
                     let is_iface = self.library_type_is_interface(&owner);
@@ -12020,14 +12055,7 @@ impl<'a> Lower<'a> {
             // Reuse the member the checker resolved for this call (keyed by the call `ExprId`); fall
             // back to resolving when it was recorded through a different path (see
             // [`TypeInfo::resolved_calls`]).
-            .or_else(|| {
-                crate::symbol_resolver::resolve_instance_member(
-                    &*self.syms.libraries,
-                    this_ty,
-                    name,
-                    &arg_tys,
-                )
-            })
+            .or_else(|| self.resolve_instance_member(this_ty, name, &arg_tys))
         {
             let member = member.member;
             let mut a = Vec::new();
@@ -14051,18 +14079,8 @@ impl<'a> Lower<'a> {
         let mutex_ty = self.info.ty(receiver);
         let mutex_internal = mutex_ty.obj_internal()?.to_string();
         let any = Ty::obj("kotlin/Any");
-        let lock_m = crate::symbol_resolver::resolve_instance(
-            &*self.syms.libraries,
-            &mutex_internal,
-            "lock",
-            &[any],
-        )?;
-        let unlock_m = crate::symbol_resolver::resolve_instance(
-            &*self.syms.libraries,
-            &mutex_internal,
-            "unlock",
-            &[any],
-        )?;
+        let lock_m = self.resolve_instance(&mutex_internal, "lock", &[any])?;
+        let unlock_m = self.resolve_instance(&mutex_internal, "unlock", &[any])?;
         let lock_owner = lock_m
             .owner
             .clone()
@@ -14186,26 +14204,11 @@ impl<'a> Lower<'a> {
     ) -> Option<u32> {
         let it_ty = self.info.ty(receiver);
         let internal = it_ty.obj_internal()?;
-        let iter_m = crate::symbol_resolver::resolve_instance(
-            &*self.syms.libraries,
-            internal,
-            "iterator",
-            &[],
-        )?;
+        let iter_m = self.resolve_instance(internal, "iterator", &[])?;
         let iter_ty = iter_m.ret;
         let iter_internal = iter_ty.obj_internal()?.to_string();
-        let hasnext_m = crate::symbol_resolver::resolve_instance(
-            &*self.syms.libraries,
-            &iter_internal,
-            "hasNext",
-            &[],
-        )?;
-        let next_m = crate::symbol_resolver::resolve_instance(
-            &*self.syms.libraries,
-            &iter_internal,
-            "next",
-            &[],
-        )?;
+        let hasnext_m = self.resolve_instance(&iter_internal, "hasNext", &[])?;
+        let next_m = self.resolve_instance(&iter_internal, "next", &[])?;
         let elem = iter_ty
             .type_args()
             .first()
@@ -14621,9 +14624,7 @@ impl<'a> Lower<'a> {
         // value (`Int` literal into a `Long` setter).
         if self.class_of(rt).is_none() {
             if let Ty::Obj(_, _) = &rt {
-                if let Some(setter) =
-                    crate::symbol_resolver::resolve_property_setter(&*self.syms.libraries, rt, name)
-                {
+                if let Some(setter) = self.resolve_property_setter(rt, name) {
                     let pty = setter
                         .params
                         .first()
@@ -14768,33 +14769,20 @@ impl<'a> Lower<'a> {
                 let (it, vt) = (self.info.ty(index), self.info.ty(value));
                 // `MutableList.set(Int, E)`, or `MutableMap.put(K, V)` — Kotlin's `m[k] = v`
                 // operator maps to `put` on a map.
-                let resolved = crate::symbol_resolver::resolve_instance(
-                    &*self.syms.libraries,
-                    internal,
-                    "set",
-                    &[it, vt],
-                )
-                .map(|m| ("set", m))
-                .or_else(|| {
-                    crate::symbol_resolver::resolve_instance(
-                        &*self.syms.libraries,
-                        internal,
-                        "put",
-                        &[it, vt],
-                    )
-                    .map(|m| ("put", m))
-                });
+                let resolved = self
+                    .resolve_instance(internal, "set", &[it, vt])
+                    .map(|m| ("set", m))
+                    .or_else(|| {
+                        self.resolve_instance(internal, "put", &[it, vt])
+                            .map(|m| ("put", m))
+                    });
                 if let Some((mname, m)) = resolved {
                     // A narrowing store into a primitive-element collection (`List<Byte>[i] = intVal`)
                     // needs `(value).toByte()` before boxing as the element wrapper — not yet modeled.
                     // Bail (skip the file) rather than box the wrong wrapper type.
-                    if let Some(elem) = crate::symbol_resolver::resolve_instance_member(
-                        &*self.syms.libraries,
-                        at,
-                        "get",
-                        &[it],
-                    )
-                    .map(|m| m.ret)
+                    if let Some(elem) = self
+                        .resolve_instance_member(at, "get", &[it])
+                        .map(|m| m.ret)
                     {
                         if self.has_scalar_value_repr(elem) && elem != vt {
                             return None;
@@ -15480,12 +15468,7 @@ impl<'a> Lower<'a> {
                 let Ty::Obj(internal, _) = rt else {
                     return None;
                 };
-                let resolved = crate::symbol_resolver::resolve_instance_member(
-                    &*self.syms.libraries,
-                    rt,
-                    "invoke",
-                    params,
-                )?;
+                let resolved = self.resolve_instance_member(rt, "invoke", params)?;
                 let recv = self.expr(receiver)?;
                 let ret = resolved.ret;
                 let member = resolved.member;
@@ -16097,12 +16080,7 @@ impl<'a> Lower<'a> {
                             } else {
                                 // A classpath instance method (`s?.substring(1)`).
                                 let arg_tys = self.arg_tys(&args);
-                                if let Some(m) = crate::symbol_resolver::resolve_instance(
-                                    &*self.syms.libraries,
-                                    &internal,
-                                    &name,
-                                    &arg_tys,
-                                ) {
+                                if let Some(m) = self.resolve_instance(&internal, &name, &arg_tys) {
                                     let mut a = Vec::new();
                                     for (arg, pt) in args.iter().zip(&m.params) {
                                         a.push(self.lower_arg(*arg, &ty_to_ir(*pt))?);
@@ -19909,13 +19887,7 @@ impl<'a> Lower<'a> {
                                             .method_descriptor(&sig.params, sig.ret)?,
                                     ))
                                 } else {
-                                    crate::symbol_resolver::resolve_instance(
-                                        &*self.syms.libraries,
-                                        sup,
-                                        &name,
-                                        &arg_tys,
-                                    )
-                                    .map(|m| {
+                                    self.resolve_instance(sup, &name, &arg_tys).map(|m| {
                                         (sup.clone(), false, m.params.clone(), m.descriptor.clone())
                                     })
                                 }
@@ -20073,13 +20045,7 @@ impl<'a> Lower<'a> {
                             || rty == Ty::String
                             || rty.obj_internal().map_or(false, |i| {
                                 self.syms.libraries.counted_loop_info(i).is_some()
-                                    || crate::symbol_resolver::resolve_instance(
-                                        &*self.syms.libraries,
-                                        i,
-                                        "iterator",
-                                        &[],
-                                    )
-                                    .is_some()
+                                    || self.resolve_instance(i, "iterator", &[]).is_some()
                                     || self.has_library_iterator_extension(receiver)
                             });
                         if iterable {
@@ -20115,13 +20081,7 @@ impl<'a> Lower<'a> {
                         {
                             let rty = self.info.ty(receiver);
                             let iterable = rty.obj_internal().is_some_and(|i| {
-                                crate::symbol_resolver::resolve_instance(
-                                    &*self.syms.libraries,
-                                    i,
-                                    "iterator",
-                                    &[],
-                                )
-                                .is_some()
+                                self.resolve_instance(i, "iterator", &[]).is_some()
                             });
                             if iterable && self.ast_subtree_suspends(lbody) {
                                 let param = ast::first_lambda_param_or_it(&params);
@@ -20161,13 +20121,7 @@ impl<'a> Lower<'a> {
                     {
                         let rty = self.info.ty(receiver);
                         let iterable = rty.obj_internal().map_or(false, |i| {
-                            crate::symbol_resolver::resolve_instance(
-                                &*self.syms.libraries,
-                                i,
-                                "iterator",
-                                &[],
-                            )
-                            .is_some()
+                            self.resolve_instance(i, "iterator", &[]).is_some()
                                 || self.has_library_iterator_extension(receiver)
                         });
                         if iterable && params.len() == 2 {
@@ -20777,13 +20731,7 @@ impl<'a> Lower<'a> {
                                 }
                             })
                             .and_then(|internal| {
-                                crate::symbol_resolver::resolve_instance(
-                                    &*self.syms.libraries,
-                                    &internal,
-                                    &name,
-                                    &arg_tys,
-                                )
-                                .map(|m| {
+                                self.resolve_instance(&internal, &name, &arg_tys).map(|m| {
                                     let owner = m.owner.clone().unwrap_or_else(|| internal.clone());
                                     let is_iface = self.library_type_is_interface(&owner);
                                     (
@@ -20881,14 +20829,7 @@ impl<'a> Lower<'a> {
                         // call `ExprId` (see [`TypeInfo::resolved_calls`]); reuse it so the call is
                         // resolved once. Fall back to resolving for a call the checker did not record
                         // through this path (its resolution came from an earlier branch above).
-                        .or_else(|| {
-                            crate::symbol_resolver::resolve_instance_member(
-                                &*self.syms.libraries,
-                                rt,
-                                &name,
-                                &self.arg_tys(&args),
-                            )
-                        })
+                        .or_else(|| self.resolve_instance_member(rt, &name, &self.arg_tys(&args)))
                     {
                         let recv = self.expr(receiver)?;
                         let ret = resolved.ret;
@@ -20925,16 +20866,11 @@ impl<'a> Lower<'a> {
                                 // Reuse the static member the checker resolved for this call (keyed by
                                 // the call ExprId); resolve only when not recorded.
                                 .or_else(|| {
-                                    crate::symbol_resolver::resolve_companion(
-                                        &*self.syms.libraries,
-                                        internal,
-                                        &name,
-                                        &self.arg_tys(&args),
-                                    )
-                                    // A `@JvmStatic suspend fun` is not CPS-lowered on this path — the
-                                    // checker leaves it unresolved, so this never fires; guard anyway to
-                                    // never emit a static call missing its `Continuation`.
-                                    .filter(|m| !m.suspend)
+                                    self.resolve_companion(internal, &name, &self.arg_tys(&args))
+                                        // A `@JvmStatic suspend fun` is not CPS-lowered on this path — the
+                                        // checker leaves it unresolved, so this never fires; guard anyway to
+                                        // never emit a static call missing its `Continuation`.
+                                        .filter(|m| !m.suspend)
                                 })
                                 .map(|m| (internal.to_string(), m))
                         })

@@ -3281,7 +3281,10 @@ fn infer_lit_ty_p(
             // Property read (`s.length`, `list.size`, `vc.value`): resolve through the FEDERATED source —
             // the same path the full checker uses, no hardcoded property names.
             let rt = infer_lit_ty_p(file, *receiver, class_names, fun_rets, props, src, up);
-            if let Some(m) = crate::symbol_resolver::resolve_property_member(src, rt, name) {
+            if let Some(m) = crate::symbol_resolver::SymbolResolver::new(src)
+                .resolve_symbol(crate::symbol_resolver::SymRecv::Value(rt), name, &[])
+                .and_then(crate::symbol_resolver::Symbol::property)
+            {
                 return m.ret;
             }
             // A property of a USER class being collected (invisible to the classpath `src`).
@@ -5174,6 +5177,104 @@ impl<'a> Checker<'a> {
             &self.fn_scope,
         )
     }
+
+    // Call-site sugar over the ONE resolution entry point [`SymbolResolver::resolve_symbol`]: each
+    // states only the syntax it wrote (a value/type receiver + name + args + a call/read/write/ref
+    // form) and reads the discovered [`Symbol`] variant it expects. Resolution itself lives entirely in
+    // `resolve_symbol`; these just spare every call site the `resolve_symbol(…).and_then(Symbol::…)`.
+    fn resolve_instance_member(
+        &self,
+        recv: Ty,
+        name: &str,
+        args: &[Ty],
+    ) -> Option<crate::symbol_resolver::ResolvedMember> {
+        use crate::symbol_resolver::{SymRecv, Symbol};
+        self.resolver()
+            .resolve_symbol(SymRecv::Value(recv), name, args)
+            .and_then(Symbol::call)
+    }
+    fn resolve_property_member(
+        &self,
+        recv: Ty,
+        name: &str,
+    ) -> Option<crate::symbol_resolver::ResolvedMember> {
+        use crate::symbol_resolver::{SymRecv, Symbol};
+        self.resolver()
+            .resolve_symbol(SymRecv::Value(recv), name, &[])
+            .and_then(Symbol::property)
+    }
+    fn resolve_property_setter(
+        &self,
+        recv: Ty,
+        name: &str,
+    ) -> Option<crate::libraries::LibraryCallable> {
+        use crate::symbol_resolver::{SymRecv, Symbol};
+        self.resolver()
+            .resolve_symbol(SymRecv::Value(recv), name, &[])
+            .and_then(Symbol::property_setter)
+    }
+    fn resolve_property_ref(
+        &self,
+        recv: Ty,
+        name: &str,
+    ) -> Option<crate::symbol_resolver::BoundPropertyRef> {
+        use crate::symbol_resolver::{SymRecv, Symbol};
+        self.resolver()
+            .resolve_symbol(SymRecv::Value(recv), name, &[])
+            .and_then(Symbol::property_ref)
+    }
+    fn resolve_instance_ref(
+        &self,
+        recv: Ty,
+        name: &str,
+    ) -> Option<crate::libraries::LibraryMember> {
+        use crate::symbol_resolver::{SymRecv, Symbol};
+        self.resolver()
+            .resolve_symbol(SymRecv::Value(recv), name, &[])
+            .and_then(Symbol::method_ref)
+    }
+    fn resolve_instance(
+        &self,
+        internal: &str,
+        name: &str,
+        args: &[Ty],
+    ) -> Option<crate::libraries::LibraryMember> {
+        use crate::symbol_resolver::{SymRecv, Symbol};
+        self.resolver()
+            .resolve_symbol(SymRecv::Type(internal), name, args)
+            .and_then(Symbol::instance)
+    }
+    fn resolve_companion(
+        &self,
+        internal: &str,
+        name: &str,
+        args: &[Ty],
+    ) -> Option<crate::libraries::LibraryMember> {
+        use crate::symbol_resolver::{SymRecv, Symbol};
+        self.resolver()
+            .resolve_symbol(SymRecv::Type(internal), name, args)
+            .and_then(Symbol::companion)
+    }
+    fn resolve_constructor(
+        &self,
+        internal: &str,
+        args: &[Ty],
+    ) -> Option<crate::libraries::LibraryMember> {
+        use crate::symbol_resolver::{SymRecv, Symbol};
+        self.resolver()
+            .resolve_symbol(SymRecv::Type(internal), "", args)
+            .and_then(Symbol::constructor)
+    }
+    fn resolve_synthetic_constructor(
+        &self,
+        internal: &str,
+        args: &[Ty],
+    ) -> Option<crate::symbol_resolver::SyntheticCtorCall> {
+        use crate::symbol_resolver::{SymRecv, Symbol};
+        self.resolver()
+            .resolve_symbol(SymRecv::Type(internal), "", args)
+            .and_then(Symbol::synthetic_constructor)
+    }
     /// Whether the current module declares a top-level function `name` (shadow-precedence test) — asked
     /// through the module source rather than touching `syms.funs` directly.
     fn module_declares(&self, name: &str) -> bool {
@@ -5233,13 +5334,8 @@ impl<'a> Checker<'a> {
             self.expect_call_args(&sig.params, false, arg_exprs, arg_tys);
             return Some(sig.ret);
         }
-        crate::symbol_resolver::resolve_instance_member(
-            &*self.syms.libraries,
-            receiver,
-            name,
-            arg_tys,
-        )
-        .map(|m| m.ret)
+        self.resolve_instance_member(receiver, name, arg_tys)
+            .map(|m| m.ret)
     }
     /// The number of context parameters of an UNAMBIGUOUS same-module top-level function `fname`
     /// (`context(a: A) fun fname()` → 1). `0` when the name is absent, overloaded (ambiguous — the
@@ -5394,13 +5490,8 @@ impl<'a> Checker<'a> {
                     .next()
                     .map(|m| (m.params, m.ret))
                     .or_else(|| {
-                        crate::symbol_resolver::resolve_instance_member(
-                            &*self.syms.libraries,
-                            receiver_ty,
-                            CALLABLE_INVOKE_OPERATOR,
-                            arg_tys,
-                        )
-                        .map(|m| (m.member.params, m.ret))
+                        self.resolve_instance_member(receiver_ty, CALLABLE_INVOKE_OPERATOR, arg_tys)
+                            .map(|m| (m.member.params, m.ret))
                     });
                 if let Some((params, ret)) = member {
                     (params, ret, InvokeKind::Operator { receiver_ty })
@@ -7259,13 +7350,8 @@ impl<'a> Checker<'a> {
                     }
                     // `str[i]` is the `String.get(Int): Char` operator.
                     if at == Ty::String {
-                        if let Some(ret) = crate::symbol_resolver::resolve_instance_member(
-                            &*self.syms.libraries,
-                            at,
-                            "get",
-                            &its,
-                        )
-                        .map(|m| m.ret)
+                        if let Some(ret) =
+                            self.resolve_instance_member(at, "get", &its).map(|m| m.ret)
                         {
                             return self.set(e, ret);
                         }
@@ -7299,12 +7385,7 @@ impl<'a> Checker<'a> {
                     return self.set(e, sig.ret);
                 }
                 // A library `get(i, j, …)` member (`List.get(Int)`, `Map.get(K)`).
-                if let Some(m) = crate::symbol_resolver::resolve_instance_member(
-                    &*self.syms.libraries,
-                    at,
-                    "get",
-                    &its,
-                ) {
+                if let Some(m) = self.resolve_instance_member(at, "get", &its) {
                     return self.set(e, m.ret);
                 }
                 self.diags.error(
@@ -7714,29 +7795,24 @@ impl<'a> Checker<'a> {
                             } else if let ("hashCode", []) = (name.as_str(), arg_tys.as_slice()) {
                                 Ty::Int // Int (not a reference), so safe-call rejection fires below
                             } else if recv == Ty::String {
-                                crate::symbol_resolver::resolve_instance_member(
-                                    &*self.syms.libraries,
-                                    recv,
-                                    &name,
-                                    &arg_tys,
-                                )
-                                .map(|m| m.ret)
-                                // A stdlib extension reached by `?.` on a `String` — resolve AND RECORD it
-                                // (keyed by the safe-call `ExprId`) for the lowerer, admitting `@InlineOnly`.
-                                .or_else(|| {
-                                    inline_arg_supported
-                                        .then(|| {
-                                            self.record_library_extension_call(
-                                                Some(e),
-                                                &name,
-                                                rt.non_null(),
-                                                &arg_tys,
-                                                &[],
-                                            )
-                                        })
-                                        .flatten()
-                                })
-                                .unwrap_or(Ty::Error)
+                                self.resolve_instance_member(recv, &name, &arg_tys)
+                                    .map(|m| m.ret)
+                                    // A stdlib extension reached by `?.` on a `String` — resolve AND RECORD it
+                                    // (keyed by the safe-call `ExprId`) for the lowerer, admitting `@InlineOnly`.
+                                    .or_else(|| {
+                                        inline_arg_supported
+                                            .then(|| {
+                                                self.record_library_extension_call(
+                                                    Some(e),
+                                                    &name,
+                                                    rt.non_null(),
+                                                    &arg_tys,
+                                                    &[],
+                                                )
+                                            })
+                                            .flatten()
+                                    })
+                                    .unwrap_or(Ty::Error)
                             } else if let Ty::Obj(internal, _) = recv {
                                 // A MODULE (user) class member only; a classpath / inherited-classpath
                                 // member falls through to the classpath selectors below (which pick by
@@ -7747,13 +7823,8 @@ impl<'a> Checker<'a> {
                                     .next()
                                     .map(|m| m.ret)
                                     .or_else(|| {
-                                        crate::symbol_resolver::resolve_instance(
-                                            &*self.syms.libraries,
-                                            internal,
-                                            &name,
-                                            &arg_tys,
-                                        )
-                                        .map(|m| m.ret)
+                                        self.resolve_instance(internal, &name, &arg_tys)
+                                            .map(|m| m.ret)
                                     })
                                     // A stdlib/classpath EXTENSION reached by `?.` (`c?.takeIf { … }`):
                                     // resolve AND RECORD the callable keyed by the safe-call `ExprId`, so the
@@ -8102,12 +8173,7 @@ impl<'a> Checker<'a> {
                         // takes `Object`, so a PRIMITIVE argument would need a box the lowering path here
                         // doesn't apply — leave that to the existing generic handling / a sound skip.
                         if rt.is_reference() {
-                            if let Some(m) = crate::symbol_resolver::resolve_instance_member(
-                                &*self.syms.libraries,
-                                lt,
-                                "compareTo",
-                                &[rt],
-                            ) {
+                            if let Some(m) = self.resolve_instance_member(lt, "compareTo", &[rt]) {
                                 if m.ret == Ty::Int {
                                     crate::trace_compiler!(
                                         "resolve",
@@ -8777,22 +8843,12 @@ impl<'a> Checker<'a> {
                         // A bound PROPERTY reference (`"kotlin"::length`) is a `KProperty0<T>` whose
                         // `get()` yields the value — resolve it (the resolver decides property-vs-method
                         // and emittability) BEFORE the plain-function path, so `.get()`/`.name` resolve.
-                        if crate::symbol_resolver::resolve_property_ref(
-                            &*self.syms.libraries,
-                            rty,
-                            &name,
-                        )
-                        .is_some()
-                        {
+                        if self.resolve_property_ref(rty, &name).is_some() {
                             if let Some(ty) = self.property_ref_ty(0, false) {
                                 return self.set(e, ty);
                             }
                         }
-                        if let Some(m) = crate::symbol_resolver::resolve_instance_ref(
-                            &*self.syms.libraries,
-                            rty,
-                            &name,
-                        ) {
+                        if let Some(m) = self.resolve_instance_ref(rty, &name) {
                             if !m.suspend && m.ret != Ty::Nothing {
                                 return self.set(e, Ty::fun(m.params.clone(), m.ret));
                             }
@@ -9216,12 +9272,7 @@ impl<'a> Checker<'a> {
             {
                 continue;
             }
-            if let Some(m) = crate::symbol_resolver::resolve_instance_member(
-                &*self.syms.libraries,
-                Ty::obj(&sup),
-                name,
-                arg_tys,
-            ) {
+            if let Some(m) = self.resolve_instance_member(Ty::obj(&sup), name, arg_tys) {
                 let ret = m.ret;
                 self.resolved_calls.insert(call, ResolvedCall::Member(m));
                 return Some(ret);
@@ -9250,12 +9301,7 @@ impl<'a> Checker<'a> {
             return Some(Ty::String);
         }
         if rt == Ty::String {
-            if let Some(m) = crate::symbol_resolver::resolve_instance_member(
-                &*self.syms.libraries,
-                rt,
-                name,
-                arg_tys,
-            ) {
+            if let Some(m) = self.resolve_instance_member(rt, name, arg_tys) {
                 let ret = m.ret;
                 self.resolved_calls.insert(call, ResolvedCall::Member(m));
                 return Some(ret);
@@ -9298,12 +9344,7 @@ impl<'a> Checker<'a> {
                     );
                 }
             }
-            if let Some(m) = crate::symbol_resolver::resolve_instance_member(
-                &*self.syms.libraries,
-                rt,
-                name,
-                arg_tys,
-            ) {
+            if let Some(m) = self.resolve_instance_member(rt, name, arg_tys) {
                 let ret = m.ret;
                 self.resolved_calls.insert(call, ResolvedCall::Member(m));
                 return Some(ret);
@@ -9837,14 +9878,10 @@ impl<'a> Checker<'a> {
     /// constructor, or a SYNTHETIC default/marker overload (a value-class-typed parameter, or omitted
     /// defaults). The lowerer (`lower_external_new`) fills the marker/placeholder/bitmask args to match.
     fn library_ctor_resolves(&self, internal: &str, arg_tys: &[Ty]) -> bool {
-        crate::symbol_resolver::resolve_constructor(&*self.syms.libraries, internal, arg_tys)
-            .is_some()
-            || crate::symbol_resolver::resolve_synthetic_constructor(
-                &*self.syms.libraries,
-                internal,
-                arg_tys,
-            )
-            .is_some()
+        self.resolve_constructor(internal, arg_tys).is_some()
+            || self
+                .resolve_synthetic_constructor(internal, arg_tys)
+                .is_some()
     }
 
     fn ctor_result(&mut self, call: ExprId, internal: &str) -> Ty {
@@ -10039,9 +10076,7 @@ impl<'a> Checker<'a> {
         }
         // Library-type property read (`list.size`): semantic property metadata first, source-owned
         // physical getter fallback second. Mapped builtins stay in the symbol provider.
-        if let Some(m) =
-            crate::symbol_resolver::resolve_property_member(&*self.syms.libraries, rt, name)
-        {
+        if let Some(m) = self.resolve_property_member(rt, name) {
             // Record the resolved getter so the lowerer reuses it (keyed by the member-access
             // ExprId; `lower_member_read_on` reads the same map — see [`TypeInfo::resolved_members`]).
             let ret = m.ret;
@@ -10068,9 +10103,7 @@ impl<'a> Checker<'a> {
             }
             return getter.ret;
         }
-        if let Some(m) =
-            crate::symbol_resolver::resolve_instance_member(&*self.syms.libraries, rt, name, &[])
-        {
+        if let Some(m) = self.resolve_instance_member(rt, name, &[]) {
             if m.ret.is_read_value_result() {
                 return m.ret;
             }
@@ -10510,11 +10543,7 @@ impl<'a> Checker<'a> {
                                 "resolve",
                                 "classpath nested constructor {qualified} -> {internal}"
                             );
-                            if let Some(m) = crate::symbol_resolver::resolve_constructor(
-                                &*self.syms.libraries,
-                                &internal,
-                                &arg_tys,
-                            ) {
+                            if let Some(m) = self.resolve_constructor(&internal, &arg_tys) {
                                 self.expect_call_args(&m.params, false, args, &arg_tys);
                             }
                             return Ty::obj(&internal);
@@ -10606,12 +10635,7 @@ impl<'a> Checker<'a> {
                                 return sig.ret;
                             }
                             // A classpath base-class method (`class C : ArrayList<…>() { … super.add(x) }`).
-                            if let Some(m) = crate::symbol_resolver::resolve_instance(
-                                &*self.syms.libraries,
-                                &sup,
-                                &name,
-                                &arg_tys,
-                            ) {
+                            if let Some(m) = self.resolve_instance(&sup, &name, &arg_tys) {
                                 return m.ret;
                             }
                         }
@@ -10703,12 +10727,7 @@ impl<'a> Checker<'a> {
                         }
                         if let Some(internal) = self.imports.get(&cls).cloned() {
                             let arg_tys = self.arg_tys(args);
-                            return match crate::symbol_resolver::resolve_companion(
-                                &*self.syms.libraries,
-                                &internal,
-                                &name,
-                                &arg_tys,
-                            ) {
+                            return match self.resolve_companion(&internal, &name, &arg_tys) {
                                 Some(m) => {
                                     // Type the class-name receiver as its own type so the LOWERING emits
                                     // the static call (`invokestatic <internal>.name`) via the classpath
@@ -10727,8 +10746,7 @@ impl<'a> Checker<'a> {
                                         .resolve_type(&internal)
                                         .and_then(|lt| lt.companion_object)
                                         .and_then(|(_, cty)| {
-                                            crate::symbol_resolver::resolve_instance_member(
-                                                &*self.syms.libraries,
+                                            self.resolve_instance_member(
                                                 Ty::obj(&cty),
                                                 &name,
                                                 &arg_tys,
@@ -10768,14 +10786,11 @@ impl<'a> Checker<'a> {
                                                 .resolve_type(&internal)
                                                 .is_some_and(|t| t.is_object());
                                             if is_object {
-                                                if let Some(m) =
-                                                    crate::symbol_resolver::resolve_instance_member(
-                                                        &*self.syms.libraries,
-                                                        Ty::obj(&internal),
-                                                        &name,
-                                                        &arg_tys,
-                                                    )
-                                                {
+                                                if let Some(m) = self.resolve_instance_member(
+                                                    Ty::obj(&internal),
+                                                    &name,
+                                                    &arg_tys,
+                                                ) {
                                                     crate::trace_compiler!(
                                                         "resolve",
                                                         "classpath object instance member {cls}.{name} on {internal}"
@@ -11022,12 +11037,7 @@ impl<'a> Checker<'a> {
                     return Ty::String; // intrinsic on any type
                 }
                 if rt == Ty::String {
-                    if let Some(m) = crate::symbol_resolver::resolve_instance_member(
-                        &*self.syms.libraries,
-                        rt,
-                        &name,
-                        &arg_tys,
-                    ) {
+                    if let Some(m) = self.resolve_instance_member(rt, &name, &arg_tys) {
                         let ret = m.ret;
                         self.resolved_calls.insert(call, ResolvedCall::Member(m));
                         return ret;
@@ -11046,12 +11056,7 @@ impl<'a> Checker<'a> {
                         return Ty::String;
                     }
                 }
-                if let Some(m) = crate::symbol_resolver::resolve_instance_member(
-                    &*self.syms.libraries,
-                    rt,
-                    &name,
-                    &arg_tys,
-                ) {
+                if let Some(m) = self.resolve_instance_member(rt, &name, &arg_tys) {
                     crate::trace_compiler!(
                         "resolve",
                         "RIM-9451 name={name} rt={rt:?} -> ret={:?}",
@@ -11194,12 +11199,7 @@ impl<'a> Checker<'a> {
                         }
                     }
                     // A classpath Java object: resolve the instance method via the `.class` reader.
-                    if let Some(m) = crate::symbol_resolver::resolve_instance_member(
-                        &*self.syms.libraries,
-                        rt,
-                        &name,
-                        &arg_tys,
-                    ) {
+                    if let Some(m) = self.resolve_instance_member(rt, &name, &arg_tys) {
                         return m.ret;
                     }
                     // A user class that EXTENDS a classpath type inherits that supertype's members
@@ -11585,16 +11585,12 @@ impl<'a> Checker<'a> {
                 // static method on the object class, so it lands in the type's `companion` (static) list —
                 // not an instance member. Resolve it there as a static call on the receiver's type.
                 if let Some(internal) = rt.obj_internal() {
-                    if let Some(m) = crate::symbol_resolver::resolve_companion(
-                        &*self.syms.libraries,
-                        internal,
-                        &name,
-                        &arg_tys,
-                    )
-                    // A `@JvmStatic suspend fun` keeps its physical `Continuation` param here (the
-                    // companion path doesn't strip/CPS it), so leave it unresolved rather than
-                    // miscompile the calling convention.
-                    .filter(|m| !m.suspend)
+                    if let Some(m) = self
+                        .resolve_companion(internal, &name, &arg_tys)
+                        // A `@JvmStatic suspend fun` keeps its physical `Continuation` param here (the
+                        // companion path doesn't strip/CPS it), so leave it unresolved rather than
+                        // miscompile the calling convention.
+                        .filter(|m| !m.suspend)
                     {
                         self.expect_call_args(&m.params, false, args, &arg_tys);
                         // Record the resolved static member so the lowerer emits it without
@@ -12204,11 +12200,7 @@ impl<'a> Checker<'a> {
                                                 .map(|a| self.expr_types[a.0 as usize])
                                                 .collect();
                                             if let Some(m) =
-                                                crate::symbol_resolver::resolve_constructor(
-                                                    &*self.syms.libraries,
-                                                    &internal,
-                                                    &tys,
-                                                )
+                                                self.resolve_constructor(&internal, &tys)
                                             {
                                                 for (p, a) in m.params.iter().zip(&sel) {
                                                     self.expect_assignable(
@@ -12398,13 +12390,7 @@ impl<'a> Checker<'a> {
                         // resolution (the call then skips) rather than risk a wrong binding.
                         t.obj_internal()
                             .is_some_and(|i| self.syms.method_of(i, &fname).is_some())
-                            || crate::symbol_resolver::resolve_instance_member(
-                                &*self.syms.libraries,
-                                t,
-                                &fname,
-                                &arg_tys,
-                            )
-                            .is_some()
+                            || self.resolve_instance_member(t, &fname, &arg_tys).is_some()
                     });
                     if ctx_count > 0
                         && !shadowed_by_member
@@ -12707,12 +12693,9 @@ impl<'a> Checker<'a> {
                             }
                         }
                     }
-                    if let Some(m) = crate::symbol_resolver::resolve_instance_member(
-                        &*self.syms.libraries,
-                        Ty::obj(&internal),
-                        &fname,
-                        &arg_tys,
-                    ) {
+                    if let Some(m) =
+                        self.resolve_instance_member(Ty::obj(&internal), &fname, &arg_tys)
+                    {
                         crate::trace_compiler!(
                             "resolve",
                             "unqualified object-member import {fname}() -> {internal}.{fname}"
@@ -12754,13 +12737,9 @@ impl<'a> Checker<'a> {
                 // `invoke` is the only way to "construct" it (`InstanceInternalId(uuid)` in mission-core).
                 if self.lookup(&fname).is_none() {
                     if let Some(ct) = self.classpath_companion_ty(&fname) {
-                        let has_invoke = crate::symbol_resolver::resolve_instance_member(
-                            &*self.syms.libraries,
-                            ct,
-                            CALLABLE_INVOKE_OPERATOR,
-                            &arg_tys,
-                        )
-                        .is_some_and(|m| !m.member.suspend);
+                        let has_invoke = self
+                            .resolve_instance_member(ct, CALLABLE_INVOKE_OPERATOR, &arg_tys)
+                            .is_some_and(|m| !m.member.suspend);
                         if has_invoke {
                             // Type the callee name as the companion instance so lowering reads it as the
                             // `getstatic Type.Companion` receiver; `record_invoke` selects the operator.
@@ -13074,14 +13053,7 @@ impl<'a> Checker<'a> {
                         // seam — which knows its own getter naming/`@JvmName` mangling.
                         let pty = internal
                             .and_then(|i| self.lookup_prop(i, prop).map(|(t, _)| t))
-                            .or_else(|| {
-                                crate::symbol_resolver::resolve_property_member(
-                                    &*self.syms.libraries,
-                                    it,
-                                    prop,
-                                )
-                                .map(|m| m.ret)
-                            });
+                            .or_else(|| self.resolve_property_member(it, prop).map(|m| m.ret));
                         match pty {
                             Some(t) => self.declare(name, t, *is_var),
                             None => {
@@ -13109,13 +13081,7 @@ impl<'a> Checker<'a> {
                                 .method_of(i, &comp)
                                 .map(|sig| sig.ret)
                                 .or_else(|| {
-                                    crate::symbol_resolver::resolve_instance_member(
-                                        &*self.syms.libraries,
-                                        it,
-                                        &comp,
-                                        &[],
-                                    )
-                                    .map(|m| m.ret)
+                                    self.resolve_instance_member(it, &comp, &[]).map(|m| m.ret)
                                 })
                         })
                         // `componentN` as a stdlib *extension* — a public one (`List.component1()`) or
@@ -13133,13 +13099,8 @@ impl<'a> Checker<'a> {
                         // element type from `get(Int)` (which kotlinc inlines the component to).
                         .or_else(|| {
                             internal.and_then(|_| {
-                                crate::symbol_resolver::resolve_instance_member(
-                                    &*self.syms.libraries,
-                                    it,
-                                    "get",
-                                    &[Ty::Int],
-                                )
-                                .map(|m| m.ret)
+                                self.resolve_instance_member(it, "get", &[Ty::Int])
+                                    .map(|m| m.ret)
                             })
                         });
                     match ty {
@@ -13308,13 +13269,7 @@ impl<'a> Checker<'a> {
                                         .error(span, "'val' cannot be reassigned.".to_string());
                                 }
                                 self.expect_assignable(lty, vt, span, "assignment");
-                            } else if let Some(setter) =
-                                crate::symbol_resolver::resolve_property_setter(
-                                    &*self.syms.libraries,
-                                    rt,
-                                    &name,
-                                )
-                            {
+                            } else if let Some(setter) = self.resolve_property_setter(rt, &name) {
                                 // A `var` member of a CLASSPATH type: its setter comes from `@Metadata`
                                 // (the `properties` query), not the user-declared `props` map. A setter
                                 // existing means the property is a `var`; the value is checked against
@@ -13383,21 +13338,9 @@ impl<'a> Checker<'a> {
                     }
                     true
                 } else {
-                    crate::symbol_resolver::resolve_instance_member(
-                        &*self.syms.libraries,
-                        at,
-                        "set",
-                        &set_args,
-                    )
-                    .is_some()
+                    self.resolve_instance_member(at, "set", &set_args).is_some()
                         || (single_index
-                            && crate::symbol_resolver::resolve_instance_member(
-                                &*self.syms.libraries,
-                                at,
-                                "put",
-                                &set_args,
-                            )
-                            .is_some())
+                            && self.resolve_instance_member(at, "put", &set_args).is_some())
                 };
                 if !ok && at != Ty::Error {
                     self.diags.error(
@@ -13533,14 +13476,7 @@ impl<'a> Checker<'a> {
                         Ty::Obj(internal, args) => {
                             if let Some(info) = self.syms.libraries.counted_loop_info(internal) {
                                 info.elem
-                            } else if crate::symbol_resolver::resolve_instance(
-                                &*self.syms.libraries,
-                                internal,
-                                "iterator",
-                                &[],
-                            )
-                            .is_some()
-                            {
+                            } else if self.resolve_instance(internal, "iterator", &[]).is_some() {
                                 args.first()
                                     .copied()
                                     .unwrap_or_else(|| Ty::obj("kotlin/Any"))
