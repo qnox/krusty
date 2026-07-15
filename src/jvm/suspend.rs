@@ -3026,6 +3026,7 @@ fn build_continuation_class(
         secondary_ctors: vec![],
         has_primary_ctor: true,
         applied_annotations: Vec::new(),
+        field_annotations: Vec::new(),
         runtime_retained: false,
     };
     ir.add_class(class)
