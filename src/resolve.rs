@@ -4607,10 +4607,9 @@ pub fn check_file(file: &File, syms: &mut SymbolTable, diags: &mut DiagSink) -> 
                         CtorDelegation::None => {}
                     }
                     if let Some(body) = sc.body {
-                        let prev = c.ret_ty;
-                        c.ret_ty = Ty::Unit;
-                        c.expr(body);
-                        c.ret_ty = prev;
+                        c.with_ret(Ty::Unit, |c| {
+                            c.expr(body);
+                        });
                     }
                     c.pop_scope();
                 }
@@ -4699,41 +4698,32 @@ pub fn check_file(file: &File, syms: &mut SymbolTable, diags: &mut DiagSink) -> 
                         })
                         .unwrap_or(Ty::Error);
                     if let Some(getter) = &bp.getter {
-                        let prev_ret = c.ret_ty;
-                        let prev_field = c.field_ty;
-                        c.ret_ty = prop_ty;
-                        c.field_ty = Some(prop_ty);
-                        match getter {
+                        c.with_ret_field(prop_ty, Some(prop_ty), |c| match getter {
                             FunBody::Expr(g) => {
                                 let gt = c.expr(*g);
-                                c.expect_assignable(c.ret_ty, gt, c.span(*g), "getter body");
+                                c.expect_assignable(prop_ty, gt, c.span(*g), "getter body");
                             }
                             FunBody::Block(g) => {
                                 let _ = c.expr(*g);
                             }
                             FunBody::None => {}
-                        }
-                        c.ret_ty = prev_ret;
-                        c.field_ty = prev_field;
+                        });
                     }
                     if let Some(setter) = &bp.setter {
                         if let Some(body) = &setter.body {
-                            let prev_ret = c.ret_ty;
-                            let prev_field = c.field_ty;
-                            c.ret_ty = Ty::Unit;
-                            c.field_ty = Some(prop_ty);
-                            c.push_scope();
-                            let pname = crate::ast::setter_param_or_value(setter.param.as_ref());
-                            c.declare(&pname, prop_ty, true);
-                            match body {
-                                FunBody::Expr(g) | FunBody::Block(g) => {
-                                    let _ = c.expr(*g);
+                            c.with_ret_field(Ty::Unit, Some(prop_ty), |c| {
+                                c.push_scope();
+                                let pname =
+                                    crate::ast::setter_param_or_value(setter.param.as_ref());
+                                c.declare(&pname, prop_ty, true);
+                                match body {
+                                    FunBody::Expr(g) | FunBody::Block(g) => {
+                                        let _ = c.expr(*g);
+                                    }
+                                    FunBody::None => {}
                                 }
-                                FunBody::None => {}
-                            }
-                            c.pop_scope();
-                            c.ret_ty = prev_ret;
-                            c.field_ty = prev_field;
+                                c.pop_scope();
+                            });
                         }
                     }
                 }
@@ -4848,48 +4838,37 @@ pub fn check_file(file: &File, syms: &mut SymbolTable, diags: &mut DiagSink) -> 
                 // property type for the accessor body (like a member accessor).
                 let has_backing_field = p.receiver.is_none() && p.init.is_some();
                 if let Some(g) = &p.getter {
-                    let prev = c.ret_ty;
-                    let prev_field = c.field_ty;
-                    c.ret_ty = prop_ty;
-                    if has_backing_field {
-                        c.field_ty = Some(prop_ty);
-                    }
-                    match g {
+                    let field_ty = has_backing_field.then_some(prop_ty);
+                    c.with_ret_field(prop_ty, field_ty, |c| match g {
                         FunBody::Expr(e) => {
                             let gt = c.expr(*e);
-                            c.expect_assignable(c.ret_ty, gt, c.span(*e), "getter body");
+                            c.expect_assignable(prop_ty, gt, c.span(*e), "getter body");
                         }
                         FunBody::Block(b) => {
                             let _ = c.expr(*b);
                         }
                         FunBody::None => {}
-                    }
-                    c.ret_ty = prev;
-                    c.field_ty = prev_field;
+                    });
                 }
                 // A setter body: an extension property's is checked with `this` = receiver; a top-level
                 // backing-field property's binds `field` to the property type. Both bind the value param.
                 if p.receiver.is_some() || has_backing_field {
                     if let Some(setter) = &p.setter {
                         if let Some(body) = &setter.body {
-                            let prev = c.ret_ty;
-                            let prev_field = c.field_ty;
-                            c.ret_ty = Ty::Unit;
-                            if has_backing_field {
-                                c.field_ty = Some(prop_ty);
-                            }
-                            c.push_scope();
-                            let pname = crate::ast::setter_param_or_value(setter.param.as_ref());
-                            c.declare(&pname, prop_ty, true);
-                            match body {
-                                FunBody::Expr(g) | FunBody::Block(g) => {
-                                    let _ = c.expr(*g);
+                            let field_ty = has_backing_field.then_some(prop_ty);
+                            c.with_ret_field(Ty::Unit, field_ty, |c| {
+                                c.push_scope();
+                                let pname =
+                                    crate::ast::setter_param_or_value(setter.param.as_ref());
+                                c.declare(&pname, prop_ty, true);
+                                match body {
+                                    FunBody::Expr(g) | FunBody::Block(g) => {
+                                        let _ = c.expr(*g);
+                                    }
+                                    FunBody::None => {}
                                 }
-                                FunBody::None => {}
-                            }
-                            c.pop_scope();
-                            c.ret_ty = prev;
-                            c.field_ty = prev_field;
+                                c.pop_scope();
+                            });
                         }
                     }
                 }
@@ -5106,6 +5085,27 @@ impl crate::assignable::TypeOracle for Checker<'_> {
 }
 
 impl<'a> Checker<'a> {
+    fn with_ret<R>(&mut self, ret_ty: Ty, f: impl FnOnce(&mut Self) -> R) -> R {
+        let prev = std::mem::replace(&mut self.ret_ty, ret_ty);
+        let r = f(self);
+        self.ret_ty = prev;
+        r
+    }
+
+    fn with_ret_field<R>(
+        &mut self,
+        ret_ty: Ty,
+        field_ty: Option<Ty>,
+        f: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        let prev_ret = std::mem::replace(&mut self.ret_ty, ret_ty);
+        let prev_field = std::mem::replace(&mut self.field_ty, field_ty);
+        let r = f(self);
+        self.ret_ty = prev_ret;
+        self.field_ty = prev_field;
+        r
+    }
+
     /// The arg-binding call-resolution layer over this checker's [`SymbolSource`]. Cheap to construct.
     fn resolver(&self) -> crate::symbol_resolver::SymbolResolver<'_> {
         crate::symbol_resolver::SymbolResolver::new_scoped_with_module(
@@ -13688,27 +13688,26 @@ impl<'a> Checker<'a> {
         );
 
         // Check the body (for a block body or when return type was already inferred above for expr).
-        let prev_ret = self.ret_ty;
-        self.ret_ty = ret_ty;
-        self.push_local_funs();
-        self.push_scope();
-        for (p, &ty) in f.params.iter().zip(&params) {
-            self.declare(&p.name, ty, false);
-        }
-        match &f.body.clone() {
-            FunBody::Expr(e) => {
-                // Already checked above for inference; re-check to fill in expr_types.
-                let t = self.expr(*e);
-                self.expect_assignable(ret_ty, t, self.span(*e), "local function body");
+        self.with_ret(ret_ty, |c| {
+            c.push_local_funs();
+            c.push_scope();
+            for (p, &ty) in f.params.iter().zip(&params) {
+                c.declare(&p.name, ty, false);
             }
-            FunBody::Block(b) => {
-                let _ = self.expr(*b);
+            match &f.body.clone() {
+                FunBody::Expr(e) => {
+                    // Already checked above for inference; re-check to fill in expr_types.
+                    let t = c.expr(*e);
+                    c.expect_assignable(ret_ty, t, c.span(*e), "local function body");
+                }
+                FunBody::Block(b) => {
+                    let _ = c.expr(*b);
+                }
+                FunBody::None => {}
             }
-            FunBody::None => {}
-        }
-        self.pop_scope();
-        self.pop_local_funs();
-        self.ret_ty = prev_ret;
+            c.pop_scope();
+            c.pop_local_funs();
+        });
         for t in added_tparams {
             self.tparams.remove(&t);
         }
