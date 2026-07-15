@@ -524,23 +524,6 @@ impl<'a> SymbolResolver<'a> {
             .any(|o| o.flags.inline.can_inline())
     }
 
-    /// Whether `name` has a `suspend` top-level overload. The flag flows uniformly from the AST
-    /// (same-module `suspend fun`, via `module_symbols`) and from `@Metadata` (classpath callees).
-    pub fn toplevel_is_suspend(&self, name: &str) -> bool {
-        self.top_level_function_set(name)
-            .top_level()
-            .any(|o| o.flags.suspend)
-    }
-
-    /// True when `receiver.name(...)` binds a `suspend` EXTENSION (e.g. `Mutex.withLock`). The member
-    /// query in the lowerer only sees instance members; a suspend extension is invisible to it, so the
-    /// coroutine pass would miss the suspension point without this. Mirrors [`Self::toplevel_is_suspend`].
-    pub fn extension_is_suspend(&self, name: &str, receiver: Ty) -> bool {
-        self.receiver_extensions(receiver, name)
-            .iter()
-            .any(|o| o.flags.suspend)
-    }
-
     /// Resolve a receiver-less top-level library callable for a concrete call site. This is the
     /// compatibility boundary for the older arg-dependent selector while checker/lowerer are moved to
     /// `FunctionSet`-backed resolution.
