@@ -8324,11 +8324,22 @@ impl<'a> Checker<'a> {
                         [cnd] => self.smartcast_binding(*cnd, false),
                         _ => None,
                     };
+                    // `when (this) { is B -> … }` narrows the implicit receiver to `B` in that arm's
+                    // body (the `when`-subject analog of `if (this is B)`).
+                    let arm_this_narrow = match arm.conditions.as_slice() {
+                        [cnd] => self.this_is_narrowing(*cnd, false),
+                        _ => None,
+                    };
                     self.push_scope();
                     if let Some((n, t)) = &arm_cast {
                         self.declare(n, *t, false);
                     }
+                    let prev_narrow = self.this_narrow;
+                    if let Some(bt) = arm_this_narrow {
+                        self.this_narrow = Some(bt);
+                    }
                     let bt = self.expr(arm.body);
+                    self.this_narrow = prev_narrow;
                     self.pop_scope();
                     result = Some(match result {
                         Some(r) => self.join(r, bt, self.span(arm.body)),
