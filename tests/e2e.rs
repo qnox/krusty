@@ -670,6 +670,8 @@ mod spread_operator_e2e;
 mod stdlib_call_resolution_e2e;
 #[path = "string_concat_append_overload_e2e.rs"]
 mod string_concat_append_overload_e2e;
+#[path = "subtype_receiver_extension_call_e2e.rs"]
+mod subtype_receiver_extension_call_e2e;
 #[path = "super_default_args_e2e.rs"]
 mod super_default_args_e2e;
 #[path = "super_interface_default_e2e.rs"]
