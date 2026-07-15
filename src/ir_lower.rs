@@ -58,24 +58,6 @@ fn is_conversion_call_name(name: &str) -> bool {
     )
 }
 
-fn library_companion_const(
-    syms: &SymbolTable,
-    type_name: &str,
-    const_name: &str,
-) -> Option<crate::libraries::LibraryConst> {
-    let fallback;
-    let internal = match syms.class_names.get(type_name) {
-        Some(internal) => internal.as_str(),
-        None => {
-            fallback = format!("kotlin/{type_name}");
-            &fallback
-        }
-    };
-    syms.libraries
-        .resolve_type(internal)
-        .and_then(|t| t.companion_consts.get(const_name).copied())
-}
-
 /// The leading variant name of a `{:?}`-formatted AST node (`"Call { .. }"` → `"Call"`).
 fn bail_variant(dbg: &str) -> &str {
     dbg.split(['(', '{', ' ']).next().unwrap_or("?")
@@ -17114,7 +17096,13 @@ impl<'a> Lower<'a> {
                     if let Some(lc) = self
                         .lookup(&rn)
                         .is_none()
-                        .then(|| library_companion_const(self.syms, &rn, &name))
+                        .then(|| {
+                            self.syms.class_names.library_companion_const(
+                                &*self.syms.libraries,
+                                &rn,
+                                &name,
+                            )
+                        })
                         .flatten()
                     {
                         let c = match lc.value {

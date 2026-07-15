@@ -271,6 +271,23 @@ impl ClassNames {
     pub fn has_internal(&self, internal: &str) -> bool {
         self.user.values().any(|v| v == internal) || self.base.values().any(|v| v == internal)
     }
+    pub fn library_companion_const(
+        &self,
+        src: &dyn CompilerPlatform,
+        type_name: &str,
+        const_name: &str,
+    ) -> Option<crate::libraries::LibraryConst> {
+        let fallback;
+        let internal = match self.get(type_name) {
+            Some(internal) => internal.as_str(),
+            None => {
+                fallback = format!("kotlin/{type_name}");
+                &fallback
+            }
+        };
+        src.resolve_type(internal)
+            .and_then(|t| t.companion_consts.get(const_name).copied())
+    }
     pub fn insert(&mut self, k: String, v: String) -> Option<String> {
         self.user.insert(k, v)
     }
@@ -3050,24 +3067,6 @@ fn infer_getter_ty(file: &File, e: ExprId, locals: &HashMap<&str, Ty>) -> Ty {
     }
 }
 
-fn companion_const(
-    src: &dyn CompilerPlatform,
-    class_names: &ClassNames,
-    type_name: &str,
-    const_name: &str,
-) -> Option<crate::libraries::LibraryConst> {
-    let fallback;
-    let internal = match class_names.get(type_name) {
-        Some(internal) => internal.as_str(),
-        None => {
-            fallback = format!("kotlin/{type_name}");
-            &fallback
-        }
-    };
-    src.resolve_type(internal)
-        .and_then(|t| t.companion_consts.get(const_name).copied())
-}
-
 /// Best-effort type of a simple literal initializer (for an unannotated top-level property).
 /// Names of Kotlin's primitive operator/bitwise/conversion-overloadable methods. An explicit call
 /// of one of these on a primitive receiver binds to the builtin operator, not a user extension.
@@ -3247,7 +3246,7 @@ fn infer_lit_ty_p(
             .unwrap_or(Ty::Error),
         Expr::Member { receiver, name } => {
             if let Expr::Name(type_name) = file.expr(*receiver) {
-                if let Some(c) = companion_const(src, class_names, type_name, name) {
+                if let Some(c) = class_names.library_companion_const(src, type_name, name) {
                     return c.ty;
                 }
             }
@@ -8088,9 +8087,8 @@ impl<'a> Checker<'a> {
                 // Library companion constants: `Int.MAX_VALUE`, `Double.NaN`, etc.
                 if let Expr::Name(type_name) = self.file.expr(receiver).clone() {
                     if self.lookup(&type_name).is_none() {
-                        if let Some(c) = companion_const(
+                        if let Some(c) = self.syms.class_names.library_companion_const(
                             &*self.syms.libraries,
-                            &self.syms.class_names,
                             &type_name,
                             &name,
                         ) {
