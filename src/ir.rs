@@ -940,6 +940,9 @@ pub struct IrFile {
     /// Instance methods kotlinc emits `private` — currently a property's `private set` setter. The JVM
     /// backend uses `ACC_PRIVATE` instead of `ACC_PUBLIC` for a `FunId` in this set.
     pub private_methods: std::collections::HashSet<u32>,
+    /// Methods kotlinc marks `ACC_SYNTHETIC` — currently a value class's `box-impl`/`unbox-impl` (the
+    /// compiler-manufactured box adapters). The JVM backend ORs `0x1000` for a `FunId` in this set.
+    pub synthetic_methods: std::collections::HashSet<u32>,
     /// Lambda impl functions that are INLINE-ONLY — their body has a non-local `return` (returning from
     /// the enclosing function), which is valid only when the lambda is spliced at the call site, never as
     /// a standalone closure method (a non-local return can't compile to a separate method — its `areturn`
