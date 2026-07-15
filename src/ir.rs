@@ -927,6 +927,12 @@ pub struct IrFile {
     pub logical_types: std::collections::HashMap<u32, Ty>,
     /// `FunId` → source parameter names and, when present, default-value expressions.
     pub fn_params: std::collections::HashMap<u32, FnParamInfo>,
+    /// Value-class internal name → the lowered default expression of its single primary-constructor
+    /// property, when it has one (`value class ServerId(val value: String = Base58Uuid.generate())`).
+    /// Lowered in the STATIC `constructor-impl` frame (the sole param is value-index 0, no `this`); the
+    /// value-class JVM pass registers it as `constructor-impl`'s param default so the backend emits the
+    /// synthetic `constructor-impl$default(U, int, DefaultConstructorMarker)` kotlinc requires.
+    pub value_ctor_defaults: std::collections::HashMap<String, u32>,
     /// Instance methods kotlinc leaves NON-`final` even in a final class — currently the data-class
     /// `Object`-overrides (`toString`/`hashCode`/`equals`), which kotlinc emits `public` (open) rather
     /// than `public final`. The JVM backend omits `ACC_FINAL` for a `FunId` in this set.
@@ -934,6 +940,9 @@ pub struct IrFile {
     /// Instance methods kotlinc emits `private` — currently a property's `private set` setter. The JVM
     /// backend uses `ACC_PRIVATE` instead of `ACC_PUBLIC` for a `FunId` in this set.
     pub private_methods: std::collections::HashSet<u32>,
+    /// Methods kotlinc marks `ACC_SYNTHETIC` — currently a value class's `box-impl`/`unbox-impl` (the
+    /// compiler-manufactured box adapters). The JVM backend ORs `0x1000` for a `FunId` in this set.
+    pub synthetic_methods: std::collections::HashSet<u32>,
     /// Lambda impl functions that are INLINE-ONLY — their body has a non-local `return` (returning from
     /// the enclosing function), which is valid only when the lambda is spliced at the call site, never as
     /// a standalone closure method (a non-local return can't compile to a separate method — its `areturn`
