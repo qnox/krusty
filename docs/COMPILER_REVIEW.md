@@ -3189,3 +3189,12 @@ foreach iterator `hasNext`/`next`, and indexed collection stores. Those paths al
 `LibraryMember` records, but still rebuilt `Callee::Virtual` locally and carried parallel method-name
 or interface facts. They now treat the selected member payload as authoritative for owner/name/
 descriptor/interface/suspend emission, leaving only the branch-specific argument construction in place.
+
+### Static Library Call Emitter Merge
+
+The next lowerer cleanup added the static counterpart to the member emitter. Fully-qualified top-level
+calls, implicit receiver extension calls, unqualified top-level calls, and qualified/defaulted extension
+calls now emit selected `LibraryCallable` records through one `emit_library_static_call` path. The
+branches still own their argument mapping, reified substitutions, and source-receiver metadata, but
+owner/name/descriptor/inline and suspend-call registration now come from the selected callable in one
+place instead of being reconstructed at every static call site.
