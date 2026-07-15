@@ -766,10 +766,6 @@ impl FunctionInfo {
         self.kind == FnKind::Extension
     }
 
-    pub fn is_member_or_extension(&self) -> bool {
-        self.is_member() || self.is_extension()
-    }
-
     pub fn extension_value_params(&self) -> &[Ty] {
         self.callable.params.get(1..).unwrap_or(&[])
     }
