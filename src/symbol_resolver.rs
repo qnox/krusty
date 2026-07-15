@@ -726,7 +726,25 @@ impl<'a> SymbolResolver<'a> {
     ) -> Option<LibraryCallable> {
         let vparams = logical_value_params(self.lib, o, receiver, type_args);
         if vparams.len() == args.len() {
-            return Some(self.bind_extension_callable(o, receiver, args, type_args));
+            let c = &o.callable;
+            let ret_ty = o
+                .generic_sig
+                .as_ref()
+                .map(|gsig| bind_ext_ret(gsig, receiver, args, type_args))
+                .unwrap_or(c.ret);
+            let ret_class = o
+                .ret
+                .class
+                .filter(|meta| self.lib.value_underlying(*meta).is_some());
+            let ret_ty2 = o.ret.apply_with_class(ret_class, ret_ty);
+            crate::trace_compiler!(
+                "resolve",
+                "bind_extension_callable {}.{} gsig={} type_args={type_args:?} ret_ty={ret_ty:?} -> {ret_ty2:?}",
+                c.owner,
+                c.name,
+                o.generic_sig.is_some()
+            );
+            return Some(callable_with_return(c, ret_ty2, false));
         }
         // Defaulted call — omitted trailing/middle params. Bind the return with default-aware alignment.
         let trailing_lambda = args.last().is_some_and(|a| matches!(a, Ty::Fun(_)));
@@ -796,34 +814,6 @@ impl<'a> SymbolResolver<'a> {
             .min_by_key(|(rank, _)| *rank)?
             .1;
         Some(p.getter).filter(|c| c.ret.is_read_value_result())
-    }
-
-    fn bind_extension_callable(
-        &self,
-        o: &FunctionInfo,
-        receiver: Ty,
-        args: &[Ty],
-        type_args: &[Ty],
-    ) -> LibraryCallable {
-        let c = &o.callable;
-        let ret_ty = o
-            .generic_sig
-            .as_ref()
-            .map(|gsig| bind_ext_ret(gsig, receiver, args, type_args))
-            .unwrap_or(c.ret);
-        let ret_class = o
-            .ret
-            .class
-            .filter(|meta| self.lib.value_underlying(*meta).is_some());
-        let ret_ty2 = o.ret.apply_with_class(ret_class, ret_ty);
-        crate::trace_compiler!(
-            "resolve",
-            "bind_extension_callable {}.{} gsig={} type_args={type_args:?} ret_ty={ret_ty:?} -> {ret_ty2:?}",
-            c.owner,
-            c.name,
-            o.generic_sig.is_some()
-        );
-        callable_with_return(c, ret_ty2, false)
     }
 
     /// Find the `name$default` synthetic callable for a defaulted extension call — the emit-shaped callable
