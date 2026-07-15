@@ -3206,3 +3206,11 @@ The next lowerer cleanup routed the remaining selected static extension operator
 reference-receiver binary operator extensions. These paths already had `LibraryCallable` handles from
 the checker, so lowering now keeps only their argument coercion locally and lets the shared emitter own
 owner/name/descriptor/inline construction.
+
+### Foreach Iterator Dispatch Shape
+
+The next foreach cleanup replaced the iterator branch's parallel return/descriptor/owner/extension/
+inline fields with one `LibraryDispatch` value: either the selected member `iterator()` or the
+checker-recorded extension callable. `lower_foreach_iterator` now asks that payload for the iterator
+return type and emits it through the shared member/static library emitters, removing the local boolean
+mode flag and duplicated `Callee::Static`/`Callee::Virtual` construction.
