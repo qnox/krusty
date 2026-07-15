@@ -12811,6 +12811,37 @@ impl<'a> Lower<'a> {
                             // `Unit` result just runs the (side-effecting) expression for effect.
                             if rty != Ty::Unit && rty != Ty::Nothing {
                                 let val = self.lower_arg(e, &rty)?;
+                                // A SUSPENDING result (`return@withLock create(...)`): the coroutine
+                                // flattener splits a suspension out of a `Variable` initializer but not out
+                                // of a `SetValue`. Hoist it into a fresh temp first so the suspension sits
+                                // in a `Variable` init the state machine can flatten, then store the temp.
+                                // Detect a suspend call the same way the flattener does — a same-file
+                                // `Call`/`MethodCall` to a `suspend_funs` target, or a recorded
+                                // cross-unit `suspend_calls` entry.
+                                let val_suspends = self.ir.suspend_calls.contains_key(&val)
+                                    || match &self.ir.exprs[val as usize] {
+                                        IrExpr::Call {
+                                            callee: Callee::Local(fid),
+                                            ..
+                                        } => self.ir.suspend_funs.contains(fid),
+                                        IrExpr::MethodCall { class, index, .. } => self.ir.classes
+                                            [*class as usize]
+                                            .methods
+                                            .get(*index as usize)
+                                            .is_some_and(|fid| self.ir.suspend_funs.contains(fid)),
+                                        _ => false,
+                                    };
+                                let val = if val_suspends {
+                                    let tmp = self.fresh_value();
+                                    stmts.push(self.ir.add_expr(IrExpr::Variable {
+                                        index: tmp,
+                                        ty: ty_to_ir(rty),
+                                        init: Some(val),
+                                    }));
+                                    self.ir.add_expr(IrExpr::GetValue(tmp))
+                                } else {
+                                    val
+                                };
                                 stmts.push(self.ir.add_expr(IrExpr::SetValue {
                                     var: slot,
                                     value: val,
@@ -13828,6 +13859,198 @@ impl<'a> Lower<'a> {
     /// coroutine pass already models. Gated to the suspend case only, so a non-suspend HOF keeps its
     /// byte-identical library call. `is_flat` selects `addAll` (flatMap) vs `add` (map). `None` (decline)
     /// when the receiver has no resolvable iterator (the caller falls back to the normal call path).
+    /// The common concrete (non-`Nothing`/`Unit`) type of EVERY `return@<label>` value expression in
+    /// `e`'s subtree — used to recover a `withLock`/inline-lambda result type that inference collapsed to
+    /// `Nothing` because every path is a non-local return. Recurses into both `Stmt::Return` and
+    /// `Expr::Return` forms and their surrounding constructs (a `?.let { return@label v }` nests the
+    /// return under a safe-call/lambda). Returns `None` when there is no such return OR the returns
+    /// disagree: a heterogeneous set has no single result-slot type, so the caller must DECLINE rather
+    /// than coerce every value to one arbitrarily-picked type (a wrong `checkcast` / narrowed slot).
+    fn labeled_return_ty(&self, e: AstExprId, label: &str) -> Option<Ty> {
+        let tys: std::cell::RefCell<Vec<Ty>> = std::cell::RefCell::new(Vec::new());
+        self.collect_labeled_return_tys(e, label, &tys);
+        let tys = tys.into_inner();
+        let first = *tys.first()?;
+        tys.iter().all(|t| *t == first).then_some(first)
+    }
+
+    fn collect_labeled_return_tys(
+        &self,
+        e: AstExprId,
+        label: &str,
+        out: &std::cell::RefCell<Vec<Ty>>,
+    ) {
+        if let Expr::Return {
+            value: Some(v),
+            label: Some(l),
+        } = self.afile.expr(e)
+        {
+            if l == label {
+                let t = self.info.ty(*v);
+                if !matches!(t, Ty::Nothing | Ty::Unit) {
+                    out.borrow_mut().push(t);
+                }
+            }
+        }
+        self.afile.any_child_expr(
+            e,
+            &mut |c| {
+                self.collect_labeled_return_tys(c, label, out);
+                false
+            },
+            &mut |s| {
+                if let Stmt::Return(Some(v), Some(l)) = self.afile.stmt(s) {
+                    if l == label {
+                        let t = self.info.ty(*v);
+                        if !matches!(t, Ty::Nothing | Ty::Unit) {
+                            out.borrow_mut().push(t);
+                        }
+                    }
+                }
+                self.afile.any_child_stmt(s, &mut |c| {
+                    self.collect_labeled_return_tys(c, label, out);
+                    false
+                });
+                false
+            },
+        );
+    }
+
+    fn lower_suspend_withlock(
+        &mut self,
+        call: AstExprId,
+        receiver: AstExprId,
+        lbody: AstExprId,
+    ) -> Option<u32> {
+        let mutex_ty = self.info.ty(receiver);
+        let mutex_internal = mutex_ty.obj_internal()?.to_string();
+        let any = Ty::obj("kotlin/Any");
+        let lock_m = crate::symbol_resolver::resolve_instance(
+            &*self.syms.libraries,
+            &mutex_internal,
+            "lock",
+            &[any],
+        )?;
+        let unlock_m = crate::symbol_resolver::resolve_instance(
+            &*self.syms.libraries,
+            &mutex_internal,
+            "unlock",
+            &[any],
+        )?;
+        let lock_owner = lock_m
+            .owner
+            .clone()
+            .unwrap_or_else(|| mutex_internal.clone());
+        let unlock_owner = unlock_m
+            .owner
+            .clone()
+            .unwrap_or_else(|| mutex_internal.clone());
+        let is_iface = self.library_type_is_interface(&mutex_internal);
+        // The withLock result type. When EVERY path of the lambda is a non-local `return@withLock`, type
+        // inference gives the call (and the lambda body) `Nothing` — all paths diverge. A `Nothing`/`Unit`
+        // result slot is wrong: it would carry zero JVM-slot words (colliding with the next local) and the
+        // `return@withLock` handler would discard the returned value rather than store it. Recover the real
+        // type from the returned expressions; DECLINE (`?`) when they have no single common type rather
+        // than pick one arbitrarily and coerce the others to it.
+        let rty = match self.info.ty(call) {
+            Ty::Nothing | Ty::Unit => self.labeled_return_ty(lbody, "withLock")?,
+            t => t,
+        };
+        let mutex_slot = self.fresh_value();
+        let recv = self.expr(receiver)?;
+        let var_mutex = self.ir.add_expr(IrExpr::Variable {
+            index: mutex_slot,
+            ty: ty_to_ir(mutex_ty),
+            init: Some(recv),
+        });
+        let m1 = self.ir.add_expr(IrExpr::GetValue(mutex_slot));
+        let null1 = self.ir.add_expr(IrExpr::Const(IrConst::Null));
+        let lock_call = self.ir.add_expr(IrExpr::Call {
+            callee: Callee::Virtual {
+                owner: lock_owner,
+                name: lock_m.name.clone(),
+                descriptor: lock_m.descriptor.clone(),
+                interface: is_iface,
+            },
+            dispatch_receiver: Some(m1),
+            args: vec![null1],
+        });
+        if lock_m.suspend {
+            self.ir
+                .suspend_calls
+                .insert(lock_call, ty_to_ir(lock_m.ret));
+        }
+        let result_slot = self.fresh_value();
+        let dflt = crate::jvm::suspend::zero_value(&mut self.ir, &rty);
+        let var_result = self.ir.add_expr(IrExpr::Variable {
+            index: result_slot,
+            ty: ty_to_ir(rty),
+            init: Some(dflt),
+        });
+        let brk = format!("$withlock${}", self.fresh_value());
+        self.inline_lambda_ret
+            .push(("withLock".to_string(), result_slot, brk.clone(), rty));
+        let depth = self.scope.len();
+        let body_val = self.expr(lbody);
+        self.inline_lambda_ret.pop();
+        self.scope.truncate(depth);
+        let body_val = body_val?;
+        let body_stmt = if self.info.ty(lbody) == Ty::Nothing {
+            body_val
+        } else {
+            self.ir.add_expr(IrExpr::SetValue {
+                var: result_slot,
+                value: body_val,
+            })
+        };
+        let brk_stmt = self.ir.add_expr(IrExpr::Break {
+            label: Some(brk.clone()),
+        });
+        let loop_body = self.ir.add_expr(IrExpr::Block {
+            stmts: vec![body_stmt, brk_stmt],
+            value: None,
+        });
+        let cond = self.ir.add_expr(IrExpr::Const(IrConst::Boolean(true)));
+        let whilew = self.ir.add_expr(IrExpr::While {
+            cond,
+            body: loop_body,
+            update: None,
+            post_test: false,
+            label: Some(brk),
+        });
+        let m2 = self.ir.add_expr(IrExpr::GetValue(mutex_slot));
+        let null2 = self.ir.add_expr(IrExpr::Const(IrConst::Null));
+        let unlock_call = self.ir.add_expr(IrExpr::Call {
+            callee: Callee::Virtual {
+                owner: unlock_owner,
+                name: unlock_m.name.clone(),
+                descriptor: unlock_m.descriptor.clone(),
+                interface: is_iface,
+            },
+            dispatch_receiver: Some(m2),
+            args: vec![null2],
+        });
+        let try_body = self.ir.add_expr(IrExpr::Block {
+            stmts: vec![whilew],
+            value: None,
+        });
+        let fin = self.ir.add_expr(IrExpr::Block {
+            stmts: vec![unlock_call],
+            value: None,
+        });
+        let tryf = self.ir.add_expr(IrExpr::Try {
+            body: try_body,
+            catches: vec![],
+            finally: Some(fin),
+            result: Ty::Unit,
+        });
+        let get = self.ir.add_expr(IrExpr::GetValue(result_slot));
+        Some(self.ir.add_expr(IrExpr::Block {
+            stmts: vec![var_mutex, lock_call, var_result, tryf],
+            value: Some(get),
+        }))
+    }
+
     fn lower_suspend_accumulate_hof(
         &mut self,
         is_flat: bool,
@@ -19736,6 +19959,23 @@ impl<'a> Lower<'a> {
                                     receiver,
                                     lbody,
                                 ) {
+                                    return Some(v);
+                                }
+                            }
+                        }
+                    }
+                    // `mutex.withLock { body }` (a `suspend inline fun`) WHERE THE BODY SUSPENDS.
+                    if self.cur_fn_suspend
+                        && name == "withLock"
+                        && args.len() == 1
+                        && self
+                            .info
+                            .resolved_extension(e)
+                            .is_some_and(|c| c.owner.starts_with("kotlinx/coroutines/sync/"))
+                    {
+                        if let Expr::Lambda { body: lbody, .. } = self.afile.expr(args[0]).clone() {
+                            if self.ast_body_suspends(lbody) {
+                                if let Some(v) = self.lower_suspend_withlock(e, receiver, lbody) {
                                     return Some(v);
                                 }
                             }

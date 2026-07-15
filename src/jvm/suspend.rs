@@ -159,7 +159,32 @@ fn splice_return_blocks(ir: &mut IrFile, b: ExprId) {
     };
     let mut new_stmts: Vec<ExprId> = Vec::with_capacity(stmts.len());
     let mut changed = false;
-    for s in stmts {
+    let mut value = value;
+    let n = stmts.len();
+    for (i, s) in stmts.into_iter().enumerate() {
+        // A bare `Block` STATEMENT is pure grouping (IR locals are flat-indexed) — lift its statements
+        // into the parent so a labeled break/suspension buried in the nested block reaches the top-level
+        // flattening stream rather than surviving as a structured node. Its trailing VALUE: when the block
+        // is the parent's LAST statement and the parent has no value of its own (an `= withLock { … }`
+        // expression body lowers to `{ <withLock block> }`), the value IS the body's result — promote it
+        // to the parent value so `ensure_tail_return` returns it. Otherwise it sits in statement position
+        // and is run for effect.
+        if let IrExpr::Block {
+            stmts: bs,
+            value: bv,
+        } = ir.exprs[s as usize].clone()
+        {
+            new_stmts.extend(bs);
+            if let Some(v) = bv {
+                if i + 1 == n && value.is_none() {
+                    value = Some(v);
+                } else {
+                    new_stmts.push(v);
+                }
+            }
+            changed = true;
+            continue;
+        }
         let spliced = match ir.exprs[s as usize].clone() {
             IrExpr::Return(Some(inner)) => value_block(ir, inner).map(|(bs, bv)| {
                 new_stmts.extend(bs);
@@ -191,6 +216,18 @@ fn splice_return_blocks(ir: &mut IrFile, b: ExprId) {
             None => new_stmts.push(s),
         }
     }
+    // The block's own trailing value may itself be a value-carrying block whose statements must surface.
+    let value = match value {
+        Some(v) => match value_block(ir, v) {
+            Some((bs, bv)) => {
+                new_stmts.extend(bs);
+                changed = true;
+                Some(bv)
+            }
+            None => Some(v),
+        },
+        None => None,
+    };
     if changed {
         ir.exprs[b as usize] = IrExpr::Block {
             stmts: new_stmts,
@@ -969,13 +1006,21 @@ fn build_state_machine(ir: &mut IrFile, facade: &str, fid: u32, b: ExprId, unit_
     // lower to `Variable{ init: Block{ prelude…, value: When } }`) into `prelude…; Variable{ init: When }`,
     // so the conditional suspension surfaces as a `Variable{init: When}` the flattener handles.
     normalize_block_inits(ir, b);
-    // A value-less body that FALLS THROUGH (a `Unit` fn whose last statement is a suspension / loop, with
-    // no explicit `return`) needs a terminal `return Unit.INSTANCE` — otherwise its final resume state runs
-    // off the end of the `when(label)` dispatch, falls back to the `while(true)` top, and re-dispatches the
-    // same label forever (an infinite loop, a coroutine that never completes). Mirrors the leaf path. Only
-    // for a value-less block — a trailing-value body is left to the `value.is_some()` bail just below (this
-    // path doesn't model a trailing-value suspend body), so its behaviour is unchanged.
-    if matches!(&ir.exprs[b as usize], IrExpr::Block { value: None, .. }) {
+    let suspend_set: HashSet<u32> = ir.suspend_funs.iter().copied().collect();
+    // Give the body a terminal `return`. A value-less body that FALLS THROUGH (a `Unit` fn whose last
+    // statement is a suspension / loop, with no explicit `return`) needs `return Unit.INSTANCE` —
+    // otherwise its final resume state runs off the end of the `when(label)` dispatch, falls back to the
+    // `while(true)` top, and re-dispatches the same label forever (a coroutine that never completes). A
+    // trailing-VALUE body (an `= withLock { … }` expression body whose result survived as the block
+    // value) needs `return <value>`. `ensure_tail_return` handles both. EXCEPT a trailing value that
+    // itself SUSPENDS: it isn't desugared into a bound-local suspension point, so converting it would
+    // emit an unmodeled `return <suspend call>` — leave that to the `value.is_some()` bail below.
+    let convert_tail = match &ir.exprs[b as usize] {
+        IrExpr::Block { value: None, .. } => true,
+        IrExpr::Block { value: Some(v), .. } => !expr_calls_suspend(ir, *v, &suspend_set),
+        _ => false,
+    };
+    if convert_tail {
         ensure_tail_return(ir, b, unit_ret);
     }
     let IrExpr::Block { stmts, value } = ir.exprs[b as usize].clone() else {
@@ -990,9 +1035,8 @@ fn build_state_machine(ir: &mut IrFile, facade: &str, fid: u32, b: ExprId, unit_
             "suspend",
             "build_state_machine fid={fid} BAIL: block has a trailing value (suspend body must use `return`)"
         );
-        return false; // a block trailing-value body isn't modeled (suspend bodies use `return`)
+        return false; // a suspending trailing-value body isn't modeled (desugar to a `return` first)
     }
-    let suspend_set: HashSet<u32> = ir.suspend_funs.iter().copied().collect();
     if binds_value_class_suspension(ir, b, &suspend_set) {
         crate::trace_compiler!(
             "suspend",
@@ -1886,6 +1930,31 @@ impl Flat<'_> {
             }
         }
     }
+    /// Whether `e` contains a LABELED `break`/`continue` targeting a loop frame currently being
+    /// flattened (an active `loop_targets` entry) — a jump that must pierce OUT of `e` to a state.
+    /// Unlike `expr_has_loop_jump`, this recurses THROUGH a nested `While` (a labeled jump can cross an
+    /// inner structural loop to an outer flattened one — e.g. a `return@withLock`/labeled break buried in
+    /// a `?.let { … }` whose inline expansion is a `while(true){ … }` wrapper). Unlabeled jumps bind to
+    /// the innermost structural loop, not an outer frame, so they don't count; a `Lambda` is a closure
+    /// boundary and stops the descent. Drives the state-split of an otherwise-structural `When`/`While`
+    /// so the buried jump reaches its `goto` instead of dangling at a dissolved loop label.
+    fn expr_jumps_to_active_frame(&self, e: ExprId) -> bool {
+        match &self.ir.exprs[e as usize] {
+            IrExpr::Break { label: Some(l) } | IrExpr::Continue { label: Some(l) } => self
+                .loop_targets
+                .iter()
+                .any(|(fl, _, _)| fl.as_deref() == Some(l.as_str())),
+            IrExpr::Break { label: None } | IrExpr::Continue { label: None } => false,
+            IrExpr::Lambda { .. } => false,
+            _ => {
+                let mut found = false;
+                crate::ir::for_each_child(&self.ir.exprs, e, &mut |c| {
+                    found = found || self.expr_jumps_to_active_frame(c);
+                });
+                found
+            }
+        }
+    }
     /// The state a `continue`/`break` transfers to: the `cont`/`exit` of the innermost active loop frame,
     /// or the frame whose label matches. `None` when no such loop is being flattened (a jump the caller
     /// leaves structural).
@@ -2116,6 +2185,7 @@ impl Flat<'_> {
                 {
                     if self.expr_has_loop_jump(stmt)
                         || expr_calls_suspend(self.ir, stmt, self.suspend)
+                        || self.expr_jumps_to_active_frame(stmt)
                     {
                         let rebind = self.add(IrExpr::Variable {
                             index,
@@ -2163,21 +2233,32 @@ impl Flat<'_> {
             }
             // A bare `Block` STATEMENT that suspends (e.g. a `for` loop desugars to
             // `{ val it = xs.iterator(); while (it.hasNext()) { … } }`, spliced into the body as one
-            // block). Inline its statements into the flattening stream — IR locals are flat-indexed, so
-            // the block is pure grouping and can be flattened away. Only for a value-less block; a
-            // block with a suspending trailing VALUE is an expression position handled elsewhere.
+            // block) or carries a jump to an outer flattened loop (a `?.let { return@withLock v }` whose
+            // safe-call/let expansion is a `Block { …, When }` holding the labeled break). Inline its
+            // statements into the flattening stream — IR locals are flat-indexed, so the block is pure
+            // grouping and can be flattened away. A trailing VALUE in this statement position is discarded,
+            // so re-emit it as a trailing statement (reached on the paths that don't take the jump).
             if let IrExpr::Block {
                 stmts: inner,
-                value: None,
+                value,
             } = &self.ir.exprs[stmt as usize]
             {
-                if expr_calls_suspend(self.ir, stmt, self.suspend) {
+                let (inner, value) = (inner.clone(), *value);
+                // A value-carrying block only splices for the jump case (its discarded trailing value is
+                // re-emitted below); a suspending block with a trailing value stays an expression position
+                // handled elsewhere.
+                if (value.is_none() && expr_calls_suspend(self.ir, stmt, self.suspend))
+                    || self.expr_jumps_to_active_frame(stmt)
+                {
                     crate::trace_compiler!(
                         "suspend",
                         "flatten: splicing suspending block stmt with {} inner stmts",
                         inner.len()
                     );
-                    let mut spliced: Vec<ExprId> = inner.clone();
+                    let mut spliced: Vec<ExprId> = inner;
+                    if let Some(v) = value {
+                        spliced.push(v);
+                    }
                     spliced.extend_from_slice(&stmts[i + 1..]);
                     self.states[cur] = out;
                     self.flatten(&spliced, cur, after);
@@ -2191,7 +2272,9 @@ impl Flat<'_> {
             // the branch must live in its own state (where its `Continue`/`Break` becomes a `goto` to the
             // loop's cont/break state) — exactly the state-split `emit_when_stmt` performs.
             if let IrExpr::When { branches } = &self.ir.exprs[stmt as usize] {
-                if expr_calls_suspend(self.ir, stmt, self.suspend) || self.expr_has_loop_jump(stmt)
+                if expr_calls_suspend(self.ir, stmt, self.suspend)
+                    || self.expr_has_loop_jump(stmt)
+                    || self.expr_jumps_to_active_frame(stmt)
                 {
                     let branches = branches.clone();
                     let merge = self.new_state();
@@ -2212,13 +2295,25 @@ impl Flat<'_> {
                 label,
             } = &self.ir.exprs[stmt as usize]
             {
-                if expr_calls_suspend(self.ir, *body, self.suspend) {
+                if expr_calls_suspend(self.ir, *body, self.suspend)
+                    || self.expr_jumps_to_active_frame(*body)
+                {
                     let (cond, body, update, post_test, label) =
                         (*cond, *body, *update, *post_test, label.clone());
                     let header = self.new_state();
                     let body_entry = self.new_state();
                     let cont = self.new_state();
-                    let exit = self.new_state();
+                    // When the loop has NO continuation (`stmts[i+1..]` is empty — e.g. the `while(true){
+                    // …; break }` wrapper an inlined `withLock`/labeled-return uses, whose only exit is
+                    // the break), route `break`/the loop exit straight to `after` rather than a separate
+                    // empty exit state (a `goto`-only state whose label the emitter binds one past the
+                    // code → the break jumps to a frameless out-of-range offset). Otherwise a real exit
+                    // state carries the rest.
+                    let rest_empty = stmts[i + 1..].is_empty();
+                    let exit = match after {
+                        Some(a) if rest_empty => a,
+                        _ => self.new_state(),
+                    };
                     // cur → header (pre-test) or → body (post-test runs the body once before testing)
                     self.goto(&mut out, if post_test { body_entry } else { header });
                     self.states[cur] = out;
@@ -2261,8 +2356,10 @@ impl Flat<'_> {
                         update.map(|u| self.block_stmts(u)).unwrap_or_default();
                     self.flatten(&update_stmts, cont, Some(header));
                     self.loop_targets.pop();
-                    // exit: the rest
-                    self.flatten(&stmts[i + 1..], exit, after);
+                    // exit: the rest (skipped when the exit IS `after` — nothing follows the loop).
+                    if !(rest_empty && Some(exit) == after) {
+                        self.flatten(&stmts[i + 1..], exit, after);
+                    }
                     return;
                 }
             }
@@ -3273,6 +3370,7 @@ fn box_returns(ir: &mut IrFile, e: ExprId) -> bool {
                 && catches.into_iter().all(|c| box_returns(ir, c.body))
                 && finally.is_none_or(|f| box_returns(ir, f))
         }
+        IrExpr::Break { .. } | IrExpr::Continue { .. } => true,
         other => {
             crate::trace_compiler!("suspend", "box_returns BAIL: unhandled node {other:?}");
             false
