@@ -17,8 +17,8 @@ use crate::ir::{
 };
 use crate::jvm::names::{property_getter_name, property_setter_name};
 use crate::libraries::{
-    required_arity, CompilerPlatform, CountedLoopInfo, InlineKind, PlatformAccessor, PlatformCtor,
-    RuntimeCtor, RuntimeOp,
+    CompilerPlatform, CountedLoopInfo, InlineKind, PlatformAccessor, PlatformCtor, RuntimeCtor,
+    RuntimeOp,
 };
 use crate::resolve::{
     CtorDefaultValue, ExprLowering, InvokeKind, LambdaCapture, Signature, StmtLowering,
@@ -5354,15 +5354,7 @@ impl<'a> Lower<'a> {
             .libraries
             .resolve_type(internal)
             .and_then(|t| t.constructor_named_params(args.len()))?;
-        let required = required_arity(ctor_params.names.len(), &ctor_params.defaults);
-        let slots = crate::resolve::map_call_args(
-            args,
-            Some(&names),
-            &ctor_params.names,
-            required,
-            &ctor_params.defaults,
-        )
-        .ok()?;
+        let slots = crate::resolve::map_param_list_args(args, Some(&names), &ctor_params).ok()?;
         if slots.iter().all(Option::is_some) {
             // Every parameter supplied — reorder onto positions and use the plain positional path.
             let ordered: Vec<AstExprId> = slots.into_iter().flatten().collect();

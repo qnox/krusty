@@ -11,7 +11,7 @@ use std::collections::HashMap;
 
 use crate::ast::*;
 use crate::diag::{DiagSink, Span};
-use crate::libraries::{required_arity, CallSig, CompilerPlatform, EmptySymbolSource};
+use crate::libraries::{required_arity, CallSig, CompilerPlatform, EmptySymbolSource, ParamList};
 use crate::symbol_source::SymbolSource;
 use crate::types::{Ty, Visibility};
 
@@ -2338,6 +2338,20 @@ pub fn map_call_sig_args(
         &sig.param_names,
         sig.required,
         &sig.param_defaults,
+    )
+}
+
+pub fn map_param_list_args(
+    args: &[ExprId],
+    names: Option<&[Option<String>]>,
+    params: &ParamList,
+) -> Result<Vec<Option<ExprId>>, String> {
+    map_call_args(
+        args,
+        names,
+        &params.names,
+        required_arity(params.names.len(), &params.defaults),
+        &params.defaults,
     )
 }
 
@@ -10341,15 +10355,8 @@ impl<'a> Checker<'a> {
                                 .resolve_type(&internal)
                                 .and_then(|t| t.constructor_named_params(args.len()))
                             {
-                                let required =
-                                    required_arity(ctor_params.names.len(), &ctor_params.defaults);
-                                match map_call_args(
-                                    args,
-                                    arg_names.as_deref(),
-                                    &ctor_params.names,
-                                    required,
-                                    &ctor_params.defaults,
-                                ) {
+                                match map_param_list_args(args, arg_names.as_deref(), &ctor_params)
+                                {
                                     Ok(slots) => {
                                         for &a in slots.iter().flatten() {
                                             self.expr(a);
@@ -12037,15 +12044,8 @@ impl<'a> Checker<'a> {
                                 .resolve_type(&internal)
                                 .and_then(|t| t.constructor_named_params(args.len()))
                             {
-                                let required =
-                                    required_arity(ctor_params.names.len(), &ctor_params.defaults);
-                                match map_call_args(
-                                    args,
-                                    arg_names.as_deref(),
-                                    &ctor_params.names,
-                                    required,
-                                    &ctor_params.defaults,
-                                ) {
+                                match map_param_list_args(args, arg_names.as_deref(), &ctor_params)
+                                {
                                     Ok(slots) => {
                                         // Type-check every PROVIDED argument (omitted-default slots are `None`).
                                         for &a in slots.iter().flatten() {
