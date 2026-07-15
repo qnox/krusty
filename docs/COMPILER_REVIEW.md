@@ -3125,3 +3125,12 @@ facts stay coupled to the selected overload produced from the shared metadata de
 
 Verification:
 `cargo test --profile gate metadata_return_types::plus_assign_receiver_is_mutable -- --nocapture`.
+
+### Top-Level Lambda Shape Probe Merge
+
+The next resolver cleanup merged the receiver-less top-level HOF lambda projections into one
+`SymbolResolver::top_level_lambda_shape` result. The checker no longer asks the resolver separately
+for lambda parameter types, receiver-function receivers, and materialization flags for the same
+`FunctionSet`; those facts now travel together from the selected overload data. This removed the
+three single-fact top-level lambda probe methods and kept fully-qualified trailing-lambda recovery on
+the same shape path as ordinary imported top-level calls.

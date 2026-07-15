@@ -10351,24 +10351,25 @@ impl<'a> Checker<'a> {
                                 let mut partial: Vec<Option<Ty>> =
                                     arg_tys.iter().map(|t| Some(*t)).collect();
                                 partial[last] = None;
-                                let pts = self
-                                    .resolver()
-                                    .top_level_lambda_param_types(&name, &partial);
-                                let recvs =
-                                    self.resolver().top_level_lambda_receivers(&name, &partial);
-                                if let Some(pt) = pts.as_ref().and_then(|p| p.get(last)).cloned() {
+                                let shape = self.resolver().top_level_lambda_shape(&name, &partial);
+                                if let Some(pt) = shape
+                                    .as_ref()
+                                    .and_then(|s| s.param_types.as_ref())
+                                    .and_then(|p| p.get(last))
+                                    .cloned()
+                                {
                                     // A RECEIVER function-type block parameter (`CoroutineScope.() -> T`):
                                     // `pt[0]` is the receiver bound as the lambda's `this`, `pt[1..]` its
                                     // value params — matching the bare-name path's `lambda_param_types` use.
-                                    let has_recv = recvs
+                                    let recv = shape
                                         .as_ref()
-                                        .and_then(|r| r.get(last).copied().flatten())
-                                        .is_some();
-                                    let lam_ty = if has_recv && !pt.is_empty() {
+                                        .and_then(|s| s.receivers.as_ref())
+                                        .and_then(|r| r.get(last).copied().flatten());
+                                    let lam_ty = if let Some(recv) = recv {
                                         self.check_lambda_with_receiver_labeled(
                                             args[last],
-                                            pt[0],
-                                            &pt[1..],
+                                            recv,
+                                            if !pt.is_empty() { &pt[1..] } else { &[] },
                                             None,
                                         )
                                     } else {
@@ -11805,36 +11806,29 @@ impl<'a> Checker<'a> {
                 let user_generic: Option<Vec<Vec<Ty>>> = toplevel_partial
                     .as_ref()
                     .and_then(|partial| self.user_generic_call(&fname, partial));
-                let toplevel_lambda_pts: Option<Vec<Vec<Ty>>> = toplevel_partial
+                let toplevel_lambda_shape = toplevel_partial
                     .as_ref()
                     // A library top-level function only when no user function shadows it.
                     .filter(|_| known_sig.is_none())
-                    .and_then(|partial| {
-                        self.resolver()
-                            .top_level_lambda_param_types(&fname, partial)
-                    })
+                    .and_then(|partial| self.resolver().top_level_lambda_shape(&fname, partial));
+                let toplevel_lambda_pts: Option<Vec<Vec<Ty>>> = toplevel_lambda_shape
+                    .as_ref()
+                    .and_then(|shape| shape.param_types.clone())
                     .or_else(|| user_generic.clone());
                 // Per-param RECEIVER function type for a classpath top-level HOF (`NavHost(builder:
                 // NGB.()->Unit){…}`) — a lambda to such a param binds its implicit `this` to the receiver.
                 // From `@Metadata`'s `@ExtensionFunctionType` (no JVM `Signature` needed, so this also
                 // drives a krusty-emitted module's HOF whose `Signature` attribute is absent). `None` for a
                 // user fn.
-                let toplevel_lambda_recvs: Option<Vec<Option<Ty>>> = toplevel_partial
+                let toplevel_lambda_recvs: Option<Vec<Option<Ty>>> = toplevel_lambda_shape
                     .as_ref()
-                    .filter(|_| known_sig.is_none())
-                    .and_then(|partial| {
-                        self.resolver().top_level_lambda_receivers(&fname, partial)
-                    });
+                    .and_then(|shape| shape.receivers.clone());
                 // Per-param `crossinline`/`noinline`: such a lambda argument is MATERIALIZED (a real
                 // closure, e.g. the `Continuation(ctx){…}` factory's `resumeWith`), so a mutable local it
                 // captures must be `Ref`-boxed — DON'T treat it as an inline splice.
-                let toplevel_lambda_materialized: Option<Vec<bool>> = toplevel_partial
+                let toplevel_lambda_materialized: Option<Vec<bool>> = toplevel_lambda_shape
                     .as_ref()
-                    .filter(|_| known_sig.is_none())
-                    .and_then(|partial| {
-                        self.resolver()
-                            .top_level_lambda_materialized(&fname, partial)
-                    });
+                    .and_then(|shape| shape.materialized.clone());
                 // A top-level NON-public (`@InlineOnly`) inline fn (`require`/`check`) inlines its lambda
                 // argument (or the file is skipped), so a mutable capture is an inline capture — type the
                 // lambda body with mutation allowed (don't `Ref`-box the captured var).
