@@ -314,10 +314,12 @@ pub struct SymbolTable {
     /// The target's compiled library set — a JVM classpath or a klib (empty unless the driver
     /// supplies one). The front end resolves external references only through this abstraction.
     pub libraries: Box<dyn CompilerPlatform>,
-    /// Top-level extension functions: (erased receiver, method_name) → Signature. The receiver is its
-    /// [`Ty::erased_recv`] key (nullability/generics/type-params folded). Used to resolve
-    /// `recv.method(args)` when no instance method matches.
-    pub ext_funs: HashMap<(Ty, String), Signature>,
+    /// Top-level extension functions: (erased receiver, method_name) → its overloads. The receiver is
+    /// its [`Ty::erased_recv`] key (nullability/generics/type-params folded). Used to resolve
+    /// `recv.method(args)` when no instance method matches. A `(recv, name)` may carry SEVERAL
+    /// overloads that differ by parameter list (`fun IntArray.f()` and `fun IntArray.f(i: Int)`); only
+    /// a true erased-parameter duplicate is a real JVM collision (rejected at collection).
+    pub ext_funs: HashMap<(Ty, String), Vec<Signature>>,
     /// Top-level extension properties: (erased receiver, prop_name) → (type, is_var). The
     /// getter/setter are emitted as static `getName(Recv)`/`setName(Recv, T)` methods.
     pub ext_props: HashMap<(Ty, String), (Ty, bool)>,
@@ -382,6 +384,22 @@ impl SymbolTable {
     /// Resolve a class reference type `Ty::Obj` back to its declaration (by internal name).
     pub fn class_by_internal(&self, internal: &str) -> Option<&ClassSig> {
         self.classes.values().find(|c| c.internal == internal)
+    }
+
+    /// The extension-function overloads registered for a receiver + name (empty if none). The receiver
+    /// is folded to its [`Ty::erased_recv`] key, matching how they are stored at collection.
+    pub fn ext_fun_overloads(&self, recv: Ty, name: &str) -> &[Signature] {
+        self.ext_funs
+            .get(&(recv.erased_recv(), name.to_string()))
+            .map_or(&[], |v| v.as_slice())
+    }
+
+    /// The first extension overload for `(recv, name)`, or `None`. Most direct-read sites resolve a
+    /// single extension (or only need a representative overload — the arity/argument disambiguation for
+    /// a genuine call runs through the `SymbolResolver`'s `receiver_extensions`), so they read the
+    /// first. A site that must pick by argument arity iterates [`Self::ext_fun_overloads`].
+    pub fn ext_fun(&self, recv: Ty, name: &str) -> Option<&Signature> {
+        self.ext_fun_overloads(recv, name).first()
     }
 
     pub fn class_by_internal_mut(&mut self, internal: &str) -> Option<&mut ClassSig> {
@@ -1378,15 +1396,25 @@ pub fn collect_signatures_with_cp(
                             && !module_declared_recv
                         {
                             diags.error(f.span, "krusty: an operator extension on a nullable reference receiver is not supported".to_string());
-                        } else if table
-                            .ext_funs
-                            .insert((recv_ty.erased_recv(), f.name.clone()), sig)
-                            .is_some()
-                        {
-                            // Two extensions with the same erased receiver + name (a duplicate, or a
-                            // nullable/non-null pair) can't be told apart at the call site under
-                            // nullability erasure — reject rather than silently pick one.
-                            diags.error(f.span, "krusty: conflicting extension functions with the same erased receiver and name".to_string());
+                        } else {
+                            // Overloading by ARITY: keep extensions of the same (erased receiver, name)
+                            // that differ in parameter COUNT (`fun IntArray.f()` and `fun IntArray.f(i)`).
+                            // The backend keys an extension's emitted method by arity, and the checker's
+                            // overload picker selects by argument count, so an arity-distinct overload is
+                            // dispatched unambiguously by BOTH phases. Two overloads of the SAME arity —
+                            // distinguished only by parameter TYPE — cannot be told apart by the arity-keyed
+                            // emit (they would collide to one method), so they are still rejected rather
+                            // than risk dispatching to the wrong one.
+                            let overloads = table
+                                .ext_funs
+                                .entry((recv_ty.erased_recv(), f.name.clone()))
+                                .or_default();
+                            let arity = sig.params.len();
+                            if overloads.iter().any(|s| s.params.len() == arity) {
+                                diags.error(f.span, "krusty: conflicting extension functions with the same erased receiver and name".to_string());
+                            } else {
+                                overloads.push(sig);
+                            }
                         }
                     } else {
                         // Overloading: keep ALL same-name functions, keyed by name. Only an exact
@@ -4261,8 +4289,12 @@ pub fn check_file(file: &File, syms: &mut SymbolTable, diags: &mut DiagSink) -> 
                 sig.ret = ret;
             }
         }
-        for ((recv, name), ret) in ext_rets {
-            if let Some(sig) = syms.ext_funs.get_mut(&(recv, name)) {
+        for ((recv, name, params), ret) in ext_rets {
+            if let Some(sig) = syms
+                .ext_funs
+                .get_mut(&(recv, name))
+                .and_then(|ov| ov.iter_mut().find(|s| s.params == params))
+            {
                 changed |= sig.ret != ret;
                 sig.ret = ret;
             }
@@ -4909,8 +4941,12 @@ pub fn check_file(file: &File, syms: &mut SymbolTable, diags: &mut DiagSink) -> 
             sig.ret = ret;
         }
     }
-    for ((recv, name), ret) in inferred_ext_fun_rets {
-        if let Some(sig) = syms.ext_funs.get_mut(&(recv, name)) {
+    for ((recv, name, params), ret) in inferred_ext_fun_rets {
+        if let Some(sig) = syms
+            .ext_funs
+            .get_mut(&(recv, name))
+            .and_then(|ov| ov.iter_mut().find(|s| s.params == params))
+        {
             sig.ret = ret;
         }
     }
@@ -4993,7 +5029,7 @@ struct Checker<'a> {
     /// Accumulated output maps (moved into TypeInfo at the end of `check_file`).
     expr_lowers: HashMap<ExprId, ExprLowering>,
     inferred_fun_rets: HashMap<(String, Vec<Ty>), Ty>,
-    inferred_ext_fun_rets: HashMap<(Ty, String), Ty>,
+    inferred_ext_fun_rets: HashMap<(Ty, String, Vec<Ty>), Ty>,
     inferred_method_rets: HashMap<(String, String, Vec<Ty>), Ty>,
     stmt_lowers: HashMap<StmtId, StmtLowering>,
     local_decl_types: HashMap<StmtId, Ty>,
@@ -5189,14 +5225,13 @@ impl<'a> Checker<'a> {
         }
         if let Some(sig) = self
             .syms
-            .ext_funs
-            .get(&(receiver.erased_recv(), name.to_string()))
+            .ext_fun_overloads(receiver, name)
+            .iter()
+            .find(|s| !s.vararg && s.params.len() == arg_tys.len())
             .cloned()
         {
-            if !sig.vararg && sig.params.len() == arg_tys.len() {
-                self.expect_call_args(&sig.params, false, arg_exprs, arg_tys);
-                return Some(sig.ret);
-            }
+            self.expect_call_args(&sig.params, false, arg_exprs, arg_tys);
+            return Some(sig.ret);
         }
         crate::symbol_resolver::resolve_instance_member(
             &*self.syms.libraries,
@@ -6319,10 +6354,25 @@ impl<'a> Checker<'a> {
         if let Some(recv_ref) = &f.receiver {
             let recv_ty = self.resolve_ty(recv_ref);
             self.this_ty = Some(recv_ty);
+            // Pick THIS declaration's overload out of the receiver+name overload set by matching its
+            // parameter list (an extension may be overloaded by arity — `fun R.f()` and `fun R.f(x)`).
+            let want: Vec<Ty> = f
+                .params
+                .iter()
+                .map(|p| {
+                    let t = self.resolve_ty(&p.ty);
+                    if p.is_vararg {
+                        Ty::array(t)
+                    } else {
+                        t
+                    }
+                })
+                .collect();
             self.ret_ty = self
                 .syms
-                .ext_funs
-                .get(&(recv_ty.erased_recv(), f.name.clone()))
+                .ext_fun_overloads(recv_ty, &f.name)
+                .iter()
+                .find(|s| s.params == want)
                 .map(|s| s.ret)
                 .or_else(|| f.ret.as_ref().map(|r| self.resolve_ty(r)))
                 .unwrap_or(Ty::Unit);
@@ -6375,8 +6425,10 @@ impl<'a> Checker<'a> {
                     self.ret_ty = inferred;
                     if let Some(recv_ref) = &f.receiver {
                         let recv_ty = self.resolve_ty(recv_ref);
-                        self.inferred_ext_fun_rets
-                            .insert((recv_ty.erased_recv(), f.name.clone()), inferred);
+                        self.inferred_ext_fun_rets.insert(
+                            (recv_ty.erased_recv(), f.name.clone(), ptys.clone()),
+                            inferred,
+                        );
                     } else {
                         self.inferred_fun_rets
                             .insert((f.name.clone(), ptys.clone()), inferred);
@@ -7236,16 +7288,15 @@ impl<'a> Checker<'a> {
                 // A same-module extension `operator fun Recv.get(i, j, …)`.
                 if let Some(sig) = self
                     .syms
-                    .ext_funs
-                    .get(&(at.erased_recv(), "get".to_string()))
+                    .ext_fun_overloads(at, "get")
+                    .iter()
+                    .find(|s| s.params.len() == its.len())
                     .cloned()
                 {
-                    if sig.params.len() == its.len() {
-                        for (i, &pt) in sig.params.iter().enumerate() {
-                            self.expect_assignable(pt, its[i], self.span(indices[i]), "index");
-                        }
-                        return self.set(e, sig.ret);
+                    for (i, &pt) in sig.params.iter().enumerate() {
+                        self.expect_assignable(pt, its[i], self.span(indices[i]), "index");
                     }
+                    return self.set(e, sig.ret);
                 }
                 // A library `get(i, j, …)` member (`List.get(Int)`, `Map.get(K)`).
                 if let Some(m) = crate::symbol_resolver::resolve_instance_member(
@@ -8633,12 +8684,7 @@ impl<'a> Checker<'a> {
                                 // the extension's own args — `(A, ext-args…) -> ext-ret`. (A member of
                                 // the same name, checked above, takes precedence.)
                                 let recv_ty = Ty::obj(&cls.internal);
-                                if let Some(sig) = self
-                                    .syms
-                                    .ext_funs
-                                    .get(&(recv_ty.erased_recv(), name.clone()))
-                                    .cloned()
-                                {
+                                if let Some(sig) = self.syms.ext_fun(recv_ty, &name).cloned() {
                                     if sig.requires_all_args() && sig.ret != Ty::Nothing {
                                         let mut params = vec![recv_ty];
                                         params.extend(sig.params.iter().copied());
@@ -8711,12 +8757,7 @@ impl<'a> Checker<'a> {
                             }
                         }
                     }
-                    if let Some(sig) = self
-                        .syms
-                        .ext_funs
-                        .get(&(rty.erased_recv(), name.clone()))
-                        .cloned()
-                    {
+                    if let Some(sig) = self.syms.ext_fun(rty, &name).cloned() {
                         if sig.requires_all_args() {
                             return self.set(e, Ty::fun(sig.params.clone(), sig.ret));
                         }
@@ -9278,16 +9319,15 @@ impl<'a> Checker<'a> {
         // resolves. Lets a bare call inside a receiver lambda reach a same-module extension on `this`.
         if let Some(sig) = self
             .syms
-            .ext_funs
-            .get(&(rt.erased_recv(), name.to_string()))
+            .ext_fun_overloads(rt, name)
+            .iter()
+            .find(|s| !s.vararg && s.params.len() == arg_tys.len())
             .cloned()
         {
-            if !sig.vararg && sig.params.len() == arg_tys.len() {
-                for (i, (p, a)) in sig.params.iter().zip(arg_tys).enumerate() {
-                    self.expect_assignable(*p, *a, self.span(args[i]), "argument");
-                }
-                return Some(sig.ret);
+            for (i, (p, a)) in sig.params.iter().zip(arg_tys).enumerate() {
+                self.expect_assignable(*p, *a, self.span(args[i]), "argument");
             }
+            return Some(sig.ret);
         }
         // A stdlib/library EXTENSION on the receiver (`String.reversed()`, `String.uppercase()`):
         // resolved receiver-aware so the right overload is selected (`CharSequence.reversed`, not the
@@ -11387,7 +11427,25 @@ impl<'a> Checker<'a> {
                 // its `callable.params` prepend the receiver and `callable.descriptor` is the full static
                 // `(recv + params)ret` the emitter wants.
                 {
-                    let module_ext = self.resolver().exact_receiver_extensions(rt, &name).next();
+                    // Select the overload matching this call's arguments (an extension may be
+                    // overloaded by arity — `fun R.f()` and `fun R.f(x)`); fall back to the first when
+                    // none fits exactly, preserving the omitted-default / named-argument handling below.
+                    let exts: Vec<_> = self
+                        .resolver()
+                        .exact_receiver_extensions(rt, &name)
+                        .collect();
+                    let module_ext = exts
+                        .iter()
+                        .find(|fi| {
+                            let lp = fi.extension_value_params();
+                            lp.len() == arg_tys.len()
+                                && lp
+                                    .iter()
+                                    .zip(&arg_tys)
+                                    .all(|(p, a)| crate::symbol_resolver::arg_fits(p, a))
+                        })
+                        .or_else(|| exts.first())
+                        .cloned();
                     if let Some(fi) = module_ext {
                         let logical = fi.extension_value_params().to_vec();
                         let cs = &fi.call_sig;
@@ -12831,9 +12889,9 @@ impl<'a> Checker<'a> {
             return Some(m.ret);
         }
         self.syms
-            .ext_funs
-            .get(&(ty.erased_recv(), name.to_string()))
-            .filter(|sig| sig.params.is_empty())
+            .ext_fun_overloads(ty, name)
+            .iter()
+            .find(|sig| sig.params.is_empty())
             .map(|sig| sig.ret)
     }
 
@@ -12856,9 +12914,9 @@ impl<'a> Checker<'a> {
             .find_map(|m| (m.params.len() == 1).then(|| m.params[0]))
             .or_else(|| {
                 self.syms
-                    .ext_funs
-                    .get(&(recv.erased_recv(), aname.to_string()))
-                    .and_then(|sig| sig.single_param())
+                    .ext_fun_overloads(recv, aname)
+                    .iter()
+                    .find_map(|sig| sig.single_param())
             });
         let rt = self.expr(rhs);
         if let Some(param) = param {
@@ -13309,9 +13367,9 @@ impl<'a> Checker<'a> {
                     .filter(|sig| sig.params.len() == set_args.len())
                     .or_else(|| {
                         self.syms
-                            .ext_funs
-                            .get(&(at.erased_recv(), "set".to_string()))
-                            .filter(|sig| sig.params.len() == set_args.len())
+                            .ext_fun_overloads(at, "set")
+                            .iter()
+                            .find(|sig| sig.params.len() == set_args.len())
                             .cloned()
                     });
                 let ok = if let Some(sig) = member_set {

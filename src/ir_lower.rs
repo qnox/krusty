@@ -86,6 +86,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
         },
         fun_ids: HashMap::new(),
         ext_fun_ids: HashMap::new(),
+        ext_fun_id_by_arity: HashMap::new(),
         ext_prop_get_ids: HashMap::new(),
         companion_consts: HashMap::new(),
         const_lits: HashMap::new(),
@@ -1431,7 +1432,27 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     return None;
                 }
                 let recv_key = recv_ty.erased_recv();
-                let sig = syms.ext_funs.get(&(recv_key, f.name.clone()))?;
+                // Select THIS declaration's overload from the receiver+name set by its parameter list —
+                // an extension may be overloaded by arity (`fun R.f()` and `fun R.f(x)`), each emitted as
+                // its own static method and keyed by arity so the call site picks the right one.
+                let want: Vec<Ty> = f
+                    .params
+                    .iter()
+                    .map(|p| {
+                        let t = ty_of(file, &p.ty, &*syms.libraries);
+                        if p.is_vararg {
+                            Ty::array(t)
+                        } else {
+                            t
+                        }
+                    })
+                    .collect();
+                let sig = syms
+                    .ext_fun_overloads(recv_ty, &f.name)
+                    .iter()
+                    .find(|s| s.params == want)
+                    .or_else(|| syms.ext_fun_overloads(recv_ty, &f.name).first())?;
+                let arity = sig.params.len();
                 let mut params = vec![ty_to_ir(recv_ty)];
                 params.extend(sig.params.iter().map(|t| stored_value_ty(*t)));
                 let ret = ty_to_ir(sig.ret);
@@ -1444,7 +1465,11 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     dispatch_receiver: None,
                     param_checks: vec![],
                 });
-                lo.ext_fun_ids.insert((recv_key, f.name.clone()), id);
+                lo.ext_fun_id_by_arity
+                    .insert((recv_key, f.name.clone(), arity), id);
+                lo.ext_fun_ids
+                    .entry((recv_key, f.name.clone()))
+                    .or_insert(id);
             } else {
                 let want: Vec<Ty> = f
                     .params
@@ -1702,12 +1727,33 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 lo.lambda_seq = 0;
                 let (fid, sig) = if let Some(recv_ref) = &f.receiver {
                     // Extension body: `this` is the receiver (parameter 0), then the declared params.
+                    // Pick THIS declaration's overload (by parameter list) and its arity-keyed method id.
                     let recv_ty = lo.ext_receiver_ty(file, recv_ref);
                     let recv_key = recv_ty.erased_recv();
-                    let fid = lo.ext_fun_ids[&(recv_key, f.name.clone())];
+                    let want: Vec<Ty> = f
+                        .params
+                        .iter()
+                        .map(|p| {
+                            let t = ty_of(file, &p.ty, &*syms.libraries);
+                            if p.is_vararg {
+                                Ty::array(t)
+                            } else {
+                                t
+                            }
+                        })
+                        .collect();
+                    let sig = syms
+                        .ext_fun_overloads(recv_ty, &f.name)
+                        .iter()
+                        .find(|s| s.params == want)?;
+                    let fid = *lo.ext_fun_id_by_arity.get(&(
+                        recv_key,
+                        f.name.clone(),
+                        sig.params.len(),
+                    ))?;
                     let this_v = lo.fresh_value();
                     lo.scope.push(("this".to_string(), this_v, recv_ty));
-                    (fid, syms.ext_funs.get(&(recv_key, f.name.clone()))?)
+                    (fid, sig)
                 } else {
                     let want: Vec<Ty> = f
                         .params
@@ -4267,8 +4313,13 @@ pub(crate) struct Lower<'a> {
     fun_ids: HashMap<(String, Vec<Ty>), u32>,
     /// Top-level extension functions, keyed by `(erased receiver, name)` ([`Ty::erased_recv`]) —
     /// separate from `fun_ids` since `fun Int.foo()` and `fun String.foo()` share a name but differ by
-    /// receiver. Same key scheme as `SymbolTable::ext_funs` so the two never disagree.
+    /// receiver. Same key scheme as `SymbolTable::ext_funs` so the two never disagree. Holds the FIRST
+    /// overload's id (the common case is a single overload); an extension overloaded by arity is
+    /// disambiguated at the call site through [`Self::ext_fun_id_by_arity`].
     ext_fun_ids: HashMap<(Ty, String), u32>,
+    /// Every extension overload id keyed additionally by its logical parameter arity, so a call resolves
+    /// `fun R.f()` vs `fun R.f(x)` to the right emitted static method. Filled alongside `ext_fun_ids`.
+    ext_fun_id_by_arity: HashMap<(Ty, String, usize), u32>,
     /// Top-level extension PROPERTIES (`val/var Recv.name: T get() = … [set(v) = …]`), keyed by
     /// `(erased receiver, name)` → the synthesized static getter (`getName(Recv): T`) / setter
     /// (`setName(Recv, T)`) FunId.
@@ -8660,11 +8711,19 @@ impl<'a> Lower<'a> {
     /// unmatched keeps the file skipped rather than miscompiled; and CLASSPATH supertypes (`Any`,
     /// `Number`, …) are not walked at all, so a builtin/operator on them is never shadowed by an
     /// extension registered under the supertype.
-    fn ext_fun_id_for_recv(&self, recv_ty: Ty, name: &str) -> Option<u32> {
-        if let Some(&fid) = self
-            .ext_fun_ids
-            .get(&(recv_ty.erased_recv(), name.to_string()))
-        {
+    fn ext_fun_id_for_recv(&self, recv_ty: Ty, name: &str, n_args: usize) -> Option<u32> {
+        // An extension overloaded by arity resolves to the overload whose logical parameter count
+        // matches the call's argument count; a single-overload extension falls back to the primary id.
+        let pick = |recv: Ty| {
+            self.ext_fun_id_by_arity
+                .get(&(recv.erased_recv(), name.to_string(), n_args))
+                .or_else(|| {
+                    self.ext_fun_ids
+                        .get(&(recv.erased_recv(), name.to_string()))
+                })
+                .copied()
+        };
+        if let Some(fid) = pick(recv_ty) {
             return Some(fid);
         }
         // A MEMBER (own or inherited through the user hierarchy) shadows a SUPERTYPE extension of the
@@ -8700,10 +8759,7 @@ impl<'a> Lower<'a> {
                 continue;
             };
             if c.tparam_names.is_empty() {
-                if let Some(&fid) = self
-                    .ext_fun_ids
-                    .get(&(Ty::obj(&internal).erased_recv(), name.to_string()))
-                {
+                if let Some(fid) = pick(Ty::obj(&internal)) {
                     return Some(fid);
                 }
             }
@@ -12002,10 +12058,15 @@ impl<'a> Lower<'a> {
         }
         // A MODULE extension on the receiver (`fun Recv.name(args)` declared in this compilation) —
         // `invokestatic <facade>.name(this, args)` (the receiver is the first parameter of the lowered
-        // static impl). Mirrors a qualified `recv.name(args)` module-extension call.
+        // static impl). Mirrors a qualified `recv.name(args)` module-extension call. Prefer the overload
+        // whose arity matches the call (`fun R.f()` vs `fun R.f(x)`), else the primary id.
         if let Some(&fid) = self
-            .ext_fun_ids
-            .get(&(this_ty.erased_recv(), name.to_string()))
+            .ext_fun_id_by_arity
+            .get(&(this_ty.erased_recv(), name.to_string(), args.len()))
+            .or_else(|| {
+                self.ext_fun_ids
+                    .get(&(this_ty.erased_recv(), name.to_string()))
+            })
         {
             let params = self.ir.functions[fid as usize].params.clone();
             if params.len() == args.len() + 1 {
@@ -14893,10 +14954,18 @@ impl<'a> Lower<'a> {
         // receiver, name)` with value params only; a GENERIC extension isn't registered there (its
         // receiver erased to `Any`), so derive from the decl.
         let (sig_params, sig_ret): (Vec<Ty>, Ty) = if let Some(rt) = &recv_ty {
-            if let Some(s) = self
-                .syms
-                .ext_funs
-                .get(&(rt.erased_recv(), fname.to_string()))
+            // Match THIS declaration's overload by its parameter list (an extension may be overloaded
+            // by arity); fall back to the first overload when the decl's types don't line up.
+            let want: Vec<Ty> = f
+                .params
+                .iter()
+                .map(|p| ty_of(self.afile, &p.ty, &*self.syms.libraries))
+                .collect();
+            let overloads = self.syms.ext_fun_overloads(*rt, fname);
+            if let Some(s) = overloads
+                .iter()
+                .find(|s| s.params == want)
+                .or_else(|| overloads.first())
             {
                 (s.params.clone(), s.ret)
             } else {
@@ -20295,7 +20364,9 @@ impl<'a> Lower<'a> {
                     // Resolve exact-receiver-first, then the receiver's supertype closure, so a
                     // `fun A.f()` called on a `B : A` binds (the checker already resolves it that way).
                     {
-                        if let Some(fid) = self.ext_fun_id_for_recv(self.recv_ty(receiver), &name) {
+                        if let Some(fid) =
+                            self.ext_fun_id_for_recv(self.recv_ty(receiver), &name, args.len())
+                        {
                             let params = self.ir.functions[fid as usize].params.clone();
                             if params.len() == args.len() + 1 {
                                 // A NAMED extension call may reorder the arguments: map labels onto

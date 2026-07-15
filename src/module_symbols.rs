@@ -233,20 +233,24 @@ impl SymbolSource for ModuleSymbols<'_> {
         // resolver's `receiver_extensions` filters by receiver applicability). Keyed by erased receiver in
         // `ext_funs` — the exact-receiver key is rung 0, the universal `Any` key rung 1.
         let any = Ty::obj("kotlin/Any");
-        for ((recv, en), sig) in &self.syms.ext_funs {
+        for ((recv, en), sigs) in &self.syms.ext_funs {
             if en == name {
                 let rank = if *recv == any { 1 } else { 0 };
-                overloads.push(fn_info(
-                    FnKind::Extension,
-                    sig,
-                    Some(*recv),
-                    String::new(),
-                    name,
-                    rank,
-                    Origin::Module {
-                        facade: String::new(),
-                    },
-                ));
+                // Surface EVERY overload registered for this (receiver, name) so the resolver's
+                // overload picker can choose by arity/argument types (`fun R.f()` vs `fun R.f(x)`).
+                for sig in sigs {
+                    overloads.push(fn_info(
+                        FnKind::Extension,
+                        sig,
+                        Some(*recv),
+                        String::new(),
+                        name,
+                        rank,
+                        Origin::Module {
+                            facade: String::new(),
+                        },
+                    ));
+                }
             }
         }
         let callables = if overloads.is_empty() {
@@ -474,7 +478,7 @@ mod tests {
         let recv = Ty::obj("demo/Point");
         st.ext_funs.insert(
             (recv.erased_recv(), "shifted".into()),
-            sig(vec![Ty::Int], recv),
+            vec![sig(vec![Ty::Int], recv)],
         );
         let m = ModuleSymbols::new(&st);
         // A module extension is surfaced through the `resolve_symbols` fqn seam (receiver as an attribute).
