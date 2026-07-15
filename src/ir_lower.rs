@@ -2655,6 +2655,53 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                         }
                     }
                 }
+                // A REGULAR (non-value, non-inner) class with a DEFAULT on any primary-ctor parameter needs
+                // kotlinc's synthetic `<init>(params…, int mask, DefaultConstructorMarker)` overload. Lower
+                // each default in the INSTANCE `<init>` frame (`this` = value 0, params = 1..=n) and stash
+                // them by class internal; the backend emits the overload. Gated like the member-default
+                // path: not an interface, ≤31 params, and only when at least one default exists.
+                if !c.is_value
+                    && c.inner_of.is_none()
+                    && !c.is_interface()
+                    && c.has_primary_ctor
+                    && c.props.len() <= 31
+                    && c.props.iter().any(|p| p.default.is_some())
+                {
+                    lo.scope.clear();
+                    lo.boxed_elem.clear();
+                    lo.next_value = 0;
+                    lo.cur_class = Some(internal.clone());
+                    lo.cur_tparams = class_tparams(file, c, &*syms.libraries);
+                    let this_v = lo.fresh_value(); // value 0 = `this`
+                    lo.scope
+                        .push(("this".to_string(), this_v, Ty::obj(&internal)));
+                    let mut ptys = Vec::new();
+                    for p in c.props.iter() {
+                        let pty = ty_of(file, &p.ty, &*syms.libraries);
+                        let v = lo.fresh_value(); // params at 1..=n
+                        lo.scope.push((p.name.clone(), v, pty));
+                        ptys.push(pty);
+                    }
+                    let mut defaults = Vec::with_capacity(c.props.len());
+                    let mut all_ok = true;
+                    for (p, pty) in c.props.iter().zip(&ptys) {
+                        match p.default {
+                            Some(d) => match lo.lower_arg(d, &ty_to_ir(*pty)) {
+                                Some(l) => defaults.push(Some(l)),
+                                None => {
+                                    all_ok = false;
+                                    break;
+                                }
+                            },
+                            None => defaults.push(None),
+                        }
+                    }
+                    // Only register when EVERY default lowered — a partial set would emit a stub that fills
+                    // some slots with a zero placeholder (a miscompile); bail to the no-stub status quo.
+                    if all_ok {
+                        lo.ir.class_ctor_defaults.insert(internal.clone(), defaults);
+                    }
+                }
                 // Constructor body: run body-property initializers and `init { … }` blocks in source
                 // order, with `this` = value 0 and the constructor params as values 1..=N. For a class
                 // with NO primary constructor the init steps run inside each `super(…)`-reaching secondary

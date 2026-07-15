@@ -24,7 +24,8 @@ pub enum VerifType {
     Long,
     Double,
     Null,
-    Object(u16), // constant-pool index of a Class entry
+    UninitializedThis, // `this` inside a constructor, before the `<init>`/`super(…)` call
+    Object(u16),       // constant-pool index of a Class entry
 }
 
 fn write_verif_type(vt: &VerifType, out: &mut Vec<u8>) {
@@ -35,6 +36,7 @@ fn write_verif_type(vt: &VerifType, out: &mut Vec<u8>) {
         VerifType::Double => out.push(3),
         VerifType::Long => out.push(4),
         VerifType::Null => out.push(5),
+        VerifType::UninitializedThis => out.push(6),
         VerifType::Object(idx) => {
             out.push(7);
             u2(out, *idx);
