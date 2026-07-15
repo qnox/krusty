@@ -112,6 +112,8 @@ mod class_metadata_roundtrip;
 mod class_tparam_cast_e2e;
 #[path = "classfile_e2e.rs"]
 mod classfile_e2e;
+#[path = "classpath_annotation_emit_e2e.rs"]
+mod classpath_annotation_emit_e2e;
 #[path = "classpath_collection_and_nested_named_e2e.rs"]
 mod classpath_collection_and_nested_named_e2e;
 #[path = "classpath_collection_param_member_e2e.rs"]

@@ -24,6 +24,7 @@ fn class_info(internal: &str, d1: Vec<u8>, d2: Vec<String>) -> ClassInfo {
         kotlin_d1: vec![d1.iter().map(|&b| b as char).collect()],
         kotlin_d2: d2,
         signature: None,
+        retention: None,
     }
 }
 

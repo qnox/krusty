@@ -1033,6 +1033,7 @@ fn mapped_builtin_fallback(internal: &str) -> Option<LibraryType> {
         value_ctor_has_default: false,
         ctor_named_params: Vec::new(),
         value_class_properties: Vec::new(),
+        retention: None,
     })
 }
 
@@ -1067,6 +1068,7 @@ fn builtin_library_type(
         value_ctor_has_default: false,
         ctor_named_params: Vec::new(),
         value_class_properties: Vec::new(),
+        retention: None,
     }
 }
 
@@ -1648,6 +1650,7 @@ impl SymbolSource for JvmLibraries {
                 value_ctor_has_default,
                 ctor_named_params: metadata::class_constructor_params(&ci),
                 value_class_properties: self.value_class_property_members_for_class(&ci),
+                retention: ci.retention.clone(),
             })
         })();
         self.cp

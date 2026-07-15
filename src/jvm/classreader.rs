@@ -77,6 +77,12 @@ pub struct ClassInfo {
     /// The class-level generic `Signature` attribute (JVM generics), e.g.
     /// `Lkotlin/ranges/IntProgression;Ljava/lang/Iterable<Ljava/lang/Integer;>;`. `None` if absent.
     pub signature: Option<String>,
+    /// For an `annotation`/`@interface`: the `java.lang.annotation.RetentionPolicy` constant name of its
+    /// `@Retention` meta-annotation (`"RUNTIME"` / `"CLASS"` / `"SOURCE"`), or `None` if absent. Kotlin
+    /// maps `AnnotationRetention.{RUNTIME,BINARY,SOURCE}` → `RetentionPolicy.{RUNTIME,CLASS,SOURCE}`, so a
+    /// use of this annotation is emitted `RuntimeVisibleAnnotations` for RUNTIME, `RuntimeInvisible…` for
+    /// CLASS, and dropped for SOURCE.
+    pub retention: Option<String>,
 }
 
 impl ClassInfo {
@@ -380,8 +386,9 @@ pub fn parse_class(bytes: &[u8]) -> Result<ClassInfo, ReadError> {
         })
         .collect();
 
-    // Read class-level attributes: @kotlin.Metadata → d1/d2 arrays, and the generic `Signature` attr.
-    let (kotlin_d1, kotlin_d2, signature) = read_class_attrs(&mut r, &cp);
+    // Read class-level attributes: @kotlin.Metadata → d1/d2 arrays, the generic `Signature` attr, and
+    // (for an annotation class) its `@Retention` policy.
+    let attrs = read_class_attrs(&mut r, &cp);
 
     Ok(ClassInfo {
         major,
@@ -391,29 +398,35 @@ pub fn parse_class(bytes: &[u8]) -> Result<ClassInfo, ReadError> {
         interfaces,
         fields,
         methods,
-        kotlin_d1: kotlin_d1.unwrap_or_default(),
-        kotlin_d2: kotlin_d2.unwrap_or_default(),
-        signature,
+        kotlin_d1: attrs.d1.unwrap_or_default(),
+        kotlin_d2: attrs.d2.unwrap_or_default(),
+        signature: attrs.signature,
+        retention: attrs.retention,
     })
 }
 
-/// Parse class-level attributes: `RuntimeVisibleAnnotations` → @kotlin/Metadata → `d2`, and the
-/// generic `Signature` attribute. Accumulates both (does not early-return) so neither is missed.
-fn read_class_attrs(
-    r: &mut Reader,
-    cp: &[C],
-) -> (Option<Vec<String>>, Option<Vec<String>>, Option<String>) {
+/// Accumulated class-level attributes from [`read_class_attrs`].
+#[derive(Default)]
+struct ClassAttrs {
+    d1: Option<Vec<String>>,
+    d2: Option<Vec<String>>,
+    signature: Option<String>,
+    retention: Option<String>,
+}
+
+/// Parse class-level attributes: `RuntimeVisibleAnnotations` → @kotlin.Metadata `d1`/`d2` and (for an
+/// annotation class) its `@Retention` policy; plus the generic `Signature` attribute. Accumulates all
+/// (does not early-return) so none is missed.
+fn read_class_attrs(r: &mut Reader, cp: &[C]) -> ClassAttrs {
     let utf8 = |i: u16| -> &str {
         match cp.get(i as usize) {
             Some(C::Utf8(s)) => s.as_str(),
             _ => "",
         }
     };
-    let mut d1 = None;
-    let mut d2 = None;
-    let mut signature = None;
+    let mut out = ClassAttrs::default();
     let Ok(n_attrs) = r.u2() else {
-        return (d1, d2, signature);
+        return out;
     };
     for _ in 0..n_attrs {
         let Ok(ni) = r.u2() else { break };
@@ -423,7 +436,7 @@ fn read_class_attrs(
         if name == "Signature" {
             if let Ok(si) = r.u2() {
                 if let Some(C::Utf8(s)) = cp.get(si as usize) {
-                    signature = Some(s.clone());
+                    out.signature = Some(s.clone());
                 }
             }
             if len > 2 {
@@ -437,26 +450,44 @@ fn read_class_attrs(
             }
             continue;
         }
-        // Parse annotations: find the one with type == "Lkotlin/Metadata;"
+        // Parse annotations: @kotlin.Metadata (d1/d2) and @java.lang.annotation.Retention (policy).
         let Ok(n_ann) = r.u2() else { break };
         for _ in 0..n_ann {
             let Ok(ati) = r.u2() else { break };
-            let is_kotlin_meta = utf8(ati) == "Lkotlin/Metadata;";
+            let atype = utf8(ati);
+            let is_kotlin_meta = atype == "Lkotlin/Metadata;";
+            let is_retention = atype == "Ljava/lang/annotation/Retention;";
             let Ok(n_pairs) = r.u2() else { break };
             for _ in 0..n_pairs {
                 let Ok(eni) = r.u2() else { break };
-                let field = if is_kotlin_meta { utf8(eni) } else { "" };
+                let ename = utf8(eni);
+                // `@Retention`'s `value` is an enum-constant element (`e` type_index const_index) — capture
+                // the `RetentionPolicy` constant name; a valid classfile always uses the `e` tag here.
+                if is_retention && ename == "value" {
+                    let Ok(tag) = r.u1() else { break };
+                    if tag == b'e' {
+                        let _ = r.u2(); // enum type descriptor index
+                        if let Ok(ci) = r.u2() {
+                            out.retention = Some(utf8(ci).to_string());
+                        }
+                    } else {
+                        // Unexpected shape — stop parsing this class's attributes rather than desync.
+                        return out;
+                    }
+                    continue;
+                }
+                let field = if is_kotlin_meta { ename } else { "" };
                 let want = field == "d1" || field == "d2";
                 match skip_element_value_extract_string_array(r, cp, want) {
-                    Ok(Some(strings)) if field == "d1" => d1 = Some(strings),
-                    Ok(Some(strings)) => d2 = Some(strings),
+                    Ok(Some(strings)) if field == "d1" => out.d1 = Some(strings),
+                    Ok(Some(strings)) => out.d2 = Some(strings),
                     Ok(None) => {}
-                    Err(_) => return (d1, d2, signature),
+                    Err(_) => return out,
                 }
             }
         }
     }
-    (d1, d2, signature)
+    out
 }
 
 /// Skip or extract an element_value. If `extract` is true and the value is a string array,
