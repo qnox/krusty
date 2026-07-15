@@ -1089,7 +1089,7 @@ impl<'a> SymbolResolver<'a> {
             .overloads
             .into_iter()
             .find(|o| {
-                o.is_member_or_extension()
+                matches!(o.kind, FnKind::Member | FnKind::Extension)
                     && !matches!(o.callable.origin, Origin::Module { .. })
                     && o.callable.ret == lambda_ret
                     && match o.kind {
