@@ -3171,3 +3171,12 @@ guards) now share `lower_member_read_on`; source reads still reuse checker-selec
 and generic coercions, while synthetic reads pass no source `ExprId` and resolve through the same
 semantic property getter path. This removes a duplicate classpath-property call emitter and keeps
 future property-shape work on one lowering path.
+
+### Library Member Call Emitter Merge
+
+The next lowerer cleanup merged repeated classpath virtual-call construction into one
+`emit_library_member_call` helper. Property getter reads, synthetic instance calls, implicit-receiver
+member calls, and qualified member calls now emit selected `LibraryMember` records through the same
+owner/name/descriptor/interface/suspend path instead of each branch unpacking those backend facts by
+hand. This keeps checker-carried `ResolvedMember` payloads and fallback resolver selections on one
+emission path, while preserving each branch's existing overload/default-argument selection order.

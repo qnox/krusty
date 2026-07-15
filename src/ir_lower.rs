@@ -4634,6 +4634,33 @@ impl<'a> Lower<'a> {
             .and_then(Symbol::synthetic_constructor)
     }
 
+    fn emit_library_member_call(
+        &mut self,
+        recv: u32,
+        owner_fallback: String,
+        member: crate::libraries::LibraryMember,
+        logical_ret: Ty,
+        suspend: bool,
+        args: Vec<u32>,
+    ) -> u32 {
+        let owner = member.owner.unwrap_or(owner_fallback);
+        let interface = member.is_interface || self.library_type_is_interface(&owner);
+        let call = self.ir.add_expr(IrExpr::Call {
+            callee: Callee::Virtual {
+                owner,
+                name: member.name,
+                descriptor: member.descriptor,
+                interface,
+            },
+            dispatch_receiver: Some(recv),
+            args,
+        });
+        if suspend {
+            self.ir.suspend_calls.insert(call, ty_to_ir(logical_ret));
+        }
+        call
+    }
+
     /// Resolve a delegate's `getValue` operator — a MEMBER on the delegate type, or a classpath
     /// EXTENSION (`Lazy.getValue` in `LazyKt`). Returns `(owner, descriptor, ret, inline, is_ext)`:
     /// a member is emitted `delegate.getValue(thisRef, prop)`; an extension is the static
@@ -11680,22 +11707,11 @@ impl<'a> Lower<'a> {
             .map(|r| {
                 let m = r.member;
                 let physical_ret = m.physical_ret;
-                let owner = m.owner.clone().unwrap_or_else(|| internal.clone());
-                let is_iface = self.library_type_is_interface(&owner);
-                (m, is_iface, physical_ret)
+                (m, physical_ret)
             });
-        if let Some((m, is_iface, physical_ret)) = resolved {
-            let owner = m.owner.clone().unwrap_or_else(|| internal.clone());
-            let read = self.ir.add_expr(IrExpr::Call {
-                callee: Callee::Virtual {
-                    owner,
-                    name: m.name.clone(),
-                    descriptor: m.descriptor,
-                    interface: is_iface,
-                },
-                dispatch_receiver: Some(recv),
-                args: vec![],
-            });
+        if let Some((m, physical_ret)) = resolved {
+            let read =
+                self.emit_library_member_call(recv, internal, m, physical_ret, false, vec![]);
             return Some(match e {
                 Some(e) => self.coerce_generic_read(read, e, physical_ret),
                 None => read,
@@ -11716,29 +11732,11 @@ impl<'a> Lower<'a> {
         let ret = resolved.ret;
         let suspend = resolved.suspend;
         let m = resolved.member;
-        let owner = m.owner.clone().unwrap_or_else(|| {
-            rt.kotlin_class_internal()
-                .unwrap_or("kotlin/Any")
-                .to_string()
-        });
-        let is_iface = self.library_type_is_interface(&owner);
-        let call = self.ir.add_expr(IrExpr::Call {
-            callee: Callee::Virtual {
-                owner,
-                name: m.name,
-                descriptor: m.descriptor,
-                interface: is_iface,
-            },
-            dispatch_receiver: Some(recv),
-            args: arg_exprs,
-        });
-        // A `suspend` member of a classpath type: record the call so the coroutine pass threads the
-        // `Continuation` into it (its CPS descriptor is rebuilt there) and types the resumed result as
-        // the logical `ret`. Only reachable inside a suspend body (calling one elsewhere is a Kotlin error
-        // the file gate already rejects).
-        if suspend {
-            self.ir.suspend_calls.insert(call, ty_to_ir(ret));
-        }
+        let owner_fallback = rt
+            .kotlin_class_internal()
+            .unwrap_or("kotlin/Any")
+            .to_string();
+        let call = self.emit_library_member_call(recv, owner_fallback, m, ret, suspend, arg_exprs);
         Some(call)
     }
 
@@ -12127,29 +12125,18 @@ impl<'a> Lower<'a> {
             if let Some(m) = self.resolve_instance(internal, name, &arg_tys) {
                 if m.params.len() == args.len() {
                     let owner = m.owner.clone().unwrap_or_else(|| internal.clone());
-                    let is_iface = self.library_type_is_interface(&owner);
                     let recv = self.ir.add_expr(IrExpr::GetValue(this_v));
                     let mut a = Vec::new();
                     for (arg, pt) in args.iter().zip(&m.params) {
                         a.push(self.lower_arg(*arg, &ty_to_ir(*pt))?);
                     }
-                    let descriptor = m.descriptor.clone();
                     let ret = m.ret;
-                    let call = self.ir.add_expr(IrExpr::Call {
-                        callee: Callee::Virtual {
-                            owner,
-                            name: m.name.clone(),
-                            descriptor,
-                            interface: is_iface,
-                        },
-                        dispatch_receiver: Some(recv),
-                        args: a,
-                    });
+                    let call = self.emit_library_member_call(recv, owner, m, ret, false, a);
                     return Some(self.coerce_generic_read(call, e, ret));
                 }
             }
         }
-        if let Some(member) = self
+        if let Some(resolved) = self
             .info
             .resolved_member(e)
             .cloned()
@@ -12158,7 +12145,8 @@ impl<'a> Lower<'a> {
             // [`TypeInfo::resolved_calls`]).
             .or_else(|| self.resolve_instance_member(this_ty, name, &arg_tys))
         {
-            let member = member.member;
+            let ret = resolved.ret;
+            let member = resolved.member;
             let mut a = Vec::new();
             for (i, &arg) in args.iter().enumerate() {
                 match member.params.get(i) {
@@ -12170,19 +12158,9 @@ impl<'a> Lower<'a> {
                 .owner
                 .clone()
                 .unwrap_or_else(|| this_ty.obj_internal().unwrap_or("kotlin/Any").to_string());
-            let descriptor = member.descriptor.clone();
             let physical_ret = member.physical_ret;
             let recv = self.ir.add_expr(IrExpr::GetValue(this_v));
-            let call = self.ir.add_expr(IrExpr::Call {
-                callee: Callee::Virtual {
-                    owner,
-                    name: member.name.clone(),
-                    descriptor,
-                    interface: member.is_interface,
-                },
-                dispatch_receiver: Some(recv),
-                args: a,
-            });
+            let call = self.emit_library_member_call(recv, owner, member, ret, false, a);
             return Some(self.coerce_generic_read(call, e, physical_ret));
         }
         // A MODULE extension on the receiver (`fun Recv.name(args)` declared in this compilation) —
@@ -20828,7 +20806,7 @@ impl<'a> Lower<'a> {
                         // the static `name$default` synthetic. Tried before the plain instance path, which
                         // would fail the arity match and fall through to a wrong construction.
                         r
-                    } else if let Some((owner, mname, desc, is_iface, mparams, mret, msuspend)) = {
+                    } else if let Some((owner, member, mparams, mret, msuspend)) = {
                         // A classpath *instance* method `recv.name(args)` → `invokevirtual`/
                         // `invokeinterface recvType.name:descriptor` (descriptor from the classpath; no
                         // hardcoded names). Enables stdlib member calls (iterators, collections, …).
@@ -20855,16 +20833,10 @@ impl<'a> Lower<'a> {
                             .and_then(|internal| {
                                 self.resolve_instance(&internal, &name, &arg_tys).map(|m| {
                                     let owner = m.owner.clone().unwrap_or_else(|| internal.clone());
-                                    let is_iface = self.library_type_is_interface(&owner);
-                                    (
-                                        owner,
-                                        m.name,
-                                        m.descriptor,
-                                        is_iface,
-                                        m.params,
-                                        m.ret,
-                                        m.suspend,
-                                    )
+                                    let params = m.params.clone();
+                                    let ret = m.ret;
+                                    let suspend = m.suspend;
+                                    (owner, m, params, ret, suspend)
                                 })
                             })
                     } {
@@ -20924,22 +20896,8 @@ impl<'a> Lower<'a> {
                                 None => a.push(self.expr(arg)?),
                             }
                         }
-                        let call = self.ir.add_expr(IrExpr::Call {
-                            callee: Callee::Virtual {
-                                owner,
-                                name: mname,
-                                descriptor: desc,
-                                interface: is_iface,
-                            },
-                            dispatch_receiver: Some(recv),
-                            args: a,
-                        });
-                        // A classpath `suspend` member: record the call so the coroutine pass threads the
-                        // `Continuation` and types the resumed result as the logical `mret` (see
-                        // `lower_library_instance_call_on`).
-                        if msuspend {
-                            self.ir.suspend_calls.insert(call, ty_to_ir(mret));
-                        }
+                        let call =
+                            self.emit_library_member_call(recv, owner, member, mret, msuspend, a);
                         // A generic member whose erased return is `Object` but whose substituted type is
                         // more specific (`List<Int>.get` → `Int`) gets the unbox/checkcast kotlinc emits.
                         self.coerce_generic_read(call, e, mret)
@@ -20964,19 +20922,17 @@ impl<'a> Lower<'a> {
                                 None => a.push(self.expr(arg)?),
                             }
                         }
-                        let owner = member.owner.unwrap_or_else(|| {
+                        let owner = member.owner.clone().unwrap_or_else(|| {
                             rt.obj_internal().unwrap_or("kotlin/Any").to_string()
                         });
-                        let call = self.ir.add_expr(IrExpr::Call {
-                            callee: Callee::Virtual {
-                                owner,
-                                name: member.name,
-                                descriptor: member.descriptor,
-                                interface: member.is_interface,
-                            },
-                            dispatch_receiver: Some(recv),
-                            args: a,
-                        });
+                        let call = self.emit_library_member_call(
+                            recv,
+                            owner,
+                            member,
+                            ret,
+                            resolved.suspend,
+                            a,
+                        );
                         self.coerce_to_static(call, ret, physical_ret)
                     } else if let Some(m) = {
                         // A `@JvmStatic` member of a classpath `object` (`Base58Uuid.of(x)`) → a static
