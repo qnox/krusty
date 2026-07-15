@@ -278,6 +278,8 @@ mod enum_generic_interface_e2e;
 mod enum_implements_interface_e2e;
 #[path = "enum_vararg_e2e.rs"]
 mod enum_vararg_e2e;
+#[path = "expected_type_propagation_e2e.rs"]
+mod expected_type_propagation_e2e;
 #[path = "expr_completeness_e2e.rs"]
 mod expr_completeness_e2e;
 #[path = "extension_default_args_e2e.rs"]
