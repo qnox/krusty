@@ -2168,27 +2168,13 @@ fn select_overload(
         );
         by_rank.entry(rank).or_default().push((o, lp));
     }
-    // A generic method erases its type-parameter arguments to `Any` (`List<E>.add(E)` → `add(Object)`),
-    // so a reference argument matches against an `Any` parameter — try the exact args, then widened.
-    let widened: Vec<Ty> = args
-        .iter()
-        .map(|t| {
-            if t.is_reference() {
-                Ty::obj("kotlin/Any")
-            } else {
-                *t
-            }
-        })
-        .collect();
     for cands in by_rank.values() {
-        if let Some(o) =
-            best_by_args(lib, cands, args).or_else(|| best_by_args(lib, cands, &widened))
-        {
+        if let Some(o) = best_by_args(lib, cands, args) {
             return Some(o.clone());
         }
     }
     // Platform assignability pass: subtype closure, erased `Any`, and value-class underlying matching.
-    // The exact/widened passes miss these while preserving their higher priority.
+    // The ordered applicability pass above stays stricter so exact/defaulted calls still win first.
     for cands in by_rank.values() {
         if let Some((o, _)) = cands.iter().find(|(_, lp)| {
             lp.len() == args.len()
