@@ -798,7 +798,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 secondary_ctors: vec![],
                 has_primary_ctor: c.has_primary_ctor,
                 applied_annotations: class_applied_annotations(file, c),
-                field_annotations: class_field_annotations(file, c),
+                field_annotations: class_field_annotations(file, c, syms),
                 // A Kotlin `annotation class` is RUNTIME-retained unless it opts out — emit the
                 // `@Retention(RUNTIME)` meta-annotation so its uses stay visible to reflection.
                 runtime_retained: c.kind == ast::ClassKind::Annotation
@@ -22114,18 +22114,75 @@ fn build_applied_annotations(
 fn class_field_annotations(
     file: &ast::File,
     c: &ast::ClassDecl,
+    syms: &crate::resolve::SymbolTable,
 ) -> Vec<crate::ir::FieldAnnotations> {
-    c.enum_entries
-        .iter()
-        .filter_map(|e| {
-            let visible = build_applied_annotations(file, &e.annotations, &e.annotation_args);
-            (!visible.is_empty()).then(|| crate::ir::FieldAnnotations {
+    let mut out = Vec::new();
+    for e in &c.enum_entries {
+        let mut visible = Vec::new();
+        let mut invisible = Vec::new();
+        for (n, a) in e.annotations.iter().zip(e.annotation_args.iter()) {
+            match resolve_field_annotation(file, syms, n, a) {
+                Some((anno, Retention::Runtime)) => visible.push(anno),
+                Some((anno, Retention::Binary)) => invisible.push(anno),
+                // SAME-FILE RUNTIME annotations still resolve through build_applied_annotation directly
+                // when the classpath path can't (a file-local annotation class isn't on the classpath).
+                None => {
+                    if let Some(anno) = build_applied_annotation(file, n, a) {
+                        visible.push(anno);
+                    }
+                }
+            }
+        }
+        if !visible.is_empty() || !invisible.is_empty() {
+            out.push(crate::ir::FieldAnnotations {
                 field: e.name.clone(),
                 visible,
-                invisible: Vec::new(),
-            })
-        })
-        .collect()
+                invisible,
+            });
+        }
+    }
+    out
+}
+
+/// JVM retention of an annotation whose uses krusty emits: RUNTIME → `RuntimeVisibleAnnotations`,
+/// BINARY (`RetentionPolicy.CLASS`) → `RuntimeInvisibleAnnotations`. SOURCE is dropped (returns `None`).
+enum Retention {
+    Runtime,
+    Binary,
+}
+
+/// Resolve `@Name(args…)` applied to a FIELD to `(AppliedAnnotation, retention)`, handling a CLASSPATH
+/// annotation (e.g. `@SerialName`): resolve the type through the file's imports, read its `@Retention`
+/// and element names from the compiled annotation class. `None` for a same-file annotation (caller
+/// falls back to [`build_applied_annotation`]), a SOURCE-retained one, an unresolved type, or a
+/// non-constant argument.
+fn resolve_field_annotation(
+    file: &ast::File,
+    syms: &crate::resolve::SymbolTable,
+    name: &str,
+    args: &[AstExprId],
+) -> Option<(crate::ir::AppliedAnnotation, Retention)> {
+    let internal = file.imports.iter().find_map(|imp| {
+        let cand = imp.replace('.', "/");
+        (imp.rsplit('.').next() == Some(name) && syms.libraries.resolve_type(&cand).is_some())
+            .then_some(cand)
+    })?;
+    let lt = syms.libraries.resolve_type(&internal)?;
+    if !lt.is_annotation() {
+        return None;
+    }
+    let retention = match lt.retention.as_deref()? {
+        "RUNTIME" => Retention::Runtime,
+        "CLASS" => Retention::Binary,
+        _ => return None, // SOURCE — kotlinc emits nothing
+    };
+    let elements = lt.annotation_members()?;
+    let mut values = Vec::new();
+    for (i, &arg) in args.iter().enumerate() {
+        let ename = elements.get(i)?.0.clone();
+        values.push((ename, eval_anno_value(file, arg)?));
+    }
+    Some((crate::ir::AppliedAnnotation { internal, values }, retention))
 }
 
 /// The RUNTIME-retained applied annotations on a class declaration, folded for `RuntimeVisibleAnnotations`.
