@@ -5207,8 +5207,7 @@ impl<'a> Lower<'a> {
         // substituted static result type the checker inferred, mirroring the bare-name path.
         Some(
             if c.inline.can_inline()
-                || (c.physical_ret.non_null().obj_internal() == Some("kotlin/Any")
-                    && c.ret != c.physical_ret)
+                || (ty_is_erased_top(&c.physical_ret) && c.ret != c.physical_ret)
             {
                 self.coerce_erased_call_result(e, call, &c.physical_ret, true)
             } else {
@@ -5464,7 +5463,7 @@ impl<'a> Lower<'a> {
         // type refine it; a concrete reference return (a value class, a bridge result) must NOT be cast,
         // or codegen inserts a spurious `checkcast` that breaks verification.
         let phys = ret.non_null();
-        if !(ret_is_tparam || phys.obj_internal() == Some("kotlin/Any")) {
+        if !(ret_is_tparam || ty_is_erased_top(&phys)) {
             return call;
         }
         // When the substituted static type is a strictly more specific reference than the erased return
@@ -5477,18 +5476,14 @@ impl<'a> Lower<'a> {
         if st != Ty::Error {
             self.ir.logical_types.insert(call, ty_to_ir(st));
         }
-        if self.has_scalar_value_repr(st) && phys == Ty::obj("kotlin/Any") {
+        if self.has_scalar_value_repr(st) && ty_is_erased_top(&phys) {
             return self.ir.add_expr(IrExpr::TypeOp {
                 op: IrTypeOp::ImplicitCoercion,
                 arg: call,
                 type_operand: ty_to_ir(st),
             });
         }
-        if st.is_reference()
-            && st != Ty::obj("kotlin/Any")
-            && st != Ty::Null
-            && st.non_null() != phys
-        {
+        if st.is_reference() && !ty_is_erased_top(&st) && st != Ty::Null && st.non_null() != phys {
             return self.ir.add_expr(IrExpr::TypeOp {
                 op: IrTypeOp::Cast,
                 arg: call,
@@ -6096,7 +6091,7 @@ impl<'a> Lower<'a> {
         } else {
             let ret_val = if sig.ret.is_reference()
                 && !matches!(sig.ret, Ty::Null)
-                && sig.ret != Ty::obj("kotlin/Any")
+                && !ty_is_erased_top(&sig.ret)
             {
                 self.ir.add_expr(IrExpr::TypeOp {
                     op: IrTypeOp::Cast,
@@ -10825,7 +10820,7 @@ impl<'a> Lower<'a> {
                 arg: e,
                 type_operand: target.clone(),
             }))
-        } else if at == Ty::obj("kotlin/Any") && target_ref && !ir_type_is_object(target) {
+        } else if ty_is_erased_top(&at) && target_ref && !ir_type_is_object(target) {
             // A generic type-parameter return is erased to `Object` in the JVM signature; flowing it
             // into a more specific reference target needs a `checkcast` (kotlinc inserts one — the
             // value really is the target type at runtime). `as`-style, but never null here.
@@ -18595,9 +18590,7 @@ impl<'a> Lower<'a> {
                         // null must stay a legal value until a primitive/non-null use site demands it.
                         if call_inline {
                             self.coerce_erased_call_result(e, call, &call_phys, true)
-                        } else if call_phys.non_null().obj_internal() == Some("kotlin/Any")
-                            && call_log != call_phys
-                        {
+                        } else if ty_is_erased_top(&call_phys) && call_log != call_phys {
                             // A NON-inline classpath top-level fn with an ERASED generic return
                             // (`runBlocking<T> { … }`, whose `$default` returns `Object`): the checker
                             // substituted the concrete result type (`T = Ch`/`Int`), so `checkcast`/unbox
