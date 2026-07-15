@@ -712,9 +712,10 @@ fn emit_class(
         }
         ctor.ensure_locals(max_slot);
         ctor.link();
-        // An `object`'s constructor is private; a `C$Companion`'s is package-private (so the outer class's
-        // `<clinit>` can call it without nestmate attributes); a normal class's is public.
-        let ctor_access = if c.is_object {
+        // An `object`'s constructor is private; a `@JvmInline value class`'s is private too (instances are
+        // created via `constructor-impl`/`box-impl`, never `new`); a `C$Companion`'s is package-private (so
+        // the outer class's `<clinit>` can call it without nestmate attributes); a normal class's is public.
+        let ctor_access = if c.is_object || c.is_value {
             0x0002
         } else if c.is_companion {
             0x0000
@@ -2789,13 +2790,15 @@ fn emit_method(
             0
         }
     } else {
-        // A `static` method is `public static final` (kotlinc) — EXCEPT on an interface, where a
-        // `final` static method is illegal (`ClassFormatError`); emit `public static`.
+        // A `static` method is `public static final` (kotlinc) — EXCEPT on an interface, where a `final`
+        // static method is illegal (`ClassFormatError`), or a value class's `constructor-impl`/
+        // `<name>-impl` delegate members, which kotlinc emits `public static` (non-`final`) and marks via
+        // `open_methods`. `box-impl`/`equals-impl0` stay `public static final` (not opened).
         let owner_is_iface = ir
             .classes
             .iter()
             .any(|o| o.fq_name == owner && o.is_interface);
-        if owner_is_iface {
+        if owner_is_iface || ir.open_methods.contains(&fid) {
             0x0009 // PUBLIC | STATIC
         } else {
             0x0019 // PUBLIC | STATIC | FINAL
