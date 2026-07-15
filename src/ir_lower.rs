@@ -2633,6 +2633,28 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     }
                     lo.ir.classes[class_id as usize].super_args = sargs;
                 }
+                // A `@JvmInline value class` with a DEFAULT on its single underlying property needs
+                // kotlinc's synthetic `constructor-impl$default`. Lower the default in the STATIC
+                // `constructor-impl` frame — the sole param is value-index 0, no `this` — and stash it by
+                // class internal; the value-class JVM pass registers it as `constructor-impl`'s param
+                // default so the backend emits the stub.
+                if c.is_value {
+                    if let Some(p) = c.props.iter().find(|p| p.is_property) {
+                        if let Some(d) = p.default {
+                            lo.scope.clear();
+                            lo.boxed_elem.clear();
+                            lo.next_value = 0;
+                            lo.cur_class = Some(internal.clone());
+                            lo.cur_tparams = class_tparams(file, c, &*syms.libraries);
+                            let pty = ty_of(file, &p.ty, &*syms.libraries);
+                            let v = lo.fresh_value(); // value-index 0 = the underlying param
+                            lo.scope.push((p.name.clone(), v, pty));
+                            if let Some(lowered) = lo.lower_arg(d, &ty_to_ir(pty)) {
+                                lo.ir.value_ctor_defaults.insert(internal.clone(), lowered);
+                            }
+                        }
+                    }
+                }
                 // Constructor body: run body-property initializers and `init { … }` blocks in source
                 // order, with `this` = value 0 and the constructor params as values 1..=N. For a class
                 // with NO primary constructor the init steps run inside each `super(…)`-reaching secondary
