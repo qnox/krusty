@@ -5104,6 +5104,16 @@ impl<'a> Checker<'a> {
         r
     }
 
+    fn with_this_narrow<R>(&mut self, narrow: Option<Ty>, f: impl FnOnce(&mut Self) -> R) -> R {
+        let prev = self.this_narrow;
+        if let Some(n) = narrow {
+            self.this_narrow = Some(n);
+        }
+        let r = f(self);
+        self.this_narrow = prev;
+        r
+    }
+
     fn check_default_arg(&mut self, ty_ref: &TypeRef, default: ExprId, pty: Ty) {
         let dty = if matches!(self.file.expr(default), Expr::Lambda { .. })
             && (!ty_ref.fun_params.is_empty() || ty_ref.name == "<fun>")
@@ -8222,18 +8232,15 @@ impl<'a> Checker<'a> {
                     }
                     self.declare(n, *t, false);
                 }
-                // `if (this is B)` narrows the implicit receiver to `B` in the then-branch, so a bare
-                // member of `B` resolves. Saved/restored around the branch (not stored per-scope):
-                // `this` is immutable, so the narrowing holds across any nested scopes of the branch.
-                let prev_narrow = self.this_narrow;
-                if let Some(bt) = self.this_is_narrowing(cond, false) {
-                    self.this_narrow = Some(bt);
-                }
-                let tt = match &expected {
-                    Some(ex) => self.expr_expected(then_branch, *ex),
-                    None => self.expr(then_branch),
-                };
-                self.this_narrow = prev_narrow;
+                // `if (this is B)` narrows the implicit receiver to `B` for the branch body.
+                let tt =
+                    self.with_this_narrow(
+                        self.this_is_narrowing(cond, false),
+                        |c| match &expected {
+                            Some(ex) => c.expr_expected(then_branch, *ex),
+                            None => c.expr(then_branch),
+                        },
+                    );
                 self.pop_scope();
                 match else_branch {
                     Some(eb) => {
@@ -8242,15 +8249,12 @@ impl<'a> Checker<'a> {
                         if let Some((n, t)) = &else_cast {
                             self.declare(n, *t, false);
                         }
-                        let prev_narrow = self.this_narrow;
-                        if let Some(bt) = self.this_is_narrowing(cond, true) {
-                            self.this_narrow = Some(bt);
-                        }
-                        let et = match &expected {
-                            Some(ex) => self.expr_expected(eb, *ex),
-                            None => self.expr(eb),
-                        };
-                        self.this_narrow = prev_narrow;
+                        let et = self.with_this_narrow(self.this_is_narrowing(cond, true), |c| {
+                            match &expected {
+                                Some(ex) => c.expr_expected(eb, *ex),
+                                None => c.expr(eb),
+                            }
+                        });
                         self.pop_scope();
                         self.join(tt, et, self.span(e))
                     }
@@ -8383,15 +8387,10 @@ impl<'a> Checker<'a> {
                     if let Some((n, t)) = &arm_cast {
                         self.declare(n, *t, false);
                     }
-                    let prev_narrow = self.this_narrow;
-                    if let Some(bt) = arm_this_narrow {
-                        self.this_narrow = Some(bt);
-                    }
-                    let bt = match &expected {
-                        Some(ex) => self.expr_expected(arm.body, *ex),
-                        None => self.expr(arm.body),
-                    };
-                    self.this_narrow = prev_narrow;
+                    let bt = self.with_this_narrow(arm_this_narrow, |c| match &expected {
+                        Some(ex) => c.expr_expected(arm.body, *ex),
+                        None => c.expr(arm.body),
+                    });
                     self.pop_scope();
                     result = Some(match result {
                         Some(r) => self.join(r, bt, self.span(arm.body)),
