@@ -12,8 +12,8 @@
 //! those `Ty` nodes lives here.
 
 use crate::libraries::{
-    CompilerPlatform, FnKind, FunctionInfo, FunctionSet, GenericSig, InlineKind, LibraryCallable,
-    LibraryMember, Origin, PropKind,
+    best_overload, CompilerPlatform, FnKind, FunctionInfo, FunctionSet, GenericSig, InlineKind,
+    LibraryCallable, LibraryMember, Origin, PropKind,
 };
 use crate::symbol_source::SymbolSource;
 use crate::types::Ty;
@@ -1626,7 +1626,7 @@ pub fn resolve_companion(
     if !t.is_public {
         return None;
     }
-    t.companion_member(name, args).cloned()
+    best_overload(t.companion.iter(), name, args).cloned()
 }
 
 /// Resolve an instance member `recv.name(args)` — the receiver's static type must be public, but the
