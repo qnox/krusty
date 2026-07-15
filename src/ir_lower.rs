@@ -5203,19 +5203,18 @@ impl<'a> Lower<'a> {
         if c.suspend {
             self.ir.suspend_calls.insert(call, ty_to_ir(c.ret));
         }
-        Some(if c.inline.can_inline() {
-            self.coerce_erased_call_result(e, call, &c.physical_ret, true)
-        } else if c.physical_ret.non_null().obj_internal() == Some("kotlin/Any")
-            && c.ret != c.physical_ret
-        {
-            // A NON-inline FQ call with an ERASED generic return (`kotlinx.coroutines.runBlocking { … }`,
-            // `$default` returning `Object`): `checkcast`/unbox the result to the substituted type the
-            // checker inferred (`T = String`/`Int`), mirroring the bare-name path — else the boxed result
-            // lands in a stricter slot / is `areturn`ed against a stricter method return (`VerifyError`).
-            self.coerce_erased_call_result(e, call, &c.physical_ret, true)
-        } else {
-            call
-        })
+        // Inline calls and non-inline FQ calls with an ERASED generic return (`Object`) both need the
+        // substituted static result type the checker inferred, mirroring the bare-name path.
+        Some(
+            if c.inline.can_inline()
+                || (c.physical_ret.non_null().obj_internal() == Some("kotlin/Any")
+                    && c.ret != c.physical_ret)
+            {
+                self.coerce_erased_call_result(e, call, &c.physical_ret, true)
+            } else {
+                call
+            },
+        )
     }
 
     fn lower_external_new(&mut self, internal: &str, args: &[AstExprId]) -> Option<u32> {
