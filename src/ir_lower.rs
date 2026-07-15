@@ -2378,16 +2378,13 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     let this_arg = lo.ir.add_expr(IrExpr::GetValue(0));
                     let pref = make_propref(&mut lo);
                     let call = if gv_is_ext {
-                        lo.ir.add_expr(IrExpr::Call {
-                            callee: crate::ir::Callee::Static {
-                                owner: gv_owner,
-                                name: "getValue".to_string(),
-                                descriptor: gv_desc,
-                                inline: gv_inline,
-                            },
-                            dispatch_receiver: None,
-                            args: vec![dele, this_arg, pref],
-                        })
+                        lo.emit_static_call(
+                            gv_owner,
+                            "getValue".to_string(),
+                            gv_desc,
+                            gv_inline,
+                            vec![dele, this_arg, pref],
+                        )
                     } else {
                         lo.ir.add_expr(IrExpr::Call {
                             callee: crate::ir::Callee::Virtual {
@@ -4729,20 +4726,37 @@ impl<'a> Lower<'a> {
         record_suspend: bool,
     ) -> u32 {
         let logical_ret = callable.ret;
-        let call = self.ir.add_expr(IrExpr::Call {
-            callee: Callee::Static {
-                owner: callable.owner,
-                name: callable.name,
-                descriptor: callable.descriptor,
-                inline: callable.inline,
-            },
-            dispatch_receiver: None,
+        let call = self.emit_static_call(
+            callable.owner,
+            callable.name,
+            callable.descriptor,
+            callable.inline,
             args,
-        });
+        );
         if record_suspend {
             self.ir.suspend_calls.insert(call, ty_to_ir(logical_ret));
         }
         call
+    }
+
+    fn emit_static_call(
+        &mut self,
+        owner: String,
+        name: String,
+        descriptor: String,
+        inline: InlineKind,
+        args: Vec<u32>,
+    ) -> u32 {
+        self.ir.add_expr(IrExpr::Call {
+            callee: Callee::Static {
+                owner,
+                name,
+                descriptor,
+                inline,
+            },
+            dispatch_receiver: None,
+            args,
+        })
     }
 
     /// Resolve a delegate's `getValue` operator — a MEMBER on the delegate type, or a classpath
@@ -5305,16 +5319,13 @@ impl<'a> Lower<'a> {
         let null_a = self.ir.add_expr(IrExpr::Const(IrConst::Null));
         let get_p = self.ir.add_expr(IrExpr::GetStatic(idx_p));
         let call = if gv_is_ext {
-            self.ir.add_expr(IrExpr::Call {
-                callee: crate::ir::Callee::Static {
-                    owner: gv_owner,
-                    name: "getValue".to_string(),
-                    descriptor: gv_desc,
-                    inline: gv_inline,
-                },
-                dispatch_receiver: None,
-                args: vec![get_d, null_a, get_p],
-            })
+            self.emit_static_call(
+                gv_owner,
+                "getValue".to_string(),
+                gv_desc,
+                gv_inline,
+                vec![get_d, null_a, get_p],
+            )
         } else {
             let is_iface = self
                 .syms
@@ -5636,16 +5647,13 @@ impl<'a> Lower<'a> {
             if let [source_arg] = args {
                 let desc = self.syms.libraries.method_descriptor(&[under], under)?;
                 let arg = self.lower_arg(*source_arg, &ty_to_ir(under))?;
-                return Some(self.ir.add_expr(IrExpr::Call {
-                    callee: Callee::Static {
-                        owner: internal.to_string(),
-                        name: "constructor-impl".to_string(),
-                        descriptor: desc,
-                        inline: crate::libraries::InlineKind::None,
-                    },
-                    dispatch_receiver: None,
-                    args: vec![arg],
-                }));
+                return Some(self.emit_static_call(
+                    internal.to_string(),
+                    "constructor-impl".to_string(),
+                    desc,
+                    InlineKind::None,
+                    vec![arg],
+                ));
             }
             // A ZERO-arg construction `Id()` of an all-default value class: kotlinc emits
             // `constructor-impl$default(dummyUnder, mask, null)`, which fills the default internally and
@@ -5667,16 +5675,13 @@ impl<'a> Lower<'a> {
                 let dummy = self.ir.add_expr(IrExpr::Const(IrConst::Null));
                 let mask = self.ir.add_expr(IrExpr::Const(IrConst::Int(1)));
                 let null_marker = self.ir.add_expr(IrExpr::Const(IrConst::Null));
-                return Some(self.ir.add_expr(IrExpr::Call {
-                    callee: Callee::Static {
-                        owner: internal.to_string(),
-                        name: "constructor-impl$default".to_string(),
-                        descriptor: desc,
-                        inline: crate::libraries::InlineKind::None,
-                    },
-                    dispatch_receiver: None,
-                    args: vec![dummy, mask, null_marker],
-                }));
+                return Some(self.emit_static_call(
+                    internal.to_string(),
+                    "constructor-impl$default".to_string(),
+                    desc,
+                    InlineKind::None,
+                    vec![dummy, mask, null_marker],
+                ));
             }
         }
         if let Some(ctor) = self
@@ -8090,25 +8095,14 @@ impl<'a> Lower<'a> {
         }
         let recv = self.expr(receiver)?;
         let (logical, physical) = (c.ret, c.physical_ret);
-        let call = self.ir.add_expr(IrExpr::Call {
-            callee: Callee::Static {
-                owner: c.owner,
-                name: c.name,
-                descriptor: c.descriptor,
-                // A non-public `@InlineOnly` scope fn (`let`/`also`/…) is `MustInline`: no callable method,
-                // so a failed splice must SKIP the file, never an `invokestatic` on the private method. A
-                // PUBLIC host (`map`/`fold`/`forEach`) is `CanInline` and may fall back to a real call.
-                inline: c.inline,
-            },
-            dispatch_receiver: None,
-            args: vec![recv, lam],
-        });
+        let source_receiver = c.source_receiver;
+        let call = self.emit_library_static_call(c, vec![recv, lam], false);
         // Record the declared source receiver so the value-class pass keeps a REFERENCE-underlying
         // value-class receiver (`Result.getOrElse`) unboxed: the spliced `-impl` body reads it as the raw
         // underlying, so boxing it to the `Object` receiver parameter (which the descriptor otherwise
         // implies) would feed the body a boxed `kotlin.Result` and mis-`checkcast` it (CCE). The other
         // extension-lowering paths record this; the inline-lambda path must too.
-        self.record_ext_source_receiver(call, c.source_receiver);
+        self.record_ext_source_receiver(call, source_receiver);
         // The inline fn's erased return is `Object` (a generic `R`); coerce the spliced result to the
         // logical return type (`5.let { it+1 }: Int` unboxes `Integer`→`int`), as a normal call would.
         Some(self.coerce_to_static(call, logical, physical))
@@ -11820,16 +11814,8 @@ impl<'a> Lower<'a> {
             .sum();
         a.push(self.ir.add_expr(IrExpr::Const(IrConst::Int(mask))));
         a.push(self.ir.add_expr(IrExpr::Const(IrConst::Null))); // omitted-default marker
-        let call = self.ir.add_expr(IrExpr::Call {
-            callee: Callee::Static {
-                owner,
-                name: format!("{phys}$default"),
-                descriptor: desc,
-                inline: crate::libraries::InlineKind::None,
-            },
-            dispatch_receiver: None,
-            args: a,
-        });
+        let call =
+            self.emit_static_call(owner, format!("{phys}$default"), desc, InlineKind::None, a);
         // A `suspend` method's `$default` already spells the `Continuation` in its descriptor (BEFORE the
         // mask/marker); record the call so the coroutine pass INSERTS the continuation value there (see
         // `append_continuation`, `$default` arm) rather than appending it after the marker.
@@ -17207,16 +17193,7 @@ impl<'a> Lower<'a> {
                         .copied()
                         .unwrap_or_else(|| self.info.ty(receiver));
                     let a = self.lower_arg(receiver, &target)?;
-                    return Some(self.ir.add_expr(IrExpr::Call {
-                        callee: Callee::Static {
-                            owner: getter.owner,
-                            name: getter.name,
-                            descriptor: getter.descriptor,
-                            inline: InlineKind::None,
-                        },
-                        dispatch_receiver: None,
-                        args: vec![a],
-                    }));
+                    return Some(self.emit_library_static_call(*getter, vec![a], false));
                 }
                 // Reading an annotation member (`a.x`, `a` typed as the annotation interface): the JVM
                 // accessor is the bare member name `x()` (not `getX`), dispatched by `invokeinterface`.
@@ -18127,16 +18104,7 @@ impl<'a> Lower<'a> {
                 match kind {
                     RangeKind::Through => {
                         if let Some(c) = range.through_static {
-                            self.ir.add_expr(IrExpr::Call {
-                                callee: Callee::Static {
-                                    owner: c.owner,
-                                    name: c.name,
-                                    descriptor: c.descriptor,
-                                    inline: c.inline,
-                                },
-                                dispatch_receiver: None,
-                                args: vec![lo_v, hi_v],
-                            })
+                            self.emit_library_static_call(c, vec![lo_v, hi_v], false)
                         } else {
                             let mut args = vec![lo_v, hi_v];
                             for _ in 0..range.through.trailing_nulls {
@@ -18151,16 +18119,7 @@ impl<'a> Lower<'a> {
                     }
                     RangeKind::Until => {
                         let c = range.until?;
-                        self.ir.add_expr(IrExpr::Call {
-                            callee: Callee::Static {
-                                owner: c.owner,
-                                name: c.name,
-                                descriptor: c.descriptor,
-                                inline: c.inline,
-                            },
-                            dispatch_receiver: None,
-                            args: vec![lo_v, hi_v],
-                        })
+                        self.emit_library_static_call(c, vec![lo_v, hi_v], false)
                     }
                     // `downTo` never reaches here (it parses as an infix function call, not `RangeTo`).
                     RangeKind::DownTo => return None,
@@ -21000,16 +20959,7 @@ impl<'a> Lower<'a> {
                                 None => a.push(self.expr(arg)?),
                             }
                         }
-                        let call = self.ir.add_expr(IrExpr::Call {
-                            callee: Callee::Static {
-                                owner,
-                                name: m.name,
-                                descriptor: m.descriptor,
-                                inline: m.inline,
-                            },
-                            dispatch_receiver: None,
-                            args: a,
-                        });
+                        let call = self.emit_static_call(owner, m.name, m.descriptor, m.inline, a);
                         self.coerce_to_static(call, m.ret, m.physical_ret)
                     } else if let Some(c) = self.info.resolved_extension(e).cloned() {
                         // SAFETY GUARD (never miscompile): a non-inlined `suspend inline fun` (e.g.

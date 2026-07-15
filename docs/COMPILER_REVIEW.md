@@ -3221,3 +3221,11 @@ The next runtime-call cleanup routed platform runtime helpers that already retur
 records through `emit_library_static_call`. `runtime_call` no longer rebuilds `Callee::Static` from
 owner/name/descriptor/inline fields, and unsigned boxing now uses the shared runtime-call path instead
 of constructing the same static call locally.
+
+### Raw Static Call Emitter Merge
+
+The next static-call cleanup put the remaining raw `Callee::Static` assembly behind one
+`emit_static_call` helper and had `emit_library_static_call` delegate to it. Delegated extension
+getters, value-class constructor helpers, classpath `$default` member calls, companion static members,
+inline receiver-lambda hosts, extension property getters, and range factory callables now share the
+same static-call construction instead of rebuilding owner/name/descriptor/inline call IR locally.
