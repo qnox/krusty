@@ -10045,17 +10045,17 @@ impl<'a> Checker<'a> {
             .map(|_| owner)
     }
 
-    /// Primary-constructor parameter names of a same-file class, in declaration order (parallel to
-    /// `ClassSig::ctor_params`/`ctor_defaults`) — for mapping named constructor arguments. `None` if
-    /// `class_name` isn't a same-file class with a primary constructor.
-    fn primary_ctor_param_names(&self, class_name: &str) -> Option<Vec<String>> {
+    /// Primary-constructor parameter names/defaults of a same-file class, in declaration order — for
+    /// mapping named constructor arguments. `None` if `class_name` isn't a same-file primary constructor.
+    fn primary_ctor_param_list(&self, class_name: &str) -> Option<ParamList> {
         self.file
             .decls
             .iter()
             .find_map(|&d| match self.file.decl(d) {
-                Decl::Class(c) if c.name == class_name && c.has_primary_ctor => {
-                    Some(c.props.iter().map(|p| p.name.clone()).collect())
-                }
+                Decl::Class(c) if c.name == class_name && c.has_primary_ctor => Some(ParamList {
+                    names: c.props.iter().map(|p| p.name.clone()).collect(),
+                    defaults: c.props.iter().map(|p| p.default.is_some()).collect(),
+                }),
                 _ => None,
             })
     }
@@ -11958,17 +11958,8 @@ impl<'a> Checker<'a> {
                         // top-level function uses. An omitted parameter falls back to its default (the
                         // lowering fills a simple-literal default, or skips the file — never miscompiles).
                         if arg_names.is_some() {
-                            if let Some(param_names) = self.primary_ctor_param_names(&fname) {
-                                let param_defaults: Vec<bool> =
-                                    cls.ctor_defaults.iter().map(|d| d.is_some()).collect();
-                                let required = required_arity(param_names.len(), &param_defaults);
-                                match map_call_args(
-                                    args,
-                                    arg_names.as_deref(),
-                                    &param_names,
-                                    required,
-                                    &param_defaults,
-                                ) {
+                            if let Some(param_list) = self.primary_ctor_param_list(&fname) {
+                                match map_param_list_args(args, arg_names.as_deref(), &param_list) {
                                     Ok(slots) => {
                                         for (i, slot) in slots.iter().enumerate() {
                                             if let (Some(a), Some(pt)) = (slot, ctor_params.get(i))
