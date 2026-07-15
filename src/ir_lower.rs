@@ -8656,6 +8656,74 @@ impl<'a> Lower<'a> {
         self.info.ty(receiver)
     }
 
+    /// The emitted id of a top-level extension `name` applicable to a receiver of type `recv_ty`.
+    /// The EXACT receiver is tried first — identical to the original exact-key lookup, so any receiver
+    /// (primitive, classpath, user) keeps its previous binding and a builtin member/operator that
+    /// shadows an extension still wins. Only when that misses is the receiver's USER-class supertype
+    /// closure walked (interfaces before the superclass — the checker's order), so a `fun A.f()` binds
+    /// on a `B : A`. Two deliberate limits keep the walk from binding an extension the emit can't
+    /// honor the way the checker resolves it: a GENERIC user supertype (`Top<D>`) is skipped — a
+    /// generic-receiver extension needs erased-`Object` boxing the emit doesn't model, so leaving it
+    /// unmatched keeps the file skipped rather than miscompiled; and CLASSPATH supertypes (`Any`,
+    /// `Number`, …) are not walked at all, so a builtin/operator on them is never shadowed by an
+    /// extension registered under the supertype.
+    fn ext_fun_id_for_recv(&self, recv_ty: Ty, name: &str) -> Option<u32> {
+        if let Some(&fid) = self
+            .ext_fun_ids
+            .get(&(recv_ty.erased_recv(), name.to_string()))
+        {
+            return Some(fid);
+        }
+        // A MEMBER (own or inherited through the user hierarchy) shadows a SUPERTYPE extension of the
+        // same name — decline so the call lowers as a member instead (Kotlin member-over-extension
+        // precedence). Without this, `.contains(1)` on a `Foo` subtype would bind the vararg
+        // `fun Foo.contains` extension over the real `Foo.contains` member. This guards only the
+        // supertype walk below; the exact-receiver key above is the long-standing exact lookup this
+        // method replaced, kept verbatim so no exact-receiver call changes binding.
+        if let Some(i) = recv_ty.non_null().obj_internal() {
+            if self.resolve_method(i, name).is_some() {
+                return None;
+            }
+        }
+        let mut seen = std::collections::HashSet::new();
+        let mut queue = std::collections::VecDeque::new();
+        if let Some(c) = recv_ty
+            .non_null()
+            .obj_internal()
+            .and_then(|i| self.syms.class_by_internal(i))
+        {
+            for i in &c.interfaces {
+                queue.push_back(i.clone());
+            }
+            if let Some(s) = &c.super_internal {
+                queue.push_back(s.clone());
+            }
+        }
+        while let Some(internal) = queue.pop_front() {
+            if !seen.insert(internal.clone()) {
+                continue;
+            }
+            let Some(c) = self.syms.class_by_internal(&internal) else {
+                continue;
+            };
+            if c.tparam_names.is_empty() {
+                if let Some(&fid) = self
+                    .ext_fun_ids
+                    .get(&(Ty::obj(&internal).erased_recv(), name.to_string()))
+                {
+                    return Some(fid);
+                }
+            }
+            for i in &c.interfaces {
+                queue.push_back(i.clone());
+            }
+            if let Some(s) = &c.super_internal {
+                queue.push_back(s.clone());
+            }
+        }
+        None
+    }
+
     /// An arithmetic operator member of a primitive numeric type called by its METHOD name
     /// (`a.plus(b)`, `a.times(b)`, … — valid Kotlin, identical to `a + b`). The checker already typed it;
     /// lower it to the same `PrimitiveBinOp` the operator form produces (with mixed-operand promotion and
@@ -20221,9 +20289,10 @@ impl<'a> Lower<'a> {
                     }
                     // A top-level extension function `recv.name(args)` → a static call whose first
                     // argument is the receiver (matching how the extension was registered/emitted).
+                    // Resolve exact-receiver-first, then the receiver's supertype closure, so a
+                    // `fun A.f()` called on a `B : A` binds (the checker already resolves it that way).
                     {
-                        let recv_key = self.recv_ty(receiver).erased_recv();
-                        if let Some(&fid) = self.ext_fun_ids.get(&(recv_key, name.clone())) {
+                        if let Some(fid) = self.ext_fun_id_for_recv(self.recv_ty(receiver), &name) {
                             let params = self.ir.functions[fid as usize].params.clone();
                             if params.len() == args.len() + 1 {
                                 // A NAMED extension call may reorder the arguments: map labels onto
