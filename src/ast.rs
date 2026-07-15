@@ -728,6 +728,11 @@ pub struct PropDecl {
     /// Declaration visibility (`public` by default). A `private set` narrows only the SETTER — that
     /// lives on [`PropAccessor::is_private`]; this is the property's (getter's) visibility.
     pub visibility: Visibility,
+    /// Generic type parameters declared on an EXTENSION property (`val <T> Array<T>.length: Int`),
+    /// scoped over the receiver, declared type, and accessor bodies. Erased to `Any` like a function's.
+    pub type_params: Vec<String>,
+    /// Declared non-`Any` upper bounds for [`type_params`] (`<T: Number>`), parallel to a function's.
+    pub type_param_bounds: Vec<(String, TypeRef)>,
     /// Extension-property receiver type (`val String.foo: T` → `Some("String")`). The getter/setter
     /// are emitted as static `getFoo(Recv)`/`setFoo(Recv, T)` methods, like an extension function.
     pub receiver: Option<TypeRef>,

@@ -365,6 +365,19 @@ impl Default for SymbolTable {
 }
 
 impl SymbolTable {
+    /// Resolve an extension-property read/write `recv.name` to its `(type, is_var)`.
+    ///
+    /// A property whose receiver is a free type parameter — `val <T> T.p` or `val <T> Array<T>.p` —
+    /// erases its receiver (or array element) to `kotlin/Any`, so an exact `erased_recv` key never
+    /// matches a concrete receiver like `String` or `Array<Int>`. Model the type-parameter's implicit
+    /// `Any` upper bound by falling back from the exact key to progressively-generalized ones: the
+    /// array-element-generalized key, then the bare `Any` receiver. Concrete overloads still win first.
+    pub fn ext_prop(&self, recv: Ty, name: &str) -> Option<(Ty, bool)> {
+        recv.erased_recv_candidates()
+            .into_iter()
+            .find_map(|k| self.ext_props.get(&(k, name.to_string())).copied())
+    }
+
     pub fn single_fun(&self, name: &str) -> Option<Signature> {
         self.funs.get(name).and_then(|v| match v.as_slice() {
             [sig] => Some(sig.clone()),
@@ -2207,10 +2220,16 @@ pub fn collect_signatures_with_cp(
                     // Extension property `val Recv.name: T get() = …`: register by (erased receiver,
                     // name); emitted as a static `getName(Recv)`/`setName(Recv, T)`.
                     if let Some(recv_ref) = &p.receiver {
-                        let recv_ty = ty_of_ref(recv_ref, &class_names, &Default::default(), diags);
+                        // An extension property's own type params (`val <T> Array<T>.length`) scope over
+                        // the receiver and declared type — bind them (erased) so the receiver isn't a raw
+                        // `Array` and `T` isn't mistaken for an unresolved class.
+                        let resolve = |n: &str| class_names.get(n).cloned();
+                        let ptp =
+                            TParams::from_decl_with(&p.type_params, &p.type_param_bounds, &resolve);
+                        let recv_ty = ty_of_ref(recv_ref, &class_names, &ptp, diags);
                         let ty =
                             p.ty.as_ref()
-                                .map(|r| ty_of_ref(r, &class_names, &Default::default(), diags))
+                                .map(|r| ty_of_ref(r, &class_names, &ptp, diags))
                                 .or_else(|| match &p.getter {
                                     Some(FunBody::Expr(g)) => Some(infer_lit_ty(
                                         file,
@@ -4861,6 +4880,11 @@ pub fn check_file(file: &File, syms: &mut SymbolTable, diags: &mut DiagSink) -> 
                 c.tparams.clear();
             }
             Decl::Property(p) => {
+                // An extension property's own generic type parameters (`val <T> Array<T>.length: Int`)
+                // scope over its receiver, declared type, and accessor bodies — bind them (erased) so
+                // `T` resolves rather than reading as an unresolved reference.
+                let resolve = class_internal_resolver(c.syms);
+                c.tparams = TParams::from_decl_with(&p.type_params, &p.type_param_bounds, &resolve);
                 // For an extension property (`val Recv.name: T get() = …`), `this` inside the
                 // accessors is the receiver.
                 let prev_this = c.this_ty;
@@ -4939,6 +4963,7 @@ pub fn check_file(file: &File, syms: &mut SymbolTable, diags: &mut DiagSink) -> 
                         }
                     }
                 }
+                c.tparams.clear();
             }
         }
     }
@@ -8781,10 +8806,8 @@ impl<'a> Checker<'a> {
                                 // bound EXTENSION property reference `obj::ext` (`val Recv.ext`) — a
                                 // `KProperty0`; the lowerer synthesizes a reference calling the static
                                 // extension getter/setter with the captured receiver.
-                                if let Some(&(_, is_var)) = self
-                                    .syms
-                                    .ext_props
-                                    .get(&(Ty::obj(&internal).erased_recv(), name.clone()))
+                                if let Some((_, is_var)) =
+                                    self.syms.ext_prop(Ty::obj(&internal), &name)
                                 {
                                     self.expr(r); // capture the receiver
                                     if let Some(ty) = self.property_ref_ty(0, is_var) {
@@ -10125,13 +10148,10 @@ impl<'a> Checker<'a> {
                 }
             }
         }
-        // Extension property: `recv.name` resolved by (erased receiver, name).
-        if let Some((ty, _)) = self
-            .syms
-            .ext_props
-            .get(&(rt.erased_recv(), name.to_string()))
-        {
-            return *ty;
+        // Extension property: `recv.name` resolved by (erased receiver, name), with a fallback to a
+        // type-parameter receiver (`val <T> T.p` / `val <T> Array<T>.p`).
+        if let Some((ty, _)) = self.syms.ext_prop(rt, name) {
+            return ty;
         }
         // Library-type property read (`list.size`): semantic property metadata first, source-owned
         // physical getter fallback second. Mapped builtins stay in the symbol provider.
@@ -13301,12 +13321,7 @@ impl<'a> Checker<'a> {
                 let vt = self.expr(value);
                 let span = self.file.stmt_spans[s.0 as usize];
                 // Extension-property write: `recv.name = value` for a `var` extension property.
-                if let Some((lty, is_var)) = self
-                    .syms
-                    .ext_props
-                    .get(&(rt.erased_recv(), name.clone()))
-                    .copied()
-                {
+                if let Some((lty, is_var)) = self.syms.ext_prop(rt, &name) {
                     if !is_var {
                         self.diags
                             .error(span, "'val' cannot be reassigned.".to_string());

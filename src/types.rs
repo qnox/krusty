@@ -386,6 +386,19 @@ impl Ty {
         }
     }
 
+    /// Candidate extension-receiver lookup keys, most-specific first. Generic receivers such as
+    /// `val <T> T.p` or `val <T> Array<T>.p` register under `Any`/`Array<Any>`, while concrete receivers
+    /// keep their precise erased key first so concrete overloads still win.
+    pub fn erased_recv_candidates(self) -> Vec<Ty> {
+        let mut keys = vec![self.erased_recv()];
+        if let Ty::Obj("kotlin/Array", _) = keys[0] {
+            keys.push(Ty::obj_args("kotlin/Array", &[Ty::obj("kotlin/Any")]));
+        }
+        keys.push(Ty::obj("kotlin/Any"));
+        keys.dedup();
+        keys
+    }
+
     /// A generic type-parameter type `T` with the given declared upper bound (`kotlin/Any` if unbounded).
     pub fn ty_param(name: &str, bound: Ty) -> Ty {
         Ty::TyParam(intern(name), intern_ty(bound))
