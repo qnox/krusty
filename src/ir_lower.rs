@@ -930,6 +930,39 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                             .insert(fid, FnParamInfo::defaults(names, defaults));
                     }
                 }
+                // A trailing `vararg` parameter is OMITTABLE by an ADAPTED callable reference (`C::mv`
+                // used as `(Int) -> Unit`): synthesize an empty-array default for it so the `$default`
+                // stub fills `new T[0]` when the vararg is masked. Merge with any existing defaults.
+                // Normal calls pass every argument (no mask), so this only affects the adapted-reference
+                // path — additive, like kotlinc.
+                if m.params.len() <= 31
+                    && !c.is_interface()
+                    && m.params.last().is_some_and(|p| p.is_vararg)
+                {
+                    let vi = m.params.len() - 1;
+                    let arr_ty = ty_to_ir(sig.params[vi]);
+                    let size0 = lo.ir.add_expr(IrExpr::Const(IrConst::Int(0)));
+                    let empty = lo.ir.add_expr(IrExpr::NewArray {
+                        array_type: arr_ty,
+                        size: size0,
+                    });
+                    let names: Vec<String> = m.params.iter().map(|p| p.name.clone()).collect();
+                    let mut info = lo
+                        .ir
+                        .fn_params
+                        .remove(&fid)
+                        .unwrap_or_else(|| FnParamInfo::names(names.clone()));
+                    let mut defs = info
+                        .defaults
+                        .take()
+                        .unwrap_or_else(|| vec![None; m.params.len()]);
+                    if defs.len() == m.params.len() {
+                        defs[vi] = Some(empty);
+                        info.names = names;
+                        info.defaults = Some(defs);
+                        lo.ir.fn_params.insert(fid, info);
+                    }
+                }
                 // Tag a `suspend` member method for the coroutine pass (same as a top-level suspend fun).
                 if m.is_suspend {
                     lo.ir.suspend_funs.push(fid);
@@ -2225,22 +2258,22 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                         && !c.is_interface()
                         && m.params.len() <= 31
                     {
+                        let last = m.params.len() - 1;
                         let mut defaults = Vec::new();
-                        for (p, t) in m.params.iter().zip(&sig.params) {
+                        for (i, (p, t)) in m.params.iter().zip(&sig.params).enumerate() {
                             match p.default {
                                 Some(d) => {
                                     let lowered = lo.lower_arg(d, &ty_to_ir(*t));
-                                    crate::trace_compiler!(
-                                        "resolve",
-                                        "member default {}.{} param {} ty={:?} info_ty={:?} lowered={}",
-                                        internal,
-                                        m.name,
-                                        p.name,
-                                        t,
-                                        lo.info.ty(d),
-                                        lowered.is_some()
-                                    );
                                     defaults.push(Some(lowered?));
+                                }
+                                // A trailing `vararg` is OMITTABLE by an adapted callable reference — its
+                                // default is an empty array so the `$default` stub fills `new T[0]`.
+                                None if p.is_vararg && i == last => {
+                                    let size0 = lo.ir.add_expr(IrExpr::Const(IrConst::Int(0)));
+                                    defaults.push(Some(lo.ir.add_expr(IrExpr::NewArray {
+                                        array_type: ty_to_ir(*t),
+                                        size: size0,
+                                    })));
                                 }
                                 None => defaults.push(None),
                             }
@@ -10019,6 +10052,13 @@ impl<'a> Lower<'a> {
         // ref). `arity` = the extension's declared params (the receiver is bound, not a parameter). A
         // `Unit` return is wrapped so `invoke` yields the `Unit` singleton.
         if let Some(&fid) = self.ext_fun_ids.get(&(rty.erased_recv(), name.to_string())) {
+            // An ADAPTED extension reference (the target has trailing default/vararg params the reference
+            // omits) can't use the direct metafactory bind — that would call a non-existent lower-arity
+            // static. Decline (skip) until the synthesized-adapter path lands. `params` is the exposed
+            // prefix; the static leads with the receiver, so the non-adapted arity is `params.len() + 1`.
+            if params.len() + 1 < self.ir.functions[fid as usize].params.len() {
+                return None;
+            }
             // A BOUND extension reference on a REFERENCE receiver (`obj::ext`) → a `FunctionReferenceImpl`
             // whose captured receiver is passed as the first `invokestatic <facade>.ext(recv, args)`
             // argument (`StaticBound`) — real reference equality (two `obj::ext` on the same receiver are
@@ -10114,10 +10154,17 @@ impl<'a> Lower<'a> {
         // and capture the receiver.
         let internal = user_method.expect("user method internal");
         let (class_id, index, target_fid, _ret) = self.resolve_method(&internal, name)?;
+        let is_adapted = params.len() < self.ir.functions[target_fid as usize].params.len();
         // The synthesized impl lives in a SEPARATE reference class; a private target would be an illegal
         // `invokespecial` from there. Target the public `access$name` accessor instead (an ordinary
         // `invokevirtual`), forwarding to the private member from inside the owner.
         let (class_id, index) = if self.ir.private_methods.contains(&target_fid) {
+            // The forwarding accessor carries no `$default` stub, so an ADAPTED reference (which fills
+            // omitted parameters through `$default`) can't dispatch it — decline (skip) rather than emit
+            // a call to a non-existent `access$name$default`.
+            if is_adapted {
+                return None;
+            }
             let acc = self.ensure_private_accessor(&internal, name)?;
             let (cid, idx, _, _) = self.resolve_method(&internal, &acc)?;
             (cid, idx)
@@ -10126,9 +10173,16 @@ impl<'a> Lower<'a> {
         };
         let cap = self.expr(recv)?;
         let recv_v = self.ir.add_expr(IrExpr::GetValue(0));
-        let arg_vs: Vec<Option<u32>> = (0..params.len() as u32)
+        let mut arg_vs: Vec<Option<u32>> = (0..params.len() as u32)
             .map(|i| Some(self.ir.add_expr(IrExpr::GetValue(i + 1))))
             .collect();
+        // ADAPTED reference: the target method has more parameters than the reference exposes (trailing
+        // defaults / a vararg). Pad the omitted ones with `None`, which the `MethodCall` emitter fills
+        // through the target's `$default` stub (an empty array for a vararg, the default for a default).
+        let target_arity = self.ir.functions[target_fid as usize].params.len();
+        while arg_vs.len() < target_arity {
+            arg_vs.push(None);
+        }
         let mc = self.ir.add_expr(IrExpr::MethodCall {
             class: class_id,
             index,
