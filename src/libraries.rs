@@ -1018,6 +1018,11 @@ pub struct LibraryType {
     /// name + physical descriptor but the LOGICAL value-class return type from `@Metadata`, so `h.id` types
     /// as the value class.
     pub value_class_properties: Vec<(String, LibraryMember)>,
+    /// For a classpath annotation type: the `java.lang.annotation.RetentionPolicy` constant name of its
+    /// `@Retention` (`"RUNTIME"` / `"CLASS"` / `"SOURCE"`), or `None` if absent. Drives whether a use of
+    /// the annotation is emitted `RuntimeVisibleAnnotations` (RUNTIME) / `RuntimeInvisibleAnnotations`
+    /// (CLASS = Kotlin BINARY) / dropped (SOURCE).
+    pub retention: Option<String>,
 }
 
 /// What a library type *is*. Mutually exclusive at the source level; at the JVM level an `Annotation`
@@ -1286,6 +1291,7 @@ mod tests {
             value_ctor_has_default: false,
             ctor_named_params: vec![],
             value_class_properties: vec![],
+            retention: None,
         };
         f(&mut t);
         t

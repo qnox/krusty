@@ -335,6 +335,7 @@ impl SymbolSource for ModuleSymbols<'_> {
             value_ctor_has_default: false,
             ctor_named_params: Vec::new(),
             value_class_properties: Vec::new(),
+            retention: None,
         })
     }
 }
