@@ -754,14 +754,6 @@ pub struct FunctionInfo {
 }
 
 impl FunctionInfo {
-    pub fn is_top_level(&self) -> bool {
-        self.kind == FnKind::TopLevel
-    }
-
-    pub fn is_member(&self) -> bool {
-        self.kind == FnKind::Member
-    }
-
     pub fn is_extension(&self) -> bool {
         self.kind == FnKind::Extension
     }
@@ -872,11 +864,13 @@ pub struct FunctionSet {
 
 impl FunctionSet {
     pub fn top_level(&self) -> impl Iterator<Item = &FunctionInfo> {
-        self.overloads.iter().filter(|o| o.is_top_level())
+        self.overloads.iter().filter(|o| o.kind == FnKind::TopLevel)
     }
 
     pub fn into_top_level(self) -> impl Iterator<Item = FunctionInfo> {
-        self.overloads.into_iter().filter(|o| o.is_top_level())
+        self.overloads
+            .into_iter()
+            .filter(|o| o.kind == FnKind::TopLevel)
     }
 
     pub fn into_single_top_level(self) -> Option<FunctionInfo> {

@@ -1108,7 +1108,7 @@ impl<'a> SymbolResolver<'a> {
                     o.callable.descriptor,
                     o.kind
                 );
-                let is_member = o.is_member();
+                let is_member = o.kind == FnKind::Member;
                 (o.callable, is_member)
             })
     }
