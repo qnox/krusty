@@ -753,6 +753,12 @@ fn emit_class(
             &ctor,
             ctor_signature.as_deref(),
         );
+        // A default on any primary-ctor parameter → kotlinc's synthetic
+        // `<init>(params…, int mask, DefaultConstructorMarker)` overload (fills the masked slots from the
+        // defaults, then `invokespecial` the real `<init>`).
+        if let Some(defaults) = ir.class_ctor_defaults.get(&c.fq_name) {
+            emit_ctor_default_stub(ir, &c.fq_name, &param_tys, defaults, &mut cw, bodies);
+        }
     } // end `if c.has_primary_ctor`
 
     // Secondary constructors: each `<init>(p)` delegates (via `this(…)` to an own `<init>`, or via
@@ -3151,6 +3157,111 @@ fn emit_facade_default_stub(
         &desc,
         &code,
     );
+}
+
+/// Emit the synthetic `<init>(params…, int mask, DefaultConstructorMarker)` overload for a class whose
+/// primary constructor has defaulted parameters. Unlike a `$default` method this is a CONSTRUCTOR: `this`
+/// is slot 0, the real parameters follow, then the mask + marker; after overwriting each masked slot with
+/// its default it `invokespecial`s the real `<init>`. Access is `PUBLIC | SYNTHETIC` (0x1001), matching
+/// kotlinc. The defaults were lowered in the instance frame (`this` = value 0, params = 1..=n).
+fn emit_ctor_default_stub(
+    ir: &IrFile,
+    owner: &str,
+    real_params: &[Ty],
+    defaults: &[Option<u32>],
+    cw: &mut ClassWriter,
+    bodies: &dyn MethodBodies,
+) {
+    let n = real_params.len();
+    let mut e = Emitter {
+        ir,
+        cw,
+        bodies,
+        owner: owner.to_string(),
+        facade: owner.to_string(),
+        slots: HashMap::new(),
+        var_types: collect_var_types(ir),
+        next_slot: 0,
+        ret: Ty::Unit,
+        loop_stack: Vec::new(),
+    };
+    let marker = Ty::obj("kotlin/jvm/internal/DefaultConstructorMarker");
+    // `this` at slot 0 = value-index 0; real params at value-index 1..=n.
+    e.slots.insert(0, (0, Ty::obj(owner)));
+    let mut slot = 1u16;
+    let mut param_slots: Vec<(u16, Ty)> = Vec::new();
+    for (i, t) in real_params.iter().enumerate() {
+        e.slots.insert((i + 1) as u32, (slot, *t));
+        param_slots.push((slot, *t));
+        slot += slot_words(*t);
+    }
+    let mask_slot = slot;
+    e.slots.insert(9_000_001, (mask_slot, Ty::Int));
+    slot += 1;
+    e.slots.insert(9_000_002, (slot, marker));
+    slot += 1;
+    e.next_slot = slot;
+
+    // The stackmap frame at each mask-branch target: `this` (slot 0) is UNINITIALIZED (the real `<init>`
+    // has not run yet), the params keep their types, then mask + marker. Built manually because the frame
+    // machinery types slot 0 from `e.slots` as an initialized `Object`, which the verifier rejects here.
+    let branch_locals: Vec<VerifType> = {
+        let mut raw = vec![VerifType::Top; e.next_slot as usize];
+        raw[0] = VerifType::UninitializedThis;
+        for &(pslot, pty) in &param_slots {
+            raw[pslot as usize] = e.verif_single(pty);
+        }
+        raw[mask_slot as usize] = VerifType::Integer;
+        raw[(mask_slot + 1) as usize] = e.verif_single(marker);
+        // Collapse the two-slot categories (long/double occupy one verif entry) and trim trailing Top.
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < raw.len() {
+            let wide = matches!(raw[i], VerifType::Long | VerifType::Double);
+            out.push(raw[i].clone());
+            i += if wide { 2 } else { 1 };
+        }
+        while out.last() == Some(&VerifType::Top) {
+            out.pop();
+        }
+        out
+    };
+    let mut code = CodeBuilder::new(slot);
+    for (i, def) in defaults.iter().enumerate().take(n) {
+        if let Some(def_expr) = def {
+            let (pslot, pty) = param_slots[i];
+            code.iload(mask_slot);
+            code.push_int(1 << i, e.cw);
+            code.iand();
+            let skip = code.new_label();
+            code.add_frame_if_new(skip, branch_locals.clone(), vec![]);
+            code.ifeq(skip);
+            e.emit_value(*def_expr, &mut code);
+            store(pty, pslot, &mut code);
+            code.bind(skip);
+        }
+    }
+    // `invokespecial <owner>.<init>(realparams)V` — delegate to the real primary constructor.
+    code.aload(0);
+    for &(pslot, pty) in &param_slots {
+        load(pty, pslot, &mut code);
+    }
+    let init_desc = method_descriptor(real_params, Ty::Unit);
+    let aw: i32 = 1 + real_params
+        .iter()
+        .map(|t| slot_words(*t) as i32)
+        .sum::<i32>();
+    let m = e.cw.methodref(owner, "<init>", &init_desc);
+    code.invokespecial(m, aw, 0);
+    code.ret_void();
+    code.ensure_locals(e.next_slot);
+    code.link();
+
+    let mut stub_params = real_params.to_vec();
+    stub_params.push(Ty::Int);
+    stub_params.push(marker);
+    let desc = method_descriptor(&stub_params, Ty::Unit);
+    e.cw.add_method(0x1001 /* PUBLIC | SYNTHETIC */, "<init>", &desc, &code);
 }
 
 struct Emitter<'a> {
