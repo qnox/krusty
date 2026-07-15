@@ -690,6 +690,8 @@ mod suspend_class_implements_interface_e2e;
 mod suspend_collection_hof_e2e;
 #[path = "suspend_collection_hof_suspend_lambda_e2e.rs"]
 mod suspend_collection_hof_suspend_lambda_e2e;
+#[path = "suspend_continuation_owner_e2e.rs"]
+mod suspend_continuation_owner_e2e;
 #[path = "suspend_default_param_e2e.rs"]
 mod suspend_default_param_e2e;
 #[path = "suspend_e2e.rs"]
