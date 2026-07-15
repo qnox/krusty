@@ -22072,36 +22072,35 @@ fn build_applied_annotation(
     })
 }
 
-/// User annotations on a class's ENUM-CONSTANT fields, folded for each field's
-/// `RuntimeVisibleAnnotations`. An enum constant `@Ann RED` unambiguously targets the static field
-/// (unlike a constructor `val` property, whose no-use-site annotation defaults to the CONSTRUCTOR
-/// PARAMETER — handled separately when param-annotation emission lands).
-///
-/// Currently resolves SAME-FILE, RUNTIME-retained annotations (via [`build_applied_annotation`]); a
-/// classpath annotation (e.g. `@SerialName`) whose retention/elements live in a compiled class is not
-/// yet resolved (a follow-up), so it is skipped rather than emitted wrong. BINARY-retained (invisible)
-/// support is likewise a follow-up.
+fn build_applied_annotations(
+    file: &ast::File,
+    names: &[String],
+    args: &[Vec<AstExprId>],
+) -> Vec<crate::ir::AppliedAnnotation> {
+    names
+        .iter()
+        .zip(args.iter())
+        .filter_map(|(name, args)| build_applied_annotation(file, name, args))
+        .collect()
+}
+
+/// User annotations on enum-constant fields. Same-file runtime annotations are folded; unsupported
+/// annotations are skipped rather than emitted with wrong values.
 fn class_field_annotations(
     file: &ast::File,
     c: &ast::ClassDecl,
 ) -> Vec<crate::ir::FieldAnnotations> {
-    let mut out = Vec::new();
-    for e in &c.enum_entries {
-        let visible: Vec<_> = e
-            .annotations
-            .iter()
-            .zip(e.annotation_args.iter())
-            .filter_map(|(n, a)| build_applied_annotation(file, n, a))
-            .collect();
-        if !visible.is_empty() {
-            out.push(crate::ir::FieldAnnotations {
+    c.enum_entries
+        .iter()
+        .filter_map(|e| {
+            let visible = build_applied_annotations(file, &e.annotations, &e.annotation_args);
+            (!visible.is_empty()).then(|| crate::ir::FieldAnnotations {
                 field: e.name.clone(),
                 visible,
                 invisible: Vec::new(),
-            });
-        }
-    }
-    out
+            })
+        })
+        .collect()
 }
 
 /// The RUNTIME-retained applied annotations on a class declaration, folded for `RuntimeVisibleAnnotations`.
@@ -22109,11 +22108,7 @@ fn class_applied_annotations(
     file: &ast::File,
     c: &ast::ClassDecl,
 ) -> Vec<crate::ir::AppliedAnnotation> {
-    c.annotations
-        .iter()
-        .zip(c.annotation_args.iter())
-        .filter_map(|(name, args)| build_applied_annotation(file, name, args))
-        .collect()
+    build_applied_annotations(file, &c.annotations, &c.annotation_args)
 }
 
 /// Extract the BACKEND-AGNOSTIC generic-signature shape of a generic class (`class Box<T>`), or `None`
