@@ -720,6 +720,8 @@ mod suspend_spill_slot_reuse_e2e;
 mod suspend_try_finally_body_e2e;
 #[path = "suspend_try_finally_e2e.rs"]
 mod suspend_try_finally_e2e;
+#[path = "suspend_value_class_mangle_e2e.rs"]
+mod suspend_value_class_mangle_e2e;
 #[path = "suspend_withlock_nonlocal_return_e2e.rs"]
 mod suspend_withlock_nonlocal_return_e2e;
 #[path = "synthetic_accessor_e2e.rs"]

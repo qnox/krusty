@@ -359,6 +359,24 @@ pub fn lower_value_classes(
     // Per-function value-slot types (parameters + local `Variable`s) and return types, captured BEFORE
     // erasure so the box/unbox analysis sees `Class{X}` (non-null = unboxed, nullable = boxed).
     let orig_rets: Vec<Ty> = ir.functions.iter().map(|f| f.ret.clone()).collect();
+    // Suspend functions, for value-class mangling: kotlinc mangles the ORIGINAL signature, which for a
+    // suspend fun carries a trailing `Continuation` value parameter (a non-inline `_` element). By fid
+    // for the declaration sites, and by `(owner, source-name, arity)` for the recompute sites (bridges,
+    // fn-references) — keyed BEFORE any name mangling so every site agrees on the same mangled name.
+    let suspend_fids: std::collections::HashSet<u32> = ir.suspend_funs.iter().copied().collect();
+    let suspend_sig: std::collections::HashSet<(String, String, usize)> = ir
+        .functions
+        .iter()
+        .enumerate()
+        .filter(|(fid, _)| suspend_fids.contains(&(*fid as u32)))
+        .map(|(fid, f)| {
+            (
+                f.dispatch_receiver.clone().unwrap_or_default(),
+                f.name.clone(),
+                orig_params[fid].len(),
+            )
+        })
+        .collect();
     let slot_types: Vec<HashMap<u32, Ty>> = ir
         .functions
         .iter()
@@ -448,6 +466,7 @@ pub fn lower_value_classes(
                 &orig_rets[fid as usize],
                 &under,
                 is_file_class,
+                suspend_fids.contains(&fid),
             ) != f.name
             {
                 continue;
@@ -539,6 +558,7 @@ pub fn lower_value_classes(
                 &orig_rets[fid],
                 &under,
                 is_file_class,
+                suspend_fids.contains(&(fid as u32)),
             );
             if mangled != f.name {
                 if let Some(owner) = &f.dispatch_receiver {
@@ -649,12 +669,18 @@ pub fn lower_value_classes(
         } else {
             target_decl_params.clone()
         };
+        let fr_suspend = suspend_sig.contains(&(
+            fr.call_owner.clone(),
+            fr.call_name.clone(),
+            target_decl_params.len(),
+        ));
         fr.call_name = vc_mangle(
             &fr.call_name,
             &mangle_params,
             &fr.ret_ty,
             &under,
             is_file_class,
+            fr_suspend,
         );
         let erase_src = if staticbound {
             fr.target_param_tys.clone()
@@ -765,8 +791,18 @@ pub fn lower_value_classes(
                     // `Object`) does not.
                     // A bridge lives on a class (never a file class); its value-class return mangles.
                     if !is_property_getter_bridge_name(&b.name) {
-                        b.name =
-                            vc_mangle(&b.name, &b.concrete_params, &b.erased_ret, &under, false);
+                        b.name = vc_mangle(
+                            &b.name,
+                            &b.concrete_params,
+                            &b.erased_ret,
+                            &under,
+                            false,
+                            suspend_sig.contains(&(
+                                c.fq_name.clone(),
+                                b.name.clone(),
+                                b.concrete_params.len(),
+                            )),
+                        );
                     }
                     // A value-class PARAM erases to its underlying in both the bridge descriptor and the
                     // target call (`foo-<hash>(Marker)` → `foo-<hash>(int)`). Done AFTER the mangle,
@@ -817,8 +853,18 @@ pub fn lower_value_classes(
                         b.target_name = Some(b.name.clone());
                     }
                     if !is_property_getter_bridge_name(&b.name) {
-                        b.name =
-                            vc_mangle(&b.name, &b.concrete_params, &b.erased_ret, &under, false);
+                        b.name = vc_mangle(
+                            &b.name,
+                            &b.concrete_params,
+                            &b.erased_ret,
+                            &under,
+                            false,
+                            suspend_sig.contains(&(
+                                c.fq_name.clone(),
+                                b.name.clone(),
+                                b.concrete_params.len(),
+                            )),
+                        );
                     }
                     for p in b.erased_params.iter_mut() {
                         *p = erase(p, &under);
@@ -3481,10 +3527,11 @@ fn vc_mangle(
     ret: &Ty,
     under: &HashMap<String, Ty>,
     is_file_class: bool,
+    is_suspend: bool,
 ) -> String {
     // PARAM mangling (kotlinc `IrType.getRequiresMangling`) EXEMPTS `kotlin.Result`
     // (`!isClassWithFqName(RESULT_FQ_NAME)`), so a `Result` parameter never triggers a mangle.
-    let pinfo: Vec<_> = params
+    let mut pinfo: Vec<_> = params
         .iter()
         .map(|t| {
             let mut info = mangling_info(t, under);
@@ -3494,6 +3541,17 @@ fn vc_mangle(
             info
         })
         .collect();
+    // kotlinc mangles the ORIGINAL (pre-CPS) signature, which for a suspend fun includes the trailing
+    // `Continuation` value parameter — a non-inline type, so it contributes the `_` placeholder. Without
+    // it a suspend `f(Id): Int` would hash identically to the non-suspend overload. (A lone non-value
+    // `_` never triggers mangling on its own — `requires_param_mangling` checks `is_value`.)
+    if is_suspend {
+        pinfo.push(crate::jvm::inline_class::InfoForMangling {
+            fq_name: String::new(),
+            is_value: false,
+            is_nullable: false,
+        });
+    }
     // RETURN mangling (kotlinc `hasMangledReturnType`) does NOT exempt `Result`, but applies only when the
     // function is NOT in a file class (a top-level fn returning a value class keeps its plain name).
     let rinfo = mangling_info(ret, under);
