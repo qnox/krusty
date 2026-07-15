@@ -470,13 +470,6 @@ impl<'a> SymbolResolver<'a> {
         out
     }
 
-    /// Whether `name` has an `inline` extension overload on `receiver`.
-    pub fn extension_is_inline(&self, receiver: Ty, name: &str) -> bool {
-        self.receiver_extensions(receiver, name)
-            .iter()
-            .any(|o| o.flags.inline.can_inline())
-    }
-
     /// All TOP-LEVEL (and same-facade extension) function overloads of `name`, resolved through the ONE
     /// `resolve_symbols` seam over this resolver's import scope (empty when there is no scope). Callers
     /// filter by [`FnKind`] as they need (`TopLevel` for a plain call, etc.).
@@ -502,13 +495,6 @@ impl<'a> SymbolResolver<'a> {
         self.receiver_extensions(recv, name)
             .into_iter()
             .filter(|o| o.receiver_rank == 1)
-    }
-
-    /// Whether `name` has an `inline` top-level overload.
-    pub fn toplevel_is_inline(&self, name: &str) -> bool {
-        self.top_level_function_set(name)
-            .top_level()
-            .any(|o| o.flags.inline.can_inline())
     }
 
     /// Resolve a receiver-less top-level library callable for a concrete call site. This is the
@@ -1048,13 +1034,6 @@ impl<'a> SymbolResolver<'a> {
             return Some(callable);
         }
         None
-    }
-
-    /// Whether `name` has a top-level overload that MUST be inlined (`@InlineOnly`, no callable method).
-    pub fn toplevel_has_must_inline(&self, name: &str) -> bool {
-        self.top_level_function_set(name)
-            .top_level()
-            .any(|o| o.flags.inline.must_inline())
     }
 
     /// Resolve a single-selector `@OverloadResolutionByLambdaReturnType` call (`sumOf { … }`): pick the

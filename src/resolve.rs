@@ -10931,8 +10931,12 @@ impl<'a> Checker<'a> {
                 // on the extension actually being inline (a non-inline lambda capture must still be boxed).
                 // Permit for this call only; the lowering must inline (or bail), never form a closure.
                 let prev_allow_mut = self.allow_lambda_mutation;
-                self.allow_lambda_mutation =
-                    ext_lambda_pts.is_some() && self.resolver().extension_is_inline(rt, &name);
+                self.allow_lambda_mutation = ext_lambda_pts.is_some()
+                    && self
+                        .resolver()
+                        .receiver_extensions(rt, &name)
+                        .iter()
+                        .any(|o| o.flags.inline.can_inline());
                 let arg_tys: Vec<Ty> = args
                     .iter()
                     .enumerate()
@@ -11802,12 +11806,19 @@ impl<'a> Checker<'a> {
                 // A top-level NON-public (`@InlineOnly`) inline fn (`require`/`check`) inlines its lambda
                 // argument (or the file is skipped), so a mutable capture is an inline capture — type the
                 // lambda body with mutation allowed (don't `Ref`-box the captured var).
+                let top_level_functions = self.resolver().top_level_function_set(&fname);
+                let toplevel_inline = toplevel_lambda_pts.is_some()
+                    && top_level_functions
+                        .top_level()
+                        .any(|o| o.flags.inline.can_inline());
                 let toplevel_must_inline = self.lookup(&fname).is_none()
                     && !self.module_declares(&fname)
                     && args
                         .iter()
                         .any(|&a| matches!(self.file.expr(a), Expr::Lambda { .. }))
-                    && self.resolver().toplevel_has_must_inline(&fname);
+                    && top_level_functions
+                        .top_level()
+                        .any(|o| o.flags.inline.must_inline());
                 // An implicit-`this` member higher-order call (`update { … }` reached inside a member or
                 // extension body, with no explicit receiver): resolve the member through the module
                 // hierarchy and pre-type each lambda argument from the member's declared function-type
@@ -11869,8 +11880,7 @@ impl<'a> Checker<'a> {
                                     .copied()
                                     .unwrap_or(false);
                                 let prev = self.allow_lambda_mutation;
-                                self.allow_lambda_mutation =
-                                    self.resolver().toplevel_is_inline(&fname) && !materialized;
+                                self.allow_lambda_mutation = toplevel_inline && !materialized;
                                 // A RECEIVER function-type param: bind the receiver as the lambda's `this`;
                                 // the rest are value params. Prefer the @Metadata receiver (`recv_i`,
                                 // deterministic — `MutableList` for `buildList`) over `pts[i][0]`, whose
