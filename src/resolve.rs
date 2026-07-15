@@ -4624,16 +4624,7 @@ pub fn check_file(file: &File, syms: &mut SymbolTable, diags: &mut DiagSink) -> 
                 for p in &cl.props {
                     if let Some(dx) = p.default {
                         let pty = c.resolve_ty(&p.ty);
-                        let dty = if matches!(c.file.expr(dx), Expr::Lambda { .. })
-                            && (!p.ty.fun_params.is_empty() || p.ty.name == "<fun>")
-                        {
-                            let lam_pts: Vec<Ty> =
-                                p.ty.fun_params.iter().map(|r| c.resolve_ty(r)).collect();
-                            c.check_lambda_with_types(dx, &lam_pts)
-                        } else {
-                            c.expr(dx)
-                        };
-                        c.expect_assignable(pty, dty, c.span(dx), "default argument");
+                        c.check_default_arg(&p.ty, dx, pty);
                     }
                 }
                 c.pop_scope();
@@ -5104,6 +5095,22 @@ impl<'a> Checker<'a> {
         self.ret_ty = prev_ret;
         self.field_ty = prev_field;
         r
+    }
+
+    fn check_default_arg(&mut self, ty_ref: &TypeRef, default: ExprId, pty: Ty) {
+        let dty = if matches!(self.file.expr(default), Expr::Lambda { .. })
+            && (!ty_ref.fun_params.is_empty() || ty_ref.name == "<fun>")
+        {
+            let lam_pts: Vec<Ty> = ty_ref
+                .fun_params
+                .iter()
+                .map(|r| self.resolve_ty(r))
+                .collect();
+            self.check_lambda_with_types(default, &lam_pts)
+        } else {
+            self.expr(default)
+        };
+        self.expect_assignable(pty, dty, self.span(default), "default argument");
     }
 
     /// The arg-binding call-resolution layer over this checker's [`SymbolSource`]. Cheap to construct.
@@ -6326,19 +6333,7 @@ impl<'a> Checker<'a> {
         for p in &f.params {
             let pty = self.resolve_ty(&p.ty);
             if let Some(dx) = p.default {
-                // A default that is a LAMBDA for a function-typed parameter (`g: (Int) -> Int = { it + 1 }`)
-                // takes its parameter types from the declared function type, so `it`/named params type
-                // concretely (not the erased `Object`) — as for a typed local / HOF argument lambda.
-                let dty = if matches!(self.file.expr(dx), Expr::Lambda { .. })
-                    && (!p.ty.fun_params.is_empty() || p.ty.name == "<fun>")
-                {
-                    let lam_pts: Vec<Ty> =
-                        p.ty.fun_params.iter().map(|r| self.resolve_ty(r)).collect();
-                    self.check_lambda_with_types(dx, &lam_pts)
-                } else {
-                    self.expr(dx)
-                };
-                self.expect_assignable(pty, dty, self.span(dx), "default argument");
+                self.check_default_arg(&p.ty, dx, pty);
             }
             // Declare each parameter as we go, so a LATER parameter's default may reference an EARLIER one
             // (`fun f(a: Int, c: Int = a + 1)`) — Kotlin evaluates defaults left-to-right with preceding
@@ -6472,16 +6467,7 @@ impl<'a> Checker<'a> {
         for p in &f.params {
             if let Some(dx) = p.default {
                 let pty = self.resolve_ty(&p.ty);
-                let dty = if matches!(self.file.expr(dx), Expr::Lambda { .. })
-                    && (!p.ty.fun_params.is_empty() || p.ty.name == "<fun>")
-                {
-                    let lam_pts: Vec<Ty> =
-                        p.ty.fun_params.iter().map(|r| self.resolve_ty(r)).collect();
-                    self.check_lambda_with_types(dx, &lam_pts)
-                } else {
-                    self.expr(dx)
-                };
-                self.expect_assignable(pty, dty, self.span(dx), "default argument");
+                self.check_default_arg(&p.ty, dx, pty);
             }
         }
         let infer_ret =
