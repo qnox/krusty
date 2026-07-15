@@ -4921,16 +4921,7 @@ impl<'a> Lower<'a> {
 
     fn runtime_call(&mut self, op: RuntimeOp, ty: Ty, args: Vec<u32>) -> Option<u32> {
         let c = self.syms.libraries.runtime_callable(op, ty)?;
-        Some(self.ir.add_expr(IrExpr::Call {
-            callee: Callee::Static {
-                owner: c.owner,
-                name: c.name,
-                descriptor: c.descriptor,
-                inline: c.inline,
-            },
-            dispatch_receiver: None,
-            args,
-        }))
+        Some(self.emit_library_static_call(c, args, false))
     }
 
     fn platform_static_field(&mut self, field: crate::libraries::PlatformField) -> u32 {
@@ -7622,20 +7613,7 @@ impl<'a> Lower<'a> {
     /// Box an unsigned primitive to its target/library value-class object via the platform synthetic
     /// factory — not a plain boxed carrier, which would lose unsigned identity (`is UInt`, `toString`).
     fn box_unsigned(&mut self, val: u32, ty: Ty) -> Option<u32> {
-        let c = self
-            .syms
-            .libraries
-            .runtime_callable(RuntimeOp::UnsignedBox, ty)?;
-        Some(self.ir.add_expr(IrExpr::Call {
-            callee: Callee::Static {
-                owner: c.owner,
-                name: c.name,
-                descriptor: c.descriptor,
-                inline: c.inline,
-            },
-            dispatch_receiver: None,
-            args: vec![val],
-        }))
+        self.runtime_call(RuntimeOp::UnsignedBox, ty, vec![val])
     }
 
     /// Unbox a possibly `Object`-typed unsigned library object back to its scalar carrier: checkcast to the
