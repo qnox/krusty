@@ -15772,7 +15772,9 @@ impl<'a> Lower<'a> {
                     || self
                         .resolver()
                         .top_level_function_set(&name)
-                        .has_top_level();
+                        .top_level()
+                        .next()
+                        .is_some();
                 if !self.module_declares(&name) && !names_a_function {
                     let ci = self.class_of(sig.ret)?;
                     let class_id = ci.id;

@@ -896,25 +896,13 @@ impl FunctionSet {
         top_level.next().filter(|_| top_level.next().is_none())
     }
 
-    pub fn top_level_with_param_names(&self) -> impl Iterator<Item = &FunctionInfo> {
-        self.top_level().filter(|o| o.call_sig.has_param_names())
-    }
-
     pub fn into_top_level_with_param_names(self) -> impl Iterator<Item = FunctionInfo> {
         self.into_top_level()
             .filter(|o| o.call_sig.has_param_names())
     }
 
-    pub fn has_top_level(&self) -> bool {
-        self.top_level().next().is_some()
-    }
-
     pub fn has_top_level_arity(&self, arity: usize) -> bool {
         self.top_level().any(|o| o.callable.params.len() == arity)
-    }
-
-    pub fn has_top_level_with_param_names(&self) -> bool {
-        self.top_level_with_param_names().next().is_some()
     }
 }
 
