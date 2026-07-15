@@ -19,3 +19,17 @@ return \"OK\"\n\
 }\n";
     common::assert_box_ok_with_stdlib(src, "C");
 }
+
+#[test]
+fn property_inferred_from_generic_companion_method() {
+    // A property initialized by a same-file class's generic companion method (`val c =
+    // C.create<String>()`) infers its type from the companion method's (inferred) return type.
+    let src = "class C() {\n\
+    companion object {\n\
+        private fun <T> create() = C()\n\
+    }\n\
+    class ZZZ { val c = C.create<String>() }\n\
+}\n\
+fun box(): String { C.ZZZ().c; return \"OK\" }\n";
+    common::assert_box_ok_with_stdlib(src, "C");
+}

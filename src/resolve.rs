@@ -3427,6 +3427,53 @@ fn infer_lit_ty_p(
                             return *ret;
                         }
                     }
+                    // `C.method(args)` — a COMPANION method of a same-file class `C` (invisible to the
+                    // classpath source). Resolve its return type: a declared return, else a recursive
+                    // inference of its expression body (`private fun <T> create() = C()` → `C`). Skip a
+                    // self-referential body so the recursion can't loop.
+                    if let Expr::Name(type_name) = file.expr(*receiver) {
+                        if let Some(cm) = file.decls.iter().find_map(|&d| match file.decl(d) {
+                            Decl::Class(c) if &c.name == type_name => {
+                                c.companion_methods.iter().find(|m| &m.name == name)
+                            }
+                            _ => None,
+                        }) {
+                            if let Some(r) = &cm.ret {
+                                let empty_tp = TParams::from_bindings([]);
+                                let mut sink = crate::diag::DiagSink::new();
+                                let t = ty_of_ref(r, class_names, &empty_tp, &mut sink);
+                                if t != Ty::Error {
+                                    return t;
+                                }
+                            } else if let FunBody::Expr(be) = &cm.body {
+                                // Guard against a companion method whose inferred return recurses back to
+                                // itself (directly or mutually, `a()=C.b(); b()=C.a()`) — track the bodies
+                                // being inferred in a thread-local set so a cycle yields `Error` (skip)
+                                // instead of unbounded recursion. Real recursive functions require an
+                                // explicit return type anyway (kotlinc rejects an inferred one).
+                                thread_local! {
+                                    static INFERRING: std::cell::RefCell<std::collections::HashSet<u32>> =
+                                        std::cell::RefCell::new(std::collections::HashSet::new());
+                                }
+                                let fresh = INFERRING.with(|s| s.borrow_mut().insert(be.0));
+                                if fresh {
+                                    let t = infer_lit_ty_p(
+                                        file,
+                                        *be,
+                                        class_names,
+                                        fun_rets,
+                                        props,
+                                        src,
+                                        up,
+                                    );
+                                    INFERRING.with(|s| s.borrow_mut().remove(&be.0));
+                                    if t != Ty::Error {
+                                        return t;
+                                    }
+                                }
+                            }
+                        }
+                    }
                     let recv_ty =
                         infer_lit_ty_p(file, *receiver, class_names, fun_rets, props, src, up);
                     if recv_ty != Ty::Error {
