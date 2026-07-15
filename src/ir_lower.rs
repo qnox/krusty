@@ -6480,13 +6480,19 @@ impl<'a> Lower<'a> {
                     crate::resolve::InvokeKind::Function { suspend, .. } if *suspend => {
                         return true
                     }
-                    crate::resolve::InvokeKind::Operator { receiver_ty }
-                        if receiver_ty
-                            .obj_internal()
-                            .is_some_and(|i| method_suspends(i, "invoke")) =>
+                    crate::resolve::InvokeKind::Operator {
+                        receiver_ty,
+                        member: None,
+                    } if receiver_ty
+                        .obj_internal()
+                        .is_some_and(|i| method_suspends(i, "invoke")) =>
                     {
                         return true
                     }
+                    crate::resolve::InvokeKind::Operator {
+                        member: Some(member),
+                        ..
+                    } if member.suspend => return true,
                     _ => {}
                 }
             }
@@ -15481,7 +15487,10 @@ impl<'a> Lower<'a> {
                 }
                 Some(invoke)
             }
-            InvokeKind::Operator { receiver_ty: rt } => {
+            InvokeKind::Operator {
+                receiver_ty: rt,
+                member: None,
+            } => {
                 // A user class with a member `operator fun invoke`: a direct method call.
                 if let Some((class, index, fid, mret)) = self
                     .class_of(rt)
@@ -15499,11 +15508,13 @@ impl<'a> Lower<'a> {
                     });
                     return Some(self.coerce_generic_read(call, e, mret));
                 }
-                // A classpath type whose `invoke` member comes from library data.
-                let Ty::Obj(internal, _) = rt else {
-                    return None;
-                };
-                let resolved = self.resolve_instance_member(rt, "invoke", params)?;
+                None
+            }
+            InvokeKind::Operator {
+                receiver_ty: rt,
+                member: Some(resolved),
+            } => {
+                // A classpath/cross-file type whose `invoke` member was selected by the checker.
                 let recv = self.expr(receiver)?;
                 let ret = resolved.ret;
                 let member = resolved.member;
@@ -15515,7 +15526,9 @@ impl<'a> Lower<'a> {
                         None => a.push(self.expr(arg)?),
                     }
                 }
-                let owner = member.owner.unwrap_or_else(|| internal.to_string());
+                let owner = member
+                    .owner
+                    .unwrap_or_else(|| rt.obj_internal().unwrap_or("kotlin/Any").to_string());
                 let call = self.ir.add_expr(IrExpr::Call {
                     callee: Callee::Virtual {
                         owner,

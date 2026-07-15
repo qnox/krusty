@@ -4109,8 +4109,13 @@ pub enum InvokeKind {
     /// is the function type's suspend-ness: a `suspend (A)->R` value implements `Function{N+1}` (the
     /// trailing `Continuation`), so the call must thread the continuation and invoke `Function{N+1}`.
     Function { ret: Ty, suspend: bool },
-    /// Receiver carries a member `operator fun invoke`; lowering calls that member.
-    Operator { receiver_ty: Ty },
+    /// Receiver carries a member `operator fun invoke`; lowering calls that member. `member` is present
+    /// for classpath/cross-file callables the checker selected, and absent for same-file user classes
+    /// whose IR method id is only available during lowering.
+    Operator {
+        receiver_ty: Ty,
+        member: Option<Box<crate::symbol_resolver::ResolvedMember>>,
+    },
     /// Receiver has an `operator fun Recv.invoke(...)` EXTENSION (`"a"(12)` → `invoke("a", 12)`);
     /// lowering calls the lifted static extension with the receiver as the leading argument.
     ExtensionOperator { receiver_ty: Ty },
@@ -5539,19 +5544,31 @@ impl<'a> Checker<'a> {
                 )
             }
             _ => {
-                // A member `operator fun invoke` (user class or a classpath/library type) → `Operator`.
-                let member = self
-                    .resolver()
-                    .instance_members(receiver_ty, CALLABLE_INVOKE_OPERATOR)
-                    .into_iter()
-                    .next()
-                    .map(|m| (m.params, m.ret))
-                    .or_else(|| {
-                        self.resolve_instance_member(receiver_ty, CALLABLE_INVOKE_OPERATOR, arg_tys)
-                            .map(|m| (m.member.params, m.ret))
-                    });
-                if let Some((params, ret)) = member {
-                    (params, ret, InvokeKind::Operator { receiver_ty })
+                // A member `operator fun invoke`: source/user classes are emitted by IR method id later,
+                // while classpath/cross-file members carry the checker-selected callable into lowering.
+                if let Some(sig) = receiver_ty
+                    .obj_internal()
+                    .and_then(|internal| self.syms.method_of(internal, CALLABLE_INVOKE_OPERATOR))
+                {
+                    (
+                        sig.params,
+                        sig.ret,
+                        InvokeKind::Operator {
+                            receiver_ty,
+                            member: None,
+                        },
+                    )
+                } else if let Some(m) =
+                    self.resolve_instance_member(receiver_ty, CALLABLE_INVOKE_OPERATOR, arg_tys)
+                {
+                    (
+                        m.member.params.clone(),
+                        m.ret,
+                        InvokeKind::Operator {
+                            receiver_ty,
+                            member: Some(Box::new(m)),
+                        },
+                    )
                 } else {
                     let fi = self
                         .resolver()

@@ -3144,3 +3144,12 @@ such as `val <T> T.p` and `val <T> Array<T>.p` resolve through one erased-receiv
 `Ty`, shared by checker and lowerer. Local getter/setter calls now coerce the receiver against the
 selected accessor parameter, so a primitive receiver to an erased `Any` property boxes through the
 normal call-argument path instead of VerifyErroring.
+
+### Invoke Member Handle Carrying
+
+The next invoke cleanup removed the classpath/cross-file `operator fun invoke` re-resolution from
+lowering. `record_invoke` now stores the checker-selected `ResolvedMember` in `InvokeKind::Operator`
+when the receiver's `invoke` comes from provider data; same-file user classes still carry only the
+receiver type because their IR method id is created during lowering. `lower_invoke` emits the recorded
+member directly, including its physical return and suspend flag, while retaining the existing user-class
+method-id path. This closes the remaining classpath member re-resolution in the invoke-convention family.
