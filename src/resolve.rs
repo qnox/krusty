@@ -7724,9 +7724,17 @@ impl<'a> Checker<'a> {
                     && ot.jvm_boxed_ref().is_some()
                     && !self.ty_is_value_class(ot)
                     && (tt.is_reference() || tt.boxed_ref().is_some());
+                // A cast between two (non-unsigned) PRIMITIVES (`1 as Byte`, `1.0 as Int`, `1 as Int`):
+                // a CHECKED cast, not a numeric conversion — kotlinc boxes the operand, `checkcast`s the
+                // TARGET wrapper (CCE when it differs), then unboxes; a same-type cast is identity. The
+                // lowerer emits the box/checkcast/unbox.
+                let scalar_prim =
+                    |t: Ty| t.jvm_boxed_ref().is_some() && !t.is_reference() && !t.is_unsigned();
+                let prim_to_prim = !nullable && scalar_prim(ot) && scalar_prim(tt);
                 if (!(tt.is_reference() || prim_unbox || unit_cast)
                     || (!ot.is_reference() && !prim_box && !unit_cast && ot != Ty::Error))
                     && !prim_operand_safe_cast
+                    && !prim_to_prim
                 {
                     self.diags.error(
                         self.span(e),

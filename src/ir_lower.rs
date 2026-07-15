@@ -15396,7 +15396,23 @@ impl<'a> Lower<'a> {
         // For a body with `return`s, set up the inline-return target (result slot + end label) so a
         // `return x` lowers to `result = x; break@end`; the body is then wrapped in `do { … } while(false)`
         // labeled `end`. A `Unit` return type needs no result slot (a `return` is a bare `break`).
-        let ret_ty = ty_to_ir(sig_ret);
+        // The result slot holds the value the CHECKER assigned to this call — a generic return
+        // SPECIALIZED to the concrete argument types (`foo(1){…}: T` → `Int`), not the erased declared
+        // `sig_ret` (`Object`). Using the specialized type keeps the slot, the `return` coercions, and
+        // the downstream use (`foo(…) != 1`) consistent — no primitive-into-Object-slot VerifyError.
+        let ret_ty = {
+            let specialized = self.info.ty(AstExprId(call_id));
+            // Only a NON-nullable, concrete specialization is a valid slot type: a nullable primitive
+            // (`Int?`) has no unboxed slot form, so keep the erased `sig_ret` (a boxed reference) there.
+            if specialized != Ty::Error
+                && specialized != Ty::Unit
+                && specialized == specialized.non_null()
+            {
+                ty_to_ir(specialized)
+            } else {
+                ty_to_ir(sig_ret)
+            }
+        };
         let target = if has_return {
             let slot = self.fresh_value();
             let label = format!("$inl${slot}");
@@ -18426,14 +18442,38 @@ impl<'a> Lower<'a> {
                 // Byte?`) is a BOX: the primitive is boxed to its wrapper (which is-a the target), an
                 // `ImplicitCoercion` the JVM backend emits as `valueOf`. Handle it before the
                 // reference-target paths below (which assume a reference operand + `checkcast`).
-                let operand_ty = self.info.ty(operand);
+                // The operand's ACTUAL representation: an inline body specializes a generic type
+                // parameter to a primitive in its SLOT even though the checker's `info.ty` still reports
+                // the erased reference — so a bare name consults its scope slot type.
+                let operand_repr = match self.afile.expr(operand) {
+                    Expr::Name(n) => self
+                        .lookup(n)
+                        .map(|(_, t)| t)
+                        .unwrap_or(self.info.ty(operand)),
+                    _ => self.info.ty(operand),
+                };
                 let target_is_tparam = self.cur_tparams.iter().any(|(n, _, _)| *n == ty.name);
-                if self.has_scalar_value_repr(operand_ty)
-                    && !operand_ty.is_unsigned()
+                if self.has_scalar_value_repr(operand_repr)
+                    && !operand_repr.is_unsigned()
                     && !target_is_tparam
                 {
-                    let target = self.info.ty(e);
-                    if target.is_reference() {
+                    // A PRIMITIVE operand cast to a reference (`42 as Any`, `x as Object`) is a BOX to the
+                    // target reference. Use the resolved target (`info.ty(e)` for `Any`/`Object`, else the
+                    // non-null `TypeRef`) — a specialized operand's `info.ty(e)` can itself read as the
+                    // erased operand, so resolve the target from the annotation when it isn't a reference.
+                    let target = {
+                        let t = self.info.ty(e);
+                        if t.is_reference() {
+                            Some(t)
+                        } else {
+                            let nn = ast::TypeRef {
+                                nullable: false,
+                                ..ty.clone()
+                            };
+                            self.ty_ref(&nn).filter(|t| t.is_reference())
+                        }
+                    };
+                    if let Some(target) = target {
                         return Some(self.ir.add_expr(IrExpr::TypeOp {
                             op: IrTypeOp::ImplicitCoercion,
                             arg,
@@ -18459,6 +18499,31 @@ impl<'a> Lower<'a> {
                         arg,
                         type_operand,
                     }));
+                }
+                // A GENUINE primitive operand cast to a DIFFERENT primitive (`1 as Byte`, `1.0 as Int`):
+                // NOT a numeric conversion (`i2b` would be wrong) — box it to its own wrapper, then the
+                // reference→primitive coercion below `checkcast`s the target wrapper (CCE on mismatch) and
+                // unboxes. A REFERENCE operand (a boxed type-parameter value in an inline body) already
+                // needs only the `checkcast`+unbox path below; a SAME-primitive cast is that identity.
+                if !ty.nullable
+                    && self.has_scalar_value_repr(operand_repr)
+                    && !operand_repr.is_reference()
+                {
+                    if let Some(tprim) = Ty::from_name(&ty.name).filter(|t| {
+                        self.has_scalar_value_repr(*t) && !t.is_unsigned() && *t != operand_repr
+                    }) {
+                        let any = ty_to_ir(Ty::obj("kotlin/Any"));
+                        let boxed = self.ir.add_expr(IrExpr::TypeOp {
+                            op: IrTypeOp::ImplicitCoercion,
+                            arg,
+                            type_operand: any,
+                        });
+                        return Some(self.ir.add_expr(IrExpr::TypeOp {
+                            op: IrTypeOp::ImplicitCoercion,
+                            arg: boxed,
+                            type_operand: ty_to_ir(tprim),
+                        }));
+                    }
                 }
                 // `x as Int` (non-null primitive target) is an unbox: `checkcast Integer; intValue()`,
                 // emitted by the `ImplicitCoercion` reference→primitive path. `ty_ref` only yields
