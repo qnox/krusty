@@ -3278,6 +3278,15 @@ fn synth_value_members(
         let body = ir.add_expr(IrExpr::Block { stmts, value: None });
         let cfid = add_static(ir, "constructor-impl", vec![u_ir], u_ir, body);
         ir.open_methods.insert(cfid); // kotlinc emits `constructor-impl` `public static` (non-final)
+                                      // A default on the single underlying property (`ServerId(val value: String = …)`) → register it as
+                                      // `constructor-impl`'s param default so the backend emits `constructor-impl$default(U, int, marker)`
+                                      // (kotlinc's synthetic). The default was lowered in the static `constructor-impl` frame (param @0).
+        if let Some(&def) = ir.value_ctor_defaults.get(&internal) {
+            ir.fn_params.insert(
+                cfid,
+                crate::ir::FnParamInfo::defaults(vec![fname.clone()], vec![Some(def)]),
+            );
+        }
     }
     // hashCode/equals/toString operate on the value class's IMMEDIATE erased underlying, NOT the final
     // primitive of a nested chain: `ZN(val z: Z1?)` erases to a BOXED `Z1` (`LZ1;`), so it hashes/compares

@@ -107,7 +107,16 @@ pub fn emit_all_with_class_meta(
         // complex default (lambda / construction / spilled temp) is skipped (`toplevel_default_stub_safe`).
         if crate::ir::toplevel_default_stub_safe(ir, i as u32) {
             let defaults = ir.param_defaults(i as u32).unwrap();
-            emit_facade_default_stub(ir, i as u32, facade, &mut cw, defaults, bodies);
+            // A top-level function's `$default` marker is a plain `Object` (kotlinc's function ABI).
+            emit_facade_default_stub(
+                ir,
+                i as u32,
+                facade,
+                &mut cw,
+                defaults,
+                bodies,
+                Ty::obj("java/lang/Object"),
+            );
         }
     }
     emit_statics(ir, facade, &mut cw, bodies);
@@ -950,12 +959,28 @@ fn emit_class(
         } else {
             cw.add_abstract_method(0x0001 | 0x0400, &f.name, &ir_method_desc(&f.params, &f.ret));
         }
-        // A method with default-valued parameters gets a `<name>$default(self, params…, mask, marker)`
-        // synthetic stub (the JVM realization of default arguments).
+        // A method with default-valued parameters gets a `<name>$default(…, mask, marker)` synthetic stub
+        // (the JVM realization of default arguments). A STATIC method (a value class's `constructor-impl`)
+        // has no `self`, so it uses the facade-style stub keyed on the class as owner; an instance member
+        // uses the self-carrying variant.
         if let Some(defaults) = ir.param_defaults(fid) {
-            emit_default_stub(
-                ir, fid, &c.fq_name, facade, &mut cw, defaults, bodies, false,
-            );
+            if f.is_static {
+                // A constructor's `$default` marker is `DefaultConstructorMarker` (kotlinc's ctor ABI),
+                // NOT the plain `Object` a function `$default` uses — the value class's `constructor-impl`.
+                emit_facade_default_stub(
+                    ir,
+                    fid,
+                    &c.fq_name,
+                    &mut cw,
+                    defaults,
+                    bodies,
+                    Ty::obj("kotlin/jvm/internal/DefaultConstructorMarker"),
+                );
+            } else {
+                emit_default_stub(
+                    ir, fid, &c.fq_name, facade, &mut cw, defaults, bodies, false,
+                );
+            }
         }
     }
     emit_bridges(c, &mut cw);
@@ -3046,6 +3071,7 @@ fn emit_facade_default_stub(
     cw: &mut ClassWriter,
     defaults: &[Option<u32>],
     bodies: &dyn MethodBodies,
+    marker: Ty,
 ) {
     let f = &ir.functions[fid as usize];
     let method_name = f.name.clone();
@@ -3077,8 +3103,7 @@ fn emit_facade_default_stub(
     let mask_slot = slot;
     e.slots.insert(9_000_001, (mask_slot, Ty::Int)); // register so frames type these slots
     slot += 1;
-    e.slots
-        .insert(9_000_002, (slot, Ty::obj("java/lang/Object")));
+    e.slots.insert(9_000_002, (slot, marker));
     slot += 1;
     e.next_slot = slot;
 
@@ -3110,7 +3135,7 @@ fn emit_facade_default_stub(
 
     let mut stub_params = real_params.clone();
     stub_params.push(Ty::Int);
-    stub_params.push(Ty::obj("java/lang/Object"));
+    stub_params.push(marker);
     let desc = method_descriptor(&stub_params, ret);
     e.cw.add_method(
         0x1009, /* PUBLIC | STATIC | SYNTHETIC */

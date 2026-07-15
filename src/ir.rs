@@ -927,6 +927,12 @@ pub struct IrFile {
     pub logical_types: std::collections::HashMap<u32, Ty>,
     /// `FunId` → source parameter names and, when present, default-value expressions.
     pub fn_params: std::collections::HashMap<u32, FnParamInfo>,
+    /// Value-class internal name → the lowered default expression of its single primary-constructor
+    /// property, when it has one (`value class ServerId(val value: String = Base58Uuid.generate())`).
+    /// Lowered in the STATIC `constructor-impl` frame (the sole param is value-index 0, no `this`); the
+    /// value-class JVM pass registers it as `constructor-impl`'s param default so the backend emits the
+    /// synthetic `constructor-impl$default(U, int, DefaultConstructorMarker)` kotlinc requires.
+    pub value_ctor_defaults: std::collections::HashMap<String, u32>,
     /// Instance methods kotlinc leaves NON-`final` even in a final class — currently the data-class
     /// `Object`-overrides (`toString`/`hashCode`/`equals`), which kotlinc emits `public` (open) rather
     /// than `public final`. The JVM backend omits `ACC_FINAL` for a `FunId` in this set.
