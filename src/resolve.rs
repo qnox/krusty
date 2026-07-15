@@ -174,6 +174,11 @@ pub struct ClassSig {
     pub interfaces: Vec<String>,
     /// Internal name of the base class (`: Base(..)`), if any.
     pub super_internal: Option<String>,
+    /// The parameter types of the base constructor that this class's `super(args)` targets, as the
+    /// CHECKER resolved it (uniformly for a same-file, module, or classpath base, via the symbol
+    /// source). Empty when the class has no base arguments. The lowerer emits `super(args)` against
+    /// these instead of re-resolving the constructor itself.
+    pub super_ctor_params: Vec<Ty>,
     /// `annotation class` — emitted as an interface; instantiation builds a synthetic impl class.
     pub is_annotation: bool,
     /// Each primary-constructor parameter's default, captured FILE-INDEPENDENTLY (see
@@ -2119,6 +2124,7 @@ pub fn collect_signatures_with_cp(
                             lateinit_props,
                             interfaces,
                             super_internal,
+                            super_ctor_params: Vec::new(),
                             is_annotation: c.is_annotation(),
                             ctor_defaults,
                             secondary_ctors,
@@ -2155,6 +2161,7 @@ pub fn collect_signatures_with_cp(
                                 lateinit_props: Default::default(),
                                 interfaces: companion_interfaces,
                                 super_internal: companion_super_internal,
+                                super_ctor_params: Vec::new(),
                                 is_annotation: false,
                                 ctor_defaults: Vec::new(),
                                 secondary_ctors: Vec::new(),
@@ -4193,6 +4200,7 @@ fn make_checker<'a>(file: &'a File, syms: &'a SymbolTable, diags: &'a mut DiagSi
         narrowed_this_member: HashMap::new(),
         resolved_calls: HashMap::new(),
         synthetic_ext_calls: HashMap::new(),
+        super_ctor_params: HashMap::new(),
         context_args: HashMap::new(),
         fn_reassigned: std::collections::HashSet::new(),
         fn_closure_reassigned: std::collections::HashSet::new(),
@@ -4663,8 +4671,22 @@ pub fn check_file(file: &File, syms: &mut SymbolTable, diags: &mut DiagSink) -> 
                     c.declare(&p.name, ty, p.is_var);
                 }
                 // Base class constructor args are evaluated before the body and may reference ctor params.
-                for arg in &cl.base_args {
-                    c.expr(*arg);
+                let base_arg_tys: Vec<Ty> = cl.base_args.iter().map(|&arg| c.expr(arg)).collect();
+                // Resolve which base constructor `super(args)` targets — uniformly for a same-file,
+                // module, or classpath base via the symbol source — and record its parameter types so
+                // the lowerer emits `super(args)` against them instead of re-resolving the constructor.
+                if !cl.base_args.is_empty() {
+                    let internal = class_internal(c.file, &cl.name);
+                    let base_internal = c
+                        .syms
+                        .class_by_internal(&internal)
+                        .and_then(|cs| cs.super_internal.clone());
+                    if let Some(base_int) = base_internal {
+                        if let Some(params) = c.resolve_super_ctor_params(&base_int, &base_arg_tys)
+                        {
+                            c.super_ctor_params.insert(internal, params);
+                        }
+                    }
                 }
                 // Interface-delegation expressions (`: I by mk(x)`) are evaluated in the constructor too,
                 // so they're typed here — with the ctor params and `this` in scope.
@@ -4928,8 +4950,14 @@ pub fn check_file(file: &File, syms: &mut SymbolTable, diags: &mut DiagSink) -> 
         resolved_calls,
         synthetic_ext_calls,
         context_args,
+        super_ctor_params,
         ..
     } = c;
+    for (internal, params) in super_ctor_params {
+        if let Some(cs) = syms.class_by_internal_mut(&internal) {
+            cs.super_ctor_params = params;
+        }
+    }
     for ((name, params), ret) in inferred_fun_rets {
         if let Some(sig) = syms
             .funs
@@ -5025,6 +5053,10 @@ struct Checker<'a> {
     inferred_fun_rets: HashMap<(String, Vec<Ty>), Ty>,
     inferred_ext_fun_rets: HashMap<(Ty, String), Ty>,
     inferred_method_rets: HashMap<(String, String, Vec<Ty>), Ty>,
+    /// A class internal name → the base-constructor parameter types its `super(args)` resolved to
+    /// (see [`ClassSig::super_ctor_params`]). Stashed during checking (where the argument types are
+    /// known) and applied to the `ClassSig` after, since `syms` is borrowed immutably while checking.
+    super_ctor_params: HashMap<String, Vec<Ty>>,
     stmt_lowers: HashMap<StmtId, StmtLowering>,
     local_decl_types: HashMap<StmtId, Ty>,
     resolved_call_type_args: HashMap<ExprId, Vec<Ty>>,
@@ -5571,6 +5603,33 @@ impl<'a> Checker<'a> {
     }
 
     /// Resolve a bare type `name` through this file's imports to an internal name that actually exists on
+    /// The parameter types of the base constructor that `: Base(args)` targets — the UNIQUE constructor
+    /// (module or classpath, resolved through the symbol source) to which every argument is assignable.
+    /// `base_internal` is the ALREADY-RESOLVED base class internal name (from `ClassSig::super_internal`).
+    /// `None` if the base type is unresolved, has no matching constructor, or the match is ambiguous
+    /// (then the lowerer bails rather than emitting a `super(...)` to a guessed overload).
+    fn resolve_super_ctor_params(&self, base_internal: &str, arg_tys: &[Ty]) -> Option<Vec<Ty>> {
+        let lt = self
+            .module
+            .resolve_type(base_internal)
+            .or_else(|| self.syms.libraries.resolve_type(base_internal))?;
+        // EXACT (nullability-insensitive) type match — a loose reference→reference assignability can't
+        // tell `RuntimeException(String)` from `RuntimeException(Throwable)` for a `String` argument.
+        let mut matches = lt.constructors.iter().filter(|ctor| {
+            ctor.params.len() == arg_tys.len()
+                && ctor
+                    .params
+                    .iter()
+                    .zip(arg_tys)
+                    .all(|(&p, &a)| p.non_null() == a.non_null())
+        });
+        let first = matches.next()?;
+        if matches.next().is_some() {
+            return None; // ambiguous — don't guess an overload
+        }
+        Some(first.params.clone())
+    }
+
     /// the classpath — the SAME kotlinc-conforming resolver the signature pass uses
     /// ([`resolve_name_against_imports`]): explicit import first, then the implicit FQN candidates by
     /// precedence level, with same-level ambiguity left unresolved. Existence is verified via
