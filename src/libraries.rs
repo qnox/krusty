@@ -1134,11 +1134,6 @@ impl LibraryType {
         self.constructors.iter().find(|m| m.params == widened)
     }
 
-    /// The best companion member named `name` for `args` (exact, then boxing, then prefix).
-    pub fn companion_member(&self, name: &str, args: &[Ty]) -> Option<&LibraryMember> {
-        best_overload(self.companion.iter(), name, args)
-    }
-
     /// Annotation members `(name, Ty)` — the no-argument accessors of an `@interface`.
     pub fn annotation_members(&self) -> Option<Vec<(String, Ty)>> {
         if !self.is_annotation() {
