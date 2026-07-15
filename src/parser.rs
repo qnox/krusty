@@ -2704,9 +2704,24 @@ impl<'a> Parser<'a> {
                         let id = self.file.add_decl(Decl::Class(nested));
                         self.file.decls.push(id);
                     }
+                    // A nested `enum class Inner { A, B }` hoists to the file top level as `Outer.Inner`
+                    // (internal `Outer$Inner`), like a nested class; its entries register under the
+                    // hoisted name and read as `Outer.Inner.ENTRY`.
+                    TokenKind::Ident
+                        if self.text() == "enum"
+                            && self
+                                .t
+                                .get(self.i + 1)
+                                .map_or(false, |t| t.kind == TokenKind::KwClass) =>
+                    {
+                        let mut nested = self.parse_enum();
+                        nested.name = format!("{}.{}", name, nested.name);
+                        let id = self.file.add_decl(Decl::Class(nested));
+                        self.file.decls.push(id);
+                    }
                     TokenKind::Ident
                         if self.text() == "object"
-                            || (matches!(self.text(), "enum" | "annotation")
+                            || (self.text() == "annotation"
                                 && self
                                     .t
                                     .get(self.i + 1)

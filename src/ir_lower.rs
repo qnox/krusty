@@ -16466,6 +16466,26 @@ impl<'a> Lower<'a> {
                         }
                     }
                 }
+                // `Outer.NestedEnum.ENTRY` — receiver is a `Member` chain naming a nested enum. The
+                // checker typed this expression as the enum's own type; use that internal to emit the
+                // enum-constant read (the bare-`Name` case above only covers a top-level enum).
+                if matches!(self.afile.expr(receiver), Expr::Member { .. }) {
+                    if let Some(internal) = self.info.ty(e).obj_internal() {
+                        if let Some(ci) = self.classes.get(internal) {
+                            let cls = ci.id;
+                            if let Some(idx) = self.ir.classes[cls as usize]
+                                .enum_entries
+                                .iter()
+                                .position(|en| en.name == name)
+                            {
+                                return Some(self.ir.add_expr(IrExpr::EnumEntry {
+                                    class: cls,
+                                    index: idx as u32,
+                                }));
+                            }
+                        }
+                    }
+                }
                 let rt = self.recv_ty(receiver);
                 // `e.ordinal` / `e.name` on an enum value: dispatched on the receiver's STATIC type while
                 // the platform owns the inherited accessor's physical name/descriptor.

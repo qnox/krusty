@@ -504,6 +504,8 @@ mod nested_class_supertype_e2e;
 mod nested_class_unqualified_e2e;
 #[path = "nested_decls_in_object_e2e.rs"]
 mod nested_decls_in_object_e2e;
+#[path = "nested_enum_access_e2e.rs"]
+mod nested_enum_access_e2e;
 #[path = "nested_lambda_capture_e2e.rs"]
 mod nested_lambda_capture_e2e;
 #[path = "nested_string_template_e2e.rs"]
