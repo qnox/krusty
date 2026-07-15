@@ -12261,6 +12261,28 @@ impl<'a> Checker<'a> {
                             self.module_declares(&fname)
                         );
                     }
+                    // The declared receiver has no such member — try the flow-narrowed receiver from an
+                    // enclosing `if (this is B)` (`fun A.test() = if (this is B) foo()`, where `foo` is a
+                    // member of the subtype `B`). Record the narrowing on the call so the lowerer
+                    // `checkcast`s `this` to `B` before dispatching, mirroring the bare-name property read.
+                    // `this_narrow` is only ever a known reference subtype of the receiver.
+                    if let Some(bt) = self.this_narrow {
+                        if let Some(bi) = bt.obj_internal() {
+                            if let Some(m) = crate::module_symbols::ModuleSymbols::new(self.syms)
+                                .instance_members(bt, &fname)
+                                .into_iter()
+                                .next()
+                            {
+                                self.narrowed_this_member.insert(call, bi.to_string());
+                                let vararg =
+                                    self.syms.method_of(bi, &fname).is_some_and(|s| s.vararg);
+                                self.expect_call_args(&m.params, vararg, args, &arg_tys);
+                                return self
+                                    .inferred_member_ret(bt, &fname, &m.params)
+                                    .unwrap_or(m.ret);
+                            }
+                        }
+                    }
                 }
                 // Resolve a receiver-less call: a user top-level function shadows everything; otherwise
                 // an implicit-receiver member (receiver-lambda body), then a library top-level function.

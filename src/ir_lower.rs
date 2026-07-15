@@ -18402,6 +18402,38 @@ impl<'a> Lower<'a> {
                         }
                     } {
                         r
+                    } else if let Some(r) = {
+                        // `this` was flow-narrowed to a subtype `B` by an enclosing `if (this is B)`, and
+                        // the checker resolved the bare call to a member of `B` (`fun A.test() = if (this
+                        // is B) foo()`). Load the implicit receiver (the extension receiver or enclosing
+                        // `this`), `checkcast` it to `B`, and dispatch the member on `B` — the call analog
+                        // of the narrowed bare-name property read.
+                        if let Some(bi) = self.info.narrowed_this_member.get(&e).cloned() {
+                            self.lookup("this").and_then(|(this_v, _)| {
+                                let recv = self.ir.add_expr(IrExpr::GetValue(this_v));
+                                let cast = self.ir.add_expr(IrExpr::TypeOp {
+                                    op: IrTypeOp::Cast,
+                                    arg: recv,
+                                    type_operand: ty_to_ir(Ty::obj(&bi)),
+                                });
+                                let (class, index, mfid, _) = self.resolve_method(&bi, &fname)?;
+                                let params = self.ir.functions[mfid as usize].params.clone();
+                                let vararg = self.syms.method_is_vararg(&bi, &fname);
+                                let n_fixed = vararg_arity(vararg, params.len(), args.len())?;
+                                let a =
+                                    self.lower_call_args_vararg(&args, &params, vararg, n_fixed)?;
+                                Some(self.ir.add_expr(IrExpr::MethodCall {
+                                    class,
+                                    index,
+                                    receiver: cast,
+                                    args: a.into_iter().map(Some).collect(),
+                                }))
+                            })
+                        } else {
+                            None
+                        }
+                    } {
+                        r
                     } else if let Some(c) = {
                         // A receiver-less top-level library function (`listOf(…)`) → `invokestatic
                         // facade.name(args)`. Resolved (vararg-aware) through the library set, so no
