@@ -582,6 +582,8 @@ mod primitive_spread_e2e;
 mod private_set_e2e;
 #[path = "property_accessor_e2e.rs"]
 mod property_accessor_e2e;
+#[path = "property_infer_member_e2e.rs"]
+mod property_infer_member_e2e;
 #[path = "qq1_safecall_diverging_scope_block_e2e.rs"]
 mod qq1_safecall_diverging_scope_block_e2e;
 #[path = "range_property_e2e.rs"]
