@@ -3225,13 +3225,15 @@ fn synth_value_members(
         })
     };
 
-    // unbox-impl(): U
+    // unbox-impl(): U — kotlinc marks it ACC_SYNTHETIC (a compiler-manufactured box adapter).
     {
         let g = this_field(ir);
         let body = ret_block(ir, g);
-        add_inst(ir, "unbox-impl", vec![], u_ir, body);
+        if let Some(fid) = add_inst(ir, "unbox-impl", vec![], u_ir, body) {
+            ir.synthetic_methods.insert(fid);
+        }
     }
-    // box-impl(U): X  — `new X(u)`
+    // box-impl(U): X  — `new X(u)`. Also ACC_SYNTHETIC.
     {
         let arg = ir.add_expr(IrExpr::GetValue(0));
         let new = ir.add_expr(IrExpr::New {
@@ -3240,7 +3242,8 @@ fn synth_value_members(
             ctor_params: Some(vec![u_ir]),
         });
         let body = ret_block(ir, new);
-        add_static(ir, "box-impl", vec![u_ir], x_ir, body);
+        let fid = add_static(ir, "box-impl", vec![u_ir], x_ir, body);
+        ir.synthetic_methods.insert(fid);
     }
     // constructor-impl(U): U  — runs the `init { … }` block (side effects/validation), then returns the
     // arg. The init runs HERE, not in `box-impl`/`<init>`: `box-impl` only wraps an already-built value, so
@@ -3278,6 +3281,15 @@ fn synth_value_members(
         let body = ir.add_expr(IrExpr::Block { stmts, value: None });
         let cfid = add_static(ir, "constructor-impl", vec![u_ir], u_ir, body);
         ir.open_methods.insert(cfid); // kotlinc emits `constructor-impl` `public static` (non-final)
+                                      // A default on the single underlying property (`ServerId(val value: String = …)`) → register it as
+                                      // `constructor-impl`'s param default so the backend emits `constructor-impl$default(U, int, marker)`
+                                      // (kotlinc's synthetic). The default was lowered in the static `constructor-impl` frame (param @0).
+        if let Some(&def) = ir.value_ctor_defaults.get(&internal) {
+            ir.fn_params.insert(
+                cfid,
+                crate::ir::FnParamInfo::defaults(vec![fname.clone()], vec![Some(def)]),
+            );
+        }
     }
     // hashCode/equals/toString operate on the value class's IMMEDIATE erased underlying, NOT the final
     // primitive of a nested chain: `ZN(val z: Z1?)` erases to a BOXED `Z1` (`LZ1;`), so it hashes/compares
