@@ -141,13 +141,11 @@ fn result_get_or_null_resolves_as_nullable_metadata_member() {
         return;
     };
     let libs = JvmLibraries::new(Rc::new(Classpath::new(vec![sl])));
-    let m = krusty::symbol_resolver::resolve_instance_member(
-        &libs,
-        Ty::obj("kotlin/Result"),
-        "getOrNull",
-        &[],
-    )
-    .expect("getOrNull resolves on Result via value-class @Metadata");
+    use krusty::symbol_resolver::{SymRecv, Symbol};
+    let m = krusty::symbol_resolver::SymbolResolver::new(&libs)
+        .resolve_symbol(SymRecv::Value(Ty::obj("kotlin/Result")), "getOrNull", &[])
+        .and_then(Symbol::call)
+        .expect("getOrNull resolves on Result via value-class @Metadata");
     assert_eq!(m.member.owner.as_deref(), Some("kotlin/Result"));
     assert_eq!(m.member.name, "getOrNull-impl");
     assert_eq!(

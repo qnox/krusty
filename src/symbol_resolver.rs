@@ -363,6 +363,116 @@ pub struct SymbolResolver<'a> {
     fn_scope: Option<&'a [String]>,
 }
 
+/// The receiver of a reference: a VALUE of some type (`x.name`), or a named TYPE (`Type(args)`,
+/// `Type.name(args)`). Reports only the receiver the caller already resolved.
+#[derive(Clone, Copy)]
+pub enum SymRecv<'q> {
+    Value(Ty),
+    Type(&'q str),
+}
+
+/// What a name DENOTES on its receiver — the declared thing the resolver found, NOT how it is used.
+/// [`SymbolResolver::resolve_symbol`] resolves a name to one of these; the CALLER then applies whatever
+/// its syntax needs (invoke it, read it, write its setter, take a reference), including handling a
+/// mismatch itself (`Test()` where `Test` is a property — the caller emits an `invoke`). The resolver
+/// does not care whether the site is a call, a read, a write, or a reference.
+/// The facets a `recv.name` member supports — see [`Symbol::Member`]. Boxed into the enum so a member
+/// symbol stays pointer-sized.
+pub struct MemberFacets {
+    pub call: Option<ResolvedMember>,
+    pub read: Option<ResolvedMember>,
+    pub write: Option<LibraryCallable>,
+    pub method_ref: Option<LibraryMember>,
+    pub property_ref: Option<BoundPropertyRef>,
+}
+
+pub enum Symbol {
+    /// A member of a value receiver `recv.name`, with whichever facets the declaration supports. A name
+    /// may support several at once — a Java zero-argument method (`list.size`, `str.length`) is both a
+    /// property `read` and a `call`/method `reference` — so the resolver reports them all and the caller
+    /// takes the one its syntax needs (`recv.name(args)` → `call`, `recv.name` → `read`, `recv.name = v`
+    /// → `write`, `recv::name` → `method_ref`/`property_ref`).
+    Member(Box<MemberFacets>),
+    /// An object/companion instance member `Type.name(args)`.
+    Instance(LibraryMember),
+    /// A static/companion member `Type.name(args)`.
+    Companion(LibraryMember),
+    /// A constructor `Type(args)`.
+    Constructor(LibraryMember),
+    /// A synthesized (value-class / default-argument) constructor.
+    SyntheticConstructor(SyntheticCtorCall),
+}
+
+impl Symbol {
+    /// This name invoked as a method with the resolved arguments (`recv.name(args)`).
+    pub fn call(self) -> Option<ResolvedMember> {
+        match self {
+            Symbol::Member(f) => f.call,
+            _ => None,
+        }
+    }
+    /// This name read as a property (`recv.name`).
+    pub fn property(self) -> Option<ResolvedMember> {
+        match self {
+            Symbol::Member(f) => f.read,
+            _ => None,
+        }
+    }
+    /// The setter of this property (`recv.name = v`).
+    pub fn property_setter(self) -> Option<LibraryCallable> {
+        match self {
+            Symbol::Member(f) => f.write,
+            _ => None,
+        }
+    }
+    /// A bound method reference to this name (`recv::name`).
+    pub fn method_ref(self) -> Option<LibraryMember> {
+        match self {
+            Symbol::Member(f) => f.method_ref,
+            _ => None,
+        }
+    }
+    /// A bound property reference to this name (`recv::name`).
+    pub fn property_ref(self) -> Option<BoundPropertyRef> {
+        match self {
+            Symbol::Member(f) => f.property_ref,
+            _ => None,
+        }
+    }
+    /// The object/companion instance member this resolved to (`Type.name(args)`).
+    pub fn instance(self) -> Option<LibraryMember> {
+        if let Symbol::Instance(m) = self {
+            Some(m)
+        } else {
+            None
+        }
+    }
+    /// The static/companion member this resolved to (`Type.name(args)`).
+    pub fn companion(self) -> Option<LibraryMember> {
+        if let Symbol::Companion(m) = self {
+            Some(m)
+        } else {
+            None
+        }
+    }
+    /// The constructor this resolved to (`Type(args)`).
+    pub fn constructor(self) -> Option<LibraryMember> {
+        if let Symbol::Constructor(m) = self {
+            Some(m)
+        } else {
+            None
+        }
+    }
+    /// The synthesized constructor this resolved to (`Type(args)`).
+    pub fn synthetic_constructor(self) -> Option<SyntheticCtorCall> {
+        if let Symbol::SyntheticConstructor(s) = self {
+            Some(s)
+        } else {
+            None
+        }
+    }
+}
+
 impl<'a> SymbolResolver<'a> {
     pub fn new(lib: &'a dyn CompilerPlatform) -> Self {
         SymbolResolver {
@@ -468,6 +578,69 @@ impl<'a> SymbolResolver<'a> {
             }
         }
         out
+    }
+
+    /// Classify a type name — the ONE type query. `internal` → its [`LibraryType`] (a class/object/
+    /// interface shape), or `None` for an unknown name. The type-side counterpart of [`resolve_symbol`].
+    pub fn resolve_type(&self, internal: &str) -> Option<crate::libraries::LibraryType> {
+        self.src.resolve_type(internal)
+    }
+
+    /// Resolve a name on a receiver to the thing it DENOTES — a member, a property, a companion/instance
+    /// member, or a constructor — WITHOUT being told how the site uses it. The resolver does not care
+    /// whether the caller is going to call it, read it, write it, or take a reference; it just says what
+    /// the name is. The caller applies its own syntax to the returned [`Symbol`] (invoke the callable,
+    /// read the property, use its setter, take a reference) and handles any mismatch itself (a `Type()`
+    /// whose type has no constructor, an `invoke` on a property, …). `args` select a callable overload /
+    /// constructor; they do not change WHAT the name is. This and [`resolve_type`] are the resolver's two
+    /// resolution entry points.
+    pub fn resolve_symbol(&self, recv: SymRecv, name: &str, args: &[Ty]) -> Option<Symbol> {
+        match recv {
+            SymRecv::Value(ty) => {
+                // Resolve every facet the name supports on this receiver; a name can support several (a
+                // Java zero-arg method is a property read AND a callable). Each facet is exactly the
+                // former per-use resolution, so the caller's chosen facet behaves as before.
+                let call = resolve_instance_member(self.lib, ty, name, args);
+                let read = resolve_property_member(self.lib, ty, name);
+                let write = resolve_property_setter(self.lib, ty, name);
+                let method_ref = resolve_instance_ref(self.lib, ty, name);
+                let property_ref = resolve_property_ref(self.lib, ty, name);
+                if call.is_none()
+                    && read.is_none()
+                    && write.is_none()
+                    && method_ref.is_none()
+                    && property_ref.is_none()
+                {
+                    return None;
+                }
+                Some(Symbol::Member(Box::new(MemberFacets {
+                    call,
+                    read,
+                    write,
+                    method_ref,
+                    property_ref,
+                })))
+            }
+            SymRecv::Type(internal) => {
+                if name.is_empty() {
+                    // `Type(args)` — the type's constructor, real or synthesized.
+                    resolve_constructor(self.lib, internal, args)
+                        .map(Symbol::Constructor)
+                        .or_else(|| {
+                            resolve_synthetic_constructor(self.lib, internal, args)
+                                .map(Symbol::SyntheticConstructor)
+                        })
+                } else {
+                    // `Type.name(args)` — an object/companion instance member, else a static/companion
+                    // member. The resolver discovers which.
+                    resolve_instance(self.lib, internal, name, args)
+                        .map(Symbol::Instance)
+                        .or_else(|| {
+                            resolve_companion(self.lib, internal, name, args).map(Symbol::Companion)
+                        })
+                }
+            }
+        }
     }
 
     /// All TOP-LEVEL (and same-facade extension) function overloads of `name`, resolved through the ONE
@@ -1348,7 +1521,7 @@ fn value_erased_args(lib: &dyn CompilerPlatform, args: &[Ty]) -> Vec<Ty> {
 }
 
 /// Resolve a constructor on a library type by argument types (with the type's own widening).
-pub fn resolve_constructor(
+fn resolve_constructor(
     lib: &dyn CompilerPlatform,
     internal: &str,
     args: &[Ty],
@@ -1549,7 +1722,7 @@ pub fn synthetic_default_member(
 /// Resolve a classpath construction that a plain [`resolve_constructor`] can't match because it needs a
 /// synthetic `DefaultConstructorMarker` overload (a value-class param, or omitted defaults). See
 /// [`SyntheticCtorCall`]. `None` when no marker overload fits.
-pub fn resolve_synthetic_constructor(
+fn resolve_synthetic_constructor(
     lib: &dyn CompilerPlatform,
     internal: &str,
     args: &[Ty],
@@ -1616,7 +1789,7 @@ pub fn resolve_synthetic_constructor(
 }
 
 /// Resolve a companion member `Type.name(args)` (the receiver type must be public).
-pub fn resolve_companion(
+fn resolve_companion(
     lib: &dyn CompilerPlatform,
     internal: &str,
     name: &str,
@@ -1633,7 +1806,7 @@ pub fn resolve_companion(
 /// member may be inherited from a (possibly non-public) supertype. Candidates come from the consolidated
 /// `functions` query, whose Member overloads carry the breadth-first `receiver_rank`; the closest rung's
 /// best overload wins (most-derived first), exactly the inherited-member walk this used to do by hand.
-pub fn resolve_instance(
+fn resolve_instance(
     lib: &dyn CompilerPlatform,
     internal: &str,
     name: &str,
@@ -1648,11 +1821,7 @@ pub fn resolve_instance(
 /// Resolve a library instance member for a BOUND callable reference (`"KOTLIN"::get`) — where there are
 /// no call arguments to drive overload resolution. Returns the UNIQUE fixed-arity overload of `name` on
 /// `internal`, or `None` when the member is absent, defaulted/vararg, or ambiguous.
-pub fn resolve_instance_ref(
-    lib: &dyn CompilerPlatform,
-    recv: Ty,
-    name: &str,
-) -> Option<LibraryMember> {
+fn resolve_instance_ref(lib: &dyn CompilerPlatform, recv: Ty, name: &str) -> Option<LibraryMember> {
     let mut fixed = lib
         .member_overloads(recv, name)
         .overloads
@@ -1693,7 +1862,7 @@ pub struct BoundPropertyRef {
 /// - a NULLABLE / type-parameter / bare-`Any` receiver may be null and would NPE at `get()`;
 /// - the getter must dispatch with a plain `invokevirtual`: a concrete non-interface, non-value-class
 ///   owner and an unmangled getter (a value-class-typed property's `getX-<hash>` lives on an erased owner).
-pub fn resolve_property_ref(
+fn resolve_property_ref(
     lib: &dyn CompilerPlatform,
     recv: Ty,
     name: &str,
@@ -1736,7 +1905,7 @@ pub struct ResolvedMember {
 /// Resolve an instance member and carry the logical return selected for this call. Generic member
 /// returns may bind from the receiver (`List<Int>.get(Int): Int`) or, for erased-`Any` returns, from
 /// the call arguments (`decodeFromString(serializer, text): T`).
-pub fn resolve_instance_member(
+fn resolve_instance_member(
     lib: &dyn CompilerPlatform,
     recv: Ty,
     name: &str,
@@ -1797,7 +1966,7 @@ fn property_getter_via_query(
 /// Resolve a zero-arg property read on `recv`. The `@Metadata` `properties` query supplies the real
 /// getter name first (no guessing); then the legacy fallbacks — the semantic Kotlin name (a
 /// computed/builtin member), a `getX` physical getter, and a value-class-mangled getter.
-pub fn resolve_property_member(
+fn resolve_property_member(
     lib: &dyn CompilerPlatform,
     recv: Ty,
     property: &str,
@@ -1834,7 +2003,7 @@ pub fn resolve_property_member(
 /// the property is read-only (`val`, no setter), no source exposes it as a member property, or the
 /// setter is value-class `@JvmName`-mangled (`setId-<hash>` — left to the value-class path, which knows
 /// the logical type).
-pub fn resolve_property_setter(
+fn resolve_property_setter(
     lib: &dyn CompilerPlatform,
     recv: Ty,
     property: &str,
