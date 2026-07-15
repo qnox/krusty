@@ -6587,7 +6587,12 @@ impl<'a> Parser<'a> {
                 None => return false,
                 Some(TokenKind::Arrow) if depth == 0 => return true,
                 Some(TokenKind::LBrace) if depth == 0 => return false, // class body
-                Some(TokenKind::Comma) if depth == 0 => return false,  // next supertype
+                // A closing `}` at depth 0 is the END of the enclosing class body — the supertype
+                // clause is over. Stop here rather than decrementing into negative depth and scanning
+                // on into the NEXT top-level declaration, where an unrelated `->` (a `when` arm or a
+                // lambda) would be misread as this supertype's function-type arrow.
+                Some(TokenKind::RBrace) if depth == 0 => return false,
+                Some(TokenKind::Comma) if depth == 0 => return false, // next supertype
                 // Track generic-argument brackets too (`<` is a single `Lt`, `>` a single `Gt`), so a
                 // function type used as a type ARGUMENT — `Base<() -> R>` — keeps its `->` at depth > 0
                 // and is NOT mistaken for a function-type supertype.
