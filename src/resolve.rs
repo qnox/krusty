@@ -5097,6 +5097,13 @@ impl<'a> Checker<'a> {
         r
     }
 
+    fn with_lambda_mutation<R>(&mut self, allow: bool, f: impl FnOnce(&mut Self) -> R) -> R {
+        let prev = std::mem::replace(&mut self.allow_lambda_mutation, allow);
+        let r = f(self);
+        self.allow_lambda_mutation = prev;
+        r
+    }
+
     fn check_default_arg(&mut self, ty_ref: &TypeRef, default: ExprId, pty: Ty) {
         let dty = if matches!(self.file.expr(default), Expr::Lambda { .. })
             && (!ty_ref.fun_params.is_empty() || ty_ref.name == "<fun>")
@@ -10902,69 +10909,64 @@ impl<'a> Checker<'a> {
                             .collect(),
                     )
                 });
-                // A call to an INLINE extension (`forEach`/`let`/`also`/`apply`/… or any user/stdlib inline
-                // extension) is spliced at the call site, so a mutable variable its lambda captures is an
-                // inline capture (no closure) — permit mutation so the checker doesn't `Ref`-box it. Gated
-                // on the extension actually being inline (a non-inline lambda capture must still be boxed).
-                // Permit for this call only; the lowering must inline (or bail), never form a closure.
-                let prev_allow_mut = self.allow_lambda_mutation;
-                self.allow_lambda_mutation = ext_lambda_pts.is_some()
+                // Inline extensions splice lambdas, so captured mutable locals stay direct for this call.
+                let allow_lambda_mutation = ext_lambda_pts.is_some()
                     && self
                         .resolver()
                         .receiver_extensions(rt, &name)
                         .iter()
                         .any(|o| o.flags.inline.can_inline());
-                let arg_tys: Vec<Ty> = args
-                    .iter()
-                    .enumerate()
-                    .map(|(i, &a)| {
-                        // A generic member's substituted lambda parameter types (`it: String`) take
-                        // precedence over the method signature's erased ones (`it: Any`).
-                        if let Some((_, _, ref lpt)) = generic_member {
-                            if lpt.get(i).is_some_and(|v| !v.is_empty())
-                                && matches!(self.file.expr(a), Expr::Lambda { .. })
-                            {
-                                let pt = lpt[i].clone();
-                                return self.check_lambda_with_types(a, &pt);
-                            }
-                        }
-                        if let Some(ref sig) = method_sig {
-                            let lpt = &sig.call_sig.lambda_param_types;
-                            if i < lpt.len()
-                                && !lpt[i].is_empty()
-                                && matches!(self.file.expr(a), Expr::Lambda { .. })
-                            {
-                                let pt = lpt[i].clone();
-                                return self.check_lambda_with_types(a, &pt);
-                            }
-                        }
-                        if let Some(ref pts) = ext_lambda_pts {
-                            if pts.get(i).map_or(false, |v| !v.is_empty())
-                                && matches!(self.file.expr(a), Expr::Lambda { .. })
-                            {
-                                if let Some(recv) = ext_lambda_recvs
-                                    .as_ref()
-                                    .and_then(|recvs| recvs.get(i))
-                                    .copied()
-                                    .flatten()
+                let arg_tys: Vec<Ty> = self.with_lambda_mutation(allow_lambda_mutation, |c| {
+                    args.iter()
+                        .enumerate()
+                        .map(|(i, &a)| {
+                            // A generic member's substituted lambda parameter types (`it: String`) take
+                            // precedence over the method signature's erased ones (`it: Any`).
+                            if let Some((_, _, ref lpt)) = generic_member {
+                                if lpt.get(i).is_some_and(|v| !v.is_empty())
+                                    && matches!(c.file.expr(a), Expr::Lambda { .. })
                                 {
-                                    let pt = &pts[i];
-                                    let value_types = pt.get(1..).unwrap_or(&[]);
-                                    return self.check_lambda_with_receiver_labeled(
-                                        a,
-                                        recv,
-                                        value_types,
-                                        call_fn_name.as_deref(),
-                                    );
+                                    let pt = lpt[i].clone();
+                                    return c.check_lambda_with_types(a, &pt);
                                 }
-                                let pt = pts[i].clone();
-                                return self.check_lambda_with_types(a, &pt);
                             }
-                        }
-                        self.expr(a)
-                    })
-                    .collect();
-                self.allow_lambda_mutation = prev_allow_mut;
+                            if let Some(ref sig) = method_sig {
+                                let lpt = &sig.call_sig.lambda_param_types;
+                                if i < lpt.len()
+                                    && !lpt[i].is_empty()
+                                    && matches!(c.file.expr(a), Expr::Lambda { .. })
+                                {
+                                    let pt = lpt[i].clone();
+                                    return c.check_lambda_with_types(a, &pt);
+                                }
+                            }
+                            if let Some(ref pts) = ext_lambda_pts {
+                                if pts.get(i).map_or(false, |v| !v.is_empty())
+                                    && matches!(c.file.expr(a), Expr::Lambda { .. })
+                                {
+                                    if let Some(recv) = ext_lambda_recvs
+                                        .as_ref()
+                                        .and_then(|recvs| recvs.get(i))
+                                        .copied()
+                                        .flatten()
+                                    {
+                                        let pt = &pts[i];
+                                        let value_types = pt.get(1..).unwrap_or(&[]);
+                                        return c.check_lambda_with_receiver_labeled(
+                                            a,
+                                            recv,
+                                            value_types,
+                                            call_fn_name.as_deref(),
+                                        );
+                                    }
+                                    let pt = pts[i].clone();
+                                    return c.check_lambda_with_types(a, &pt);
+                                }
+                            }
+                            c.expr(a)
+                        })
+                        .collect()
+                });
                 if rt == Ty::Error {
                     return Ty::Error;
                 }
@@ -11847,34 +11849,32 @@ impl<'a> Checker<'a> {
                                 && i < pts.len()
                                 && !pts[i].is_empty()
                             {
-                                // A top-level INLINE fn (`repeat`/`run`/…) splices its lambda, so a mutable
-                                // variable the lambda captures is an inline capture (no `Ref` box). EXCEPT a
-                                // `crossinline`/`noinline` param materializes the lambda into a real closure,
-                                // where a mutable capture IS `Ref`-boxed (e.g. `Continuation(ctx){ res = it }`).
+                                // crossinline/noinline materializes a closure; other inline lambdas splice.
                                 let materialized = toplevel_lambda_materialized
                                     .as_ref()
                                     .and_then(|m| m.get(i))
                                     .copied()
                                     .unwrap_or(false);
-                                let prev = self.allow_lambda_mutation;
-                                self.allow_lambda_mutation = toplevel_inline && !materialized;
                                 // A RECEIVER function-type param: bind the receiver as the lambda's `this`;
                                 // the rest are value params. Prefer the @Metadata receiver (`recv_i`,
                                 // deterministic — `MutableList` for `buildList`) over `pts[i][0]`, whose
                                 // JVM-`Signature` decode is order-dependent (flakily `java/util/List`, on which
                                 // a `MutableList` extension like `removeLastOrNull` fails to resolve).
-                                let t = if let Some(recv) = recv_i {
-                                    self.check_lambda_with_receiver_labeled(
-                                        a,
-                                        recv,
-                                        &pts[i][1..],
-                                        call_fn_name.as_deref(),
-                                    )
-                                } else {
-                                    self.check_lambda_with_types(a, &pts[i])
-                                };
-                                self.allow_lambda_mutation = prev;
-                                return t;
+                                return self.with_lambda_mutation(
+                                    toplevel_inline && !materialized,
+                                    |c| {
+                                        if let Some(recv) = recv_i {
+                                            c.check_lambda_with_receiver_labeled(
+                                                a,
+                                                recv,
+                                                &pts[i][1..],
+                                                call_fn_name.as_deref(),
+                                            )
+                                        } else {
+                                            c.check_lambda_with_types(a, &pts[i])
+                                        }
+                                    },
+                                );
                             }
                         }
                         // No JVM `Signature` for this callee (a krusty-emitted module) — but `@Metadata`
@@ -11900,11 +11900,8 @@ impl<'a> Checker<'a> {
                                 .and_then(|pts| pts.get(i))
                                 .cloned()
                                 .unwrap_or_default();
-                            let prev = self.allow_lambda_mutation;
-                            self.allow_lambda_mutation = true;
-                            let t = self.check_lambda_with_types(a, &pt);
-                            self.allow_lambda_mutation = prev;
-                            return t;
+                            return self
+                                .with_lambda_mutation(true, |c| c.check_lambda_with_types(a, &pt));
                         }
                         // Reuse the already-computed non-lambda argument type (avoid re-typing).
                         if let Some(Some(t)) = toplevel_partial.as_ref().and_then(|p| p.get(i)) {
@@ -11935,24 +11932,22 @@ impl<'a> Checker<'a> {
                                 && matches!(self.file.expr(a), Expr::Lambda { .. })
                             {
                                 let pt = sig.lambda_param_types.get(i).cloned().unwrap_or_default();
-                                let prev = self.allow_lambda_mutation;
-                                self.allow_lambda_mutation = sig.is_inline;
                                 // A RECEIVER function-type param (`Recv.(A) -> R`): bind `pt[0]` as the
                                 // lambda's implicit `this`; the rest are its value params.
-                                let t = if sig.lambda_recv.get(i).copied().unwrap_or(false)
-                                    && !pt.is_empty()
-                                {
-                                    self.check_lambda_with_receiver_labeled(
-                                        a,
-                                        pt[0],
-                                        &pt[1..],
-                                        call_fn_name.as_deref(),
-                                    )
-                                } else {
-                                    self.check_lambda_with_types(a, &pt)
-                                };
-                                self.allow_lambda_mutation = prev;
-                                return t;
+                                return self.with_lambda_mutation(sig.is_inline, |c| {
+                                    if sig.lambda_recv.get(i).copied().unwrap_or(false)
+                                        && !pt.is_empty()
+                                    {
+                                        c.check_lambda_with_receiver_labeled(
+                                            a,
+                                            pt[0],
+                                            &pt[1..],
+                                            call_fn_name.as_deref(),
+                                        )
+                                    } else {
+                                        c.check_lambda_with_types(a, &pt)
+                                    }
+                                });
                             }
                             // A lambda argument SAM-converted to a simple `fun interface` parameter:
                             // type it with the interface abstract method's parameter types so its
