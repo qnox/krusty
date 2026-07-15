@@ -11792,12 +11792,45 @@ impl<'a> Checker<'a> {
                         .iter()
                         .any(|&a| matches!(self.file.expr(a), Expr::Lambda { .. }))
                     && self.resolver().toplevel_has_must_inline(&fname);
+                // An implicit-`this` member higher-order call (`update { … }` reached inside a member or
+                // extension body, with no explicit receiver): resolve the member through the module
+                // hierarchy and pre-type each lambda argument from the member's declared function-type
+                // parameter. Without this a no-parameter lambda (`{ null }`) adopts the erased zero-arg
+                // form and then fails the arity check against the parameter's `(T?) -> T?`. Mirrors the
+                // explicit-receiver `method_sig` lambda pre-typing; gated to a receiver-less name that is
+                // neither a local nor a top-level function (`known_sig` covers the latter).
+                let this_member_lambda_pts: Option<Vec<Vec<Ty>>> = if self.lookup(&fname).is_none()
+                    && known_sig.is_none()
+                    && args
+                        .iter()
+                        .any(|&a| matches!(self.file.expr(a), Expr::Lambda { .. }))
+                {
+                    self.this_ty.and_then(|rt| {
+                        crate::module_symbols::ModuleSymbols::new(self.syms)
+                            .instance_members(rt, &fname)
+                            .into_iter()
+                            .next()
+                            .map(|m| m.call_sig.lambda_param_types)
+                    })
+                } else {
+                    None
+                };
                 let arg_tys: Vec<Ty> = args
                     .iter()
                     .enumerate()
                     .map(|(i, &a)| {
                         if array_init_lambda && i == 1 {
                             return self.check_lambda_with_types(a, &[Ty::Int]);
+                        }
+                        // Implicit-`this` member HOF: pre-type the lambda from the member's declared
+                        // function-type parameter (see `this_member_lambda_pts`).
+                        if let Some(ref pts) = this_member_lambda_pts {
+                            if pts.get(i).is_some_and(|v| !v.is_empty())
+                                && matches!(self.file.expr(a), Expr::Lambda { .. })
+                            {
+                                let pt = pts[i].clone();
+                                return self.check_lambda_with_types(a, &pt);
+                            }
                         }
                         // The receiver type for a RECEIVER function-type param (from `@Metadata`), if any.
                         let recv_i = toplevel_lambda_recvs
