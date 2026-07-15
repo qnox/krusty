@@ -4708,6 +4708,29 @@ impl<'a> Lower<'a> {
         call
     }
 
+    fn emit_library_static_call(
+        &mut self,
+        callable: crate::libraries::LibraryCallable,
+        args: Vec<u32>,
+        record_suspend: bool,
+    ) -> u32 {
+        let logical_ret = callable.ret;
+        let call = self.ir.add_expr(IrExpr::Call {
+            callee: Callee::Static {
+                owner: callable.owner,
+                name: callable.name,
+                descriptor: callable.descriptor,
+                inline: callable.inline,
+            },
+            dispatch_receiver: None,
+            args,
+        });
+        if record_suspend {
+            self.ir.suspend_calls.insert(call, ty_to_ir(logical_ret));
+        }
+        call
+    }
+
     /// Resolve a delegate's `getValue` operator — a MEMBER on the delegate type, or a classpath
     /// EXTENSION (`Lazy.getValue` in `LazyKt`). Returns `(owner, descriptor, ret, inline, is_ext)`:
     /// a member is emitted `delegate.getValue(thisRef, prop)`; an extension is the static
@@ -5555,29 +5578,19 @@ impl<'a> Lower<'a> {
                 a.push(self.lower_arg(arg, &ty_to_ir(c.params[i]))?);
             }
         }
-        let call = self.ir.add_expr(IrExpr::Call {
-            callee: Callee::Static {
-                owner: c.owner.clone(),
-                name: c.name.clone(),
-                descriptor: c.descriptor.clone(),
-                inline: c.inline,
-            },
-            dispatch_receiver: None,
-            args: a,
-        });
-        if c.suspend {
-            self.ir.suspend_calls.insert(call, ty_to_ir(c.ret));
-        }
+        let call_inline = c.inline.can_inline();
+        let physical_ret = c.physical_ret;
+        let logical_ret = c.ret;
+        let erased_generic_ret = physical_ret.is_erased_top() && logical_ret != physical_ret;
+        let suspend = c.suspend;
+        let call = self.emit_library_static_call(c, a, suspend);
         // Inline calls and non-inline FQ calls with an ERASED generic return (`Object`) both need the
         // substituted static result type the checker inferred, mirroring the bare-name path.
-        Some(
-            if c.inline.can_inline() || (c.physical_ret.is_erased_top() && c.ret != c.physical_ret)
-            {
-                self.coerce_erased_call_result(e, call, &c.physical_ret, true)
-            } else {
-                call
-            },
-        )
+        Some(if call_inline || erased_generic_ret {
+            self.coerce_erased_call_result(e, call, &physical_ret, true)
+        } else {
+            call
+        })
     }
 
     fn lower_external_new(&mut self, internal: &str, args: &[AstExprId]) -> Option<u32> {
@@ -11960,24 +11973,13 @@ impl<'a> Lower<'a> {
         // type arguments (`Collection<T>.toTypedArray()` infers `T` from the receiver) so the splicer
         // specializes the body.
         let reified_subst = self.reified_call_subst_for(e, &c, Some(rt));
-        let call = self.ir.add_expr(IrExpr::Call {
-            callee: Callee::Static {
-                owner: c.owner,
-                name: c.name,
-                descriptor: c.descriptor,
-                // `c` is either a public extension (`resolve_ext_lit_widened` → `None`/`CanInline`, emit
-                // its real inline-ness) or a `@InlineOnly` scope-inline match the spliceability filter
-                // is selected as inline-capable (`CanInline`/`MustInline`) — so pass `c.inline` through.
-                inline: c.inline,
-            },
-            dispatch_receiver: None,
-            args: a,
-        });
+        let physical_ret = c.physical_ret;
+        let call = self.emit_library_static_call(c, a, false);
         if !reified_subst.is_empty() {
             self.ir.reified_call_subst.insert(call, reified_subst);
         }
         self.record_ext_source_receiver(call, source_receiver);
-        Some(self.coerce_erased_call_result(e, call, &c.physical_ret, true))
+        Some(self.coerce_erased_call_result(e, call, &physical_ret, true))
     }
 
     /// Lower an unqualified CALL `name(args)` against the implicit `this` receiver — the body of a
@@ -19521,19 +19523,7 @@ impl<'a> Lower<'a> {
                                 a.push(self.lower_arg(arg, &ty_to_ir(c.params[ctx_n + i]))?);
                             }
                         }
-                        let call = self.ir.add_expr(IrExpr::Call {
-                            callee: Callee::Static {
-                                owner: c.owner,
-                                name: c.name,
-                                descriptor: c.descriptor,
-                                inline: c.inline,
-                            },
-                            dispatch_receiver: None,
-                            args: a,
-                        });
-                        if call_suspend {
-                            self.ir.suspend_calls.insert(call, ty_to_ir(call_log));
-                        }
+                        let call = self.emit_library_static_call(c, a, call_suspend);
                         // A spliced inline fn leaves its erased return on the stack. Refine it the same
                         // way as a type-parameter-returning source function: checkcast a stricter
                         // reference, but do not eagerly unbox nullable generic returns (`T?`), because
@@ -21093,29 +21083,18 @@ impl<'a> Lower<'a> {
                         // before the mask/marker, so record the call for the coroutine pass to INSERT the
                         // continuation value there (`append_continuation`, `$default` arm). `c.ret` is the
                         // logical return the pass unboxes the erased `Object` suspension result by.
-                        let logical_ret = c.ret;
+                        let physical_ret = c.physical_ret;
                         let suspend_default = c.default_call && c.suspend;
                         // `rt` is the extension receiver's type — its type args bind a reified `T` that is
                         // inferred from the receiver (`Collection<T>.toTypedArray()`) when none is explicit.
                         let reified_subst = self.reified_call_subst_for(e, &c, Some(rt));
-                        let call = self.ir.add_expr(IrExpr::Call {
-                            callee: Callee::Static {
-                                owner: c.owner,
-                                name: c.name,
-                                descriptor: c.descriptor,
-                                inline: c.inline,
-                            },
-                            dispatch_receiver: None,
-                            args: a,
-                        });
+                        let source_receiver = c.source_receiver;
+                        let call = self.emit_library_static_call(c, a, suspend_default);
                         if !reified_subst.is_empty() {
                             self.ir.reified_call_subst.insert(call, reified_subst);
                         }
-                        self.record_ext_source_receiver(call, c.source_receiver);
-                        if suspend_default {
-                            self.ir.suspend_calls.insert(call, ty_to_ir(logical_ret));
-                        }
-                        self.coerce_generic_read(call, e, c.physical_ret)
+                        self.record_ext_source_receiver(call, source_receiver);
+                        self.coerce_generic_read(call, e, physical_ret)
                     } else if let Some(ResolvedCall::LambdaReturnMember(c)) =
                         self.info.resolved_calls.get(&e).cloned()
                     {
