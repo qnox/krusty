@@ -1104,17 +1104,8 @@ impl<'a> SymbolResolver<'a> {
         // `sumOfInt`) that the Kotlin name never matches, so the legacy walk returns nothing and the call
         // bails ("not yet supported by the IR backend"). This mirrors `lambda_return_overload_param_types`.
         // Fall back to the receiver-indexed `functions()` only when there is no import scope.
-        let candidates: Vec<FunctionInfo> = match self.fn_scope {
-            Some(scope) => resolve_symbols_in_scope(&self.src, name, scope)
-                .into_iter()
-                .flat_map(|(_, r)| match r.callables {
-                    crate::libraries::Callables::Functions(f) => f.overloads,
-                    _ => Vec::new(),
-                })
-                .collect(),
-            None => Vec::new(),
-        };
-        candidates
+        self.top_level_function_set(name)
+            .overloads
             .into_iter()
             .find(|o| {
                 o.is_member_or_extension()
@@ -1144,17 +1135,8 @@ impl<'a> SymbolResolver<'a> {
     /// Parameter types for the lambda argument of a call selected by lambda return type
     /// (`Iterable<T>.sumOf { … }`), read from the selected overload family.
     pub fn lambda_return_overload_param_types(&self, receiver: Ty, name: &str) -> Option<Vec<Ty>> {
-        let candidates: Vec<FunctionInfo> = match self.fn_scope {
-            Some(scope) => resolve_symbols_in_scope(&self.src, name, scope)
-                .into_iter()
-                .flat_map(|(_, r)| match r.callables {
-                    crate::libraries::Callables::Functions(f) => f.overloads,
-                    _ => Vec::new(),
-                })
-                .collect(),
-            None => Vec::new(),
-        };
-        candidates
+        self.top_level_function_set(name)
+            .overloads
             .iter()
             .filter(|o| {
                 o.is_extension()
