@@ -21,8 +21,8 @@ use crate::libraries::{
     RuntimeOp,
 };
 use crate::resolve::{
-    CtorDefaultValue, ExprLowering, InvokeKind, LambdaCapture, Signature, StmtLowering,
-    SymbolTable, TypeInfo,
+    CtorDefaultValue, ExprLowering, InvokeKind, LambdaCapture, ResolvedCall, Signature,
+    StmtLowering, SymbolTable, TypeInfo,
 };
 use crate::types::Ty;
 
@@ -20993,7 +20993,9 @@ impl<'a> Lower<'a> {
                             self.ir.suspend_calls.insert(call, ty_to_ir(logical_ret));
                         }
                         self.coerce_generic_read(call, e, c.physical_ret)
-                    } else if let Some(c) = self.info.resolved_lambda_member(e).cloned() {
+                    } else if let Some(ResolvedCall::LambdaReturnMember(c)) =
+                        self.info.resolved_calls.get(&e).cloned()
+                    {
                         // An INSTANCE MEMBER selected by lambda-return overload resolution (`recv.run2
                         // { … }`): the receiver is the DISPATCH receiver (`invokevirtual`/`invokeinterface`),
                         // NOT an argument. The checker recorded it; the lowerer has no other path for it
