@@ -10122,6 +10122,72 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Resolve a semantic property read `recv.name` without reporting "unresolved" on a miss. When the
+    /// selected property has a backend handle (classpath/member getter or extension getter), record it on
+    /// the read expression so lowering reads the checker-selected property instead of reconstructing it.
+    fn resolve_property_read(
+        &mut self,
+        rt: Ty,
+        name: &str,
+        span: Span,
+        mexpr: Option<ExprId>,
+    ) -> Option<Ty> {
+        if let Ty::Obj(internal, args) = rt {
+            if let Some((ty, _)) = self.lookup_prop(internal, name) {
+                if let Some((vis, owner)) = self.effective_member_visibility(internal, name, false)
+                {
+                    if vis != Visibility::Public {
+                        self.reject_if_inaccessible(vis, name, &owner, span);
+                    }
+                }
+                if let Some(cs) = self.syms.class_by_internal(internal) {
+                    if let Some(&i) = cs.generic_props.get(name) {
+                        if let Some(&arg) = args.get(i) {
+                            return Some(arg);
+                        }
+                    }
+                }
+                return Some(ty);
+            }
+            let is_enum_val = self.syms.enums.keys().any(|en| {
+                self.syms
+                    .classes
+                    .get(en)
+                    .map_or(false, |c| c.internal == internal)
+            });
+            if is_enum_val {
+                match name {
+                    "name" => return Some(Ty::String),
+                    "ordinal" => return Some(Ty::Int),
+                    _ => {}
+                }
+            }
+        }
+        if let Some((ty, _)) = self.syms.ext_prop(rt, name) {
+            return Some(ty);
+        }
+        if let Some(m) = self.resolve_property_member(rt, name) {
+            let ret = m.ret;
+            if let Some(me) = mexpr {
+                self.resolved_calls.insert(me, ResolvedCall::Member(m));
+            }
+            return Some(ret);
+        }
+        if let Some(getter) = self.resolver().resolve_extension_property_getter(name, rt) {
+            let ret = getter.ret;
+            if let Some(e) = mexpr {
+                self.expr_lowers.insert(
+                    e,
+                    ExprLowering::ExtensionPropertyGet {
+                        getter: Box::new(getter),
+                    },
+                );
+            }
+            return Some(ret);
+        }
+        None
+    }
+
     fn check_member(&mut self, rt: Ty, name: &str, span: Span, mexpr: Option<ExprId>) -> Ty {
         if rt == Ty::Error {
             return Ty::Error;
@@ -10136,80 +10202,8 @@ impl<'a> Checker<'a> {
             // `arr.size` — covers primitive arrays and a boxed `Array<T>` (`array_elem` sees both).
             return Ty::Int;
         }
-        // Property read on a class value: `p.prop` (own or inherited).
-        if let Ty::Obj(internal, args) = rt {
-            if let Some((ty, _)) = self.lookup_prop(internal, name) {
-                // A non-public member property may be inaccessible from this site (kotlinc rejects it).
-                // The member DOES resolve here, so surface kotlinc's diagnostic rather than silently
-                // compiling an illegal read. (Under-enforcement is safe — a legal program is never
-                // rejected; over-enforcement would be a false positive, so the rule stays conservative.)
-                if let Some((vis, owner)) = self.effective_member_visibility(internal, name, false)
-                {
-                    if vis != Visibility::Public {
-                        self.reject_if_inaccessible(vis, name, &owner, span);
-                    }
-                }
-                // Generic substitution: if `name` is declared as one of the receiver class's type
-                // parameters and the receiver carries that argument (`Box<Int>().x`), report the
-                // argument type instead of the erased `Object`. The member-read lowering inserts the
-                // checkcast/unbox kotlinc emits on such a read.
-                if let Some(cs) = self.syms.class_by_internal(internal) {
-                    if let Some(&i) = cs.generic_props.get(name) {
-                        if let Some(&arg) = args.get(i) {
-                            return arg;
-                        }
-                    }
-                }
-                return ty;
-            }
-            // `java.lang.Enum` members (`name`, `ordinal`) available on any enum value.
-            let is_enum_val = self.syms.enums.keys().any(|en| {
-                self.syms
-                    .classes
-                    .get(en)
-                    .map_or(false, |c| c.internal == internal)
-            });
-            if is_enum_val {
-                match name {
-                    "name" => return Ty::String,
-                    "ordinal" => return Ty::Int,
-                    _ => {}
-                }
-            }
-        }
-        // Extension property: `recv.name` resolved by (erased receiver, name), with a fallback to a
-        // type-parameter receiver (`val <T> T.p` / `val <T> Array<T>.p`).
-        if let Some((ty, _)) = self.syms.ext_prop(rt, name) {
+        if let Some(ty) = self.resolve_property_read(rt, name, span, mexpr) {
             return ty;
-        }
-        // Library-type property read (`list.size`): semantic property metadata first, source-owned
-        // physical getter fallback second. Mapped builtins stay in the symbol provider.
-        if let Some(m) = self.resolve_property_member(rt, name) {
-            // Record the resolved getter so the lowerer reuses it (keyed by the member-access
-            // ExprId; `lower_member_read_on` reads the same map — see [`TypeInfo::resolved_members`]).
-            let ret = m.ret;
-            if let Some(me) = mexpr {
-                self.resolved_calls.insert(me, ResolvedCall::Member(m));
-            }
-            return ret;
-        }
-        // Classpath EXTENSION property: `recv.name` whose getter is a top-level `get<Name>(recv)` static
-        // (e.g. `descriptor.elementDescriptors` → `SerialDescriptorKt.getElementDescriptors(descriptor)`).
-        // Tried last, after members/user-ext-props/library getters, so it never shadows a real member.
-        // An extension property (`recv.name` whose getter is a static `get<Name>(recv)` on a facade). Tried
-        // LAST (after members / user-ext-props / library getters), so it never shadows a real member. Any
-        // receiver — reference, array, primitive, or value class — is allowed: the emit coerces the receiver
-        // to the getter's parameter type (see `lower_arg` in the `ExtensionPropertyGet` lowering).
-        if let Some(getter) = self.resolver().resolve_extension_property_getter(name, rt) {
-            if let Some(e) = mexpr {
-                self.expr_lowers.insert(
-                    e,
-                    ExprLowering::ExtensionPropertyGet {
-                        getter: Box::new(getter.clone()),
-                    },
-                );
-            }
-            return getter.ret;
         }
         if let Some(m) = self.resolve_instance_member(rt, name, &[]) {
             if m.ret.is_read_value_result() {
@@ -11713,11 +11707,8 @@ impl<'a> Checker<'a> {
                 // `val func: (…) -> R` property (e.g. an enum entry's `func`). No method `func` exists;
                 // read the property (its type is `Ty::Fun`) and invoke it through the one invoke
                 // convention, exactly like a local/top-level function-typed value.
-                let prop_fun_ty = rt
-                    .obj_internal()
-                    .and_then(|internal| self.lookup_prop(internal, &name))
-                    .map(|(t, _)| t)
-                    .or_else(|| self.resolve_property_member(rt, &name).map(|m| m.ret))
+                let prop_fun_ty = self
+                    .resolve_property_read(rt, &name, span, Some(callee))
                     .filter(|t| matches!(t, Ty::Fun(_)));
                 if let Some(fun_ty) = prop_fun_ty {
                     if let Some(ret) =
