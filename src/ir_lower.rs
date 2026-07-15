@@ -17,8 +17,8 @@ use crate::ir::{
 };
 use crate::jvm::names::{property_getter_name, property_setter_name};
 use crate::libraries::{
-    CompilerPlatform, CountedLoopInfo, InlineKind, PlatformAccessor, PlatformCtor, RuntimeCtor,
-    RuntimeOp,
+    CompilerPlatform, CountedLoopInfo, InlineKind, LibraryCallable, LibraryMember,
+    PlatformAccessor, PlatformCtor, RuntimeCtor, RuntimeOp,
 };
 use crate::resolve::{
     CtorDefaultValue, ExprLowering, InvokeKind, LambdaCapture, ResolvedCall, Signature,
@@ -71,6 +71,20 @@ struct ClassInfo {
     methods: HashMap<String, (u32, u32, Ty)>,
     /// Base class internal name (`class B : A(…)`), for inherited field/method resolution.
     super_internal: Option<String>,
+}
+
+enum LibraryDispatch {
+    Member(String, Box<LibraryMember>),
+    Static(Box<LibraryCallable>),
+}
+
+impl LibraryDispatch {
+    fn ret(&self) -> Ty {
+        match self {
+            Self::Member(_, member) => member.ret,
+            Self::Static(callable) => callable.ret,
+        }
+    }
 }
 
 /// Lower a checked file to IR, or `None` if it uses anything outside the core subset.
@@ -10894,25 +10908,17 @@ impl<'a> Lower<'a> {
         let internal = it_ty.obj_internal()?;
         // The iterator comes from a member `iterator()` (`List`), or — when there is none — the stdlib
         // `iterator` *extension* (`for (e in map)` uses `Map.iterator()` → `Iterator<Map.Entry<K,V>>`).
-        // `iter_ret` is the (possibly parameterized) iterator type; `ext_iter` flags the static call.
-        let (iter_ret, iter_desc, iter_owner, iter_ext, iter_inline) =
-            if let Some(m) = self.resolve_instance(internal, "iterator", &[]) {
-                (
-                    m.ret,
-                    m.descriptor,
-                    internal.to_string(),
-                    false,
-                    InlineKind::None,
-                )
-            } else if let Some(c) = self.info.synthetic_ext(iterable, "iterator").cloned() {
-                // `iterator` is an EXTENSION — public (an `Iterable`-shaped receiver) or `@InlineOnly`
-                // (`Map<K,V>.iterator()` inlines to `entries.iterator()`). The CHECKER resolved and recorded
-                // it (keyed by the iterable expr); `c.inline` drives whether the emit splices it or calls it.
-                (c.ret, c.descriptor, c.owner, true, c.inline)
-            } else {
-                return None;
-            };
-        let iter_ty = iter_ret;
+        let iter_dispatch = if let Some(m) = self.resolve_instance(internal, "iterator", &[]) {
+            LibraryDispatch::Member(internal.to_string(), Box::new(m))
+        } else if let Some(c) = self.info.synthetic_ext(iterable, "iterator").cloned() {
+            // `iterator` is an EXTENSION — public (an `Iterable`-shaped receiver) or `@InlineOnly`
+            // (`Map<K,V>.iterator()` inlines to `entries.iterator()`). The CHECKER resolved and recorded
+            // it (keyed by the iterable expr); `c.inline` drives whether the emit splices it or calls it.
+            LibraryDispatch::Static(Box::new(c))
+        } else {
+            return None;
+        };
+        let iter_ty = iter_dispatch.ret();
         let iter_internal = iter_ty.obj_internal()?.to_string();
         let hasnext_m = self.resolve_instance(&iter_internal, "hasNext", &[])?;
         let next_m = self.resolve_instance(&iter_internal, "next", &[])?;
@@ -10925,7 +10931,6 @@ impl<'a> Lower<'a> {
             .copied()
             .or_else(|| it_ty.type_args().first().copied())
             .unwrap_or_else(|| Ty::obj("kotlin/Any"));
-        let it_iface = self.library_type_is_interface(internal);
         let depth = self.scope.len();
         // `forEachIndexed`: an `Int` index counter, declared before the loop and bound to the lambda's
         // first parameter, incremented at the end of each iteration.
@@ -10947,26 +10952,16 @@ impl<'a> Lower<'a> {
 
         // it = iterable.iterator()  (member virtual call, or the extension's static call)
         let recv = self.expr(iterable)?;
-        let iter_callee = if iter_ext {
-            Callee::Static {
-                owner: iter_owner,
-                name: "iterator".to_string(),
-                descriptor: iter_desc,
-                inline: iter_inline,
+        let iter_call = match iter_dispatch {
+            LibraryDispatch::Member(owner_fallback, member) => {
+                let ret = member.ret;
+                let suspend = member.suspend;
+                self.emit_library_member_call(recv, owner_fallback, *member, ret, suspend, vec![])
             }
-        } else {
-            Callee::Virtual {
-                owner: iter_owner,
-                name: "iterator".to_string(),
-                descriptor: iter_desc,
-                interface: it_iface,
+            LibraryDispatch::Static(callable) => {
+                self.emit_library_static_call(*callable, vec![recv], false)
             }
         };
-        let iter_call = self.ir.add_expr(IrExpr::Call {
-            callee: iter_callee,
-            dispatch_receiver: if iter_ext { None } else { Some(recv) },
-            args: if iter_ext { vec![recv] } else { vec![] },
-        });
         let it_v = self.fresh_value();
         let var_it = self.ir.add_expr(IrExpr::Variable {
             index: it_v,
