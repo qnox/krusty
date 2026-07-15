@@ -4152,6 +4152,7 @@ fn make_checker<'a>(file: &'a File, syms: &'a SymbolTable, diags: &'a mut DiagSi
         expr_types: vec![Ty::Error; file.expr_arena.len()],
         scopes: Vec::new(),
         ret_ty: Ty::Unit,
+        expected: None,
         imports,
         import_levels,
         fn_scope,
@@ -4956,6 +4957,12 @@ struct Checker<'a> {
     expr_types: Vec<Ty>,
     scopes: Vec<HashMap<String, Local>>,
     ret_ty: Ty,
+    /// The EXPECTED type of the expression about to be checked, propagated from an enclosing typed
+    /// context (a declared `val f: (Int) -> Int = …`) into RESULT positions (an `if`/`when` branch, a
+    /// block's trailing value) so a bare lambda literal there takes its parameter types from the
+    /// expectation instead of erasing to `Any`. Consumed (cleared) at each `expr()` entry, so it only
+    /// reaches the immediate expression; propagation sites re-arm it via [`Self::expr_expected`].
+    expected: Option<Ty>,
     imports: HashMap<String, String>,
     /// Star/implicit import packages by kotlinc precedence level (same-package, explicit stars, Kotlin
     /// defaults, platform defaults) — the import set [`Self::imported_type_internal`] resolves against.
@@ -6907,9 +6914,18 @@ impl<'a> Checker<'a> {
             self.expr_depth -= 1;
             return self.set(e, Ty::Error);
         }
-        let t = self.expr_inner(e);
+        // Consume the propagated expectation so it reaches only THIS expression; a nested
+        // subexpression sees `None` unless a propagation site re-arms it via `expr_expected`.
+        let expected = self.expected.take();
+        let t = self.expr_inner(e, expected);
         self.expr_depth -= 1;
         t
+    }
+
+    /// Check `e` with an EXPECTED type propagated in (see [`Self::expected`]).
+    fn expr_expected(&mut self, e: ExprId, expected: Ty) -> Ty {
+        self.expected = Some(expected);
+        self.expr(e)
     }
 
     fn arg_tys(&mut self, args: &[ExprId]) -> Vec<Ty> {
@@ -7040,7 +7056,7 @@ impl<'a> Checker<'a> {
         Some(Ty::fun(exp.params.clone(), exp.ret))
     }
 
-    fn expr_inner(&mut self, e: ExprId) -> Ty {
+    fn expr_inner(&mut self, e: ExprId, expected: Option<Ty>) -> Ty {
         let t = match self.file.expr(e).clone() {
             Expr::IntLit(_) => Ty::Int,
             Expr::LongLit(_) => Ty::Long,
@@ -7077,6 +7093,14 @@ impl<'a> Checker<'a> {
             // the non-null LHS).
             Expr::Break { .. } | Expr::Continue { .. } => Ty::Nothing,
             Expr::Lambda { params, body } => {
+                // An EXPECTED function type propagated in from a typed context binds the lambda's
+                // parameter types — `val f: (Int) -> Int = { it * 2 }`, even when the lambda is the
+                // result of a nested `if`/`when` branch or block. Delegate to the shared typed-lambda
+                // check (the same path a HOF/typed-initializer argument takes).
+                if let Some(Ty::Fun(s)) = &expected {
+                    let pts = s.params.clone();
+                    return self.check_lambda_with_types(e, &pts);
+                }
                 // A lambda literal `{ a, b -> body }` — type is `Fun(arity)`. With no explicit
                 // parameters but a body referencing `it`, bind the implicit single parameter.
                 let bind_names: Vec<String> = if !params.is_empty() {
@@ -8191,7 +8215,10 @@ impl<'a> Checker<'a> {
                 if let Some(bt) = self.this_is_narrowing(cond, false) {
                     self.this_narrow = Some(bt);
                 }
-                let tt = self.expr(then_branch);
+                let tt = match &expected {
+                    Some(ex) => self.expr_expected(then_branch, *ex),
+                    None => self.expr(then_branch),
+                };
                 self.this_narrow = prev_narrow;
                 self.pop_scope();
                 match else_branch {
@@ -8205,7 +8232,10 @@ impl<'a> Checker<'a> {
                         if let Some(bt) = self.this_is_narrowing(cond, true) {
                             self.this_narrow = Some(bt);
                         }
-                        let et = self.expr(eb);
+                        let et = match &expected {
+                            Some(ex) => self.expr_expected(eb, *ex),
+                            None => self.expr(eb),
+                        };
                         self.this_narrow = prev_narrow;
                         self.pop_scope();
                         self.join(tt, et, self.span(e))
@@ -8248,7 +8278,12 @@ impl<'a> Checker<'a> {
                         self.expr(te);
                         Ty::Nothing
                     }
-                    Some(te) => self.expr(te),
+                    // Propagate an expected type into the block's trailing value (a typed context
+                    // reaching a `{ … ; lambda }` result).
+                    Some(te) => match &expected {
+                        Some(ex) => self.expr_expected(te, *ex),
+                        None => self.expr(te),
+                    },
                     None if diverged => Ty::Nothing,
                     None => {
                         // A block whose last statement always transfers control (break/continue/return)
@@ -8338,7 +8373,10 @@ impl<'a> Checker<'a> {
                     if let Some(bt) = arm_this_narrow {
                         self.this_narrow = Some(bt);
                     }
-                    let bt = self.expr(arm.body);
+                    let bt = match &expected {
+                        Some(ex) => self.expr_expected(arm.body, *ex),
+                        None => self.expr(arm.body),
+                    };
                     self.this_narrow = prev_narrow;
                     self.pop_scope();
                     result = Some(match result {
@@ -12778,14 +12816,12 @@ impl<'a> Checker<'a> {
                     );
                 }
                 let declared = ty.as_ref().map(|r| self.resolve_ty(r));
-                // A lambda initializer with a declared function type takes its parameter types from
-                // the annotation, so `val f: (Int) -> Int = { it * 2 }` types `it`/`x` as `Int`
-                // (not the erased `Object`). HOF *arguments* already do this.
-                let it = match (
-                    declared,
-                    matches!(self.file.expr(init), Expr::Lambda { .. }),
-                ) {
-                    (Some(Ty::Fun(s)), true) => self.check_lambda_with_types(init, &s.params),
+                // An initializer with a declared FUNCTION type takes its parameter types from the
+                // annotation, so `val f: (Int) -> Int = { it * 2 }` types `it`/`x` as `Int` (not the
+                // erased `Object`). Propagating the expectation also reaches a lambda that is the
+                // result of a nested `if`/`when`/block initializer. HOF *arguments* already do this.
+                let it = match declared {
+                    Some(d @ Ty::Fun(_)) => self.expr_expected(init, d),
                     _ => self.expr(init),
                 };
                 let bind = match declared {
