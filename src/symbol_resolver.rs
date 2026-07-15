@@ -18,6 +18,13 @@ use crate::libraries::{
 use crate::symbol_source::SymbolSource;
 use crate::types::Ty;
 
+#[derive(Clone, Debug, Default)]
+pub struct TopLevelLambdaShape {
+    pub param_types: Option<Vec<Vec<Ty>>>,
+    pub receivers: Option<Vec<Option<Ty>>>,
+    pub materialized: Option<Vec<bool>>,
+}
+
 type GSigBinds = std::collections::HashMap<String, Ty>;
 
 /// [`crate::assignable::TypeOracle`] over a federated [`SymbolSource`] (module ∪ classpath): the class
@@ -1279,96 +1286,89 @@ impl<'a> SymbolResolver<'a> {
             })
     }
 
-    /// Lambda parameter types for a receiver-less top-level call. This is arg-dependent because a
+    /// Lambda call-shape facts for a receiver-less top-level call. This is arg-dependent because a
     /// generic HOF can bind lambda parameter types from already-typed non-lambda arguments
-    /// (`applyIt(5) { it + 1 }`). Providers expose parsed generic signatures on `FunctionInfo`; this
-    /// resolver binds them for the concrete partial call.
-    pub fn top_level_lambda_param_types(
+    /// (`applyIt(5) { it + 1 }`). Providers expose parsed generic signatures and metadata call-shape on
+    /// `FunctionInfo`; this resolver aligns those facts for the concrete partial call in one pass.
+    pub fn top_level_lambda_shape(
         &self,
         name: &str,
         arg_tys: &[Option<Ty>],
-    ) -> Option<Vec<Vec<Ty>>> {
+    ) -> Option<TopLevelLambdaShape> {
         // Lambda-SHAPE info for a name the caller already validated resolves (via import scope OR an
         // explicit FQ package). UNSCOPED over the federated source so a fully-qualified, unimported callee
-        // (`kotlinx.coroutines.runBlocking { … }`) still yields its lambda parameter types.
+        // (`kotlinx.coroutines.runBlocking { … }`) still yields its lambda facts.
         let fs = self.top_level_function_set(name);
         // The default-omitted trailing-lambda alignment (`runBlocking { … }`) applies ONLY when NO overload
         // of this name matches the provided argument count exactly. A name WITH an exact-arity overload
         // (`run { … }`) always uses that overload's own parameter positions — never an alignment against a
         // wider overload — so a legitimately-empty lambda-parameter result is not shadowed by one.
         let has_exact = fs.has_top_level_arity(arg_tys.len());
-        let result = fs.top_level().find_map(|o| {
-            let gsig = o.generic_sig.as_ref()?;
-            if has_exact && gsig.params.len() != arg_tys.len() {
-                return None;
-            }
-            let map = trailing_default_arg_indices(gsig.params.len(), arg_tys)?;
-            let mut binds = std::collections::HashMap::new();
-            for (ai, at) in arg_tys.iter().enumerate() {
-                if let (Some(t), Some(ps)) = (at, gsig.params.get(map[ai])) {
-                    unify_ty(*ps, *t, &mut binds);
+        let mut shape = TopLevelLambdaShape::default();
+        for o in fs.top_level() {
+            if shape.param_types.is_none() {
+                if let Some(gsig) = o.generic_sig.as_ref() {
+                    if !(has_exact && gsig.params.len() != arg_tys.len()) {
+                        if let Some(map) = trailing_default_arg_indices(gsig.params.len(), arg_tys)
+                        {
+                            let mut binds = std::collections::HashMap::new();
+                            for (ai, at) in arg_tys.iter().enumerate() {
+                                if let (Some(t), Some(ps)) = (at, gsig.params.get(map[ai])) {
+                                    unify_ty(*ps, *t, &mut binds);
+                                }
+                            }
+                            let out: Vec<Vec<Ty>> = map
+                                .iter()
+                                .map(|&pi| {
+                                    gsig.params
+                                        .get(pi)
+                                        .map(|ps| function_input_types(*ps, &binds))
+                                        .unwrap_or_default()
+                                })
+                                .collect();
+                            if out
+                                .iter()
+                                .zip(arg_tys)
+                                .any(|(v, at)| at.is_none() && !v.is_empty())
+                            {
+                                shape.param_types = Some(out);
+                            }
+                        }
+                    }
                 }
             }
-            let out: Vec<Vec<Ty>> = map
-                .iter()
-                .map(|&pi| {
-                    gsig.params
-                        .get(pi)
-                        .map(|ps| function_input_types(*ps, &binds))
-                        .unwrap_or_default()
-                })
-                .collect();
-            out.iter()
-                .zip(arg_tys)
-                .any(|(v, at)| at.is_none() && !v.is_empty())
-                .then_some(out)
-        });
-        result
-    }
 
-    /// Receiver type for each top-level function parameter that is a receiver function type
-    /// (`Recv.(...) -> R`). This is source call-shape data stored on `CallSig`; the resolver only aligns
-    /// it with the concrete arity before the checker binds lambda `this`.
-    pub fn top_level_lambda_receivers(
-        &self,
-        name: &str,
-        arg_tys: &[Option<Ty>],
-    ) -> Option<Vec<Option<Ty>>> {
-        // Unscoped over the federated source, like `top_level_lambda_param_types` — an FQ unimported callee
-        // must still yield receivers.
-        let fs = self.top_level_function_set(name);
-        // Same rule as `top_level_lambda_param_types`: only fall back to the default-omitted trailing-lambda
-        // alignment (`runBlocking { … }` binds `this: CoroutineScope`) when NO overload matches the argument
-        // count exactly, so an exact-arity call never mis-binds a receiver from a wider overload.
-        let has_exact = fs.has_top_level_arity(arg_tys.len());
-        let result = fs.top_level().find_map(|o| {
-            let recvs = &o.call_sig.lambda_receivers;
-            if has_exact && recvs.len() != arg_tys.len() {
-                return None;
+            if shape.receivers.is_none() {
+                let recvs = &o.call_sig.lambda_receivers;
+                if !(has_exact && recvs.len() != arg_tys.len()) {
+                    if let Some(map) = trailing_default_arg_indices(recvs.len(), arg_tys) {
+                        let out: Vec<Option<Ty>> = map
+                            .iter()
+                            .map(|&pi| recvs.get(pi).cloned().flatten())
+                            .collect();
+                        if out.iter().any(Option::is_some) {
+                            shape.receivers = Some(out);
+                        }
+                    }
+                }
             }
-            let map = trailing_default_arg_indices(recvs.len(), arg_tys)?;
-            let out: Vec<Option<Ty>> = map
-                .iter()
-                .map(|&pi| recvs.get(pi).cloned().flatten())
-                .collect();
-            out.iter().any(|o| o.is_some()).then_some(out)
-        });
-        result
-    }
 
-    /// Per-param `crossinline`/`noinline` flags for a top-level function (its lambda argument is
-    /// MATERIALIZED, so a mutable capture must be `Ref`-boxed rather than inline-spliced). `None` when
-    /// no matching overload carries such a parameter.
-    pub fn top_level_lambda_materialized(
-        &self,
-        name: &str,
-        arg_tys: &[Option<Ty>],
-    ) -> Option<Vec<bool>> {
-        // Unscoped over the federated source — lambda-shape must cover an FQ unimported callee.
-        self.top_level_function_set(name).top_level().find_map(|o| {
-            let m = &o.call_sig.lambda_materialized;
-            (m.len() == arg_tys.len() && m.iter().any(|b| *b)).then(|| m.clone())
-        })
+            if shape.materialized.is_none() {
+                let m = &o.call_sig.lambda_materialized;
+                if m.len() == arg_tys.len() && m.iter().any(|b| *b) {
+                    shape.materialized = Some(m.clone());
+                }
+            }
+
+            if shape.param_types.is_some()
+                && shape.receivers.is_some()
+                && shape.materialized.is_some()
+            {
+                break;
+            }
+        }
+        (shape.param_types.is_some() || shape.receivers.is_some() || shape.materialized.is_some())
+            .then_some(shape)
     }
 
     /// Lambda parameter types for an extension call before lambda bodies are typed. This binds the
