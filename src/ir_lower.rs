@@ -11011,12 +11011,7 @@ impl<'a> Lower<'a> {
         }))
     }
 
-    /// `println(x)` / `print(x)` (and the no-arg `println()`) — the `kotlin.io` console intrinsics. Their
-    /// `ConsoleKt` realization is a PRIVATE `@InlineOnly` method (no callable `invokestatic` target), so
-    /// kotlinc splices `System.out.println(x)`; krusty emits the same directly: `getstatic
-    /// java/lang/System.out:PrintStream`, then an `invokevirtual` of the matching `PrintStream` overload
-    /// (the resolved callable's descriptor names the parameter shape — `Object`/`int`/`char[]`/…, each a
-    /// real `PrintStream.println`/`print` overload). Returns `None` for any other callable.
+    /// Lower Kotlin console intrinsics to `System.out.print*`; returns `None` for other callables.
     fn lower_println(
         &mut self,
         callable: &crate::libraries::LibraryCallable,
@@ -11027,6 +11022,13 @@ impl<'a> Lower<'a> {
         {
             return None;
         }
+        let descriptor = if callable.descriptor.is_empty() {
+            self.syms
+                .libraries
+                .method_descriptor(&callable.params, Ty::Unit)?
+        } else {
+            callable.descriptor.clone()
+        };
         let out = self.ir.add_expr(IrExpr::ExternalStaticField {
             owner: "java/lang/System".to_string(),
             name: "out".to_string(),
@@ -11045,7 +11047,7 @@ impl<'a> Lower<'a> {
             callee: Callee::Virtual {
                 owner: "java/io/PrintStream".to_string(),
                 name: callable.name.clone(),
-                descriptor: callable.descriptor.clone(),
+                descriptor,
                 interface: false,
             },
             dispatch_receiver: Some(out),
