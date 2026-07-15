@@ -173,14 +173,11 @@ pub trait TargetRuntime {
         None
     }
 
-    /// Normalize a semantic type to the form a JVM `<init>`/method descriptor carries, so a call
-    /// argument can be matched against a descriptor-read parameter. A Kotlin built-in erases to its
-    /// single JVM identity (`kotlin/collections/Set<String>` → `java/util/Set`, read-only and mutable
-    /// alike) and type arguments are dropped, mirroring erasure. Targets that do not need platform
-    /// normalization return the type unchanged. Reference (`Ty::Obj`) types are normalized and arrays
-    /// recurse into their element (so a nested collection normalizes too); primitives, `String` and
-    /// function types already compare exactly across the two sides.
-    fn jvm_descriptor_form(&self, ty: Ty) -> Ty {
+    /// Normalize a semantic type to the identity a target ABI uses when matching a call argument against
+    /// a library parameter. Targets that do not need ABI normalization return the type unchanged.
+    /// Reference (`Ty::Obj`) types are normalized and arrays recurse into their element; primitives,
+    /// `String`, and function types already compare exactly across the two sides.
+    fn abi_value_form(&self, ty: Ty) -> Ty {
         ty
     }
 
@@ -193,7 +190,7 @@ pub trait TargetRuntime {
     /// receiver-agnostic `resolve_symbols` overload (which carries no rung). Default: apply only on an exact
     /// type match (a target with no supertype model).
     fn extension_receiver_rank(&self, recv: Ty, decl_recv: Ty) -> Option<u32> {
-        (self.jvm_descriptor_form(recv) == self.jvm_descriptor_form(decl_recv)).then_some(0)
+        (self.abi_value_form(recv) == self.abi_value_form(decl_recv)).then_some(0)
     }
 
     /// If values of this type can be invoked like a Kotlin function, return their arity. Plain
