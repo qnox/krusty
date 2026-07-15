@@ -3214,3 +3214,10 @@ inline fields with one `LibraryDispatch` value: either the selected member `iter
 checker-recorded extension callable. `lower_foreach_iterator` now asks that payload for the iterator
 return type and emits it through the shared member/static library emitters, removing the local boolean
 mode flag and duplicated `Callee::Static`/`Callee::Virtual` construction.
+
+### Runtime Static Emitter Merge
+
+The next runtime-call cleanup routed platform runtime helpers that already return `LibraryCallable`
+records through `emit_library_static_call`. `runtime_call` no longer rebuilds `Callee::Static` from
+owner/name/descriptor/inline fields, and unsigned boxing now uses the shared runtime-call path instead
+of constructing the same static call locally.
