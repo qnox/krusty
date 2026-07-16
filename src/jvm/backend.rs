@@ -80,6 +80,9 @@ impl Backend for JvmBackend {
             );
             return outputs;
         }
+        // Drop the dead standalone impl of a must-inline call's (`require`/`check`) message lambda — it is
+        // spliced at the call site, so emitting it would only force a spurious facade class.
+        crate::jvm::ir_emit::mark_must_inline_lambdas(&mut ir);
         // `@kotlin.Metadata` for the facade: each top-level `suspend fun` is recorded with `IS_SUSPEND`
         // and its LOGICAL signature, so another krusty/kotlinc compilation resolves a call to it (a
         // suspend fn's physical method is `Object foo(…, Continuation)` — only `@Metadata` distinguishes
