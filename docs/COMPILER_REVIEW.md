@@ -3316,3 +3316,10 @@ Same-file field and facade-static writes now go through `emit_set_field`/`emit_s
 Initializer stores, suspend-lambda label/parameter stores, custom accessor `field =` writes,
 unqualified member assignments, inc/dec writes, and direct member assignments no longer rebuild
 `SetField`/`SetStatic` nodes at their feature sites.
+
+### Return/Block Emitter Merge
+
+Lowerer control-flow bodies now go through `emit_return`/`emit_block`. Generated accessors,
+delegated property bodies, SAM/lambda wrappers, suspend-lambda state bodies, data-class members,
+callable-reference adapters, tailrec bodies, inline lambda expansion, and loop rewrites no longer
+rebuild `Return`/`Block` IR nodes at their feature sites.

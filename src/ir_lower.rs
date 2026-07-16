@@ -1120,11 +1120,8 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                             class: id,
                             index: fidx as u32,
                         });
-                        let ret = lo.ir.add_expr(IrExpr::Return(Some(gf)));
-                        let body = lo.ir.add_expr(IrExpr::Block {
-                            stmts: vec![ret],
-                            value: None,
-                        });
+                        let ret = lo.emit_return(Some(gf));
+                        let body = lo.emit_block(vec![ret], None);
                         let mi = method_fids.len() as u32;
                         let fid = lo.ir.add_fun(IrFunction {
                             name: gname.clone(),
@@ -1160,10 +1157,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                                 index: fidx as u32,
                                 value: v,
                             });
-                            let body = lo.ir.add_expr(IrExpr::Block {
-                                stmts: vec![sf],
-                                value: None,
-                            });
+                            let body = lo.emit_block(vec![sf], None);
                             let mi = method_fids.len() as u32;
                             let fid = lo.ir.add_fun(IrFunction {
                                 name: sname.clone(),
@@ -2431,11 +2425,8 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     // A generic delegate's `getValue` returns the erased `Object`; coerce to the property
                     // type (`checkcast`/unbox), exactly as kotlinc does.
                     let coerced = lo.coerce_to_static(call, prop_ty, gv_ret);
-                    let ret = lo.ir.add_expr(IrExpr::Return(Some(coerced)));
-                    let body = lo.ir.add_expr(IrExpr::Block {
-                        stmts: vec![ret],
-                        value: None,
-                    });
+                    let ret = lo.emit_return(Some(coerced));
+                    let body = lo.emit_block(vec![ret], None);
                     lo.ir.functions[get_fid as usize].body = Some(body);
                     // setX(value): this.x$delegate.setValue(this, propref, value)
                     if p.is_var {
@@ -2476,10 +2467,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                             dele,
                             vec![this_arg, pref, value_arg],
                         );
-                        let body = lo.ir.add_expr(IrExpr::Block {
-                            stmts: vec![call],
-                            value: None,
-                        });
+                        let body = lo.emit_block(vec![call], None);
                         lo.ir.functions[set_fid as usize].body = Some(body);
                     }
                 }
@@ -2987,7 +2975,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                             value: val,
                         }));
                     }
-                    let body = lo.ir.add_expr(IrExpr::Block { stmts, value: None });
+                    let body = lo.emit_block(stmts, None);
                     lo.ir.classes[class_id as usize].init_body = Some(body);
                 }
                 // Lower each secondary constructor to an extra `<init>(p)`. For a class WITH a primary
@@ -3213,10 +3201,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                         let body = if out.is_empty() {
                             None
                         } else {
-                            Some(lo.ir.add_expr(IrExpr::Block {
-                                stmts: out,
-                                value: None,
-                            }))
+                            Some(lo.emit_block(out, None))
                         };
                         secs.push(crate::ir::IrSecondaryCtor {
                             params: param_irs,
@@ -3464,7 +3449,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                                     value: val,
                                 }));
                             }
-                            let blk = lo.ir.add_expr(IrExpr::Block { stmts, value: None });
+                            let blk = lo.emit_block(stmts, None);
                             lo.ir.classes[sub_id as usize].init_body = Some(blk);
                         }
                         let mut mfids = Vec::new();
@@ -3517,11 +3502,8 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                         for (fi, (pname, pty)) in prop_fields.iter().enumerate() {
                             let getter = property_getter_name(pname);
                             let get = lo.this_field(sub_id, fi as u32);
-                            let ret = lo.ir.add_expr(IrExpr::Return(Some(get)));
-                            let gbody = lo.ir.add_expr(IrExpr::Block {
-                                stmts: vec![ret],
-                                value: None,
-                            });
+                            let ret = lo.emit_return(Some(get));
+                            let gbody = lo.emit_block(vec![ret], None);
                             lo.add_synth_method(
                                 &sub_fq,
                                 sub_id,
@@ -3603,11 +3585,8 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                         } else {
                             // Default getter: `return field` → `getstatic; areturn`.
                             let read = lo.ir.add_expr(IrExpr::GetStatic(sidx));
-                            let ret = lo.ir.add_expr(IrExpr::Return(Some(read)));
-                            let body = lo.ir.add_expr(IrExpr::Block {
-                                stmts: vec![ret],
-                                value: None,
-                            });
+                            let ret = lo.emit_return(Some(read));
+                            let body = lo.emit_block(vec![ret], None);
                             lo.ir.functions[gfid as usize].body = Some(body);
                         }
                         lo.cur_static_field = None;
@@ -3636,11 +3615,8 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                                 index: sidx,
                                 value: val,
                             });
-                            let ret = lo.ir.add_expr(IrExpr::Return(None));
-                            let body = lo.ir.add_expr(IrExpr::Block {
-                                stmts: vec![set, ret],
-                                value: None,
-                            });
+                            let ret = lo.emit_return(None);
+                            let body = lo.emit_block(vec![set, ret], None);
                             lo.ir.functions[sfid as usize].body = Some(body);
                         }
                         lo.cur_static_field = None;
@@ -4908,6 +4884,14 @@ impl<'a> Lower<'a> {
         self.ir.add_expr(IrExpr::SetStatic { index, value })
     }
 
+    fn emit_return(&mut self, value: Option<u32>) -> u32 {
+        self.ir.add_expr(IrExpr::Return(value))
+    }
+
+    fn emit_block(&mut self, stmts: Vec<u32>, value: Option<u32>) -> u32 {
+        self.ir.add_expr(IrExpr::Block { stmts, value })
+    }
+
     fn emit_external_static_field(
         &mut self,
         owner: impl Into<String>,
@@ -5480,11 +5464,8 @@ impl<'a> Lower<'a> {
                 vec![null_a, get_p],
             )
         };
-        let ret = self.ir.add_expr(IrExpr::Return(Some(call)));
-        let body = self.ir.add_expr(IrExpr::Block {
-            stmts: vec![ret],
-            value: None,
-        });
+        let ret = self.emit_return(Some(call));
+        let body = self.emit_block(vec![ret], None);
         let (fid, _) = self.computed_props[&p.name];
         self.ir.functions[fid as usize].body = Some(body);
         Some(())
@@ -5573,10 +5554,7 @@ impl<'a> Lower<'a> {
         let gi2 = self.ir.add_expr(IrExpr::GetValue(i_v));
         let gtmp = self.ir.add_expr(IrExpr::GetValue(tmp_v));
         let set = self.emit_external_call("kotlin/Array.set", Some(ga), vec![gi2, gtmp]);
-        let wbody = self.ir.add_expr(IrExpr::Block {
-            stmts: vec![var_tmp, set],
-            value: None,
-        });
+        let wbody = self.emit_block(vec![var_tmp, set], None);
         // update: i = i + 1
         let gi3 = self.ir.add_expr(IrExpr::GetValue(i_v));
         let one = self.ir.add_expr(IrExpr::Const(IrConst::Int(1)));
@@ -5597,10 +5575,7 @@ impl<'a> Lower<'a> {
             label: None,
         });
         let result = self.ir.add_expr(IrExpr::GetValue(arr_v));
-        Some(self.ir.add_expr(IrExpr::Block {
-            stmts: vec![var_n, var_arr, var_i, wh],
-            value: Some(result),
-        }))
+        Some(self.emit_block(vec![var_n, var_arr, var_i, wh], Some(result)))
     }
 
     /// Resolve a `catch` exception type name to its JVM internal name (mirrors the checker): a file
@@ -6488,29 +6463,17 @@ impl<'a> Lower<'a> {
         // user `return` in the lambda becomes a real return from the *enclosing* method (a correct
         // non-local return), not the lambda.
         let (ret_ty, block, inline_body) = if diverges {
-            let b = self.ir.add_expr(IrExpr::Block {
-                stmts: vec![ve],
-                value: None,
-            });
+            let b = self.emit_block(vec![ve], None);
             (ty_to_ir(sig.ret), b, ve)
         } else if sam_void {
             // The SAM method returns `void` (`run()V`): run the body for effect, no return value.
-            let b = self.ir.add_expr(IrExpr::Block {
-                stmts: vec![ve],
-                value: None,
-            });
+            let b = self.emit_block(vec![ve], None);
             (ty_to_ir(Ty::Unit), b, ve)
         } else if sig.ret == Ty::Unit {
             let unit = self.ir.add_expr(IrExpr::UnitInstance);
-            let ret = self.ir.add_expr(IrExpr::Return(Some(unit)));
-            let b = self.ir.add_expr(IrExpr::Block {
-                stmts: vec![ve, ret],
-                value: None,
-            });
-            let inline_b = self.ir.add_expr(IrExpr::Block {
-                stmts: vec![ve],
-                value: Some(unit),
-            });
+            let ret = self.emit_return(Some(unit));
+            let b = self.emit_block(vec![ve, ret], None);
+            let inline_b = self.emit_block(vec![ve], Some(unit));
             (ty_to_ir(stored_value_ty(Ty::Unit)), b, inline_b)
         } else {
             let ret_val = if sig.ret.is_reference()
@@ -6525,11 +6488,8 @@ impl<'a> Lower<'a> {
             } else {
                 ve
             };
-            let ret = self.ir.add_expr(IrExpr::Return(Some(ret_val)));
-            let b = self.ir.add_expr(IrExpr::Block {
-                stmts: vec![ret],
-                value: None,
-            });
+            let ret = self.emit_return(Some(ret_val));
+            let b = self.emit_block(vec![ret], None);
             (ty_to_ir(sig.ret), b, ret_val)
         };
         let impl_name = format!("{}$lambda${}", self.cur_fn_name, self.lambda_seq);
@@ -6850,12 +6810,8 @@ impl<'a> Lower<'a> {
                 self.emit_set_field(this, 0, i, val)
             })
             .collect();
-        let init_body = (!init_stores.is_empty()).then(|| {
-            self.ir.add_expr(IrExpr::Block {
-                stmts: init_stores.clone(),
-                value: None,
-            })
-        });
+        let init_body =
+            (!init_stores.is_empty()).then(|| self.emit_block(init_stores.clone(), None));
         let arity_const = self
             .ir
             .add_expr(IrExpr::Const(IrConst::Int(jvm_arity as i32)));
@@ -7028,11 +6984,8 @@ impl<'a> Lower<'a> {
                     arg: tmpg,
                     type_operand: object_ir.clone(),
                 });
-                b_stmts.push(self.ir.add_expr(IrExpr::Return(Some(boxed))));
-                self.ir.add_expr(IrExpr::Block {
-                    stmts: b_stmts,
-                    value: None,
-                })
+                b_stmts.push(self.emit_return(Some(boxed)));
+                self.emit_block(b_stmts, None)
             } else {
                 // The inline machine's `label` field is appended to the lambda class now.
                 {
@@ -7101,15 +7054,9 @@ impl<'a> Lower<'a> {
                     rhs: sg,
                 });
                 let sg2 = self.ir.add_expr(IrExpr::GetValue(susp_idx));
-                let ret_susp = self.ir.add_expr(IrExpr::Return(Some(sg2)));
-                let ret_susp_b = self.ir.add_expr(IrExpr::Block {
-                    stmts: vec![ret_susp],
-                    value: None,
-                });
-                let empty = self.ir.add_expr(IrExpr::Block {
-                    stmts: vec![],
-                    value: None,
-                });
+                let ret_susp = self.emit_return(Some(sg2));
+                let ret_susp_b = self.emit_block(vec![ret_susp], None);
+                let empty = self.emit_block(vec![], None);
                 let susp_when = self.ir.add_expr(IrExpr::When {
                     branches: vec![(Some(is_eq), ret_susp_b), (None, empty)],
                 });
@@ -7134,26 +7081,20 @@ impl<'a> Lower<'a> {
                             arg: te,
                             type_operand: object_ir.clone(),
                         });
-                        vec![bind, this.ir.add_expr(IrExpr::Return(Some(boxed)))]
+                        vec![bind, this.emit_return(Some(boxed))]
                     } else {
                         let g = this.ir.add_expr(IrExpr::GetValue(src));
-                        vec![this.ir.add_expr(IrExpr::Return(Some(g)))]
+                        vec![this.emit_return(Some(g))]
                     }
                 };
                 let mut s0_stmts = vec![s0_tof, set_label, r_var, susp_when];
                 s0_stmts.extend(tail_at(self, r_idx));
-                let s0 = self.ir.add_expr(IrExpr::Block {
-                    stmts: s0_stmts,
-                    value: None,
-                });
+                let s0 = self.emit_block(s0_stmts, None);
                 // State 1 (resume): throwOnFailure(result); bind `a` from `result`; run the tail.
                 let s1_tof = throw_on_failure(self, 1)?;
                 let mut s1_stmts = vec![s1_tof];
                 s1_stmts.extend(tail_at(self, 1));
-                let s1 = self.ir.add_expr(IrExpr::Block {
-                    stmts: s1_stmts,
-                    value: None,
-                });
+                let s1 = self.emit_block(s1_stmts, None);
                 // Dispatch on `this.label`.
                 let lbl0r = self.ir.add_expr(IrExpr::GetValue(0));
                 let lbl0 = self.emit_get_field(lbl0r, class_id, label_idx);
@@ -7180,18 +7121,12 @@ impl<'a> Lower<'a> {
                     .runtime_ctor(RuntimeCtor::IllegalStateException)?;
                 let exc = self.emit_new_external(exc_ctor.internal, exc_ctor.ctor_desc, vec![msg]);
                 let throw = self.ir.add_expr(IrExpr::Throw { operand: exc });
-                let else_b = self.ir.add_expr(IrExpr::Block {
-                    stmts: vec![throw],
-                    value: None,
-                });
+                let else_b = self.emit_block(vec![throw], None);
                 let dispatch = self.ir.add_expr(IrExpr::When {
                     branches: vec![(Some(cond0), s0), (Some(cond1), s1), (None, else_b)],
                 });
                 self.next_value = saved_next_sm;
-                self.ir.add_expr(IrExpr::Block {
-                    stmts: vec![susp_var, dispatch],
-                    value: None,
-                })
+                self.emit_block(vec![susp_var, dispatch], None)
             }
         } else {
             let mut stmts = vec![throw_on_failure(self, 1)?];
@@ -7233,7 +7168,7 @@ impl<'a> Lower<'a> {
                 // singleton — boxing a Unit-typed (no-value) body would `areturn` an empty stack.
                 stmts.push(body_val);
                 let unit = self.ir.add_expr(IrExpr::UnitInstance);
-                stmts.push(self.ir.add_expr(IrExpr::Return(Some(unit))));
+                stmts.push(self.emit_return(Some(unit)));
             } else if body_ty == Ty::Nothing {
                 // The body always diverges (throws/returns) — no trailing return.
                 stmts.push(body_val);
@@ -7243,9 +7178,9 @@ impl<'a> Lower<'a> {
                     arg: body_val,
                     type_operand: object_ir.clone(),
                 });
-                stmts.push(self.ir.add_expr(IrExpr::Return(Some(boxed))));
+                stmts.push(self.emit_return(Some(boxed)));
             }
-            self.ir.add_expr(IrExpr::Block { stmts, value: None })
+            self.emit_block(stmts, None)
         };
         let invoke_susp_fid = self.add_synth_method(
             &internal,
@@ -7302,11 +7237,8 @@ impl<'a> Lower<'a> {
         let rg2 = self.ir.add_expr(IrExpr::GetValue(r_idx));
         let unit = self.ir.add_expr(IrExpr::UnitInstance);
         let call_is = self.emit_method_call(class_id, 0, rg2, vec![Some(unit)]);
-        inv_stmts.push(self.ir.add_expr(IrExpr::Return(Some(call_is))));
-        let inv_body = self.ir.add_expr(IrExpr::Block {
-            stmts: inv_stmts,
-            value: None,
-        });
+        inv_stmts.push(self.emit_return(Some(call_is)));
+        let inv_body = self.emit_block(inv_stmts, None);
         self.add_synth_method(
             &internal,
             class_id,
@@ -7352,11 +7284,8 @@ impl<'a> Lower<'a> {
             ));
         }
         let crg = self.ir.add_expr(IrExpr::GetValue(cr_idx));
-        create_stmts.push(self.ir.add_expr(IrExpr::Return(Some(crg))));
-        let create_body = self.ir.add_expr(IrExpr::Block {
-            stmts: create_stmts,
-            value: None,
-        });
+        create_stmts.push(self.emit_return(Some(crg)));
+        let create_body = self.emit_block(create_stmts, None);
         let mut create_params: Vec<Ty> = vec![Ty::obj("kotlin/Any"); arity];
         create_params.push(Ty::obj("kotlin/coroutines/Continuation"));
         self.add_synth_method(
@@ -7601,16 +7530,10 @@ impl<'a> Lower<'a> {
                 args,
             );
             let body = if ret == Ty::Unit {
-                self.ir.add_expr(IrExpr::Block {
-                    stmts: vec![call],
-                    value: None,
-                })
+                self.emit_block(vec![call], None)
             } else {
-                let ret_stmt = self.ir.add_expr(IrExpr::Return(Some(call)));
-                self.ir.add_expr(IrExpr::Block {
-                    stmts: vec![ret_stmt],
-                    value: None,
-                })
+                let ret_stmt = self.emit_return(Some(call));
+                self.emit_block(vec![ret_stmt], None)
             };
             self.add_synth_method(internal, class_id, &mname, params_ir, ret, body, false);
         }
@@ -7721,11 +7644,8 @@ impl<'a> Lower<'a> {
     /// `if (cond) return <b>` — a no-`else` statement-`when` whose only branch diverges.
     fn guard_return_bool(&mut self, cond: u32, b: bool) -> u32 {
         let f = self.ir.add_expr(IrExpr::Const(IrConst::Boolean(b)));
-        let ret = self.ir.add_expr(IrExpr::Return(Some(f)));
-        let blk = self.ir.add_expr(IrExpr::Block {
-            stmts: vec![ret],
-            value: None,
-        });
+        let ret = self.emit_return(Some(f));
+        let blk = self.emit_block(vec![ret], None);
         self.ir.add_expr(IrExpr::When {
             branches: vec![(Some(cond), blk)],
         })
@@ -7745,11 +7665,8 @@ impl<'a> Lower<'a> {
         // componentN(): `return this.fieldN`.
         for (i, (_, t)) in fields.iter().enumerate() {
             let get = self.this_field(class_id, i as u32);
-            let ret = self.ir.add_expr(IrExpr::Return(Some(get)));
-            let body = self.ir.add_expr(IrExpr::Block {
-                stmts: vec![ret],
-                value: None,
-            });
+            let ret = self.emit_return(Some(get));
+            let body = self.emit_block(vec![ret], None);
             self.add_synth_method(
                 internal,
                 class_id,
@@ -7770,11 +7687,8 @@ impl<'a> Lower<'a> {
                 .map(|i| self.ir.add_expr(IrExpr::GetValue(i as u32 + 1)))
                 .collect();
             let new = self.emit_new(class_id, args, None);
-            let ret = self.ir.add_expr(IrExpr::Return(Some(new)));
-            let body = self.ir.add_expr(IrExpr::Block {
-                stmts: vec![ret],
-                value: None,
-            });
+            let ret = self.emit_return(Some(new));
+            let body = self.emit_block(vec![ret], None);
             if let Some(copy_fid) = self.add_synth_method(
                 internal,
                 class_id,
@@ -7848,11 +7762,8 @@ impl<'a> Lower<'a> {
             }
             parts.push(self.ir_const_str(")".to_string()));
             let acc = self.ir.add_expr(IrExpr::StringConcat(parts));
-            let ret = self.ir.add_expr(IrExpr::Return(Some(acc)));
-            let body = self.ir.add_expr(IrExpr::Block {
-                stmts: vec![ret],
-                value: None,
-            });
+            let ret = self.emit_return(Some(acc));
+            let body = self.emit_block(vec![ret], None);
             if let Some(fid) = self.add_synth_method(
                 internal,
                 class_id,
@@ -7872,20 +7783,14 @@ impl<'a> Lower<'a> {
         {
             let body = if fields.is_empty() {
                 let zero = self.ir.add_expr(IrExpr::Const(IrConst::Int(0)));
-                let ret = self.ir.add_expr(IrExpr::Return(Some(zero)));
-                self.ir.add_expr(IrExpr::Block {
-                    stmts: vec![ret],
-                    value: None,
-                })
+                let ret = self.emit_return(Some(zero));
+                self.emit_block(vec![ret], None)
             } else if fields.len() == 1 {
                 let fv = self.this_field(class_id, 0);
                 let n = self.field_nullable(class_id, 0);
                 let h = self.field_hash(fv, fields[0].1, n)?;
-                let ret = self.ir.add_expr(IrExpr::Return(Some(h)));
-                self.ir.add_expr(IrExpr::Block {
-                    stmts: vec![ret],
-                    value: None,
-                })
+                let ret = self.emit_return(Some(h));
+                self.emit_block(vec![ret], None)
             } else {
                 // `result` occupies the first local slot after `this` (hashCode takes no parameters).
                 const RV: u32 = 1;
@@ -7920,8 +7825,8 @@ impl<'a> Lower<'a> {
                     }));
                 }
                 let getr = self.ir.add_expr(IrExpr::GetValue(RV));
-                stmts.push(self.ir.add_expr(IrExpr::Return(Some(getr))));
-                self.ir.add_expr(IrExpr::Block { stmts, value: None })
+                stmts.push(self.emit_return(Some(getr)));
+                self.emit_block(stmts, None)
             };
             if let Some(fid) =
                 self.add_synth_method(internal, class_id, "hashCode", vec![], Ty::Int, body, true)
@@ -7981,8 +7886,8 @@ impl<'a> Lower<'a> {
                 stmts.push(g);
             }
             let t = self.ir.add_expr(IrExpr::Const(IrConst::Boolean(true)));
-            stmts.push(self.ir.add_expr(IrExpr::Return(Some(t))));
-            let body = self.ir.add_expr(IrExpr::Block { stmts, value: None });
+            stmts.push(self.emit_return(Some(t)));
+            let body = self.emit_block(stmts, None);
             let obj = ty_to_ir(Ty::obj("kotlin/Any"));
             if let Some(fid) = self.add_synth_method(
                 internal,
@@ -8470,10 +8375,7 @@ impl<'a> Lower<'a> {
         if prelude.is_empty() {
             return call;
         }
-        self.ir.add_expr(IrExpr::Block {
-            stmts: prelude,
-            value: Some(call),
-        })
+        self.emit_block(prelude, Some(call))
     }
 
     /// Lower a top-level function call that OMITS one or more defaulted arguments, via kotlinc's
@@ -8671,10 +8573,7 @@ impl<'a> Lower<'a> {
             a.push(Some(self.ir.add_expr(IrExpr::GetValue(tmp))));
         }
         let mcall = self.emit_method_call(class, index, recv_read, a);
-        Some(self.ir.add_expr(IrExpr::Block {
-            stmts: prelude,
-            value: Some(mcall),
-        }))
+        Some(self.emit_block(prelude, Some(mcall)))
     }
 
     /// Lower a named same-module extension call while preserving source evaluation order.
@@ -8749,10 +8648,7 @@ impl<'a> Lower<'a> {
             a.push(self.ir.add_expr(IrExpr::GetValue(tmp)));
         }
         let ecall = self.emit_local_call(fid, a);
-        Some(self.ir.add_expr(IrExpr::Block {
-            stmts: prelude,
-            value: Some(ecall),
-        }))
+        Some(self.emit_block(prelude, Some(ecall)))
     }
 
     /// Reorder a NAMED-argument call to a CLASSPATH top-level function (`foo(b = …, a = …)`) into
@@ -9451,17 +9347,11 @@ impl<'a> Lower<'a> {
         let unit_return = ret == Ty::Unit;
         let body = if unit_return {
             let unit = self.ir.add_expr(IrExpr::UnitInstance);
-            let ret_e = self.ir.add_expr(IrExpr::Return(Some(unit)));
-            self.ir.add_expr(IrExpr::Block {
-                stmts: vec![call, ret_e],
-                value: None,
-            })
+            let ret_e = self.emit_return(Some(unit));
+            self.emit_block(vec![call, ret_e], None)
         } else {
-            let ret_e = self.ir.add_expr(IrExpr::Return(Some(call)));
-            self.ir.add_expr(IrExpr::Block {
-                stmts: vec![ret_e],
-                value: None,
-            })
+            let ret_e = self.emit_return(Some(call));
+            self.emit_block(vec![ret_e], None)
         };
         let adapter_ret = ty_to_ir(stored_value_ty(ret));
         let adapter_fid = self.ir.add_fun(IrFunction {
@@ -9538,17 +9428,11 @@ impl<'a> Lower<'a> {
         let unit_return = ret == Ty::Unit;
         let body = if unit_return {
             let unit = self.ir.add_expr(IrExpr::UnitInstance);
-            let ret_e = self.ir.add_expr(IrExpr::Return(Some(unit)));
-            self.ir.add_expr(IrExpr::Block {
-                stmts: vec![dcall, ret_e],
-                value: None,
-            })
+            let ret_e = self.emit_return(Some(unit));
+            self.emit_block(vec![dcall, ret_e], None)
         } else {
-            let ret_e = self.ir.add_expr(IrExpr::Return(Some(dcall)));
-            self.ir.add_expr(IrExpr::Block {
-                stmts: vec![ret_e],
-                value: None,
-            })
+            let ret_e = self.emit_return(Some(dcall));
+            self.emit_block(vec![ret_e], None)
         };
         let adapter_ret = ty_to_ir(stored_value_ty(ret));
         let adapter_fid = self.ir.add_fun(IrFunction {
@@ -9675,11 +9559,8 @@ impl<'a> Lower<'a> {
             .collect();
         let call = self.emit_local_call(target_fid, argvals);
         let unit = self.ir.add_expr(IrExpr::UnitInstance);
-        let ret_e = self.ir.add_expr(IrExpr::Return(Some(unit)));
-        let block = self.ir.add_expr(IrExpr::Block {
-            stmts: vec![call, ret_e],
-            value: None,
-        });
+        let ret_e = self.emit_return(Some(unit));
+        let block = self.emit_block(vec![call, ret_e], None);
         let impl_name = format!("{}$unitref${}", self.cur_fn_name, uniq);
         self.ir.add_fun(IrFunction {
             name: impl_name,
@@ -10079,13 +9960,13 @@ impl<'a> Lower<'a> {
         let mc = self.emit_method_call(class_id, index, recv_v, arg_vs);
         let (stmts, impl_ret) = if ret == Ty::Unit {
             let unit = self.ir.add_expr(IrExpr::UnitInstance);
-            let ret_e = self.ir.add_expr(IrExpr::Return(Some(unit)));
+            let ret_e = self.emit_return(Some(unit));
             (vec![mc, ret_e], ty_to_ir(stored_value_ty(Ty::Unit)))
         } else {
-            let ret_e = self.ir.add_expr(IrExpr::Return(Some(mc)));
+            let ret_e = self.emit_return(Some(mc));
             (vec![ret_e], ty_to_ir(ret))
         };
-        let block = self.ir.add_expr(IrExpr::Block { stmts, value: None });
+        let block = self.emit_block(stmts, None);
         // Name with the ref's globally-unique AST expr id (not the per-function `lambda_seq`): two
         // OVERLOADED enclosing functions share `cur_fn_name`, so a seq-based name would clash.
         let impl_name = format!("{}$boundref${}", self.cur_fn_name, e.0);
@@ -10135,12 +10016,12 @@ impl<'a> Lower<'a> {
         // Wrap in an explicit return so the method's control flow terminates: `return this.<m>(args)`
         // for a value-returning target, or the call then a bare `return` for a `Unit`/void one.
         let stmts = if ret == Ty::Unit {
-            let r = self.ir.add_expr(IrExpr::Return(None));
+            let r = self.emit_return(None);
             vec![call, r]
         } else {
-            vec![self.ir.add_expr(IrExpr::Return(Some(call)))]
+            vec![self.emit_return(Some(call))]
         };
-        let body = self.ir.add_expr(IrExpr::Block { stmts, value: None });
+        let body = self.emit_block(stmts, None);
         let acc_fid = self.ir.add_fun(IrFunction {
             name: accessor.clone(),
             params,
@@ -10567,14 +10448,8 @@ impl<'a> Lower<'a> {
         let if_break = self.ir.add_expr(IrExpr::When {
             branches: vec![(Some(at_end), brk)],
         });
-        let update = self.ir.add_expr(IrExpr::Block {
-            stmts: vec![if_break, incs],
-            value: None,
-        });
-        let wbody = self.ir.add_expr(IrExpr::Block {
-            stmts: out,
-            value: None,
-        });
+        let update = self.emit_block(vec![if_break, incs], None);
+        let wbody = self.emit_block(out, None);
         let wh = self.ir.add_expr(IrExpr::While {
             cond,
             body: wbody,
@@ -10583,10 +10458,7 @@ impl<'a> Lower<'a> {
             label,
         });
         self.scope.truncate(depth);
-        Some(self.ir.add_expr(IrExpr::Block {
-            stmts: vec![var_r, var_i, var_n, wh],
-            value: None,
-        }))
+        Some(self.emit_block(vec![var_r, var_i, var_n, wh], None))
     }
 
     /// `for (x in progression)` over an `IntProgression`/`LongProgression`/`CharProgression` (and the
@@ -10734,14 +10606,8 @@ impl<'a> Lower<'a> {
             var: i_v,
             value: inc,
         });
-        let update = self.ir.add_expr(IrExpr::Block {
-            stmts: vec![if_break, incs],
-            value: None,
-        });
-        let wbody = self.ir.add_expr(IrExpr::Block {
-            stmts: out,
-            value: None,
-        });
+        let update = self.emit_block(vec![if_break, incs], None);
+        let wbody = self.emit_block(out, None);
         let wh = self.ir.add_expr(IrExpr::While {
             cond,
             body: wbody,
@@ -10750,10 +10616,7 @@ impl<'a> Lower<'a> {
             label,
         });
         self.scope.truncate(depth);
-        Some(self.ir.add_expr(IrExpr::Block {
-            stmts: vec![var_r, var_i, var_n, var_s, wh],
-            value: None,
-        }))
+        Some(self.emit_block(vec![var_r, var_i, var_n, var_s, wh], None))
     }
 
     fn lower_foreach_iterator(
@@ -10900,10 +10763,7 @@ impl<'a> Lower<'a> {
                 value: inc,
             })
         });
-        let wbody = self.ir.add_expr(IrExpr::Block {
-            stmts: out,
-            value: None,
-        });
+        let wbody = self.emit_block(out, None);
         let wh = self.ir.add_expr(IrExpr::While {
             cond,
             body: wbody,
@@ -10918,7 +10778,7 @@ impl<'a> Lower<'a> {
         }
         stmts.push(var_it);
         stmts.push(wh);
-        Some(self.ir.add_expr(IrExpr::Block { stmts, value: None }))
+        Some(self.emit_block(stmts, None))
     }
 
     /// Lower a positional argument list against parallel parameter types, coercing each argument to its
@@ -10972,10 +10832,7 @@ impl<'a> Lower<'a> {
     /// where a Unit flows into a reference target (`= unitExpr` as `Any?`) or is an `==`/`!=` operand.
     fn unit_value_after_effect(&mut self, effect: u32) -> u32 {
         let unit = self.ir.add_expr(IrExpr::UnitInstance);
-        self.ir.add_expr(IrExpr::Block {
-            stmts: vec![effect],
-            value: Some(unit),
-        })
+        self.emit_block(vec![effect], Some(unit))
     }
 
     pub(crate) fn lower_arg(&mut self, arg: AstExprId, target: &Ty) -> Option<u32> {
@@ -11243,10 +11100,7 @@ impl<'a> Lower<'a> {
         let assertion =
             self.emit_new_external(assertion_ctor.internal, assertion_ctor.ctor_desc, vec![msg]);
         let throw_assertion = self.ir.add_expr(IrExpr::Throw { operand: assertion });
-        let body = self.ir.add_expr(IrExpr::Block {
-            stmts: vec![invoke],
-            value: Some(throw_assertion),
-        });
+        let body = self.emit_block(vec![invoke], Some(throw_assertion));
         let catch_var = self.fresh_value();
         let caught = self.ir.add_expr(IrExpr::GetValue(catch_var));
         Some(self.ir.add_expr(IrExpr::Try {
@@ -11278,10 +11132,7 @@ impl<'a> Lower<'a> {
         // `// ASSERTIONS_MODE: always-disable` — the call is elided entirely; the condition (and message
         // lambda) are not even evaluated, matching kotlinc. Yield an empty `Unit` statement.
         if self.afile.assert_always_disabled {
-            return Some(self.ir.add_expr(IrExpr::Block {
-                stmts: vec![],
-                value: None,
-            }));
+            return Some(self.emit_block(vec![], None));
         }
         let cond = self.lower_arg(*args.first()?, &ty_to_ir(Ty::Boolean))?;
         // The thrown `AssertionError`: no-arg for `assert(cond)`; for `assert(cond) { msg }` invoke the
@@ -11312,14 +11163,8 @@ impl<'a> Lower<'a> {
             )
         };
         let throw = self.ir.add_expr(IrExpr::Throw { operand: assertion });
-        let throw_block = self.ir.add_expr(IrExpr::Block {
-            stmts: vec![throw],
-            value: None,
-        });
-        let empty = self.ir.add_expr(IrExpr::Block {
-            stmts: vec![],
-            value: None,
-        });
+        let throw_block = self.emit_block(vec![throw], None);
+        let empty = self.emit_block(vec![], None);
         // `if (cond) {} else { throw }` ≡ `if (!cond) throw`.
         let check = self.ir.add_expr(IrExpr::When {
             branches: vec![(Some(cond), empty), (None, throw_block)],
@@ -11470,10 +11315,7 @@ impl<'a> Lower<'a> {
                 branches: vec![(Some(eq), f), (None, t)],
             });
         }
-        Some(self.ir.add_expr(IrExpr::Block {
-            stmts: vec![avar, bvar],
-            value: Some(eq),
-        }))
+        Some(self.emit_block(vec![avar, bvar], Some(eq)))
     }
 
     /// Mark a value's substituted STATIC type for the backend's box/unbox coercion (an unsigned/primitive
@@ -12113,15 +11955,9 @@ impl<'a> Lower<'a> {
         let body_val = body_val?;
         let result = if rl.returns_receiver {
             let recv_read = self.ir.add_expr(IrExpr::GetValue(p_slot));
-            self.ir.add_expr(IrExpr::Block {
-                stmts: vec![var_p, body_val],
-                value: Some(recv_read),
-            })
+            self.emit_block(vec![var_p, body_val], Some(recv_read))
         } else {
-            self.ir.add_expr(IrExpr::Block {
-                stmts: vec![var_p],
-                value: Some(body_val),
-            })
+            self.emit_block(vec![var_p], Some(body_val))
         };
         Some(result)
     }
@@ -12174,15 +12010,9 @@ impl<'a> Lower<'a> {
         let body_diverges = self.info.ty(body) == Ty::Nothing;
         Some(if returns_receiver && !body_diverges {
             let recv_read = self.ir.add_expr(IrExpr::GetValue(p_slot));
-            self.ir.add_expr(IrExpr::Block {
-                stmts: vec![var_p, body_val],
-                value: Some(recv_read),
-            })
+            self.emit_block(vec![var_p, body_val], Some(recv_read))
         } else {
-            self.ir.add_expr(IrExpr::Block {
-                stmts: vec![var_p],
-                value: Some(body_val),
-            })
+            self.emit_block(vec![var_p], Some(body_val))
         })
     }
 
@@ -12456,9 +12286,9 @@ impl<'a> Lower<'a> {
                     // Coerce the body to the return type (a generic-erased `Object` return gets the
                     // `checkcast` kotlinc inserts).
                     let ve = self.lower_arg(*e, ret_ty)?;
-                    vec![self.ir.add_expr(IrExpr::Return(Some(ve)))]
+                    vec![self.emit_return(Some(ve))]
                 };
-                self.ir.add_expr(IrExpr::Block { stmts, value: None })
+                self.emit_block(stmts, None)
             }
             FunBody::Block(blk) => self.block_as_body(*blk, ret_ty)?,
             FunBody::None => return None,
@@ -12487,10 +12317,7 @@ impl<'a> Lower<'a> {
         // needs no `return` — the diverging statement already transfers control; the trailing is dead.
         if diverged {
             self.scope.truncate(depth);
-            return Some(self.ir.add_expr(IrExpr::Block {
-                stmts: out,
-                value: None,
-            }));
+            return Some(self.emit_block(out, None));
         }
         if let Some(t) = trailing {
             let tt = self.info.ty(t);
@@ -12511,23 +12338,17 @@ impl<'a> Lower<'a> {
                 let tail = self.lower_tail_expr(t, ret_ty)?;
                 out.push(tail);
                 self.scope.truncate(depth);
-                return Some(self.ir.add_expr(IrExpr::Block {
-                    stmts: out,
-                    value: None,
-                }));
+                return Some(self.emit_block(out, None));
             }
             let ve = self.expr(t)?;
             if *ret_ty == Ty::Unit || diverges {
                 out.push(ve); // Unit trailing, or a diverging one (returns/throws itself — no wrap)
             } else {
-                out.push(self.ir.add_expr(IrExpr::Return(Some(ve))));
+                out.push(self.emit_return(Some(ve)));
             }
         }
         self.scope.truncate(depth);
-        Some(self.ir.add_expr(IrExpr::Block {
-            stmts: out,
-            value: None,
-        }))
+        Some(self.emit_block(out, None))
     }
 
     /// Lower a `tailrec fun` body: rewrite tail-position self-calls into a `while(true)` loop (reassign
@@ -12584,10 +12405,7 @@ impl<'a> Lower<'a> {
             post_test: false,
             label: Some(label),
         });
-        let body = self.ir.add_expr(IrExpr::Block {
-            stmts: vec![whilexpr],
-            value: None,
-        });
+        let body = self.emit_block(vec![whilexpr], None);
         self.ir.functions[fid as usize].body = Some(body);
         Some(())
     }
@@ -12629,7 +12447,7 @@ impl<'a> Lower<'a> {
         stmts.push(self.ir.add_expr(IrExpr::Continue {
             label: Some(ctx.label.clone()),
         }));
-        Some(self.ir.add_expr(IrExpr::Block { stmts, value: None }))
+        Some(self.emit_block(stmts, None))
     }
 
     /// Lower an expression in TAIL position of a `tailrec` body: an `if` recurses into both branches; a
@@ -12661,7 +12479,7 @@ impl<'a> Lower<'a> {
                     return None;
                 }
                 let v = self.lower_arg(e, ret_ty)?;
-                Some(self.ir.add_expr(IrExpr::Return(Some(v))))
+                Some(self.emit_return(Some(v)))
             }
         }
     }
@@ -12681,12 +12499,9 @@ impl<'a> Lower<'a> {
         let mut out = vec![body];
         if !diverges {
             // No tail self-call fired on this path → return `Unit`, exiting the `while(true)` loop.
-            out.push(self.ir.add_expr(IrExpr::Return(None)));
+            out.push(self.emit_return(None));
         }
-        Some(self.ir.add_expr(IrExpr::Block {
-            stmts: out,
-            value: None,
-        }))
+        Some(self.emit_block(out, None))
     }
 
     /// Lower a block's statements + optional trailing expression in TAIL position. Only the final
@@ -12721,13 +12536,7 @@ impl<'a> Lower<'a> {
             if self.stmt_diverges(s) {
                 // A non-tail statement that always transfers control makes the tail dead — stop here.
                 self.scope.truncate(depth);
-                return Some((
-                    self.ir.add_expr(IrExpr::Block {
-                        stmts: out,
-                        value: None,
-                    }),
-                    true,
-                ));
+                return Some((self.emit_block(out, None), true));
             }
         }
         let tail = match trailing {
@@ -12740,13 +12549,7 @@ impl<'a> Lower<'a> {
         };
         out.push(ir);
         self.scope.truncate(depth);
-        Some((
-            self.ir.add_expr(IrExpr::Block {
-                stmts: out,
-                value: None,
-            }),
-            diverges,
-        ))
+        Some((self.emit_block(out, None), diverges))
     }
 
     /// Lower the TAIL statement of a `Unit` `tailrec` body. Returns `(ir, always_transfers_control)`.
@@ -12765,13 +12568,7 @@ impl<'a> Lower<'a> {
         let mut tmp = Vec::new();
         self.append_stmt(s, &mut tmp)?;
         let d = self.stmt_diverges(s);
-        Some((
-            self.ir.add_expr(IrExpr::Block {
-                stmts: tmp,
-                value: None,
-            }),
-            d,
-        ))
+        Some((self.emit_block(tmp, None), d))
     }
 
     /// Lower a `Unit`-typed expression in TAIL position: `if` recurses into both branches (a no-`else`
@@ -12979,7 +12776,7 @@ impl<'a> Lower<'a> {
                             }
                         }
                         stmts.push(self.ir.add_expr(IrExpr::Break { label: Some(brk) }));
-                        return Some(self.ir.add_expr(IrExpr::Block { stmts, value: None }));
+                        return Some(self.emit_block(stmts, None));
                     }
                 }
                 // Inside an expanded `inline fun` body: `return x` is not a real method return — it
@@ -13008,7 +12805,7 @@ impl<'a> Lower<'a> {
                         stmts.push(self.expr(e)?);
                     }
                     stmts.push(self.ir.add_expr(IrExpr::Break { label: Some(label) }));
-                    return Some(self.ir.add_expr(IrExpr::Block { stmts, value: None }));
+                    return Some(self.emit_block(stmts, None));
                 }
                 let v = match e {
                     // Coerce to the enclosing function's return type (generic-erased `Object` → cast).
@@ -13062,10 +12859,10 @@ impl<'a> Lower<'a> {
                     }
                     self.try_finally_stack = saved;
                     let rv = ret_val.map(|tmp| self.ir.add_expr(IrExpr::GetValue(tmp)));
-                    stmts.push(self.ir.add_expr(IrExpr::Return(rv)));
-                    return Some(self.ir.add_expr(IrExpr::Block { stmts, value: None }));
+                    stmts.push(self.emit_return(rv));
+                    return Some(self.emit_block(stmts, None));
                 }
-                Some(self.ir.add_expr(IrExpr::Return(v)))
+                Some(self.emit_return(v))
             }
             Stmt::LocalLateinit { name, ty } => {
                 // A lateinit local captured by a NON-inline closure isn't modeled: the closure holds the
@@ -13103,10 +12900,7 @@ impl<'a> Lower<'a> {
                     let unit_ty = stored_value_ty(Ty::Unit);
                     let side = self.expr(init)?;
                     let unit_val = self.ir.add_expr(IrExpr::UnitInstance);
-                    let seq = self.ir.add_expr(IrExpr::Block {
-                        stmts: vec![side],
-                        value: Some(unit_val),
-                    });
+                    let seq = self.emit_block(vec![side], Some(unit_val));
                     let v = self.fresh_value();
                     self.scope.push((name.clone(), v, unit_ty));
                     return Some(self.ir.add_expr(IrExpr::Variable {
@@ -13318,10 +13112,7 @@ impl<'a> Lower<'a> {
                 let mut out = Vec::new();
                 let sp = self.afile.destructure_source_props.get(&s.0).cloned();
                 self.lower_destructure(&entries, init, sp.as_deref(), &mut out)?;
-                Some(self.ir.add_expr(IrExpr::Block {
-                    stmts: out,
-                    value: None,
-                }))
+                Some(self.emit_block(out, None))
             }
             Stmt::Assign { name, value } => {
                 // `field = …` inside a custom setter body writes the property's backing field.
@@ -13566,10 +13357,7 @@ impl<'a> Lower<'a> {
                     Some(store)
                 } else {
                     prelude.push(store);
-                    Some(self.ir.add_expr(IrExpr::Block {
-                        stmts: prelude,
-                        value: None,
-                    }))
+                    Some(self.emit_block(prelude, None))
                 }
             }
             Stmt::AssignIndex {
@@ -13623,10 +13411,7 @@ impl<'a> Lower<'a> {
                     Some(store)
                 } else {
                     prelude.push(store);
-                    Some(self.ir.add_expr(IrExpr::Block {
-                        stmts: prelude,
-                        value: None,
-                    }))
+                    Some(self.emit_block(prelude, None))
                 }
             }
             Stmt::While { cond, body, label } => {
@@ -13635,10 +13420,7 @@ impl<'a> Lower<'a> {
                 let mut out = Vec::new();
                 self.append_body_stmts(body, &mut out)?;
                 self.scope.truncate(depth);
-                let b = self.ir.add_expr(IrExpr::Block {
-                    stmts: out,
-                    value: None,
-                });
+                let b = self.emit_block(out, None);
                 Some(self.ir.add_expr(IrExpr::While {
                     cond: c,
                     body: b,
@@ -13655,10 +13437,7 @@ impl<'a> Lower<'a> {
                 // The condition is lowered after the body's scope is dropped — a `do…while` condition
                 // can't see body-local declarations (Kotlin scopes them to the body).
                 let c = self.expr(cond)?;
-                let b = self.ir.add_expr(IrExpr::Block {
-                    stmts: out,
-                    value: None,
-                });
+                let b = self.emit_block(out, None);
                 Some(self.ir.add_expr(IrExpr::While {
                     cond: c,
                     body: b,
@@ -13824,15 +13603,9 @@ impl<'a> Lower<'a> {
                     let if_break = self.ir.add_expr(IrExpr::When {
                         branches: vec![(Some(at_end), brk)],
                     });
-                    self.ir.add_expr(IrExpr::Block {
-                        stmts: vec![if_break, inc],
-                        value: None,
-                    })
+                    self.emit_block(vec![if_break, inc], None)
                 };
-                let wbody = self.ir.add_expr(IrExpr::Block {
-                    stmts: out,
-                    value: None,
-                });
+                let wbody = self.emit_block(out, None);
                 let wh = self.ir.add_expr(IrExpr::While {
                     cond,
                     body: wbody,
@@ -13846,10 +13619,7 @@ impl<'a> Lower<'a> {
                     prologue.push(ve);
                 }
                 prologue.push(wh);
-                Some(self.ir.add_expr(IrExpr::Block {
-                    stmts: prologue,
-                    value: None,
-                }))
+                Some(self.emit_block(prologue, None))
             }
             // `for (x in arr)` over an array → an index loop `i=0; while (i<arr.size) { x=arr[i]; …; i++ }`.
             Stmt::ForEach {
@@ -13860,16 +13630,10 @@ impl<'a> Lower<'a> {
             } => self.lower_for_each(&name, iterable, body, label),
             // A local-function declaration emits no code here — its body is lifted to a separate static
             // method (pass 2'); a call to it routes to that method.
-            Stmt::LocalFun(_) => Some(self.ir.add_expr(IrExpr::Block {
-                stmts: vec![],
-                value: None,
-            })),
+            Stmt::LocalFun(_) => Some(self.emit_block(vec![], None)),
             // A local class is lowered via its hoisted top-level `Decl::Class`; the in-body statement
             // emits nothing.
-            Stmt::LocalClass(_) => Some(self.ir.add_expr(IrExpr::Block {
-                stmts: vec![],
-                value: None,
-            })),
+            Stmt::LocalClass(_) => Some(self.emit_block(vec![], None)),
         }
     }
 
@@ -14072,10 +13836,7 @@ impl<'a> Lower<'a> {
         let brk_stmt = self.ir.add_expr(IrExpr::Break {
             label: Some(brk.clone()),
         });
-        let loop_body = self.ir.add_expr(IrExpr::Block {
-            stmts: vec![body_stmt, brk_stmt],
-            value: None,
-        });
+        let loop_body = self.emit_block(vec![body_stmt, brk_stmt], None);
         let cond = self.ir.add_expr(IrExpr::Const(IrConst::Boolean(true)));
         let whilew = self.ir.add_expr(IrExpr::While {
             cond,
@@ -14094,14 +13855,8 @@ impl<'a> Lower<'a> {
             m2,
             vec![null2],
         );
-        let try_body = self.ir.add_expr(IrExpr::Block {
-            stmts: vec![whilew],
-            value: None,
-        });
-        let fin = self.ir.add_expr(IrExpr::Block {
-            stmts: vec![unlock_call],
-            value: None,
-        });
+        let try_body = self.emit_block(vec![whilew], None);
+        let fin = self.emit_block(vec![unlock_call], None);
         let tryf = self.ir.add_expr(IrExpr::Try {
             body: try_body,
             catches: vec![],
@@ -14109,10 +13864,7 @@ impl<'a> Lower<'a> {
             result: Ty::Unit,
         });
         let get = self.ir.add_expr(IrExpr::GetValue(result_slot));
-        Some(self.ir.add_expr(IrExpr::Block {
-            stmts: vec![var_mutex, lock_call, var_result, tryf],
-            value: Some(get),
-        }))
+        Some(self.emit_block(vec![var_mutex, lock_call, var_result, tryf], Some(get)))
     }
 
     fn lower_suspend_accumulate_hof(
@@ -14277,10 +14029,7 @@ impl<'a> Lower<'a> {
         wstmts.append(&mut loop_stmts);
         wstmts.push(var_part);
         wstmts.push(add_call);
-        let wbody = self.ir.add_expr(IrExpr::Block {
-            stmts: wstmts,
-            value: None,
-        });
+        let wbody = self.emit_block(wstmts, None);
         let wh = self.ir.add_expr(IrExpr::While {
             cond,
             body: wbody,
@@ -14289,10 +14038,7 @@ impl<'a> Lower<'a> {
             label: None,
         });
         let acc_read = self.ir.add_expr(IrExpr::GetValue(acc_v));
-        Some(self.ir.add_expr(IrExpr::Block {
-            stmts: vec![var_acc, var_it, wh],
-            value: Some(acc_read),
-        }))
+        Some(self.emit_block(vec![var_acc, var_it, wh], Some(acc_read)))
     }
 
     fn lower_for_each(
@@ -14401,10 +14147,7 @@ impl<'a> Lower<'a> {
             var: i_v,
             value: inc,
         });
-        let wbody = self.ir.add_expr(IrExpr::Block {
-            stmts: out,
-            value: None,
-        });
+        let wbody = self.emit_block(out, None);
         let wh = self.ir.add_expr(IrExpr::While {
             cond,
             body: wbody,
@@ -14418,7 +14161,7 @@ impl<'a> Lower<'a> {
             stmts.push(va);
         }
         stmts.extend([var_i, var_n, wh]);
-        Some(self.ir.add_expr(IrExpr::Block { stmts, value: None }))
+        Some(self.emit_block(stmts, None))
     }
 
     /// If `e` is a plain (non-boxed) local variable read that the loop `body` does NOT reassign, its IR
@@ -15221,19 +14964,13 @@ impl<'a> Lower<'a> {
                     label: Some(label.clone()),
                 });
                 if unit_ret {
-                    self.ir.add_expr(IrExpr::Block {
-                        stmts: vec![body_val, brk],
-                        value: None,
-                    })
+                    self.emit_block(vec![body_val, brk], None)
                 } else {
                     let assign = self.ir.add_expr(IrExpr::SetValue {
                         var: slot,
                         value: body_val,
                     });
-                    self.ir.add_expr(IrExpr::Block {
-                        stmts: vec![assign, brk],
-                        value: None,
-                    })
+                    self.emit_block(vec![assign, brk], None)
                 }
             };
             let cond = self.ir.add_expr(IrExpr::Const(IrConst::Boolean(true)));
@@ -15276,17 +15013,11 @@ impl<'a> Lower<'a> {
             } else {
                 self.ir.add_expr(IrExpr::GetValue(slot))
             };
-            Some(self.ir.add_expr(IrExpr::Block {
-                stmts,
-                value: Some(value),
-            }))
+            Some(self.emit_block(stmts, Some(value)))
         } else if stmts.is_empty() {
             Some(body_val)
         } else {
-            Some(self.ir.add_expr(IrExpr::Block {
-                stmts,
-                value: Some(body_val),
-            }))
+            Some(self.emit_block(stmts, Some(body_val)))
         }
     }
 
@@ -15468,10 +15199,7 @@ impl<'a> Lower<'a> {
                 let brk_stmt = self.ir.add_expr(IrExpr::Break {
                     label: Some(brk.clone()),
                 });
-                let loop_body = self.ir.add_expr(IrExpr::Block {
-                    stmts: vec![assign, brk_stmt],
-                    value: None,
-                });
+                let loop_body = self.emit_block(vec![assign, brk_stmt], None);
                 let cond = self.ir.add_expr(IrExpr::Const(IrConst::Boolean(true)));
                 let loopw = self.ir.add_expr(IrExpr::While {
                     cond,
@@ -15482,10 +15210,7 @@ impl<'a> Lower<'a> {
                 });
                 stmts.push(loopw);
                 let get = self.ir.add_expr(IrExpr::GetValue(result_slot));
-                return Some(self.ir.add_expr(IrExpr::Block {
-                    stmts,
-                    value: Some(get),
-                }));
+                return Some(self.emit_block(stmts, Some(get)));
             }
             let brk = format!("$lamret${}", self.fresh_value());
             self.inline_lambda_ret
@@ -15497,10 +15222,7 @@ impl<'a> Lower<'a> {
             let brk_stmt = self.ir.add_expr(IrExpr::Break {
                 label: Some(brk.clone()),
             });
-            let loop_body = self.ir.add_expr(IrExpr::Block {
-                stmts: vec![body_val, brk_stmt],
-                value: None,
-            });
+            let loop_body = self.emit_block(vec![body_val, brk_stmt], None);
             let cond = self.ir.add_expr(IrExpr::Const(IrConst::Boolean(true)));
             let loopw = self.ir.add_expr(IrExpr::While {
                 cond,
@@ -15511,10 +15233,7 @@ impl<'a> Lower<'a> {
             });
             stmts.push(loopw);
             let unit = self.ir.add_expr(IrExpr::UnitInstance);
-            return Some(self.ir.add_expr(IrExpr::Block {
-                stmts,
-                value: Some(unit),
-            }));
+            return Some(self.emit_block(stmts, Some(unit)));
         }
         // A BARE `return` in the spliced lambda body is NON-LOCAL: it returns from the function enclosing
         // the lambda literal, NOT from the inline fn whose call is being expanded. Clear the inline-return
@@ -15529,10 +15248,7 @@ impl<'a> Lower<'a> {
         if stmts.is_empty() {
             Some(body_val)
         } else {
-            Some(self.ir.add_expr(IrExpr::Block {
-                stmts,
-                value: Some(body_val),
-            }))
+            Some(self.emit_block(stmts, Some(body_val)))
         }
     }
 
@@ -15683,7 +15399,7 @@ impl<'a> Lower<'a> {
                     Some(ve) => Some(self.expr(ve)?),
                     None => None,
                 };
-                self.ir.add_expr(IrExpr::Return(v))
+                self.emit_return(v)
             }
             // `break`/`continue` in expression position (`m[k] ?: continue`) — the same loop jump as the
             // statement form, lowered to `IrExpr::Break`/`Continue`. A pending `finally` between the jump
@@ -15843,10 +15559,7 @@ impl<'a> Lower<'a> {
                 if rty == Ty::Null {
                     let recv = self.expr(receiver)?;
                     let nullc = self.ir.add_expr(IrExpr::Const(IrConst::Null));
-                    return Some(self.ir.add_expr(IrExpr::Block {
-                        stmts: vec![recv],
-                        value: Some(nullc),
-                    }));
+                    return Some(self.emit_block(vec![recv], Some(nullc)));
                 }
                 // A primitive receiver can never be null, so `a?.foo(b)` is a vacuous safe call (kotlinc
                 // warns "unnecessary safe call") ≡ `a.foo(b)`. Fold an arithmetic operator-method call to
@@ -16023,10 +15736,7 @@ impl<'a> Lower<'a> {
                     // A `Unit` result (`x?.let { for … }`): run the member for effect, then yield
                     // `Unit.INSTANCE` so this branch matches the `null` branch (both references).
                     let unit = self.ir.add_expr(IrExpr::UnitInstance);
-                    self.ir.add_expr(IrExpr::Block {
-                        stmts: vec![member],
-                        value: Some(unit),
-                    })
+                    self.emit_block(vec![member], Some(unit))
                 } else {
                     member
                 };
@@ -16043,19 +15753,13 @@ impl<'a> Lower<'a> {
                         branches: vec![(Some(cond), member)],
                     });
                     let nullv = self.ir.add_expr(IrExpr::Const(IrConst::Null));
-                    return Some(self.ir.add_expr(IrExpr::Block {
-                        stmts: vec![var, guard],
-                        value: Some(nullv),
-                    }));
+                    return Some(self.emit_block(vec![var, guard], Some(nullv)));
                 }
                 let nullb = self.ir.add_expr(IrExpr::Const(IrConst::Null));
                 let when = self.ir.add_expr(IrExpr::When {
                     branches: vec![(Some(cond), member), (None, nullb)],
                 });
-                self.ir.add_expr(IrExpr::Block {
-                    stmts: vec![var],
-                    value: Some(when),
-                })
+                self.emit_block(vec![var], Some(when))
             }
             // `a ?: b` → `{ val t = a; if (t != null) t else b }` (t bound once, so `a` runs once).
             Expr::Elvis { lhs, rhs } => {
@@ -16084,10 +15788,7 @@ impl<'a> Lower<'a> {
                             let when = self.ir.add_expr(IrExpr::When {
                                 branches: vec![(Some(cond), member), (None, rv)],
                             });
-                            return Some(self.ir.add_expr(IrExpr::Block {
-                                stmts: vec![var],
-                                value: Some(when),
-                            }));
+                            return Some(self.emit_block(vec![var], Some(when)));
                         }
                     }
                 }
@@ -16116,10 +15817,7 @@ impl<'a> Lower<'a> {
                         init: Some(lv),
                     });
                     let rv = self.lower_arg(rhs, &ty_to_ir(result_ty))?;
-                    return Some(self.ir.add_expr(IrExpr::Block {
-                        stmts: vec![sink],
-                        value: Some(rv),
-                    }));
+                    return Some(self.emit_block(vec![sink], Some(rv)));
                 }
                 if !lty.is_reference() {
                     return self.lower_arg(lhs, &ty_to_ir(result_ty));
@@ -16165,10 +15863,7 @@ impl<'a> Lower<'a> {
                 let when = self.ir.add_expr(IrExpr::When {
                     branches: vec![(Some(cond), get2), (None, rv)],
                 });
-                self.ir.add_expr(IrExpr::Block {
-                    stmts: vec![var],
-                    value: Some(when),
-                })
+                self.emit_block(vec![var], Some(when))
             }
             // A block in expression position: `{ stmt; …; trailing }`; value is the trailing expr.
             Expr::Block { stmts, trailing } => {
@@ -16196,7 +15891,7 @@ impl<'a> Lower<'a> {
                     _ => None,
                 };
                 self.scope.truncate(depth);
-                self.ir.add_expr(IrExpr::Block { stmts: out, value })
+                self.emit_block(out, value)
             }
             Expr::Lambda { params, body } => return self.lower_lambda(e, &params, body),
             // Unbound top-level function reference `::foo` → the same `invokedynamic` +
@@ -16419,11 +16114,8 @@ impl<'a> Lower<'a> {
                         .map(|i| self.ir.add_expr(IrExpr::GetValue(i)))
                         .collect();
                     let new_e = self.emit_new(class_id, argvals, None);
-                    let ret_e = self.ir.add_expr(IrExpr::Return(Some(new_e)));
-                    let block = self.ir.add_expr(IrExpr::Block {
-                        stmts: vec![ret_e],
-                        value: None,
-                    });
+                    let ret_e = self.emit_return(Some(new_e));
+                    let block = self.emit_block(vec![ret_e], None);
                     let impl_name = format!("{}$ctorref${}", self.cur_fn_name, self.lambda_seq);
                     self.lambda_seq += 1;
                     let fid = self.ir.add_fun(IrFunction {
@@ -17485,10 +17177,7 @@ impl<'a> Lower<'a> {
                             let when = self.ir.add_expr(IrExpr::When {
                                 branches: vec![(Some(isnull), fixed), (None, cmp)],
                             });
-                            return Some(self.ir.add_expr(IrExpr::Block {
-                                stmts: vec![var],
-                                value: Some(when),
-                            }));
+                            return Some(self.emit_block(vec![var], Some(when)));
                         }
                         // A general `Any == 5`: box the primitive operand → structural `Intrinsics.areEqual`.
                         let obj = ty_to_ir(Ty::obj("kotlin/Any"));
@@ -17527,10 +17216,7 @@ impl<'a> Lower<'a> {
                         return match else_branch {
                             Some(els) => self.expr(els),
                             // `if (false) {}` with no else is a no-op `Unit` statement.
-                            None => Some(self.ir.add_expr(IrExpr::Block {
-                                stmts: vec![],
-                                value: None,
-                            })),
+                            None => Some(self.emit_block(vec![], None)),
                         };
                     }
                     _ => {}
@@ -17624,10 +17310,7 @@ impl<'a> Lower<'a> {
                             ty: opnd_ty,
                             init: Some(arg),
                         });
-                        return Some(self.ir.add_expr(IrExpr::Block {
-                            stmts: vec![temp],
-                            value: Some(combined),
-                        }));
+                        return Some(self.emit_block(vec![temp], Some(combined)));
                     }
                 }
                 let raw = self.expr(operand)?;
@@ -17778,10 +17461,7 @@ impl<'a> Lower<'a> {
                         in_chain
                     }
                 };
-                self.ir.add_expr(IrExpr::Block {
-                    stmts: vec![var_s, var_e, var_v],
-                    value: Some(cond),
-                })
+                self.emit_block(vec![var_s, var_e, var_v], Some(cond))
             }
             Expr::RangeTo { lo, hi, kind } => {
                 use crate::ast::RangeKind;
@@ -17854,10 +17534,7 @@ impl<'a> Lower<'a> {
                     } else {
                         self.scalar_update_value(read, elem, undo, one_c)
                     };
-                    return Some(self.ir.add_expr(IrExpr::Block {
-                        stmts: vec![set],
-                        value: Some(value),
-                    }));
+                    return Some(self.emit_block(vec![set], Some(value)));
                 }
                 let (v, ty) = self.lookup(&name)?;
                 // A user `inc`/`dec` operator on a non-numeric variable → `x = x.inc()` yielding the
@@ -17870,10 +17547,7 @@ impl<'a> Lower<'a> {
                             value: call,
                         });
                         let value = self.ir.add_expr(IrExpr::GetValue(v));
-                        return Some(self.ir.add_expr(IrExpr::Block {
-                            stmts: vec![set],
-                            value: Some(value),
-                        }));
+                        return Some(self.emit_block(vec![set], Some(value)));
                     }
                     // Postfix: capture the old value before updating.
                     let tmp = self.fresh_value();
@@ -17889,10 +17563,7 @@ impl<'a> Lower<'a> {
                         value: call,
                     });
                     let value = self.ir.add_expr(IrExpr::GetValue(tmp));
-                    return Some(self.ir.add_expr(IrExpr::Block {
-                        stmts: vec![var_decl, set],
-                        value: Some(value),
-                    }));
+                    return Some(self.emit_block(vec![var_decl, set], Some(value)));
                 }
                 let op = if dec { IrBinOp::Sub } else { IrBinOp::Add };
                 if ty.int_arithmetic_repr() != ty {
@@ -17913,10 +17584,7 @@ impl<'a> Lower<'a> {
                         let undo = if dec { IrBinOp::Add } else { IrBinOp::Sub };
                         self.scalar_update_value(read, ty, undo, IrConst::Int(1))
                     };
-                    return Some(self.ir.add_expr(IrExpr::Block {
-                        stmts: vec![set],
-                        value: Some(value),
-                    }));
+                    return Some(self.emit_block(vec![set], Some(value)));
                 }
                 let one = self.scalar_one_const(ty)?;
                 // i = i ± 1 (no temp: wraparound is consistent for Int/Long/Float/Double)
@@ -17941,10 +17609,7 @@ impl<'a> Lower<'a> {
                         rhs: one2,
                     })
                 };
-                self.ir.add_expr(IrExpr::Block {
-                    stmts: vec![set],
-                    value: Some(value),
-                })
+                self.emit_block(vec![set], Some(value))
             }
             Expr::As {
                 operand,
@@ -17989,10 +17654,7 @@ impl<'a> Lower<'a> {
                         // `as? Prim` (`Unit` is never a primitive wrapper) → always `null`.
                         self.ir.add_expr(IrExpr::Const(IrConst::Null))
                     };
-                    return Some(self.ir.add_expr(IrExpr::Block {
-                        stmts: vec![eff],
-                        value: Some(value),
-                    }));
+                    return Some(self.emit_block(vec![eff], Some(value)));
                 }
                 // `x as? T` (safe cast): `{ val t = x; if (t is T) t as T else null }` — `instanceof`
                 // then `checkcast` on the non-null branch, `null` on a mismatch (never throws). The
@@ -18053,10 +17715,7 @@ impl<'a> Lower<'a> {
                     let when = self.ir.add_expr(IrExpr::When {
                         branches: vec![(Some(is_t), cast_t), (None, nullc)],
                     });
-                    return Some(self.ir.add_expr(IrExpr::Block {
-                        stmts: vec![var_t],
-                        value: Some(when),
-                    }));
+                    return Some(self.emit_block(vec![var_t], Some(when)));
                 }
                 let arg = self.expr(operand)?;
                 // A PRIMITIVE operand cast to a reference type (`42 as Any`, `'a' as Char?`, `b as
@@ -18376,10 +18035,7 @@ impl<'a> Lower<'a> {
                 let when = self.ir.add_expr(IrExpr::When { branches });
                 // Prepend the subject-temp declaration (if any) so it's evaluated before the arms.
                 match subj_tmp {
-                    Some((_, var)) => self.ir.add_expr(IrExpr::Block {
-                        stmts: vec![var],
-                        value: Some(when),
-                    }),
+                    Some((_, var)) => self.emit_block(vec![var], Some(when)),
                     None => when,
                 }
             }
@@ -18456,10 +18112,7 @@ impl<'a> Lower<'a> {
                     let body_val = self.expr(body);
                     self.scope.truncate(depth);
                     let body_val = body_val?;
-                    self.ir.add_expr(IrExpr::Block {
-                        stmts: vec![var],
-                        value: Some(body_val),
-                    })
+                    self.emit_block(vec![var], Some(body_val))
                 } else {
                     self.expr(body)?
                 }
@@ -19904,16 +19557,10 @@ impl<'a> Lower<'a> {
                         let body_val = body_val?;
                         let returns_receiver = matches!(name.as_str(), "also" | "apply");
                         let result = if !returns_receiver {
-                            self.ir.add_expr(IrExpr::Block {
-                                stmts: vec![var_p],
-                                value: Some(body_val),
-                            })
+                            self.emit_block(vec![var_p], Some(body_val))
                         } else {
                             let recv_read = self.ir.add_expr(IrExpr::GetValue(p_slot));
-                            self.ir.add_expr(IrExpr::Block {
-                                stmts: vec![var_p, body_val],
-                                value: Some(recv_read),
-                            })
+                            self.emit_block(vec![var_p, body_val], Some(recv_read))
                         };
                         return Some(result);
                     }
