@@ -8473,12 +8473,16 @@ impl<'a> Lower<'a> {
     ) -> Option<Vec<AstExprId>> {
         // The single classpath top-level overload with recorded parameter names (federated library set —
         // a classpath function is not a module function, so `ModuleSymbols` wouldn't surface it).
-        let sets: Vec<Vec<String>> = self
-            .resolver()
-            .top_level_function_set(fname)
-            .into_top_level_with_param_names()
-            .map(|o| o.call_sig.param_names)
-            .collect();
+        let sets: Vec<Vec<String>> = crate::libraries::FunctionSet {
+            overloads: self
+                .resolver()
+                .resolve_symbol(crate::symbol_resolver::SymRecv::TopLevel, fname, &[])
+                .map(crate::symbol_resolver::Symbol::overloads)
+                .unwrap_or_default(),
+        }
+        .into_top_level_with_param_names()
+        .map(|o| o.call_sig.param_names)
+        .collect();
         let [param_names] = sets.as_slice() else {
             return None;
         };
@@ -15333,12 +15337,16 @@ impl<'a> Lower<'a> {
                 // reference to a FUNCTION of this name (module or classpath, e.g. `::greet`) is NOT a
                 // constructor reference — fall through to the function-reference paths below.
                 let names_a_function = self.fun_ids.iter().any(|((n, _), _)| n == &name)
-                    || self
-                        .resolver()
-                        .top_level_function_set(&name)
-                        .top_level()
-                        .next()
-                        .is_some();
+                    || crate::libraries::FunctionSet {
+                        overloads: self
+                            .resolver()
+                            .resolve_symbol(crate::symbol_resolver::SymRecv::TopLevel, &name, &[])
+                            .map(crate::symbol_resolver::Symbol::overloads)
+                            .unwrap_or_default(),
+                    }
+                    .top_level()
+                    .next()
+                    .is_some();
                 if !self.module_declares(&name) && !names_a_function {
                     let ci = self.class_of(sig.ret)?;
                     let class_id = ci.id;
@@ -15420,11 +15428,15 @@ impl<'a> Lower<'a> {
                 }
                 // A CLASSPATH top-level function reference (`::greet` from a jar/dependency module): the
                 // sole `TopLevel` overload's `invoke` does `invokestatic <classpath-facade>.greet(args)`.
-                let tl: Vec<_> = self
-                    .resolver()
-                    .top_level_function_set(&name)
-                    .into_top_level()
-                    .collect();
+                let tl: Vec<_> = crate::libraries::FunctionSet {
+                    overloads: self
+                        .resolver()
+                        .resolve_symbol(crate::symbol_resolver::SymRecv::TopLevel, &name, &[])
+                        .map(crate::symbol_resolver::Symbol::overloads)
+                        .unwrap_or_default(),
+                }
+                .into_top_level()
+                .collect();
                 let [o] = tl.as_slice() else { return None };
                 let c = &o.callable;
                 if c.params.len() != arity || c.vararg_elem.is_some() || c.ret == Ty::Nothing {

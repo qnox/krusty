@@ -3262,11 +3262,15 @@ fn infer_lit_ty_p(
                 .into_iter()
                 .map(|o| o.callable.ret)
                 .collect(),
-            None => resolver
-                .top_level_function_set(name)
-                .into_top_level()
-                .map(|o| o.callable.ret)
-                .collect(),
+            None => crate::libraries::FunctionSet {
+                overloads: resolver
+                    .resolve_symbol(crate::symbol_resolver::SymRecv::TopLevel, name, &[])
+                    .map(crate::symbol_resolver::Symbol::overloads)
+                    .unwrap_or_default(),
+            }
+            .into_top_level()
+            .map(|o| o.callable.ret)
+            .collect(),
         };
         let mut ret: Option<Ty> = None;
         for r in rets {
@@ -3576,7 +3580,12 @@ fn infer_lit_ty_p(
             receiver: None,
             name,
         } if name != "class" => {
-            let overloads = resolver.top_level_function_set(name);
+            let overloads = crate::libraries::FunctionSet {
+                overloads: resolver
+                    .resolve_symbol(crate::symbol_resolver::SymRecv::TopLevel, name, &[])
+                    .map(crate::symbol_resolver::Symbol::overloads)
+                    .unwrap_or_default(),
+            };
             match overloads.into_single_top_level() {
                 Some(o) if o.call_sig.requires_all_args(o.callable.params.len()) => {
                     Ty::fun(o.callable.params.clone(), o.callable.ret)
@@ -5465,11 +5474,16 @@ impl<'a> Checker<'a> {
         if self.module_declares("contract") {
             return false;
         }
-        self.resolver()
-            .top_level_function_set("contract")
-            .overloads
-            .iter()
-            .any(|o| o.callable.owner.starts_with("kotlin/contracts"))
+        crate::libraries::FunctionSet {
+            overloads: self
+                .resolver()
+                .resolve_symbol(crate::symbol_resolver::SymRecv::TopLevel, "contract", &[])
+                .map(crate::symbol_resolver::Symbol::overloads)
+                .unwrap_or_default(),
+        }
+        .overloads
+        .iter()
+        .any(|o| o.callable.owner.starts_with("kotlin/contracts"))
     }
     /// Resolve an operator/method call `receiver.name(args)` — a user-class MEMBER, a same-module
     /// EXTENSION, or a library member — checking each argument type, and return its result type.
@@ -8892,10 +8906,18 @@ impl<'a> Checker<'a> {
                         }
                     }
                     if !self.syms.classes.contains_key(&name) && self.lookup(&name).is_none() {
-                        let overload = self
-                            .resolver()
-                            .top_level_function_set(&name)
-                            .into_single_top_level();
+                        let overload = crate::libraries::FunctionSet {
+                            overloads: self
+                                .resolver()
+                                .resolve_symbol(
+                                    crate::symbol_resolver::SymRecv::TopLevel,
+                                    &name,
+                                    &[],
+                                )
+                                .map(crate::symbol_resolver::Symbol::overloads)
+                                .unwrap_or_default(),
+                        }
+                        .into_single_top_level();
                         if let Some(o) = overload {
                             if o.call_sig.requires_all_args(o.callable.params.len())
                                 && o.callable.ret != Ty::Nothing
@@ -10459,9 +10481,8 @@ impl<'a> Checker<'a> {
                         // (`foo(b = …, a = …)` against a function from a jar/dependency module). Module
                         // top-level functions are covered by `module_declares`; this queries the federated
                         // library set for a classpath overload carrying names.
-                        || self
-                            .resolver()
-                            .top_level_function_set(n)
+                        || crate::libraries::FunctionSet { overloads: self
+                            .resolver().resolve_symbol(crate::symbol_resolver::SymRecv::TopLevel, n, &[]).map(crate::symbol_resolver::Symbol::overloads).unwrap_or_default() }
                             .top_level()
                             .any(|o| o.call_sig.has_param_names())
                         // A CLASSPATH CONSTRUCTOR whose `@Metadata` records parameter names
@@ -12124,7 +12145,13 @@ impl<'a> Checker<'a> {
                 // A top-level NON-public (`@InlineOnly`) inline fn (`require`/`check`) inlines its lambda
                 // argument (or the file is skipped), so a mutable capture is an inline capture — type the
                 // lambda body with mutation allowed (don't `Ref`-box the captured var).
-                let top_level_functions = self.resolver().top_level_function_set(&fname);
+                let top_level_functions = crate::libraries::FunctionSet {
+                    overloads: self
+                        .resolver()
+                        .resolve_symbol(crate::symbol_resolver::SymRecv::TopLevel, &fname, &[])
+                        .map(crate::symbol_resolver::Symbol::overloads)
+                        .unwrap_or_default(),
+                };
                 let toplevel_inline = toplevel_lambda_pts.is_some()
                     && top_level_functions
                         .top_level()
@@ -12860,12 +12887,20 @@ impl<'a> Checker<'a> {
                         .filter(|ns| ns.iter().any(Option::is_some))
                     {
                         Some(names) => {
-                            let pnames: Vec<Vec<String>> = self
-                                .resolver()
-                                .top_level_function_set(&fname)
-                                .into_top_level_with_param_names()
-                                .map(|o| o.call_sig.param_names)
-                                .collect();
+                            let pnames: Vec<Vec<String>> = crate::libraries::FunctionSet {
+                                overloads: self
+                                    .resolver()
+                                    .resolve_symbol(
+                                        crate::symbol_resolver::SymRecv::TopLevel,
+                                        &fname,
+                                        &[],
+                                    )
+                                    .map(crate::symbol_resolver::Symbol::overloads)
+                                    .unwrap_or_default(),
+                            }
+                            .into_top_level_with_param_names()
+                            .map(|o| o.call_sig.param_names)
+                            .collect();
                             match pnames.as_slice() {
                                 [pn] => match map_call_args(args, Some(names), pn, pn.len(), &[]) {
                                     Ok(slots) if slots.iter().all(Option::is_some) => {
