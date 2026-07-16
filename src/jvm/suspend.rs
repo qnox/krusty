@@ -1219,8 +1219,52 @@ fn build_state_machine(ir: &mut IrFile, facade: &str, fid: u32, b: ExprId, unit_
     head_writes.sort_unstable();
     head_writes.dedup();
     reads.retain(|idx| param_ty(*idx).is_some() || head_writes.binary_search(idx).is_ok());
+    // kotlinc spills every named REFERENCE param/local IN SCOPE at a suspension point — regardless of
+    // liveness (an unused param still gets an `L$N` slot) — excluding the binding of the LAST suspension
+    // itself (not yet in scope there). Union that scope set with the liveness set above (which keeps
+    // primitives and the locals internal to a suspending-loop last statement) so the `L$N` field set
+    // matches kotlinc's.
+    let mut spill_idx: Vec<u32> = reads;
+    for (i, p) in real_params.iter().enumerate() {
+        if p.is_reference() {
+            spill_idx.push(this_offset + i as u32);
+        }
+    }
+    let mut scope_writes: Vec<u32> = Vec::new();
+    for &s in &stmts[..last_susp] {
+        collect_live_writes(ir, s, &suspend_set, &mut scope_writes);
+    }
+    for w in scope_writes {
+        if find_local_ty(ir, b, w).is_some_and(|t| t.is_reference()) {
+            spill_idx.push(w);
+        }
+    }
+    // The LAST suspension's own DIRECT binding (`val rules = <suspend call>` with nothing suspending
+    // after) is NOT in scope at any suspension point — kotlinc gives it no slot (its value arrives as
+    // the resume `result`, bound as a fresh local). Only the direct-call shape: a CONDITIONAL init
+    // (`val a = if (…) susp() else 7`) assigns the local from several branch states, which need the
+    // spilled slot's loop-top declaration. Drop it unless an EARLIER statement also writes it.
+    if let IrExpr::Variable {
+        index,
+        init: Some(init),
+        ..
+    } = &ir.exprs[stmts[last_susp] as usize]
+    {
+        if is_suspend_call(ir, *init, &suspend_set) {
+            let idx = *index;
+            let mut earlier: Vec<u32> = Vec::new();
+            for &s in &stmts[..last_susp] {
+                collect_live_writes(ir, s, &suspend_set, &mut earlier);
+            }
+            if !earlier.contains(&idx) {
+                spill_idx.retain(|&i| i != idx);
+            }
+        }
+    }
+    spill_idx.sort_unstable();
+    spill_idx.dedup();
     let mut spilled: Vec<(u32, Ty)> = Vec::new();
-    for idx in reads {
+    for idx in spill_idx {
         if let Some(ty) = param_ty(idx).or_else(|| find_local_ty(ir, b, idx)) {
             spilled.push((idx, spill_field_ty(ty)));
         }
