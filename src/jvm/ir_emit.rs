@@ -438,10 +438,13 @@ fn emit_pass(
     // Each class — with its optional `@Metadata` (the provider returns `None` for the default emit).
     for c in &ir.classes {
         let cm = class_meta(&c.fq_name);
+        let mut extra: Vec<(String, Vec<u8>)> = Vec::new();
         out.push((
             c.fq_name.clone(),
-            emit_class(ir, c, facade, bodies, cm.as_ref()),
+            emit_class(ir, c, facade, bodies, cm.as_ref(), &mut extra),
         ));
+        // An interface's `$DefaultImpls` holder (its `name$default` synthetics), when any exist.
+        out.extend(extra);
     }
     if INLINE_BAIL.with(|b| b.borrow().is_some()) {
         return None;
@@ -856,6 +859,7 @@ fn emit_class(
     facade: &str,
     bodies: &dyn MethodBodies,
     class_meta: Option<&KotlinMetadata>,
+    extra: &mut Vec<(String, Vec<u8>)>,
 ) -> Vec<u8> {
     if !c.enum_entries.is_empty() {
         return emit_enum_class(ir, c, facade, bodies);
@@ -867,7 +871,7 @@ fn emit_class(
         return emit_annotation_class(c, class_meta);
     }
     if c.is_interface {
-        return emit_interface_class(ir, c, facade, bodies, class_meta);
+        return emit_interface_class(ir, c, facade, bodies, class_meta, extra);
     }
     if let Some(user_tys) = &c.enum_entry_of {
         return emit_enum_entry_subclass(ir, c, facade, bodies, user_tys);
@@ -1192,6 +1196,40 @@ fn emit_class(
         // defaults, then `invokespecial` the real `<init>`).
         if let Some(defaults) = ir.class_ctor_defaults.get(&c.fq_name) {
             emit_ctor_default_stub(ir, &c.fq_name, &param_tys, defaults, &mut cw, bodies);
+            // EVERY parameter defaulted → kotlinc also emits the no-arg convenience `<init>()`
+            // (`AuditFilters()` in Java/reflection), delegating to the `$default` overload with a
+            // full mask.
+            if !param_tys.is_empty()
+                && defaults.len() == param_tys.len()
+                && defaults.iter().all(Option::is_some)
+                && !c.is_sealed
+                && ctor_access == 0x0001
+            {
+                let mut z = CodeBuilder::new(1);
+                z.aload(0);
+                for &t in &param_tys {
+                    push_zero(t, &mut z, &mut cw);
+                }
+                z.push_int((1i32 << param_tys.len()) - 1, &mut cw);
+                z.aconst_null();
+                let mut stub_params = param_tys.clone();
+                stub_params.push(Ty::Int);
+                stub_params.push(Ty::obj("kotlin/jvm/internal/DefaultConstructorMarker"));
+                let aw: i32 = 1 + stub_params
+                    .iter()
+                    .map(|t| slot_words(*t) as i32)
+                    .sum::<i32>();
+                let m = cw.methodref(
+                    &c.fq_name,
+                    "<init>",
+                    &method_descriptor(&stub_params, Ty::Unit),
+                );
+                z.invokespecial(m, aw, 0);
+                z.ret_void();
+                z.ensure_locals(1);
+                z.link();
+                cw.add_method(0x0001, "<init>", "()V", &z);
+            }
         }
         // A value-class-param primary ctor is private (above); kotlinc exposes a PUBLIC|SYNTHETIC accessor
         // `<init>(…args, DefaultConstructorMarker)` that simply delegates to it, so Java/reflection can
@@ -2793,12 +2831,14 @@ fn emit_interface_class(
     facade: &str,
     bodies: &dyn MethodBodies,
     class_meta: Option<&KotlinMetadata>,
+    extra: &mut Vec<(String, Vec<u8>)>,
 ) -> Vec<u8> {
     let mut cw = ClassWriter::new(&c.fq_name, "java/lang/Object");
     cw.set_access(0x0001 | 0x0200 | 0x0400); // PUBLIC | INTERFACE | ABSTRACT
     for itf in &c.interfaces {
         cw.add_interface(itf);
     }
+    let mut default_impls: Option<ClassWriter> = None;
     for &fid in &c.methods {
         let f = &ir.functions[fid as usize];
         if f.body.is_some() {
@@ -2810,10 +2850,21 @@ fn emit_interface_class(
         }
         // An interface method with default parameters gets a STATIC `<name>$default(iface, params…, mask,
         // marker)` (the JVM realization of interface default args) — it applies the defaults then dispatches
-        // to the abstract method via `invokeinterface`.
+        // to the abstract method via `invokeinterface`. kotlinc emits it ON THE INTERFACE (call sites use
+        // it) AND a compatibility copy on the `<Iface>$DefaultImpls` holder class (`public final`).
         if let Some(defaults) = ir.param_defaults(fid) {
             emit_default_stub(ir, fid, &c.fq_name, facade, &mut cw, defaults, bodies, true);
+            let di = default_impls.get_or_insert_with(|| {
+                let mut w =
+                    ClassWriter::new(&format!("{}$DefaultImpls", c.fq_name), "java/lang/Object");
+                w.set_access(0x0011 | 0x0020); // PUBLIC | FINAL | SUPER
+                w
+            });
+            emit_default_stub(ir, fid, &c.fq_name, facade, di, defaults, bodies, true);
         }
+    }
+    if let Some(di) = default_impls {
+        extra.push((format!("{}$DefaultImpls", c.fq_name), di.finish()));
     }
     // A companion `val` on the interface is a `public static final` field ON THE INTERFACE (interface
     // fields are implicitly static final): a `const val` as a `ConstantValue`, a non-const `val`
@@ -5159,7 +5210,8 @@ impl<'a> Emitter<'a> {
                     let stub_name = format!("{name}$default");
                     // The `$default` stub of an INTERFACE method is a STATIC interface method — referenced
                     // via an `InterfaceMethodref` constant (a plain `Methodref` is an
-                    // `IncompatibleClassChangeError`), still invoked with `invokestatic`.
+                    // `IncompatibleClassChangeError`), still invoked with `invokestatic`. (kotlinc ALSO
+                    // emits a compatibility copy on `<Iface>$DefaultImpls`; call sites use the interface.)
                     let m = if is_iface {
                         self.cw.interface_methodref(&owner, &stub_name, &stub_desc)
                     } else {

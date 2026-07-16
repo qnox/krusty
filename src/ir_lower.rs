@@ -391,6 +391,11 @@ pub fn lower_file(
     }
 
     // Pass 1a: register classes (id, fields) and reserve method FunIds.
+    // An INTERFACE method default that references a class declared LATER in the file
+    // (`filters: AuditFilters = AuditFilters()`) can't lower mid-pass — retried after the loop.
+    // One entry per method: `(FunId, per-param (default expr, checker type), parameter names)`.
+    type PendingIfaceDefault = (u32, Vec<(Option<crate::ast::ExprId>, Ty)>, Vec<String>);
+    let mut pending_iface_defaults: Vec<PendingIfaceDefault> = Vec::new();
     for &d in &file.decls {
         if let Decl::Class(c) = file.decl(d) {
             let internal = class_internal(file, &c.name);
@@ -924,11 +929,21 @@ pub fn lower_file(
                             }
                         }
                     }
-                    let names = m.params.iter().map(|p| p.name.clone()).collect();
+                    let names: Vec<String> = m.params.iter().map(|p| p.name.clone()).collect();
                     if c.is_interface() && !all_const {
-                        // An interface's non-constant default is never modeled (no pass-2 body) — drop the
-                        // marker so an omitted-arg call skips the file instead of miscompiling.
+                        // An interface's non-constant default may reference a class declared LATER in
+                        // the file — retry once every class is registered (below); a default that
+                        // still doesn't lower drops the marker (an omitted-arg call skips the file).
                         lo.ir.fn_params.remove(&fid);
+                        pending_iface_defaults.push((
+                            fid,
+                            m.params
+                                .iter()
+                                .zip(&sig.params)
+                                .map(|(p, t)| (p.default, *t))
+                                .collect(),
+                            names,
+                        ));
                     } else {
                         lo.ir
                             .fn_params
@@ -1484,6 +1499,65 @@ pub fn lower_file(
             }
         }
     }
+    // Retry the interface defaults that failed mid-pass (forward class references): every class is
+    // registered now. STRUCTURALLY scope-free defaults only — a literal, or a no-/literal-arg
+    // construction of a plain (non-value) class (`filters: AuditFilters = AuditFilters()`). Anything
+    // else — an implicit-`this` member call (`x: T = defaultX()`), a value-class construction (whose
+    // stub-side boxing isn't modeled here) — keeps the marker dropped (omitted-arg calls skip the
+    // file, never miscompile).
+    for (fid, params, names) in std::mem::take(&mut pending_iface_defaults) {
+        let scope_free = |lo: &Lower, d: crate::ast::ExprId| -> bool {
+            if is_const_literal(file, d) {
+                return true;
+            }
+            match file.expr(d) {
+                Expr::Call { callee, args } => {
+                    let Expr::Name(n) = file.expr(*callee) else {
+                        return false;
+                    };
+                    let internal = class_internal(file, n);
+                    let Some(ci) = lo.classes.get(&internal) else {
+                        return false;
+                    };
+                    let is_value = lo
+                        .ir
+                        .classes
+                        .get(ci.id as usize)
+                        .is_some_and(|c| c.is_value);
+                    !is_value && args.iter().all(|&a| is_const_literal(file, a))
+                }
+                _ => false,
+            }
+        };
+        if !params
+            .iter()
+            .all(|(d, _)| d.is_none_or(|d| scope_free(&lo, d)))
+        {
+            continue;
+        }
+        lo.scope.clear();
+        lo.cur_class = None;
+        let mut defaults = Vec::new();
+        let mut ok = true;
+        for (d, t) in &params {
+            match d {
+                None => defaults.push(None),
+                Some(d) => match lo.lower_arg(*d, &ty_to_ir(*t)) {
+                    Some(e) => defaults.push(Some(e)),
+                    None => {
+                        ok = false;
+                        break;
+                    }
+                },
+            }
+        }
+        if ok {
+            lo.ir
+                .fn_params
+                .insert(fid, FnParamInfo::defaults(names, defaults));
+        }
+    }
+
     // Pass 1b: register top-level functions and extension functions. An `inline fun` is not emitted
     // as a standalone method — it is expanded at each call site (pass 2 skips it too).
     for &d in &file.decls {
