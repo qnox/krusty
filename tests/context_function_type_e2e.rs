@@ -27,3 +27,18 @@ fn context_and_value_params_flatten() {
         }\n";
     assert_eq!(run(SRC).expect("context + value params"), "OK");
 }
+
+/// A context receiver on an EXTENSION function type (`context(S) Int.(Long) -> R`) folds BOTH the
+/// context receiver and the extension receiver in as leading parameters — `(S, Int, Long) -> R`. A
+/// plain function reference of that shape converts to it. Previously the parser rejected this type.
+#[test]
+fn context_receiver_on_extension_function_type() {
+    const SRC: &str = "// LANGUAGE: +ContextParameters\n\
+fun helper(s: String, i: Int, l: Long): Int = i + l.toInt() + s.length\n\
+fun use(f: context(String) Int.(Long) -> Int): Int = f(\"ctx\", 5, 3L)\n\
+fun box(): String = if (use(::helper) == 11) \"OK\" else \"no\"\n";
+    assert_eq!(
+        run(SRC).expect("context receiver on extension function type"),
+        "OK"
+    );
+}

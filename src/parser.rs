@@ -3607,29 +3607,11 @@ impl<'a> Parser<'a> {
                 }
             }
             self.expect(TokenKind::RParen, "')'");
-            // Only a `(`-started plain function type absorbs the context receivers as leading params. A
-            // context receiver on an EXTENSION function type (`context(O) K.(A) -> R`) would need the
-            // receiver folded in too — unsupported. Consume and DISCARD the following type, then return
-            // an `<error>` type so the file skips: falling through would parse `K.(A) -> R` WITHOUT its
-            // context receiver and build a wrong-arity function type (a miscompile).
-            if !self.at(TokenKind::LParen) {
-                self.diags.error(
-                    span,
-                    "krusty: context receiver on an extension function type is not supported"
-                        .to_string(),
-                );
-                let _ = self.parse_type();
-                return TypeRef {
-                    name: "<error>".to_string(),
-                    nullable: false,
-                    arg: None,
-                    targs: Vec::new(),
-                    span,
-                    fun_params: Vec::new(),
-                    fun_has_receiver: false,
-                    fun_suspend: false,
-                };
-            }
+            // A `(`-started plain function type absorbs the context receivers as leading params below. An
+            // EXTENSION function type (`context(O) K.(A) -> R`) folds them in ahead of its receiver — the
+            // `Ident`-started branch prepends `context_types` to `[receiver, params…]`. A context receiver
+            // on a NON-function type is invalid; the guard at that branch's tail rejects it (never a
+            // silently mis-arity function type).
         }
         // Function type: `(A, B) -> R` — starts with `(`.
         if self.at(TokenKind::LParen) {
@@ -3783,7 +3765,11 @@ impl<'a> Parser<'a> {
             {
                 self.bump(); // '.'
                 self.bump(); // '('
-                let mut fun_params = vec![base];
+                             // Any leading `context(…)` receivers fold in AHEAD of the extension receiver, so
+                             // `context(O) K.(A) -> R` becomes the plain `(O, K, A) -> R` (matching how context
+                             // parameters lower). `context_types` is empty for an ordinary extension function type.
+                let mut fun_params = std::mem::take(&mut context_types);
+                fun_params.push(base);
                 while !self.at(TokenKind::RParen) && !self.at(TokenKind::Eof) {
                     if self.at(TokenKind::Ident)
                         && self
@@ -3812,6 +3798,24 @@ impl<'a> Parser<'a> {
                     fun_params,
                     fun_has_receiver: true,
                     fun_suspend,
+                };
+            }
+            // A `context(…)` receiver must precede a FUNCTION type; on a plain type it is invalid — reject
+            // rather than silently dropping the context receivers (which would mis-type the value).
+            if !context_types.is_empty() {
+                self.diags.error(
+                    span,
+                    "krusty: a context receiver is only valid on a function type".to_string(),
+                );
+                return TypeRef {
+                    name: "<error>".to_string(),
+                    nullable: false,
+                    arg: None,
+                    targs: Vec::new(),
+                    span,
+                    fun_params: Vec::new(),
+                    fun_has_receiver: false,
+                    fun_suspend: false,
                 };
             }
             base
