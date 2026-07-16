@@ -74,6 +74,46 @@ pub fn reparent_lambda_impls(ir: &mut IrFile) {
         .iter()
         .flat_map(|c| c.methods.iter().copied())
         .collect();
+    // Impls whose `invokedynamic` (also) emits from FACADE code — facade-owned function bodies and
+    // static initializers — must STAY on the facade: a suspend-lambda state machine SHARES its body
+    // exprs with facade code, so a class walk alone would move an impl the facade still references.
+    let facade_reachable: std::collections::HashSet<u32> = {
+        let mut roots: Vec<crate::ir::ExprId> = Vec::new();
+        for (i, f) in ir.functions.iter().enumerate() {
+            // A lambda IMPL's body emits wherever the impl itself lands (facade or a class), so it
+            // is NOT a facade root — its nested lambdas are marked transitively below only when the
+            // impl is genuinely reachable from real facade code.
+            if !owned.contains(&(i as u32))
+                && f.dispatch_receiver.is_none()
+                && !ir.lambda_own_params_from.contains_key(&(i as u32))
+            {
+                if let Some(b) = f.body {
+                    roots.push(b);
+                }
+            }
+        }
+        for st in &ir.statics {
+            roots.push(st.init);
+        }
+        let mut out = std::collections::HashSet::new();
+        let mut seen: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        let mut stack = roots;
+        while let Some(cur) = stack.pop() {
+            if !seen.insert(cur) {
+                continue;
+            }
+            if let IrExpr::Lambda { impl_fn, .. } = &ir.exprs[cur as usize] {
+                if out.insert(*impl_fn) {
+                    // Its nested lambdas emit wherever it does — keep the whole chain facade-side.
+                    if let Some(b) = ir.functions.get(*impl_fn as usize).and_then(|f| f.body) {
+                        stack.push(b);
+                    }
+                }
+            }
+            crate::ir::for_each_child(&ir.exprs, cur, &mut |ch| stack.push(ch));
+        }
+        out
+    };
     for cid in 0..ir.classes.len() {
         // Class-context roots whose code emits inside this class: member/method bodies (covers a
         // suspend machine's `invokeSuspend`), the instance initializer, super/delegate arguments,
@@ -105,6 +145,7 @@ pub fn reparent_lambda_impls(ir: &mut IrFile) {
                 // Only a free (facade-owned) standalone impl moves; one already owned by a class —
                 // including THIS one — stays. A spliced (inline-only) impl never emits a method.
                 if !owned.contains(&fid)
+                    && !facade_reachable.contains(&fid)
                     && !ir.inline_only_fns.contains(&fid)
                     && ir
                         .functions
@@ -147,6 +188,7 @@ pub fn mark_must_inline_lambdas(ir: &mut IrFile) {
     }
     for fid in dead {
         ir.inline_only_fns.insert(fid);
+        ir.must_inline_lambdas.insert(fid);
     }
 }
 
@@ -186,8 +228,19 @@ pub fn emit_all_with_class_meta(
         metadata,
         class_meta,
         &std::collections::HashSet::new(),
+        &std::collections::HashSet::new(),
     )?;
     let used = USED_LAMBDAS.with(|u| u.borrow().clone());
+    // A MUST-INLINE message lambda whose call-site splice FELL BACK to a real `invokedynamic`
+    // (pass 1 recorded the use): its impl was pre-marked `inline_only` on the assumption the splice
+    // always succeeds — emitting the reference without the method would be a broken class
+    // (`NoSuchMethodError`). RESCUE it: re-emit with the impl method present. (A bare-return impl is
+    // never rescued — it is not a valid standalone method — and is not in `must_inline_lambdas`.)
+    let rescued: std::collections::HashSet<u32> = used
+        .iter()
+        .copied()
+        .filter(|fid| ir.must_inline_lambdas.contains(fid))
+        .collect();
     let class_member_fids: std::collections::HashSet<u32> = ir
         .classes
         .iter()
@@ -212,12 +265,13 @@ pub fn emit_all_with_class_meta(
         })
         .copied()
         .collect();
-    if dead.is_empty() {
+    if dead.is_empty() && rescued.is_empty() {
         return Some(first);
     }
-    // Pass 2: re-emit without the dead facade impls (deterministic — identical decisions, minus the dead
-    // methods; the facade itself drops when they were its only members).
-    emit_pass(ir, facade, bodies, metadata, class_meta, &dead)
+    // Pass 2: re-emit without the dead facade impls, plus any rescued must-inline impls
+    // (deterministic — identical decisions, minus the dead methods, plus the rescued ones; the
+    // facade itself drops when the dead impls were its only members).
+    emit_pass(ir, facade, bodies, metadata, class_meta, &dead, &rescued)
 }
 
 fn emit_pass(
@@ -227,6 +281,7 @@ fn emit_pass(
     metadata: Option<&KotlinMetadata>,
     class_meta: &dyn Fn(&str) -> Option<KotlinMetadata>,
     dead_lambdas: &std::collections::HashSet<u32>,
+    rescued_lambdas: &std::collections::HashSet<u32>,
 ) -> Option<Vec<(String, Vec<u8>)>> {
     if !jvm_can_emit(ir) {
         return None;
@@ -315,10 +370,15 @@ fn emit_pass(
         // An inline-only lambda impl is never emitted (it's spliced) — don't count it as a facade method,
         // else an otherwise class-only file emits an empty facade kotlinc omits. A DEAD lambda impl
         // (inlined at every use — pass-1 discovery) is dropped the same way.
-        if ir.inline_only_fns.contains(&(i as u32)) || dead_lambdas.contains(&(i as u32)) {
+        let rescued = rescued_lambdas.contains(&(i as u32));
+        if (ir.inline_only_fns.contains(&(i as u32)) && !rescued)
+            || dead_lambdas.contains(&(i as u32))
+        {
             continue;
         }
-        emit_method(ir, i as u32, facade, facade, &mut cw, false, bodies);
+        emit_method_maybe_rescued(
+            ir, i as u32, facade, facade, &mut cw, false, bodies, rescued,
+        );
         facade_has_method = true;
         if facade_access_bridges.contains(&(i as u32)) {
             let param_tys = jvm_tys(&f.params);
@@ -3134,6 +3194,26 @@ fn emit_enum_class(
 }
 
 /// Emit function `fid` as a method on `owner`. `instance` = an instance method (`this` in slot 0).
+#[allow(clippy::too_many_arguments)]
+fn emit_method_maybe_rescued(
+    ir: &IrFile,
+    fid: u32,
+    owner: &str,
+    facade: &str,
+    cw: &mut ClassWriter,
+    instance: bool,
+    bodies: &dyn MethodBodies,
+    rescued: bool,
+) {
+    if rescued {
+        // A rescued must-inline impl IS emitted despite its `inline_only` mark (see
+        // `emit_all_with_class_meta`) — bypass the early return.
+        emit_method_inner(ir, fid, owner, facade, cw, instance, bodies);
+    } else {
+        emit_method(ir, fid, owner, facade, cw, instance, bodies);
+    }
+}
+
 fn emit_method(
     ir: &IrFile,
     fid: u32,
@@ -3149,6 +3229,18 @@ fn emit_method(
     if ir.inline_only_fns.contains(&fid) {
         return;
     }
+    emit_method_inner(ir, fid, owner, facade, cw, instance, bodies);
+}
+
+fn emit_method_inner(
+    ir: &IrFile,
+    fid: u32,
+    owner: &str,
+    facade: &str,
+    cw: &mut ClassWriter,
+    instance: bool,
+    bodies: &dyn MethodBodies,
+) {
     let f = &ir.functions[fid as usize];
     let body = f.body.unwrap();
     let param_tys = jvm_tys(&f.params);

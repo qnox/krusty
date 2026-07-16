@@ -59,6 +59,9 @@ fn krusty_compile(src: &str, stem: &str, cp: &Rc<Classpath>) -> Option<Vec<(Stri
     if !krusty::jvm::suspend::lower_suspend(&mut ir, &facade) {
         return None;
     }
+    // Mirror the real backend's post-transform passes (jvm/backend.rs).
+    krusty::jvm::ir_emit::mark_must_inline_lambdas(&mut ir);
+    krusty::jvm::ir_emit::reparent_lambda_impls(&mut ir);
     let out = emit_all(&ir, &facade, &**cp, None)?;
     if out.is_empty() {
         None
