@@ -12,7 +12,7 @@ use crate::libraries::{
     CountedLoopInfo, FnFlags, FnKind, FunctionInfo, FunctionSet, GenericSig, InlineKind, LibConst,
     LibraryCallable, LibraryConst, LibraryMember, LibraryType, PlatformAccessor, PlatformCtor,
     PlatformField, PlatformRangeCtor, PropKind, PropertyInfo, PropertySet, RangeConstruction,
-    ReturnInfo, RuntimeCtor, RuntimeOp, TargetRuntime, Visibility,
+    ReturnInfo, RuntimeCtor, RuntimeOp, SemanticPlatform, Visibility,
 };
 use crate::symbol_resolver::{arg_fits, ty_subst, ty_subst_all};
 use crate::symbol_source::SymbolSource;
@@ -1730,13 +1730,17 @@ impl SymbolSource for JvmLibraries {
                 // overloads (`maxOrNull(Iterable)Double` vs `…Comparable`). A type-var return has no class,
                 // so `None` selects the generic-bound overload in the fallback.
                 let recv_desc = type_descriptor(
-                    <Self as crate::libraries::TargetRuntime>::abi_value_form(self, receiver),
+                    <Self as crate::libraries::SemanticPlatform>::library_value_form(
+                        self, receiver,
+                    ),
                 );
                 let ret_desc = mf.ret_class.map(|r| {
-                    type_descriptor(<Self as crate::libraries::TargetRuntime>::abi_value_form(
-                        self,
-                        kotlin_name_to_ty(r),
-                    ))
+                    type_descriptor(
+                        <Self as crate::libraries::SemanticPlatform>::library_value_form(
+                            self,
+                            kotlin_name_to_ty(r),
+                        ),
+                    )
                 });
                 // The value parameters' ERASED JVM descriptors, from the metadata generic signature, so a
                 // bytecode lookup disambiguates same-receiver/same-return overloads by their VALUE param —
@@ -1750,7 +1754,9 @@ impl SymbolSource for JvmLibraries {
                         .map(|p| {
                             let ty = ty_subst(*p, &std::collections::HashMap::new());
                             type_descriptor(
-                                <Self as crate::libraries::TargetRuntime>::abi_value_form(self, ty),
+                                <Self as crate::libraries::SemanticPlatform>::library_value_form(
+                                    self, ty,
+                                ),
                             )
                         })
                         .collect()
@@ -2112,7 +2118,7 @@ impl SymbolSource for JvmLibraries {
     }
 }
 
-impl crate::libraries::TargetRuntime for JvmLibraries {
+impl crate::libraries::SemanticPlatform for JvmLibraries {
     fn function_type(&self, arity: usize) -> Option<Ty> {
         Some(Ty::obj(&format!("kotlin/jvm/functions/Function{arity}")))
     }
@@ -2122,8 +2128,8 @@ impl crate::libraries::TargetRuntime for JvmLibraries {
         // binds only a `UInt` extension (`UInt.downTo` → `UIntProgression`), never `Int`'s — they share the
         // `I` descriptor, so the erased MRO below would tie them. Reject a value-class mismatch on either
         // side up front; a genuine `UInt.downTo` matches at rung 0.
-        let recv_vc = TargetRuntime::value_underlying(self, recv).is_some();
-        let decl_vc = TargetRuntime::value_underlying(self, decl_recv).is_some();
+        let recv_vc = SemanticPlatform::value_underlying(self, recv).is_some();
+        let decl_vc = SemanticPlatform::value_underlying(self, decl_recv).is_some();
         if recv_vc || decl_vc {
             return (recv.obj_internal() == decl_recv.obj_internal() && recv == decl_recv)
                 .then_some(0);
@@ -2133,9 +2139,9 @@ impl crate::libraries::TargetRuntime for JvmLibraries {
         // Comparable → Any`, `List → Collection → Iterable`), so most-specific selection is preserved. The
         // MRO carries JVM-form descriptors (`Ljava/lang/Object;`), so normalize the declared receiver to the
         // same form first (`kotlin/Any` → `java/lang/Object`, a Kotlin collection → its `java/util/*` face).
-        let want = type_descriptor(<Self as crate::libraries::TargetRuntime>::abi_value_form(
-            self, decl_recv,
-        ));
+        let want = type_descriptor(
+            <Self as crate::libraries::SemanticPlatform>::library_value_form(self, decl_recv),
+        );
         let rank = supertype_descriptors(&self.cp, recv)
             .iter()
             .position(|d| *d == want)
@@ -2153,7 +2159,8 @@ impl crate::libraries::TargetRuntime for JvmLibraries {
             recv.type_args().first().copied(),
             decl_recv.type_args().first().copied(),
         ) {
-            if re != any && de != any && self.abi_value_form(re) != self.abi_value_form(de) {
+            if re != any && de != any && self.library_value_form(re) != self.library_value_form(de)
+            {
                 return None;
             }
         }
@@ -2169,7 +2176,7 @@ impl crate::libraries::TargetRuntime for JvmLibraries {
         }
     }
 
-    fn abi_value_form(&self, ty: Ty) -> Ty {
+    fn library_value_form(&self, ty: Ty) -> Ty {
         // A reference type erases to its JVM internal name (a Kotlin collection → its single
         // `java/util/*` interface) with type arguments dropped — exactly what a descriptor-read
         // constructor/method parameter carries. Arrays recurse into their element (`Array<Set<String>>`
@@ -2182,7 +2189,7 @@ impl crate::libraries::TargetRuntime for JvmLibraries {
             // `Array<Int>` (`[Ljava/lang/Integer;`) to a primitive `IntArray` (`[I`).
             _ if ty.is_reference_array() => {
                 let e = ty.array_elem().unwrap_or_else(|| Ty::obj("kotlin/Any"));
-                Ty::obj_args("kotlin/Array", &[self.abi_value_form(e)])
+                Ty::obj_args("kotlin/Array", &[self.library_value_form(e)])
             }
             Ty::Obj(internal, _) => Ty::obj(super::jvm_class_map::to_jvm_internal(internal)),
             _ => ty,
@@ -2223,6 +2230,33 @@ impl crate::libraries::TargetRuntime for JvmLibraries {
         (getter != property).then_some(getter)
     }
 
+    fn builtin_type_internal(&self, simple_name: &str) -> Option<String> {
+        // Collection built-ins keep their `kotlin/collections/…` identity (read-only vs mutable);
+        // normalize any JVM spelling the mapping returns back to the Kotlin identity so the core IR
+        // stays in Kotlin names (the emitter re-maps at its boundary).
+        let internal = crate::jvm::jvm_class_map::kotlin_builtin_to_internal(simple_name)?;
+        Some(crate::jvm::jvm_class_map::to_kotlin_internal(internal).to_string())
+    }
+
+    fn is_collection_interface(&self, supertype_internal: &str) -> bool {
+        crate::jvm::jvm_class_map::to_jvm_internal(supertype_internal).starts_with("java/util/")
+    }
+
+    fn collection_property_accessor(&self, property: &str) -> Option<String> {
+        crate::jvm::names::collection_property_stub_name(property).map(str::to_string)
+    }
+
+    fn signature_formal_names(&self, signature: &str) -> Vec<String> {
+        signature_formals(signature)
+    }
+
+    fn iterable_element_type(&self, internal: &str) -> Option<Ty> {
+        self.counted_loop_info_for_type(internal)
+            .map(|info| info.elem)
+    }
+}
+
+impl crate::libraries::TargetRuntime for JvmLibraries {
     fn property_reference_impl(&self, arity: usize, mutable: bool) -> Option<PlatformCtor> {
         let internal = match (arity, mutable) {
             (0, false) => "kotlin/jvm/internal/PropertyReference0Impl",
@@ -2251,26 +2285,6 @@ impl crate::libraries::TargetRuntime for JvmLibraries {
 
     fn method_descriptor(&self, params: &[Ty], ret: Ty) -> Option<String> {
         Some(method_descriptor(params, ret))
-    }
-
-    fn builtin_type_internal(&self, simple_name: &str) -> Option<String> {
-        // Collection built-ins keep their `kotlin/collections/…` identity (read-only vs mutable);
-        // normalize any JVM spelling the mapping returns back to the Kotlin identity so the core IR
-        // stays in Kotlin names (the emitter re-maps at its boundary).
-        let internal = crate::jvm::jvm_class_map::kotlin_builtin_to_internal(simple_name)?;
-        Some(crate::jvm::jvm_class_map::to_kotlin_internal(internal).to_string())
-    }
-
-    fn is_collection_interface(&self, supertype_internal: &str) -> bool {
-        crate::jvm::jvm_class_map::to_jvm_internal(supertype_internal).starts_with("java/util/")
-    }
-
-    fn collection_property_accessor(&self, property: &str) -> Option<String> {
-        crate::jvm::names::collection_property_stub_name(property).map(str::to_string)
-    }
-
-    fn signature_formal_names(&self, signature: &str) -> Vec<String> {
-        signature_formals(signature)
     }
 
     fn function_reference_impl_type(&self) -> Option<Ty> {

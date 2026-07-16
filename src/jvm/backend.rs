@@ -42,7 +42,8 @@ impl Backend for JvmBackend {
         // Lower the checked file to the backend-agnostic IR, then emit JVM bytecode from it.
         // (The legacy direct AST emitter has been removed — IR is the sole JVM codegen path.)
         let facade_name = file_class_name(stem, file.package.as_deref());
-        let Some(mut ir) = crate::ir_lower::lower_file(file, info, syms) else {
+        let runtime = crate::jvm::jvm_libraries::JvmLibraries::new(self.cp.clone());
+        let Some(mut ir) = crate::ir_lower::lower_file(file, info, syms, &runtime) else {
             crate::trace_compiler!("lower", "bail: {}", crate::ir_lower::lower_bail_reason());
             diags.error(
                 crate::diag::Span::new(0, 0),

@@ -53,7 +53,8 @@ fn compile_two(a: &str, b: &str) -> Option<Vec<(String, Vec<u8>)>> {
             return None;
         }
         let facade = file_class_name(stems[i], file.package.as_deref());
-        let mut ir = krusty::ir_lower::lower_file(file, &info, &syms)?;
+        let runtime = krusty::jvm::jvm_libraries::JvmLibraries::new(cp.clone());
+        let mut ir = krusty::ir_lower::lower_file(file, &info, &syms, &runtime)?;
         if !{
             let vc_module = krusty::module_symbols::ModuleSymbols::new(&syms);
             let vc_resolver = krusty::symbol_resolver::SymbolResolver::new_scoped_with_module(

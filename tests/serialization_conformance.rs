@@ -62,7 +62,8 @@ fn serializer_object_emits_wellformed_bytecode() {
         eprintln!("skipping: krusty could not lower Foo (front-end gap)");
         return;
     }
-    let Some(mut ir) = lower_file(&files[0], &info, &syms) else {
+    let runtime = JvmLibraries::new(cp.clone());
+    let Some(mut ir) = lower_file(&files[0], &info, &syms, &runtime) else {
         eprintln!("skipping: Foo outside IR subset");
         return;
     };
