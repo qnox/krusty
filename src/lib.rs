@@ -14,9 +14,11 @@ pub mod assignable;
 pub mod ast;
 pub mod backend;
 pub mod cli;
+pub mod compiler;
 pub mod conformance;
 pub mod diag;
 pub mod features;
+pub mod frontend;
 pub mod ir;
 pub mod ir_lower;
 pub mod js;
@@ -24,6 +26,7 @@ pub mod jvm;
 pub mod lexer;
 pub mod libraries;
 pub mod lru;
+pub mod lsp;
 pub mod metadata;
 pub mod module_symbols;
 pub mod parser;
@@ -36,3 +39,6 @@ pub mod token;
 pub mod toolchain;
 pub mod trace;
 pub mod types;
+
+#[cfg(test)]
+mod architecture;

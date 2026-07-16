@@ -14,4 +14,4 @@ pub mod names;
 pub mod suspend;
 pub mod value_classes;
 
-pub use backend::JvmBackend;
+pub use backend::{prepare_module_symbols, JvmBackend};
