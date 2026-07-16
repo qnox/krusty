@@ -3491,17 +3491,39 @@ fn infer_lit_ty_p(
                         if let Some(t) = builtin_bitwise_ret(recv_ty, name, args.len()) {
                             return t;
                         }
-                        // Everything else (`s.uppercase()`, library members/extensions): federated
-                        // classpath/stdlib resolution — no hardcoded symbol names.
-                        if let Some(t) = resolved_ret(&resolver, name, Some(recv_ty)) {
-                            return t;
+                        // Everything else (`s.uppercase()`, `10.toLong()`, library members/extensions):
+                        // resolve the call through the resolver's single discovering entry point,
+                        // `resolve_symbol`. It maps a primitive/`String` receiver to its class and runs the
+                        // same overload resolution the checker uses (so a numeric conversion — a real member
+                        // on `kotlin/Int`/`Number` — is typed without any hardcoded method name). The `Any`
+                        // fallback covers a USER receiver calling an inherited `toString`/`hashCode`/`equals`.
+                        let arg_tys: Vec<Ty> = args
+                            .iter()
+                            .map(|a| {
+                                infer_lit_ty_p(file, *a, class_names, fun_rets, props, src, up)
+                            })
+                            .collect();
+                        // Only select an overload when every argument's type is known — an `Error` arg is
+                        // assignable to any parameter, so it could spuriously match the wrong overload and
+                        // infer a type the checker won't agree with. With an unknown arg, skip to the
+                        // agreement-based extension fallback instead.
+                        if !arg_tys.contains(&Ty::Error) {
+                            for r in [recv_ty, Ty::obj("kotlin/Any")] {
+                                if let Some(m) = resolver
+                                    .resolve_symbol(
+                                        crate::symbol_resolver::SymRecv::Value(r),
+                                        name,
+                                        &arg_tys,
+                                    )
+                                    .and_then(crate::symbol_resolver::Symbol::call)
+                                {
+                                    return m.ret;
+                                }
+                            }
                         }
-                        // A USER receiver type (a module class — not in the library source, so the call
-                        // above found nothing) can still call an `Any`-inherited member (`toString`,
-                        // `hashCode`, `equals`): resolve it on `kotlin/Any`, the universal supertype the
-                        // source DOES carry. Still real classpath resolution — no member name hardcoded.
-                        if let Some(t) = resolved_ret(&resolver, name, Some(Ty::obj("kotlin/Any")))
-                        {
+                        // A scoped receiver-EXTENSION (`"s".uppercase()`) isn't surfaced by the member
+                        // facet in this phase — fall back to the federated extension resolution.
+                        if let Some(t) = resolved_ret(&resolver, name, Some(recv_ty)) {
                             return t;
                         }
                     }
