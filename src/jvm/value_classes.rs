@@ -616,6 +616,44 @@ pub fn lower_value_classes(
             }
         }
     }
+    // A class whose supertype chain leaves the file (a CLASSPATH base/interface — `known=false`
+    // above): ask the resolver whether the supertype declares the member — an override drops
+    // `ACC_FINAL` exactly like the same-file case (`class ChangeAwareEngine : Engine` from a jar).
+    {
+        let mut classpath_opens: Vec<u32> = Vec::new();
+        for c in &ir.classes {
+            if c.is_interface {
+                continue;
+            }
+            if let Some(Some(_)) = super_member_names.get(&c.fq_name) {
+                continue; // whole chain same-file — handled above
+            }
+            let mut supers: Vec<String> = c.interfaces.clone();
+            supers.extend(
+                c.supertypes
+                    .iter()
+                    .filter_map(|t| t.obj_internal())
+                    .map(str::to_string),
+            );
+            if !c.superclass.is_empty()
+                && c.superclass != "java/lang/Object"
+                && c.superclass != "kotlin/Any"
+            {
+                supers.push(c.superclass.clone());
+            }
+            if supers.is_empty() {
+                continue;
+            }
+            for &m in &c.methods {
+                if let Some(f) = ir.functions.get(m as usize) {
+                    if !f.is_static && supers.iter().any(|s| resolver.declares_member(s, &f.name)) {
+                        classpath_opens.push(m);
+                    }
+                }
+            }
+        }
+        override_opens.extend(classpath_opens);
+    }
     ir.open_methods.extend(override_opens);
     // A getter NAME whose override pair DIVERGES in type across the same-file hierarchy (a covariant
     // `val alt: Vid` overriding `val alt: Vid?`): the two sides would hash differently, and krusty

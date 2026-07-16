@@ -1723,8 +1723,9 @@ fn build_lambda_state_machine(
         };
         push("result", object_ty());
         push("label", int_ty());
-        for (i, (_, ty)) in spilled.iter().enumerate() {
-            push(&format!("L${i}"), ty.clone());
+        let names = spill_field_names(&spilled);
+        for ((_, ty), name) in spilled.iter().zip(&names) {
+            push(name, ty.clone());
         }
     }
 
@@ -3349,13 +3350,14 @@ fn build_continuation_class(
             ..crate::ir::IrField::new("label".to_string(), int_ty())
         },
     ];
-    for (i, (_, ty)) in spilled.iter().enumerate() {
+    let spill_names = spill_field_names(spilled);
+    for ((_, ty), name) in spilled.iter().zip(&spill_names) {
         // A REFERENCE spill slot is `Object`-typed (kotlinc's `L$N` layout) — the loop-top restore
         // `checkcast`s it back to the local's real type. A primitive keeps its own type.
         let field_ty = if ty.is_reference() { object_ty() } else { *ty };
         fields.push(crate::ir::IrField {
             is_private: false,
-            ..crate::ir::IrField::new(format!("L${i}"), field_ty)
+            ..crate::ir::IrField::new(name.clone(), field_ty)
         });
     }
 
@@ -3660,6 +3662,36 @@ fn ensure_tail_return(ir: &mut IrFile, body: ExprId, unit_ret: bool) {
 /// The continuation-field type for a spilled local. A `Unit`-typed local spills as the `kotlin/Unit`
 /// object reference — a JVM field cannot carry the `void` ("V") descriptor that `Ty::Unit` produces, and
 /// the live value across the suspension is the `Unit` singleton.
+/// kotlinc names spill fields PER KIND with independent counters: references share `L$0..`, ints
+/// `I$0..`, longs `J$0..`, floats `F$0..`, doubles `D$0..`, and the sub-int primitives their own
+/// letters (`Z$`/`C$`/`B$`/`S$`). One field name per `spilled` entry, in order.
+fn spill_field_names(spilled: &[(u32, Ty)]) -> Vec<String> {
+    let mut counts: std::collections::HashMap<char, u32> = std::collections::HashMap::new();
+    spilled
+        .iter()
+        .map(|(_, ty)| {
+            let k = if ty.is_reference() {
+                'L'
+            } else {
+                match ty {
+                    Ty::Long => 'J',
+                    Ty::Float => 'F',
+                    Ty::Double => 'D',
+                    Ty::Boolean => 'Z',
+                    Ty::Char => 'C',
+                    Ty::Byte => 'B',
+                    Ty::Short => 'S',
+                    _ => 'I',
+                }
+            };
+            let n = counts.entry(k).or_insert(0);
+            let name = format!("{k}${n}");
+            *n += 1;
+            name
+        })
+        .collect()
+}
+
 fn spill_field_ty(ty: Ty) -> Ty {
     if ty == Ty::Unit {
         Ty::obj("kotlin/Unit")
