@@ -956,6 +956,10 @@ pub struct IrFile {
     /// Instance methods kotlinc emits `private` — currently a property's `private set` setter. The JVM
     /// backend uses `ACC_PRIVATE` instead of `ACC_PUBLIC` for a `FunId` in this set.
     pub private_methods: std::collections::HashSet<u32>,
+    /// Lambda impls pre-marked `inline_only` by `mark_must_inline_lambdas` (a must-inline callee's
+    /// message lambda, assumed spliced). If emission nonetheless records an `invokedynamic` for one,
+    /// the two-pass driver RESCUES it — emits the method after all — so the reference never dangles.
+    pub must_inline_lambdas: std::collections::HashSet<u32>,
     /// Methods kotlinc marks `ACC_SYNTHETIC` — currently a value class's `box-impl`/`unbox-impl` (the
     /// compiler-manufactured box adapters). The JVM backend ORs `0x1000` for a `FunId` in this set.
     pub synthetic_methods: std::collections::HashSet<u32>,

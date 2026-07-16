@@ -181,7 +181,10 @@ pub fn lower_value_classes(
             continue;
         }
         if let Some(u) = resolver.value_underlying(&fq) {
-            let ir_under = u.scalar_value_repr().unwrap_or_else(|| Ty::nullable(u));
+            // The resolver carries the underlying's declared nullability (decoded from `@Metadata`) —
+            // trust it: a NON-NULL reference underlying (`ChangeId(val value: String)`) means `ChangeId?`
+            // stays UNBOXED (null carried by the reference), exactly like a same-file value class.
+            let ir_under = u.scalar_value_repr().unwrap_or(u);
             under.insert(fq, ir_under);
         }
     }
@@ -527,25 +530,20 @@ pub fn lower_value_classes(
         target_param_map.insert(key.clone(), orig_params[fid].clone());
         target_nullable_map.insert(key, nullable);
     }
-    // Classes whose OWN property getters may be mangled: a non-value class with NO supertype or interface,
-    // so a getter can't OVERRIDE a supertype declaration (mangling an override needs the supertype's hash +
-    // a bridge, which krusty doesn't emit — it broke box `overrideReturnNothing.kt`). A plain data class
-    // (`data class Server(val id: ServerId)`) qualifies; its `getId` mangles to kotlinc's `getId-<hash>`.
-    // Exclude interfaces: an interface's abstract getter would mangle here, but its IMPLEMENTORS carry the
-    // interface (so they're NOT in this set) and stay unmangled → an inconsistent override pair
-    // (AbstractMethodError, box `overrideReturnNothing.kt`). Keeping interface getters unmangled keeps both
-    // sides consistent.
-    // Per owner: the method names its supertype chain declares — `None` when any supertype is not a
+    // Per owner: the members its supertype chain declares — `None` when any supertype is not a
     // SAME-FILE class (a classpath/cross-file parent can't be inspected → conservatively skip getter
-    // mangling for that owner entirely). A getter that OVERRIDES a supertype declaration must keep the
-    // supertype's (unmangled) name — mangling one side of the pair is an AbstractMethodError (box
-    // `overrideReturnNothing.kt`); a class's OWN property getter mangles freely.
-    let super_member_names: HashMap<String, Option<HashSet<String>>> = ir
+    // mangling for that owner entirely). Each declared member name maps to `Some(ret)` when it is a
+    // no-arg property GETTER (pre-erasure return), `None` for any other member. A getter that
+    // OVERRIDES a supertype declaration mangles ONLY when the supertype's declaration is the same
+    // getter of the SAME type — then BOTH sides mangle to the same `get<X>-<hash>` (kotlinc's
+    // behavior for `interface I { val id: Vid }` + `class C(override val id: Vid) : I`). Mangling
+    // one side of a pair is an AbstractMethodError (box `overrideReturnNothing.kt`).
+    let super_member_names: HashMap<String, Option<HashMap<String, Option<Ty>>>> = ir
         .classes
         .iter()
-        .filter(|c| !c.is_value && !c.is_interface)
+        .filter(|c| !c.is_value)
         .map(|c| {
-            let mut names: HashSet<String> = HashSet::new();
+            let mut names: HashMap<String, Option<Ty>> = HashMap::new();
             let mut work: Vec<&str> = c
                 .interfaces
                 .iter()
@@ -568,7 +566,9 @@ pub fn lower_value_classes(
                     Some(sup) => {
                         for &m in &sup.methods {
                             if let Some(f) = ir.functions.get(m as usize) {
-                                names.insert(f.name.clone());
+                                let getter_ret = (f.name.starts_with("get") && f.params.is_empty())
+                                    .then_some(f.ret);
+                                names.insert(f.name.clone(), getter_ret);
                             }
                         }
                         work.extend(sup.interfaces.iter().map(String::as_str));
@@ -610,13 +610,36 @@ pub fn lower_value_classes(
         };
         for &m in &c.methods {
             if let Some(f) = ir.functions.get(m as usize) {
-                if !f.is_static && names.contains(&f.name) {
+                if !f.is_static && names.contains_key(&f.name) {
                     override_opens.push(m);
                 }
             }
         }
     }
     ir.open_methods.extend(override_opens);
+    // A getter NAME whose override pair DIVERGES in type across the same-file hierarchy (a covariant
+    // `val alt: Vid` overriding `val alt: Vid?`): the two sides would hash differently, and krusty
+    // doesn't emit the bridge kotlinc pairs them with — keep BOTH sides unmangled (consistent).
+    let divergent_getters: HashSet<String> = {
+        let mut out = HashSet::new();
+        for c in &ir.classes {
+            let Some(Some(names)) = super_member_names.get(&c.fq_name) else {
+                continue;
+            };
+            for &m in &c.methods {
+                if let Some(f) = ir.functions.get(m as usize) {
+                    if f.name.starts_with("get") && f.params.is_empty() {
+                        if let Some(Some(sup_ret)) = names.get(&f.name) {
+                            if *sup_ret != f.ret {
+                                out.insert(f.name.clone());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        out
+    };
     for (fid, f) in ir.functions.iter_mut().enumerate() {
         let is_box_impl = f.name == "box-impl";
         // A USER value-class member function's body runs on the BOXED object; its value-class-typed
@@ -633,11 +656,17 @@ pub fn lower_value_classes(
             && orig_params[fid].is_empty()
             && !f.dispatch_receiver.as_ref().is_some_and(|r| {
                 // Mangle this getter only when the owner's WHOLE supertype chain is same-file-known
-                // AND none of it declares a method of this name (i.e. the getter is the class's own,
-                // never an override).
-                super_member_names
-                    .get(r)
-                    .is_some_and(|sups| sups.as_ref().is_some_and(|names| !names.contains(&f.name)))
+                // AND either none of it declares this name (the class's own getter) or the
+                // declaration is the SAME-typed getter (both sides mangle to the same hash). A
+                // type-divergent pair stays unmangled on both sides.
+                !divergent_getters.contains(&f.name)
+                    && super_member_names.get(r).is_some_and(|sups| {
+                        sups.as_ref().is_some_and(|names| match names.get(&f.name) {
+                            None => true,
+                            Some(Some(t)) => *t == orig_rets[fid],
+                            Some(None) => false,
+                        })
+                    })
             });
         let synthesized = matches!(
             f.name.as_str(),

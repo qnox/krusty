@@ -1044,11 +1044,30 @@ pub fn lower_file(
                     .iter()
                     .filter(|p| p.is_abstract || (c.is_interface() && !is_computed_prop(p)))
                 {
-                    let ty =
+                    let mut ty =
                         p.ty.as_ref()
                             .map(|r| ty_of(file, r, &*syms.libraries))
                             .unwrap_or_else(|| Ty::obj("kotlin/Any"));
-                    let ir_ty = body_prop_ir_ty(file, info, p, &*syms.libraries);
+                    let mut ir_ty = body_prop_ir_ty(file, info, p, &*syms.libraries);
+                    // `ty_of` resolves only file-local types + built-ins, and an ABSTRACT property has
+                    // no initializer/getter to recover a CLASSPATH type from (`val id: Vid` on an
+                    // interface would erase to `Any`/`Object`). Resolve the annotation against the
+                    // classpath and re-apply the declared `?` — the type drives the getter's
+                    // descriptor AND its value-class erasure/mangle.
+                    if ty.is_erased_top() {
+                        if let Some(r) = p.ty.as_ref() {
+                            if r.name != "Any" && r.name != "kotlin/Any" {
+                                if let Some(rt) = lo.classpath_ty_ref(r) {
+                                    ty = rt;
+                                    ir_ty = if r.nullable {
+                                        mark_nullable(ty_to_ir(rt))
+                                    } else {
+                                        ty_to_ir(rt)
+                                    };
+                                }
+                            }
+                        }
+                    }
                     let gname = property_getter_name(&p.name);
                     if !methods.contains_key(&gname) {
                         let mi = method_fids.len() as u32;
@@ -1518,6 +1537,11 @@ pub fn lower_file(
                 lo.ext_fun_ids
                     .entry((recv_key, f.name.clone()))
                     .or_insert(id);
+                // A `private` top-level extension is `private static` on the facade (kotlinc); a
+                // class-body caller goes through the `access$<name>` bridge (see `emit_pass`).
+                if f.visibility.is_private() {
+                    lo.ir.private_methods.insert(id);
+                }
             } else {
                 let want: Vec<Ty> = f
                     .params
@@ -1557,6 +1581,11 @@ pub fn lower_file(
                     param_checks,
                 });
                 lo.fun_ids.insert((f.name.clone(), sig.params.clone()), id);
+                // A `private` top-level function is `private static` on the facade (kotlinc); a
+                // class-body caller goes through the `access$<name>` bridge (see `emit_pass`).
+                if f.visibility.is_private() {
+                    lo.ir.private_methods.insert(id);
+                }
                 // Emit a JVM generic `Signature` for a type-parameterized function (kotlinc does), so the
                 // bytecode matches for generics. `None` for non-generic / not-yet-modeled shapes.
                 if let Some(s) = fn_generic_sig(file, f, &*lo.syms.libraries) {
@@ -6502,17 +6531,21 @@ impl<'a> Lower<'a> {
         if !is_anon_fun && body_has_bare_return(self.afile, body) {
             self.ir.inline_only_fns.insert(fid);
         }
-        // A lambda inside a class member captures the enclosing `this` and reads its (private) members,
-        // so its impl method must live ON THAT CLASS — not the file facade (which can't touch C's
-        // privates). Register it as a class method; the facade skips it and `invokedynamic` targets it on
-        // the class. (Skip an inline-only impl — it is spliced, never emitted as a standalone method.)
-        if captures_this && !self.ir.inline_only_fns.contains(&fid) {
+        // A lambda impl method lives ON THE CLASS declaring the enclosing member (kotlinc's placement:
+        // same class as the `invokedynamic` call site, so a PRIVATE impl — and any enclosing-`this`
+        // member access — resolves without bridges); a top-level declaration's lambda keeps its impl on
+        // the file facade. (Skip an inline-only impl — it is spliced, never emitted as a standalone
+        // method.)
+        if !self.ir.inline_only_fns.contains(&fid) {
             if let Some(internal) = self.cur_class.clone() {
                 if let Some(cid) = self.classes.get(&internal).map(|ci| ci.id) {
                     self.ir.classes[cid as usize].methods.push(fid);
                 }
             }
         }
+        // kotlinc emits every standalone lambda impl `private static final` — it is reachable only
+        // through the same-class `invokedynamic`, never part of the public ABI.
+        self.ir.private_methods.insert(fid);
         Some(self.ir.add_expr(IrExpr::Lambda {
             impl_fn: fid,
             arity: arity as u8,
@@ -7400,11 +7433,11 @@ impl<'a> Lower<'a> {
         let fields: Vec<(String, Ty)> = self.classes[internal].fields[..n].to_vec();
 
         // componentN(): `return this.fieldN`.
-        for (i, (_, t)) in fields.iter().enumerate() {
+        for (i, (fname, t)) in fields.iter().enumerate() {
             let get = self.this_field(class_id, i as u32);
             let ret = self.emit_return(Some(get));
             let body = self.emit_block(vec![ret], None);
-            self.add_synth_method(
+            let fid = self.add_synth_method(
                 internal,
                 class_id,
                 &format!("component{}", i + 1),
@@ -7413,6 +7446,19 @@ impl<'a> Lower<'a> {
                 body,
                 true,
             );
+            // The checker `Ty` drops the declared `?`; the IrField carries it (re-applied at field
+            // creation). Recover it on the synthesized return — the value-class mangler hashes a
+            // nullable `Lfq?;` element differently from `Lfq;` (`component2` of a `Vid?` property is
+            // `component2-<hash of :Lfq?;>` in kotlinc).
+            if let Some(fid) = fid {
+                if let Some(irf) = self.ir.classes[class_id as usize]
+                    .fields
+                    .iter()
+                    .find(|f| f.name == *fname)
+                {
+                    self.ir.functions[fid as usize].ret = irf.ty;
+                }
+            }
         }
 
         // copy(f1, f2, …): `return P(f1, f2, …)`. Emitted BEFORE toString/hashCode/equals to match
@@ -7435,6 +7481,17 @@ impl<'a> Lower<'a> {
                 body,
                 true,
             ) {
+                // Recover each parameter's declared `?` from its IrField (see componentN above) — it
+                // decides the value-class mangle hash and the nullable-erasure of the parameter.
+                for (k, (fname, _)) in fields.iter().enumerate() {
+                    if let Some(irf) = self.ir.classes[class_id as usize]
+                        .fields
+                        .iter()
+                        .find(|f| f.name == *fname)
+                    {
+                        self.ir.functions[copy_fid as usize].params[k] = irf.ty;
+                    }
+                }
                 // `copy`'s parameters are the primary-ctor properties, so they take the SAME
                 // `checkNotNullParameter` guards kotlinc emits at the constructor — a non-null reference
                 // parameter is null-checked at `copy` entry. Reuse the class's precomputed ctor checks.

@@ -96,6 +96,9 @@ fn emit_checked_ir(ir: &mut IrFile, facade: &str, cp: &Rc<Classpath>) -> Option<
     if !krusty::jvm::suspend::lower_suspend(ir, facade) {
         return Some("lower: suspend-function shape not lowered".into());
     }
+    // Mirror the real backend's post-transform passes (jvm/backend.rs).
+    krusty::jvm::ir_emit::mark_must_inline_lambdas(ir);
+    krusty::jvm::ir_emit::reparent_lambda_impls(ir);
     match emit_all(ir, facade, &**cp, None) {
         Some(o) if !o.is_empty() => None,
         _ => Some(

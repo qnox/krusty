@@ -267,6 +267,9 @@ fn compile_source(
         T_EMIT.fetch_add(t4.elapsed().as_nanos() as u64, Ordering::Relaxed);
         return None;
     }
+    // Mirror the real backend's post-transform passes (jvm/backend.rs).
+    krusty::jvm::ir_emit::mark_must_inline_lambdas(&mut ir);
+    krusty::jvm::ir_emit::reparent_lambda_impls(&mut ir);
     let outputs: Vec<(String, Vec<u8>)> = match ir_emit::emit_all(&ir, &facade_name, &*cp, None) {
         Some(o) => o,
         None => {
@@ -480,6 +483,9 @@ fn compile_blocks(
         if !krusty::jvm::suspend::lower_suspend(&mut ir, &facade) {
             return None; // suspend shape not yet lowered — skip, don't miscompile
         }
+        // Mirror the real backend's post-transform passes (jvm/backend.rs).
+        krusty::jvm::ir_emit::mark_must_inline_lambdas(&mut ir);
+        krusty::jvm::ir_emit::reparent_lambda_impls(&mut ir);
         let out = ir_emit::emit_all(&ir, &facade, &*cp, None)?;
         all.extend(out);
     }

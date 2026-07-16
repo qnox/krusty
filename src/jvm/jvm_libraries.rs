@@ -1588,12 +1588,12 @@ impl SymbolSource for JvmLibraries {
             // the JVM backend can unbox it like a user value class. `UInt` → `Int`, `Result` → `Any`.
             let inline = metadata::class_inline(&ci);
             let value_underlying = inline.as_ref().map(|ic| {
-                match ic.underlying_class.as_deref() {
+                let u = match ic.underlying_class.as_deref() {
                     Some(other) => kotlin_name_to_ty(other),
-                    // The underlying type was carried in the @Metadata type TABLE (proto field 19), not
-                    // inlined — `class_inline` can't resolve it there. Recover it from the synthesized
-                    // `box-impl(U)` parameter descriptor, the authoritative JVM underlying type. (A type
-                    // PARAMETER underlying — `Result<T>` — has no concrete box-impl param and stays `Any`.)
+                    // The underlying type couldn't be resolved from `@Metadata` (an unparsed shape).
+                    // Recover it from the synthesized `box-impl(U)` parameter descriptor, the
+                    // authoritative JVM underlying type. (A type PARAMETER underlying — `Result<T>` —
+                    // has no concrete box-impl param and stays `Any`.)
                     None => ci
                         .methods
                         .iter()
@@ -1602,6 +1602,22 @@ impl SymbolSource for JvmLibraries {
                         .and_then(split_one)
                         .map(|(d, _)| field_desc_to_ty(d))
                         .unwrap_or_else(|| Ty::obj("kotlin/Any")),
+                };
+                // Carry the underlying's declared nullability — it decides the null-representation
+                // (`X?` unboxed over a NON-NULL reference underlying; boxed otherwise). Unknown
+                // (metadata shape not parsed) stays nullable: the conservative boxed treatment.
+                crate::trace_compiler!(
+                    "resolve",
+                    "value_underlying {}: class={:?} nullable={:?} u={:?}",
+                    ci.this_class,
+                    ic.underlying_class,
+                    ic.underlying_nullable,
+                    u
+                );
+                if ic.underlying_nullable == Some(false) {
+                    u
+                } else {
+                    crate::types::Ty::nullable(u)
                 }
             });
             let value_class_metadata_members =

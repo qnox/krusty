@@ -201,6 +201,11 @@ pub fn compile_in_process(
     if !krusty::jvm::suspend::lower_suspend(&mut ir, &facade) {
         return None; // suspend shape not lowered — skip, don't miscompile
     }
+    // Mirror the real backend's post-transform passes (jvm/backend.rs): drop must-inline message-lambda
+    // impls, then reparent lambda impls into the class whose code emits their `invokedynamic` (the
+    // impls are PRIVATE — a cross-class handle is an IllegalAccessError).
+    krusty::jvm::ir_emit::mark_must_inline_lambdas(&mut ir);
+    krusty::jvm::ir_emit::reparent_lambda_impls(&mut ir);
     let outputs = krusty::jvm::ir_emit::emit_all(&ir, &facade, &*cp, None)?;
     if outputs.is_empty() {
         None
