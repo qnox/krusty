@@ -3337,3 +3337,11 @@ Lowerer slot writes, type operations, and primitive binary operations now go thr
 `emit_set_value`/`emit_type_op`/`emit_primitive_bin_op`. Numeric updates, casts/coercions,
 range/progression loops, null/type tests, inline/safe-call rewrites, array element coercions,
 and comparison lowering no longer rebuild those IR node shapes at their feature sites.
+
+### Control Flow Emitter Merge
+
+Lowerer branch, loop, jump, throw, and try nodes now go through
+`emit_when`/`emit_while`/`emit_break`/`emit_continue`/`emit_throw`/`emit_try`. Tailrec lowering,
+range/progression loops, iterator loops, inline-lambda return bridges, safe calls, elvis/if/when
+expressions, asserts, and try/catch/finally lowering no longer rebuild those IR node shapes at
+their feature sites.
