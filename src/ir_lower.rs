@@ -6749,10 +6749,8 @@ impl<'a> Lower<'a> {
         for (name, ty) in bind_names.iter().zip(params.iter()) {
             fields.push((name.clone(), ty_to_ir(*ty)));
         }
-        // A suspending lambda's state-machine fields go after the captures/params. For the SINGLE-
-        // suspension inline machine a `label` field is appended below (`label_idx`); the general
-        // (multi-suspension) machine has its `result`/`label`/spilled fields added by the coroutine pass.
-        let label_idx = n_cap + arity as u32;
+        // A suspending lambda's state-machine fields go after the captures/params. The coroutine pass
+        // appends its `result`/`label`/spilled fields after this prefix.
         let ctor_args: Vec<IrCtorArg> = captures
             .iter()
             .map(|(_, _, ty)| IrCtorArg {
@@ -6876,172 +6874,26 @@ impl<'a> Lower<'a> {
             self.cur_fn_suspend = saved_cur_suspend;
             self.scope = saved_scope_sm;
             let body_val = body_val?;
-            // Extract the suspend `call`, an optional `bound` local (`val a = <call>`) and `tail_expr`
-            // (the expression computed after the binding). Shapes: `{ foo() }` (call, no bound), and
-            // `{ val a = foo(); <tail> }` (call = the binding init, bound = `a`, tail = the value).
-            let (tail, bound): (u32, Option<(u32, Ty)>) = match &self.ir.exprs[body_val as usize] {
+            needs_pass_sm = true;
+            // `tmp` goes ABOVE the body's locals (next_value still points past them here).
+            let tmp_idx = self.next_value;
+            self.next_value = saved_next_sm;
+            let body_ty = ty_to_ir(self.info.ty(body));
+            let (mut b_stmts, b_val) = match &self.ir.exprs[body_val as usize] {
                 IrExpr::Block {
                     stmts,
                     value: Some(v),
-                } if stmts.is_empty() => (*v, None),
-                IrExpr::Block {
-                    stmts,
-                    value: Some(v),
-                } if stmts.len() == 1 => {
-                    if let IrExpr::Variable {
-                        index,
-                        ty,
-                        init: Some(init),
-                    } = &self.ir.exprs[stmts[0] as usize]
-                    {
-                        (*init, Some((*index, ty.clone())))
-                    } else {
-                        // A bare (non-`Variable`) leading statement — e.g. a suspend-call STATEMENT
-                        // whose result is discarded (`{ foo(); tail }`). Only the retired hand-roll
-                        // machine below cared about `tail`/`bound`; the general lambda-mode machine
-                        // flattens any block shape, so fall back rather than skip the file.
-                        (body_val, None)
-                    }
-                }
-                _ => (body_val, None),
+                } => (stmts.clone(), *v),
+                _ => (Vec::new(), body_val),
             };
-            let tail_expr = bound
-                .as_ref()
-                .map(|_| match &self.ir.exprs[body_val as usize] {
-                    IrExpr::Block { value: Some(v), .. } => *v,
-                    _ => body_val,
-                });
-            let is_susp = matches!(&self.ir.exprs[tail as usize],
-                IrExpr::Call { callee: Callee::Local(fid), .. } if self.ir.suspend_funs.contains(fid))
-                || self.ir.suspend_calls.contains_key(&tail);
-            // All suspend lambdas use the general lambda-mode machine from the coroutine pass; the inline
-            // two-state hand-roll is retired (it duplicated the state machine and miscompiled frames).
-            let _ = is_susp;
-            let handroll = false;
-            if !handroll {
-                needs_pass_sm = true;
-                // `tmp` goes ABOVE the body's locals (next_value still points past them here).
-                let tmp_idx = self.next_value;
-                self.next_value = saved_next_sm;
-                let body_ty = ty_to_ir(self.info.ty(body));
-                let (mut b_stmts, b_val) = match &self.ir.exprs[body_val as usize] {
-                    IrExpr::Block {
-                        stmts,
-                        value: Some(v),
-                    } => (stmts.clone(), *v),
-                    _ => (Vec::new(), body_val),
-                };
-                // Bind the body value to a temp (`val tmp = <value>; return box(tmp)`) so a CONDITIONAL
-                // suspension in the value (`if (c) foo() else 7`) surfaces as a `Variable{init: When}`
-                // the flattener's `stmt_cond_suspension` handles — not a raw `return box(When)`.
-                b_stmts.push(self.emit_variable(tmp_idx, body_ty, Some(b_val)));
-                let tmpg = self.emit_get_value(tmp_idx);
-                let boxed = self.emit_type_op(IrTypeOp::ImplicitCoercion, tmpg, object_ir.clone());
-                b_stmts.push(self.emit_return(Some(boxed)));
-                self.emit_block(b_stmts, None)
-            } else {
-                // The inline machine's `label` field is appended to the lambda class now.
-                {
-                    let cls = &mut self.ir.classes[class_id as usize];
-                    cls.fields.push(IrField {
-                        is_private: false,
-                        ..IrField::new("label".to_string(), ty_to_ir(Ty::Int))
-                    });
-                }
-                // Thread `this` (as Continuation) as the callee's trailing argument.
-                let this_for_cont = self.emit_get_value(0);
-                let this_cont = self.emit_type_op(IrTypeOp::Cast, this_for_cont, cont_ir.clone());
-                // For a same-file callee (`Local`) the CPS descriptor comes from the callee's
-                // pass-rewritten signature; a classpath (`Static`) / sibling (`CrossFile`) callee is
-                // resolved by its LOGICAL signature, so ask the target runtime for the physical CPS form.
-                let cont_param_ty = cont_ir.clone();
-                let object_ret_ty = object_ir.clone();
-                match &mut self.ir.exprs[tail as usize] {
-                    IrExpr::Call { args, callee, .. } => {
-                        match callee {
-                            Callee::Static { descriptor, .. } => {
-                                *descriptor =
-                                    self.syms.libraries.suspend_cps_descriptor(descriptor)?;
-                            }
-                            Callee::CrossFile { params, ret, .. } => {
-                                params.push(cont_param_ty);
-                                *ret = object_ret_ty;
-                            }
-                            _ => {}
-                        }
-                        args.push(this_cont);
-                    }
-                    _ => return None,
-                }
-                // SUSPENDED marker into local 2 (this=0, result=1).
-                let susp_call =
-                    self.runtime_call(RuntimeOp::CoroutineSuspended, Ty::Unit, vec![])?;
-                // Machine locals are allocated ABOVE the body's locals (the body was already lowered) so the
-                // bound `a` slot (if any) can't collide with the SUSPENDED marker / call-result temp.
-                let susp_idx = self.fresh_value();
-                let r_idx = self.fresh_value();
-                let susp_var = self.emit_variable(susp_idx, object_ir.clone(), Some(susp_call));
-                // State 0: throwOnFailure(result); this.label = 1; r = call; if r==SUSPENDED return it; tail.
-                let s0_tof = throw_on_failure(self, 1)?;
-                let this_l = self.emit_get_value(0);
-                let one = self.emit_const(IrConst::Int(1));
-                let set_label = self.emit_set_field(this_l, class_id, label_idx, one);
-                let r_var = self.emit_variable(r_idx, object_ir.clone(), Some(tail));
-                let rg = self.emit_get_value(r_idx);
-                let sg = self.emit_get_value(susp_idx);
-                let is_eq = self.emit_primitive_bin_op(IrBinOp::RefEq, rg, sg);
-                let sg2 = self.emit_get_value(susp_idx);
-                let ret_susp = self.emit_return(Some(sg2));
-                let ret_susp_b = self.emit_block(vec![ret_susp], None);
-                let empty = self.emit_block(vec![], None);
-                let susp_when = self.emit_when(vec![(Some(is_eq), ret_susp_b), (None, empty)]);
-                // After the suspend call completes (synchronously here), bind the result `a` and run the
-                // tail expression; with no binding the lambda simply returns the suspension value. `tail_at`
-                // builds `[ (val a = unbox(src);) return box(tail_expr | src) ]` for a result at value `src`.
-                let tail_at = |this: &mut Self, src: u32| -> Vec<u32> {
-                    if let (Some((a_idx, a_ty)), Some(te)) = (&bound, tail_expr) {
-                        let srcg = this.emit_get_value(src);
-                        let unb = this.emit_type_op(IrTypeOp::ImplicitCoercion, srcg, a_ty.clone());
-                        let bind = this.emit_variable(*a_idx, a_ty.clone(), Some(unb));
-                        let boxed =
-                            this.emit_type_op(IrTypeOp::ImplicitCoercion, te, object_ir.clone());
-                        vec![bind, this.emit_return(Some(boxed))]
-                    } else {
-                        let g = this.emit_get_value(src);
-                        vec![this.emit_return(Some(g))]
-                    }
-                };
-                let mut s0_stmts = vec![s0_tof, set_label, r_var, susp_when];
-                s0_stmts.extend(tail_at(self, r_idx));
-                let s0 = self.emit_block(s0_stmts, None);
-                // State 1 (resume): throwOnFailure(result); bind `a` from `result`; run the tail.
-                let s1_tof = throw_on_failure(self, 1)?;
-                let mut s1_stmts = vec![s1_tof];
-                s1_stmts.extend(tail_at(self, 1));
-                let s1 = self.emit_block(s1_stmts, None);
-                // Dispatch on `this.label`.
-                let lbl0r = self.emit_get_value(0);
-                let lbl0 = self.emit_get_field(lbl0r, class_id, label_idx);
-                let c0 = self.emit_const(IrConst::Int(0));
-                let cond0 = self.emit_primitive_bin_op(IrBinOp::Eq, lbl0, c0);
-                let lbl1r = self.emit_get_value(0);
-                let lbl1 = self.emit_get_field(lbl1r, class_id, label_idx);
-                let c1 = self.emit_const(IrConst::Int(1));
-                let cond1 = self.emit_primitive_bin_op(IrBinOp::Eq, lbl1, c1);
-                let msg = self
-                    .ir_const_str("call to 'resume' before 'invoke' with coroutine".to_string());
-                let exc_ctor = self
-                    .syms
-                    .libraries
-                    .runtime_ctor(RuntimeCtor::IllegalStateException)?;
-                let exc = self.emit_new_external(exc_ctor.internal, exc_ctor.ctor_desc, vec![msg]);
-                let throw = self.emit_throw(exc);
-                let else_b = self.emit_block(vec![throw], None);
-                let dispatch =
-                    self.emit_when(vec![(Some(cond0), s0), (Some(cond1), s1), (None, else_b)]);
-                self.next_value = saved_next_sm;
-                self.emit_block(vec![susp_var, dispatch], None)
-            }
+            // Bind the body value to a temp (`val tmp = <value>; return box(tmp)`) so a CONDITIONAL
+            // suspension in the value (`if (c) foo() else 7`) surfaces as a `Variable{init: When}`
+            // the flattener's `stmt_cond_suspension` handles — not a raw `return box(When)`.
+            b_stmts.push(self.emit_variable(tmp_idx, body_ty, Some(b_val)));
+            let tmpg = self.emit_get_value(tmp_idx);
+            let boxed = self.emit_type_op(IrTypeOp::ImplicitCoercion, tmpg, object_ir.clone());
+            b_stmts.push(self.emit_return(Some(boxed)));
+            self.emit_block(b_stmts, None)
         } else {
             let mut stmts = vec![throw_on_failure(self, 1)?];
             let saved_scope = std::mem::take(&mut self.scope);
