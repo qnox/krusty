@@ -868,11 +868,12 @@ fn emit_class(
         // package-private (so the outer class's `<clinit>` can call it without nestmate attributes); a
         // normal class's is public.
         let value_param_ctor = ir.value_param_ctors.contains(&c.fq_name);
-        let ctor_access = if c.is_object || c.is_value || value_param_ctor {
+        let ctor_access = if c.is_object || c.is_value || value_param_ctor || c.is_companion {
+            // A companion's real ctor is PRIVATE too — the outer `<clinit>` constructs it through the
+            // PUBLIC|SYNTHETIC `(DefaultConstructorMarker)` accessor emitted below (kotlinc's shape).
             0x0002
-        } else if c.is_companion || is_continuation {
-            // A companion's ctor is package-private (called from the outer `<clinit>`); so is a
-            // continuation class's (constructed only by its own file's suspend function).
+        } else if is_continuation {
+            // A continuation class's ctor is package-private (constructed only by its own file).
             0x0000
         } else {
             0x0001
@@ -893,7 +894,7 @@ fn emit_class(
         // A value-class-param primary ctor is private (above); kotlinc exposes a PUBLIC|SYNTHETIC accessor
         // `<init>(…args, DefaultConstructorMarker)` that simply delegates to it, so Java/reflection can
         // still construct the class.
-        if value_param_ctor {
+        if value_param_ctor || c.is_companion {
             emit_ctor_marker_accessor(&c.fq_name, &param_tys, &mut cw);
         }
     } // end `if c.has_primary_ctor`
@@ -1066,8 +1067,15 @@ fn emit_class(
                 let ci = e.cw.class_ref(comp_fq);
                 clinit.new_obj(ci);
                 clinit.dup();
-                let init = e.cw.methodref(comp_fq, "<init>", "()V");
-                clinit.invokespecial(init, 0, 0);
+                // The companion's real ctor is PRIVATE (kotlinc); construct through its
+                // PUBLIC|SYNTHETIC `(DefaultConstructorMarker)` accessor with a null marker.
+                clinit.aconst_null();
+                let init = e.cw.methodref(
+                    comp_fq,
+                    "<init>",
+                    "(Lkotlin/jvm/internal/DefaultConstructorMarker;)V",
+                );
+                clinit.invokespecial(init, 1, 0);
                 let fref = e.cw.fieldref(&c.fq_name, "Companion", &comp_desc);
                 clinit.putstatic(fref, 1);
             }
@@ -2527,8 +2535,14 @@ fn emit_interface_class(
             let ci = e.cw.class_ref(comp_fq);
             clinit.new_obj(ci);
             clinit.dup();
-            let init = e.cw.methodref(comp_fq, "<init>", "()V");
-            clinit.invokespecial(init, 0, 0);
+            // Through the companion's `(DefaultConstructorMarker)` accessor — its real ctor is private.
+            clinit.aconst_null();
+            let init = e.cw.methodref(
+                comp_fq,
+                "<init>",
+                "(Lkotlin/jvm/internal/DefaultConstructorMarker;)V",
+            );
+            clinit.invokespecial(init, 1, 0);
             let fref = e.cw.fieldref(&c.fq_name, "Companion", &comp_desc);
             clinit.putstatic(fref, 1);
         }
