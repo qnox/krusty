@@ -4866,6 +4866,14 @@ impl<'a> Lower<'a> {
         })
     }
 
+    fn emit_new(&mut self, class: u32, args: Vec<u32>, ctor_params: Option<Vec<Ty>>) -> u32 {
+        self.ir.add_expr(IrExpr::New {
+            class,
+            args,
+            ctor_params,
+        })
+    }
+
     fn emit_new_external(&mut self, internal: String, ctor_desc: String, args: Vec<u32>) -> u32 {
         self.ir.add_expr(IrExpr::NewExternal {
             internal,
@@ -7273,11 +7281,7 @@ impl<'a> Lower<'a> {
             arg: comp_get,
             type_operand: cont_ir.clone(),
         }));
-        let new_inst = self.ir.add_expr(IrExpr::New {
-            class: class_id,
-            args: new_args,
-            ctor_params: None,
-        });
+        let new_inst = self.emit_new(class_id, new_args, None);
         let r_idx = arity as u32 + 2;
         let mut inv_stmts = vec![self.ir.add_expr(IrExpr::Variable {
             index: r_idx,
@@ -7334,11 +7338,7 @@ impl<'a> Lower<'a> {
             .collect();
         // The completion parameter is already a `Continuation` (the ctor's last param) — no cast.
         create_new_args.push(self.ir.add_expr(IrExpr::GetValue(completion_idx)));
-        let create_new = self.ir.add_expr(IrExpr::New {
-            class: class_id,
-            args: create_new_args,
-            ctor_params: None,
-        });
+        let create_new = self.emit_new(class_id, create_new_args, None);
         let cr_idx = arity as u32 + 2;
         let mut create_stmts = vec![self.ir.add_expr(IrExpr::Variable {
             index: cr_idx,
@@ -7384,11 +7384,7 @@ impl<'a> Lower<'a> {
             .map(|(_, v, _)| self.ir.add_expr(IrExpr::GetValue(*v)))
             .collect();
         site_args.push(self.ir.add_expr(IrExpr::Const(IrConst::Null)));
-        Some(self.ir.add_expr(IrExpr::New {
-            class: class_id,
-            args: site_args,
-            ctor_params: None,
-        }))
+        Some(self.emit_new(class_id, site_args, None))
     }
 
     /// Register a synthesized instance method (a real `IrFunction` with an IR body) on a class, so
@@ -7786,11 +7782,7 @@ impl<'a> Lower<'a> {
             let args: Vec<u32> = (0..fields.len())
                 .map(|i| self.ir.add_expr(IrExpr::GetValue(i as u32 + 1)))
                 .collect();
-            let new = self.ir.add_expr(IrExpr::New {
-                class: class_id,
-                args,
-                ctor_params: None,
-            });
+            let new = self.emit_new(class_id, args, None);
             let ret = self.ir.add_expr(IrExpr::Return(Some(new)));
             let body = self.ir.add_expr(IrExpr::Block {
                 stmts: vec![ret],
@@ -9327,11 +9319,11 @@ impl<'a> Lower<'a> {
         });
         if let Some(recv_e) = capture {
             // `new <Synth>(receiver)` — the captured receiver is the constructor's `Object` argument.
-            Some(self.ir.add_expr(IrExpr::New {
-                class: synth_id,
-                args: vec![recv_e],
-                ctor_params: Some(vec![ty_to_ir(Ty::obj("kotlin/Any"))]),
-            }))
+            Some(self.emit_new(
+                synth_id,
+                vec![recv_e],
+                Some(vec![ty_to_ir(Ty::obj("kotlin/Any"))]),
+            ))
         } else {
             Some(self.ir.add_expr(IrExpr::StaticInstance {
                 owner: synth_id,
@@ -9420,11 +9412,11 @@ impl<'a> Lower<'a> {
             field_annotations: Vec::new(),
             runtime_retained: false,
         });
-        Some(self.ir.add_expr(IrExpr::New {
-            class: synth_id,
-            args: vec![cap],
-            ctor_params: Some(vec![ty_to_ir(Ty::obj("kotlin/Any"))]),
-        }))
+        Some(self.emit_new(
+            synth_id,
+            vec![cap],
+            Some(vec![ty_to_ir(Ty::obj("kotlin/Any"))]),
+        ))
     }
 
     /// Lower an ADAPTED top-level function reference (`::foo` where `foo` has trailing default parameters,
@@ -10302,11 +10294,11 @@ impl<'a> Lower<'a> {
             runtime_retained: false,
         });
         match capture {
-            Some(cap) => Some(self.ir.add_expr(IrExpr::New {
-                class: synth_id,
-                args: vec![cap],
-                ctor_params: Some(vec![ty_to_ir(Ty::obj("kotlin/Any"))]),
-            })),
+            Some(cap) => Some(self.emit_new(
+                synth_id,
+                vec![cap],
+                Some(vec![ty_to_ir(Ty::obj("kotlin/Any"))]),
+            )),
             None => Some(self.ir.add_expr(IrExpr::StaticInstance {
                 owner: synth_id,
                 ty: synth_id,
@@ -16502,11 +16494,7 @@ impl<'a> Lower<'a> {
                     let argvals: Vec<u32> = (0..arity as u32)
                         .map(|i| self.ir.add_expr(IrExpr::GetValue(i)))
                         .collect();
-                    let new_e = self.ir.add_expr(IrExpr::New {
-                        class: class_id,
-                        args: argvals,
-                        ctor_params: None,
-                    });
+                    let new_e = self.emit_new(class_id, argvals, None);
                     let ret_e = self.ir.add_expr(IrExpr::Return(Some(new_e)));
                     let block = self.ir.add_expr(IrExpr::Block {
                         stmts: vec![ret_e],
@@ -19376,11 +19364,7 @@ impl<'a> Lower<'a> {
                                 for (i, &arg) in args.iter().enumerate() {
                                     a.push(self.lower_arg(arg, &field_tys[i + 1])?);
                                 }
-                                return Some(self.ir.add_expr(IrExpr::New {
-                                    class,
-                                    args: a,
-                                    ctor_params: None,
-                                }));
+                                return Some(self.emit_new(class, a, None));
                             }
                             return None;
                         }
@@ -19488,11 +19472,7 @@ impl<'a> Lower<'a> {
                                     a.push(self.lower_arg(arg, &field_tys[i])?);
                                 }
                             }
-                            return Some(self.ir.add_expr(IrExpr::New {
-                                class,
-                                args: a,
-                                ctor_params: None,
-                            }));
+                            return Some(self.emit_new(class, a, None));
                         }
                         let meta: Vec<(String, Option<AstExprId>)> = self
                             .class_decl(&fname)
@@ -19549,19 +19529,11 @@ impl<'a> Lower<'a> {
                             for (arg, pt) in args.iter().zip(&sc.params) {
                                 a.push(self.lower_arg(*arg, pt)?);
                             }
-                            self.ir.add_expr(IrExpr::New {
-                                class,
-                                args: a,
-                                ctor_params: Some(sc.params),
-                            })
+                            self.emit_new(class, a, Some(sc.params))
                         } else if let Some((a, prelude)) =
                             self.lower_args_defaulted(e, &meta, &args, &field_tys)
                         {
-                            let new = self.ir.add_expr(IrExpr::New {
-                                class,
-                                args: a,
-                                ctor_params: None,
-                            });
+                            let new = self.emit_new(class, a, None);
                             self.wrap_arg_prelude(new, prelude)
                         } else if let Some(sc) = no_named
                             .then(|| {
@@ -19577,11 +19549,7 @@ impl<'a> Lower<'a> {
                             for (arg, pt) in args.iter().zip(&sc.params) {
                                 a.push(self.lower_arg(*arg, pt)?);
                             }
-                            self.ir.add_expr(IrExpr::New {
-                                class,
-                                args: a,
-                                ctor_params: Some(sc.params),
-                            })
+                            self.emit_new(class, a, Some(sc.params))
                         } else {
                             return None;
                         }
@@ -19875,11 +19843,7 @@ impl<'a> Lower<'a> {
                             for (arg, pt) in args.iter().zip(&field_tys[1..]) {
                                 a.push(self.lower_arg(*arg, pt)?);
                             }
-                            return Some(self.ir.add_expr(IrExpr::New {
-                                class: class_id,
-                                args: a,
-                                ctor_params: None,
-                            }));
+                            return Some(self.emit_new(class_id, a, None));
                         }
                     }
                     // `iterable.forEach { x -> body }` is the stdlib `inline fun` whose body is
@@ -20088,11 +20052,7 @@ impl<'a> Lower<'a> {
                                 if let Some((a, prelude)) =
                                     self.lower_args_defaulted(e, &meta, &args, &field_tys)
                                 {
-                                    let new = self.ir.add_expr(IrExpr::New {
-                                        class,
-                                        args: a,
-                                        ctor_params: None,
-                                    });
+                                    let new = self.emit_new(class, a, None);
                                     return Some(self.wrap_arg_prelude(new, prelude));
                                 }
                                 return None;

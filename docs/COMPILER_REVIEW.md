@@ -3290,3 +3290,9 @@ operator, and named-member paths through it.
 The follow-up pass routed the remaining same-file method-call constructions through `emit_method_call`,
 including safe-call, narrowed receiver, inner/outer receiver, companion, defaulted member, property,
 index-set, and binary-operator paths.
+
+### Same-File Construction Emitter Merge
+
+Same-file object construction now goes through `emit_new`; suspend-lambda factories, data-class copy,
+property/function reference wrappers, constructor references, inner/nested construction, primary/defaulted
+constructors, and secondary-constructor paths no longer rebuild `IrExpr::New` at their feature sites.
