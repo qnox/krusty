@@ -1288,7 +1288,6 @@ fn build_state_machine(ir: &mut IrFile, facade: &str, fid: u32, b: ExprId, unit_
         &spilled,
         receiver.as_deref(),
         &real_params,
-        &param_caps,
     );
 
     // Flatten the body into a state graph.
@@ -1337,17 +1336,20 @@ fn build_state_machine(ir: &mut IrFile, facade: &str, fid: u32, b: ExprId, unit_
     let spill_field =
         |local: u32| 2 + spilled.iter().position(|(l, _)| *l == local).unwrap() as u32;
 
-    // For an instance method, `new C$fn$1(this, …, completion)` also captures the receiver (value-index
-    // 0); a member/top-level with live params additionally passes those param values (`param_caps`).
+    // For an instance method, `new C$fn$1(this, completion)` also captures the receiver (value-index 0);
+    // live value parameters are stored into their `L$N` fields right after a FRESH construction.
     let receiver_this = receiver.as_ref().map(|_| 0u32);
-    let cap_indices: Vec<u32> = param_caps.iter().map(|(i, _)| *i).collect();
+    let cap_pairs: Vec<(u32, u32)> = param_caps
+        .iter()
+        .map(|(i, _)| (*i, spill_field(*i)))
+        .collect();
     let get_or_create = build_get_or_create(
         ir,
         completion_idx,
         &cont_ty,
         cont_id,
         receiver_this,
-        &cap_indices,
+        &cap_pairs,
     );
     let var_cont = k(
         ir,
@@ -1394,7 +1396,19 @@ fn build_state_machine(ir: &mut IrFile, facade: &str, fid: u32, b: ExprId, unit_
     for (local, ty) in spilled.clone() {
         let cont_for_f = k(ir, IrExpr::GetValue(cont_v));
         let fld = spill_field(local);
-        let init = getf(ir, cont_for_f, fld);
+        let mut init = getf(ir, cont_for_f, fld);
+        // A reference spill lives in an `Object`-typed `L$N` field (kotlinc's layout) — `checkcast` it
+        // back to the local's real type on restore.
+        if ty.is_reference() && ty != object_ty() {
+            init = k(
+                ir,
+                IrExpr::TypeOp {
+                    op: IrTypeOp::Cast,
+                    arg: init,
+                    type_operand: ty,
+                },
+            );
+        }
         // A value PARAMETER already owns its local slot (from the method signature), so assign it
         // (`SetValue`) rather than declaring a fresh `Variable` — a re-declaration would allocate a
         // phantom second slot and leave the param slot `top` at the loop back-edge (a frame conflict).
@@ -2798,7 +2812,7 @@ fn build_get_or_create(
     cont_ty: &Ty,
     cont_id: ClassId,
     receiver_this: Option<u32>,
-    param_caps: &[u32],
+    param_caps: &[(u32, u32)],
 ) -> ExprId {
     let k = |ir: &mut IrFile, e: IrExpr| ir.add_expr(e);
     let cast = |ir: &mut IrFile| {
@@ -2816,22 +2830,44 @@ fn build_get_or_create(
             index: 1,
         })
     };
-    // `new Cont([this,] [param_caps…,] $completion)` — a member continuation captures the receiver as
-    // its first arg, then each live value parameter (so the loop-top restore reads correct values on
-    // the first iteration), then the completion continuation.
+    // `new Cont([this,] $completion)` — kotlinc's continuation ctor takes only the receiver + the
+    // completion. Each live value parameter is stored into its `L$N` field RIGHT AFTER construction (a
+    // fresh continuation only — a resumed one keeps its saved fields), so the loop-top restore reads
+    // correct values on the first iteration: `{ val t = new Cont(recv?, completion); t.L$i = p; …; t }`.
     let new_cont = |ir: &mut IrFile| {
         let mut args = Vec::new();
         if let Some(this_idx) = receiver_this {
             args.push(ir.add_expr(IrExpr::GetValue(this_idx)));
         }
-        for &p in param_caps {
-            args.push(ir.add_expr(IrExpr::GetValue(p)));
-        }
         args.push(ir.add_expr(IrExpr::GetValue(completion_idx)));
-        ir.add_expr(IrExpr::New {
+        let new = ir.add_expr(IrExpr::New {
             class: cont_id,
             args,
             ctor_params: None,
+        });
+        if param_caps.is_empty() {
+            return new;
+        }
+        let tmp = max_value_index(ir) + 1;
+        let mut stmts = vec![ir.add_expr(IrExpr::Variable {
+            index: tmp,
+            ty: *cont_ty,
+            init: Some(new),
+        })];
+        for &(local, field) in param_caps {
+            let recv = ir.add_expr(IrExpr::GetValue(tmp));
+            let val = ir.add_expr(IrExpr::GetValue(local));
+            stmts.push(ir.add_expr(IrExpr::SetField {
+                receiver: recv,
+                class: cont_id,
+                index: field,
+                value: val,
+            }));
+        }
+        let out = ir.add_expr(IrExpr::GetValue(tmp));
+        ir.add_expr(IrExpr::Block {
+            stmts,
+            value: Some(out),
         })
     };
 
@@ -2940,7 +2976,6 @@ fn build_continuation_class(
     spilled: &[(u32, Ty)],
     receiver: Option<&str>,
     params: &[Ty],
-    param_caps: &[(u32, Ty)],
 ) -> ClassId {
     let class_id = ir.classes.len() as ClassId;
     // result(0), label(1), spilled(2..), and — for a member — the captured receiver `this$0` last.
@@ -3113,9 +3148,12 @@ fn build_continuation_class(
         },
     ];
     for (i, (_, ty)) in spilled.iter().enumerate() {
+        // A REFERENCE spill slot is `Object`-typed (kotlinc's `L$N` layout) — the loop-top restore
+        // `checkcast`s it back to the local's real type. A primitive keeps its own type.
+        let field_ty = if ty.is_reference() { object_ty() } else { *ty };
         fields.push(crate::ir::IrField {
             is_private: false,
-            ..crate::ir::IrField::new(format!("L${i}"), ty.clone())
+            ..crate::ir::IrField::new(format!("L${i}"), field_ty)
         });
     }
 
@@ -3143,23 +3181,6 @@ fn build_continuation_class(
         }));
         ctor_args.push(IrCtorArg {
             ty: recv_ty,
-            is_field: false,
-            check: None,
-        });
-        arg_idx += 1;
-    }
-    for (v, ty) in param_caps {
-        let field = 2 + spilled.iter().position(|(l, _)| l == v).unwrap() as u32;
-        let this_c = ir.add_expr(IrExpr::GetValue(0));
-        let val = ir.add_expr(IrExpr::GetValue(arg_idx));
-        ctor_stores.push(ir.add_expr(IrExpr::SetField {
-            receiver: this_c,
-            class: class_id,
-            index: field,
-            value: val,
-        }));
-        ctor_args.push(IrCtorArg {
-            ty: ty.clone(),
             is_field: false,
             check: None,
         });
