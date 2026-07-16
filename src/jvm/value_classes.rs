@@ -597,6 +597,26 @@ pub fn lower_value_classes(
             (c.fq_name.clone(), known.then_some(names))
         })
         .collect();
+    // A method that OVERRIDES a supertype declaration is emitted WITHOUT `ACC_FINAL` by kotlinc (even in
+    // a final class). Mark every class method whose name a KNOWN same-file supertype chain declares as
+    // open; an unknown (classpath) chain conservatively keeps the status quo.
+    let mut override_opens: Vec<u32> = Vec::new();
+    for c in &ir.classes {
+        if c.is_interface {
+            continue;
+        }
+        let Some(Some(names)) = super_member_names.get(&c.fq_name) else {
+            continue;
+        };
+        for &m in &c.methods {
+            if let Some(f) = ir.functions.get(m as usize) {
+                if !f.is_static && names.contains(&f.name) {
+                    override_opens.push(m);
+                }
+            }
+        }
+    }
+    ir.open_methods.extend(override_opens);
     for (fid, f) in ir.functions.iter_mut().enumerate() {
         let is_box_impl = f.name == "box-impl";
         // A USER value-class member function's body runs on the BOXED object; its value-class-typed
