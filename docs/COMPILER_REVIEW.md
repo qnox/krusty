@@ -3267,3 +3267,8 @@ top-level calls through `emit_cross_file_call`; several raw virtual calls now re
 
 Progression accessors, delegated local property access, classpath property setters, safe calls, and
 selected operator-invoke paths now share `emit_virtual_call` instead of rebuilding `Callee::Virtual`.
+
+### Local Default Call Tail Merge
+
+Same-file `$default` calls now use `emit_local_default_call`, and the default/adapter vararg paths
+share `empty_array` instead of rebuilding `0`-sized array literals inline.
