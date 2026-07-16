@@ -248,6 +248,27 @@ fn bind_defaulted_ext_ret(
     ty_subst(gsig.ret, &binds)
 }
 
+fn bind_defaulted_ext_ret_slots(
+    o: &FunctionInfo,
+    receiver: Ty,
+    slots: &[Option<Ty>],
+    targs: &[Ty],
+) -> Ty {
+    let Some(gsig) = o.generic_sig.as_ref() else {
+        return o.callable.ret;
+    };
+    let mut binds = seeded_gsig_binds(gsig, targs);
+    if let Some(recv_sig) = gsig.receiver {
+        unify_ty(recv_sig, receiver, &mut binds);
+    }
+    for (ps, slot) in gsig.params.iter().zip(slots) {
+        if let Some(arg) = slot {
+            unify_ty(*ps, *arg, &mut binds);
+        }
+    }
+    ty_subst(gsig.ret, &binds)
+}
+
 /// If `sig` is a function type, the substituted types of its lambda parameters. Empty for anything else.
 pub(crate) fn function_input_types(sig: Ty, binds: &GSigBinds) -> Vec<Ty> {
     match sig {
@@ -957,6 +978,51 @@ impl<'a> SymbolResolver<'a> {
         None
     }
 
+    pub(crate) fn build_extension_callable_for_slots(
+        &self,
+        name: &str,
+        receiver: Ty,
+        type_args: &[Ty],
+        o: &FunctionInfo,
+        slots: &[Option<Ty>],
+    ) -> Option<LibraryCallable> {
+        let vparams = logical_value_params(self.lib, o, receiver, type_args);
+        if vparams.len() != slots.len() {
+            return None;
+        }
+        for (param, slot) in vparams.iter().zip(slots) {
+            if let Some(arg) = slot {
+                if !self.arg_fits_or_subtype(param, arg) {
+                    return None;
+                }
+            }
+        }
+        if slots.iter().all(Option::is_some) {
+            let args: Vec<Ty> = slots.iter().map(|slot| slot.unwrap()).collect();
+            return self.build_extension_callable(name, receiver, &args, type_args, o);
+        }
+
+        let ret_ty = o
+            .ret
+            .apply(bind_defaulted_ext_ret_slots(o, receiver, slots, type_args));
+        if let Some(c) = self.default_synthetic_callable_for_slots(name, o, slots) {
+            crate::trace_compiler!(
+                "resolve",
+                "extension defaulted slots ($default) {name} recv={receiver:?} slots={slots:?} -> {}.{}{} ret={ret_ty:?}",
+                c.owner,
+                c.name,
+                c.descriptor
+            );
+            return Some(callable_with_return(&c, ret_ty, true));
+        }
+        if o.flags.inline.can_inline() {
+            let mut callable = callable_with_return(&o.callable, ret_ty, true);
+            callable.inline = crate::libraries::InlineKind::MustInline;
+            return Some(callable);
+        }
+        None
+    }
+
     /// Find the `name$default` synthetic callable for a defaulted extension call — the emit-shaped callable
     /// (receiver at `params[0]`, all real params present) the backend fills with placeholders.
     fn default_synthetic_callable(
@@ -1007,6 +1073,35 @@ impl<'a> SymbolResolver<'a> {
                         .all(|(p, a)| self.arg_fits_or_subtype(p, a))
             };
             if fits {
+                return Some(o.callable.clone());
+            }
+        }
+        None
+    }
+
+    fn default_synthetic_callable_for_slots(
+        &self,
+        name: &str,
+        base: &FunctionInfo,
+        slots: &[Option<Ty>],
+    ) -> Option<LibraryCallable> {
+        let fs =
+            function_set_from_symbols(self.symbols_in_scope(&format!("{name}$default"))).overloads;
+        for o in &fs {
+            if !o.public() && !o.flags.inline.must_inline() {
+                continue;
+            }
+            let params = &o.callable.params;
+            if params.is_empty() || base.callable.params.first() != params.first() {
+                continue;
+            }
+            let real = params.len() - 1;
+            if real != slots.len() {
+                continue;
+            }
+            if slots.iter().enumerate().all(|(i, slot)| {
+                slot.is_none_or(|arg| self.arg_fits_or_subtype(&params[i + 1], &arg))
+            }) {
                 return Some(o.callable.clone());
             }
         }

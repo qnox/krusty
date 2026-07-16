@@ -4035,11 +4035,14 @@ pub struct TypeInfo {
     pub narrowed_this_member: HashMap<ExprId, String>,
     /// Calls the checker already resolved, keyed by the `Expr::Call` (or member-read) `ExprId`. The
     /// lowerer reads the resolved target here instead of re-running `symbol_resolver`, so a source call
-    /// is resolved exactly once and the two passes cannot select different overloads. Absent for calls
-    /// the checker resolved through a path the lowerer reconstructs itself (module members, synthesized
-    /// operator calls) — the lowerer falls back to resolving those. See [`ResolvedCall`] for the target
-    /// kinds and the typed accessors ([`Self::resolved_member`], [`Self::resolved_top_level`], …).
+    /// is resolved exactly once and the two passes cannot select different overloads. Module-local
+    /// members and language intrinsics are still lowered from module tables or expression shape. See
+    /// [`ResolvedCall`] for the target kinds and the typed accessors ([`Self::resolved_member`],
+    /// [`Self::resolved_top_level`], …).
     pub resolved_calls: HashMap<ExprId, ResolvedCall>,
+    /// For a resolved classpath member or extension call, maps callee parameter slots to source
+    /// arguments. `None` means the target default-call ABI fills that slot.
+    pub resolved_call_arg_slots: HashMap<ExprId, Vec<Option<ExprId>>>,
     /// Extension callables the checker resolved for a SYNTHESIZED call that has no source-call `ExprId` —
     /// a destructuring `componentN`, a `for`-loop `iterator`, a `+=` `plusAssign` — keyed by the receiver
     /// expression's `ExprId` (the destructured value / iterable / assignment target) and the operator
@@ -4375,6 +4378,7 @@ fn make_checker<'a>(file: &'a File, syms: &'a SymbolTable, diags: &'a mut DiagSi
         resolved_call_type_args: HashMap::new(),
         narrowed_this_member: HashMap::new(),
         resolved_calls: HashMap::new(),
+        resolved_call_arg_slots: HashMap::new(),
         synthetic_ext_calls: HashMap::new(),
         super_ctor_params: HashMap::new(),
         context_args: HashMap::new(),
@@ -5116,6 +5120,7 @@ pub fn check_file(file: &File, syms: &mut SymbolTable, diags: &mut DiagSink) -> 
         resolved_call_type_args,
         narrowed_this_member,
         resolved_calls,
+        resolved_call_arg_slots,
         synthetic_ext_calls,
         context_args,
         super_ctor_params,
@@ -5161,6 +5166,7 @@ pub fn check_file(file: &File, syms: &mut SymbolTable, diags: &mut DiagSink) -> 
         resolved_call_type_args,
         narrowed_this_member,
         resolved_calls,
+        resolved_call_arg_slots,
         synthetic_ext_calls,
         context_args,
     }
@@ -5237,6 +5243,7 @@ struct Checker<'a> {
     /// [`TypeInfo::resolved_calls`] so the lowerer reads them instead of re-resolving). See
     /// [`ResolvedCall`] for the variants.
     resolved_calls: HashMap<ExprId, ResolvedCall>,
+    resolved_call_arg_slots: HashMap<ExprId, Vec<Option<ExprId>>>,
     synthetic_ext_calls: HashMap<(ExprId, String), crate::libraries::LibraryCallable>,
     /// Implicit context arguments per call (see [`TypeInfo::context_args`]).
     context_args: HashMap<ExprId, Vec<String>>,
@@ -5261,6 +5268,12 @@ struct Checker<'a> {
     /// In-scope loop labels (`l@ for …`), innermost last. A `break@l`/`continue@l` must name one of
     /// these — an unknown label is rejected (the file skips) rather than silently retargeting a loop.
     loop_labels: Vec<String>,
+}
+
+enum ClasspathMemberSlotCall {
+    Resolved(Ty),
+    Ambiguous,
+    NoMatch,
 }
 
 /// Record a type-parameter → type binding, tracking a CONFLICT when the same parameter is bound to two
@@ -9954,6 +9967,11 @@ impl<'a> Checker<'a> {
             return Some(Ty::String);
         }
         if rt == Ty::String {
+            match self.record_classpath_member_call_with_slots(call, rt, name, args) {
+                ClasspathMemberSlotCall::Resolved(ret) => return Some(ret),
+                ClasspathMemberSlotCall::Ambiguous => return Some(Ty::Error),
+                ClasspathMemberSlotCall::NoMatch => {}
+            }
             if let Some(m) = self.resolve_instance_member(rt, name, arg_tys) {
                 let ret = m.ret;
                 self.resolved_calls.insert(call, ResolvedCall::Member(m));
@@ -9997,6 +10015,11 @@ impl<'a> Checker<'a> {
                     );
                 }
             }
+            match self.record_classpath_member_call_with_slots(call, rt, name, args) {
+                ClasspathMemberSlotCall::Resolved(ret) => return Some(ret),
+                ClasspathMemberSlotCall::Ambiguous => return Some(Ty::Error),
+                ClasspathMemberSlotCall::NoMatch => {}
+            }
             if let Some(m) = self.resolve_instance_member(rt, name, arg_tys) {
                 let ret = m.ret;
                 self.resolved_calls.insert(call, ResolvedCall::Member(m));
@@ -10029,6 +10052,10 @@ impl<'a> Checker<'a> {
         // (keyed by the call `ExprId`) — not just its return type — so the lowerer emits it through the
         // ordinary extension path instead of bailing (`lower_ext_call_on` reads `resolved_extension`).
         // Mirrors the qualified `recv.name(args)` extension typing + recording.
+        if let Some(ret) = self.record_library_extension_call_with_slots(call, name, rt, args, &[])
+        {
+            return Some(ret);
+        }
         if let Some(ret) = self.record_library_extension_call(Some(call), name, rt, arg_tys, &[]) {
             return Some(ret);
         }
@@ -10325,6 +10352,72 @@ impl<'a> Checker<'a> {
                 .insert(call, ResolvedCall::Extension(c.clone()));
         }
         Some(c.ret)
+    }
+
+    fn record_library_extension_call_with_slots(
+        &mut self,
+        call: ExprId,
+        name: &str,
+        receiver: Ty,
+        args: &[ExprId],
+        type_args: &[Ty],
+    ) -> Option<Ty> {
+        let names = self
+            .file
+            .call_arg_names
+            .get(&call.0)
+            .cloned()
+            .filter(|ns| ns.iter().any(Option::is_some))?;
+        let mut candidates: Vec<_> = self
+            .resolver()
+            .resolve_symbol(
+                crate::symbol_resolver::SymRecv::Value(receiver),
+                name,
+                &[],
+                &[],
+            )
+            .map(crate::symbol_resolver::Symbol::overloads)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(crate::libraries::FunctionInfo::is_extension)
+            .filter(|o| o.call_sig.has_param_names())
+            .filter_map(|o| {
+                let params = o.extension_value_params().to_vec();
+                let slots = map_call_sig_args(args, Some(&names), &o.call_sig).ok()?;
+                let score = self.call_slot_score(&params, &slots)?;
+                Some((score, o, params, slots))
+            })
+            .collect();
+        candidates.sort_by_key(|(score, _, _, _)| std::cmp::Reverse(*score));
+        if candidates
+            .get(1)
+            .zip(candidates.first())
+            .is_some_and(|((next_score, _, _, _), (best_score, _, _, _))| next_score == best_score)
+        {
+            return None;
+        }
+        let (_, fi, params, slots) = candidates.into_iter().next()?;
+        let slot_tys: Vec<Option<Ty>> = slots
+            .iter()
+            .map(|slot| slot.map(|arg| self.expr_types[arg.0 as usize]))
+            .collect();
+        let c = self
+            .resolver()
+            .build_extension_callable_for_slots(name, receiver, type_args, &fi, &slot_tys)?;
+        for (i, slot) in slots.iter().enumerate() {
+            if let Some(arg) = slot {
+                self.expect_assignable(
+                    params[i],
+                    self.expr_types[arg.0 as usize],
+                    self.span(*arg),
+                    "argument",
+                );
+            }
+        }
+        let ret = c.ret;
+        self.resolved_calls.insert(call, ResolvedCall::Extension(c));
+        self.resolved_call_arg_slots.insert(call, slots);
+        Some(ret)
     }
 
     /// Resolve and record the extension callable for a SYNTHESIZED operator (`componentN`/`iterator`/
@@ -10807,6 +10900,85 @@ impl<'a> Checker<'a> {
         Some(t)
     }
 
+    fn record_classpath_member_call_with_slots(
+        &mut self,
+        call: ExprId,
+        rt: Ty,
+        name: &str,
+        args: &[ExprId],
+    ) -> ClasspathMemberSlotCall {
+        let arg_names = self.file.call_arg_names.get(&call.0).cloned();
+        let needs_slot_map = arg_names.is_some();
+        let mut candidates: Vec<_> = self
+            .resolver()
+            .resolve_symbol(crate::symbol_resolver::SymRecv::Value(rt), name, &[], &[])
+            .map(crate::symbol_resolver::Symbol::overloads)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|o| o.kind == crate::libraries::FnKind::Member)
+            .filter(|o| o.call_sig.has_param_names())
+            .filter_map(|o| {
+                let params = o.callable.params.clone();
+                let needs_slot_map = needs_slot_map || args.len() != params.len();
+                if !needs_slot_map {
+                    return None;
+                }
+                let slots = map_call_sig_args(args, arg_names.as_deref(), &o.call_sig).ok()?;
+                let score = self.call_slot_score(&params, &slots)?;
+                Some((score, o, params, slots))
+            })
+            .collect();
+        candidates.sort_by_key(|(score, _, _, _)| std::cmp::Reverse(*score));
+        if candidates
+            .get(1)
+            .zip(candidates.first())
+            .is_some_and(|((next_score, _, _, _), (best_score, _, _, _))| next_score == best_score)
+        {
+            self.diags.error(
+                self.span(call),
+                format!("overload resolution ambiguity for member '{name}'"),
+            );
+            return ClasspathMemberSlotCall::Ambiguous;
+        }
+        let Some((_, fi, params, slots)) = candidates.into_iter().next() else {
+            return ClasspathMemberSlotCall::NoMatch;
+        };
+        for (i, slot) in slots.iter().enumerate() {
+            if let Some(a) = slot {
+                let aty = self.expr_types[a.0 as usize];
+                self.expect_assignable(params[i], aty, self.span(*a), "argument");
+            }
+        }
+        let ret = fi.callable.ret;
+        let member = fi.member_with_return(ret);
+        self.resolved_calls.insert(
+            call,
+            ResolvedCall::Member(crate::symbol_resolver::ResolvedMember {
+                member,
+                ret,
+                suspend: fi.flags.suspend,
+            }),
+        );
+        self.resolved_call_arg_slots.insert(call, slots);
+        ClasspathMemberSlotCall::Resolved(ret)
+    }
+
+    fn call_slot_score(&self, params: &[Ty], slots: &[Option<ExprId>]) -> Option<usize> {
+        if params.len() != slots.len() {
+            return None;
+        }
+        let mut score = 0usize;
+        for (i, slot) in slots.iter().enumerate() {
+            let Some(arg) = slot else { continue };
+            let aty = self.expr_types[arg.0 as usize];
+            if !arg_assignable_simple(params[i], aty) {
+                return None;
+            }
+            score += if params[i] == aty { 4 } else { 1 };
+        }
+        Some(score)
+    }
+
     /// The classpath internal name a bare class name resolves to — an explicit import first, then the
     /// federated class-name seed (default/same-package/wildcard imports). Used to reach a classpath type's
     /// `@Metadata` (e.g. constructor parameter names) from a simple-name constructor call.
@@ -10892,6 +11064,26 @@ impl<'a> Checker<'a> {
                             .resolver().resolve_symbol(crate::symbol_resolver::SymRecv::TopLevel, n, &[], &[]).map(crate::symbol_resolver::Symbol::overloads).unwrap_or_default() }
                             .top_level()
                             .any(|o| o.call_sig.has_param_names())
+                        || self.this_ty.is_some_and(|rt| {
+                            self.resolver()
+                                .resolve_symbol(
+                                    crate::symbol_resolver::SymRecv::Value(rt),
+                                    n,
+                                    &[],
+                                    &[],
+                                )
+                                .map(crate::symbol_resolver::Symbol::overloads)
+                                .unwrap_or_default()
+                                .iter()
+                                .any(|o| {
+                                    matches!(
+                                        o.kind,
+                                        crate::libraries::FnKind::Member
+                                            | crate::libraries::FnKind::Extension
+                                    )
+                                        && o.call_sig.has_param_names()
+                                })
+                        })
                         // A CLASSPATH CONSTRUCTOR whose `@Metadata` records parameter names
                         // (`Point(y = 2, x = 1)`, or `Cfg(a = 1, c = "x")` omitting a defaulted `b`,
                         // against a data/plain class from a dependency). `constructor_named_params` returns
@@ -11453,14 +11645,17 @@ impl<'a> Checker<'a> {
                                             // Only when erased — a concrete return (`encodeToString: String`)
                                             // keeps the canonical `m.ret` (the recovered form would be a
                                             // non-canonical `Obj("kotlin/String")`).
-                                            if m.member.physical_ret.is_erased_top() {
+                                            let ret = if m.member.physical_ret.is_erased_top() {
                                                 // A reified member (`<T> T decodeFromString(…)`) called
                                                 // with an explicit type argument (`decodeFromString<C>`)
                                                 // returns that type; else recover it from the arguments.
                                                 self.reified_type_arg(call).unwrap_or(m.ret)
                                             } else {
                                                 m.ret
-                                            }
+                                            };
+                                            self.resolved_calls
+                                                .insert(call, ResolvedCall::Member(m));
+                                            ret
                                         }
                                         None => {
                                             // A classpath `object` INSTANCE member (`Ids.generate()`,
@@ -11490,7 +11685,10 @@ impl<'a> Checker<'a> {
                                                             internal: internal.clone(),
                                                         },
                                                     );
-                                                    return m.ret;
+                                                    let ret = m.ret;
+                                                    self.resolved_calls
+                                                        .insert(call, ResolvedCall::Member(m));
+                                                    return ret;
                                                 }
                                             }
                                             self.diags.error(span, format!("unresolved Java static '{cls}.{name}' for given argument types"));
@@ -11733,6 +11931,11 @@ impl<'a> Checker<'a> {
                     }
                     return Ty::String; // intrinsic on any type
                 }
+                match self.record_classpath_member_call_with_slots(call, rt, &name, args) {
+                    ClasspathMemberSlotCall::Resolved(ret) => return ret,
+                    ClasspathMemberSlotCall::Ambiguous => return Ty::Error,
+                    ClasspathMemberSlotCall::NoMatch => {}
+                }
                 if rt == Ty::String {
                     if let Some(m) = self.resolve_instance_member(rt, &name, &arg_tys) {
                         let ret = m.ret;
@@ -11899,57 +12102,11 @@ impl<'a> Checker<'a> {
                             .inferred_member_ret(rt, &name, &params)
                             .unwrap_or(fi.ret);
                     }
-                    // A CLASSPATH instance member called with NAMED arguments: reorder the labels onto
-                    // parameter positions via the member's `@Metadata` names, then check each against its
-                    // parameter (overload resolution by source-order types would otherwise fail to pair).
-                    if let Some(names) = arg_names
-                        .as_ref()
-                        .filter(|ns| ns.iter().any(Option::is_some))
-                    {
-                        if let Some(fi) = self
-                            .resolver()
-                            .resolve_symbol(
-                                crate::symbol_resolver::SymRecv::Value(rt),
-                                &name,
-                                &[],
-                                &[],
-                            )
-                            .map(crate::symbol_resolver::Symbol::overloads)
-                            .unwrap_or_default()
-                            .into_iter()
-                            .filter(|o| o.kind == crate::libraries::FnKind::Member)
-                            .find(|o| o.call_sig.has_param_names())
-                        {
-                            let params = fi.callable.params.clone();
-                            // Honour the member's per-parameter DEFAULT flags (a data-class `copy` defaults
-                            // every parameter to the receiver's property), so a named call may OMIT one —
-                            // otherwise every label would be required and `r.copy(b = "y")` errors on `a`.
-                            match map_call_sig_args(args, Some(names), &fi.call_sig) {
-                                Ok(slots) => {
-                                    for (i, slot) in slots.iter().enumerate() {
-                                        if let Some(a) = slot {
-                                            if matches!(self.file.expr(*a), Expr::Lambda { .. }) {
-                                                continue;
-                                            }
-                                            self.expect_assignable(
-                                                params[i],
-                                                self.expr_types[a.0 as usize],
-                                                self.span(*a),
-                                                "argument",
-                                            );
-                                        }
-                                    }
-                                }
-                                Err(msg) => {
-                                    self.diags.error(span, format!("call to '{name}': {msg}"))
-                                }
-                            }
-                            return fi.callable.ret;
-                        }
-                    }
                     // A classpath Java object: resolve the instance method via the `.class` reader.
                     if let Some(m) = self.resolve_instance_member(rt, &name, &arg_tys) {
-                        return m.ret;
+                        let ret = m.ret;
+                        self.resolved_calls.insert(call, ResolvedCall::Member(m));
+                        return ret;
                     }
                     // A user class that EXTENDS a classpath type inherits that supertype's members
                     // (`sub.inheritedMethod()`). Runs after the module-member lookup, so a user override
@@ -12064,46 +12221,14 @@ impl<'a> Checker<'a> {
                     self.resolved_call_type_args
                         .insert(call, call_targs.clone());
                 }
-                // NAMED arguments to a classpath EXTENSION (`"s".tag(count = …, name = …)`): the
-                // `@Metadata` names are the LOGICAL value parameters (the receiver is a separate
-                // `receiver_type`, not a label), so reorder the labelled arguments into parameter order
-                // before resolving — source-order type matching would otherwise fail to pair them.
-                if let Some(names) = self
-                    .file
-                    .call_arg_names
-                    .get(&call.0)
-                    .cloned()
-                    .filter(|ns| ns.iter().any(Option::is_some))
-                {
-                    let sets: Vec<Vec<String>> = self
-                        .resolver()
-                        .resolve_symbol(crate::symbol_resolver::SymRecv::Value(rt), &name, &[], &[])
-                        .map(crate::symbol_resolver::Symbol::overloads)
-                        .unwrap_or_default()
-                        .into_iter()
-                        .filter(crate::libraries::FunctionInfo::is_extension)
-                        .collect::<Vec<_>>()
-                        .into_iter()
-                        .filter(|o| o.call_sig.has_param_names())
-                        .map(|o| o.call_sig.param_names)
-                        .collect();
-                    if let [pn] = sets.as_slice() {
-                        if let Ok(slots) = map_call_args(args, Some(&names), pn, pn.len(), &[]) {
-                            if let Some(sel) = slots.into_iter().collect::<Option<Vec<ExprId>>>() {
-                                let tys: Vec<Ty> =
-                                    sel.iter().map(|a| self.expr_types[a.0 as usize]).collect();
-                                if let Some(ret) = self.record_library_extension_call(
-                                    Some(call),
-                                    &name,
-                                    rt,
-                                    &tys,
-                                    &call_targs,
-                                ) {
-                                    return ret;
-                                }
-                            }
-                        }
-                    }
+                if let Some(ret) = self.record_library_extension_call_with_slots(
+                    call,
+                    &name,
+                    rt,
+                    args,
+                    &call_targs,
+                ) {
+                    return ret;
                 }
                 if let Some(ret) =
                     self.record_library_extension_call(Some(call), &name, rt, &arg_tys, &call_targs)
@@ -14564,6 +14689,85 @@ mod tests {
         parse(src, &toks, d)
     }
 
+    struct FakeMemberPlatform;
+
+    impl crate::symbol_source::SymbolSource for FakeMemberPlatform {
+        fn resolve_type(&self, internal: &str) -> Option<crate::libraries::LibraryType> {
+            (internal == "kotlin/String").then(|| crate::libraries::LibraryType {
+                is_public: true,
+                kind: crate::libraries::TypeKind::Class,
+                supertypes: vec![],
+                constructors: vec![],
+                members: vec![],
+                companion: vec![],
+                companion_consts: HashMap::new(),
+                sam_method: None,
+                companion_object: None,
+                value_companion_fns: vec![],
+                value_underlying: None,
+                alias_target: None,
+                type_params: vec![],
+                sealed_subclasses: vec![],
+                enum_entries: vec![],
+                value_ctor_has_default: false,
+                ctor_named_params: vec![],
+                value_class_properties: vec![],
+                retention: None,
+            })
+        }
+
+        fn member_overloads(&self, recv: Ty, name: &str) -> crate::libraries::FunctionSet {
+            if recv != Ty::String || !matches!(name, "known" | "choose" | "tie") {
+                return crate::libraries::FunctionSet::default();
+            }
+            let member = |params: Vec<Ty>, descriptor: &'static str, defaults: Vec<bool>| {
+                let callable = crate::libraries::LibraryCallable::library(
+                    "test/Host",
+                    name,
+                    params,
+                    Ty::String,
+                    Ty::String,
+                    descriptor,
+                );
+                let mut info = crate::libraries::FunctionInfo::plain(
+                    crate::libraries::FnKind::Member,
+                    Some(Ty::String),
+                    callable,
+                );
+                info.call_sig = CallSig {
+                    param_names: if defaults.len() == 1 {
+                        vec!["a".to_string()]
+                    } else {
+                        vec!["a".to_string(), "b".to_string()]
+                    },
+                    param_defaults: defaults,
+                    required: 1,
+                    ..Default::default()
+                };
+                info
+            };
+            let overloads = match name {
+                "known" => vec![member(
+                    vec![Ty::Int, Ty::Int],
+                    "(II)Ljava/lang/String;",
+                    vec![false, true],
+                )],
+                "choose" => vec![
+                    member(vec![Ty::Boolean], "(Z)Ljava/lang/String;", vec![false]),
+                    member(vec![Ty::Int], "(I)Ljava/lang/String;", vec![false]),
+                ],
+                "tie" => vec![
+                    member(vec![Ty::Long], "(J)Ljava/lang/String;", vec![false]),
+                    member(vec![Ty::Byte], "(B)Ljava/lang/String;", vec![false]),
+                ],
+                _ => Vec::new(),
+            };
+            crate::libraries::FunctionSet { overloads }
+        }
+    }
+
+    impl SemanticPlatform for FakeMemberPlatform {}
+
     #[test]
     fn same_simple_name_in_different_packages_is_not_a_conflict() {
         // Two files declaring a class (and a top-level function) of the same simple name in
@@ -14692,6 +14896,143 @@ mod tests {
                 Some(ResolvedCall::Member(_))
             ),
             "checker must record the selected classpath getter for safe-call lowering"
+        );
+    }
+
+    #[test]
+    fn classpath_member_calls_record_resolved_members_for_lowering() {
+        let mut d = DiagSink::new();
+        let file = parse_file(
+            "fun direct(s: String): String = s.known(b = 2, a = 1)\n\
+             fun String.implicit(): String = known(a = 2)\n\
+             fun overloaded(s: String): String = s.choose(a = 1)",
+            &mut d,
+        );
+        let files = vec![file];
+        let mut syms = collect_signatures_with_cp(&files, Box::new(FakeMemberPlatform), &mut d);
+        let info = check_file(&files[0], &mut syms, &mut d);
+        assert!(
+            d.diags.is_empty(),
+            "unexpected diagnostics: {:?}",
+            d.diags.iter().map(|x| &x.msg).collect::<Vec<_>>()
+        );
+
+        let direct = files[0]
+            .expr_arena
+            .iter()
+            .enumerate()
+            .find_map(|(idx, expr)| match expr {
+                Expr::Call { callee, .. } => match files[0].expr(*callee) {
+                    Expr::Member { name, .. } if name == "known" => Some(ExprId(idx as u32)),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .expect("source should contain s.known() call");
+        assert!(
+            matches!(
+                info.resolved_calls.get(&direct),
+                Some(ResolvedCall::Member(_))
+            ),
+            "checker must record direct classpath member calls for lowering"
+        );
+        let direct_slots = info
+            .resolved_call_arg_slots
+            .get(&direct)
+            .expect("direct named member call should record argument slots");
+        let direct_values: Vec<_> = direct_slots
+            .iter()
+            .map(|slot| {
+                slot.and_then(|arg| match files[0].expr(arg) {
+                    Expr::IntLit(v) => Some(*v),
+                    _ => None,
+                })
+            })
+            .collect();
+        assert_eq!(direct_values, vec![Some(1), Some(2)]);
+
+        let implicit = files[0]
+            .expr_arena
+            .iter()
+            .enumerate()
+            .find_map(|(idx, expr)| match expr {
+                Expr::Call { callee, .. } => match files[0].expr(*callee) {
+                    Expr::Name(name) if name == "known" => Some(ExprId(idx as u32)),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .expect("source should contain implicit known() call");
+        assert!(
+            matches!(
+                info.resolved_calls.get(&implicit),
+                Some(ResolvedCall::Member(_))
+            ),
+            "checker must record implicit-receiver classpath member calls for lowering"
+        );
+        let implicit_slots = info
+            .resolved_call_arg_slots
+            .get(&implicit)
+            .expect("implicit defaulted member call should record argument slots");
+        let implicit_values: Vec<_> = implicit_slots
+            .iter()
+            .map(|slot| {
+                slot.and_then(|arg| match files[0].expr(arg) {
+                    Expr::IntLit(v) => Some(*v),
+                    _ => None,
+                })
+            })
+            .collect();
+        assert_eq!(implicit_values, vec![Some(2), None]);
+
+        let overloaded = files[0]
+            .expr_arena
+            .iter()
+            .enumerate()
+            .find_map(|(idx, expr)| match expr {
+                Expr::Call { callee, .. } => match files[0].expr(*callee) {
+                    Expr::Member { name, .. } if name == "choose" => Some(ExprId(idx as u32)),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .expect("source should contain s.choose() call");
+        let Some(ResolvedCall::Member(selected)) = info.resolved_calls.get(&overloaded) else {
+            panic!("checker must record overloaded classpath member calls for lowering");
+        };
+        assert_eq!(selected.member.params, vec![Ty::Int]);
+    }
+
+    #[test]
+    fn classpath_member_slot_ties_do_not_fall_back_to_first_match() {
+        let mut d = DiagSink::new();
+        let file = parse_file("fun ambiguous(s: String): String = s.tie(a = 1)", &mut d);
+        let files = vec![file];
+        let mut syms = collect_signatures_with_cp(&files, Box::new(FakeMemberPlatform), &mut d);
+        let info = check_file(&files[0], &mut syms, &mut d);
+        assert!(
+            d.diags
+                .iter()
+                .any(|diag| diag.msg.contains("overload resolution ambiguity")),
+            "expected ambiguity diagnostic, got {:?}",
+            d.diags.iter().map(|x| &x.msg).collect::<Vec<_>>()
+        );
+
+        let call = files[0]
+            .expr_arena
+            .iter()
+            .enumerate()
+            .find_map(|(idx, expr)| match expr {
+                Expr::Call { callee, .. } => match files[0].expr(*callee) {
+                    Expr::Member { name, .. } if name == "tie" => Some(ExprId(idx as u32)),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .expect("source should contain s.tie() call");
+        assert!(
+            !matches!(info.resolved_calls.get(&call), Some(ResolvedCall::Member(_))),
+            "ambiguous slot-aware classpath member call must not fall back to first-match resolution"
         );
     }
 

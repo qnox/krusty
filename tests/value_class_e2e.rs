@@ -153,6 +153,36 @@ fun box(): String {
 }
 
 #[test]
+fn nullable_reference_underlying_value_class_extension_to_string_is_null_safe() {
+    let Some(stdlib) = common::stdlib_jar() else {
+        return;
+    };
+    let Some(java_home) = common::java_home() else {
+        return;
+    };
+    let jdk = std::path::PathBuf::from(format!("{java_home}/lib/modules"));
+    let src = r#"
+@JvmInline
+value class Id(val raw: String)
+
+fun Id?.show(): String = toString()
+
+fun box(): String {
+    val n = (null as Id?).show()
+    if (n != "null") return "n:$n"
+    val x = Id("x").show()
+    if (x != "Id(raw=x)") return "x:$x"
+    return "OK"
+}
+"#;
+    assert_eq!(
+        common::compile_and_run_box(src, "NullableValueClassToString", &[stdlib], Some(&jdk))
+            .as_deref(),
+        Some("OK")
+    );
+}
+
+#[test]
 fn sized_array_of_value_class_uses_provider_value_underlying() {
     let Some(stdlib) = common::stdlib_jar() else {
         return;
