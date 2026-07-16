@@ -3284,3 +3284,9 @@ assertion/runtime exceptions, range objects, and runtime collection helpers no l
 The next lowerer cleanup added `emit_method_call` for by-index same-file member calls and routed
 inc/dec, object-member, destructuring, callable-reference adapter, private-accessor, getter/setter,
 operator, and named-member paths through it.
+
+### Same-File Method Call Emitter Sweep
+
+The follow-up pass routed the remaining same-file method-call constructions through `emit_method_call`,
+including safe-call, narrowed receiver, inner/outer receiver, companion, defaulted member, property,
+index-set, and binary-operator paths.
