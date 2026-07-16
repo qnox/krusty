@@ -1038,11 +1038,30 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     .iter()
                     .filter(|p| p.is_abstract || (c.is_interface() && !is_computed_prop(p)))
                 {
-                    let ty =
+                    let mut ty =
                         p.ty.as_ref()
                             .map(|r| ty_of(file, r, &*syms.libraries))
                             .unwrap_or_else(|| Ty::obj("kotlin/Any"));
-                    let ir_ty = body_prop_ir_ty(file, info, p, &*syms.libraries);
+                    let mut ir_ty = body_prop_ir_ty(file, info, p, &*syms.libraries);
+                    // `ty_of` resolves only file-local types + built-ins, and an ABSTRACT property has
+                    // no initializer/getter to recover a CLASSPATH type from (`val id: Vid` on an
+                    // interface would erase to `Any`/`Object`). Resolve the annotation against the
+                    // classpath and re-apply the declared `?` — the type drives the getter's
+                    // descriptor AND its value-class erasure/mangle.
+                    if ty.is_erased_top() {
+                        if let Some(r) = p.ty.as_ref() {
+                            if r.name != "Any" && r.name != "kotlin/Any" {
+                                if let Some(rt) = lo.classpath_ty_ref(r) {
+                                    ty = rt;
+                                    ir_ty = if r.nullable {
+                                        mark_nullable(ty_to_ir(rt))
+                                    } else {
+                                        ty_to_ir(rt)
+                                    };
+                                }
+                            }
+                        }
+                    }
                     let gname = property_getter_name(&p.name);
                     if !methods.contains_key(&gname) {
                         let mi = method_fids.len() as u32;
@@ -7421,11 +7440,11 @@ impl<'a> Lower<'a> {
         let fields: Vec<(String, Ty)> = self.classes[internal].fields[..n].to_vec();
 
         // componentN(): `return this.fieldN`.
-        for (i, (_, t)) in fields.iter().enumerate() {
+        for (i, (fname, t)) in fields.iter().enumerate() {
             let get = self.this_field(class_id, i as u32);
             let ret = self.emit_return(Some(get));
             let body = self.emit_block(vec![ret], None);
-            self.add_synth_method(
+            let fid = self.add_synth_method(
                 internal,
                 class_id,
                 &format!("component{}", i + 1),
@@ -7434,6 +7453,19 @@ impl<'a> Lower<'a> {
                 body,
                 true,
             );
+            // The checker `Ty` drops the declared `?`; the IrField carries it (re-applied at field
+            // creation). Recover it on the synthesized return — the value-class mangler hashes a
+            // nullable `Lfq?;` element differently from `Lfq;` (`component2` of a `Vid?` property is
+            // `component2-<hash of :Lfq?;>` in kotlinc).
+            if let Some(fid) = fid {
+                if let Some(irf) = self.ir.classes[class_id as usize]
+                    .fields
+                    .iter()
+                    .find(|f| f.name == *fname)
+                {
+                    self.ir.functions[fid as usize].ret = irf.ty;
+                }
+            }
         }
 
         // copy(f1, f2, …): `return P(f1, f2, …)`. Emitted BEFORE toString/hashCode/equals to match
@@ -7456,6 +7488,17 @@ impl<'a> Lower<'a> {
                 body,
                 true,
             ) {
+                // Recover each parameter's declared `?` from its IrField (see componentN above) — it
+                // decides the value-class mangle hash and the nullable-erasure of the parameter.
+                for (k, (fname, _)) in fields.iter().enumerate() {
+                    if let Some(irf) = self.ir.classes[class_id as usize]
+                        .fields
+                        .iter()
+                        .find(|f| f.name == *fname)
+                    {
+                        self.ir.functions[copy_fid as usize].params[k] = irf.ty;
+                    }
+                }
                 // `copy`'s parameters are the primary-ctor properties, so they take the SAME
                 // `checkNotNullParameter` guards kotlinc emits at the constructor — a non-null reference
                 // parameter is null-checked at `copy` entry. Reuse the class's precomputed ctor checks.
