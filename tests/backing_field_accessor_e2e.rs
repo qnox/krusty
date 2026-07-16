@@ -71,3 +71,28 @@ class My {\n\
 fun box(): String = if (My().selfTest() == 34) \"OK\" else \"fail: ${My().selfTest()}\"\n";
     common::expect_box_ok_with_stdlib(SRC, "P");
 }
+
+/// The `inline` modifier on a property ACCESSOR (`inline get()`, `private inline set(…)`) — accepted
+/// (erased; krusty emits an ordinary accessor) rather than misparsed as an unterminated declaration.
+#[test]
+fn inline_accessor_modifier_parses_and_runs() {
+    const SRC: &str = "// WITH_STDLIB
+\
+class C(val b: Int) {
+\
+    val p: Int
+\
+        inline get() = b + 1
+\
+    private val q: Int
+\
+        private inline get() = b + 2
+\
+    fun sum(): Int = p + q
+\
+}
+\
+fun box(): String = if (C(5).sum() == 13) \"OK\" else \"no\"
+";
+    common::expect_box_ok_with_stdlib(SRC, "C");
+}

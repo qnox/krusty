@@ -1502,12 +1502,19 @@ impl<'a> Parser<'a> {
         loop {
             let save = self.i;
             self.skip_newlines();
-            // Optional visibility modifier on the accessor (`private set`, …).
+            // Optional modifiers on the accessor, in any order: a visibility (`private set`) and/or
+            // `inline` (`inline get()`, `private inline set(…)`). `inline` is erased here — krusty emits
+            // an ordinary accessor — so it only needs to be consumed so the `get`/`set` still parses.
             let mut is_private = false;
-            if self.at(TokenKind::Ident)
-                && matches!(self.text(), "private" | "protected" | "internal" | "public")
+            while self.at(TokenKind::Ident)
+                && matches!(
+                    self.text(),
+                    "private" | "protected" | "internal" | "public" | "inline"
+                )
             {
-                is_private = self.text() == "private";
+                if self.text() == "private" {
+                    is_private = true;
+                }
                 self.bump();
                 self.skip_newlines();
             }
