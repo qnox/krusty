@@ -391,6 +391,11 @@ pub struct MemberFacets {
     pub write: Option<LibraryCallable>,
     pub method_ref: Option<LibraryMember>,
     pub property_ref: Option<BoundPropertyRef>,
+    /// Every overload named `name` applicable to the receiver — instance members, operators, AND in-scope
+    /// extension functions with a matching receiver — most-derived/member-first. A caller inspecting the
+    /// whole family (named-arg mapping, defaults, return agreement, member-vs-extension dispatch) filters
+    /// this by [`FunctionInfo::kind`]/`receiver_rank`.
+    pub overloads: Vec<FunctionInfo>,
 }
 
 pub enum Symbol {
@@ -444,6 +449,13 @@ impl Symbol {
         match self {
             Symbol::Member(f) => f.property_ref,
             _ => None,
+        }
+    }
+    /// Every overload named this on the receiver — members, operators, and applicable in-scope extensions.
+    pub fn overloads(self) -> Vec<FunctionInfo> {
+        match self {
+            Symbol::Member(f) => f.overloads,
+            _ => Vec::new(),
         }
     }
     /// The object/companion instance member this resolved to (`Type.name(args)`).
@@ -536,57 +548,6 @@ impl<'a> SymbolResolver<'a> {
             .unwrap_or_default()
     }
 
-    /// Extension overloads of `name` APPLICABLE to `recv`, resolved through the ONE `resolve_symbols` seam:
-    /// the scoped extension callables whose declared receiver is in `recv`'s supertype closure (the same
-    /// `extension_receiver_rank` applicability [`select_overload`] uses). This replaces the receiver-indexed
-    /// `functions(name, Some(recv))` extension lookup — `resolve_symbols` surfaces every extension (including
-    /// value-class ones) by its LOGICAL `@Metadata` name + receiver, so no per-mangling special-case is
-    /// needed here (the mangling is a jvm-emit concern). Falls back to the `functions()` extension
-    /// slice only when there is no import scope.
-    pub(crate) fn receiver_extensions(&self, recv: Ty, name: &str) -> Vec<FunctionInfo> {
-        let applies = |o: &FunctionInfo| {
-            o.is_extension()
-                && o.receiver
-                    .and_then(|dr| source_receiver_rank(&self.src, recv, dr))
-                    .is_some()
-        };
-        self.top_level_function_set(name)
-            .overloads
-            .into_iter()
-            .filter(|o| applies(o))
-            .collect()
-    }
-
-    /// Instance members named `name` on `recv` (own + inherited), collected over the type's supertype
-    /// closure through `resolve_type` — breadth-first from the receiver, so the FIRST entry is the most
-    /// derived (an override before the supertype it overrides). Replaces the removed receiver-indexed
-    /// `functions(name, Some(recv)).filter(Member)`: members are a shape of the TYPE, so they resolve
-    /// through `resolve_type`, not a callable query.
-    pub fn instance_members(&self, recv: Ty, name: &str) -> Vec<crate::libraries::LibraryMember> {
-        let mut out = Vec::new();
-        let mut seen = std::collections::HashSet::new();
-        let mut queue = std::collections::VecDeque::new();
-        if let Some(i) = recv.non_null().obj_internal() {
-            queue.push_back(i.to_string());
-        }
-        while let Some(internal) = queue.pop_front() {
-            if !seen.insert(internal.clone()) {
-                continue;
-            }
-            if let Some(t) = self.src.resolve_type(&internal) {
-                for m in &t.members {
-                    if m.name == name {
-                        out.push(m.clone());
-                    }
-                }
-                for s in t.supertypes {
-                    queue.push_back(s);
-                }
-            }
-        }
-        out
-    }
-
     /// Classify a type name — the ONE type query. `internal` → its [`LibraryType`] (a class/object/
     /// interface shape), or `None` for an unknown name. The type-side counterpart of [`resolve_symbol`].
     pub fn resolve_type(&self, internal: &str) -> Option<crate::libraries::LibraryType> {
@@ -612,11 +573,32 @@ impl<'a> SymbolResolver<'a> {
                 let write = resolve_property_setter(self.lib, ty, name);
                 let method_ref = resolve_instance_ref(self.lib, ty, name);
                 let property_ref = resolve_property_ref(self.lib, ty, name);
+                // EVERY overload named `name` applicable to the receiver: instance members and operators
+                // (the receiver-aware member query, federated over module + libraries) UNION the in-scope
+                // extension functions whose declared receiver is in the receiver's supertype closure. This
+                // is the whole candidate family `select_overload` picks from — a caller inspecting the set
+                // (named-argument mapping, default-argument selection, return agreement, member-vs-extension
+                // dispatch) reads it here and filters by `kind`/`receiver_rank` as it needs.
+                let mut overloads = self.src.member_overloads(ty, name).overloads;
+                if let Some(scope) = self.fn_scope {
+                    overloads.extend(
+                        function_set_from_symbols(resolve_symbols_in_scope(&self.src, name, scope))
+                            .overloads
+                            .into_iter()
+                            .filter(|o| {
+                                o.is_extension()
+                                    && o.receiver
+                                        .and_then(|dr| source_receiver_rank(&self.src, ty, dr))
+                                        .is_some()
+                            }),
+                    );
+                }
                 if call.is_none()
                     && read.is_none()
                     && write.is_none()
                     && method_ref.is_none()
                     && property_ref.is_none()
+                    && overloads.is_empty()
                 {
                     return None;
                 }
@@ -626,6 +608,7 @@ impl<'a> SymbolResolver<'a> {
                     write,
                     method_ref,
                     property_ref,
+                    overloads,
                 })))
             }
             SymRecv::Type(internal) => {
@@ -655,26 +638,6 @@ impl<'a> SymbolResolver<'a> {
     /// filter by [`FnKind`] as they need (`TopLevel` for a plain call, etc.).
     pub(crate) fn top_level_function_set(&self, name: &str) -> FunctionSet {
         function_set_from_symbols(self.symbols_in_scope(name))
-    }
-
-    pub(crate) fn exact_receiver_extensions(
-        &self,
-        recv: Ty,
-        name: &str,
-    ) -> impl Iterator<Item = FunctionInfo> {
-        self.receiver_extensions(recv, name)
-            .into_iter()
-            .filter(|o| o.receiver_rank == 0)
-    }
-
-    pub(crate) fn generic_receiver_extensions(
-        &self,
-        recv: Ty,
-        name: &str,
-    ) -> impl Iterator<Item = FunctionInfo> {
-        self.receiver_extensions(recv, name)
-            .into_iter()
-            .filter(|o| o.receiver_rank == 1)
     }
 
     /// Resolve a receiver-less top-level library callable for a concrete call site. This is the
@@ -1382,7 +1345,13 @@ impl<'a> SymbolResolver<'a> {
         arg_tys: &[Option<Ty>],
     ) -> Option<Vec<Vec<Ty>>> {
         let fs = FunctionSet {
-            overloads: self.receiver_extensions(receiver, name),
+            overloads: self
+                .resolve_symbol(SymRecv::Value(receiver), name, &[])
+                .map(Symbol::overloads)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(FunctionInfo::is_extension)
+                .collect(),
         };
         for allow_must_inline in [false, true] {
             for o in ranked_extension_overloads_by_recv(&self.src, receiver, &fs, allow_must_inline)
@@ -1423,7 +1392,13 @@ impl<'a> SymbolResolver<'a> {
         arg_tys: &[Option<Ty>],
     ) -> Option<Vec<Option<Ty>>> {
         let fs = FunctionSet {
-            overloads: self.receiver_extensions(receiver, name),
+            overloads: self
+                .resolve_symbol(SymRecv::Value(receiver), name, &[])
+                .map(Symbol::overloads)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(FunctionInfo::is_extension)
+                .collect(),
         };
         for allow_must_inline in [false, true] {
             for o in ranked_extension_overloads_by_recv(&self.src, receiver, &fs, allow_must_inline)
