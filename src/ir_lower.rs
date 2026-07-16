@@ -14624,12 +14624,7 @@ impl<'a> Lower<'a> {
                 let pty = self.ir.functions[mfid as usize].params[0].clone();
                 let r = self.expr(receiver)?;
                 let v = self.lower_arg(value, &pty)?;
-                return Some(self.ir.add_expr(IrExpr::MethodCall {
-                    class: mclass,
-                    index: mindex,
-                    receiver: r,
-                    args: vec![Some(v)],
-                }));
+                return Some(self.emit_method_call(mclass, mindex, r, vec![Some(v)]));
             }
         }
         let (class, idx, field_ty) = {
@@ -14721,12 +14716,7 @@ impl<'a> Lower<'a> {
                     let a = self.expr(array)?;
                     let i = self.lower_arg(index, ptys.first().unwrap_or(&ity))?;
                     let v = self.lower_arg(value, ptys.get(1).unwrap_or(&vty))?;
-                    return Some(self.ir.add_expr(IrExpr::MethodCall {
-                        class,
-                        index: midx,
-                        receiver: a,
-                        args: vec![Some(i), Some(v)],
-                    }));
+                    return Some(self.emit_method_call(class, midx, a, vec![Some(i), Some(v)]));
                 }
             }
         }
@@ -15434,12 +15424,12 @@ impl<'a> Lower<'a> {
                     let recv = self.expr(receiver)?;
                     let target_params = self.ir.functions[fid as usize].params.clone();
                     let a = self.lower_args(args, &target_params)?;
-                    let call = self.ir.add_expr(IrExpr::MethodCall {
+                    let call = self.emit_method_call(
                         class,
                         index,
-                        receiver: recv,
-                        args: a.into_iter().map(Some).collect(),
-                    });
+                        recv,
+                        a.into_iter().map(Some).collect(),
+                    );
                     return Some(self.coerce_generic_read(call, e, mret));
                 }
                 None
@@ -15659,12 +15649,7 @@ impl<'a> Lower<'a> {
                 if let Some((mclass, mindex, _, _)) =
                     self.resolve_method(&internal, &property_getter_name(name))
                 {
-                    self.ir.add_expr(IrExpr::MethodCall {
-                        class: mclass,
-                        index: mindex,
-                        receiver: recv2,
-                        args: vec![],
-                    })
+                    self.emit_method_call(mclass, mindex, recv2, vec![])
                 } else {
                     self.ir.add_expr(IrExpr::GetField {
                         receiver: recv2,
@@ -16026,12 +16011,12 @@ impl<'a> Lower<'a> {
                                     return None;
                                 }
                                 let a = self.lower_args(&args, &params)?;
-                                self.ir.add_expr(IrExpr::MethodCall {
+                                self.emit_method_call(
                                     class,
                                     index,
-                                    receiver: recv2,
-                                    args: a.into_iter().map(Some).collect(),
-                                })
+                                    recv2,
+                                    a.into_iter().map(Some).collect(),
+                                )
                             } else if let Some(&fid) =
                                 self.ext_fun_ids.get(&(nn.erased_recv(), name.clone()))
                             {
@@ -16888,12 +16873,7 @@ impl<'a> Lower<'a> {
                         if let Some((class, index, _, _)) =
                             self.resolve_method(&bi, &property_getter_name(&n))
                         {
-                            return Some(self.ir.add_expr(IrExpr::MethodCall {
-                                class,
-                                index,
-                                receiver: cast,
-                                args: vec![],
-                            }));
+                            return Some(self.emit_method_call(class, index, cast, vec![]));
                         }
                         let (fclass, idx, _) = self.resolve_field(&bi, &n)?;
                         return Some(self.ir.add_expr(IrExpr::GetField {
@@ -16934,12 +16914,7 @@ impl<'a> Lower<'a> {
                         } else if let Some((class, index, _, _)) =
                             self.resolve_method(&cur, &property_getter_name(&n))
                         {
-                            self.ir.add_expr(IrExpr::MethodCall {
-                                class,
-                                index,
-                                receiver: recv,
-                                args: vec![],
-                            })
+                            self.emit_method_call(class, index, recv, vec![])
                         } else {
                             // An inner class reads an enclosing member through `this$0` (its field 0).
                             let cur_id = self.classes.get(&cur)?.id;
@@ -16966,12 +16941,7 @@ impl<'a> Lower<'a> {
                             // The outer backing field is private — read it through its synthesized getter.
                             let (class, index, _, _) =
                                 self.resolve_method(&outer, &property_getter_name(&n))?;
-                            self.ir.add_expr(IrExpr::MethodCall {
-                                class,
-                                index,
-                                receiver: this0,
-                                args: vec![],
-                            })
+                            self.emit_method_call(class, index, this0, vec![])
                         }
                     } else {
                         // An extension/receiver-lambda implicit receiver: `fun A.f() = n` (or
@@ -16984,12 +16954,7 @@ impl<'a> Lower<'a> {
                             if let Some((class, index, _, _)) =
                                 self.resolve_method(internal, &property_getter_name(&n))
                             {
-                                self.ir.add_expr(IrExpr::MethodCall {
-                                    class,
-                                    index,
-                                    receiver: recv,
-                                    args: vec![],
-                                })
+                                self.emit_method_call(class, index, recv, vec![])
                             } else if let Some((fclass, idx, _)) = self.resolve_field(internal, &n)
                             {
                                 self.ir.add_expr(IrExpr::GetField {
@@ -17267,12 +17232,7 @@ impl<'a> Lower<'a> {
                         self.resolve_method(&recv_internal, &property_getter_name(&name))
                     {
                         // A computed property → `recv.getX()`.
-                        self.ir.add_expr(IrExpr::MethodCall {
-                            class,
-                            index,
-                            receiver: recv,
-                            args: vec![],
-                        })
+                        self.emit_method_call(class, index, recv, vec![])
                     } else {
                         return None;
                     }
@@ -17390,12 +17350,7 @@ impl<'a> Lower<'a> {
                             if let [param] = params.as_slice() {
                                 let l = self.expr(lhs)?;
                                 let r = self.lower_arg(rhs, param)?;
-                                return Some(self.ir.add_expr(IrExpr::MethodCall {
-                                    class,
-                                    index,
-                                    receiver: l,
-                                    args: vec![Some(r)],
-                                }));
+                                return Some(self.emit_method_call(class, index, l, vec![Some(r)]));
                             }
                         }
                     }
@@ -17411,12 +17366,7 @@ impl<'a> Lower<'a> {
                             if let [param] = params.as_slice() {
                                 let l = self.expr(lhs)?;
                                 let r = self.lower_arg(rhs, param)?;
-                                let cmp = self.ir.add_expr(IrExpr::MethodCall {
-                                    class,
-                                    index,
-                                    receiver: l,
-                                    args: vec![Some(r)],
-                                });
+                                let cmp = self.emit_method_call(class, index, l, vec![Some(r)]);
                                 let zero = self.ir.add_expr(IrExpr::Const(IrConst::Int(0)));
                                 return Some(self.ir.add_expr(IrExpr::PrimitiveBinOp {
                                     op: bin_to_ir(op)?,
@@ -19128,12 +19078,12 @@ impl<'a> Lower<'a> {
                                 let n_fixed = vararg_arity(vararg, params.len(), args.len())?;
                                 let a =
                                     self.lower_call_args_vararg(&args, &params, vararg, n_fixed)?;
-                                Some(self.ir.add_expr(IrExpr::MethodCall {
+                                Some(self.emit_method_call(
                                     class,
                                     index,
-                                    receiver: cast,
-                                    args: a.into_iter().map(Some).collect(),
-                                }))
+                                    cast,
+                                    a.into_iter().map(Some).collect(),
+                                ))
                             })
                         } else {
                             None
@@ -19341,12 +19291,7 @@ impl<'a> Lower<'a> {
                         let n_fixed = vararg_arity(vararg, params.len(), args.len())?;
                         let this = self.ir.add_expr(IrExpr::GetValue(0));
                         let a = self.lower_call_args_vararg(&args, &params, vararg, n_fixed)?;
-                        self.ir.add_expr(IrExpr::MethodCall {
-                            class,
-                            index,
-                            receiver: this,
-                            args: a.into_iter().map(Some).collect(),
-                        })
+                        self.emit_method_call(class, index, this, a.into_iter().map(Some).collect())
                     } else if let Some((class, index, mfid, cur_id)) =
                         self.inner_outer_method(&fname)
                     {
@@ -19375,12 +19320,12 @@ impl<'a> Lower<'a> {
                             index: 0,
                         });
                         let a = self.lower_args(&args, &params)?;
-                        self.ir.add_expr(IrExpr::MethodCall {
+                        self.emit_method_call(
                             class,
                             index,
-                            receiver: this0,
-                            args: a.into_iter().map(Some).collect(),
-                        })
+                            this0,
+                            a.into_iter().map(Some).collect(),
+                        )
                     } else if let Some(internal) = self
                         .info
                         .ty(e)
@@ -20455,12 +20400,12 @@ impl<'a> Lower<'a> {
                                     field: "Companion",
                                 });
                                 let a = self.lower_args(&args, &params)?;
-                                return Some(self.ir.add_expr(IrExpr::MethodCall {
+                                return Some(self.emit_method_call(
                                     class,
                                     index,
-                                    receiver: recv,
-                                    args: a.into_iter().map(Some).collect(),
-                                }));
+                                    recv,
+                                    a.into_iter().map(Some).collect(),
+                                ));
                             }
                         }
                     }
@@ -20510,12 +20455,9 @@ impl<'a> Lower<'a> {
                                 }
                                 if ok {
                                     let recv = self.expr(receiver)?;
-                                    return Some(self.ir.add_expr(IrExpr::MethodCall {
-                                        class,
-                                        index,
-                                        receiver: recv,
-                                        args: provided,
-                                    }));
+                                    return Some(
+                                        self.emit_method_call(class, index, recv, provided),
+                                    );
                                 }
                             }
                         }
@@ -20536,12 +20478,12 @@ impl<'a> Lower<'a> {
                         let recv = self.expr(receiver)?;
                         // Coerce each argument to its parameter type (numeric widening, boxing, …).
                         let a = self.lower_args(&args, &params)?;
-                        let call = self.ir.add_expr(IrExpr::MethodCall {
+                        let call = self.emit_method_call(
                             class,
                             index,
-                            receiver: recv,
-                            args: a.into_iter().map(Some).collect(),
-                        });
+                            recv,
+                            a.into_iter().map(Some).collect(),
+                        );
                         // A generic higher-order member erases its `<R>` return to `Object`; the checker
                         // recovers the concrete result (`box.map { it.length }` → `Int`), so insert the
                         // `checkcast`/unbox kotlinc emits on the erased return (a no-op when they match).
