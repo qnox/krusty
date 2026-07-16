@@ -948,6 +948,12 @@ pub struct IrFile {
     /// Methods kotlinc marks `ACC_SYNTHETIC` — currently a value class's `box-impl`/`unbox-impl` (the
     /// compiler-manufactured box adapters). The JVM backend ORs `0x1000` for a `FunId` in this set.
     pub synthetic_methods: std::collections::HashSet<u32>,
+    /// Internal names of classes whose primary constructor has a value-class-typed parameter (a
+    /// `data class Server(val id: ServerId, …)`). kotlinc makes such a primary `<init>` PRIVATE and adds a
+    /// PUBLIC|SYNTHETIC accessor `<init>(…args, DefaultConstructorMarker)` that delegates to it — its ABI
+    /// for a constructor mentioning an inline class. Recorded by the value-class pass BEFORE it erases the
+    /// parameter types (which lose the value-class identity).
+    pub value_param_ctors: std::collections::HashSet<String>,
     /// Lambda impl functions that are INLINE-ONLY — their body has a non-local `return` (returning from
     /// the enclosing function), which is valid only when the lambda is spliced at the call site, never as
     /// a standalone closure method (a non-local return can't compile to a separate method — its `areturn`

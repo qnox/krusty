@@ -527,6 +527,22 @@ pub fn lower_value_classes(
         target_param_map.insert(key.clone(), orig_params[fid].clone());
         target_nullable_map.insert(key, nullable);
     }
+    // Classes whose OWN property getters may be mangled: a non-value class with NO supertype or interface,
+    // so a getter can't OVERRIDE a supertype declaration (mangling an override needs the supertype's hash +
+    // a bridge, which krusty doesn't emit — it broke box `overrideReturnNothing.kt`). A plain data class
+    // (`data class Server(val id: ServerId)`) qualifies; its `getId` mangles to kotlinc's `getId-<hash>`.
+    // Exclude interfaces: an interface's abstract getter would mangle here, but its IMPLEMENTORS carry the
+    // interface (so they're NOT in this set) and stay unmangled → an inconsistent override pair
+    // (AbstractMethodError, box `overrideReturnNothing.kt`). Keeping interface getters unmangled keeps both
+    // sides consistent.
+    let getter_mangle_owners: HashSet<String> = ir
+        .classes
+        .iter()
+        .filter(|c| {
+            !c.is_value && !c.is_interface && c.supertypes.is_empty() && c.interfaces.is_empty()
+        })
+        .map(|c| c.fq_name.clone())
+        .collect();
     for (fid, f) in ir.functions.iter_mut().enumerate() {
         let is_box_impl = f.name == "box-impl";
         // A USER value-class member function's body runs on the BOXED object; its value-class-typed
@@ -534,11 +550,17 @@ pub fn lower_value_classes(
         // SYNTHESIZED members (`-impl`, `equals`/`hashCode`/`toString`, the getter, `<init>`) operate on
         // the underlying representation, so they erase like any other function.
         // A property GETTER (`getValue` on a value class, `getProperty` for a `val`) takes no value
-        // parameters — match it by the `get` prefix AND an empty parameter list, so it stays unmangled
-        // (krusty does not yet mangle a getter's value-class signature override-consistently). A user
-        // FUNCTION that merely starts with `get` but takes parameters (`suspend fun getById(id: ServerId)`)
-        // is a normal member and MUST mangle its value-class signature like any other method.
-        let is_vc_field_getter = f.name.starts_with("get") && orig_params[fid].is_empty();
+        // parameters — match it by the `get` prefix AND an empty parameter list. It stays unmangled UNLESS
+        // its owner is a supertype-free class (`getter_mangle_owners`), where a value-class-returning getter
+        // safely mangles to kotlinc's `getId-<hash>` (no override to keep consistent). A user FUNCTION that
+        // starts with `get` but takes parameters (`suspend fun getById(id: ServerId)`) is a normal member
+        // and always mangles.
+        let is_vc_field_getter = f.name.starts_with("get")
+            && orig_params[fid].is_empty()
+            && !f
+                .dispatch_receiver
+                .as_ref()
+                .is_some_and(|r| getter_mangle_owners.contains(r));
         let synthesized = matches!(
             f.name.as_str(),
             "box-impl"
@@ -922,7 +944,17 @@ pub fn lower_value_classes(
 
     // 2. Erase class field + ctor-arg types; drop the `<init>` null-check on a constructor parameter
     //    that erased to a non-reference (a value-class ctor arg `a: Na` → `int` can't be null-checked).
+    // A NON-value class whose primary ctor has a value-class-typed param gets kotlinc's private-primary +
+    // synthetic marker accessor ABI — recorded BEFORE erasure loses the value-class identity of the param.
+    let mut value_param_ctors: Vec<String> = Vec::new();
     for c in &mut ir.classes {
+        if !c.is_value
+            && !c.is_object
+            && !c.is_interface
+            && c.ctor_args.iter().any(|a| is_vc_ty(&a.ty))
+        {
+            value_param_ctors.push(c.fq_name.clone());
+        }
         for fld in &mut c.fields {
             fld.ty = erase(&fld.ty, &under);
         }
@@ -944,6 +976,7 @@ pub fn lower_value_classes(
             }
         }
     }
+    ir.value_param_ctors.extend(value_param_ctors);
 
     for c in &mut ir.classes {
         let mut method_keys: HashSet<(String, String)> = c
