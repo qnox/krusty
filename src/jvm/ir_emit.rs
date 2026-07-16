@@ -27,6 +27,13 @@ thread_local! {
     /// it sets the flag and `emit_all` drops the whole file (returns `None`), so the file is skipped,
     /// never miscompiled. A compiler must never crash on its own IR.
     static EMIT_BAIL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Lambda impl `FunId`s that got a REAL `invokedynamic` during emission. A lambda spliced by the
+    /// inliner (a `require { … }` message, an inlined `flatMap { … }` body) never emits one, so its
+    /// standalone `$lambda$N` method is dead — kotlinc emits neither the method nor (for an otherwise
+    /// class-only file) the facade holding it. `emit_all_with_class_meta` runs a discovery pass, then
+    /// re-emits without the dead facade impls.
+    static USED_LAMBDAS: std::cell::RefCell<std::collections::HashSet<u32>> =
+        std::cell::RefCell::new(std::collections::HashSet::new());
 }
 
 pub fn inline_bail_reason() -> Option<String> {
@@ -106,6 +113,59 @@ pub fn emit_all_with_class_meta(
     metadata: Option<&KotlinMetadata>,
     class_meta: &dyn Fn(&str) -> Option<KotlinMetadata>,
 ) -> Option<Vec<(String, Vec<u8>)>> {
+    // Pass 1 (discovery): emit everything, recording which lambda impls actually get an `invokedynamic`
+    // (`USED_LAMBDAS`). A lambda spliced by the inliner never emits one — its standalone `$lambda$N` is
+    // dead, and kotlinc emits neither the method nor (for a class-only file) the facade holding it.
+    USED_LAMBDAS.with(|u| u.borrow_mut().clear());
+    let first = emit_pass(
+        ir,
+        facade,
+        bodies,
+        metadata,
+        class_meta,
+        &std::collections::HashSet::new(),
+    )?;
+    let used = USED_LAMBDAS.with(|u| u.borrow().clone());
+    let class_member_fids: std::collections::HashSet<u32> = ir
+        .classes
+        .iter()
+        .flat_map(|c| c.methods.iter().copied())
+        .collect();
+    // Dead = a FACADE-owned lambda impl (no receiver, not a class member — a class-owned or
+    // suspend-state-machine lambda may be reached through paths discovery doesn't model) that no emitted
+    // `invokedynamic` references. NB single iteration: an indy inside a dead lambda still marks its inner
+    // lambda used, so a nested-dead chain keeps the inner method — rare, and strictly better than today.
+    let dead: std::collections::HashSet<u32> = ir
+        .lambda_own_params_from
+        .keys()
+        .filter(|&&fid| {
+            !used.contains(&fid)
+                && !ir.inline_only_fns.contains(&fid)
+                && !class_member_fids.contains(&fid)
+                && ir
+                    .functions
+                    .get(fid as usize)
+                    .is_some_and(|f| f.dispatch_receiver.is_none())
+                && !ir.suspend_lambda_sm.iter().any(|(f2, _, _)| *f2 == fid)
+        })
+        .copied()
+        .collect();
+    if dead.is_empty() {
+        return Some(first);
+    }
+    // Pass 2: re-emit without the dead facade impls (deterministic — identical decisions, minus the dead
+    // methods; the facade itself drops when they were its only members).
+    emit_pass(ir, facade, bodies, metadata, class_meta, &dead)
+}
+
+fn emit_pass(
+    ir: &IrFile,
+    facade: &str,
+    bodies: &dyn MethodBodies,
+    metadata: Option<&KotlinMetadata>,
+    class_meta: &dyn Fn(&str) -> Option<KotlinMetadata>,
+    dead_lambdas: &std::collections::HashSet<u32>,
+) -> Option<Vec<(String, Vec<u8>)>> {
     if !jvm_can_emit(ir) {
         return None;
     }
@@ -131,8 +191,9 @@ pub fn emit_all_with_class_meta(
             continue;
         }
         // An inline-only lambda impl is never emitted (it's spliced) — don't count it as a facade method,
-        // else an otherwise class-only file emits an empty facade kotlinc omits.
-        if ir.inline_only_fns.contains(&(i as u32)) {
+        // else an otherwise class-only file emits an empty facade kotlinc omits. A DEAD lambda impl
+        // (inlined at every use — pass-1 discovery) is dropped the same way.
+        if ir.inline_only_fns.contains(&(i as u32)) || dead_lambdas.contains(&(i as u32)) {
             continue;
         }
         emit_method(ir, i as u32, facade, facade, &mut cw, false, bodies);
@@ -5205,6 +5266,11 @@ impl<'a> Emitter<'a> {
                 sam,
                 ..
             } => {
+                // This lambda becomes a REAL closure (`invokedynamic` referencing its impl method) — record
+                // it so the dead-lambda pass keeps the impl. An INLINED lambda never reaches this arm.
+                USED_LAMBDAS.with(|u| {
+                    u.borrow_mut().insert(*impl_fn);
+                });
                 let f = &self.ir.functions[*impl_fn as usize];
                 let impl_name = f.name.clone();
                 let impl_params = jvm_tys(&f.params);
