@@ -619,6 +619,23 @@ fn hoist_stmt(
             out.push(stmt);
             return;
         }
+        // A VALUE-bearing `Block` in STATEMENT position (`recv?.let { susp(...) }` with the result
+        // discarded): the value runs for effect only — demote it to a trailing statement so the
+        // flattener sees a plain value-less block.
+        IrExpr::Block {
+            stmts: bstmts,
+            value: Some(v),
+        } => {
+            let mut ns = bstmts.clone();
+            ns.push(*v);
+            ir.exprs[stmt as usize] = IrExpr::Block {
+                stmts: ns,
+                value: None,
+            };
+            hoist_suspensions(ir, stmt, suspend_set, orig_rets);
+            out.push(stmt);
+            return;
+        }
         IrExpr::Variable { init: Some(i), .. } if is_suspend_call(ir, *i, suspend_set) => {
             out.push(stmt);
             return;
@@ -2771,6 +2788,23 @@ impl Flat<'_> {
                     let a_handler = std::mem::take(&mut self.assigned);
                     self.assigned = a_body.intersection(&a_handler).copied().collect();
                     self.flatten(&stmts[i + 1..], try_after, after);
+                    return;
+                }
+            }
+            // A VALUE-bearing `Block` in STATEMENT position (`recv?.let { susp(…) }` inside an `if`
+            // branch, result discarded): the value runs for effect only — splice its statements plus
+            // the demoted value into this sequence and continue flattening.
+            if expr_calls_suspend(self.ir, stmt, self.suspend) {
+                if let IrExpr::Block {
+                    stmts: bs,
+                    value: Some(v),
+                } = self.ir.exprs[stmt as usize].clone()
+                {
+                    let mut spliced = bs;
+                    spliced.push(v);
+                    spliced.extend_from_slice(&stmts[i + 1..]);
+                    self.states[cur] = out;
+                    self.flatten(&spliced, cur, after);
                     return;
                 }
             }
