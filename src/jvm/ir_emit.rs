@@ -49,6 +49,38 @@ pub struct KotlinMetadata {
 /// Emit a whole IR file: the facade class of top-level `static` functions, plus one `.class` per
 /// `IrClass`. Returns `(internal_name, bytes)` for each, or `None` when the IR uses a construct the
 /// JVM backend can't represent (so every emission path skips it rather than miscompiling).
+/// Mark the lambda-argument impls of a MUST-INLINE call (`require`/`check`/`error` — a non-public
+/// `@InlineOnly` callee the backend always splices, never invokes) as `inline_only`, so the standalone
+/// `$lambda$N` method is NOT emitted. It is dead: the message lambda is spliced at the call site, so a
+/// leftover impl would only force a spurious facade class (`OrganizationIdKt` holding a dead
+/// `$lambda$0`) that kotlinc never emits. Safe because a `MustInline` callee is guaranteed spliced (or
+/// the whole file is skipped — then nothing is emitted anyway).
+pub fn mark_must_inline_lambdas(ir: &mut IrFile) {
+    let mut dead: Vec<u32> = Vec::new();
+    for i in 0..ir.exprs.len() {
+        let args = match &ir.exprs[i] {
+            IrExpr::Call {
+                callee:
+                    Callee::Static {
+                        inline: crate::libraries::InlineKind::MustInline,
+                        ..
+                    },
+                args,
+                ..
+            } => args.clone(),
+            _ => continue,
+        };
+        for a in args {
+            if let IrExpr::Lambda { impl_fn, .. } = &ir.exprs[a as usize] {
+                dead.push(*impl_fn);
+            }
+        }
+    }
+    for fid in dead {
+        ir.inline_only_fns.insert(fid);
+    }
+}
+
 pub fn emit_all(
     ir: &IrFile,
     facade: &str,
@@ -96,6 +128,11 @@ pub fn emit_all_with_class_meta(
             continue;
         }
         if f.dispatch_receiver.is_some() || f.body.is_none() {
+            continue;
+        }
+        // An inline-only lambda impl is never emitted (it's spliced) — don't count it as a facade method,
+        // else an otherwise class-only file emits an empty facade kotlinc omits.
+        if ir.inline_only_fns.contains(&(i as u32)) {
             continue;
         }
         emit_method(ir, i as u32, facade, facade, &mut cw, false, bodies);
