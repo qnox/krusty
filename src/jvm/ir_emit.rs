@@ -895,10 +895,13 @@ fn emit_class(
     } else {
         0x0001 | 0x0020 // PUBLIC | SUPER
     };
-    if !extended && !has_abstract {
+    // A SEALED class is abstract (kotlinc: sealed implies no direct instantiation), and an
+    // `abstract class` is too — both alongside any class with an abstract (body-less) member.
+    let is_abstract = has_abstract || c.is_sealed || c.is_abstract;
+    if !extended && !is_abstract {
         access |= 0x0010;
     } // FINAL
-    if has_abstract {
+    if is_abstract {
         access |= 0x0400;
     } // ABSTRACT
     cw.set_access(access);
@@ -1087,10 +1090,15 @@ fn emit_class(
                     e.emit_value(a, &mut ctor);
                 }
             }
-            // A base whose primary ctor takes a value-class param has a PRIVATE primary; a subclass
-            // `super(…)` must reach it through the PUBLIC|SYNTHETIC `(…args, DefaultConstructorMarker)`
-            // accessor (a trailing `null` marker), never the inaccessible private primary.
-            let super_accessor = e.ir.value_param_ctors.contains(&c.superclass);
+            // A base whose primary ctor takes a value-class param — or a SEALED base — has a PRIVATE
+            // primary; a subclass `super(…)` must reach it through the PUBLIC|SYNTHETIC
+            // `(…args, DefaultConstructorMarker)` accessor (a trailing `null` marker), never the
+            // inaccessible private primary.
+            let super_accessor = e.ir.value_param_ctors.contains(&c.superclass)
+                || e.ir
+                    .classes
+                    .iter()
+                    .any(|o| o.fq_name == c.superclass && o.is_sealed);
             let mut super_param_tys = super_param_tys.clone();
             if super_accessor {
                 ctor.aconst_null();
@@ -1152,16 +1160,19 @@ fn emit_class(
         // package-private (so the outer class's `<clinit>` can call it without nestmate attributes); a
         // normal class's is public.
         let value_param_ctor = ir.value_param_ctors.contains(&c.fq_name);
-        let ctor_access = if c.is_object || c.is_value || value_param_ctor || c.is_companion {
-            // A companion's real ctor is PRIVATE too — the outer `<clinit>` constructs it through the
-            // PUBLIC|SYNTHETIC `(DefaultConstructorMarker)` accessor emitted below (kotlinc's shape).
-            0x0002
-        } else if is_continuation {
-            // A continuation class's ctor is package-private (constructed only by its own file).
-            0x0000
-        } else {
-            0x0001
-        };
+        // A SEALED class's primary ctor is private too — subclasses (and Java/reflection) construct
+        // through the PUBLIC|SYNTHETIC `(…args, DefaultConstructorMarker)` accessor (kotlinc's shape).
+        let ctor_access =
+            if c.is_object || c.is_value || value_param_ctor || c.is_companion || c.is_sealed {
+                // A companion's real ctor is PRIVATE too — the outer `<clinit>` constructs it through the
+                // PUBLIC|SYNTHETIC `(DefaultConstructorMarker)` accessor emitted below (kotlinc's shape).
+                0x0002
+            } else if is_continuation {
+                // A continuation class's ctor is package-private (constructed only by its own file).
+                0x0000
+            } else {
+                0x0001
+            };
         cw.add_method_sig(
             ctor_access,
             "<init>",
@@ -1178,7 +1189,7 @@ fn emit_class(
         // A value-class-param primary ctor is private (above); kotlinc exposes a PUBLIC|SYNTHETIC accessor
         // `<init>(…args, DefaultConstructorMarker)` that simply delegates to it, so Java/reflection can
         // still construct the class.
-        if value_param_ctor || c.is_companion {
+        if value_param_ctor || c.is_companion || c.is_sealed {
             emit_ctor_marker_accessor(&c.fq_name, &param_tys, &mut cw);
         }
     } // end `if c.has_primary_ctor`
@@ -1285,7 +1296,14 @@ fn emit_class(
             // param has a PRIVATE primary — reach it through the `(…args, DefaultConstructorMarker)`
             // accessor. A same-class `this(…)` to the own private primary stays direct (accessible).
             let mut target_jvm_tys = target_jvm_tys;
-            if target_class != c.fq_name && e.ir.value_param_ctors.contains(&target_class) {
+            let target_sealed = target_class != c.fq_name
+                && e.ir
+                    .classes
+                    .iter()
+                    .any(|o| o.fq_name == target_class && o.is_sealed);
+            if (target_class != c.fq_name && e.ir.value_param_ctors.contains(&target_class))
+                || target_sealed
+            {
                 sctor.aconst_null();
                 target_jvm_tys.push(Ty::obj("kotlin/jvm/internal/DefaultConstructorMarker"));
             }
@@ -1307,12 +1325,18 @@ fn emit_class(
         }
         sctor.ensure_locals(sec_max);
         sctor.link();
+        // A SEALED class's secondary ctor is private too, with its own PUBLIC
+        // `(…args, DefaultConstructorMarker)` accessor (kotlinc: EVERY sealed ctor pairs with one).
+        let sc_access = if c.is_sealed { 0x0002 } else { 0x0001 };
         cw.add_method(
-            0x0001,
+            sc_access,
             "<init>",
             &method_descriptor(&sc_param_tys, Ty::Unit),
             &sctor,
         );
+        if c.is_sealed {
+            emit_ctor_marker_accessor(&c.fq_name, &sc_param_tys, &mut cw);
+        }
     }
     // A class with a `companion object`: a `public static final Companion` field of the companion
     // type, constructed in this class's `<clinit>`.
