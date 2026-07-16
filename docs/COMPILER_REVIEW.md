@@ -3309,3 +3309,10 @@ Same-file field reads now go through `emit_get_field`, and classpath/static fiel
 `emit_external_static_field`. Suspend-lambda captures, data-class copy/default/equals paths, backing
 field reads, safe-call reads, labeled/inner `this` access, top-level consts, companion consts, enum
 entries, and `System.out` no longer rebuild those IR nodes at their feature sites.
+
+### Field Write Emitter Merge
+
+Same-file field and facade-static writes now go through `emit_set_field`/`emit_set_static`.
+Initializer stores, suspend-lambda label/parameter stores, custom accessor `field =` writes,
+unqualified member assignments, inc/dec writes, and direct member assignments no longer rebuild
+`SetField`/`SetStatic` nodes at their feature sites.

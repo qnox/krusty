@@ -4895,6 +4895,19 @@ impl<'a> Lower<'a> {
         })
     }
 
+    fn emit_set_field(&mut self, receiver: u32, class: u32, index: u32, value: u32) -> u32 {
+        self.ir.add_expr(IrExpr::SetField {
+            receiver,
+            class,
+            index,
+            value,
+        })
+    }
+
+    fn emit_set_static(&mut self, index: u32, value: u32) -> u32 {
+        self.ir.add_expr(IrExpr::SetStatic { index, value })
+    }
+
     fn emit_external_static_field(
         &mut self,
         owner: impl Into<String>,
@@ -5271,12 +5284,7 @@ impl<'a> Lower<'a> {
                     }
                     let val = self.lower_arg(init_e, &field_ty)?;
                     let recv = self.ir.add_expr(IrExpr::GetValue(this_v));
-                    stmts.push(self.ir.add_expr(IrExpr::SetField {
-                        receiver: recv,
-                        class: class_id,
-                        index: field_idx,
-                        value: val,
-                    }));
+                    stmts.push(self.emit_set_field(recv, class_id, field_idx, val));
                 }
                 ast::ClassInit::Block(e) => {
                     let Expr::Block {
@@ -6839,12 +6847,7 @@ impl<'a> Lower<'a> {
             .map(|i| {
                 let this = self.ir.add_expr(IrExpr::GetValue(0));
                 let val = self.ir.add_expr(IrExpr::GetValue(1 + i));
-                self.ir.add_expr(IrExpr::SetField {
-                    receiver: this,
-                    class: 0, // patched after add_class (class_id known then)
-                    index: i,
-                    value: val,
-                })
+                self.emit_set_field(this, 0, i, val)
             })
             .collect();
         let init_body = (!init_stores.is_empty()).then(|| {
@@ -7084,12 +7087,7 @@ impl<'a> Lower<'a> {
                 let s0_tof = throw_on_failure(self, 1)?;
                 let this_l = self.ir.add_expr(IrExpr::GetValue(0));
                 let one = self.ir.add_expr(IrExpr::Const(IrConst::Int(1)));
-                let set_label = self.ir.add_expr(IrExpr::SetField {
-                    receiver: this_l,
-                    class: class_id,
-                    index: label_idx,
-                    value: one,
-                });
+                let set_label = self.emit_set_field(this_l, class_id, label_idx, one);
                 let r_var = self.ir.add_expr(IrExpr::Variable {
                     index: r_idx,
                     ty: object_ir.clone(),
@@ -7299,12 +7297,7 @@ impl<'a> Lower<'a> {
                 type_operand: ty_to_ir(*pty),
             });
             let rg = self.ir.add_expr(IrExpr::GetValue(r_idx));
-            inv_stmts.push(self.ir.add_expr(IrExpr::SetField {
-                receiver: rg,
-                class: class_id,
-                index: param_field_base + i as u32,
-                value: coerced,
-            }));
+            inv_stmts.push(self.emit_set_field(rg, class_id, param_field_base + i as u32, coerced));
         }
         let rg2 = self.ir.add_expr(IrExpr::GetValue(r_idx));
         let unit = self.ir.add_expr(IrExpr::UnitInstance);
@@ -7351,12 +7344,12 @@ impl<'a> Lower<'a> {
                 type_operand: ty_to_ir(*pty),
             });
             let rg = self.ir.add_expr(IrExpr::GetValue(cr_idx));
-            create_stmts.push(self.ir.add_expr(IrExpr::SetField {
-                receiver: rg,
-                class: class_id,
-                index: param_field_base + i as u32,
-                value: coerced,
-            }));
+            create_stmts.push(self.emit_set_field(
+                rg,
+                class_id,
+                param_field_base + i as u32,
+                coerced,
+            ));
         }
         let crg = self.ir.add_expr(IrExpr::GetValue(cr_idx));
         create_stmts.push(self.ir.add_expr(IrExpr::Return(Some(crg))));
@@ -13336,20 +13329,12 @@ impl<'a> Lower<'a> {
                     if let Some((class_id, fidx, fty)) = self.cur_field.clone() {
                         let val = self.lower_arg(value, &fty)?;
                         let this_e = self.ir.add_expr(IrExpr::GetValue(0));
-                        return Some(self.ir.add_expr(IrExpr::SetField {
-                            receiver: this_e,
-                            class: class_id,
-                            index: fidx,
-                            value: val,
-                        }));
+                        return Some(self.emit_set_field(this_e, class_id, fidx, val));
                     }
                     // A top-level custom setter writes the backing STATIC field.
                     if let Some((sidx, fty)) = self.cur_static_field {
                         let val = self.lower_arg(value, &fty)?;
-                        return Some(self.ir.add_expr(IrExpr::SetStatic {
-                            index: sidx,
-                            value: val,
-                        }));
+                        return Some(self.emit_set_static(sidx, val));
                     }
                 }
                 // A local delegated `var`: write through the delegate's `setValue(null, propref, value)`.
@@ -13412,12 +13397,7 @@ impl<'a> Lower<'a> {
                 } else if let Some((this_v, class, idx, field_ty)) = own_field {
                     let recv = self.ir.add_expr(IrExpr::GetValue(this_v));
                     let val = self.lower_arg(value, &field_ty)?;
-                    Some(self.ir.add_expr(IrExpr::SetField {
-                        receiver: recv,
-                        class,
-                        index: idx,
-                        value: val,
-                    }))
+                    Some(self.emit_set_field(recv, class, idx, val))
                 } else if let Some(sfid) = self.computed_setters.get(&name).copied() {
                     // A top-level backing-field `var` with a custom setter → call `setX(value)` (which
                     // runs the custom body), not a direct `putstatic`.
@@ -13430,10 +13410,7 @@ impl<'a> Lower<'a> {
                     Some(self.emit_local_call(sfid, vec![val]))
                 } else if let Some((idx, ty)) = self.statics.get(&name).cloned() {
                     let val = self.lower_arg(value, &ty_to_ir(ty))?;
-                    Some(self.ir.add_expr(IrExpr::SetStatic {
-                        index: idx,
-                        value: val,
-                    }))
+                    Some(self.emit_set_static(idx, val))
                 } else if let Some((facade, ty, is_var, _)) =
                     self.syms.prop_facades.get(&name).cloned()
                 {
@@ -13530,12 +13507,7 @@ impl<'a> Lower<'a> {
                     let nv = self.scalar_update_value(cur_val, fty, op, one_c);
                     let recv2 = self.ir.add_expr(IrExpr::GetValue(this_v));
                     return Some(if let Some((class, idx)) = own {
-                        self.ir.add_expr(IrExpr::SetField {
-                            receiver: recv2,
-                            class,
-                            index: idx,
-                            value: nv,
-                        })
+                        self.emit_set_field(recv2, class, idx, nv)
                     } else {
                         let (sclass, sindex, _, _) =
                             self.resolve_method(&internal, &property_setter_name(&name))?;
@@ -14592,12 +14564,7 @@ impl<'a> Lower<'a> {
         let r = self.expr(receiver)?;
         // Coerce the value to the field's type (e.g. `Int` literal into a `Long` field).
         let v = self.lower_arg(value, &field_ty)?;
-        Some(self.ir.add_expr(IrExpr::SetField {
-            receiver: r,
-            class,
-            index: idx,
-            value: v,
-        }))
+        Some(self.emit_set_field(r, class, idx, v))
     }
 
     /// Whether `receiver.name = value` is a compound assignment (`receiver.name op= …`): the parser
