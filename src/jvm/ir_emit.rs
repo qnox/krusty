@@ -493,13 +493,13 @@ fn emit_statics(ir: &IrFile, facade: &str, cw: &mut ClassWriter, bodies: &dyn Me
         let fref = cw.fieldref(facade, &s.name, &desc);
         g.getstatic(fref, slot_words(jt) as i32);
         emit_return(jt, &mut g);
-        g.ensure_locals(0);
-        g.link();
-        cw.add_method(
+        finish_code(
+            cw,
             0x0019,
             &property_getter_name(&s.name),
             &format!("(){desc}"),
-            &g,
+            &mut g,
+            0,
         );
         if s.is_var {
             let words = slot_words(jt);
@@ -519,13 +519,13 @@ fn emit_statics(ir: &IrFile, facade: &str, cw: &mut ClassWriter, bodies: &dyn Me
             let fref = cw.fieldref(facade, &s.name, &desc);
             st.putstatic(fref, slot_words(jt) as i32);
             st.ret_void();
-            st.ensure_locals(words);
-            st.link();
-            cw.add_method(
+            finish_code(
+                cw,
                 0x0019,
                 &property_setter_name(&s.name),
                 &format!("({desc})V"),
-                &st,
+                &mut st,
+                words,
             );
         }
     }
@@ -561,9 +561,7 @@ fn emit_statics(ir: &IrFile, facade: &str, cw: &mut ClassWriter, bodies: &dyn Me
         return;
     }
     code.ret_void();
-    code.ensure_locals(e.next_slot);
-    code.link();
-    e.cw.add_method(0x0008 /* STATIC */, "<clinit>", "()V", &code);
+    finish_code(e.cw, 0x0008, "<clinit>", "()V", &mut code, e.next_slot);
 }
 
 fn emit_class(
@@ -1256,9 +1254,7 @@ fn emit_prop_ref_class(c: &crate::ir::IrClass, facade: &str) -> Vec<u8> {
     );
     ctor.invokespecial(sup, 4, 0);
     ctor.ret_void();
-    ctor.ensure_locals(1);
-    ctor.link();
-    cw.add_method(0x0000, "<init>", "()V", &ctor);
+    finish_code(&mut cw, 0x0000, "<init>", "()V", &mut ctor, 1);
 
     // `get(Object)Object`: ((Owner) it).getName(), boxed if primitive.
     let mut get = CodeBuilder::new(2);
@@ -1271,13 +1267,13 @@ fn emit_prop_ref_class(c: &crate::ir::IrClass, facade: &str) -> Vec<u8> {
         box_prim_free(&mut cw, &mut get, prop_jvm);
     }
     get.areturn();
-    get.ensure_locals(2);
-    get.link();
-    cw.add_method(
+    finish_code(
+        &mut cw,
         0x0001,
         "get",
         "(Ljava/lang/Object;)Ljava/lang/Object;",
-        &get,
+        &mut get,
+        2,
     );
 
     // `set(Object, Object)V` (an unbound `var` reference): `((Owner) it).setName(v)` after
@@ -1303,13 +1299,13 @@ fn emit_prop_ref_class(c: &crate::ir::IrClass, facade: &str) -> Vec<u8> {
         let sref = cw.methodref(&pr.owner_internal, &setter, &setter_desc);
         set.invokevirtual(sref, slot_words(prop_jvm) as i32, 0);
         set.ret_void();
-        set.ensure_locals(3);
-        set.link();
-        cw.add_method(
+        finish_code(
+            &mut cw,
             0x0001,
             "set",
             "(Ljava/lang/Object;Ljava/lang/Object;)V",
-            &set,
+            &mut set,
+            3,
         );
     }
 
@@ -1323,9 +1319,7 @@ fn emit_prop_ref_class(c: &crate::ir::IrClass, facade: &str) -> Vec<u8> {
     let fref = cw.fieldref(&fq, "INSTANCE", &self_desc);
     clinit.putstatic(fref, 1);
     clinit.ret_void();
-    clinit.ensure_locals(0);
-    clinit.link();
-    cw.add_method(0x0008, "<clinit>", "()V", &clinit);
+    finish_code(&mut cw, 0x0008, "<clinit>", "()V", &mut clinit, 0);
     cw.finish()
 }
 
@@ -1365,9 +1359,14 @@ fn emit_bound_prop_ref_class(
     );
     ctor.invokespecial(sup, 5, 0);
     ctor.ret_void();
-    ctor.ensure_locals(2);
-    ctor.link();
-    cw.add_method(0x0000, "<init>", "(Ljava/lang/Object;)V", &ctor);
+    finish_code(
+        &mut cw,
+        0x0000,
+        "<init>",
+        "(Ljava/lang/Object;)V",
+        &mut ctor,
+        2,
+    );
 
     // `get()Object`: for a member ref `((Owner) this.receiver).getName()`; for an extension ref
     // `Facade.getName((Owner) this.receiver)`. Boxed if primitive.
@@ -1388,9 +1387,7 @@ fn emit_bound_prop_ref_class(
         box_prim_free(&mut cw, &mut get, prop_jvm);
     }
     get.areturn();
-    get.ensure_locals(1);
-    get.link();
-    cw.add_method(0x0001, "get", "()Ljava/lang/Object;", &get);
+    finish_code(&mut cw, 0x0001, "get", "()Ljava/lang/Object;", &mut get, 1);
 
     // `set(Object)V` (a bound `var` reference): `((Owner) this.receiver).setName(v)` after
     // casting/unboxing the argument to the property type.
@@ -1423,9 +1420,7 @@ fn emit_bound_prop_ref_class(
             set.invokevirtual(sref, slot_words(prop_jvm) as i32, 0);
         }
         set.ret_void();
-        set.ensure_locals(2);
-        set.link();
-        cw.add_method(0x0001, "set", "(Ljava/lang/Object;)V", &set);
+        finish_code(&mut cw, 0x0001, "set", "(Ljava/lang/Object;)V", &mut set, 2);
     }
     cw.finish()
 }
@@ -1466,9 +1461,7 @@ fn emit_toplevel_prop_ref_class(
     );
     ctor.invokespecial(sup, 4, 0);
     ctor.ret_void();
-    ctor.ensure_locals(1);
-    ctor.link();
-    cw.add_method(0x0000, "<init>", "()V", &ctor);
+    finish_code(&mut cw, 0x0000, "<init>", "()V", &mut ctor, 1);
 
     // `get()Object`: invokestatic <facade>.getName(), boxed if primitive.
     let mut get = CodeBuilder::new(1);
@@ -1478,9 +1471,7 @@ fn emit_toplevel_prop_ref_class(
         box_prim_free(&mut cw, &mut get, prop_jvm);
     }
     get.areturn();
-    get.ensure_locals(1);
-    get.link();
-    cw.add_method(0x0001, "get", "()Ljava/lang/Object;", &get);
+    finish_code(&mut cw, 0x0001, "get", "()Ljava/lang/Object;", &mut get, 1);
 
     // `set(Object)V` (a `var`): invokestatic <facade>.setName(v) after casting/unboxing the argument.
     if pr.mutable {
@@ -1501,9 +1492,7 @@ fn emit_toplevel_prop_ref_class(
         let sref = cw.methodref(owner, &setter, &setter_desc);
         set.invokestatic(sref, slot_words(prop_jvm) as i32, 0);
         set.ret_void();
-        set.ensure_locals(2);
-        set.link();
-        cw.add_method(0x0001, "set", "(Ljava/lang/Object;)V", &set);
+        finish_code(&mut cw, 0x0001, "set", "(Ljava/lang/Object;)V", &mut set, 2);
     }
 
     // `<clinit>`: INSTANCE = new.
@@ -1516,9 +1505,7 @@ fn emit_toplevel_prop_ref_class(
     let fref = cw.fieldref(&fq, "INSTANCE", &self_desc);
     clinit.putstatic(fref, 1);
     clinit.ret_void();
-    clinit.ensure_locals(0);
-    clinit.link();
-    cw.add_method(0x0008, "<clinit>", "()V", &clinit);
+    finish_code(&mut cw, 0x0008, "<clinit>", "()V", &mut clinit, 0);
     cw.finish()
 }
 
@@ -1891,8 +1878,9 @@ fn throw_assertion_error(cw: &mut ClassWriter, code: &mut CodeBuilder) {
     code.athrow();
 }
 
-fn finish_bridge(
+fn finish_code(
     cw: &mut ClassWriter,
+    access: u16,
     name: &str,
     desc: &str,
     code: &mut CodeBuilder,
@@ -1900,7 +1888,17 @@ fn finish_bridge(
 ) {
     code.ensure_locals(locals);
     code.link();
-    cw.add_method(0x0001 | 0x0040 | 0x1000, name, desc, code);
+    cw.add_method(access, name, desc, code);
+}
+
+fn finish_bridge(
+    cw: &mut ClassWriter,
+    name: &str,
+    desc: &str,
+    code: &mut CodeBuilder,
+    locals: u16,
+) {
+    finish_code(cw, 0x0001 | 0x0040 | 0x1000, name, desc, code, locals);
 }
 
 /// Emit `ACC_BRIDGE|ACC_SYNTHETIC` methods: each has the supertype's erased descriptor, adapts its
