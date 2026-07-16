@@ -3251,3 +3251,9 @@ The next neutral-IR cleanup added `emit_local_call` for same-file function calls
 function captures, destructuring components, generated wrappers, property accessors, operator
 extensions, and same-file extension calls through it. The lowerer now has one place for the
 `Callee::Local`/no-dispatch call shape instead of rebuilding that IR node in each feature branch.
+
+### External Intrinsic Call Emitter Merge
+
+The next neutral-IR cleanup added `emit_external_call` for backend-resolved Kotlin intrinsic symbols.
+Array size/get/set, string concatenation fallback, and `Any.toString`/`hashCode` now share the same
+`Callee::External` call construction instead of rebuilding the node at each feature-specific site.
