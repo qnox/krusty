@@ -941,11 +941,8 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 {
                     let vi = m.params.len() - 1;
                     let arr_ty = ty_to_ir(sig.params[vi]);
-                    let size0 = lo.ir.add_expr(IrExpr::Const(IrConst::Int(0)));
-                    let empty = lo.ir.add_expr(IrExpr::NewArray {
-                        array_type: arr_ty,
-                        size: size0,
-                    });
+                    let size0 = lo.emit_const(IrConst::Int(0));
+                    let empty = lo.emit_new_array(arr_ty, size0);
                     let names: Vec<String> = m.params.iter().map(|p| p.name.clone()).collect();
                     let mut info = lo
                         .ir
@@ -2263,11 +2260,8 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                                 // A trailing `vararg` is OMITTABLE by an adapted callable reference — its
                                 // default is an empty array so the `$default` stub fills `new T[0]`.
                                 None if p.is_vararg && i == last => {
-                                    let size0 = lo.ir.add_expr(IrExpr::Const(IrConst::Int(0)));
-                                    defaults.push(Some(lo.ir.add_expr(IrExpr::NewArray {
-                                        array_type: ty_to_ir(*t),
-                                        size: size0,
-                                    })));
+                                    let size0 = lo.emit_const(IrConst::Int(0));
+                                    defaults.push(Some(lo.emit_new_array(ty_to_ir(*t), size0)));
                                 }
                                 None => defaults.push(None),
                             }
@@ -2375,16 +2369,10 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     let prop_sig = lo.property_reference_signature(&gname, prop_ty)?;
                     let propref_impl = lo.property_reference_impl(1, false)?;
                     let make_propref = |lo: &mut Lower| {
-                        let cls = lo.ir.add_expr(IrExpr::ClassConst {
-                            internal: internal.clone(),
-                        });
-                        let nm = lo
-                            .ir
-                            .add_expr(IrExpr::Const(IrConst::String(p.name.clone())));
-                        let sigc = lo
-                            .ir
-                            .add_expr(IrExpr::Const(IrConst::String(prop_sig.clone())));
-                        let flag = lo.ir.add_expr(IrExpr::Const(IrConst::Int(0)));
+                        let cls = lo.emit_class_const(internal.clone());
+                        let nm = lo.ir_const_str(p.name.clone());
+                        let sigc = lo.ir_const_str(prop_sig.clone());
+                        let flag = lo.emit_const(IrConst::Int(0));
                         lo.emit_new_external(
                             propref_impl.internal.clone(),
                             propref_impl.ctor_desc.clone(),
@@ -3313,11 +3301,8 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                                     lowered.push(lo.lower_arg(arg, ft)?);
                                 }
                                 None if param_meta.get(i).is_some_and(|p| p.2) => {
-                                    let zero = lo.ir.add_expr(IrExpr::Const(IrConst::Int(0)));
-                                    lowered.push(lo.ir.add_expr(IrExpr::NewArray {
-                                        array_type: ty_to_ir(*ft),
-                                        size: zero,
-                                    }));
+                                    let zero = lo.emit_const(IrConst::Int(0));
+                                    lowered.push(lo.emit_new_array(ty_to_ir(*ft), zero));
                                 }
                                 None => return None,
                             }
@@ -4858,6 +4843,29 @@ impl<'a> Lower<'a> {
         })
     }
 
+    fn emit_const(&mut self, value: IrConst) -> u32 {
+        self.ir.add_expr(IrExpr::Const(value))
+    }
+
+    fn emit_unit(&mut self) -> u32 {
+        self.ir.add_expr(IrExpr::UnitInstance)
+    }
+
+    fn emit_class_const(&mut self, internal: String) -> u32 {
+        self.ir.add_expr(IrExpr::ClassConst { internal })
+    }
+
+    fn emit_new_array(&mut self, array_type: Ty, size: u32) -> u32 {
+        self.ir.add_expr(IrExpr::NewArray { array_type, size })
+    }
+
+    fn emit_vararg(&mut self, array_type: Ty, elements: Vec<u32>) -> u32 {
+        self.ir.add_expr(IrExpr::Vararg {
+            array_type,
+            elements,
+        })
+    }
+
     fn emit_static_instance(&mut self, owner: u32, ty: u32, field: &'static str) -> u32 {
         self.ir
             .add_expr(IrExpr::StaticInstance { owner, ty, field })
@@ -5102,7 +5110,7 @@ impl<'a> Lower<'a> {
         } else {
             current
         };
-        let rhs = self.ir.add_expr(IrExpr::Const(one));
+        let rhs = self.emit_const(one);
         let sum = self.emit_primitive_bin_op(op, lhs, rhs);
         if arithmetic_ty != ty {
             self.implicit_coercion(sum, ty)
@@ -5127,7 +5135,7 @@ impl<'a> Lower<'a> {
     fn compare_ordered(&mut self, ty: Ty, op: IrBinOp, lhs: u32, rhs: u32) -> Option<u32> {
         if ty.is_unsigned() {
             let call = self.runtime_call(RuntimeOp::UnsignedCompare, ty, vec![lhs, rhs])?;
-            let zero = self.ir.add_expr(IrExpr::Const(IrConst::Int(0)));
+            let zero = self.emit_const(IrConst::Int(0));
             Some(self.emit_primitive_bin_op(op, call, zero))
         } else {
             Some(self.emit_primitive_bin_op(op, lhs, rhs))
@@ -5413,16 +5421,12 @@ impl<'a> Lower<'a> {
     /// is the empty-internal `ClassConst` sentinel (resolved to `self.facade` at emit).
     fn make_local_propref(&mut self, ld: &LocalDelegate) -> Option<ExprId> {
         let propref_impl = self.property_reference_impl(0, false)?;
-        let cls = self.ir.add_expr(IrExpr::ClassConst {
-            internal: String::new(),
-        });
-        let nm = self
-            .ir
-            .add_expr(IrExpr::Const(IrConst::String(ld.name.clone())));
+        let cls = self.emit_class_const(String::new());
+        let nm = self.ir_const_str(ld.name.clone());
         let getter_name = property_getter_name(&ld.name);
         let signature = self.property_reference_signature(&getter_name, ld.ret_ty)?;
-        let sig = self.ir.add_expr(IrExpr::Const(IrConst::String(signature)));
-        let flag = self.ir.add_expr(IrExpr::Const(IrConst::Int(0)));
+        let sig = self.ir_const_str(signature);
+        let flag = self.emit_const(IrConst::Int(0));
         Some(self.emit_new_external(
             propref_impl.internal,
             propref_impl.ctor_desc,
@@ -5472,16 +5476,12 @@ impl<'a> Lower<'a> {
         });
 
         // x$kprop: KProperty — init = new PropertyReference0Impl(Facade::class, "x", "getX()<ret>", 1).
-        let facade_cls = self.ir.add_expr(IrExpr::ClassConst {
-            internal: String::new(),
-        });
-        let name_c = self
-            .ir
-            .add_expr(IrExpr::Const(IrConst::String(p.name.clone())));
+        let facade_cls = self.emit_class_const(String::new());
+        let name_c = self.ir_const_str(p.name.clone());
         let getter_name = property_getter_name(&p.name);
         let sig_str = self.property_reference_signature(&getter_name, prop_ty)?;
-        let sig_c = self.ir.add_expr(IrExpr::Const(IrConst::String(sig_str)));
-        let flag_c = self.ir.add_expr(IrExpr::Const(IrConst::Int(1)));
+        let sig_c = self.ir_const_str(sig_str);
+        let flag_c = self.emit_const(IrConst::Int(1));
         let propref_impl = self.property_reference_impl(0, false)?;
         let propref = self.emit_new_external(
             propref_impl.internal,
@@ -5503,7 +5503,7 @@ impl<'a> Lower<'a> {
         // getX(): a member → `x$delegate.getValue(null, x$kprop)`; an extension → the static
         // `getValue(x$delegate, null, x$kprop)`.
         let get_d = self.ir.add_expr(IrExpr::GetStatic(idx_d));
-        let null_a = self.ir.add_expr(IrExpr::Const(IrConst::Null));
+        let null_a = self.emit_const(IrConst::Null);
         let get_p = self.ir.add_expr(IrExpr::GetStatic(idx_p));
         let call = if gv_is_ext {
             self.emit_static_call(
@@ -5568,15 +5568,12 @@ impl<'a> Lower<'a> {
         // emitter's `newarray`/`anewarray` + element boxing.
         let arr_ir = ty_to_ir(Ty::array(elem));
         let gn0 = self.emit_get_value(n_v);
-        let alloc = self.ir.add_expr(IrExpr::NewArray {
-            array_type: arr_ir,
-            size: gn0,
-        });
+        let alloc = self.emit_new_array(arr_ir, gn0);
         let arr_v = self.fresh_value();
         let var_arr = self.emit_variable(arr_v, arr_ir, Some(alloc));
         // var i = 0
         let i_v = self.fresh_value();
-        let zero = self.ir.add_expr(IrExpr::Const(IrConst::Int(0)));
+        let zero = self.emit_const(IrConst::Int(0));
         let var_i = self.emit_variable(i_v, int_ir, Some(zero));
         // cond: i < n
         let gi = self.emit_get_value(i_v);
@@ -5601,7 +5598,7 @@ impl<'a> Lower<'a> {
         let wbody = self.emit_block(vec![var_tmp, set], None);
         // update: i = i + 1
         let gi3 = self.emit_get_value(i_v);
-        let one = self.ir.add_expr(IrExpr::Const(IrConst::Int(1)));
+        let one = self.emit_const(IrConst::Int(1));
         let inc_val = self.emit_primitive_bin_op(IrBinOp::Add, gi3, one);
         let inc = self.emit_set_value(i_v, inc_val);
         let wh = self.emit_while(cond, wbody, Some(inc), false, None);
@@ -5783,9 +5780,9 @@ impl<'a> Lower<'a> {
                     .syms
                     .libraries
                     .method_descriptor(&[under, Ty::Int, marker], under)?;
-                let dummy = self.ir.add_expr(IrExpr::Const(IrConst::Null));
-                let mask = self.ir.add_expr(IrExpr::Const(IrConst::Int(1)));
-                let null_marker = self.ir.add_expr(IrExpr::Const(IrConst::Null));
+                let dummy = self.emit_const(IrConst::Null);
+                let mask = self.emit_const(IrConst::Int(1));
+                let null_marker = self.emit_const(IrConst::Null);
                 return Some(self.emit_static_call(
                     internal.to_string(),
                     "constructor-impl$default".to_string(),
@@ -5820,9 +5817,9 @@ impl<'a> Lower<'a> {
                 }
             }
             if let Some(mask) = sc.mask {
-                a.push(self.ir.add_expr(IrExpr::Const(IrConst::Int(mask))));
+                a.push(self.emit_const(IrConst::Int(mask)));
             }
-            a.push(self.ir.add_expr(IrExpr::Const(IrConst::Null))); // DefaultConstructorMarker
+            a.push(self.emit_const(IrConst::Null)); // DefaultConstructorMarker
             return Some(self.emit_new_external(internal.to_string(), sc.descriptor, a));
         }
         None
@@ -6232,7 +6229,7 @@ impl<'a> Lower<'a> {
             } else {
                 // An indexable type: `componentN` is the inline `get(N-1)`.
                 let m = self.resolve_instance_member(it_ty, "get", &[Ty::Int])?;
-                let i = self.ir.add_expr(IrExpr::Const(IrConst::Int(idx as i32)));
+                let i = self.emit_const(IrConst::Int(idx as i32));
                 let physical_ret = m.member.physical_ret;
                 let c = self.emit_library_member_call(
                     recv,
@@ -6477,7 +6474,7 @@ impl<'a> Lower<'a> {
             let b = self.emit_block(vec![ve], None);
             (ty_to_ir(Ty::Unit), b, ve)
         } else if sig.ret == Ty::Unit {
-            let unit = self.ir.add_expr(IrExpr::UnitInstance);
+            let unit = self.emit_unit();
             let ret = self.emit_return(Some(unit));
             let b = self.emit_block(vec![ve, ret], None);
             let inline_b = self.emit_block(vec![ve], Some(unit));
@@ -6815,9 +6812,7 @@ impl<'a> Lower<'a> {
             .collect();
         let init_body =
             (!init_stores.is_empty()).then(|| self.emit_block(init_stores.clone(), None));
-        let arity_const = self
-            .ir
-            .add_expr(IrExpr::Const(IrConst::Int(jvm_arity as i32)));
+        let arity_const = self.emit_const(IrConst::Int(jvm_arity as i32));
         let completion_get = self.emit_get_value(1 + n_cap);
         // Captures and own parameters are `final`; only the `label` state cursor is mutable. All fields
         // are non-private (read/written by the coroutine state machine cross-class).
@@ -7026,7 +7021,7 @@ impl<'a> Lower<'a> {
                 // State 0: throwOnFailure(result); this.label = 1; r = call; if r==SUSPENDED return it; tail.
                 let s0_tof = throw_on_failure(self, 1)?;
                 let this_l = self.emit_get_value(0);
-                let one = self.ir.add_expr(IrExpr::Const(IrConst::Int(1)));
+                let one = self.emit_const(IrConst::Int(1));
                 let set_label = self.emit_set_field(this_l, class_id, label_idx, one);
                 let r_var = self.emit_variable(r_idx, object_ir.clone(), Some(tail));
                 let rg = self.emit_get_value(r_idx);
@@ -7064,15 +7059,14 @@ impl<'a> Lower<'a> {
                 // Dispatch on `this.label`.
                 let lbl0r = self.emit_get_value(0);
                 let lbl0 = self.emit_get_field(lbl0r, class_id, label_idx);
-                let c0 = self.ir.add_expr(IrExpr::Const(IrConst::Int(0)));
+                let c0 = self.emit_const(IrConst::Int(0));
                 let cond0 = self.emit_primitive_bin_op(IrBinOp::Eq, lbl0, c0);
                 let lbl1r = self.emit_get_value(0);
                 let lbl1 = self.emit_get_field(lbl1r, class_id, label_idx);
-                let c1 = self.ir.add_expr(IrExpr::Const(IrConst::Int(1)));
+                let c1 = self.emit_const(IrConst::Int(1));
                 let cond1 = self.emit_primitive_bin_op(IrBinOp::Eq, lbl1, c1);
-                let msg = self.ir.add_expr(IrExpr::Const(IrConst::String(
-                    "call to 'resume' before 'invoke' with coroutine".to_string(),
-                )));
+                let msg = self
+                    .ir_const_str("call to 'resume' before 'invoke' with coroutine".to_string());
                 let exc_ctor = self
                     .syms
                     .libraries
@@ -7116,7 +7110,7 @@ impl<'a> Lower<'a> {
                 // A `suspend () -> Unit` lambda: run the body for effect, then return the `Unit`
                 // singleton — boxing a Unit-typed (no-value) body would `areturn` an empty stack.
                 stmts.push(body_val);
-                let unit = self.ir.add_expr(IrExpr::UnitInstance);
+                let unit = self.emit_unit();
                 stmts.push(self.emit_return(Some(unit)));
             } else if body_ty == Ty::Nothing {
                 // The body always diverges (throws/returns) — no trailing return.
@@ -7169,7 +7163,7 @@ impl<'a> Lower<'a> {
             inv_stmts.push(self.emit_set_field(rg, class_id, param_field_base + i as u32, coerced));
         }
         let rg2 = self.emit_get_value(r_idx);
-        let unit = self.ir.add_expr(IrExpr::UnitInstance);
+        let unit = self.emit_unit();
         let call_is = self.emit_method_call(class_id, 0, rg2, vec![Some(unit)]);
         inv_stmts.push(self.emit_return(Some(call_is)));
         let inv_body = self.emit_block(inv_stmts, None);
@@ -7229,7 +7223,7 @@ impl<'a> Lower<'a> {
             .iter()
             .map(|(_, v, _)| self.emit_get_value(*v))
             .collect();
-        site_args.push(self.ir.add_expr(IrExpr::Const(IrConst::Null)));
+        site_args.push(self.emit_const(IrConst::Null));
         Some(self.emit_new(class_id, site_args, None))
     }
 
@@ -7490,7 +7484,7 @@ impl<'a> Lower<'a> {
     }
 
     fn ir_const_str(&mut self, s: String) -> u32 {
-        self.ir.add_expr(IrExpr::Const(IrConst::String(s)))
+        self.emit_const(IrConst::String(s))
     }
     fn this_field(&mut self, class_id: ClassId, i: u32) -> u32 {
         let this = self.emit_get_value(0);
@@ -7543,7 +7537,7 @@ impl<'a> Lower<'a> {
         match t {
             Ty::Double | Ty::Float => {
                 let cmp = self.runtime_call(RuntimeOp::PrimitiveCompare, t, vec![a, b])?;
-                let z = self.ir.add_expr(IrExpr::Const(IrConst::Int(0)));
+                let z = self.emit_const(IrConst::Int(0));
                 Some(self.emit_primitive_bin_op(IrBinOp::Ne, cmp, z))
             }
             // Int/Long/… → native compare; reference (incl. an array property, which a data class
@@ -7557,7 +7551,7 @@ impl<'a> Lower<'a> {
     }
     /// `if (cond) return <b>` — a no-`else` statement-`when` whose only branch diverges.
     fn guard_return_bool(&mut self, cond: u32, b: bool) -> u32 {
-        let f = self.ir.add_expr(IrExpr::Const(IrConst::Boolean(b)));
+        let f = self.emit_const(IrConst::Boolean(b));
         let ret = self.emit_return(Some(f));
         let blk = self.emit_block(vec![ret], None);
         self.emit_when(vec![(Some(cond), blk)])
@@ -7694,7 +7688,7 @@ impl<'a> Lower<'a> {
         // return result` (an explicit `istore`/`iload` round-trip per field). Match that shape exactly.
         {
             let body = if fields.is_empty() {
-                let zero = self.ir.add_expr(IrExpr::Const(IrConst::Int(0)));
+                let zero = self.emit_const(IrConst::Int(0));
                 let ret = self.emit_return(Some(zero));
                 self.emit_block(vec![ret], None)
             } else if fields.len() == 1 {
@@ -7716,7 +7710,7 @@ impl<'a> Lower<'a> {
                     let ni = self.field_nullable(class_id, i);
                     let h = self.field_hash(fv, f.1, ni)?;
                     let prev = self.emit_get_value(RV);
-                    let c31 = self.ir.add_expr(IrExpr::Const(IrConst::Int(31)));
+                    let c31 = self.emit_const(IrConst::Int(31));
                     let mul = self.emit_primitive_bin_op(IrBinOp::Mul, prev, c31);
                     let add = self.emit_primitive_bin_op(IrBinOp::Add, mul, h);
                     stmts.push(self.emit_set_value(RV, add));
@@ -7766,7 +7760,7 @@ impl<'a> Lower<'a> {
                 let g = self.guard_return_false(ne);
                 stmts.push(g);
             }
-            let t = self.ir.add_expr(IrExpr::Const(IrConst::Boolean(true)));
+            let t = self.emit_const(IrConst::Boolean(true));
             stmts.push(self.emit_return(Some(t)));
             let body = self.emit_block(stmts, None);
             let obj = ty_to_ir(Ty::obj("kotlin/Any"));
@@ -9150,10 +9144,7 @@ impl<'a> Lower<'a> {
             let v = self.emit_get_value(k as u32);
             collected.push(self.emit_type_op(IrTypeOp::ImplicitCoercion, v, elem_ir));
         }
-        let arr = self.ir.add_expr(IrExpr::Vararg {
-            array_type: ty_to_ir(arr_ty),
-            elements: collected,
-        });
+        let arr = self.emit_vararg(ty_to_ir(arr_ty), collected);
         let call = if let Some(internal) = object_internal {
             // A member of a same-file `object`: dispatch on its `INSTANCE` singleton.
             let cid = self.classes.get(internal)?.id;
@@ -9174,7 +9165,7 @@ impl<'a> Lower<'a> {
         };
         let unit_return = ret == Ty::Unit;
         let body = if unit_return {
-            let unit = self.ir.add_expr(IrExpr::UnitInstance);
+            let unit = self.emit_unit();
             let ret_e = self.emit_return(Some(unit));
             self.emit_block(vec![call, ret_e], None)
         } else {
@@ -9255,7 +9246,7 @@ impl<'a> Lower<'a> {
         // takes the same singleton path.
         let unit_return = ret == Ty::Unit;
         let body = if unit_return {
-            let unit = self.ir.add_expr(IrExpr::UnitInstance);
+            let unit = self.emit_unit();
             let ret_e = self.emit_return(Some(unit));
             self.emit_block(vec![dcall, ret_e], None)
         } else {
@@ -9386,7 +9377,7 @@ impl<'a> Lower<'a> {
             .map(|i| self.emit_get_value(i))
             .collect();
         let call = self.emit_local_call(target_fid, argvals);
-        let unit = self.ir.add_expr(IrExpr::UnitInstance);
+        let unit = self.emit_unit();
         let ret_e = self.emit_return(Some(unit));
         let block = self.emit_block(vec![call, ret_e], None);
         let impl_name = format!("{}$unitref${}", self.cur_fn_name, uniq);
@@ -9787,7 +9778,7 @@ impl<'a> Lower<'a> {
         }
         let mc = self.emit_method_call(class_id, index, recv_v, arg_vs);
         let (stmts, impl_ret) = if ret == Ty::Unit {
-            let unit = self.ir.add_expr(IrExpr::UnitInstance);
+            let unit = self.emit_unit();
             let ret_e = self.emit_return(Some(unit));
             (vec![mc, ret_e], ty_to_ir(stored_value_ty(Ty::Unit)))
         } else {
@@ -10237,9 +10228,7 @@ impl<'a> Lower<'a> {
         }
         // i += 1  (the loop update, at the `continue` target)
         let gi2 = self.emit_get_value(i_v);
-        let one = self
-            .ir
-            .add_expr(IrExpr::Const(self.scalar_one_const(elem)?));
+        let one = self.emit_const(self.scalar_one_const(elem)?);
         let inc = self.emit_primitive_bin_op(IrBinOp::Add, gi2, one);
         let incs = self.emit_set_value(i_v, inc);
         // Break when the counter reaches the inclusive last *before* incrementing, so a range ending at
@@ -10312,11 +10301,11 @@ impl<'a> Lower<'a> {
         let var_s = self.emit_variable(s_v, ty_to_ir(step_ty), Some(step));
         // The step zero literal, in the step's own (signed) type.
         let zero_step = |this: &mut Self| {
-            this.ir.add_expr(IrExpr::Const(if step_ty == Ty::Long {
+            this.emit_const(if step_ty == Ty::Long {
                 IrConst::Long(0)
             } else {
                 IrConst::Int(0)
-            }))
+            })
         };
         // Compare two counter-typed values; unsigned elements use the platform unsigned comparator.
         let cmp = |this: &mut Self, op: IrBinOp, a: u32, b: u32| -> Option<u32> {
@@ -10402,7 +10391,7 @@ impl<'a> Lower<'a> {
         let (idx_v, var_idx) = if let Some(iname) = index {
             let v = self.fresh_value();
             self.scope.push((iname.to_string(), v, Ty::Int));
-            let zero = self.ir.add_expr(IrExpr::Const(IrConst::Int(0)));
+            let zero = self.emit_const(IrConst::Int(0));
             (
                 Some(v),
                 Some(self.emit_variable(v, ty_to_ir(Ty::Int), Some(zero))),
@@ -10474,7 +10463,7 @@ impl<'a> Lower<'a> {
         // index += 1 (forEachIndexed)
         let update = idx_v.map(|iv| {
             let g = self.emit_get_value(iv);
-            let one = self.ir.add_expr(IrExpr::Const(IrConst::Int(1)));
+            let one = self.emit_const(IrConst::Int(1));
             let inc = self.emit_primitive_bin_op(IrBinOp::Add, g, one);
             self.emit_set_value(iv, inc)
         });
@@ -10540,7 +10529,7 @@ impl<'a> Lower<'a> {
     /// the singleton. The single rule for materializing a Unit VALUE where the JVM has only `void` — used
     /// where a Unit flows into a reference target (`= unitExpr` as `Any?`) or is an `==`/`!=` operand.
     fn unit_value_after_effect(&mut self, effect: u32) -> u32 {
-        let unit = self.ir.add_expr(IrExpr::UnitInstance);
+        let unit = self.emit_unit();
         self.emit_block(vec![effect], Some(unit))
     }
 
@@ -10634,10 +10623,7 @@ impl<'a> Lower<'a> {
         // throwing stub. Recognized by the call shape (not the erased `Array<Any>` type, which a real
         // `Object[]` value also has); the target supplies the otherwise-erased element.
         if self.is_empty_array_intrinsic(arg) && ir_array_element(target).is_some() {
-            return Some(self.ir.add_expr(IrExpr::Vararg {
-                array_type: *target,
-                elements: vec![],
-            }));
+            return Some(self.emit_vararg(*target, vec![]));
         }
         let e = self.expr(arg)?;
         let target_ref = ir_type_is_reference(target);
@@ -10701,17 +10687,17 @@ impl<'a> Lower<'a> {
             t if self.has_scalar_value_repr(t) => IrConst::Int(0),
             _ => IrConst::Null,
         };
-        self.ir.add_expr(IrExpr::Const(c))
+        self.emit_const(c)
     }
 
     fn append_default_mask_marker(&mut self, out: &mut Vec<u32>, mask: i32) {
-        out.push(self.ir.add_expr(IrExpr::Const(IrConst::Int(mask))));
-        out.push(self.ir.add_expr(IrExpr::Const(IrConst::Null)));
+        out.push(self.emit_const(IrConst::Int(mask)));
+        out.push(self.emit_const(IrConst::Null));
     }
 
     fn empty_array(&mut self, array_type: Ty) -> u32 {
-        let size = self.ir.add_expr(IrExpr::Const(IrConst::Int(0)));
-        self.ir.add_expr(IrExpr::NewArray { array_type, size })
+        let size = self.emit_const(IrConst::Int(0));
+        self.emit_new_array(array_type, size)
     }
 
     fn append_default_call_args(
@@ -10783,9 +10769,7 @@ impl<'a> Lower<'a> {
             args: Vec::new(),
             ret: Ty::obj("kotlin/Any"),
         });
-        let msg = self.ir.add_expr(IrExpr::Const(IrConst::String(
-            "Expected an exception to be thrown.".to_string(),
-        )));
+        let msg = self.ir_const_str("Expected an exception to be thrown.".to_string());
         let assertion_ctor = self
             .syms
             .libraries
@@ -10865,9 +10849,7 @@ impl<'a> Lower<'a> {
             return Some(check);
         }
         // `<ThisClass>.class.desiredAssertionStatus()` — the per-class JVM assertion flag.
-        let cls = self.ir.add_expr(IrExpr::ClassConst {
-            internal: String::new(),
-        });
+        let cls = self.emit_class_const(String::new());
         let enabled = self.emit_virtual_call(
             "java/lang/Class".to_string(),
             "desiredAssertionStatus".to_string(),
@@ -10944,7 +10926,7 @@ impl<'a> Lower<'a> {
         let bvar = self.emit_variable(bvar_i, any, Some(bv));
         let is_null = |this: &mut Self, slot: u32| {
             let g = this.emit_get_value(slot);
-            let n = this.ir.add_expr(IrExpr::Const(IrConst::Null));
+            let n = this.emit_const(IrConst::Null);
             this.emit_primitive_bin_op(IrBinOp::RefEq, g, n)
         };
         // Both non-null: unbox each to its own primitive, promote to the common type, primitive-compare
@@ -10963,15 +10945,15 @@ impl<'a> Lower<'a> {
         let cmp = self.emit_primitive_bin_op(IrBinOp::Eq, a_unb, b_unb);
         // `if (b == null) false else cmp` (reached only when `a` is non-null).
         let b_null2 = is_null(self, bvar_i);
-        let false_c = self.ir.add_expr(IrExpr::Const(IrConst::Boolean(false)));
+        let false_c = self.emit_const(IrConst::Boolean(false));
         let inner = self.emit_when(vec![(Some(b_null2), false_c), (None, cmp)]);
         // `if (a == null) (b == null) else <inner>`.
         let a_null = is_null(self, avar_i);
         let b_null1 = is_null(self, bvar_i);
         let mut eq = self.emit_when(vec![(Some(a_null), b_null1), (None, inner)]);
         if negated {
-            let t = self.ir.add_expr(IrExpr::Const(IrConst::Boolean(true)));
-            let f = self.ir.add_expr(IrExpr::Const(IrConst::Boolean(false)));
+            let t = self.emit_const(IrConst::Boolean(true));
+            let f = self.emit_const(IrConst::Boolean(false));
             eq = self.emit_when(vec![(Some(eq), f), (None, t)]);
         }
         Some(self.emit_block(vec![avar, bvar], Some(eq)))
@@ -11371,10 +11353,7 @@ impl<'a> Lower<'a> {
             for &arg in trailing {
                 elements.push(self.lower_arg(arg, &elem)?);
             }
-            out.push(self.ir.add_expr(IrExpr::Vararg {
-                array_type: array_param,
-                elements,
-            }));
+            out.push(self.emit_vararg(array_param, elements));
         }
         Some(out)
     }
@@ -11451,7 +11430,7 @@ impl<'a> Lower<'a> {
                     .and_then(|d| *d)
                     .map(|d| self.ir.exprs[d as usize].clone())
                 {
-                    Some(IrExpr::Const(c)) => self.ir.add_expr(IrExpr::Const(c)),
+                    Some(IrExpr::Const(c)) => self.emit_const(c),
                     _ => return None,
                 },
             };
@@ -12033,7 +12012,7 @@ impl<'a> Lower<'a> {
         };
         self.cur_tailrec = None;
         let loop_body = loop_body?;
-        let cond = self.ir.add_expr(IrExpr::Const(IrConst::Boolean(true)));
+        let cond = self.emit_const(IrConst::Boolean(true));
         let whilexpr = self.emit_while(cond, loop_body, None, false, Some(label));
         let body = self.emit_block(vec![whilexpr], None);
         self.ir.functions[fid as usize].body = Some(body);
@@ -12396,7 +12375,7 @@ impl<'a> Lower<'a> {
                         let val = match e {
                             Some(e) if self.info.ty(e) != Ty::Nothing => self.lower_arg(e, &rty)?,
                             Some(e) => self.expr(e)?,
-                            None => self.ir.add_expr(IrExpr::UnitInstance),
+                            None => self.emit_unit(),
                         };
                         stmts.push(self.emit_set_value(slot, val));
                     } else if let Some(e) = e {
@@ -12415,9 +12394,7 @@ impl<'a> Lower<'a> {
                     Some(e) => Some(self.expr(e)?),
                     // A valueless `return@lambda` in a `() -> Unit` closure method must `areturn` the
                     // `kotlin/Unit` singleton (the method's JVM return is a reference, not `void`).
-                    None if self.cur_method_returns_unit_ref => {
-                        Some(self.ir.add_expr(IrExpr::UnitInstance))
-                    }
+                    None if self.cur_method_returns_unit_ref => Some(self.emit_unit()),
                     None => None,
                 };
                 // Inside one or more `try { … } finally { … }`, a `return` must run each enclosing
@@ -12474,7 +12451,7 @@ impl<'a> Lower<'a> {
                 self.lateinit_locals.insert(v, name.clone());
                 // The slot defaults to `null` (kotlinc: `aconst_null; astore`); a read while still null
                 // throws via the `LateinitCheck` wrapper (see the local-read path).
-                let null = self.ir.add_expr(IrExpr::Const(IrConst::Null));
+                let null = self.emit_const(IrConst::Null);
                 Some(self.emit_variable(v, ty_to_ir(kty), Some(null)))
             }
             Stmt::Local { name, init, ty, .. } => {
@@ -12490,7 +12467,7 @@ impl<'a> Lower<'a> {
                 if init_ty == Ty::Unit {
                     let unit_ty = stored_value_ty(Ty::Unit);
                     let side = self.expr(init)?;
-                    let unit_val = self.ir.add_expr(IrExpr::UnitInstance);
+                    let unit_val = self.emit_unit();
                     let seq = self.emit_block(vec![side], Some(unit_val));
                     let v = self.fresh_value();
                     self.scope.push((name.clone(), v, unit_ty));
@@ -12710,7 +12687,7 @@ impl<'a> Lower<'a> {
                     let val = self.lower_arg(value, &ty_to_ir(value_ty))?;
                     let (dslot, _) = self.lookup(&format!("{name}$delegate"))?;
                     let dele = self.emit_get_value(dslot);
-                    let null_a = self.ir.add_expr(IrExpr::Const(IrConst::Null));
+                    let null_a = self.emit_const(IrConst::Null);
                     let pref = self.make_local_propref(&ld)?;
                     return Some(self.emit_virtual_call(
                         ld.delegate_internal.clone(),
@@ -13080,7 +13057,7 @@ impl<'a> Lower<'a> {
                 };
                 let cond = if let Some(b) = inline_bound {
                     let gi = self.emit_get_value(i_v);
-                    let c = self.ir.add_expr(IrExpr::Const(IrConst::Int(b)));
+                    let c = self.emit_const(IrConst::Int(b));
                     // Descending compares the constant against the counter (`C-1 < i`) so the emitted
                     // operand order (`iconst C-1; iload i; if_icmpge`) matches kotlinc; ascending is `i < C`.
                     let (lhs, rhs) = if matches!(range.kind, RangeKind::DownTo) {
@@ -13102,7 +13079,7 @@ impl<'a> Lower<'a> {
                 }
                 // The counted `Stmt::For` is always unit-step: a range with a `step` (or any trailing
                 // infix) is parsed as a progression value and lowered by `lower_foreach_progression`.
-                let step = self.ir.add_expr(IrExpr::Const(one));
+                let step = self.emit_const(one);
                 let inc_op = if matches!(range.kind, RangeKind::DownTo) {
                     IrBinOp::Sub
                 } else {
@@ -13313,7 +13290,7 @@ impl<'a> Lower<'a> {
         let recv = self.expr(receiver)?;
         let var_mutex = self.emit_variable(mutex_slot, ty_to_ir(mutex_ty), Some(recv));
         let m1 = self.emit_get_value(mutex_slot);
-        let null1 = self.ir.add_expr(IrExpr::Const(IrConst::Null));
+        let null1 = self.emit_const(IrConst::Null);
         let lock_call = self.emit_virtual_call(
             lock_owner,
             lock_m.name.clone(),
@@ -13345,10 +13322,10 @@ impl<'a> Lower<'a> {
         };
         let brk_stmt = self.emit_break(Some(brk.clone()));
         let loop_body = self.emit_block(vec![body_stmt, brk_stmt], None);
-        let cond = self.ir.add_expr(IrExpr::Const(IrConst::Boolean(true)));
+        let cond = self.emit_const(IrConst::Boolean(true));
         let whilew = self.emit_while(cond, loop_body, None, false, Some(brk));
         let m2 = self.emit_get_value(mutex_slot);
-        let null2 = self.ir.add_expr(IrExpr::Const(IrConst::Null));
+        let null2 = self.emit_const(IrConst::Null);
         let unlock_call = self.emit_virtual_call(
             unlock_owner,
             unlock_m.name.clone(),
@@ -13552,7 +13529,7 @@ impl<'a> Lower<'a> {
         };
         // i = 0
         let i_v = self.fresh_value();
-        let zero = self.ir.add_expr(IrExpr::Const(IrConst::Int(0)));
+        let zero = self.emit_const(IrConst::Int(0));
         let var_i = self.emit_variable(i_v, ty_to_ir(Ty::Int), Some(zero));
         // n = arr.size (hoisted)
         let n_v = self.fresh_value();
@@ -13584,7 +13561,7 @@ impl<'a> Lower<'a> {
             return None;
         }
         let gi3 = self.emit_get_value(i_v);
-        let one = self.ir.add_expr(IrExpr::Const(IrConst::Int(1)));
+        let one = self.emit_const(IrConst::Int(1));
         let inc = self.emit_primitive_bin_op(IrBinOp::Add, gi3, one);
         let incs = self.emit_set_value(i_v, inc);
         let wbody = self.emit_block(out, None);
@@ -14218,10 +14195,7 @@ impl<'a> Lower<'a> {
                         }
                     }
                 }
-                let arr = self.ir.add_expr(IrExpr::Vararg {
-                    array_type: ty_to_ir(*pty),
-                    elements,
-                });
+                let arr = self.emit_vararg(ty_to_ir(*pty), elements);
                 let slot = self.fresh_value();
                 let var = self.emit_variable(slot, ty_to_ir(*pty), Some(arr));
                 stmts.push(var);
@@ -14386,7 +14360,7 @@ impl<'a> Lower<'a> {
                     self.emit_block(vec![assign, brk], None)
                 }
             };
-            let cond = self.ir.add_expr(IrExpr::Const(IrConst::Boolean(true)));
+            let cond = self.emit_const(IrConst::Boolean(true));
             let loopw = self.emit_while(cond, loop_body, None, false, Some(label));
             if !unit_ret {
                 // Initialize the result slot to a type default so its frame type is consistent at the
@@ -14407,12 +14381,12 @@ impl<'a> Lower<'a> {
                         _ => IrConst::Int(0), // Int/Short/Byte
                     }
                 };
-                let init = self.ir.add_expr(IrExpr::Const(init));
+                let init = self.emit_const(init);
                 stmts.push(self.emit_variable(slot, ret_ty, Some(init)));
             }
             stmts.push(loopw);
             let value = if unit_ret {
-                self.ir.add_expr(IrExpr::UnitInstance)
+                self.emit_unit()
             } else {
                 self.emit_get_value(slot)
             };
@@ -14590,7 +14564,7 @@ impl<'a> Lower<'a> {
                 let assign = self.emit_set_value(result_slot, body_val);
                 let brk_stmt = self.emit_break(Some(brk.clone()));
                 let loop_body = self.emit_block(vec![assign, brk_stmt], None);
-                let cond = self.ir.add_expr(IrExpr::Const(IrConst::Boolean(true)));
+                let cond = self.emit_const(IrConst::Boolean(true));
                 let loopw = self.emit_while(cond, loop_body, None, false, Some(brk));
                 stmts.push(loopw);
                 let get = self.emit_get_value(result_slot);
@@ -14605,10 +14579,10 @@ impl<'a> Lower<'a> {
             let body_val = body_val?;
             let brk_stmt = self.emit_break(Some(brk.clone()));
             let loop_body = self.emit_block(vec![body_val, brk_stmt], None);
-            let cond = self.ir.add_expr(IrExpr::Const(IrConst::Boolean(true)));
+            let cond = self.emit_const(IrConst::Boolean(true));
             let loopw = self.emit_while(cond, loop_body, None, false, Some(brk));
             stmts.push(loopw);
-            let unit = self.ir.add_expr(IrExpr::UnitInstance);
+            let unit = self.emit_unit();
             return Some(self.emit_block(stmts, Some(unit)));
         }
         // A BARE `return` in the spliced lambda body is NON-LOCAL: it returns from the function enclosing
@@ -14648,7 +14622,7 @@ impl<'a> Lower<'a> {
         let v = self.fresh_value();
         let var = self.emit_variable(v, mark_nullable(ty_to_ir(rty)), Some(rv));
         let get1 = self.emit_get_value(v);
-        let nullc = self.ir.add_expr(IrExpr::Const(IrConst::Null));
+        let nullc = self.emit_const(IrConst::Null);
         let cond = self.emit_primitive_bin_op(IrBinOp::Ne, get1, nullc);
         let recv2 = self.emit_get_value(v);
         let member = if let Some((fclass, idx, _)) = self.resolve_field(&internal, name) {
@@ -14716,20 +14690,18 @@ impl<'a> Lower<'a> {
 
     fn expr_inner(&mut self, e: AstExprId) -> Option<u32> {
         Some(match self.afile.expr(e).clone() {
-            Expr::IntLit(v) => self.ir.add_expr(IrExpr::Const(IrConst::Int(v as i32))),
-            Expr::LongLit(v) => self.ir.add_expr(IrExpr::Const(IrConst::Long(v))),
+            Expr::IntLit(v) => self.emit_const(IrConst::Int(v as i32)),
+            Expr::LongLit(v) => self.emit_const(IrConst::Long(v)),
             // Unsigned literals are the signed int/long bit pattern of their magnitude (`UInt.MAX` =
             // 0xFFFFFFFFu reinterprets to int -1, which is what kotlinc stores).
-            Expr::UIntLit(v) => self
-                .ir
-                .add_expr(IrExpr::Const(IrConst::Int(v as u32 as i32))),
-            Expr::ULongLit(v) => self.ir.add_expr(IrExpr::Const(IrConst::Long(v))),
-            Expr::DoubleLit(v) => self.ir.add_expr(IrExpr::Const(IrConst::Double(v))),
-            Expr::FloatLit(v) => self.ir.add_expr(IrExpr::Const(IrConst::Float(v))),
-            Expr::CharLit(c) => self.ir.add_expr(IrExpr::Const(IrConst::Char(c))),
-            Expr::BoolLit(b) => self.ir.add_expr(IrExpr::Const(IrConst::Boolean(b))),
-            Expr::StringLit(s) => self.ir.add_expr(IrExpr::Const(IrConst::String(s))),
-            Expr::NullLit => self.ir.add_expr(IrExpr::Const(IrConst::Null)),
+            Expr::UIntLit(v) => self.emit_const(IrConst::Int(v as u32 as i32)),
+            Expr::ULongLit(v) => self.emit_const(IrConst::Long(v)),
+            Expr::DoubleLit(v) => self.emit_const(IrConst::Double(v)),
+            Expr::FloatLit(v) => self.emit_const(IrConst::Float(v)),
+            Expr::CharLit(c) => self.emit_const(IrConst::Char(c)),
+            Expr::BoolLit(b) => self.emit_const(IrConst::Boolean(b)),
+            Expr::StringLit(s) => self.ir_const_str(s),
+            Expr::NullLit => self.emit_const(IrConst::Null),
             // `throw e` — throw the exception value; control never returns.
             Expr::Throw { operand } => {
                 let v = self.expr(operand)?;
@@ -14913,7 +14885,7 @@ impl<'a> Lower<'a> {
                 // effects (a bare `null` literal has none), then yield `null`.
                 if rty == Ty::Null {
                     let recv = self.expr(receiver)?;
-                    let nullc = self.ir.add_expr(IrExpr::Const(IrConst::Null));
+                    let nullc = self.emit_const(IrConst::Null);
                     return Some(self.emit_block(vec![recv], Some(nullc)));
                 }
                 // A primitive receiver can never be null, so `a?.foo(b)` is a vacuous safe call (kotlinc
@@ -14961,7 +14933,7 @@ impl<'a> Lower<'a> {
                 // the boxed `as?`/nullable value doesn't mismatch an unboxed-`int` slot.
                 let var = self.emit_variable(v, mark_nullable(ty_to_ir(rty)), Some(rv));
                 let get1 = self.emit_get_value(v);
-                let nullc = self.ir.add_expr(IrExpr::Const(IrConst::Null));
+                let nullc = self.emit_const(IrConst::Null);
                 let cond = self.emit_primitive_bin_op(IrBinOp::Ne, get1, nullc);
                 let recv2 = self.emit_get_value(v);
                 // A safe-call scope function (`s?.let { it… }`, `s?.run { … }`): inline it with the
@@ -15078,7 +15050,7 @@ impl<'a> Lower<'a> {
                 } else if result_ty == Ty::Unit {
                     // A `Unit` result (`x?.let { for … }`): run the member for effect, then yield
                     // `Unit.INSTANCE` so this branch matches the `null` branch (both references).
-                    let unit = self.ir.add_expr(IrExpr::UnitInstance);
+                    let unit = self.emit_unit();
                     self.emit_block(vec![member], Some(unit))
                 } else {
                     member
@@ -15093,10 +15065,10 @@ impl<'a> Lower<'a> {
                 // receiver was null (else control left via the `return`/`throw`).
                 if result_ty.non_null() == Ty::Nothing || (from_scope_fn && lambda_body_diverges) {
                     let guard = self.emit_when(vec![(Some(cond), member)]);
-                    let nullv = self.ir.add_expr(IrExpr::Const(IrConst::Null));
+                    let nullv = self.emit_const(IrConst::Null);
                     return Some(self.emit_block(vec![var, guard], Some(nullv)));
                 }
-                let nullb = self.ir.add_expr(IrExpr::Const(IrConst::Null));
+                let nullb = self.emit_const(IrConst::Null);
                 let when = self.emit_when(vec![(Some(cond), member), (None, nullb)]);
                 self.emit_block(vec![var], Some(when))
             }
@@ -15159,7 +15131,7 @@ impl<'a> Lower<'a> {
                 let v = self.fresh_value();
                 let var = self.emit_variable(v, ty_to_ir(lty), Some(lv));
                 let get1 = self.emit_get_value(v);
-                let nullc = self.ir.add_expr(IrExpr::Const(IrConst::Null));
+                let nullc = self.emit_const(IrConst::Null);
                 let cond = self.emit_primitive_bin_op(IrBinOp::Ne, get1, nullc);
                 // When the elvis result is a primitive (a nullable-primitive lhs, `Int? ?: 0`), the
                 // non-null lhs unboxes to the primitive and the rhs coerces to it too.
@@ -15295,14 +15267,14 @@ impl<'a> Lower<'a> {
                                 if let Some(sub) = sub {
                                     let ty = self.ty_ref(&sub)?;
                                     let internal = self.class_literal_ldc_internal(ty)?;
-                                    return Some(self.ir.add_expr(IrExpr::ClassConst { internal }));
+                                    return Some(self.emit_class_const(internal));
                                 }
                             }
                         }
                         return match unbound {
                             Some(ty) => {
                                 let internal = self.class_literal_ldc_internal(ty)?;
-                                Some(self.ir.add_expr(IrExpr::ClassConst { internal }))
+                                Some(self.emit_class_const(internal))
                             }
                             None => {
                                 let recv = receiver?;
@@ -15599,7 +15571,7 @@ impl<'a> Lower<'a> {
                     // don't thread the delegate through).
                     let (dslot, _) = self.lookup(&format!("{n}$delegate"))?;
                     let dele = self.emit_get_value(dslot);
-                    let null_a = self.ir.add_expr(IrExpr::Const(IrConst::Null));
+                    let null_a = self.emit_const(IrConst::Null);
                     let pref = self.make_local_propref(&ld)?;
                     return Some(
                         self.emit_virtual_call(
@@ -15669,7 +15641,7 @@ impl<'a> Lower<'a> {
                     self.emit_local_call(fid, vec![])
                 } else if let Some(c) = self.const_lits.get(&n).cloned() {
                     // A same-file `const val` read → inline its literal (`ldc`), like kotlinc.
-                    self.ir.add_expr(IrExpr::Const(c))
+                    self.emit_const(c)
                 } else if let Some(c) = self
                     .cur_class
                     .as_ref()
@@ -15678,7 +15650,7 @@ impl<'a> Lower<'a> {
                 {
                     // A `const val` of the enclosing `object` read UNQUALIFIED inside its own method
                     // (`fun m() = MAX`) → inline the literal, like kotlinc.
-                    self.ir.add_expr(IrExpr::Const(c))
+                    self.emit_const(c)
                 } else if let Some(&(idx, sty)) = self.statics.get(&n) {
                     let read = self.ir.add_expr(IrExpr::GetStatic(idx));
                     // Smart-cast of a top-level `val` to a scalar (`val x: Any; if (x is Double) …`)
@@ -15726,7 +15698,7 @@ impl<'a> Lower<'a> {
                     self.emit_static_instance(class, class, "INSTANCE")
                 } else if n == "Unit" {
                     // The `Unit` singleton used as a value → `getstatic kotlin/Unit.INSTANCE`.
-                    self.ir.add_expr(IrExpr::UnitInstance)
+                    self.emit_unit()
                 } else if let Some((owner, field, cty)) = {
                     // A bare CLASSPATH class with a companion object (`Json` → `Json.Default`): read the
                     // companion-instance static field. Resolve the simple name to its classpath internal
@@ -15970,7 +15942,7 @@ impl<'a> Lower<'a> {
                             crate::libraries::LibConst::Float(v) => IrConst::Float(v),
                             crate::libraries::LibConst::Double(v) => IrConst::Double(v),
                         };
-                        return Some(self.ir.add_expr(IrExpr::Const(c)));
+                        return Some(self.emit_const(c));
                     }
                 }
                 // `EnumClass.ENTRY` — a static enum-constant read.
@@ -15996,7 +15968,7 @@ impl<'a> Lower<'a> {
                         .get(&(internal.clone(), name.clone()))
                         .cloned()
                     {
-                        return Some(self.ir.add_expr(IrExpr::Const(c)));
+                        return Some(self.emit_const(c));
                     }
                     // `C.X` where `X` is a companion `const val` → `getstatic C.X` (the field lives on the
                     // outer class C; the JVM initializes it from its `ConstantValue` attribute).
@@ -16136,12 +16108,8 @@ impl<'a> Lower<'a> {
                     if let Expr::BoolLit(lv) = self.afile.expr(lhs) {
                         let lv = *lv;
                         return match (op, lv) {
-                            (BinOp::And, false) => {
-                                Some(self.ir.add_expr(IrExpr::Const(IrConst::Boolean(false))))
-                            }
-                            (BinOp::Or, true) => {
-                                Some(self.ir.add_expr(IrExpr::Const(IrConst::Boolean(true))))
-                            }
+                            (BinOp::And, false) => Some(self.emit_const(IrConst::Boolean(false))),
+                            (BinOp::Or, true) => Some(self.emit_const(IrConst::Boolean(true))),
                             // `true && b` / `false || b` → the right operand.
                             _ => self.expr(rhs),
                         };
@@ -16152,9 +16120,7 @@ impl<'a> Lower<'a> {
                     if !self.cur_fn_suspend {
                         let l = self.expr(lhs)?;
                         let r = self.expr(rhs)?;
-                        let konst = |this: &mut Self, b: bool| {
-                            this.ir.add_expr(IrExpr::Const(IrConst::Boolean(b)))
-                        };
+                        let konst = |this: &mut Self, b: bool| this.emit_const(IrConst::Boolean(b));
                         let (then_e, else_e) = if op == BinOp::And {
                             let f = konst(self, false);
                             (r, f)
@@ -16231,7 +16197,7 @@ impl<'a> Lower<'a> {
                                 let l = self.expr(lhs)?;
                                 let r = self.lower_arg(rhs, param)?;
                                 let cmp = self.emit_method_call(class, index, l, vec![Some(r)]);
-                                let zero = self.ir.add_expr(IrExpr::Const(IrConst::Int(0)));
+                                let zero = self.emit_const(IrConst::Int(0));
                                 return Some(self.emit_primitive_bin_op(bin_to_ir(op)?, cmp, zero));
                             }
                         }
@@ -16252,7 +16218,7 @@ impl<'a> Lower<'a> {
                                 vec![r],
                                 &[rt],
                             ) {
-                                let zero = self.ir.add_expr(IrExpr::Const(IrConst::Int(0)));
+                                let zero = self.emit_const(IrConst::Int(0));
                                 return Some(self.emit_primitive_bin_op(bin_to_ir(op)?, cmp, zero));
                             }
                         }
@@ -16405,16 +16371,14 @@ impl<'a> Lower<'a> {
                             let v = self.fresh_value();
                             let var = self.emit_variable(v, ty_to_ir(w_ty), Some(wv));
                             let getn = self.emit_get_value(v);
-                            let nullc = self.ir.add_expr(IrExpr::Const(IrConst::Null));
+                            let nullc = self.emit_const(IrConst::Null);
                             let isnull = self.emit_primitive_bin_op(IrBinOp::Eq, getn, nullc);
                             let getw = self.emit_get_value(v);
                             let unboxed =
                                 self.emit_type_op(IrTypeOp::ImplicitCoercion, getw, ty_to_ir(wp));
                             let pv = self.lower_arg(p_e, &ty_to_ir(wp))?;
                             let cmp = self.emit_primitive_bin_op(irop, unboxed, pv);
-                            let fixed = self
-                                .ir
-                                .add_expr(IrExpr::Const(IrConst::Boolean(op == BinOp::Ne)));
+                            let fixed = self.emit_const(IrConst::Boolean(op == BinOp::Ne));
                             let when = self.emit_when(vec![(Some(isnull), fixed), (None, cmp)]);
                             return Some(self.emit_block(vec![var], Some(when)));
                         }
@@ -16507,7 +16471,7 @@ impl<'a> Lower<'a> {
                         // local-variable type.
                         let opnd_ty = ty_to_ir(Ty::obj("kotlin/Any"));
                         let g1 = self.emit_get_value(v);
-                        let nullc = self.ir.add_expr(IrExpr::Const(IrConst::Null));
+                        let nullc = self.emit_const(IrConst::Null);
                         let null_test = self.emit_primitive_bin_op(
                             if negated {
                                 IrBinOp::RefNe
@@ -16585,7 +16549,7 @@ impl<'a> Lower<'a> {
                     if negated {
                         // `!in` → `!contains(...)`, emitted as `contains == false` (the lowering has no
                         // logical-not node — see the primitive `UnOp::Not` path).
-                        let f = self.ir.add_expr(IrExpr::Const(IrConst::Boolean(false)));
+                        let f = self.emit_const(IrConst::Boolean(false));
                         return Some(self.emit_primitive_bin_op(IrBinOp::Eq, contains_v, f));
                     }
                     return Some(contains_v);
@@ -16646,7 +16610,7 @@ impl<'a> Lower<'a> {
                     let in_chain = self.emit_primitive_bin_op(IrBinOp::And, c1, c2);
                     if negated {
                         // float `!in`: negate the boolean `in` result (`in == false`).
-                        let f = self.ir.add_expr(IrExpr::Const(IrConst::Boolean(false)));
+                        let f = self.emit_const(IrConst::Boolean(false));
                         self.emit_primitive_bin_op(IrBinOp::Eq, in_chain, f)
                     } else {
                         in_chain
@@ -16668,7 +16632,7 @@ impl<'a> Lower<'a> {
                         } else {
                             let mut args = vec![lo_v, hi_v];
                             for _ in 0..range.through.trailing_nulls {
-                                args.push(self.ir.add_expr(IrExpr::Const(IrConst::Null)));
+                                args.push(self.emit_const(IrConst::Null));
                             }
                             self.emit_new_external(
                                 range.through.internal,
@@ -16767,7 +16731,7 @@ impl<'a> Lower<'a> {
                 let one = self.scalar_one_const(ty)?;
                 // i = i ± 1 (no temp: wraparound is consistent for Int/Long/Float/Double)
                 let cur = self.emit_get_value(v);
-                let one1 = self.ir.add_expr(IrExpr::Const(one.clone()));
+                let one1 = self.emit_const(one.clone());
                 let nv = self.emit_primitive_bin_op(op, cur, one1);
                 let set = self.emit_set_value(v, nv);
                 // value: new `i` (prefix), or new `i` ∓ 1 = old `i` (postfix).
@@ -16775,7 +16739,7 @@ impl<'a> Lower<'a> {
                 let value = if prefix {
                     read
                 } else {
-                    let one2 = self.ir.add_expr(IrExpr::Const(one));
+                    let one2 = self.emit_const(one);
                     let undo = if dec { IrBinOp::Add } else { IrBinOp::Sub };
                     self.emit_primitive_bin_op(undo, read, one2)
                 };
@@ -16800,19 +16764,19 @@ impl<'a> Lower<'a> {
                         // `as T`: `checkcast` the singleton (only `Any`/`Unit` succeed; an impossible
                         // target was already rejected by the checker).
                         let target = self.ty_ref(&non_null_ref)?;
-                        let unit = self.ir.add_expr(IrExpr::UnitInstance);
+                        let unit = self.emit_unit();
                         self.emit_type_op(IrTypeOp::Cast, unit, ty_to_ir(target))
                     } else if let Some(target) = self.ty_ref(&non_null_ref) {
                         // `as? T` (reference target): the singleton is-a `T` (true for `Any`/`Unit`) →
                         // keep it, else `null`.
-                        let u1 = self.ir.add_expr(IrExpr::UnitInstance);
+                        let u1 = self.emit_unit();
                         let is_t = self.emit_type_op(IrTypeOp::InstanceOf, u1, ty_to_ir(target));
-                        let u2 = self.ir.add_expr(IrExpr::UnitInstance);
-                        let nullc = self.ir.add_expr(IrExpr::Const(IrConst::Null));
+                        let u2 = self.emit_unit();
+                        let nullc = self.emit_const(IrConst::Null);
                         self.emit_when(vec![(Some(is_t), u2), (None, nullc)])
                     } else {
                         // `as? Prim` (`Unit` is never a primitive wrapper) → always `null`.
-                        self.ir.add_expr(IrExpr::Const(IrConst::Null))
+                        self.emit_const(IrConst::Null)
                     };
                     return Some(self.emit_block(vec![eff], Some(value)));
                 }
@@ -16855,7 +16819,7 @@ impl<'a> Lower<'a> {
                     let is_t = self.emit_type_op(IrTypeOp::InstanceOf, g1, target_ir.clone());
                     let g2 = self.emit_get_value(ov);
                     let cast_t = self.emit_type_op(IrTypeOp::Cast, g2, target_ir);
-                    let nullc = self.ir.add_expr(IrExpr::Const(IrConst::Null));
+                    let nullc = self.emit_const(IrConst::Null);
                     let when = self.emit_when(vec![(Some(is_t), cast_t), (None, nullc)]);
                     return Some(self.emit_block(vec![var_t], Some(when)));
                 }
@@ -16991,25 +16955,23 @@ impl<'a> Lower<'a> {
                         // e.g. `Double.compare(0.0, -0.0) == 1`).
                         match self.afile.expr(operand) {
                             Expr::DoubleLit(d) => {
-                                return Some(self.ir.add_expr(IrExpr::Const(IrConst::Double(-d))))
+                                return Some(self.emit_const(IrConst::Double(-d)))
                             }
-                            Expr::FloatLit(f) => {
-                                return Some(self.ir.add_expr(IrExpr::Const(IrConst::Float(-f))))
-                            }
+                            Expr::FloatLit(f) => return Some(self.emit_const(IrConst::Float(-f))),
                             _ => {}
                         }
                         // `-x` → `0 - x` with the zero typed to the operand so both Sub operands
                         // share one numeric type (Byte/Short/Char negate in the `int` category).
                         let zero = match self.info.ty(operand) {
-                            Ty::Long => self.ir.add_expr(IrExpr::Const(IrConst::Long(0))),
-                            Ty::Double => self.ir.add_expr(IrExpr::Const(IrConst::Double(0.0))),
-                            Ty::Float => self.ir.add_expr(IrExpr::Const(IrConst::Float(0.0))),
-                            _ => self.ir.add_expr(IrExpr::Const(IrConst::Int(0))),
+                            Ty::Long => self.emit_const(IrConst::Long(0)),
+                            Ty::Double => self.emit_const(IrConst::Double(0.0)),
+                            Ty::Float => self.emit_const(IrConst::Float(0.0)),
+                            _ => self.emit_const(IrConst::Int(0)),
                         };
                         self.emit_primitive_bin_op(IrBinOp::Sub, zero, v)
                     }
                     UnOp::Not => {
-                        let f = self.ir.add_expr(IrExpr::Const(IrConst::Boolean(false)));
+                        let f = self.emit_const(IrConst::Boolean(false));
                         self.emit_primitive_bin_op(IrBinOp::Eq, v, f)
                     }
                     // Unary `+` is identity on numerics — emit the operand unchanged. A non-numeric
@@ -17153,9 +17115,7 @@ impl<'a> Lower<'a> {
                 for part in parts {
                     match part {
                         TemplatePart::Str(s) if s.is_empty() => {}
-                        TemplatePart::Str(s) => {
-                            ir_parts.push(self.ir.add_expr(IrExpr::Const(IrConst::String(s))))
-                        }
+                        TemplatePart::Str(s) => ir_parts.push(self.ir_const_str(s)),
                         TemplatePart::Expr(e) => {
                             let v = self.expr(e)?;
                             // An unsigned interpolated value prints in unsigned decimal.
@@ -17170,10 +17130,7 @@ impl<'a> Lower<'a> {
                     }
                 }
                 if ir_parts.is_empty() {
-                    ir_parts.push(
-                        self.ir
-                            .add_expr(IrExpr::Const(IrConst::String(String::new()))),
-                    );
+                    ir_parts.push(self.ir_const_str(String::new()));
                 }
                 self.ir.add_expr(IrExpr::StringConcat(ir_parts))
             }
@@ -17547,10 +17504,7 @@ impl<'a> Lower<'a> {
                                     elements.push(self.lower_arg(arg, &elem_ir)?);
                                 }
                             }
-                            let arr = self.ir.add_expr(IrExpr::Vararg {
-                                array_type: params[fixed],
-                                elements,
-                            });
+                            let arr = self.emit_vararg(params[fixed], elements);
                             a.push(arr);
                             return Some(self.emit_local_call(fid, a));
                         }
@@ -17841,7 +17795,7 @@ impl<'a> Lower<'a> {
                                 // `Int` is a kotlinc error here, so only constant literals adapt).
                                 if bound == Some(Ty::Long) {
                                     if let Expr::IntLit(v) = *self.afile.expr(arg) {
-                                        let lc = self.ir.add_expr(IrExpr::Const(IrConst::Long(v)));
+                                        let lc = self.emit_const(IrConst::Long(v));
                                         elements.push(self.emit_type_op(
                                             IrTypeOp::ImplicitCoercion,
                                             lc,
@@ -17852,10 +17806,7 @@ impl<'a> Lower<'a> {
                                 }
                                 elements.push(self.lower_arg(arg, &elem_ir)?);
                             }
-                            a.push(self.ir.add_expr(IrExpr::Vararg {
-                                array_type: ty_to_ir(c.params[fixed]),
-                                elements,
-                            }));
+                            a.push(self.emit_vararg(ty_to_ir(c.params[fixed]), elements));
                         } else if c.default_call {
                             // A `name$default` call (`assertEquals(a, b)` omits the `message` default):
                             // lower the provided prefix, then append a placeholder per omitted trailing
@@ -18211,7 +18162,7 @@ impl<'a> Lower<'a> {
                             } else {
                                 trim_margin(&s, "|")
                             };
-                            return Some(self.ir.add_expr(IrExpr::Const(IrConst::String(folded))));
+                            return Some(self.ir_const_str(folded));
                         }
                     }
                     // A FULLY-QUALIFIED top-level FUNCTION call `a.b.helper(args)` (the checker typed it):
@@ -18442,7 +18393,7 @@ impl<'a> Lower<'a> {
                                 self.emit_external_call("kotlin/Array.size", Some(a), vec![]);
                             return Some(match op {
                                 Some(c) => {
-                                    let z = self.ir.add_expr(IrExpr::Const(IrConst::Int(0)));
+                                    let z = self.emit_const(IrConst::Int(0));
                                     self.emit_primitive_bin_op(c, size, z)
                                 }
                                 None => size,
@@ -18821,9 +18772,7 @@ impl<'a> Lower<'a> {
                                                 })
                                                 .map(|d| self.ir.exprs[d as usize].clone())
                                             {
-                                                Some(IrExpr::Const(c)) => {
-                                                    self.ir.add_expr(IrExpr::Const(c))
-                                                }
+                                                Some(IrExpr::Const(c)) => self.emit_const(c),
                                                 _ => {
                                                     ok = false;
                                                     break;
@@ -18856,7 +18805,7 @@ impl<'a> Lower<'a> {
                             if rty.is_unsigned() && matches!(name.as_str(), "inc" | "dec") {
                                 let one = self.scalar_one_const(rty)?;
                                 let r = self.expr(receiver)?;
-                                let o = self.ir.add_expr(IrExpr::Const(one));
+                                let o = self.emit_const(one);
                                 let op = if name == "dec" {
                                     IrBinOp::Sub
                                 } else {
@@ -18935,11 +18884,11 @@ impl<'a> Lower<'a> {
                         let rty = self.info.ty(receiver);
                         if matches!(rty, Ty::Int | Ty::Long) && name == "inv" && args.is_empty() {
                             let l = self.expr(receiver)?;
-                            let neg1 = self.ir.add_expr(IrExpr::Const(if rty == Ty::Long {
+                            let neg1 = self.emit_const(if rty == Ty::Long {
                                 IrConst::Long(-1)
                             } else {
                                 IrConst::Int(-1)
-                            }));
+                            });
                             return Some(self.emit_primitive_bin_op(IrBinOp::BitXor, l, neg1));
                         }
                     }
