@@ -1114,7 +1114,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     if !methods.contains_key(&gname) {
                         // A plain field read; if the field is `lateinit` the backend's `GetField`
                         // emission inserts the uninitialized null-check throw (so does every other read).
-                        let this_e = lo.ir.add_expr(IrExpr::GetValue(0));
+                        let this_e = lo.emit_get_value(0);
                         let gf = lo.ir.add_expr(IrExpr::GetField {
                             receiver: this_e,
                             class: id,
@@ -1149,8 +1149,8 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     if *is_var {
                         let sname = property_setter_name(pname);
                         if !methods.contains_key(&sname) {
-                            let this_e = lo.ir.add_expr(IrExpr::GetValue(0));
-                            let v = lo.ir.add_expr(IrExpr::GetValue(1));
+                            let this_e = lo.emit_get_value(0);
+                            let v = lo.emit_get_value(1);
                             let sf = lo.ir.add_expr(IrExpr::SetField {
                                 receiver: this_e,
                                 class: id,
@@ -2396,13 +2396,13 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     let dty = lo.info.ty(p.delegate?);
                     let (gv_owner, gv_desc, gv_ret, gv_inline, gv_is_ext) =
                         lo.delegate_getvalue_info(dty, &delegate_internal)?;
-                    let this_e = lo.ir.add_expr(IrExpr::GetValue(0));
+                    let this_e = lo.emit_get_value(0);
                     let dele = lo.ir.add_expr(IrExpr::GetField {
                         receiver: this_e,
                         class: class_id,
                         index: field_idx,
                     });
-                    let this_arg = lo.ir.add_expr(IrExpr::GetValue(0));
+                    let this_arg = lo.emit_get_value(0);
                     let pref = make_propref(&mut lo);
                     let call = if gv_is_ext {
                         lo.emit_static_call(
@@ -2434,15 +2434,15 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                         let (_, set_fid, _) = lo.classes[&internal].methods[&sname];
                         let sv = lo.syms.method_of(&delegate_internal, "setValue")?;
                         let sv_desc = lo.syms.libraries.method_descriptor(&sv.params, sv.ret)?;
-                        let this_e = lo.ir.add_expr(IrExpr::GetValue(0));
+                        let this_e = lo.emit_get_value(0);
                         let dele = lo.ir.add_expr(IrExpr::GetField {
                             receiver: this_e,
                             class: class_id,
                             index: field_idx,
                         });
-                        let this_arg = lo.ir.add_expr(IrExpr::GetValue(0));
+                        let this_arg = lo.emit_get_value(0);
                         let pref = make_propref(&mut lo);
-                        let value_arg = lo.ir.add_expr(IrExpr::GetValue(1));
+                        let value_arg = lo.emit_get_value(1);
                         // A generic delegate's `setValue` takes the ERASED value param (`<T> setValue(…, i:
                         // T)`); a PRIMITIVE property value boxes into it (`Integer.valueOf`), exactly as
                         // kotlinc does. A reference value passes through.
@@ -2806,8 +2806,8 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                         }
                         for (name, idx) in targets {
                             let (pv, _) = lo.lookup(&name)?;
-                            let recv = lo.ir.add_expr(IrExpr::GetValue(this_v));
-                            let val = lo.ir.add_expr(IrExpr::GetValue(pv));
+                            let recv = lo.emit_get_value(this_v);
+                            let val = lo.emit_get_value(pv);
                             stmts.push(lo.ir.add_expr(IrExpr::SetField {
                                 receiver: recv,
                                 class: class_id,
@@ -2831,8 +2831,8 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                             .position(|f| f.name == synth)?
                             as u32;
                         let (pv, _) = lo.lookup(dname)?;
-                        let this_e = lo.ir.add_expr(IrExpr::GetValue(this_v));
-                        let val_e = lo.ir.add_expr(IrExpr::GetValue(pv));
+                        let this_e = lo.emit_get_value(this_v);
+                        let val_e = lo.emit_get_value(pv);
                         let sf = lo.ir.add_expr(IrExpr::SetField {
                             receiver: this_e,
                             class: class_id,
@@ -2854,7 +2854,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                             .ty
                             .clone();
                         let val_e = lo.lower_arg(*e, &fty)?;
-                        let this_e = lo.ir.add_expr(IrExpr::GetValue(this_v));
+                        let this_e = lo.emit_get_value(this_v);
                         let sf = lo.ir.add_expr(IrExpr::SetField {
                             receiver: this_e,
                             class: class_id,
@@ -2905,7 +2905,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                                 let val = lo.with_init_shared_cells(init_e, |lo| {
                                     lo.lower_arg(init_e, &field_ty)
                                 })?;
-                                let recv = lo.ir.add_expr(IrExpr::GetValue(this_v));
+                                let recv = lo.emit_get_value(this_v);
                                 stmts.push(lo.ir.add_expr(IrExpr::SetField {
                                     receiver: recv,
                                     class: class_id,
@@ -2967,7 +2967,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                             .ty
                             .clone();
                         let val = lo.lower_arg(p.delegate.unwrap(), &field_ty)?;
-                        let recv = lo.ir.add_expr(IrExpr::GetValue(this_v));
+                        let recv = lo.emit_get_value(this_v);
                         stmts.push(lo.ir.add_expr(IrExpr::SetField {
                             receiver: recv,
                             class: class_id,
@@ -3441,7 +3441,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                             for (fi, (_, fty)) in prop_fields.iter().enumerate() {
                                 let init = eprops[fi].init.unwrap();
                                 let val = lo.lower_arg(init, &ty_to_ir(*fty))?;
-                                let recv = lo.ir.add_expr(IrExpr::GetValue(this_v));
+                                let recv = lo.emit_get_value(this_v);
                                 stmts.push(lo.ir.add_expr(IrExpr::SetField {
                                     receiver: recv,
                                     class: sub_id,
@@ -3610,7 +3610,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                             lo.lower_body(&sbody, &ty_to_ir(Ty::Unit), sfid)?;
                         } else {
                             // Default setter: `field = value` → `putstatic; return`.
-                            let val = lo.ir.add_expr(IrExpr::GetValue(v_v));
+                            let val = lo.emit_get_value(v_v);
                             let set = lo.ir.add_expr(IrExpr::SetStatic {
                                 index: sidx,
                                 value: val,
@@ -4871,6 +4871,14 @@ impl<'a> Lower<'a> {
         })
     }
 
+    fn emit_get_value(&mut self, index: u32) -> u32 {
+        self.ir.add_expr(IrExpr::GetValue(index))
+    }
+
+    fn emit_variable(&mut self, index: u32, ty: Ty, init: Option<u32>) -> u32 {
+        self.ir.add_expr(IrExpr::Variable { index, ty, init })
+    }
+
     fn emit_set_field(&mut self, receiver: u32, class: u32, index: u32, value: u32) -> u32 {
         self.ir.add_expr(IrExpr::SetField {
             receiver,
@@ -5003,7 +5011,7 @@ impl<'a> Lower<'a> {
         // Member operator on the (non-null) receiver type.
         if let Some(internal) = ty.obj_internal().map(|s| s.to_string()) {
             if let Some((class, index, _, _)) = self.resolve_method(&internal, op) {
-                let recv = self.ir.add_expr(IrExpr::GetValue(var_slot));
+                let recv = self.emit_get_value(var_slot);
                 return Some(self.emit_method_call(class, index, recv, vec![]));
             }
         }
@@ -5012,7 +5020,7 @@ impl<'a> Lower<'a> {
         // checker guards, so leave those to skip.
         if ty.erased_recv().is_reference() {
             if let Some(&fid) = self.ext_fun_ids.get(&(ty.erased_recv(), op.to_string())) {
-                let recv = self.ir.add_expr(IrExpr::GetValue(var_slot));
+                let recv = self.emit_get_value(var_slot);
                 return Some(self.emit_local_call(fid, vec![recv]));
             }
         }
@@ -5267,7 +5275,7 @@ impl<'a> Lower<'a> {
                         return None;
                     }
                     let val = self.lower_arg(init_e, &field_ty)?;
-                    let recv = self.ir.add_expr(IrExpr::GetValue(this_v));
+                    let recv = self.emit_get_value(this_v);
                     stmts.push(self.emit_set_field(recv, class_id, field_idx, val));
                 }
                 ast::ClassInit::Block(e) => {
@@ -5499,36 +5507,24 @@ impl<'a> Lower<'a> {
         // val n = <size> (evaluated once — the bound is read again in the loop)
         let size = self.lower_arg(size_arg, &int_ir)?;
         let n_v = self.fresh_value();
-        let var_n = self.ir.add_expr(IrExpr::Variable {
-            index: n_v,
-            ty: int_ir.clone(),
-            init: Some(size),
-        });
+        let var_n = self.emit_variable(n_v, int_ir.clone(), Some(size));
         // val a = new T[n] — the whole array type (`kotlin/IntArray` or `kotlin/Array<X>`) drives the
         // emitter's `newarray`/`anewarray` + element boxing.
         let arr_ir = ty_to_ir(Ty::array(elem));
-        let gn0 = self.ir.add_expr(IrExpr::GetValue(n_v));
+        let gn0 = self.emit_get_value(n_v);
         let alloc = self.ir.add_expr(IrExpr::NewArray {
             array_type: arr_ir,
             size: gn0,
         });
         let arr_v = self.fresh_value();
-        let var_arr = self.ir.add_expr(IrExpr::Variable {
-            index: arr_v,
-            ty: arr_ir,
-            init: Some(alloc),
-        });
+        let var_arr = self.emit_variable(arr_v, arr_ir, Some(alloc));
         // var i = 0
         let i_v = self.fresh_value();
         let zero = self.ir.add_expr(IrExpr::Const(IrConst::Int(0)));
-        let var_i = self.ir.add_expr(IrExpr::Variable {
-            index: i_v,
-            ty: int_ir,
-            init: Some(zero),
-        });
+        let var_i = self.emit_variable(i_v, int_ir, Some(zero));
         // cond: i < n
-        let gi = self.ir.add_expr(IrExpr::GetValue(i_v));
-        let gn = self.ir.add_expr(IrExpr::GetValue(n_v));
+        let gi = self.emit_get_value(i_v);
+        let gn = self.emit_get_value(n_v);
         let cond = self.ir.add_expr(IrExpr::PrimitiveBinOp {
             op: IrBinOp::Lt,
             lhs: gi,
@@ -5545,18 +5541,14 @@ impl<'a> Lower<'a> {
         // records a stackmap frame, and `kotlin/Array.set` pushes the array + index *before* the value
         // — without the spill those operands would be stranded on the stack across that frame.
         let tmp_v = self.fresh_value();
-        let var_tmp = self.ir.add_expr(IrExpr::Variable {
-            index: tmp_v,
-            ty: value_ir,
-            init: Some(body_val),
-        });
-        let ga = self.ir.add_expr(IrExpr::GetValue(arr_v));
-        let gi2 = self.ir.add_expr(IrExpr::GetValue(i_v));
-        let gtmp = self.ir.add_expr(IrExpr::GetValue(tmp_v));
+        let var_tmp = self.emit_variable(tmp_v, value_ir, Some(body_val));
+        let ga = self.emit_get_value(arr_v);
+        let gi2 = self.emit_get_value(i_v);
+        let gtmp = self.emit_get_value(tmp_v);
         let set = self.emit_external_call("kotlin/Array.set", Some(ga), vec![gi2, gtmp]);
         let wbody = self.emit_block(vec![var_tmp, set], None);
         // update: i = i + 1
-        let gi3 = self.ir.add_expr(IrExpr::GetValue(i_v));
+        let gi3 = self.emit_get_value(i_v);
         let one = self.ir.add_expr(IrExpr::Const(IrConst::Int(1)));
         let inc_val = self.ir.add_expr(IrExpr::PrimitiveBinOp {
             op: IrBinOp::Add,
@@ -5574,7 +5566,7 @@ impl<'a> Lower<'a> {
             post_test: false,
             label: None,
         });
-        let result = self.ir.add_expr(IrExpr::GetValue(arr_v));
+        let result = self.emit_get_value(arr_v);
         Some(self.emit_block(vec![var_n, var_arr, var_i, wh], Some(result)))
     }
 
@@ -6116,16 +6108,12 @@ impl<'a> Lower<'a> {
         let internal = it_ty.obj_internal()?.to_string();
         let init_v = self.expr(init)?;
         let tmp = self.fresh_value();
-        out.push(self.ir.add_expr(IrExpr::Variable {
-            index: tmp,
-            ty: ty_to_ir(it_ty),
-            init: Some(init_v),
-        }));
+        out.push(self.emit_variable(tmp, ty_to_ir(it_ty), Some(init_v)));
         for (idx, (name, _)) in entries.iter().enumerate() {
             if name == "_" {
                 continue;
             }
-            let recv = self.ir.add_expr(IrExpr::GetValue(tmp));
+            let recv = self.emit_get_value(tmp);
             // NAME-BASED entry (`val (newName = sourceProp) = src`): read the receiver's `sourceProp`
             // property via its getter (`getSourceProp`) instead of `componentN`.
             if let Some(prop) = source_props
@@ -6252,19 +6240,11 @@ impl<'a> Lower<'a> {
             self.scope.push((name.to_string(), holder, holder_ty));
             self.boxed_elem.insert(name.to_string(), elem_ty);
             let new_ref = self.ir.add_expr(IrExpr::RefNew { elem, init: call });
-            out.push(self.ir.add_expr(IrExpr::Variable {
-                index: holder,
-                ty: ty_to_ir(holder_ty),
-                init: Some(new_ref),
-            }));
+            out.push(self.emit_variable(holder, ty_to_ir(holder_ty), Some(new_ref)));
         } else {
             let v = self.fresh_value();
             self.scope.push((name.to_string(), v, log_ty));
-            out.push(self.ir.add_expr(IrExpr::Variable {
-                index: v,
-                ty: ty_to_ir(log_ty),
-                init: Some(call),
-            }));
+            out.push(self.emit_variable(v, ty_to_ir(log_ty), Some(call)));
         }
         Some(())
     }
@@ -6380,7 +6360,7 @@ impl<'a> Lower<'a> {
         // The capture values are read in the *enclosing* scope before it's swapped out.
         let capture_vals: Vec<u32> = captures
             .iter()
-            .map(|(_, v, _)| self.ir.add_expr(IrExpr::GetValue(*v)))
+            .map(|(_, v, _)| self.emit_get_value(*v))
             .collect();
         // Lower the body in a fresh value-numbering scope: captured params first (values `0..n_cap`),
         // then the lambda's own parameters.
@@ -6805,8 +6785,8 @@ impl<'a> Lower<'a> {
             .collect();
         let init_stores: Vec<u32> = (0..n_cap)
             .map(|i| {
-                let this = self.ir.add_expr(IrExpr::GetValue(0));
-                let val = self.ir.add_expr(IrExpr::GetValue(1 + i));
+                let this = self.emit_get_value(0);
+                let val = self.emit_get_value(1 + i);
                 self.emit_set_field(this, 0, i, val)
             })
             .collect();
@@ -6815,7 +6795,7 @@ impl<'a> Lower<'a> {
         let arity_const = self
             .ir
             .add_expr(IrExpr::Const(IrConst::Int(jvm_arity as i32)));
-        let completion_get = self.ir.add_expr(IrExpr::GetValue(1 + n_cap));
+        let completion_get = self.emit_get_value(1 + n_cap);
         // Captures and own parameters are `final`; only the `label` state cursor is mutable. All fields
         // are non-private (read/written by the coroutine state machine cross-class).
         let ir_fields: Vec<IrField> = fields
@@ -6877,7 +6857,7 @@ impl<'a> Lower<'a> {
         // invokeSuspend(Object result): either the LEAF form (throwOnFailure; load captures; return
         // box(<body>)) or, when the body suspends, a TAIL state machine with `this` as the continuation.
         let throw_on_failure = |s: &mut Self, value_idx: u32| -> Option<u32> {
-            let v = s.ir.add_expr(IrExpr::GetValue(value_idx));
+            let v = s.emit_get_value(value_idx);
             s.runtime_call(RuntimeOp::ThrowOnFailure, Ty::Unit, vec![v])
         };
         // Set when the body needs the general (multi-suspension / control-flow) lambda-mode machine,
@@ -6973,12 +6953,8 @@ impl<'a> Lower<'a> {
                 // Bind the body value to a temp (`val tmp = <value>; return box(tmp)`) so a CONDITIONAL
                 // suspension in the value (`if (c) foo() else 7`) surfaces as a `Variable{init: When}`
                 // the flattener's `stmt_cond_suspension` handles — not a raw `return box(When)`.
-                b_stmts.push(self.ir.add_expr(IrExpr::Variable {
-                    index: tmp_idx,
-                    ty: body_ty,
-                    init: Some(b_val),
-                }));
-                let tmpg = self.ir.add_expr(IrExpr::GetValue(tmp_idx));
+                b_stmts.push(self.emit_variable(tmp_idx, body_ty, Some(b_val)));
+                let tmpg = self.emit_get_value(tmp_idx);
                 let boxed = self.ir.add_expr(IrExpr::TypeOp {
                     op: IrTypeOp::ImplicitCoercion,
                     arg: tmpg,
@@ -6996,7 +6972,7 @@ impl<'a> Lower<'a> {
                     });
                 }
                 // Thread `this` (as Continuation) as the callee's trailing argument.
-                let this_for_cont = self.ir.add_expr(IrExpr::GetValue(0));
+                let this_for_cont = self.emit_get_value(0);
                 let this_cont = self.ir.add_expr(IrExpr::TypeOp {
                     op: IrTypeOp::Cast,
                     arg: this_for_cont,
@@ -7031,29 +7007,21 @@ impl<'a> Lower<'a> {
                 // bound `a` slot (if any) can't collide with the SUSPENDED marker / call-result temp.
                 let susp_idx = self.fresh_value();
                 let r_idx = self.fresh_value();
-                let susp_var = self.ir.add_expr(IrExpr::Variable {
-                    index: susp_idx,
-                    ty: object_ir.clone(),
-                    init: Some(susp_call),
-                });
+                let susp_var = self.emit_variable(susp_idx, object_ir.clone(), Some(susp_call));
                 // State 0: throwOnFailure(result); this.label = 1; r = call; if r==SUSPENDED return it; tail.
                 let s0_tof = throw_on_failure(self, 1)?;
-                let this_l = self.ir.add_expr(IrExpr::GetValue(0));
+                let this_l = self.emit_get_value(0);
                 let one = self.ir.add_expr(IrExpr::Const(IrConst::Int(1)));
                 let set_label = self.emit_set_field(this_l, class_id, label_idx, one);
-                let r_var = self.ir.add_expr(IrExpr::Variable {
-                    index: r_idx,
-                    ty: object_ir.clone(),
-                    init: Some(tail),
-                });
-                let rg = self.ir.add_expr(IrExpr::GetValue(r_idx));
-                let sg = self.ir.add_expr(IrExpr::GetValue(susp_idx));
+                let r_var = self.emit_variable(r_idx, object_ir.clone(), Some(tail));
+                let rg = self.emit_get_value(r_idx);
+                let sg = self.emit_get_value(susp_idx);
                 let is_eq = self.ir.add_expr(IrExpr::PrimitiveBinOp {
                     op: IrBinOp::RefEq,
                     lhs: rg,
                     rhs: sg,
                 });
-                let sg2 = self.ir.add_expr(IrExpr::GetValue(susp_idx));
+                let sg2 = self.emit_get_value(susp_idx);
                 let ret_susp = self.emit_return(Some(sg2));
                 let ret_susp_b = self.emit_block(vec![ret_susp], None);
                 let empty = self.emit_block(vec![], None);
@@ -7065,17 +7033,13 @@ impl<'a> Lower<'a> {
                 // builds `[ (val a = unbox(src);) return box(tail_expr | src) ]` for a result at value `src`.
                 let tail_at = |this: &mut Self, src: u32| -> Vec<u32> {
                     if let (Some((a_idx, a_ty)), Some(te)) = (&bound, tail_expr) {
-                        let srcg = this.ir.add_expr(IrExpr::GetValue(src));
+                        let srcg = this.emit_get_value(src);
                         let unb = this.ir.add_expr(IrExpr::TypeOp {
                             op: IrTypeOp::ImplicitCoercion,
                             arg: srcg,
                             type_operand: a_ty.clone(),
                         });
-                        let bind = this.ir.add_expr(IrExpr::Variable {
-                            index: *a_idx,
-                            ty: a_ty.clone(),
-                            init: Some(unb),
-                        });
+                        let bind = this.emit_variable(*a_idx, a_ty.clone(), Some(unb));
                         let boxed = this.ir.add_expr(IrExpr::TypeOp {
                             op: IrTypeOp::ImplicitCoercion,
                             arg: te,
@@ -7083,7 +7047,7 @@ impl<'a> Lower<'a> {
                         });
                         vec![bind, this.emit_return(Some(boxed))]
                     } else {
-                        let g = this.ir.add_expr(IrExpr::GetValue(src));
+                        let g = this.emit_get_value(src);
                         vec![this.emit_return(Some(g))]
                     }
                 };
@@ -7096,7 +7060,7 @@ impl<'a> Lower<'a> {
                 s1_stmts.extend(tail_at(self, 1));
                 let s1 = self.emit_block(s1_stmts, None);
                 // Dispatch on `this.label`.
-                let lbl0r = self.ir.add_expr(IrExpr::GetValue(0));
+                let lbl0r = self.emit_get_value(0);
                 let lbl0 = self.emit_get_field(lbl0r, class_id, label_idx);
                 let c0 = self.ir.add_expr(IrExpr::Const(IrConst::Int(0)));
                 let cond0 = self.ir.add_expr(IrExpr::PrimitiveBinOp {
@@ -7104,7 +7068,7 @@ impl<'a> Lower<'a> {
                     lhs: lbl0,
                     rhs: c0,
                 });
-                let lbl1r = self.ir.add_expr(IrExpr::GetValue(0));
+                let lbl1r = self.emit_get_value(0);
                 let lbl1 = self.emit_get_field(lbl1r, class_id, label_idx);
                 let c1 = self.ir.add_expr(IrExpr::Const(IrConst::Int(1)));
                 let cond1 = self.ir.add_expr(IrExpr::PrimitiveBinOp {
@@ -7135,13 +7099,9 @@ impl<'a> Lower<'a> {
             self.next_value = 2; // this=0, result=1
             for (i, (name, _, ty)) in captures.iter().enumerate() {
                 let lv = self.fresh_value();
-                let this = self.ir.add_expr(IrExpr::GetValue(0));
+                let this = self.emit_get_value(0);
                 let getf = self.emit_get_field(this, class_id, i as u32);
-                stmts.push(self.ir.add_expr(IrExpr::Variable {
-                    index: lv,
-                    ty: ty_to_ir(*ty),
-                    init: Some(getf),
-                }));
+                stmts.push(self.emit_variable(lv, ty_to_ir(*ty), Some(getf)));
                 self.scope.push((name.clone(), lv, *ty));
             }
             // Own parameters: load each from its field and bind it in the body's scope. The source
@@ -7149,13 +7109,9 @@ impl<'a> Lower<'a> {
             for (i, name) in bind_names.iter().enumerate() {
                 let pty = params[i];
                 let lv = self.fresh_value();
-                let this = self.ir.add_expr(IrExpr::GetValue(0));
+                let this = self.emit_get_value(0);
                 let getf = self.emit_get_field(this, class_id, param_field_base + i as u32);
-                stmts.push(self.ir.add_expr(IrExpr::Variable {
-                    index: lv,
-                    ty: ty_to_ir(pty),
-                    init: Some(getf),
-                }));
+                stmts.push(self.emit_variable(lv, ty_to_ir(pty), Some(getf)));
                 self.scope.push((name.clone(), lv, pty));
             }
             let body_val = self.expr(body);
@@ -7206,11 +7162,11 @@ impl<'a> Lower<'a> {
         let completion_idx = arity as u32 + 1;
         let mut new_args: Vec<u32> = (0..n_cap)
             .map(|i| {
-                let this = self.ir.add_expr(IrExpr::GetValue(0));
+                let this = self.emit_get_value(0);
                 self.emit_get_field(this, class_id, i)
             })
             .collect();
-        let comp_get = self.ir.add_expr(IrExpr::GetValue(completion_idx));
+        let comp_get = self.emit_get_value(completion_idx);
         new_args.push(self.ir.add_expr(IrExpr::TypeOp {
             op: IrTypeOp::Cast,
             arg: comp_get,
@@ -7218,23 +7174,19 @@ impl<'a> Lower<'a> {
         }));
         let new_inst = self.emit_new(class_id, new_args, None);
         let r_idx = arity as u32 + 2;
-        let mut inv_stmts = vec![self.ir.add_expr(IrExpr::Variable {
-            index: r_idx,
-            ty: lambda_ty.clone(),
-            init: Some(new_inst),
-        })];
+        let mut inv_stmts = vec![self.emit_variable(r_idx, lambda_ty.clone(), Some(new_inst))];
         // Store each own parameter (coerced from the erased `Object` argument) into its field.
         for (i, pty) in params.iter().enumerate() {
-            let pv = self.ir.add_expr(IrExpr::GetValue(1 + i as u32));
+            let pv = self.emit_get_value(1 + i as u32);
             let coerced = self.ir.add_expr(IrExpr::TypeOp {
                 op: IrTypeOp::ImplicitCoercion,
                 arg: pv,
                 type_operand: ty_to_ir(*pty),
             });
-            let rg = self.ir.add_expr(IrExpr::GetValue(r_idx));
+            let rg = self.emit_get_value(r_idx);
             inv_stmts.push(self.emit_set_field(rg, class_id, param_field_base + i as u32, coerced));
         }
-        let rg2 = self.ir.add_expr(IrExpr::GetValue(r_idx));
+        let rg2 = self.emit_get_value(r_idx);
         let unit = self.ir.add_expr(IrExpr::UnitInstance);
         let call_is = self.emit_method_call(class_id, 0, rg2, vec![Some(unit)]);
         inv_stmts.push(self.emit_return(Some(call_is)));
@@ -7255,27 +7207,23 @@ impl<'a> Lower<'a> {
         // Value-indices: this=0, params 1..=arity, completion=arity+1, the fresh `r` at arity+2.
         let mut create_new_args: Vec<u32> = (0..n_cap)
             .map(|i| {
-                let this = self.ir.add_expr(IrExpr::GetValue(0));
+                let this = self.emit_get_value(0);
                 self.emit_get_field(this, class_id, i)
             })
             .collect();
         // The completion parameter is already a `Continuation` (the ctor's last param) — no cast.
-        create_new_args.push(self.ir.add_expr(IrExpr::GetValue(completion_idx)));
+        create_new_args.push(self.emit_get_value(completion_idx));
         let create_new = self.emit_new(class_id, create_new_args, None);
         let cr_idx = arity as u32 + 2;
-        let mut create_stmts = vec![self.ir.add_expr(IrExpr::Variable {
-            index: cr_idx,
-            ty: lambda_ty,
-            init: Some(create_new),
-        })];
+        let mut create_stmts = vec![self.emit_variable(cr_idx, lambda_ty, Some(create_new))];
         for (i, pty) in params.iter().enumerate() {
-            let pv = self.ir.add_expr(IrExpr::GetValue(1 + i as u32));
+            let pv = self.emit_get_value(1 + i as u32);
             let coerced = self.ir.add_expr(IrExpr::TypeOp {
                 op: IrTypeOp::ImplicitCoercion,
                 arg: pv,
                 type_operand: ty_to_ir(*pty),
             });
-            let rg = self.ir.add_expr(IrExpr::GetValue(cr_idx));
+            let rg = self.emit_get_value(cr_idx);
             create_stmts.push(self.emit_set_field(
                 rg,
                 class_id,
@@ -7283,7 +7231,7 @@ impl<'a> Lower<'a> {
                 coerced,
             ));
         }
-        let crg = self.ir.add_expr(IrExpr::GetValue(cr_idx));
+        let crg = self.emit_get_value(cr_idx);
         create_stmts.push(self.emit_return(Some(crg)));
         let create_body = self.emit_block(create_stmts, None);
         let mut create_params: Vec<Ty> = vec![Ty::obj("kotlin/Any"); arity];
@@ -7301,7 +7249,7 @@ impl<'a> Lower<'a> {
         // Creation site: `new This(captures.., (Continuation) null)`.
         let mut site_args: Vec<u32> = captures
             .iter()
-            .map(|(_, v, _)| self.ir.add_expr(IrExpr::GetValue(*v)))
+            .map(|(_, v, _)| self.emit_get_value(*v))
             .collect();
         site_args.push(self.ir.add_expr(IrExpr::Const(IrConst::Null)));
         Some(self.emit_new(class_id, site_args, None))
@@ -7519,7 +7467,7 @@ impl<'a> Lower<'a> {
             let descriptor = self.syms.libraries.method_descriptor(&params, ret)?;
             let field = self.this_field(class_id, delegate_idx);
             let args: Vec<u32> = (0..params.len())
-                .map(|i| self.ir.add_expr(IrExpr::GetValue(i as u32 + 1)))
+                .map(|i| self.emit_get_value(i as u32 + 1))
                 .collect();
             let call = self.emit_virtual_call(
                 iface_internal.clone(),
@@ -7571,7 +7519,7 @@ impl<'a> Lower<'a> {
         self.ir.add_expr(IrExpr::Const(IrConst::String(s)))
     }
     fn this_field(&mut self, class_id: ClassId, i: u32) -> u32 {
-        let this = self.ir.add_expr(IrExpr::GetValue(0));
+        let this = self.emit_get_value(0);
         self.emit_get_field(this, class_id, i)
     }
     /// The `Int` hash of a field value `v` of type `t` (Kotlin's per-field `.hashCode()`). A value-class
@@ -7684,7 +7632,7 @@ impl<'a> Lower<'a> {
         if !is_object {
             let params: Vec<Ty> = fields.iter().map(|(_, t)| ty_to_ir(*t)).collect();
             let args: Vec<u32> = (0..fields.len())
-                .map(|i| self.ir.add_expr(IrExpr::GetValue(i as u32 + 1)))
+                .map(|i| self.emit_get_value(i as u32 + 1))
                 .collect();
             let new = self.emit_new(class_id, args, None);
             let ret = self.emit_return(Some(new));
@@ -7712,7 +7660,7 @@ impl<'a> Lower<'a> {
                 if fields.len() <= 31 {
                     let defaults: Vec<Option<u32>> = (0..fields.len())
                         .map(|i| {
-                            let this = self.ir.add_expr(IrExpr::GetValue(0));
+                            let this = self.emit_get_value(0);
                             Some(self.emit_get_field(this, class_id, i as u32))
                         })
                         .collect();
@@ -7798,16 +7746,12 @@ impl<'a> Lower<'a> {
                 let f0 = self.this_field(class_id, 0);
                 let n0 = self.field_nullable(class_id, 0);
                 let h0 = self.field_hash(f0, fields[0].1, n0)?;
-                stmts.push(self.ir.add_expr(IrExpr::Variable {
-                    index: RV,
-                    ty: ty_to_ir(Ty::Int),
-                    init: Some(h0),
-                }));
+                stmts.push(self.emit_variable(RV, ty_to_ir(Ty::Int), Some(h0)));
                 for (i, f) in fields.iter().enumerate().skip(1) {
                     let fv = self.this_field(class_id, i as u32);
                     let ni = self.field_nullable(class_id, i);
                     let h = self.field_hash(fv, f.1, ni)?;
-                    let prev = self.ir.add_expr(IrExpr::GetValue(RV));
+                    let prev = self.emit_get_value(RV);
                     let c31 = self.ir.add_expr(IrExpr::Const(IrConst::Int(31)));
                     let mul = self.ir.add_expr(IrExpr::PrimitiveBinOp {
                         op: IrBinOp::Mul,
@@ -7824,7 +7768,7 @@ impl<'a> Lower<'a> {
                         value: add,
                     }));
                 }
-                let getr = self.ir.add_expr(IrExpr::GetValue(RV));
+                let getr = self.emit_get_value(RV);
                 stmts.push(self.emit_return(Some(getr)));
                 self.emit_block(stmts, None)
             };
@@ -7847,8 +7791,8 @@ impl<'a> Lower<'a> {
             const OV: u32 = 2;
             let mut stmts = Vec::new();
             // `this === other` referential-identity fast-path.
-            let this0 = self.ir.add_expr(IrExpr::GetValue(0));
-            let other0 = self.ir.add_expr(IrExpr::GetValue(1));
+            let this0 = self.emit_get_value(0);
+            let other0 = self.emit_get_value(1);
             let ident = self.ir.add_expr(IrExpr::PrimitiveBinOp {
                 op: IrBinOp::RefEq,
                 lhs: this0,
@@ -7857,7 +7801,7 @@ impl<'a> Lower<'a> {
             let id_guard = self.guard_return_bool(ident, true);
             stmts.push(id_guard);
             // `other !is T` → return false.
-            let other = self.ir.add_expr(IrExpr::GetValue(1));
+            let other = self.emit_get_value(1);
             let not_inst = self.ir.add_expr(IrExpr::TypeOp {
                 op: IrTypeOp::NotInstanceOf,
                 arg: other,
@@ -7866,20 +7810,16 @@ impl<'a> Lower<'a> {
             let g = self.guard_return_false(not_inst);
             stmts.push(g);
             // `val o = other as T` — one checkcast, stored to the local.
-            let other_v = self.ir.add_expr(IrExpr::GetValue(1));
+            let other_v = self.emit_get_value(1);
             let ocast = self.ir.add_expr(IrExpr::TypeOp {
                 op: IrTypeOp::Cast,
                 arg: other_v,
                 type_operand: class_ty.clone(),
             });
-            stmts.push(self.ir.add_expr(IrExpr::Variable {
-                index: OV,
-                ty: class_ty.clone(),
-                init: Some(ocast),
-            }));
+            stmts.push(self.emit_variable(OV, class_ty.clone(), Some(ocast)));
             for (i, (_, t)) in fields.iter().enumerate() {
                 let af = self.this_field(class_id, i as u32);
-                let o_local = self.ir.add_expr(IrExpr::GetValue(OV));
+                let o_local = self.emit_get_value(OV);
                 let bf = self.emit_get_field(o_local, class_id, i as u32);
                 let ne = self.field_ne(af, bf, *t)?;
                 let g = self.guard_return_false(ne);
@@ -8342,18 +8282,14 @@ impl<'a> Lower<'a> {
             let k = arg_slot[i];
             let v = self.lower_arg(arg, &ir_params[k])?;
             let tmp = self.fresh_value();
-            let decl = self.ir.add_expr(IrExpr::Variable {
-                index: tmp,
-                ty: ty_to_ir(ir_params[k]),
-                init: Some(v),
-            });
+            let decl = self.emit_variable(tmp, ty_to_ir(ir_params[k]), Some(v));
             prelude.push(decl);
             slot_temp[k] = Some(tmp);
         }
         let mut a = Vec::new();
         for k in 0..n {
             let val = match slot_temp[k] {
-                Some(tmp) => self.ir.add_expr(IrExpr::GetValue(tmp)),
+                Some(tmp) => self.emit_get_value(tmp),
                 None => {
                     let def = param_meta.get(k).and_then(|(_, d)| *d)?;
                     if !is_const_literal(self.afile, def) {
@@ -8458,11 +8394,7 @@ impl<'a> Lower<'a> {
             let k = arg_slot[i];
             let v = self.lower_arg(arg, &ir_params[k])?;
             let tmp = self.fresh_value();
-            let decl = self.ir.add_expr(IrExpr::Variable {
-                index: tmp,
-                ty: ir_params[k],
-                init: Some(v),
-            });
+            let decl = self.emit_variable(tmp, ir_params[k], Some(v));
             prelude.push(decl);
             slot_temp[k] = Some(tmp);
         }
@@ -8476,7 +8408,7 @@ impl<'a> Lower<'a> {
         let mut mask: i32 = 0;
         for (k, item) in slot_temp.iter().enumerate() {
             match item {
-                Some(tmp) => a.push(self.ir.add_expr(IrExpr::GetValue(*tmp))),
+                Some(tmp) => a.push(self.emit_get_value(*tmp)),
                 // The omitted trailing `vararg` slot gets an EMPTY array and NO mask bit (a vararg is
                 // passed through by `$default`, not filled from the mask).
                 None if vararg && k == n - 1 => a.push(self.empty_array(ir_params[k])),
@@ -8545,11 +8477,7 @@ impl<'a> Lower<'a> {
         let recv_v = self.expr(receiver)?;
         let recv_tmp = self.fresh_value();
         let recv_ty = ty_to_ir(self.info.ty(receiver));
-        let recv_decl = self.ir.add_expr(IrExpr::Variable {
-            index: recv_tmp,
-            ty: recv_ty,
-            init: Some(recv_v),
-        });
+        let recv_decl = self.emit_variable(recv_tmp, recv_ty, Some(recv_v));
         let mut prelude = vec![recv_decl];
         // Arguments in SOURCE order → temps (typed by their target slot).
         let mut slot_temp: Vec<Option<u32>> = vec![None; n];
@@ -8557,20 +8485,16 @@ impl<'a> Lower<'a> {
             let k = arg_slot[i];
             let v = self.lower_arg(arg, &params[k])?;
             let tmp = self.fresh_value();
-            let decl = self.ir.add_expr(IrExpr::Variable {
-                index: tmp,
-                ty: params[k],
-                init: Some(v),
-            });
+            let decl = self.emit_variable(tmp, params[k], Some(v));
             prelude.push(decl);
             slot_temp[k] = Some(tmp);
         }
         // Load the temps in slot order for the call.
-        let recv_read = self.ir.add_expr(IrExpr::GetValue(recv_tmp));
+        let recv_read = self.emit_get_value(recv_tmp);
         let mut a: Vec<Option<u32>> = Vec::with_capacity(n);
         for slot in &slot_temp {
             let tmp = (*slot)?;
-            a.push(Some(self.ir.add_expr(IrExpr::GetValue(tmp))));
+            a.push(Some(self.emit_get_value(tmp)));
         }
         let mcall = self.emit_method_call(class, index, recv_read, a);
         Some(self.emit_block(prelude, Some(mcall)))
@@ -8622,30 +8546,22 @@ impl<'a> Lower<'a> {
         // Receiver first, then arguments in SOURCE order into temps.
         let recv_v = self.lower_arg(receiver, &params[0])?;
         let recv_tmp = self.fresh_value();
-        let recv_decl = self.ir.add_expr(IrExpr::Variable {
-            index: recv_tmp,
-            ty: params[0],
-            init: Some(recv_v),
-        });
+        let recv_decl = self.emit_variable(recv_tmp, params[0], Some(recv_v));
         let mut prelude = vec![recv_decl];
         let mut slot_temp: Vec<Option<u32>> = vec![None; n];
         for (i, &arg) in args.iter().enumerate() {
             let k = arg_slot[i];
             let v = self.lower_arg(arg, &params[k])?;
             let tmp = self.fresh_value();
-            let decl = self.ir.add_expr(IrExpr::Variable {
-                index: tmp,
-                ty: params[k],
-                init: Some(v),
-            });
+            let decl = self.emit_variable(tmp, params[k], Some(v));
             prelude.push(decl);
             slot_temp[k] = Some(tmp);
         }
         // Build args `[receiver, slot1, …]` in slot order.
-        let mut a = vec![self.ir.add_expr(IrExpr::GetValue(recv_tmp))];
+        let mut a = vec![self.emit_get_value(recv_tmp)];
         for slot in slot_temp.iter().skip(1) {
             let tmp = (*slot)?;
-            a.push(self.ir.add_expr(IrExpr::GetValue(tmp)));
+            a.push(self.emit_get_value(tmp));
         }
         let ecall = self.emit_local_call(fid, a);
         Some(self.emit_block(prelude, Some(ecall)))
@@ -9050,10 +8966,7 @@ impl<'a> Lower<'a> {
         // `get` argument. `capture` holds the captured-receiver expression for the bound forms.
         let (owner, capture): (String, Option<u32>) = match self.afile.expr(recv).clone() {
             Expr::Name(rn) => match self.lookup(&rn) {
-                Some((v, ty)) => (
-                    ty.obj_internal()?.to_string(),
-                    Some(self.ir.add_expr(IrExpr::GetValue(v))),
-                ),
+                Some((v, ty)) => (ty.obj_internal()?.to_string(), Some(self.emit_get_value(v))),
                 None => {
                     let owner = class_internal(self.afile, &rn);
                     // An OBJECT singleton receiver (`O::p`) is BOUND to `O.INSTANCE`; a plain class name
@@ -9313,7 +9226,7 @@ impl<'a> Lower<'a> {
         let elem_ir = ty_to_ir(arr_ty.array_elem().unwrap_or(Ty::obj("kotlin/Any")));
         let mut collected = Vec::with_capacity(n - fixed);
         for k in fixed..n {
-            let v = self.ir.add_expr(IrExpr::GetValue(k as u32));
+            let v = self.emit_get_value(k as u32);
             collected.push(self.ir.add_expr(IrExpr::TypeOp {
                 op: IrTypeOp::ImplicitCoercion,
                 arg: v,
@@ -9330,7 +9243,7 @@ impl<'a> Lower<'a> {
             let (class_id, index, _fid, _) = self.resolve_method(internal, name)?;
             let recv = self.emit_static_instance(cid, cid, "INSTANCE");
             let mut a: Vec<Option<u32>> = (0..fixed as u32)
-                .map(|k| Some(self.ir.add_expr(IrExpr::GetValue(k))))
+                .map(|k| Some(self.emit_get_value(k)))
                 .collect();
             a.push(Some(arr));
             self.emit_method_call(class_id, index, recv, a)
@@ -9338,9 +9251,7 @@ impl<'a> Lower<'a> {
             let fid = *self
                 .fun_ids
                 .get(&(name.to_string(), target_params.to_vec()))?;
-            let mut a: Vec<u32> = (0..fixed as u32)
-                .map(|k| self.ir.add_expr(IrExpr::GetValue(k)))
-                .collect();
+            let mut a: Vec<u32> = (0..fixed as u32).map(|k| self.emit_get_value(k)).collect();
             a.push(arr);
             self.emit_local_call(fid, a)
         };
@@ -9390,7 +9301,7 @@ impl<'a> Lower<'a> {
         // The adapter's own N params fill the retained slots (`GetValue(0..N-1)`).
         let mut a: Vec<u32> = Vec::with_capacity(m + 2);
         for k in 0..n {
-            a.push(self.ir.add_expr(IrExpr::GetValue(k as u32)));
+            a.push(self.emit_get_value(k as u32));
         }
         let dcall = if n == m {
             // No dropped parameters (a pure return coercion): a plain full-arity call.
@@ -9555,7 +9466,7 @@ impl<'a> Lower<'a> {
     fn unit_ref_wrapper(&mut self, target_fid: u32, uniq: u32) -> u32 {
         let params = self.ir.functions[target_fid as usize].params.clone();
         let argvals: Vec<u32> = (0..params.len() as u32)
-            .map(|i| self.ir.add_expr(IrExpr::GetValue(i)))
+            .map(|i| self.emit_get_value(i))
             .collect();
         let call = self.emit_local_call(target_fid, argvals);
         let unit = self.ir.add_expr(IrExpr::UnitInstance);
@@ -9591,7 +9502,7 @@ impl<'a> Lower<'a> {
         // receiver is CAPTURED. Unbound `Type::m` (`rn` a class): the receiver is the reference's first
         // parameter (`param_tys[0]`). `capture` holds the bound receiver expression.
         let (capture, recv_ty): (Option<u32>, Ty) = match self.lookup(&rn) {
-            Some((v, ty)) => (Some(self.ir.add_expr(IrExpr::GetValue(v))), ty),
+            Some((v, ty)) => (Some(self.emit_get_value(v)), ty),
             None => {
                 let internal = class_internal(self.afile, &rn);
                 let cid = self.classes.get(&internal)?.id;
@@ -9784,7 +9695,7 @@ impl<'a> Lower<'a> {
             .classes
             .get(&internal)
             .is_some_and(|ci| self.ir.classes[ci.id as usize].is_interface);
-        let this_e = self.ir.add_expr(IrExpr::GetValue(0));
+        let this_e = self.emit_get_value(0);
         let param_tys = tys_to_ir(&sig.params);
         self.make_func_ref(
             e.0,
@@ -9946,9 +9857,9 @@ impl<'a> Lower<'a> {
             (class_id, index)
         };
         let cap = self.expr(recv)?;
-        let recv_v = self.ir.add_expr(IrExpr::GetValue(0));
+        let recv_v = self.emit_get_value(0);
         let mut arg_vs: Vec<Option<u32>> = (0..params.len() as u32)
-            .map(|i| Some(self.ir.add_expr(IrExpr::GetValue(i + 1))))
+            .map(|i| Some(self.emit_get_value(i + 1)))
             .collect();
         // ADAPTED reference: the target method has more parameters than the reference exposes (trailing
         // defaults / a vararg). Pad the omitted ones with `None`, which the `MethodCall` emitter fills
@@ -10008,9 +9919,9 @@ impl<'a> Lower<'a> {
         let (class_id, index, fid, ret) = self.resolve_method(internal, method_name)?;
         let params = self.ir.functions[fid as usize].params.clone();
         let ret_ir = self.ir.functions[fid as usize].ret;
-        let recv = self.ir.add_expr(IrExpr::GetValue(0));
+        let recv = self.emit_get_value(0);
         let args: Vec<Option<u32>> = (0..params.len())
-            .map(|i| Some(self.ir.add_expr(IrExpr::GetValue((i + 1) as u32))))
+            .map(|i| Some(self.emit_get_value((i + 1) as u32)))
             .collect();
         let call = self.emit_method_call(class_id, index, recv, args);
         // Wrap in an explicit return so the method's control flow terminates: `return this.<m>(args)`
@@ -10375,13 +10286,9 @@ impl<'a> Lower<'a> {
         // Evaluate the range once into a temp (the getters must share one receiver).
         let rng = self.expr(iterable)?;
         let r_v = self.fresh_value();
-        let var_r = self.ir.add_expr(IrExpr::Variable {
-            index: r_v,
-            ty: ty_to_ir(it_ty),
-            init: Some(rng),
-        });
+        let var_r = self.emit_variable(r_v, ty_to_ir(it_ty), Some(rng));
         let getter = |this: &mut Self, accessor: &PlatformAccessor| {
-            let recv = this.ir.add_expr(IrExpr::GetValue(r_v));
+            let recv = this.emit_get_value(r_v);
             this.emit_virtual_call(
                 internal.clone(),
                 accessor.name.clone(),
@@ -10395,23 +10302,15 @@ impl<'a> Lower<'a> {
         let first = getter(self, &loop_info.first);
         let i_v = self.fresh_value();
         self.scope.push((name.to_string(), i_v, elem));
-        let var_i = self.ir.add_expr(IrExpr::Variable {
-            index: i_v,
-            ty: elem_ir.clone(),
-            init: Some(first),
-        });
+        let var_i = self.emit_variable(i_v, elem_ir.clone(), Some(first));
         // last = range.getLast()  (hoisted)
         let last = getter(self, &loop_info.last);
         let n_v = self.fresh_value();
-        let var_n = self.ir.add_expr(IrExpr::Variable {
-            index: n_v,
-            ty: elem_ir.clone(),
-            init: Some(last),
-        });
+        let var_n = self.emit_variable(n_v, elem_ir.clone(), Some(last));
         // condition: i <= last. Unsigned element types use the platform unsigned comparator so values
         // past the sign bit order correctly.
-        let gi = self.ir.add_expr(IrExpr::GetValue(i_v));
-        let gn = self.ir.add_expr(IrExpr::GetValue(n_v));
+        let gi = self.emit_get_value(i_v);
+        let gn = self.emit_get_value(n_v);
         let cond = self.compare_ordered(elem, IrBinOp::Le, gi, gn)?;
         // body (the loop variable `x` is the counter `i` itself)
         let mut out = Vec::new();
@@ -10420,7 +10319,7 @@ impl<'a> Lower<'a> {
             return None;
         }
         // i += 1  (the loop update, at the `continue` target)
-        let gi2 = self.ir.add_expr(IrExpr::GetValue(i_v));
+        let gi2 = self.emit_get_value(i_v);
         let one = self
             .ir
             .add_expr(IrExpr::Const(self.scalar_one_const(elem)?));
@@ -10437,8 +10336,8 @@ impl<'a> Lower<'a> {
         // `Int.MAX_VALUE`/`Long.MAX_VALUE` doesn't wrap past it and loop forever (same overflow-safe
         // counted-loop shape as `Stmt::For`). The break + increment are the `update` (the `continue`
         // target), so a `continue` also hits the bound check rather than skipping to the wrapping `i++`.
-        let ic = self.ir.add_expr(IrExpr::GetValue(i_v));
-        let ec = self.ir.add_expr(IrExpr::GetValue(n_v));
+        let ic = self.emit_get_value(i_v);
+        let ec = self.emit_get_value(n_v);
         let at_end = self.ir.add_expr(IrExpr::PrimitiveBinOp {
             op: IrBinOp::Eq,
             lhs: ic,
@@ -10488,13 +10387,9 @@ impl<'a> Lower<'a> {
         // Evaluate the progression once; the three getters share the one receiver.
         let rng = self.expr(iterable)?;
         let r_v = self.fresh_value();
-        let var_r = self.ir.add_expr(IrExpr::Variable {
-            index: r_v,
-            ty: ty_to_ir(it_ty),
-            init: Some(rng),
-        });
+        let var_r = self.emit_variable(r_v, ty_to_ir(it_ty), Some(rng));
         let getter = |this: &mut Self, accessor: &PlatformAccessor| {
-            let recv = this.ir.add_expr(IrExpr::GetValue(r_v));
+            let recv = this.emit_get_value(r_v);
             this.emit_virtual_call(
                 internal.clone(),
                 accessor.name.clone(),
@@ -10508,27 +10403,15 @@ impl<'a> Lower<'a> {
         let first = getter(self, &loop_info.first);
         let i_v = self.fresh_value();
         self.scope.push((name.to_string(), i_v, elem));
-        let var_i = self.ir.add_expr(IrExpr::Variable {
-            index: i_v,
-            ty: elem_ir.clone(),
-            init: Some(first),
-        });
+        let var_i = self.emit_variable(i_v, elem_ir.clone(), Some(first));
         // last = p.getLast()  (hoisted)
         let last = getter(self, &loop_info.last);
         let n_v = self.fresh_value();
-        let var_n = self.ir.add_expr(IrExpr::Variable {
-            index: n_v,
-            ty: elem_ir.clone(),
-            init: Some(last),
-        });
+        let var_n = self.emit_variable(n_v, elem_ir.clone(), Some(last));
         // step = p.getStep()  (hoisted)
         let step = getter(self, &step_accessor);
         let s_v = self.fresh_value();
-        let var_s = self.ir.add_expr(IrExpr::Variable {
-            index: s_v,
-            ty: ty_to_ir(step_ty),
-            init: Some(step),
-        });
+        let var_s = self.emit_variable(s_v, ty_to_ir(step_ty), Some(step));
         // The step zero literal, in the step's own (signed) type.
         let zero_step = |this: &mut Self| {
             this.ir.add_expr(IrExpr::Const(if step_ty == Ty::Long {
@@ -10539,13 +10422,13 @@ impl<'a> Lower<'a> {
         };
         // Compare two counter-typed values; unsigned elements use the platform unsigned comparator.
         let cmp = |this: &mut Self, op: IrBinOp, a: u32, b: u32| -> Option<u32> {
-            let la = this.ir.add_expr(IrExpr::GetValue(a));
-            let lb = this.ir.add_expr(IrExpr::GetValue(b));
+            let la = this.emit_get_value(a);
+            let lb = this.emit_get_value(b);
             this.compare_ordered(elem, op, la, lb)
         };
         // cond: (step > 0 && i <= last) || (step < 0 && i >= last). A constant step folds to one branch
         // at the bytecode level; iterating is correct for either direction.
-        let sg1 = self.ir.add_expr(IrExpr::GetValue(s_v));
+        let sg1 = self.emit_get_value(s_v);
         let z1 = zero_step(self);
         let step_pos = self.ir.add_expr(IrExpr::PrimitiveBinOp {
             op: IrBinOp::Gt,
@@ -10558,7 +10441,7 @@ impl<'a> Lower<'a> {
             lhs: step_pos,
             rhs: i_le,
         });
-        let sg2 = self.ir.add_expr(IrExpr::GetValue(s_v));
+        let sg2 = self.emit_get_value(s_v);
         let z2 = zero_step(self);
         let step_neg = self.ir.add_expr(IrExpr::PrimitiveBinOp {
             op: IrBinOp::Lt,
@@ -10584,8 +10467,8 @@ impl<'a> Lower<'a> {
         }
         // update (the `continue` target): break exactly at `last`, then `i += step`. Breaking before the
         // increment keeps a progression ending at `MAX_VALUE`/`MIN_VALUE` from wrapping past it.
-        let ic = self.ir.add_expr(IrExpr::GetValue(i_v));
-        let ec = self.ir.add_expr(IrExpr::GetValue(n_v));
+        let ic = self.emit_get_value(i_v);
+        let ec = self.emit_get_value(n_v);
         let at_end = self.ir.add_expr(IrExpr::PrimitiveBinOp {
             op: IrBinOp::Eq,
             lhs: ic,
@@ -10595,8 +10478,8 @@ impl<'a> Lower<'a> {
         let if_break = self.ir.add_expr(IrExpr::When {
             branches: vec![(Some(at_end), brk)],
         });
-        let gi2 = self.ir.add_expr(IrExpr::GetValue(i_v));
-        let gs = self.ir.add_expr(IrExpr::GetValue(s_v));
+        let gi2 = self.emit_get_value(i_v);
+        let gs = self.emit_get_value(s_v);
         let inc = self.ir.add_expr(IrExpr::PrimitiveBinOp {
             op: IrBinOp::Add,
             lhs: gi2,
@@ -10663,11 +10546,7 @@ impl<'a> Lower<'a> {
             let zero = self.ir.add_expr(IrExpr::Const(IrConst::Int(0)));
             (
                 Some(v),
-                Some(self.ir.add_expr(IrExpr::Variable {
-                    index: v,
-                    ty: ty_to_ir(Ty::Int),
-                    init: Some(zero),
-                })),
+                Some(self.emit_variable(v, ty_to_ir(Ty::Int), Some(zero))),
             )
         } else {
             (None, None)
@@ -10686,14 +10565,10 @@ impl<'a> Lower<'a> {
             }
         };
         let it_v = self.fresh_value();
-        let var_it = self.ir.add_expr(IrExpr::Variable {
-            index: it_v,
-            ty: ty_to_ir(iter_ty),
-            init: Some(iter_call),
-        });
+        let var_it = self.emit_variable(it_v, ty_to_ir(iter_ty), Some(iter_call));
 
         // cond: it.hasNext()
-        let it_g = self.ir.add_expr(IrExpr::GetValue(it_v));
+        let it_g = self.emit_get_value(it_v);
         let hasnext_ret = hasnext_m.ret;
         let hasnext_suspend = hasnext_m.suspend;
         let cond = self.emit_library_member_call(
@@ -10706,7 +10581,7 @@ impl<'a> Lower<'a> {
         );
 
         // x = (elem) it.next()  — unbox a primitive element, checkcast a specific reference.
-        let it_g2 = self.ir.add_expr(IrExpr::GetValue(it_v));
+        let it_g2 = self.emit_get_value(it_v);
         let next_ret = next_m.ret;
         let next_suspend = next_m.suspend;
         let next_call = self.emit_library_member_call(
@@ -10738,11 +10613,7 @@ impl<'a> Lower<'a> {
         };
         let x_v = self.fresh_value();
         self.scope.push((name.to_string(), x_v, elem));
-        let var_x = self.ir.add_expr(IrExpr::Variable {
-            index: x_v,
-            ty: ty_to_ir(elem),
-            init: Some(x_init),
-        });
+        let var_x = self.emit_variable(x_v, ty_to_ir(elem), Some(x_init));
 
         let mut out = vec![var_x];
         if self.append_body_stmts(body, &mut out).is_none() {
@@ -10751,7 +10622,7 @@ impl<'a> Lower<'a> {
         }
         // index += 1 (forEachIndexed)
         let update = idx_v.map(|iv| {
-            let g = self.ir.add_expr(IrExpr::GetValue(iv));
+            let g = self.emit_get_value(iv);
             let one = self.ir.add_expr(IrExpr::Const(IrConst::Int(1)));
             let inc = self.ir.add_expr(IrExpr::PrimitiveBinOp {
                 op: IrBinOp::Add,
@@ -11102,7 +10973,7 @@ impl<'a> Lower<'a> {
         let throw_assertion = self.ir.add_expr(IrExpr::Throw { operand: assertion });
         let body = self.emit_block(vec![invoke], Some(throw_assertion));
         let catch_var = self.fresh_value();
-        let caught = self.ir.add_expr(IrExpr::GetValue(catch_var));
+        let caught = self.emit_get_value(catch_var);
         Some(self.ir.add_expr(IrExpr::Try {
             body,
             catches: vec![IrCatch {
@@ -11251,18 +11122,10 @@ impl<'a> Lower<'a> {
         let any = ty_to_ir(Ty::nullable(Ty::obj("kotlin/Any")));
         let avar_i = self.fresh_value();
         let bvar_i = self.fresh_value();
-        let avar = self.ir.add_expr(IrExpr::Variable {
-            index: avar_i,
-            ty: any,
-            init: Some(av),
-        });
-        let bvar = self.ir.add_expr(IrExpr::Variable {
-            index: bvar_i,
-            ty: any,
-            init: Some(bv),
-        });
+        let avar = self.emit_variable(avar_i, any, Some(av));
+        let bvar = self.emit_variable(bvar_i, any, Some(bv));
         let is_null = |this: &mut Self, slot: u32| {
-            let g = this.ir.add_expr(IrExpr::GetValue(slot));
+            let g = this.emit_get_value(slot);
             let n = this.ir.add_expr(IrExpr::Const(IrConst::Null));
             this.ir.add_expr(IrExpr::PrimitiveBinOp {
                 op: IrBinOp::RefEq,
@@ -11273,7 +11136,7 @@ impl<'a> Lower<'a> {
         // Both non-null: unbox each to its own primitive, promote to the common type, primitive-compare
         // (IEEE for Float/Double — `dcmpl`/`fcmpl`, so `-0.0 == 0.0` and `NaN != NaN`).
         let unbox_to_common = |this: &mut Self, slot: u32, p: Ty| {
-            let g = this.ir.add_expr(IrExpr::GetValue(slot));
+            let g = this.emit_get_value(slot);
             let prim = this.ir.add_expr(IrExpr::TypeOp {
                 op: IrTypeOp::ImplicitCoercion,
                 arg: g,
@@ -11792,7 +11655,7 @@ impl<'a> Lower<'a> {
             }
             slot[p] = Some(self.lower_arg(*arg, &params[p])?);
         }
-        let recv = self.ir.add_expr(IrExpr::GetValue(this_v));
+        let recv = self.emit_get_value(this_v);
         let mut a: Vec<Option<u32>> = Vec::with_capacity(n);
         for (k, s) in slot.iter().enumerate() {
             let v = match s {
@@ -11827,7 +11690,7 @@ impl<'a> Lower<'a> {
                 let params = self.ir.functions[mfid as usize].params.clone();
                 let vararg = self.syms.method_is_vararg(internal, name);
                 if let Some(n_fixed) = vararg_arity(vararg, params.len(), args.len()) {
-                    let recv = self.ir.add_expr(IrExpr::GetValue(this_v));
+                    let recv = self.emit_get_value(this_v);
                     let a = self.lower_call_args_vararg(args, &params, vararg, n_fixed)?;
                     return Some(self.emit_method_call(
                         class,
@@ -11866,7 +11729,7 @@ impl<'a> Lower<'a> {
             if let Some(m) = self.resolve_instance(internal, name, &arg_tys) {
                 if m.params.len() == args.len() {
                     let owner = m.owner.clone().unwrap_or_else(|| internal.clone());
-                    let recv = self.ir.add_expr(IrExpr::GetValue(this_v));
+                    let recv = self.emit_get_value(this_v);
                     let mut a = Vec::new();
                     for (arg, pt) in args.iter().zip(&m.params) {
                         a.push(self.lower_arg(*arg, &ty_to_ir(*pt))?);
@@ -11900,7 +11763,7 @@ impl<'a> Lower<'a> {
                 .clone()
                 .unwrap_or_else(|| this_ty.obj_internal().unwrap_or("kotlin/Any").to_string());
             let physical_ret = member.physical_ret;
-            let recv = self.ir.add_expr(IrExpr::GetValue(this_v));
+            let recv = self.emit_get_value(this_v);
             let call = self.emit_library_member_call(recv, owner, member, ret, false, a);
             return Some(self.coerce_generic_read(call, e, physical_ret));
         }
@@ -11918,7 +11781,7 @@ impl<'a> Lower<'a> {
         {
             let params = self.ir.functions[fid as usize].params.clone();
             if params.len() == args.len() + 1 {
-                let recv = self.ir.add_expr(IrExpr::GetValue(this_v));
+                let recv = self.emit_get_value(this_v);
                 let mut a = vec![recv];
                 for (arg, pt) in args.iter().zip(&params[1..]) {
                     a.push(self.lower_arg(*arg, pt)?);
@@ -11927,7 +11790,7 @@ impl<'a> Lower<'a> {
             }
         }
         // A stdlib/library EXTENSION on the receiver (`uppercase`/`reversed`).
-        let recv = self.ir.add_expr(IrExpr::GetValue(this_v));
+        let recv = self.emit_get_value(this_v);
         self.lower_ext_call_on(recv, this_ty, name, args, e)
     }
 
@@ -11944,17 +11807,13 @@ impl<'a> Lower<'a> {
         let saved_cur = self.cur_class.clone();
         self.cur_class = None;
         self.scope.push(("this".to_string(), p_slot, rty));
-        let var_p = self.ir.add_expr(IrExpr::Variable {
-            index: p_slot,
-            ty: ty_to_ir(rty),
-            init: Some(recv),
-        });
+        let var_p = self.emit_variable(p_slot, ty_to_ir(rty), Some(recv));
         let body_val = self.expr(rl.body);
         self.scope.truncate(depth);
         self.cur_class = saved_cur;
         let body_val = body_val?;
         let result = if rl.returns_receiver {
-            let recv_read = self.ir.add_expr(IrExpr::GetValue(p_slot));
+            let recv_read = self.emit_get_value(p_slot);
             self.emit_block(vec![var_p, body_val], Some(recv_read))
         } else {
             self.emit_block(vec![var_p], Some(body_val))
@@ -11994,11 +11853,7 @@ impl<'a> Lower<'a> {
             self.cur_class = None;
         }
         self.scope.push((pname.to_string(), p_slot, rty));
-        let var_p = self.ir.add_expr(IrExpr::Variable {
-            index: p_slot,
-            ty: ty_to_ir(rty),
-            init: Some(recv_val),
-        });
+        let var_p = self.emit_variable(p_slot, ty_to_ir(rty), Some(recv_val));
         let body_val = self.expr(body);
         self.scope.truncate(depth);
         self.cur_class = saved_cur;
@@ -12009,7 +11864,7 @@ impl<'a> Lower<'a> {
         // drop it and let the divergent body be the block value — identical to the non-receiver form.
         let body_diverges = self.info.ty(body) == Ty::Nothing;
         Some(if returns_receiver && !body_diverges {
-            let recv_read = self.ir.add_expr(IrExpr::GetValue(p_slot));
+            let recv_read = self.emit_get_value(p_slot);
             self.emit_block(vec![var_p, body_val], Some(recv_read))
         } else {
             self.emit_block(vec![var_p], Some(body_val))
@@ -12430,15 +12285,11 @@ impl<'a> Lower<'a> {
         for (a, t) in args.iter().zip(&ctx.param_tys) {
             let v = self.lower_arg(*a, &ty_to_ir(*t))?;
             let tmp = self.fresh_value();
-            stmts.push(self.ir.add_expr(IrExpr::Variable {
-                index: tmp,
-                ty: ty_to_ir(*t),
-                init: Some(v),
-            }));
+            stmts.push(self.emit_variable(tmp, ty_to_ir(*t), Some(v)));
             temps.push(tmp);
         }
         for (pv, tmp) in ctx.param_vals.iter().zip(&temps) {
-            let read = self.ir.add_expr(IrExpr::GetValue(*tmp));
+            let read = self.emit_get_value(*tmp);
             stmts.push(self.ir.add_expr(IrExpr::SetValue {
                 var: *pv,
                 value: read,
@@ -12758,12 +12609,8 @@ impl<'a> Lower<'a> {
                                     };
                                 let val = if val_suspends {
                                     let tmp = self.fresh_value();
-                                    stmts.push(self.ir.add_expr(IrExpr::Variable {
-                                        index: tmp,
-                                        ty: ty_to_ir(rty),
-                                        init: Some(val),
-                                    }));
-                                    self.ir.add_expr(IrExpr::GetValue(tmp))
+                                    stmts.push(self.emit_variable(tmp, ty_to_ir(rty), Some(val)));
+                                    self.emit_get_value(tmp)
                                 } else {
                                     val
                                 };
@@ -12833,11 +12680,7 @@ impl<'a> Lower<'a> {
                         Some(val) => {
                             let tmp = self.fresh_value();
                             let vty = self.cur_ret_ty.clone();
-                            stmts.push(self.ir.add_expr(IrExpr::Variable {
-                                index: tmp,
-                                ty: vty,
-                                init: Some(val),
-                            }));
+                            stmts.push(self.emit_variable(tmp, vty, Some(val)));
                             Some(tmp)
                         }
                         None => None,
@@ -12858,7 +12701,7 @@ impl<'a> Lower<'a> {
                         stmts.push(s);
                     }
                     self.try_finally_stack = saved;
-                    let rv = ret_val.map(|tmp| self.ir.add_expr(IrExpr::GetValue(tmp)));
+                    let rv = ret_val.map(|tmp| self.emit_get_value(tmp));
                     stmts.push(self.emit_return(rv));
                     return Some(self.emit_block(stmts, None));
                 }
@@ -12880,11 +12723,7 @@ impl<'a> Lower<'a> {
                 // The slot defaults to `null` (kotlinc: `aconst_null; astore`); a read while still null
                 // throws via the `LateinitCheck` wrapper (see the local-read path).
                 let null = self.ir.add_expr(IrExpr::Const(IrConst::Null));
-                Some(self.ir.add_expr(IrExpr::Variable {
-                    index: v,
-                    ty: ty_to_ir(kty),
-                    init: Some(null),
-                }))
+                Some(self.emit_variable(v, ty_to_ir(kty), Some(null)))
             }
             Stmt::Local { name, init, ty, .. } => {
                 let init_ty = self.info.ty(init);
@@ -12903,11 +12742,7 @@ impl<'a> Lower<'a> {
                     let seq = self.emit_block(vec![side], Some(unit_val));
                     let v = self.fresh_value();
                     self.scope.push((name.clone(), v, unit_ty));
-                    return Some(self.ir.add_expr(IrExpr::Variable {
-                        index: v,
-                        ty: ty_to_ir(unit_ty),
-                        init: Some(seq),
-                    }));
+                    return Some(self.emit_variable(v, ty_to_ir(unit_ty), Some(seq)));
                 }
                 // Use the declared type only when it's a builtin krusty `Ty`; for a user/class type
                 // (`val en: En`) `Ty::from_name` is `None`, so fall back to the checker's inferred
@@ -12981,11 +12816,7 @@ impl<'a> Lower<'a> {
                     // A single `Variable` (no scoping block) so the holder's slot lives in the enclosing
                     // scope — the closure's capture reads it later.
                     let new_ref = self.ir.add_expr(IrExpr::RefNew { elem, init: it });
-                    return Some(self.ir.add_expr(IrExpr::Variable {
-                        index: holder,
-                        ty: ty_to_ir(holder_ty),
-                        init: Some(new_ref),
-                    }));
+                    return Some(self.emit_variable(holder, ty_to_ir(holder_ty), Some(new_ref)));
                 }
                 // A NESTED-array local (`val x: Array<Array<*>> = arrayOf(arrayOf(1))`): its outermost
                 // array-creating initializer builds over the DECLARED element (`Array<*>` = `Object[]`),
@@ -13042,11 +12873,7 @@ impl<'a> Lower<'a> {
                 if nullable {
                     var_ty = mark_nullable(var_ty);
                 }
-                Some(self.ir.add_expr(IrExpr::Variable {
-                    index: v,
-                    ty: var_ty,
-                    init: Some(it),
-                }))
+                Some(self.emit_variable(v, var_ty, Some(it)))
             }
             Stmt::LocalDelegate {
                 is_var,
@@ -13100,11 +12927,7 @@ impl<'a> Lower<'a> {
                         ret_ty: prop_ty,
                     },
                 );
-                Some(self.ir.add_expr(IrExpr::Variable {
-                    index: dv,
-                    ty: ty_to_ir(delegate_ty),
-                    init: Some(init),
-                }))
+                Some(self.emit_variable(dv, ty_to_ir(delegate_ty), Some(init)))
             }
             Stmt::Destructure { entries, init } => {
                 // A direct `stmt()` call wraps the bindings in a Block; the block builders use
@@ -13119,7 +12942,7 @@ impl<'a> Lower<'a> {
                 if name == "field" {
                     if let Some((class_id, fidx, fty)) = self.cur_field.clone() {
                         let val = self.lower_arg(value, &fty)?;
-                        let this_e = self.ir.add_expr(IrExpr::GetValue(0));
+                        let this_e = self.emit_get_value(0);
                         return Some(self.emit_set_field(this_e, class_id, fidx, val));
                     }
                     // A top-level custom setter writes the backing STATIC field.
@@ -13134,7 +12957,7 @@ impl<'a> Lower<'a> {
                     let value_ty = sv.params.last().copied().unwrap_or(Ty::Error);
                     let val = self.lower_arg(value, &ty_to_ir(value_ty))?;
                     let (dslot, _) = self.lookup(&format!("{name}$delegate"))?;
-                    let dele = self.ir.add_expr(IrExpr::GetValue(dslot));
+                    let dele = self.emit_get_value(dslot);
                     let null_a = self.ir.add_expr(IrExpr::Const(IrConst::Null));
                     let pref = self.make_local_propref(&ld)?;
                     return Some(self.emit_virtual_call(
@@ -13149,7 +12972,7 @@ impl<'a> Lower<'a> {
                 // A boxed mutable-capture local: write through its `Ref` holder's `element`.
                 if let Some(elem) = self.boxed_elem.get(&name).cloned() {
                     let (holder, _) = self.lookup(&name)?;
-                    let hv = self.ir.add_expr(IrExpr::GetValue(holder));
+                    let hv = self.emit_get_value(holder);
                     let val = self.lower_arg(value, &ty_to_ir(elem))?;
                     return Some(self.ir.add_expr(IrExpr::RefSet {
                         holder: hv,
@@ -13186,7 +13009,7 @@ impl<'a> Lower<'a> {
                     let val = self.lower_arg(value, &ty_to_ir(sty))?;
                     Some(self.ir.add_expr(IrExpr::SetValue { var: v, value: val }))
                 } else if let Some((this_v, class, idx, field_ty)) = own_field {
-                    let recv = self.ir.add_expr(IrExpr::GetValue(this_v));
+                    let recv = self.emit_get_value(this_v);
                     let val = self.lower_arg(value, &field_ty)?;
                     Some(self.emit_set_field(recv, class, idx, val))
                 } else if let Some(sfid) = self.computed_setters.get(&name).copied() {
@@ -13221,7 +13044,7 @@ impl<'a> Lower<'a> {
                     // `this` is an external receiver (an inlined `apply`/`run` whose backing field is
                     // private) — write through the property setter `setX(v)`.
                     let (this_v, this_ty) = self.lookup("this")?;
-                    let recv = self.ir.add_expr(IrExpr::GetValue(this_v));
+                    let recv = self.emit_get_value(this_v);
                     {
                         let internal = this_ty.obj_internal()?.to_string();
                         let (sclass, sindex, sfid, _) =
@@ -13245,13 +13068,13 @@ impl<'a> Lower<'a> {
                     let (holder, _) = self.lookup(&name)?;
                     let one = self.scalar_one_const(elem)?;
                     let op = if dec { IrBinOp::Sub } else { IrBinOp::Add };
-                    let hv = self.ir.add_expr(IrExpr::GetValue(holder));
+                    let hv = self.emit_get_value(holder);
                     let cur = self.ir.add_expr(IrExpr::RefGet {
                         holder: hv,
                         elem: ty_to_ir(elem),
                     });
                     let nv = self.scalar_update_value(cur, elem, op, one);
-                    let hv2 = self.ir.add_expr(IrExpr::GetValue(holder));
+                    let hv2 = self.emit_get_value(holder);
                     return Some(self.ir.add_expr(IrExpr::RefSet {
                         holder: hv2,
                         elem: ty_to_ir(elem),
@@ -13287,7 +13110,7 @@ impl<'a> Lower<'a> {
                                 .map(|i| (ci.id, i as u32))
                         })
                     });
-                    let recv = self.ir.add_expr(IrExpr::GetValue(this_v));
+                    let recv = self.emit_get_value(this_v);
                     let cur_val = if let Some((class, idx)) = own {
                         self.emit_get_field(recv, class, idx)
                     } else {
@@ -13296,7 +13119,7 @@ impl<'a> Lower<'a> {
                         self.emit_method_call(gclass, gindex, recv, vec![])
                     };
                     let nv = self.scalar_update_value(cur_val, fty, op, one_c);
-                    let recv2 = self.ir.add_expr(IrExpr::GetValue(this_v));
+                    let recv2 = self.emit_get_value(this_v);
                     return Some(if let Some((class, idx)) = own {
                         self.emit_set_field(recv2, class, idx, nv)
                     } else {
@@ -13315,7 +13138,7 @@ impl<'a> Lower<'a> {
                 }
                 let one = self.scalar_one_const(ty)?;
                 let op = if dec { IrBinOp::Sub } else { IrBinOp::Add };
-                let cur = self.ir.add_expr(IrExpr::GetValue(v));
+                let cur = self.emit_get_value(v);
                 let nv = self.scalar_update_value(cur, ty, op, one);
                 Some(self.ir.add_expr(IrExpr::SetValue { var: v, value: nv }))
             }
@@ -13339,12 +13162,8 @@ impl<'a> Lower<'a> {
                     let lowered = self.expr(receiver)?;
                     let slot = self.fresh_value();
                     let ty = ty_to_ir(self.info.ty(receiver));
-                    let var = self.ir.add_expr(IrExpr::Variable {
-                        index: slot,
-                        ty,
-                        init: Some(lowered),
-                    });
-                    let getv = self.ir.add_expr(IrExpr::GetValue(slot));
+                    let var = self.emit_variable(slot, ty, Some(lowered));
+                    let getv = self.emit_get_value(slot);
                     self.index_subst.insert(receiver, getv);
                     prelude.push(var);
                 }
@@ -13392,12 +13211,8 @@ impl<'a> Lower<'a> {
                             let lowered = self.expr(sub)?;
                             let slot = self.fresh_value();
                             let ty = ty_to_ir(self.info.ty(sub));
-                            let var = self.ir.add_expr(IrExpr::Variable {
-                                index: slot,
-                                ty,
-                                init: Some(lowered),
-                            });
-                            let getv = self.ir.add_expr(IrExpr::GetValue(slot));
+                            let var = self.emit_variable(slot, ty, Some(lowered));
+                            let getv = self.emit_get_value(slot);
                             self.index_subst.insert(sub, getv);
                             prelude.push(var);
                         }
@@ -13469,11 +13284,7 @@ impl<'a> Lower<'a> {
                 let start = self.lower_arg(range.start, &elem_ir)?;
                 let i_v = self.fresh_value();
                 self.scope.push((name.clone(), i_v, elem));
-                let var_i = self.ir.add_expr(IrExpr::Variable {
-                    index: i_v,
-                    ty: elem_ir.clone(),
-                    init: Some(start),
-                });
+                let var_i = self.emit_variable(i_v, elem_ir.clone(), Some(start));
                 // The bound. kotlinc folds a CONSTANT bound with unit step into a single `i < C` exclusive
                 // test — no hoisted local, no overflow guard: `1..10` → `i < 11`, `0 until 10` → `i < 10`.
                 // Match that for a literal `Int` bound; every other case hoists the (possibly
@@ -13520,11 +13331,7 @@ impl<'a> Lower<'a> {
                 } else {
                     let end_e = self.lower_arg(range.end, &elem_ir)?;
                     let ev = self.fresh_value();
-                    let var = self.ir.add_expr(IrExpr::Variable {
-                        index: ev,
-                        ty: elem_ir.clone(),
-                        init: Some(end_e),
-                    });
+                    let var = self.emit_variable(ev, elem_ir.clone(), Some(end_e));
                     (Some(var), Some(ev))
                 };
                 // condition. Constant bound: a single `i < C`. Otherwise compare against the hoisted
@@ -13535,7 +13342,7 @@ impl<'a> Lower<'a> {
                     RangeKind::DownTo => IrBinOp::Ge,
                 };
                 let cond = if let Some(b) = inline_bound {
-                    let gi = self.ir.add_expr(IrExpr::GetValue(i_v));
+                    let gi = self.emit_get_value(i_v);
                     let c = self.ir.add_expr(IrExpr::Const(IrConst::Int(b)));
                     // Descending compares the constant against the counter (`C-1 < i`) so the emitted
                     // operand order (`iconst C-1; iload i; if_icmpge`) matches kotlinc; ascending is `i < C`.
@@ -13550,8 +13357,8 @@ impl<'a> Lower<'a> {
                         rhs,
                     })
                 } else {
-                    let gi = self.ir.add_expr(IrExpr::GetValue(i_v));
-                    let ge = self.ir.add_expr(IrExpr::GetValue(end_v.unwrap()));
+                    let gi = self.emit_get_value(i_v);
+                    let ge = self.emit_get_value(end_v.unwrap());
                     self.compare_ordered(elem, cmp, gi, ge)?
                 };
                 // body + increment
@@ -13568,7 +13375,7 @@ impl<'a> Lower<'a> {
                 } else {
                     IrBinOp::Add
                 };
-                let gi2 = self.ir.add_expr(IrExpr::GetValue(i_v));
+                let gi2 = self.emit_get_value(i_v);
                 let inc_val = self.ir.add_expr(IrExpr::PrimitiveBinOp {
                     op: inc_op,
                     lhs: gi2,
@@ -13592,8 +13399,8 @@ impl<'a> Lower<'a> {
                     inc
                 } else {
                     let end_v = end_v.unwrap();
-                    let ic = self.ir.add_expr(IrExpr::GetValue(i_v));
-                    let ec = self.ir.add_expr(IrExpr::GetValue(end_v));
+                    let ic = self.emit_get_value(i_v);
+                    let ec = self.emit_get_value(end_v);
                     let at_end = self.ir.add_expr(IrExpr::PrimitiveBinOp {
                         op: IrBinOp::Eq,
                         lhs: ic,
@@ -13790,12 +13597,8 @@ impl<'a> Lower<'a> {
         };
         let mutex_slot = self.fresh_value();
         let recv = self.expr(receiver)?;
-        let var_mutex = self.ir.add_expr(IrExpr::Variable {
-            index: mutex_slot,
-            ty: ty_to_ir(mutex_ty),
-            init: Some(recv),
-        });
-        let m1 = self.ir.add_expr(IrExpr::GetValue(mutex_slot));
+        let var_mutex = self.emit_variable(mutex_slot, ty_to_ir(mutex_ty), Some(recv));
+        let m1 = self.emit_get_value(mutex_slot);
         let null1 = self.ir.add_expr(IrExpr::Const(IrConst::Null));
         let lock_call = self.emit_virtual_call(
             lock_owner,
@@ -13812,11 +13615,7 @@ impl<'a> Lower<'a> {
         }
         let result_slot = self.fresh_value();
         let dflt = crate::jvm::suspend::zero_value(&mut self.ir, &rty);
-        let var_result = self.ir.add_expr(IrExpr::Variable {
-            index: result_slot,
-            ty: ty_to_ir(rty),
-            init: Some(dflt),
-        });
+        let var_result = self.emit_variable(result_slot, ty_to_ir(rty), Some(dflt));
         let brk = format!("$withlock${}", self.fresh_value());
         self.inline_lambda_ret
             .push(("withLock".to_string(), result_slot, brk.clone(), rty));
@@ -13845,7 +13644,7 @@ impl<'a> Lower<'a> {
             post_test: false,
             label: Some(brk),
         });
-        let m2 = self.ir.add_expr(IrExpr::GetValue(mutex_slot));
+        let m2 = self.emit_get_value(mutex_slot);
         let null2 = self.ir.add_expr(IrExpr::Const(IrConst::Null));
         let unlock_call = self.emit_virtual_call(
             unlock_owner,
@@ -13863,7 +13662,7 @@ impl<'a> Lower<'a> {
             finally: Some(fin),
             result: Ty::Unit,
         });
-        let get = self.ir.add_expr(IrExpr::GetValue(result_slot));
+        let get = self.emit_get_value(result_slot);
         Some(self.emit_block(vec![var_mutex, lock_call, var_result, tryf], Some(get)))
     }
 
@@ -13895,11 +13694,7 @@ impl<'a> Lower<'a> {
             self.emit_new_external("java/util/ArrayList".to_string(), "()V".to_string(), vec![]);
         let acc_v = self.fresh_value();
         let acc_ty = Ty::obj("java/util/ArrayList");
-        let var_acc = self.ir.add_expr(IrExpr::Variable {
-            index: acc_v,
-            ty: ty_to_ir(acc_ty),
-            init: Some(acc_new),
-        });
+        let var_acc = self.emit_variable(acc_v, ty_to_ir(acc_ty), Some(acc_new));
 
         // it = recv.iterator()
         let recv = self.expr(receiver)?;
@@ -13912,14 +13707,10 @@ impl<'a> Lower<'a> {
             vec![],
         );
         let it_v = self.fresh_value();
-        let var_it = self.ir.add_expr(IrExpr::Variable {
-            index: it_v,
-            ty: ty_to_ir(iter_ty),
-            init: Some(iter_call),
-        });
+        let var_it = self.emit_variable(it_v, ty_to_ir(iter_ty), Some(iter_call));
 
         // cond: it.hasNext()
-        let it_g = self.ir.add_expr(IrExpr::GetValue(it_v));
+        let it_g = self.emit_get_value(it_v);
         let cond = self.emit_virtual_call(
             iter_internal.clone(),
             "hasNext".to_string(),
@@ -13930,7 +13721,7 @@ impl<'a> Lower<'a> {
         );
 
         // body: e = (elem) it.next(); acc.add/addAll(<inlined lambda body>)
-        let it_g2 = self.ir.add_expr(IrExpr::GetValue(it_v));
+        let it_g2 = self.emit_get_value(it_v);
         let next_call = self.emit_virtual_call(
             iter_internal,
             "next".to_string(),
@@ -13968,11 +13759,7 @@ impl<'a> Lower<'a> {
         let depth = self.scope.len();
         let elem_bv = self.fresh_value();
         self.scope.push((param.to_string(), elem_bv, elem));
-        let var_e = self.ir.add_expr(IrExpr::Variable {
-            index: elem_bv,
-            ty: ty_to_ir(elem),
-            init: Some(elem_val),
-        });
+        let var_e = self.emit_variable(elem_bv, ty_to_ir(elem), Some(elem_val));
         let body_val = self.expr(body);
         self.scope.truncate(depth);
         let body_val = body_val?;
@@ -13999,13 +13786,9 @@ impl<'a> Lower<'a> {
             return None;
         }
         let part_v = self.fresh_value();
-        let var_part = self.ir.add_expr(IrExpr::Variable {
-            index: part_v,
-            ty: ty_to_ir(part_ty),
-            init: Some(body_v),
-        });
-        let acc_g = self.ir.add_expr(IrExpr::GetValue(acc_v));
-        let part_g = self.ir.add_expr(IrExpr::GetValue(part_v));
+        let var_part = self.emit_variable(part_v, ty_to_ir(part_ty), Some(body_v));
+        let acc_g = self.emit_get_value(acc_v);
+        let part_g = self.emit_get_value(part_v);
         let (add_name, add_desc, add_arg) = if is_flat {
             ("addAll", "(Ljava/util/Collection;)Z", part_g)
         } else {
@@ -14037,7 +13820,7 @@ impl<'a> Lower<'a> {
             post_test: false,
             label: None,
         });
-        let acc_read = self.ir.add_expr(IrExpr::GetValue(acc_v));
+        let acc_read = self.emit_get_value(acc_v);
         Some(self.emit_block(vec![var_acc, var_it, wh], Some(acc_read)))
     }
 
@@ -14080,37 +13863,25 @@ impl<'a> Lower<'a> {
         } else {
             let v = self.fresh_value();
             let arr_val = self.expr(iterable)?;
-            let var = self.ir.add_expr(IrExpr::Variable {
-                index: v,
-                ty: ty_to_ir(it_ty),
-                init: Some(arr_val),
-            });
+            let var = self.emit_variable(v, ty_to_ir(it_ty), Some(arr_val));
             (v, Some(var))
         };
         // i = 0
         let i_v = self.fresh_value();
         let zero = self.ir.add_expr(IrExpr::Const(IrConst::Int(0)));
-        let var_i = self.ir.add_expr(IrExpr::Variable {
-            index: i_v,
-            ty: ty_to_ir(Ty::Int),
-            init: Some(zero),
-        });
+        let var_i = self.emit_variable(i_v, ty_to_ir(Ty::Int), Some(zero));
         // n = arr.size (hoisted)
         let n_v = self.fresh_value();
-        let arr_g = self.ir.add_expr(IrExpr::GetValue(arr_v));
+        let arr_g = self.emit_get_value(arr_v);
         let size = if it_ty == Ty::String {
             self.lower_member_read_on(arr_g, it_ty, "length", None)?
         } else {
             self.emit_external_call("kotlin/Array.size", Some(arr_g), vec![])
         };
-        let var_n = self.ir.add_expr(IrExpr::Variable {
-            index: n_v,
-            ty: ty_to_ir(Ty::Int),
-            init: Some(size),
-        });
+        let var_n = self.emit_variable(n_v, ty_to_ir(Ty::Int), Some(size));
         // condition: i < n
-        let gi = self.ir.add_expr(IrExpr::GetValue(i_v));
-        let gn = self.ir.add_expr(IrExpr::GetValue(n_v));
+        let gi = self.emit_get_value(i_v);
+        let gn = self.emit_get_value(n_v);
         let cond = self.ir.add_expr(IrExpr::PrimitiveBinOp {
             op: IrBinOp::Lt,
             lhs: gi,
@@ -14119,24 +13890,20 @@ impl<'a> Lower<'a> {
         // loop var `x = arr[i]`, bound for the body
         let x_v = self.fresh_value();
         self.scope.push((name.to_string(), x_v, elem));
-        let arr_g2 = self.ir.add_expr(IrExpr::GetValue(arr_v));
-        let gi2 = self.ir.add_expr(IrExpr::GetValue(i_v));
+        let arr_g2 = self.emit_get_value(arr_v);
+        let gi2 = self.emit_get_value(i_v);
         let elem_get = if it_ty == Ty::String {
             self.lower_library_instance_call_on(arr_g2, it_ty, "get", vec![gi2], &[Ty::Int])?
         } else {
             self.emit_external_call("kotlin/Array.get", Some(arr_g2), vec![gi2])
         };
-        let var_x = self.ir.add_expr(IrExpr::Variable {
-            index: x_v,
-            ty: ty_to_ir(elem),
-            init: Some(elem_get),
-        });
+        let var_x = self.emit_variable(x_v, ty_to_ir(elem), Some(elem_get));
         let mut out = vec![var_x];
         if self.append_body_stmts(body, &mut out).is_none() {
             self.scope.truncate(depth);
             return None;
         }
-        let gi3 = self.ir.add_expr(IrExpr::GetValue(i_v));
+        let gi3 = self.emit_get_value(i_v);
         let one = self.ir.add_expr(IrExpr::Const(IrConst::Int(1)));
         let inc = self.ir.add_expr(IrExpr::PrimitiveBinOp {
             op: IrBinOp::Add,
@@ -14745,11 +14512,7 @@ impl<'a> Lower<'a> {
                     return None;
                 }
             };
-            stmts.push(self.ir.add_expr(IrExpr::Variable {
-                index: slot,
-                ty: ty_to_ir(rt),
-                init: Some(val),
-            }));
+            stmts.push(self.emit_variable(slot, ty_to_ir(rt), Some(val)));
             self.scope.push(("this".to_string(), slot, rt));
         }
         for (i, pty) in sig_params.iter().enumerate() {
@@ -14793,11 +14556,7 @@ impl<'a> Lower<'a> {
                     elements,
                 });
                 let slot = self.fresh_value();
-                let var = self.ir.add_expr(IrExpr::Variable {
-                    index: slot,
-                    ty: ty_to_ir(*pty),
-                    init: Some(arr),
-                });
+                let var = self.emit_variable(slot, ty_to_ir(*pty), Some(arr));
                 stmts.push(var);
                 self.scope.push((pnames[i].clone(), slot, *pty));
                 continue;
@@ -14875,11 +14634,7 @@ impl<'a> Lower<'a> {
                             return None;
                         }
                     };
-                    let var = self.ir.add_expr(IrExpr::Variable {
-                        index: slot,
-                        ty: ty_to_ir(*pty),
-                        init: Some(val),
-                    });
+                    let var = self.emit_variable(slot, ty_to_ir(*pty), Some(val));
                     stmts.push(var);
                     self.scope.push((pnames[i].clone(), slot, *pty));
                 }
@@ -14902,11 +14657,7 @@ impl<'a> Lower<'a> {
                         return None;
                     }
                 };
-                let var = self.ir.add_expr(IrExpr::Variable {
-                    index: slot,
-                    ty: ty_to_ir(spty),
-                    init: Some(val),
-                });
+                let var = self.emit_variable(slot, ty_to_ir(spty), Some(val));
                 stmts.push(var);
                 self.scope.push((pnames[i].clone(), slot, spty));
             }
@@ -15001,17 +14752,13 @@ impl<'a> Lower<'a> {
                     }
                 };
                 let init = self.ir.add_expr(IrExpr::Const(init));
-                stmts.push(self.ir.add_expr(IrExpr::Variable {
-                    index: slot,
-                    ty: ret_ty,
-                    init: Some(init),
-                }));
+                stmts.push(self.emit_variable(slot, ret_ty, Some(init)));
             }
             stmts.push(loopw);
             let value = if unit_ret {
                 self.ir.add_expr(IrExpr::UnitInstance)
             } else {
-                self.ir.add_expr(IrExpr::GetValue(slot))
+                self.emit_get_value(slot)
             };
             Some(self.emit_block(stmts, Some(value)))
         } else if stmts.is_empty() {
@@ -15155,11 +14902,7 @@ impl<'a> Lower<'a> {
                     return None;
                 }
             };
-            let var = self.ir.add_expr(IrExpr::Variable {
-                index: slot,
-                ty: ty_to_ir(*pty),
-                init: Some(val),
-            });
+            let var = self.emit_variable(slot, ty_to_ir(*pty), Some(val));
             stmts.push(var);
             self.scope.push((pname.clone(), slot, *pty));
         }
@@ -15179,11 +14922,7 @@ impl<'a> Lower<'a> {
                 let brk = format!("$lamret${}", self.fresh_value());
                 let result_slot = self.fresh_value();
                 let dflt = crate::jvm::suspend::zero_value(&mut self.ir, &lam_ret);
-                let decl = self.ir.add_expr(IrExpr::Variable {
-                    index: result_slot,
-                    ty: ty_to_ir(lam_ret),
-                    init: Some(dflt),
-                });
+                let decl = self.emit_variable(result_slot, ty_to_ir(lam_ret), Some(dflt));
                 stmts.push(decl);
                 self.inline_lambda_ret
                     .push((lam_label.clone(), result_slot, brk.clone(), lam_ret));
@@ -15209,7 +14948,7 @@ impl<'a> Lower<'a> {
                     label: Some(brk),
                 });
                 stmts.push(loopw);
-                let get = self.ir.add_expr(IrExpr::GetValue(result_slot));
+                let get = self.emit_get_value(result_slot);
                 return Some(self.emit_block(stmts, Some(get)));
             }
             let brk = format!("$lamret${}", self.fresh_value());
@@ -15270,19 +15009,15 @@ impl<'a> Lower<'a> {
         let internal = recv_ty.kotlin_class_internal()?.to_string();
         let rv = self.expr(receiver)?;
         let v = self.fresh_value();
-        let var = self.ir.add_expr(IrExpr::Variable {
-            index: v,
-            ty: mark_nullable(ty_to_ir(rty)),
-            init: Some(rv),
-        });
-        let get1 = self.ir.add_expr(IrExpr::GetValue(v));
+        let var = self.emit_variable(v, mark_nullable(ty_to_ir(rty)), Some(rv));
+        let get1 = self.emit_get_value(v);
         let nullc = self.ir.add_expr(IrExpr::Const(IrConst::Null));
         let cond = self.ir.add_expr(IrExpr::PrimitiveBinOp {
             op: IrBinOp::Ne,
             lhs: get1,
             rhs: nullc,
         });
-        let recv2 = self.ir.add_expr(IrExpr::GetValue(v));
+        let recv2 = self.emit_get_value(v);
         let member = if let Some((fclass, idx, _)) = self.resolve_field(&internal, name) {
             let owner_internal = self.ir.classes[fclass as usize].fq_name.clone();
             if self.cur_class.as_deref() != Some(owner_internal.as_str()) {
@@ -15604,19 +15339,15 @@ impl<'a> Lower<'a> {
                 // The `?.` receiver is NULLABLE by construction — carry that into the temp's IrType (`Ty`
                 // drops it). For a value-class receiver this keeps it BOXED (`MyC?` → `LMyC;`), so storing
                 // the boxed `as?`/nullable value doesn't mismatch an unboxed-`int` slot.
-                let var = self.ir.add_expr(IrExpr::Variable {
-                    index: v,
-                    ty: mark_nullable(ty_to_ir(rty)),
-                    init: Some(rv),
-                });
-                let get1 = self.ir.add_expr(IrExpr::GetValue(v));
+                let var = self.emit_variable(v, mark_nullable(ty_to_ir(rty)), Some(rv));
+                let get1 = self.emit_get_value(v);
                 let nullc = self.ir.add_expr(IrExpr::Const(IrConst::Null));
                 let cond = self.ir.add_expr(IrExpr::PrimitiveBinOp {
                     op: IrBinOp::Ne,
                     lhs: get1,
                     rhs: nullc,
                 });
-                let recv2 = self.ir.add_expr(IrExpr::GetValue(v));
+                let recv2 = self.emit_get_value(v);
                 // A safe-call scope function (`s?.let { it… }`, `s?.run { … }`): inline it with the
                 // non-null receiver `recv2`; the surrounding null-check + nullable-wrap below make the
                 // whole `s?.…` yield `null` when `s` is null.
@@ -15811,11 +15542,7 @@ impl<'a> Lower<'a> {
                     }
                     let lv = self.expr(lhs)?;
                     let tmp = self.fresh_value();
-                    let sink = self.ir.add_expr(IrExpr::Variable {
-                        index: tmp,
-                        ty: Ty::obj("kotlin/Any"),
-                        init: Some(lv),
-                    });
+                    let sink = self.emit_variable(tmp, Ty::obj("kotlin/Any"), Some(lv));
                     let rv = self.lower_arg(rhs, &ty_to_ir(result_ty))?;
                     return Some(self.emit_block(vec![sink], Some(rv)));
                 }
@@ -15824,12 +15551,8 @@ impl<'a> Lower<'a> {
                 }
                 let lv = self.expr(lhs)?;
                 let v = self.fresh_value();
-                let var = self.ir.add_expr(IrExpr::Variable {
-                    index: v,
-                    ty: ty_to_ir(lty),
-                    init: Some(lv),
-                });
-                let get1 = self.ir.add_expr(IrExpr::GetValue(v));
+                let var = self.emit_variable(v, ty_to_ir(lty), Some(lv));
+                let get1 = self.emit_get_value(v);
                 let nullc = self.ir.add_expr(IrExpr::Const(IrConst::Null));
                 let cond = self.ir.add_expr(IrExpr::PrimitiveBinOp {
                     op: IrBinOp::Ne,
@@ -15839,7 +15562,7 @@ impl<'a> Lower<'a> {
                 // When the elvis result is a primitive (a nullable-primitive lhs, `Int? ?: 0`), the
                 // non-null lhs unboxes to the primitive and the rhs coerces to it too.
                 let result_ty = self.info.ty(e);
-                let mut get2 = self.ir.add_expr(IrExpr::GetValue(v));
+                let mut get2 = self.emit_get_value(v);
                 if self.has_scalar_value_repr(result_ty) && lty.is_reference() {
                     // Unbox to the wrapper's OWN primitive (`Integer`→`Int`), then numeric-convert to the
                     // result if it differs (`Int? ?: 0.0` → unbox to `Int`, then `i2d` to `Double`) —
@@ -16064,7 +15787,7 @@ impl<'a> Lower<'a> {
                             .iter()
                             .map(|cap| {
                                 self.lookup(&cap.name)
-                                    .map(|(cv, _)| self.ir.add_expr(IrExpr::GetValue(cv)))
+                                    .map(|(cv, _)| self.emit_get_value(cv))
                             })
                             .collect::<Option<Vec<_>>>()?;
                         let impl_fn = if sig.ret == Ty::Unit {
@@ -16110,9 +15833,8 @@ impl<'a> Lower<'a> {
                     if field_tys.len() != arity {
                         return None;
                     }
-                    let argvals: Vec<u32> = (0..arity as u32)
-                        .map(|i| self.ir.add_expr(IrExpr::GetValue(i)))
-                        .collect();
+                    let argvals: Vec<u32> =
+                        (0..arity as u32).map(|i| self.emit_get_value(i)).collect();
                     let new_e = self.emit_new(class_id, argvals, None);
                     let ret_e = self.emit_return(Some(new_e));
                     let block = self.emit_block(vec![ret_e], None);
@@ -16220,9 +15942,9 @@ impl<'a> Lower<'a> {
                             let internal = self.cur_class.clone()?;
                             let class = self.classes.get(&internal)?.id;
                             if let Some((v, _)) = self.lookup("this$0") {
-                                return Some(self.ir.add_expr(IrExpr::GetValue(v)));
+                                return Some(self.emit_get_value(v));
                             }
-                            let this0 = self.ir.add_expr(IrExpr::GetValue(0));
+                            let this0 = self.emit_get_value(0);
                             return Some(self.emit_get_field(this0, class, 0));
                         }
                         _ => return None,
@@ -16242,7 +15964,7 @@ impl<'a> Lower<'a> {
                 // The `field` keyword inside a custom accessor body reads the property's backing field.
                 if n == "field" {
                     if let Some((class_id, fidx, _)) = self.cur_field {
-                        let this_e = self.ir.add_expr(IrExpr::GetValue(0));
+                        let this_e = self.emit_get_value(0);
                         return Some(self.emit_get_field(this_e, class_id, fidx));
                     }
                     // A top-level custom accessor reads the backing STATIC field.
@@ -16280,7 +16002,7 @@ impl<'a> Lower<'a> {
                     // space is honored); bail if it isn't reachable here (e.g. captured into a closure we
                     // don't thread the delegate through).
                     let (dslot, _) = self.lookup(&format!("{n}$delegate"))?;
-                    let dele = self.ir.add_expr(IrExpr::GetValue(dslot));
+                    let dele = self.emit_get_value(dslot);
                     let null_a = self.ir.add_expr(IrExpr::Const(IrConst::Null));
                     let pref = self.make_local_propref(&ld)?;
                     return Some(
@@ -16299,14 +16021,14 @@ impl<'a> Lower<'a> {
                 // A boxed mutable-capture local: read through its `Ref` holder's `element`.
                 if let Some(elem) = self.boxed_elem.get(&n).cloned() {
                     let (holder, _) = self.lookup(&n)?;
-                    let hv = self.ir.add_expr(IrExpr::GetValue(holder));
+                    let hv = self.emit_get_value(holder);
                     return Some(self.ir.add_expr(IrExpr::RefGet {
                         holder: hv,
                         elem: ref_elem_ir(elem),
                     }));
                 }
                 if let Some((v, slot_ty)) = self.lookup(&n) {
-                    let mut read = self.ir.add_expr(IrExpr::GetValue(v));
+                    let mut read = self.emit_get_value(v);
                     // A `lateinit var` local read throws `UninitializedPropertyAccessException` while the
                     // slot is still null — wrap the raw read in the guard before any smart-cast narrowing
                     // (kotlinc inserts the guard on the read; the narrowing then applies to its result).
@@ -16448,7 +16170,7 @@ impl<'a> Lower<'a> {
                     // Unqualified member of the enclosing class: a backing field (`this.<field>`), or a
                     // computed property (`this.getX()`).
                     let (this_v, this_ty) = self.lookup("this")?;
-                    let recv = self.ir.add_expr(IrExpr::GetValue(this_v));
+                    let recv = self.emit_get_value(this_v);
                     // `this` was flow-narrowed to a subtype by an enclosing `if (this is B)`, and this
                     // member exists only on `B` — `checkcast` the receiver to `B`, then read the member
                     // (backing field or getter) on `B`.
@@ -16514,7 +16236,7 @@ impl<'a> Lower<'a> {
                                 if vty.obj_internal() != Some(outer.as_str()) {
                                     return None;
                                 }
-                                self.ir.add_expr(IrExpr::GetValue(v))
+                                self.emit_get_value(v)
                             } else {
                                 self.emit_get_field(recv, cur_id, 0)
                             };
@@ -17147,19 +16869,15 @@ impl<'a> Lower<'a> {
                             };
                             let wv = self.expr(w_e)?;
                             let v = self.fresh_value();
-                            let var = self.ir.add_expr(IrExpr::Variable {
-                                index: v,
-                                ty: ty_to_ir(w_ty),
-                                init: Some(wv),
-                            });
-                            let getn = self.ir.add_expr(IrExpr::GetValue(v));
+                            let var = self.emit_variable(v, ty_to_ir(w_ty), Some(wv));
+                            let getn = self.emit_get_value(v);
                             let nullc = self.ir.add_expr(IrExpr::Const(IrConst::Null));
                             let isnull = self.ir.add_expr(IrExpr::PrimitiveBinOp {
                                 op: IrBinOp::Eq,
                                 lhs: getn,
                                 rhs: nullc,
                             });
-                            let getw = self.ir.add_expr(IrExpr::GetValue(v));
+                            let getw = self.emit_get_value(v);
                             let unboxed = self.ir.add_expr(IrExpr::TypeOp {
                                 op: IrTypeOp::ImplicitCoercion,
                                 arg: getw,
@@ -17279,7 +16997,7 @@ impl<'a> Lower<'a> {
                         // holds it — a precise operand type (or `null`/`Nothing`) could be an invalid
                         // local-variable type.
                         let opnd_ty = ty_to_ir(Ty::obj("kotlin/Any"));
-                        let g1 = self.ir.add_expr(IrExpr::GetValue(v));
+                        let g1 = self.emit_get_value(v);
                         let nullc = self.ir.add_expr(IrExpr::Const(IrConst::Null));
                         let null_test = self.ir.add_expr(IrExpr::PrimitiveBinOp {
                             op: if negated {
@@ -17290,7 +17008,7 @@ impl<'a> Lower<'a> {
                             lhs: g1,
                             rhs: nullc,
                         });
-                        let g2 = self.ir.add_expr(IrExpr::GetValue(v));
+                        let g2 = self.emit_get_value(v);
                         let inst = self.ir.add_expr(IrExpr::TypeOp {
                             op: if negated {
                                 IrTypeOp::NotInstanceOf
@@ -17305,11 +17023,7 @@ impl<'a> Lower<'a> {
                             lhs: null_test,
                             rhs: inst,
                         });
-                        let temp = self.ir.add_expr(IrExpr::Variable {
-                            index: v,
-                            ty: opnd_ty,
-                            init: Some(arg),
-                        });
+                        let temp = self.emit_variable(v, opnd_ty, Some(arg));
                         return Some(self.emit_block(vec![temp], Some(combined)));
                     }
                 }
@@ -17380,25 +17094,13 @@ impl<'a> Lower<'a> {
                 // comparison chain. `!in` uses the De Morgan dual so no logical-not node is needed.
                 let s = self.expr(start)?;
                 let sv = self.fresh_value();
-                let var_s = self.ir.add_expr(IrExpr::Variable {
-                    index: sv,
-                    ty: ty_to_ir(self.info.ty(start)),
-                    init: Some(s),
-                });
+                let var_s = self.emit_variable(sv, ty_to_ir(self.info.ty(start)), Some(s));
                 let en = self.expr(end)?;
                 let ev = self.fresh_value();
-                let var_e = self.ir.add_expr(IrExpr::Variable {
-                    index: ev,
-                    ty: ty_to_ir(self.info.ty(end)),
-                    init: Some(en),
-                });
+                let var_e = self.emit_variable(ev, ty_to_ir(self.info.ty(end)), Some(en));
                 let v = self.expr(value)?;
                 let vv = self.fresh_value();
-                let var_v = self.ir.add_expr(IrExpr::Variable {
-                    index: vv,
-                    ty: ty_to_ir(self.info.ty(value)),
-                    init: Some(v),
-                });
+                let var_v = self.emit_variable(vv, ty_to_ir(self.info.ty(value)), Some(v));
                 // `lo`/`hi` are the inclusive low / (in/ex)clusive high bound. `downTo` runs high→low, so
                 // membership is `end <= value <= start` — swap the bounds.
                 let (lo, hi, hi_strict) = match kind {
@@ -17410,8 +17112,8 @@ impl<'a> Lower<'a> {
                 // unsigned comparator, matching kotlinc's unsigned-range membership.
                 let elem = self.info.ty(value);
                 let cmp = |this: &mut Self, op: IrBinOp, a: u32, b: u32| -> Option<u32> {
-                    let la = this.ir.add_expr(IrExpr::GetValue(a));
-                    let lb = this.ir.add_expr(IrExpr::GetValue(b));
+                    let la = this.emit_get_value(a);
+                    let lb = this.emit_get_value(b);
                     this.compare_ordered(elem, op, la, lb)
                 };
                 // The De Morgan dual (`value < lo || value > hi`) of `!in` is only valid when the
@@ -17512,19 +17214,19 @@ impl<'a> Lower<'a> {
                     let elem_ir = ty_to_ir(elem);
                     let op = if dec { IrBinOp::Sub } else { IrBinOp::Add };
                     let undo = if dec { IrBinOp::Add } else { IrBinOp::Sub };
-                    let h1 = self.ir.add_expr(IrExpr::GetValue(holder));
+                    let h1 = self.emit_get_value(holder);
                     let cur = self.ir.add_expr(IrExpr::RefGet {
                         holder: h1,
                         elem: elem_ir.clone(),
                     });
                     let nv = self.scalar_update_value(cur, elem, op, one_c.clone());
-                    let h2 = self.ir.add_expr(IrExpr::GetValue(holder));
+                    let h2 = self.emit_get_value(holder);
                     let set = self.ir.add_expr(IrExpr::RefSet {
                         holder: h2,
                         elem: elem_ir.clone(),
                         value: nv,
                     });
-                    let h3 = self.ir.add_expr(IrExpr::GetValue(holder));
+                    let h3 = self.emit_get_value(holder);
                     let read = self.ir.add_expr(IrExpr::RefGet {
                         holder: h3,
                         elem: elem_ir,
@@ -17546,23 +17248,19 @@ impl<'a> Lower<'a> {
                             var: v,
                             value: call,
                         });
-                        let value = self.ir.add_expr(IrExpr::GetValue(v));
+                        let value = self.emit_get_value(v);
                         return Some(self.emit_block(vec![set], Some(value)));
                     }
                     // Postfix: capture the old value before updating.
                     let tmp = self.fresh_value();
-                    let old = self.ir.add_expr(IrExpr::GetValue(v));
-                    let var_decl = self.ir.add_expr(IrExpr::Variable {
-                        index: tmp,
-                        ty: ty_to_ir(ty),
-                        init: Some(old),
-                    });
+                    let old = self.emit_get_value(v);
+                    let var_decl = self.emit_variable(tmp, ty_to_ir(ty), Some(old));
                     let call = self.lower_member_inc_dec(v, ty, dec)?;
                     let set = self.ir.add_expr(IrExpr::SetValue {
                         var: v,
                         value: call,
                     });
-                    let value = self.ir.add_expr(IrExpr::GetValue(tmp));
+                    let value = self.emit_get_value(tmp);
                     return Some(self.emit_block(vec![var_decl, set], Some(value)));
                 }
                 let op = if dec { IrBinOp::Sub } else { IrBinOp::Add };
@@ -17571,16 +17269,16 @@ impl<'a> Lower<'a> {
                     // `Variable` inside an operand `Block` trips the verifier in a template/argument
                     // position): the postfix value is `narrow(new ∓ 1)`, which wraps back to the old value
                     // even at the boundary (`Byte` 127++: new = narrow(128) = -128; narrow(-128 - 1) = 127).
-                    let cur = self.ir.add_expr(IrExpr::GetValue(v));
+                    let cur = self.emit_get_value(v);
                     let narrowed = self.scalar_update_value(cur, ty, op, IrConst::Int(1));
                     let set = self.ir.add_expr(IrExpr::SetValue {
                         var: v,
                         value: narrowed,
                     });
                     let value = if prefix {
-                        self.ir.add_expr(IrExpr::GetValue(v))
+                        self.emit_get_value(v)
                     } else {
-                        let read = self.ir.add_expr(IrExpr::GetValue(v));
+                        let read = self.emit_get_value(v);
                         let undo = if dec { IrBinOp::Add } else { IrBinOp::Sub };
                         self.scalar_update_value(read, ty, undo, IrConst::Int(1))
                     };
@@ -17588,7 +17286,7 @@ impl<'a> Lower<'a> {
                 }
                 let one = self.scalar_one_const(ty)?;
                 // i = i ± 1 (no temp: wraparound is consistent for Int/Long/Float/Double)
-                let cur = self.ir.add_expr(IrExpr::GetValue(v));
+                let cur = self.emit_get_value(v);
                 let one1 = self.ir.add_expr(IrExpr::Const(one.clone()));
                 let nv = self.ir.add_expr(IrExpr::PrimitiveBinOp {
                     op,
@@ -17597,7 +17295,7 @@ impl<'a> Lower<'a> {
                 });
                 let set = self.ir.add_expr(IrExpr::SetValue { var: v, value: nv });
                 // value: new `i` (prefix), or new `i` ∓ 1 = old `i` (postfix).
-                let read = self.ir.add_expr(IrExpr::GetValue(v));
+                let read = self.emit_get_value(v);
                 let value = if prefix {
                     read
                 } else {
@@ -17694,18 +17392,14 @@ impl<'a> Lower<'a> {
                         oty = any;
                     }
                     let ov = self.fresh_value();
-                    let var_t = self.ir.add_expr(IrExpr::Variable {
-                        index: ov,
-                        ty: oty,
-                        init: Some(v),
-                    });
-                    let g1 = self.ir.add_expr(IrExpr::GetValue(ov));
+                    let var_t = self.emit_variable(ov, oty, Some(v));
+                    let g1 = self.emit_get_value(ov);
                     let is_t = self.ir.add_expr(IrExpr::TypeOp {
                         op: IrTypeOp::InstanceOf,
                         arg: g1,
                         type_operand: target_ir.clone(),
                     });
-                    let g2 = self.ir.add_expr(IrExpr::GetValue(ov));
+                    let g2 = self.emit_get_value(ov);
                     let cast_t = self.ir.add_expr(IrExpr::TypeOp {
                         op: IrTypeOp::Cast,
                         arg: g2,
@@ -17965,11 +17659,7 @@ impl<'a> Lower<'a> {
                     Some(subj) if !matches!(self.afile.expr(subj), Expr::Name(_)) => {
                         let sv = self.expr(subj)?;
                         let v = self.fresh_value();
-                        let var = self.ir.add_expr(IrExpr::Variable {
-                            index: v,
-                            ty: ty_to_ir(self.info.ty(subj)),
-                            init: Some(sv),
-                        });
+                        let var = self.emit_variable(v, ty_to_ir(self.info.ty(subj)), Some(sv));
                         Some((v, var))
                     }
                     _ => None,
@@ -18000,7 +17690,7 @@ impl<'a> Lower<'a> {
                             } else {
                                 match (subj_tmp, subject) {
                                     (Some((v, _)), _) => {
-                                        let s = self.ir.add_expr(IrExpr::GetValue(v));
+                                        let s = self.emit_get_value(v);
                                         let cv = self.expr(c)?;
                                         self.ir.add_expr(IrExpr::PrimitiveBinOp {
                                             op: IrBinOp::Eq,
@@ -18102,11 +17792,7 @@ impl<'a> Lower<'a> {
                     let slot = self.fresh_value();
                     let cont = self.ir.add_expr(IrExpr::CurrentContinuation);
                     let cont_ty = Ty::obj("kotlin/coroutines/Continuation");
-                    let var = self.ir.add_expr(IrExpr::Variable {
-                        index: slot,
-                        ty: ty_to_ir(cont_ty),
-                        init: Some(cont),
-                    });
+                    let var = self.emit_variable(slot, ty_to_ir(cont_ty), Some(cont));
                     let depth = self.scope.len();
                     self.scope.push((cont_name, slot, cont_ty));
                     let body_val = self.expr(body);
@@ -18267,12 +17953,12 @@ impl<'a> Lower<'a> {
                                 let mut a = Vec::new();
                                 for cap in &local_fun.captures {
                                     let (cv, _) = self.lookup(&cap.name)?;
-                                    a.push(self.ir.add_expr(IrExpr::GetValue(cv)));
+                                    a.push(self.emit_get_value(cv));
                                 }
                                 if let Some(sources) = &ctx_sources {
                                     for src in sources {
                                         let (v, _) = self.lookup(src)?;
-                                        a.push(self.ir.add_expr(IrExpr::GetValue(v)));
+                                        a.push(self.emit_get_value(v));
                                     }
                                 }
                                 for (arg, pt) in args.iter().zip(&params[ncap + ctx_n..]) {
@@ -18463,7 +18149,7 @@ impl<'a> Lower<'a> {
                                 let mut a = Vec::new();
                                 for src in &sources {
                                     let (v, _) = self.lookup(src)?;
-                                    a.push(self.ir.add_expr(IrExpr::GetValue(v)));
+                                    a.push(self.emit_get_value(v));
                                 }
                                 for (i, &arg) in args.iter().enumerate() {
                                     a.push(self.lower_arg(arg, &params[ctx_n + i])?);
@@ -18603,7 +18289,7 @@ impl<'a> Lower<'a> {
                         // of the narrowed bare-name property read.
                         if let Some(bi) = self.info.narrowed_this_member.get(&e).cloned() {
                             self.lookup("this").and_then(|(this_v, _)| {
-                                let recv = self.ir.add_expr(IrExpr::GetValue(this_v));
+                                let recv = self.emit_get_value(this_v);
                                 let cast = self.ir.add_expr(IrExpr::TypeOp {
                                     op: IrTypeOp::Cast,
                                     arg: recv,
@@ -18718,7 +18404,7 @@ impl<'a> Lower<'a> {
                             }
                             for src in ctx_sources.as_ref().unwrap() {
                                 let (v, _) = self.lookup(src)?;
-                                a.push(self.ir.add_expr(IrExpr::GetValue(v)));
+                                a.push(self.emit_get_value(v));
                             }
                         }
                         if vararg {
@@ -18826,7 +18512,7 @@ impl<'a> Lower<'a> {
                         let params = self.ir.functions[mfid as usize].params.clone();
                         let vararg = self.syms.method_is_vararg(&cur, &fname);
                         let n_fixed = vararg_arity(vararg, params.len(), args.len())?;
-                        let this = self.ir.add_expr(IrExpr::GetValue(0));
+                        let this = self.emit_get_value(0);
                         let a = self.lower_call_args_vararg(&args, &params, vararg, n_fixed)?;
                         self.emit_method_call(class, index, this, a.into_iter().map(Some).collect())
                     } else if let Some((class, index, mfid, cur_id)) =
@@ -18850,7 +18536,7 @@ impl<'a> Lower<'a> {
                         } else {
                             (class, index)
                         };
-                        let this = self.ir.add_expr(IrExpr::GetValue(0));
+                        let this = self.emit_get_value(0);
                         let this0 = self.emit_get_field(this, cur_id, 0);
                         let a = self.lower_args(&args, &params)?;
                         self.emit_method_call(
@@ -18897,7 +18583,7 @@ impl<'a> Lower<'a> {
                             .is_some_and(|f| f.name == "this$0");
                         if is_inner {
                             let (this_v, _) = self.lookup("this")?;
-                            let outer = self.ir.add_expr(IrExpr::GetValue(this_v));
+                            let outer = self.emit_get_value(this_v);
                             let field_tys: Vec<Ty> = self.ir.classes[class as usize]
                                 .fields
                                 .iter()
@@ -19234,7 +18920,7 @@ impl<'a> Lower<'a> {
                             .classes
                             .get(&cur)
                             .and_then(|ci| ci.super_internal.clone());
-                        let this = self.ir.add_expr(IrExpr::GetValue(0));
+                        let this = self.emit_get_value(0);
                         let arg_tys = self.arg_tys(&args);
                         // The concrete `super.f()` target: the SUPERCLASS's method when it exists and is
                         // concrete; otherwise a superinterface DEFAULT (`class C : I` with an interface
@@ -19546,11 +19232,7 @@ impl<'a> Lower<'a> {
                             self.cur_class = None;
                         }
                         self.scope.push((pname, p_slot, rty));
-                        let var_p = self.ir.add_expr(IrExpr::Variable {
-                            index: p_slot,
-                            ty: ty_to_ir(rty),
-                            init: Some(recv),
-                        });
+                        let var_p = self.emit_variable(p_slot, ty_to_ir(rty), Some(recv));
                         let body_val = self.expr(*lbody);
                         self.scope.truncate(depth);
                         self.cur_class = saved_cur;
@@ -19559,7 +19241,7 @@ impl<'a> Lower<'a> {
                         let result = if !returns_receiver {
                             self.emit_block(vec![var_p], Some(body_val))
                         } else {
-                            let recv_read = self.ir.add_expr(IrExpr::GetValue(p_slot));
+                            let recv_read = self.emit_get_value(p_slot);
                             self.emit_block(vec![var_p, body_val], Some(recv_read))
                         };
                         return Some(result);

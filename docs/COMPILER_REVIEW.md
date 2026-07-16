@@ -3323,3 +3323,10 @@ Lowerer control-flow bodies now go through `emit_return`/`emit_block`. Generated
 delegated property bodies, SAM/lambda wrappers, suspend-lambda state bodies, data-class members,
 callable-reference adapters, tailrec bodies, inline lambda expansion, and loop rewrites no longer
 rebuild `Return`/`Block` IR nodes at their feature sites.
+
+### Local Value Emitter Merge
+
+Lowerer local reads and variable declarations now go through `emit_get_value`/`emit_variable`.
+Generated property accessors, constructor/init stores, lambda captures, suspend state machines,
+destructuring, default-call adapters, loops, callable references, safe calls, assignments, and
+inc/dec rewrites no longer rebuild `GetValue`/`Variable` IR nodes at their feature sites.
