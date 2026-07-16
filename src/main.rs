@@ -7,11 +7,9 @@ use std::path::Path;
 
 use krusty::cli;
 use krusty::diag::DiagSink;
+use krusty::frontend::{collect_signatures_with_cp, parse_source};
 use krusty::jvm::classpath::Classpath;
 use krusty::jvm::jvm_libraries::JvmLibraries;
-use krusty::lexer::lex;
-use krusty::parser::parse_with_features;
-use krusty::resolve::collect_signatures_with_cp;
 
 fn main() {
     let opts = cli::parse(std::env::args().skip(1));
@@ -41,8 +39,7 @@ fn main() {
             eprintln!("krusty: cannot read {path}: {e}");
             std::process::exit(1);
         });
-        let toks = lex(&src, &mut diags);
-        files.push(parse_with_features(&src, &toks, &mut diags, &opts.features));
+        files.push(parse_source(&src, &opts.features, &mut diags));
         stems.push(file_stem(path));
         sources.push(src);
     }
@@ -50,47 +47,10 @@ fn main() {
     let cp = std::rc::Rc::new(Classpath::new(opts.effective_classpath()));
     let platform = Box::new(JvmLibraries::new(cp.clone()));
     let mut syms = collect_signatures_with_cp(&files, platform, &mut diags);
+    krusty::jvm::prepare_module_symbols(&files, &stems, &mut syms);
 
-    // Multi-file: map each top-level (non-extension, non-inline) function to the facade class of the
-    // file that declares it, so lowering a call to a function in ANOTHER file emits a cross-facade
-    // `invokestatic` instead of bailing. Only the driver knows each file's stem→facade.
-    if files.len() > 1 {
-        use krusty::ast::Decl;
-        use krusty::jvm::names::file_class_name;
-        // Collect (name, facade) first — inserting into syms.{fn,prop}_facades while reading syms.props
-        // would conflict-borrow.
-        let mut fns: Vec<(String, String)> = Vec::new();
-        let mut props: Vec<(String, String)> = Vec::new();
-        for (i, file) in files.iter().enumerate() {
-            let facade = file_class_name(&stems[i], file.package.as_deref());
-            for &d in &file.decls {
-                match file.decl(d) {
-                    Decl::Fun(f) if f.receiver.is_none() && !f.is_inline => {
-                        fns.push((f.name.clone(), facade.clone()))
-                    }
-                    Decl::Property(p) if p.receiver.is_none() => {
-                        props.push((p.name.clone(), facade.clone()))
-                    }
-                    _ => {}
-                }
-            }
-        }
-        for (name, facade) in fns {
-            syms.fn_facades.insert(name, facade);
-        }
-        for (name, facade) in props {
-            if let Some(&(ty, is_var, is_const)) = syms.props.get(&name) {
-                syms.prop_facades
-                    .insert(name, (facade, ty, is_var, is_const));
-            }
-        }
-    }
-
-    // Common pipeline: front-end type-check each file, then lower through the selected backend
-    // (JVM today; see docs/ARCHITECTURE.md). `-target wasm|js` would select a different backend here.
-    // The backend shares the same classpath instance (caches) as the symbol provider, for the inliner.
     let backend = krusty::jvm::JvmBackend::new(cp);
-    let outputs = krusty::backend::compile(
+    let outputs = krusty::compiler::compile(
         &files,
         &stems,
         &mut syms,

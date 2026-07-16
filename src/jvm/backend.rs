@@ -19,6 +19,39 @@ impl JvmBackend {
     }
 }
 
+pub fn prepare_module_symbols(files: &[File], stems: &[String], syms: &mut SymbolTable) {
+    if files.len() <= 1 {
+        return;
+    }
+
+    let mut fns: Vec<(String, String)> = Vec::new();
+    let mut props: Vec<(String, String)> = Vec::new();
+    for (file, stem) in files.iter().zip(stems) {
+        let facade = file_class_name(stem, file.package.as_deref());
+        for &d in &file.decls {
+            match file.decl(d) {
+                Decl::Fun(f) if f.receiver.is_none() && !f.is_inline => {
+                    fns.push((f.name.clone(), facade.clone()))
+                }
+                Decl::Property(p) if p.receiver.is_none() => {
+                    props.push((p.name.clone(), facade.clone()))
+                }
+                _ => {}
+            }
+        }
+    }
+
+    for (name, facade) in fns {
+        syms.fn_facades.insert(name, facade);
+    }
+    for (name, facade) in props {
+        if let Some(&(ty, is_var, is_const)) = syms.props.get(&name) {
+            syms.prop_facades
+                .insert(name, (facade, ty, is_var, is_const));
+        }
+    }
+}
+
 /// package → file-facade class names, accumulated across files for the `.kotlin_module` mapping.
 #[derive(Default)]
 pub struct JvmState {
@@ -199,5 +232,40 @@ impl Backend for JvmBackend {
             format!("META-INF/{module_name}.kotlin_module"),
             module_bytes,
         )]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::diag::DiagSink;
+    use crate::frontend::{collect_signatures, parse_source_with_detected_features};
+
+    #[test]
+    fn prepare_module_symbols_records_cross_file_facades() {
+        let mut diags = DiagSink::new();
+        let files = vec![
+            parse_source_with_detected_features(
+                "package p\nfun helper(): String = \"OK\"\nval answer: Int = 42",
+                &mut diags,
+            ),
+            parse_source_with_detected_features(
+                "package p\nfun box(): String = helper()",
+                &mut diags,
+            ),
+        ];
+        let stems = vec!["A".to_string(), "B".to_string()];
+        let mut syms = collect_signatures(&files, &mut diags);
+
+        prepare_module_symbols(&files, &stems, &mut syms);
+
+        assert!(!diags.has_errors(), "{:?}", diags.diags);
+        assert_eq!(syms.fn_facades.get("helper"), Some(&"p/AKt".to_string()));
+        assert_eq!(
+            syms.prop_facades
+                .get("answer")
+                .map(|(facade, _, _, _)| facade),
+            Some(&"p/AKt".to_string())
+        );
     }
 }
