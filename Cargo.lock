@@ -412,6 +412,7 @@ dependencies = [
  "libc",
  "pprof",
  "rayon",
+ "syn",
  "zip",
 ]
 

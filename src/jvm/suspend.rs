@@ -3137,18 +3137,7 @@ fn build_get_or_create(
 /// `invokeSuspend` re-enters the outer function — the real value is restored from the continuation
 /// field at the loop top, so this placeholder is immediately overwritten (kotlinc passes `iconst_0`).
 pub(crate) fn zero_value(ir: &mut IrFile, ty: &Ty) -> ExprId {
-    use crate::types::Ty;
-    let c = match super::ir_emit::ir_ty_to_jvm(ty) {
-        Ty::Boolean => IrConst::Boolean(false),
-        Ty::Byte => IrConst::Byte(0),
-        Ty::Short => IrConst::Short(0),
-        Ty::Int => IrConst::Int(0),
-        Ty::Long => IrConst::Long(0),
-        Ty::Float => IrConst::Float(0.0),
-        Ty::Double => IrConst::Double(0.0),
-        Ty::Char => IrConst::Char('\0'),
-        _ => IrConst::Null,
-    };
+    let c = IrConst::zero_for_value_type(super::ir_emit::ir_ty_to_jvm(ty));
     ir.add_expr(IrExpr::Const(c))
 }
 

@@ -110,6 +110,22 @@ pub enum IrConst {
     Null,
 }
 
+impl IrConst {
+    pub fn zero_for_value_type(ty: Ty) -> IrConst {
+        match ty {
+            Ty::Boolean => IrConst::Boolean(false),
+            Ty::Byte => IrConst::Byte(0),
+            Ty::Short => IrConst::Short(0),
+            Ty::Int | Ty::UInt => IrConst::Int(0),
+            Ty::Long | Ty::ULong => IrConst::Long(0),
+            Ty::Float => IrConst::Float(0.0),
+            Ty::Double => IrConst::Double(0.0),
+            Ty::Char => IrConst::Char('\0'),
+            _ => IrConst::Null,
+        }
+    }
+}
+
 /// An IR expression node (a subset of Kotlin IR's `IrExpression` hierarchy). Operands reference
 /// other expressions by `ExprId` into the arena.
 #[derive(Clone, Debug)]
@@ -1347,6 +1363,18 @@ mod tests {
             None => panic!("expected class type"),
         }
         assert!(matches!(f.expr(body), IrExpr::Block { .. }));
+    }
+
+    #[test]
+    fn zero_for_value_type_tracks_primitive_carriers() {
+        assert_eq!(
+            IrConst::zero_for_value_type(Ty::Boolean),
+            IrConst::Boolean(false)
+        );
+        assert_eq!(IrConst::zero_for_value_type(Ty::Int), IrConst::Int(0));
+        assert_eq!(IrConst::zero_for_value_type(Ty::UInt), IrConst::Int(0));
+        assert_eq!(IrConst::zero_for_value_type(Ty::ULong), IrConst::Long(0));
+        assert_eq!(IrConst::zero_for_value_type(Ty::String), IrConst::Null);
     }
 
     #[test]

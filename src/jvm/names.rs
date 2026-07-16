@@ -23,18 +23,7 @@ pub fn file_class_name(file_stem: &str, package: Option<&str>) -> String {
     }
 }
 
-/// The JVM getter name for a Kotlin property: `x` -> `getX`; `isOpen` keeps `isOpen`.
-pub fn property_getter_name(prop: &str) -> String {
-    let b = prop.as_bytes();
-    if prop.starts_with("is") && b.len() > 2 && b[2].is_ascii_uppercase() {
-        return prop.to_string();
-    }
-    let mut c = prop.chars();
-    match c.next() {
-        Some(f) => format!("get{}{}", f.to_uppercase(), c.as_str()),
-        None => "get".to_string(),
-    }
-}
+pub use crate::names::property_getter_name;
 
 /// The `java.util` method name a mapped `kotlin.collections` interface declares for a Kotlin *property*
 /// member (`Map.keys` → `keySet()`, `Collection.size` → `size()`), from `JavaToKotlinClassMap`'s
@@ -52,20 +41,7 @@ pub fn collection_property_stub_name(prop: &str) -> Option<&'static str> {
     }
 }
 
-/// The JVM setter name for a Kotlin property: `x` -> `setX`; `isOpen` -> `setOpen`.
-pub fn property_setter_name(prop: &str) -> String {
-    let b = prop.as_bytes();
-    let base = if prop.starts_with("is") && b.len() > 2 && b[2].is_ascii_uppercase() {
-        &prop[2..]
-    } else {
-        prop
-    };
-    let mut c = base.chars();
-    match c.next() {
-        Some(f) => format!("set{}{}", f.to_uppercase(), c.as_str()),
-        None => "set".to_string(),
-    }
-}
+pub use crate::names::property_setter_name;
 
 /// A JVM method descriptor `(params)ret` from krusty `Ty`s.
 pub fn method_descriptor(params: &[Ty], ret: Ty) -> String {
