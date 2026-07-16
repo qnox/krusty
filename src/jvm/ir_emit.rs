@@ -1882,6 +1882,27 @@ fn ref_class(elem: &Ty) -> (&'static str, &'static str) {
     }
 }
 
+fn throw_assertion_error(cw: &mut ClassWriter, code: &mut CodeBuilder) {
+    let ae = cw.class_ref("java/lang/AssertionError");
+    code.new_obj(ae);
+    code.dup();
+    let init = cw.methodref("java/lang/AssertionError", "<init>", "()V");
+    code.invokespecial(init, 0, 0);
+    code.athrow();
+}
+
+fn finish_bridge(
+    cw: &mut ClassWriter,
+    name: &str,
+    desc: &str,
+    code: &mut CodeBuilder,
+    locals: u16,
+) {
+    code.ensure_locals(locals);
+    code.link();
+    cw.add_method(0x0001 | 0x0040 | 0x1000, name, desc, code);
+}
+
 /// Emit `ACC_BRIDGE|ACC_SYNTHETIC` methods: each has the supertype's erased descriptor, adapts its
 /// arguments (checkcast / unbox / numeric convert), delegates to the concrete override, and adapts
 /// the return value back (box / numeric convert). Bridges are straight-line — no frames.
@@ -1891,11 +1912,12 @@ fn emit_bridges(c: &crate::ir::IrClass, cw: &mut ClassWriter) {
         let cp = jvm_tys(&b.concrete_params);
         let er = ir_ty_to_jvm(&b.erased_ret);
         let cr = ir_ty_to_jvm(&b.concrete_ret);
+        let erased_desc = method_descriptor(&ep, er);
         // A bridge whose (name, descriptor) already names a REAL method on this class would be a
         // duplicate (`ClassFormatError`) — e.g. an interface getter `getX()T` overridden with the SAME
         // type differs from the impl only by a spurious nullability/representation detail. Skip it; the
         // real method already satisfies the interface. (Real methods are emitted before `emit_bridges`.)
-        if cw.has_method(&b.name, &method_descriptor(&ep, er)) {
+        if cw.has_method(&b.name, &erased_desc) {
             continue;
         }
         let pw: u16 = ep.iter().map(|t| slot_words(*t)).sum();
@@ -1935,20 +1957,8 @@ fn emit_bridges(c: &crate::ir::IrClass, cw: &mut ClassWriter) {
             // supertype bridge returns the unboxed primitive. The target must diverge; if it ever
             // falls through, discard the null-only Void result and throw to keep the bridge verifiable.
             code.pop();
-            let ae = cw.class_ref("java/lang/AssertionError");
-            code.new_obj(ae);
-            code.dup();
-            let init = cw.methodref("java/lang/AssertionError", "<init>", "()V");
-            code.invokespecial(init, 0, 0);
-            code.athrow();
-            code.ensure_locals(1 + pw);
-            code.link();
-            cw.add_method(
-                0x0001 | 0x0040 | 0x1000,
-                &b.name,
-                &method_descriptor(&ep, er),
-                &code,
-            );
+            throw_assertion_error(cw, &mut code);
+            finish_bridge(cw, &b.name, &erased_desc, &mut code, 1 + pw);
             continue;
         }
         if b.concrete_ret == Ty::Nothing {
@@ -1960,20 +1970,8 @@ fn emit_bridges(c: &crate::ir::IrClass, cw: &mut ClassWriter) {
             } else {
                 discard(cr, &mut code);
             }
-            let ae = cw.class_ref("java/lang/AssertionError");
-            code.new_obj(ae);
-            code.dup();
-            let init = cw.methodref("java/lang/AssertionError", "<init>", "()V");
-            code.invokespecial(init, 0, 0);
-            code.athrow();
-            code.ensure_locals(1 + pw);
-            code.link();
-            cw.add_method(
-                0x0001 | 0x0040 | 0x1000,
-                &b.name,
-                &method_descriptor(&ep, er),
-                &code,
-            );
+            throw_assertion_error(cw, &mut code);
+            finish_bridge(cw, &b.name, &erased_desc, &mut code, 1 + pw);
             continue;
         }
         if let Some(owner) = &b.box_ret {
@@ -2020,14 +2018,7 @@ fn emit_bridges(c: &crate::ir::IrClass, cw: &mut ClassWriter) {
             } // reference→reference (concrete is a subtype of erased): no cast needed
         }
         emit_return(er, &mut code);
-        code.ensure_locals(1 + pw);
-        code.link();
-        cw.add_method(
-            0x0001 | 0x0040 | 0x1000,
-            &b.name,
-            &method_descriptor(&ep, er),
-            &code,
-        );
+        finish_bridge(cw, &b.name, &erased_desc, &mut code, 1 + pw);
     }
 }
 
