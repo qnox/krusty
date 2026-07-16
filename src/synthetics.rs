@@ -22,7 +22,6 @@
 
 use crate::ast::ExprId as AstExprId;
 use crate::ir::{Callee, ExprId, IrExpr};
-use crate::ir_lower::{ty_to_ir, Lower};
 use crate::types::Ty;
 
 /// A call site matched against the registry: the call's argument AST ids and the call expression
@@ -32,10 +31,25 @@ pub struct SynthCall<'a> {
     pub call: AstExprId,
 }
 
-/// A synthetic's IR **body** — builds its IR with ordinary nodes against the active `Lower`. Returns
-/// the body's result expr, or `None` to decline (the caller falls through to normal resolution). Gets
-/// its own `Synthetic` so one body can serve an element-parameterized family (`intArrayOf`/`longArrayOf`).
-pub(crate) type BodyFn = fn(&'static Synthetic, &mut Lower<'_>, &SynthCall<'_>) -> Option<ExprId>;
+pub(crate) trait SyntheticIrBuilder {
+    fn emit(&mut self, expr: IrExpr) -> ExprId;
+    fn lower_arg(&mut self, expr: AstExprId, target: &Ty) -> Option<ExprId>;
+    fn synth_expr(&mut self, expr: AstExprId) -> Option<ExprId>;
+    fn synth_is_branchy(&self, expr: AstExprId) -> bool;
+    fn synth_array_elem(&self, call: AstExprId) -> Option<Ty>;
+    fn synth_arg_lambda(&self, arg: AstExprId) -> Option<(Vec<String>, AstExprId)>;
+    fn build_fill_array(
+        &mut self,
+        elem: Ty,
+        size_arg: AstExprId,
+        params: Vec<String>,
+        body: AstExprId,
+    ) -> Option<ExprId>;
+}
+
+/// Builds a synthetic call body, or returns `None` to fall through to normal lowering.
+pub(crate) type BodyFn =
+    fn(&'static Synthetic, &mut dyn SyntheticIrBuilder, &SynthCall<'_>) -> Option<ExprId>;
 
 /// One synthetic function: its fully-qualified name (the identity shared with the JVM intrinsic
 /// registry), the source call name lookup matches on, and its mandatory IR body.
@@ -110,19 +124,18 @@ fn prim_elem(name: &str) -> Option<Ty> {
 /// (its stackmap frame would strand the partially-built array). A boxed-primitive element (`arrayOf(1)` →
 /// `Integer[]`) is allocated as the wrapper array (the emitter's `array_element_jvm`); each value is boxed
 /// by `lower_arg` / the Vararg emit. `intArrayOf` passes a primitive `Ty` here, so it stays `[I`.
-fn vararg_of(lw: &mut Lower<'_>, elem: Ty, args: &[AstExprId]) -> Option<ExprId> {
-    let elem_ir = ty_to_ir(elem);
+fn vararg_of(lw: &mut dyn SyntheticIrBuilder, elem: Ty, args: &[AstExprId]) -> Option<ExprId> {
     let mut elements = Vec::new();
     for &arg in args {
         if lw.synth_is_branchy(arg) {
             return None;
         }
-        elements.push(lw.lower_arg(arg, &elem_ir)?);
+        elements.push(lw.lower_arg(arg, &elem)?);
     }
     // The whole array type (`kotlin/IntArray` / `kotlin/Array<Int>` / `kotlin/Array<String>`) drives the
     // emitter — a boxed `Array<Int>` becomes `Integer[]`, a primitive `IntArray` stays `[I`.
     Some(lw.emit(IrExpr::Vararg {
-        array_type: ty_to_ir(Ty::array(elem)),
+        array_type: Ty::array(elem),
         elements,
     }))
 }
@@ -130,13 +143,21 @@ fn vararg_of(lw: &mut Lower<'_>, elem: Ty, args: &[AstExprId]) -> Option<ExprId>
 // ---- IR bodies ------------------------------------------------------------------------------------
 
 /// `intArrayOf(1, 2, 3)` → a primitive `Vararg`.
-fn b_prim_vararg(syn: &'static Synthetic, lw: &mut Lower<'_>, c: &SynthCall<'_>) -> Option<ExprId> {
+fn b_prim_vararg(
+    syn: &'static Synthetic,
+    lw: &mut dyn SyntheticIrBuilder,
+    c: &SynthCall<'_>,
+) -> Option<ExprId> {
     vararg_of(lw, prim_elem(syn.name)?, c.args)
 }
 
 /// `IntArray(n)` → the `kotlin/IntArray.<init>` allocation intrinsic; `IntArray(n) { i -> e }` → a
 /// fill loop. Other arities decline.
-fn b_prim_size(syn: &'static Synthetic, lw: &mut Lower<'_>, c: &SynthCall<'_>) -> Option<ExprId> {
+fn b_prim_size(
+    syn: &'static Synthetic,
+    lw: &mut dyn SyntheticIrBuilder,
+    c: &SynthCall<'_>,
+) -> Option<ExprId> {
     let elem = prim_elem(syn.name)?;
     match c.args {
         [size_arg] => {
@@ -166,7 +187,11 @@ fn b_prim_size(syn: &'static Synthetic, lw: &mut Lower<'_>, c: &SynthCall<'_>) -
 
 /// `arrayOf(a, b, c)` → a reference `Vararg` (the checker already typed the call `Array<T>` and
 /// rejected a primitive element).
-fn b_ref_vararg(_syn: &'static Synthetic, lw: &mut Lower<'_>, c: &SynthCall<'_>) -> Option<ExprId> {
+fn b_ref_vararg(
+    _syn: &'static Synthetic,
+    lw: &mut dyn SyntheticIrBuilder,
+    c: &SynthCall<'_>,
+) -> Option<ExprId> {
     // Box a primitive element (`arrayOf(1,2,3)` → `Integer[]`); a reference element is unchanged.
     let elem = lw
         .synth_array_elem(c.call)
@@ -178,7 +203,11 @@ fn b_ref_vararg(_syn: &'static Synthetic, lw: &mut Lower<'_>, c: &SynthCall<'_>)
 /// `Array<T>(n) { i -> e }` → a fill loop over a reference array. The element is a reference, or a boxed
 /// primitive (`Array<Int>` = `Integer[]`): `build_fill_array` allocates the wrapper array and
 /// `kotlin/Array.set` boxes each filled value. Declines a non-lambda call.
-fn b_ref_array(_syn: &'static Synthetic, lw: &mut Lower<'_>, c: &SynthCall<'_>) -> Option<ExprId> {
+fn b_ref_array(
+    _syn: &'static Synthetic,
+    lw: &mut dyn SyntheticIrBuilder,
+    c: &SynthCall<'_>,
+) -> Option<ExprId> {
     let [size_arg, init_arg] = c.args else {
         return None;
     };
@@ -193,22 +222,30 @@ fn b_ref_array(_syn: &'static Synthetic, lw: &mut Lower<'_>, c: &SynthCall<'_>) 
 }
 
 /// `emptyArray<T>()` → an empty `Vararg` of the reified element (`new T[0]`).
-fn b_empty(_syn: &'static Synthetic, lw: &mut Lower<'_>, c: &SynthCall<'_>) -> Option<ExprId> {
+fn b_empty(
+    _syn: &'static Synthetic,
+    lw: &mut dyn SyntheticIrBuilder,
+    c: &SynthCall<'_>,
+) -> Option<ExprId> {
     let elem = lw.synth_array_elem(c.call)?;
     vararg_of(lw, elem, &[])
 }
 
 /// `arrayOfNulls<T>(n)` → `new T[n]` (a reference array of nulls; a boxed primitive `Array<Int?>` =
 /// `Integer[]`).
-fn b_arr_nulls(_syn: &'static Synthetic, lw: &mut Lower<'_>, c: &SynthCall<'_>) -> Option<ExprId> {
+fn b_arr_nulls(
+    _syn: &'static Synthetic,
+    lw: &mut dyn SyntheticIrBuilder,
+    c: &SynthCall<'_>,
+) -> Option<ExprId> {
     let [size_arg] = c.args else { return None };
     let elem = lw
         .synth_array_elem(c.call)
         .map(|t| t.boxed_ref().unwrap_or(t))
         .filter(|t| t.is_reference())?;
-    let size = lw.lower_arg(*size_arg, &ty_to_ir(Ty::Int))?;
+    let size = lw.lower_arg(*size_arg, &Ty::Int)?;
     Some(lw.emit(IrExpr::NewArray {
-        array_type: ty_to_ir(Ty::array(elem)),
+        array_type: Ty::array(elem),
         size,
     }))
 }

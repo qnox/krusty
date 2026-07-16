@@ -19554,6 +19554,42 @@ fn ctor_default_to_ir(
     Some(ir.add_expr(e))
 }
 
+impl crate::synthetics::SyntheticIrBuilder for Lower<'_> {
+    fn emit(&mut self, expr: IrExpr) -> ExprId {
+        Lower::emit(self, expr)
+    }
+
+    fn lower_arg(&mut self, expr: AstExprId, target: &Ty) -> Option<ExprId> {
+        Lower::lower_arg(self, expr, target)
+    }
+
+    fn synth_expr(&mut self, expr: AstExprId) -> Option<ExprId> {
+        Lower::synth_expr(self, expr)
+    }
+
+    fn synth_is_branchy(&self, expr: AstExprId) -> bool {
+        Lower::synth_is_branchy(self, expr)
+    }
+
+    fn synth_array_elem(&self, call: AstExprId) -> Option<Ty> {
+        Lower::synth_array_elem(self, call)
+    }
+
+    fn synth_arg_lambda(&self, arg: AstExprId) -> Option<(Vec<String>, AstExprId)> {
+        Lower::synth_arg_lambda(self, arg)
+    }
+
+    fn build_fill_array(
+        &mut self,
+        elem: Ty,
+        size_arg: AstExprId,
+        params: Vec<String>,
+        body: AstExprId,
+    ) -> Option<ExprId> {
+        Lower::build_fill_array(self, elem, size_arg, params, body)
+    }
+}
+
 fn platform_field_expr(field: crate::libraries::PlatformField) -> IrExpr {
     IrExpr::ExternalStaticField {
         owner: field.owner,
