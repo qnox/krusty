@@ -3272,3 +3272,9 @@ selected operator-invoke paths now share `emit_virtual_call` instead of rebuildi
 
 Same-file `$default` calls now use `emit_local_default_call`, and the default/adapter vararg paths
 share `empty_array` instead of rebuilding `0`-sized array literals inline.
+
+### External Construction Emitter Merge
+
+Classpath object construction now goes through `emit_new_external`; property references, constructors,
+assertion/runtime exceptions, range objects, and runtime collection helpers no longer rebuild
+`NewExternal` nodes at their feature sites.
