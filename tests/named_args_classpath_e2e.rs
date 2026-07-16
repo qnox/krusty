@@ -175,3 +175,76 @@ fn named_args_to_classpath_extension_fn_reorder_and_run() {
     };
     assert_eq!(out.trim(), "OK", "box() returned {out:?}");
 }
+
+#[test]
+fn named_args_to_classpath_extension_fn_omitted_default_uses_slots() {
+    let Some(java_home) = env("KRUSTY_REF_JAVA_HOME").or_else(|| env("JAVA_HOME")) else {
+        eprintln!("skipping: set JAVA_HOME");
+        return;
+    };
+    let Some(stdlib_path) = common::stdlib_jar() else {
+        eprintln!("skipping: no kotlin-stdlib jar");
+        return;
+    };
+    let jdk_modules = std::path::PathBuf::from(format!("{java_home}/lib/modules"));
+
+    let Some(libout) = common::compile_lib(
+        "named_args_ext_default",
+        "package lib\n\
+         fun String.tag(a: String = \"A\", b: String = \"B\"): String = this + \"/\" + a + \"/\" + b\n",
+    ) else {
+        return;
+    };
+
+    let main_src = "import lib.tag\n\
+        fun box(): String {\n\
+        \x20   val r = \"R\".tag(b = \"ok\")\n\
+        \x20   return if (r == \"R/A/ok\") \"OK\" else \"fail:\" + r\n\
+        }\n";
+    let cp = vec![libout.clone(), stdlib_path.clone()];
+    let classes = common::compile_in_process(main_src, "Main", &cp, Some(&jdk_modules))
+        .expect("krusty(main) failed to compile a named extension default call");
+
+    let Some(out) = common::run_box(&classes, "MainKt", &[libout.clone(), stdlib_path]) else {
+        eprintln!("skipping: box runner unavailable");
+        return;
+    };
+    assert_eq!(out.trim(), "OK", "box() returned {out:?}");
+}
+
+#[test]
+fn implicit_receiver_classpath_extension_default_uses_slots() {
+    let Some(java_home) = env("KRUSTY_REF_JAVA_HOME").or_else(|| env("JAVA_HOME")) else {
+        eprintln!("skipping: set JAVA_HOME");
+        return;
+    };
+    let Some(stdlib_path) = common::stdlib_jar() else {
+        eprintln!("skipping: no kotlin-stdlib jar");
+        return;
+    };
+    let jdk_modules = std::path::PathBuf::from(format!("{java_home}/lib/modules"));
+
+    let Some(libout) = common::compile_lib(
+        "named_args_ext_default_implicit",
+        "package lib\n\
+         fun String.tag(a: String = \"A\", b: String = \"B\"): String = this + \"/\" + a + \"/\" + b\n",
+    ) else {
+        return;
+    };
+
+    let main_src = "import lib.tag\n\
+        fun String.wrap(): String = tag(b = \"ok\")\n\
+        fun box(): String {\n\
+        \x20   val r = \"R\".wrap()\n\
+        \x20   return if (r == \"R/A/ok\") \"OK\" else \"fail:\" + r\n\
+        }\n";
+    let cp = vec![libout.clone(), stdlib_path.clone()];
+    let classes = common::compile_in_process(main_src, "Main", &cp, Some(&jdk_modules))
+        .expect("krusty(main) failed to compile an implicit receiver extension default call");
+
+    let Some(out) = common::run_box(&classes, "MainKt", &[libout.clone(), stdlib_path]) else {
+        eprintln!("skipping: box runner unavailable");
+        return;
+    };
+    assert_eq!(out.trim(), "OK", "box() returned {out:?}");
+}

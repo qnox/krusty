@@ -1523,7 +1523,12 @@ pub fn lower_file(
                     .find(|s| s.params == want)
                     .or_else(|| syms.ext_fun_overloads(recv_ty, &f.name).first())?;
                 let arity = sig.params.len();
-                let mut params = vec![ty_to_ir(recv_ty)];
+                let recv_param = if recv_ref.nullable {
+                    mark_nullable(ty_to_ir(recv_ty))
+                } else {
+                    ty_to_ir(recv_ty)
+                };
+                let mut params = vec![recv_param];
                 params.extend(sig.params.iter().map(|t| stored_value_ty(*t)));
                 let ret = ty_to_ir(sig.ret);
                 let id = lo.ir.add_fun(IrFunction {
@@ -8430,32 +8435,6 @@ impl<'a> Lower<'a> {
         self.reorder_by_param_names(call, args, param_names)
     }
 
-    /// Reorder a NAMED-argument call to a CLASSPATH instance MEMBER or EXTENSION (`g.greet(b = …, a = …)`
-    /// / `"s".tag(b = …, a = …)`) into declared-parameter order, from the callee's `@Metadata` names
-    /// (a single `Member`/`Extension` overload's `CallSig.param_names` — the LOGICAL params, receiver
-    /// excluded). `rt` is the receiver type. `None` when not a uniquely-resolvable classpath named call.
-    fn reorder_classpath_named_member_args(
-        &self,
-        call: AstExprId,
-        rt: Ty,
-        name: &str,
-        args: &[AstExprId],
-    ) -> Option<Vec<AstExprId>> {
-        let sets: Vec<Vec<String>> = self
-            .resolver()
-            .resolve_symbol(crate::symbol_resolver::SymRecv::Value(rt), name, &[], &[])
-            .map(crate::symbol_resolver::Symbol::overloads)
-            .unwrap_or_default()
-            .into_iter()
-            .map(|o| o.call_sig.param_names)
-            .filter(|names| !names.is_empty())
-            .collect();
-        let [param_names] = sets.as_slice() else {
-            return None;
-        };
-        self.reorder_by_param_names(call, args, param_names)
-    }
-
     /// Map a named/positional argument list onto `param_names`-ordered positions (the shared core of the
     /// top-level and member classpath named-argument reorders). Requires an exact-arity call (no omitted
     /// defaults), every label to name a parameter, and — when the placement reorders evaluation — every
@@ -11025,69 +11004,105 @@ impl<'a> Lower<'a> {
         Some(call)
     }
 
-    /// Lower a classpath instance-member call that OMITS a defaulted argument (named or short) through
-    /// the member's static `$default` synthetic — the general case behind a classpath `data class`'s
-    /// `r.copy(b = "y")`. Maps the labels onto positions via `@Metadata` names/default flags, then emits
-    /// `invokestatic Owner.name$default(recv, <arg | placeholder>…, int mask, Object marker)` (the omitted
-    /// positions form the bitmask; the synthetic fills them from the receiver). `None` (fall through to the
-    /// plain member path) when nothing is omitted, no defaulting member matches, or no synthetic exists.
+    fn lower_call_slot_args(
+        &mut self,
+        source_args: &[AstExprId],
+        slots: &[Option<AstExprId>],
+        params: &[Ty],
+    ) -> Option<Vec<u32>> {
+        self.lower_call_slot_args_with_element(source_args, slots, params, None)
+    }
+
+    fn lower_call_slot_args_with_element(
+        &mut self,
+        source_args: &[AstExprId],
+        slots: &[Option<AstExprId>],
+        params: &[Ty],
+        elem_prim: Option<Ty>,
+    ) -> Option<Vec<u32>> {
+        if slots.len() != params.len() {
+            return None;
+        }
+        let mut arg_slots = Vec::with_capacity(source_args.len());
+        for &arg in source_args {
+            let slot = slots.iter().position(|slot| *slot == Some(arg))?;
+            arg_slots.push(slot);
+        }
+        let reordered = arg_slots.windows(2).any(|w| w[0] > w[1]);
+        if reordered
+            && source_args.iter().any(|&arg| {
+                !is_const_literal(self.afile, arg) && !matches!(self.afile.expr(arg), Expr::Name(_))
+            })
+        {
+            return None;
+        }
+        let mut lowered = Vec::with_capacity(slots.len());
+        for (i, slot) in slots.iter().enumerate() {
+            match slot {
+                Some(arg) => {
+                    let param = params[i];
+                    if param.is_erased_top()
+                        && elem_prim.is_some_and(|elem| {
+                            let arg_ty = self.info.ty(*arg);
+                            self.has_scalar_value_repr(arg_ty) && arg_ty != elem
+                        })
+                    {
+                        let elem = elem_prim?;
+                        let value = self.lower_arg(*arg, &ty_to_ir(elem))?;
+                        lowered.push(self.emit_type_op(
+                            IrTypeOp::ImplicitCoercion,
+                            value,
+                            ty_to_ir(param),
+                        ));
+                    } else {
+                        lowered.push(self.lower_arg(*arg, &ty_to_ir(param))?);
+                    }
+                }
+                None => lowered.push(self.zero_placeholder(params[i])),
+            }
+        }
+        Some(lowered)
+    }
+
+    /// Lower a classpath instance-member call with omitted arguments through the member's `$default`
+    /// synthetic, using the checker-recorded argument slots.
     fn lower_library_default_member_call(
         &mut self,
-        receiver: AstExprId,
+        recv: u32,
         rt: Ty,
-        name: &str,
         call: AstExprId,
+        resolved: &crate::symbol_resolver::ResolvedMember,
         args: &[AstExprId],
     ) -> Option<u32> {
-        // The receiver may be typed NULLABLE at this point (a smart-cast `if (x == null) throw` the
-        // lowerer doesn't re-narrow) — the member lives on the non-null class either way.
-        let owner = self
-            .class_of(rt)
-            .map(|ci| ci.internal.clone())
+        let slots = self.info.resolved_call_arg_slots.get(&call).cloned()?;
+        if slots.iter().all(Option::is_some) {
+            return None;
+        }
+        let member = &resolved.member;
+        // The receiver may be typed nullable at this point; the member/default synthetic lives on the
+        // non-null class either way.
+        let owner = member
+            .owner
+            .clone()
+            .or_else(|| self.class_of(rt).map(|ci| ci.internal.clone()))
             .or_else(|| rt.non_null().obj_internal().map(str::to_string))?;
         crate::trace_compiler!(
             "resolve",
-            "lower_library_default_member_call {owner}.{name} args={} named={}",
+            "lower_library_default_member_call {owner}.{} args={} named={}",
+            member.name,
             args.len(),
             self.afile.call_arg_names.contains_key(&call.0)
         );
-        let fi = self
-            .resolver()
-            .resolve_symbol(crate::symbol_resolver::SymRecv::Value(rt), name, &[], &[])
-            .map(crate::symbol_resolver::Symbol::overloads)
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|o| o.kind == crate::libraries::FnKind::Member)
-            .find(|o| o.call_sig.can_map_omitted_args(o.callable.params.len()))?;
-        let cs = fi.call_sig;
-        // The `@Metadata`/synthetic key on the JVM name: a value-class-param-MANGLED member (`copy` →
-        // `copy-<hash>`, with `copy-<hash>$default`) is looked up by its physical name — which the member
-        // query already resolved into the callable's name.
-        let phys = fi.callable.name.clone();
-        // The member's LOGICAL return (e.g. `Int`) — a `suspend` `$default` descriptor erases its return to
-        // `Object`, so record the logical type for the coroutine pass to unbox the suspension result by (a
-        // hoisted `if (s.list() == 5)` else compares the erased `Object` against an int → VerifyError).
-        let logical_ret = fi.callable.ret;
-        let arg_names = self.afile.call_arg_names.get(&call.0).cloned();
-        // Only this path when an argument is actually OMITTED (else the plain member call is emitted).
-        if arg_names.is_none() && args.len() == cs.param_names.len() {
-            return None;
-        }
-        let slots = crate::resolve::map_call_sig_args(args, arg_names.as_deref(), &cs).ok()?;
+        let phys = member.name.clone();
+        let logical_ret = resolved.ret;
         let (desc, real, _ret, suspend) = crate::symbol_resolver::synthetic_default_member(
             &*self.syms.libraries,
             &owner,
             &phys,
             slots.len(),
         )?;
-        let recv = self.expr(receiver)?;
         let mut a = vec![recv];
-        for (i, slot) in slots.iter().enumerate() {
-            match slot {
-                Some(arg) => a.push(self.lower_arg(*arg, &ty_to_ir(real[i]))?),
-                None => a.push(self.zero_placeholder(real[i])),
-            }
-        }
+        a.extend(self.lower_call_slot_args(args, &slots, &real)?);
         let mask: i32 = slots
             .iter()
             .enumerate()
@@ -11097,9 +11112,6 @@ impl<'a> Lower<'a> {
         self.append_default_mask_marker(&mut a, mask);
         let call =
             self.emit_static_call(owner, format!("{phys}$default"), desc, InlineKind::None, a);
-        // A `suspend` method's `$default` already spells the `Continuation` in its descriptor (BEFORE the
-        // mask/marker); record the call so the coroutine pass INSERTS the continuation value there (see
-        // `append_continuation`, `$default` arm) rather than appending it after the marker.
         if suspend {
             self.ir.suspend_calls.insert(call, ty_to_ir(logical_ret));
         }
@@ -11179,13 +11191,9 @@ impl<'a> Lower<'a> {
         e: AstExprId,
     ) -> Option<u32> {
         // The CHECKER resolved this extension and recorded the callable (keyed by the call `ExprId`).
-        let c = self
-            .info
-            .resolved_extension(e)
-            .cloned()
-            .filter(|c| !c.default_call)?; // a defaulted extension needs the AST receiver expr — bail
-                                           // The first parameter is the extension receiver. Box a primitive receiver flowing into a generic
-                                           // `Object` receiver param; a reference receiver widens to its declared param type for free.
+        let c = self.info.resolved_extension(e).cloned()?;
+        // The first parameter is the extension receiver. Box a primitive receiver flowing into a generic
+        // `Object` receiver param; a reference receiver widens to its declared param type for free.
         let p0 = *c.params.first().unwrap_or(&rt);
         let recv = if self.has_scalar_value_repr(rt) && p0.is_reference() {
             self.coerce_to_static(recv_ir, rt, p0)
@@ -11194,10 +11202,33 @@ impl<'a> Lower<'a> {
         };
         let source_receiver = c.source_receiver;
         let mut a = vec![recv];
-        for (i, &arg) in args.iter().enumerate() {
-            match c.params.get(i + 1) {
-                Some(p) => a.push(self.lower_arg(arg, &ty_to_ir(*p))?),
-                None => a.push(self.expr(arg)?),
+        let explicit_params = c.params.get(1..)?;
+        if let Some(slots) = self.info.resolved_call_arg_slots.get(&e).cloned() {
+            let slot_args = self.lower_call_slot_args(args, &slots, explicit_params)?;
+            if c.default_call {
+                let mask: i32 = slots
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, slot)| slot.is_none())
+                    .map(|(i, _)| 1i32 << i)
+                    .sum();
+                a.extend(slot_args);
+                self.append_default_mask_marker(&mut a, mask);
+            } else {
+                if slots.iter().any(Option::is_none) {
+                    return None;
+                }
+                a.extend(slot_args);
+            }
+        } else {
+            if c.default_call {
+                return None;
+            }
+            for (i, &arg) in args.iter().enumerate() {
+                match explicit_params.get(i) {
+                    Some(p) => a.push(self.lower_arg(arg, &ty_to_ir(*p))?),
+                    None => a.push(self.expr(arg)?),
+                }
             }
         }
         // For a `<reified T>` extension the backend must SPLICE (its compiled body carries a
@@ -11207,7 +11238,8 @@ impl<'a> Lower<'a> {
         // specializes the body.
         let reified_subst = self.reified_call_subst_for(e, &c, Some(rt));
         let physical_ret = c.physical_ret;
-        let call = self.emit_library_static_call(c, a, false);
+        let suspend_default = c.default_call && c.suspend;
+        let call = self.emit_library_static_call(c, a, suspend_default);
         if !reified_subst.is_empty() {
             self.ir.reified_call_subst.insert(call, reified_subst);
         }
@@ -11377,52 +11409,47 @@ impl<'a> Lower<'a> {
                 }
             }
         }
-        // A builtin/library member method (`StringBuilder.append`, `String.isEmpty`) — `this.m(args)`.
-        let arg_tys = self.arg_tys(args);
-        let lib_owner = match this_ty {
-            Ty::String => Some("kotlin/String".to_string()),
-            Ty::Obj(i, _) => Some(i.to_string()),
-            _ => None,
-        };
-        if let Some(internal) = &lib_owner {
-            if let Some(m) = self.resolve_instance(internal, name, &arg_tys) {
-                if m.params.len() == args.len() {
-                    let owner = m.owner.clone().unwrap_or_else(|| internal.clone());
-                    let recv = self.emit_get_value(this_v);
-                    let mut a = Vec::new();
-                    for (arg, pt) in args.iter().zip(&m.params) {
-                        a.push(self.lower_arg(*arg, &ty_to_ir(*pt))?);
-                    }
-                    let ret = m.ret;
-                    let call = self.emit_library_member_call(recv, owner, m, ret, false, a);
-                    return Some(self.coerce_generic_read(call, e, ret));
-                }
-            }
+        if matches!(name, "toString" | "hashCode") && args.is_empty() {
+            let recv = self.emit_get_value(this_v);
+            return Some(self.emit_external_call(format!("kotlin/Any.{name}"), Some(recv), vec![]));
         }
-        if let Some(resolved) = self
-            .info
-            .resolved_member(e)
-            .cloned()
-            // Reuse the member the checker resolved for this call (keyed by the call `ExprId`); fall
-            // back to resolving when it was recorded through a different path (see
-            // [`TypeInfo::resolved_calls`]).
-            .or_else(|| self.resolve_instance_member(this_ty, name, &arg_tys))
-        {
+        if let Some(resolved) = self.info.resolved_member(e).cloned() {
+            let recv = self.emit_get_value(this_v);
+            if let Some(r) =
+                self.lower_library_default_member_call(recv, this_ty, e, &resolved, args)
+            {
+                return Some(r);
+            }
             let ret = resolved.ret;
             let member = resolved.member;
-            let mut a = Vec::new();
-            for (i, &arg) in args.iter().enumerate() {
-                match member.params.get(i) {
-                    Some(p) => a.push(self.lower_arg(arg, &ty_to_ir(*p))?),
-                    None => a.push(self.expr(arg)?),
+            let a = if let Some(slots) = self.info.resolved_call_arg_slots.get(&e).cloned() {
+                if slots.iter().any(Option::is_none) {
+                    return None;
                 }
-            }
+                self.lower_call_slot_args(args, &slots, &member.params)?
+            } else {
+                if args.len() < member.params.len()
+                    && member
+                        .params
+                        .last()
+                        .is_none_or(|p| p.array_elem().is_none())
+                {
+                    return None;
+                }
+                let mut lowered = Vec::new();
+                for (i, &arg) in args.iter().enumerate() {
+                    match member.params.get(i) {
+                        Some(p) => lowered.push(self.lower_arg(arg, &ty_to_ir(*p))?),
+                        None => lowered.push(self.expr(arg)?),
+                    }
+                }
+                lowered
+            };
             let owner = member
                 .owner
                 .clone()
                 .unwrap_or_else(|| this_ty.obj_internal().unwrap_or("kotlin/Any").to_string());
             let physical_ret = member.physical_ret;
-            let recv = self.emit_get_value(this_v);
             let call = self.emit_library_member_call(recv, owner, member, ret, false, a);
             return Some(self.coerce_generic_read(call, e, physical_ret));
         }
@@ -18141,17 +18168,6 @@ impl<'a> Lower<'a> {
                             }
                         }
                     }
-                    // NAMED-ARGUMENT call to a CLASSPATH instance member (`g.greet(b = …, a = …)`):
-                    // reorder the arguments into parameter order (from the member's `@Metadata` names) so
-                    // the positional lowering below pairs each argument with its parameter. `None` → leave
-                    // the args untouched (module members keep their own named-arg handling).
-                    let args = if self.afile.call_arg_names.contains_key(&e.0) {
-                        let rt = self.info.ty(receiver);
-                        self.reorder_classpath_named_member_args(e, rt, &name, &args)
-                            .unwrap_or(args)
-                    } else {
-                        args
-                    };
                     // CLASSPATH nested-class construction `Outer.Nested(args)` (`Subject.User("x")`): the
                     // receiver names a type (not a value), and the call's result type is the nested
                     // classpath internal (`lib/Subject$User`, not an IR class). Emit `new … invokespecial`.
@@ -18995,51 +19011,20 @@ impl<'a> Lower<'a> {
                         // override), not a by-index member — so it needs no class-side method-table entry.
                         let recv = self.expr(receiver)?;
                         self.emit_external_call(format!("kotlin/Any.{name}"), Some(recv), vec![])
-                    } else if let Some(r) = self.lower_library_default_member_call(
-                        receiver,
-                        self.recv_ty(receiver),
-                        &name,
-                        e,
-                        &args,
-                    ) {
-                        // A classpath member call OMITTING a defaulted argument (`r.copy(b = "y")`) →
-                        // the static `name$default` synthetic. Tried before the plain instance path, which
-                        // would fail the arity match and fall through to a wrong construction.
-                        r
-                    } else if let Some((owner, member, mparams, mret, msuspend)) = {
-                        // A classpath *instance* method `recv.name(args)` → `invokevirtual`/
-                        // `invokeinterface recvType.name:descriptor` (descriptor from the classpath; no
-                        // hardcoded names). Enables stdlib member calls (iterators, collections, …).
-                        let arg_tys = self.arg_tys(&args);
-                        self.class_of(rt)
-                            .map(|ci| ci.internal.clone())
-                            .or_else(|| {
-                                if let Ty::Obj(i, _) = rt {
-                                    Some(i.to_string())
-                                } else {
-                                    None
-                                }
-                            })
-                            // A `String` receiver resolves its Kotlin builtin members (`isEmpty()`,
-                            // `isBlank()`, …); the provider supplies the physical owner. A member wins
-                            // over a same-named extension, as in kotlinc.
-                            .or_else(|| {
-                                if rt == Ty::String {
-                                    Some("kotlin/String".to_string())
-                                } else {
-                                    None
-                                }
-                            })
-                            .and_then(|internal| {
-                                self.resolve_instance(&internal, &name, &arg_tys).map(|m| {
-                                    let owner = m.owner.clone().unwrap_or_else(|| internal.clone());
-                                    let params = m.params.clone();
-                                    let ret = m.ret;
-                                    let suspend = m.suspend;
-                                    (owner, m, params, ret, suspend)
-                                })
-                            })
-                    } {
+                    } else if let Some(resolved) = self.info.resolved_member(e).cloned() {
+                        let recv = self.expr(receiver)?;
+                        let ret = resolved.ret;
+                        if let Some(r) =
+                            self.lower_library_default_member_call(recv, rt, e, &resolved, &args)
+                        {
+                            return Some(r);
+                        }
+                        let member = resolved.member;
+                        let physical_ret = member.physical_ret;
+                        let mparams = member.params.clone();
+                        let owner = member.owner.clone().unwrap_or_else(|| {
+                            rt.obj_internal().unwrap_or("kotlin/Any").to_string()
+                        });
                         // Fewer arguments than the resolved member has parameters means a DEFAULTED
                         // argument was omitted, but the `$default` path above (`lower_library_default_member_
                         // call`) could not fill it — e.g. a method inherited through DELEGATION (`class C(x:
@@ -19056,7 +19041,6 @@ impl<'a> Lower<'a> {
                         {
                             return None;
                         }
-                        let recv = self.expr(receiver)?;
                         // The receiver's PRIMITIVE element type (`ArrayList<Byte>` → `Byte`,
                         // `ArrayList<Long>` → `Long`). `coll.add(0)` must box the value as THAT wrapper
                         // (`Byte`/`Long`/…), not the literal's own `Integer` — else iterating the element
@@ -19072,59 +19056,42 @@ impl<'a> Lower<'a> {
                         };
                         // Coerce each argument to the resolved parameter type so a primitive flowing into
                         // an erased `Any` parameter (`List<Int>.add(E)` → `add(Object)`) autoboxes.
-                        let mut a = Vec::new();
-                        for (i, &arg) in args.iter().enumerate() {
-                            match mparams.get(i) {
-                                Some(p)
-                                    if p.is_erased_top()
-                                        && elem_prim.is_some_and(|e| {
-                                            let a = self.info.ty(arg);
-                                            self.has_scalar_value_repr(a) && a != e
-                                        }) =>
-                                {
-                                    // Coerce to the element primitive (i2b/i2l/…), then box as THAT
-                                    // wrapper for the erased `Object` parameter.
-                                    let e = elem_prim.unwrap();
-                                    let v = self.lower_arg(arg, &ty_to_ir(e))?;
-                                    a.push(self.emit_type_op(
-                                        IrTypeOp::ImplicitCoercion,
-                                        v,
-                                        ty_to_ir(*p),
-                                    ));
+                        let a = if let Some(slots) =
+                            self.info.resolved_call_arg_slots.get(&e).cloned()
+                        {
+                            if slots.iter().any(Option::is_none) {
+                                return None;
+                            }
+                            self.lower_call_slot_args_with_element(
+                                &args, &slots, &mparams, elem_prim,
+                            )?
+                        } else {
+                            let mut lowered = Vec::new();
+                            for (i, &arg) in args.iter().enumerate() {
+                                match mparams.get(i) {
+                                    Some(p)
+                                        if p.is_erased_top()
+                                            && elem_prim.is_some_and(|e| {
+                                                let a = self.info.ty(arg);
+                                                self.has_scalar_value_repr(a) && a != e
+                                            }) =>
+                                    {
+                                        // Coerce to the element primitive (i2b/i2l/…), then box as THAT
+                                        // wrapper for the erased `Object` parameter.
+                                        let e = elem_prim.unwrap();
+                                        let v = self.lower_arg(arg, &ty_to_ir(e))?;
+                                        lowered.push(self.emit_type_op(
+                                            IrTypeOp::ImplicitCoercion,
+                                            v,
+                                            ty_to_ir(*p),
+                                        ));
+                                    }
+                                    Some(p) => lowered.push(self.lower_arg(arg, &ty_to_ir(*p))?),
+                                    None => lowered.push(self.expr(arg)?),
                                 }
-                                Some(p) => a.push(self.lower_arg(arg, &ty_to_ir(*p))?),
-                                None => a.push(self.expr(arg)?),
                             }
-                        }
-                        let call =
-                            self.emit_library_member_call(recv, owner, member, mret, msuspend, a);
-                        // A generic member whose erased return is `Object` but whose substituted type is
-                        // more specific (`List<Int>.get` → `Int`) gets the unbox/checkcast kotlinc emits.
-                        self.coerce_generic_read(call, e, mret)
-                    } else if let Some(resolved) = self
-                        .info
-                        .resolved_member(e)
-                        .cloned()
-                        // The checker records the member it resolved for this source call keyed by the
-                        // call `ExprId` (see [`TypeInfo::resolved_calls`]); reuse it so the call is
-                        // resolved once. Fall back to resolving for a call the checker did not record
-                        // through this path (its resolution came from an earlier branch above).
-                        .or_else(|| self.resolve_instance_member(rt, &name, &self.arg_tys(&args)))
-                    {
-                        let recv = self.expr(receiver)?;
-                        let ret = resolved.ret;
-                        let member = resolved.member;
-                        let physical_ret = member.physical_ret;
-                        let mut a = Vec::new();
-                        for (i, &arg) in args.iter().enumerate() {
-                            match member.params.get(i) {
-                                Some(p) => a.push(self.lower_arg(arg, &ty_to_ir(*p))?),
-                                None => a.push(self.expr(arg)?),
-                            }
-                        }
-                        let owner = member.owner.clone().unwrap_or_else(|| {
-                            rt.obj_internal().unwrap_or("kotlin/Any").to_string()
-                        });
+                            lowered
+                        };
                         let call = self.emit_library_member_call(
                             recv,
                             owner,
@@ -19133,6 +19100,8 @@ impl<'a> Lower<'a> {
                             resolved.suspend,
                             a,
                         );
+                        // A generic member whose erased return is `Object` but whose substituted type is
+                        // more specific (`List<Int>.get` → `Int`) gets the unbox/checkcast kotlinc emits.
                         self.coerce_to_static(call, ret, physical_ret)
                     } else if let Some(m) = {
                         // A `@JvmStatic` member of a classpath `object` (`Base58Uuid.of(x)`) → a static
@@ -19205,7 +19174,25 @@ impl<'a> Lower<'a> {
                             && args
                                 .last()
                                 .is_some_and(|&x| matches!(self.info.ty(x), Ty::Fun(_)));
-                        if c.default_call {
+                        if let Some(slots) = self.info.resolved_call_arg_slots.get(&e).cloned() {
+                            let slot_args =
+                                self.lower_call_slot_args(&args, &slots, explicit_params)?;
+                            if c.default_call {
+                                let mask: i32 = slots
+                                    .iter()
+                                    .enumerate()
+                                    .filter(|(_, slot)| slot.is_none())
+                                    .map(|(i, _)| 1i32 << i)
+                                    .sum();
+                                a.extend(slot_args);
+                                self.append_default_mask_marker(&mut a, mask);
+                            } else {
+                                if slots.iter().any(Option::is_none) {
+                                    return None;
+                                }
+                                a.extend(slot_args);
+                            }
+                        } else if c.default_call {
                             self.append_default_call_args(
                                 &mut a,
                                 explicit_params,
