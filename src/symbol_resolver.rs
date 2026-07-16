@@ -289,7 +289,7 @@ fn arg_fits_platform(lib: &dyn CompilerPlatform, param: &Ty, arg: &Ty) -> bool {
 /// `CharArray.any`'s and the wrong one (`(Char)->…`) could win. Ranking by the actual receiver drops the
 /// non-applicable siblings (a `CharArray` extension does not apply to an `IntArray`) and keeps only the
 /// exact match at rung 0.
-fn ranked_extension_overloads_by_recv<'a>(
+pub(crate) fn ranked_extension_overloads_by_recv<'a>(
     src: &dyn SymbolSource,
     receiver: Ty,
     fs: &'a FunctionSet,
@@ -318,7 +318,10 @@ fn ranked_extension_overloads_by_recv<'a>(
 /// Map each provided argument to a logical parameter index. Identity when the counts match; else, for a
 /// call that omits leading defaulted parameters before a TRAILING lambda (`runBlocking { … }`), leading
 /// args → leading params and the trailing lambda → the LAST parameter.
-fn trailing_default_arg_indices(param_count: usize, arg_tys: &[Option<Ty>]) -> Option<Vec<usize>> {
+pub(crate) fn trailing_default_arg_indices(
+    param_count: usize,
+    arg_tys: &[Option<Ty>],
+) -> Option<Vec<usize>> {
     let n = arg_tys.len();
     if param_count == n {
         Some((0..n).collect())
@@ -1150,303 +1153,6 @@ impl<'a> SymbolResolver<'a> {
         }
         None
     }
-
-    /// Resolve a single-selector `@OverloadResolutionByLambdaReturnType` call (`sumOf { … }`): pick the
-    /// overload on `receiver` whose return type equals the lambda's return type. The candidate set (with
-    /// its per-overload disambiguation) comes entirely from the one `functions` query.
-    /// Resolve `receiver.name(lambda)` where the return type binds from the lambda's return. Returns the
-    /// callable plus `is_member` — `true` ⇒ an instance member (lower as `invokevirtual` with the
-    /// receiver as the dispatch receiver), `false` ⇒ an extension (lower as a static call with the
-    /// receiver as the first argument).
-    pub fn resolve_lambda_return_overload(
-        &self,
-        receiver: Ty,
-        name: &str,
-        lambda_ret: Ty,
-        arg_tys: &[Ty],
-    ) -> Option<(LibraryCallable, bool)> {
-        if arg_tys.len() != 1 {
-            return None;
-        }
-        // The matched overload's KIND decides how the caller lowers it: an EXTENSION's receiver is the
-        // first argument of a static method (`Callee::Static`, receiver as `args[0]`), but an instance
-        // MEMBER's receiver is the dispatch receiver (`Callee::Virtual`, `invokevirtual`). Conflating
-        // them — emitting a member static with the receiver as an argument — leaves the receiver on the
-        // operand stack (`VerifyError: Inconsistent stackmap frames`), which is exactly what a classpath
-        // instance member taking a trailing lambda hit. Return the kind so the caller branches.
-        // Candidates from the scope-pruned `resolve_symbols` seam, NOT the plain `functions(name, …)`
-        // walk: a `@OverloadResolutionByLambdaReturnType` family carries a `@JvmName` (`sumOf` →
-        // `sumOfInt`) that the Kotlin name never matches, so the walk returns nothing and the call
-        // bails ("not yet supported by the IR backend"). This mirrors `lambda_return_overload_param_types`.
-        // Fall back to the receiver-indexed `functions()` only when there is no import scope.
-        FunctionSet { overloads: self.resolve_symbol(SymRecv::TopLevel, name, &[], &[]).map(Symbol::overloads).unwrap_or_default() }
-            .overloads
-            .into_iter()
-            .find(|o| {
-                matches!(o.kind, FnKind::Member | FnKind::Extension)
-                    && !matches!(o.callable.origin, Origin::Module { .. })
-                    && o.callable.ret == lambda_ret
-                    && match o.kind {
-                        FnKind::Extension => o.receiver.is_none_or(|dr| {
-                            source_receiver_rank(&self.src, receiver, dr).is_some()
-                        }),
-                        _ => true,
-                    }
-            })
-            .map(|o| {
-                crate::trace_compiler!(
-                    "resolve",
-                    "lambda-return {name} recv={receiver:?} lambda_ret={lambda_ret:?} -> {}.{}{} kind={:?}",
-                    o.callable.owner,
-                    o.callable.name,
-                    o.callable.descriptor,
-                    o.kind
-                );
-                let is_member = o.kind == FnKind::Member;
-                (o.callable, is_member)
-            })
-    }
-
-    /// Parameter types for the lambda argument of a call selected by lambda return type
-    /// (`Iterable<T>.sumOf { … }`), read from the selected overload family.
-    pub fn lambda_return_overload_param_types(&self, receiver: Ty, name: &str) -> Option<Vec<Ty>> {
-        FunctionSet {
-            overloads: self
-                .resolve_symbol(SymRecv::TopLevel, name, &[], &[])
-                .map(Symbol::overloads)
-                .unwrap_or_default(),
-        }
-        .overloads
-        .iter()
-        .filter(|o| {
-            o.is_extension()
-                && o.receiver
-                    .is_none_or(|dr| source_receiver_rank(self.lib, receiver, dr).is_some())
-        })
-        .find_map(|o| {
-            let gsig = o.generic_sig.as_ref()?;
-            let mut binds = std::collections::HashMap::new();
-            if let Some(recv_sig) = gsig.receiver {
-                unify_ty(recv_sig, receiver, &mut binds);
-            }
-            gsig.params
-                .first()
-                .map(|selector| function_input_types(*selector, &binds))
-                .filter(|params| !params.is_empty())
-        })
-    }
-
-    /// Lambda call-shape facts for a receiver-less top-level call. This is arg-dependent because a
-    /// generic HOF can bind lambda parameter types from already-typed non-lambda arguments
-    /// (`applyIt(5) { it + 1 }`). Providers expose parsed generic signatures and metadata call-shape on
-    /// `FunctionInfo`; this resolver aligns those facts for the concrete partial call in one pass.
-    pub fn top_level_lambda_shape(
-        &self,
-        name: &str,
-        arg_tys: &[Option<Ty>],
-    ) -> Option<TopLevelLambdaShape> {
-        // Lambda-SHAPE info for a name the caller already validated resolves (via import scope OR an
-        // explicit FQ package). UNSCOPED over the federated source so a fully-qualified, unimported callee
-        // (`kotlinx.coroutines.runBlocking { … }`) still yields its lambda facts.
-        let fs = FunctionSet {
-            overloads: self
-                .resolve_symbol(SymRecv::TopLevel, name, &[], &[])
-                .map(Symbol::overloads)
-                .unwrap_or_default(),
-        };
-        // The default-omitted trailing-lambda alignment (`runBlocking { … }`) applies ONLY when NO overload
-        // of this name matches the provided argument count exactly. A name WITH an exact-arity overload
-        // (`run { … }`) always uses that overload's own parameter positions — never an alignment against a
-        // wider overload — so a legitimately-empty lambda-parameter result is not shadowed by one.
-        let has_exact = fs.has_top_level_arity(arg_tys.len());
-        let mut shape = TopLevelLambdaShape::default();
-        for o in fs.top_level() {
-            if shape.param_types.is_none() {
-                if let Some(gsig) = o.generic_sig.as_ref() {
-                    if !(has_exact && gsig.params.len() != arg_tys.len()) {
-                        if let Some(map) = trailing_default_arg_indices(gsig.params.len(), arg_tys)
-                        {
-                            let mut binds = std::collections::HashMap::new();
-                            for (ai, at) in arg_tys.iter().enumerate() {
-                                if let (Some(t), Some(ps)) = (at, gsig.params.get(map[ai])) {
-                                    unify_ty(*ps, *t, &mut binds);
-                                }
-                            }
-                            let out: Vec<Vec<Ty>> = map
-                                .iter()
-                                .map(|&pi| {
-                                    gsig.params
-                                        .get(pi)
-                                        .map(|ps| function_input_types(*ps, &binds))
-                                        .unwrap_or_default()
-                                })
-                                .collect();
-                            if out
-                                .iter()
-                                .zip(arg_tys)
-                                .any(|(v, at)| at.is_none() && !v.is_empty())
-                            {
-                                shape.param_types = Some(out);
-                            }
-                        }
-                    }
-                }
-            }
-
-            if shape.receivers.is_none() {
-                let recvs = &o.call_sig.lambda_receivers;
-                if !(has_exact && recvs.len() != arg_tys.len()) {
-                    if let Some(map) = trailing_default_arg_indices(recvs.len(), arg_tys) {
-                        let out: Vec<Option<Ty>> = map
-                            .iter()
-                            .map(|&pi| recvs.get(pi).cloned().flatten())
-                            .collect();
-                        if out.iter().any(Option::is_some) {
-                            shape.receivers = Some(out);
-                        }
-                    }
-                }
-            }
-
-            if shape.materialized.is_none() {
-                let m = &o.call_sig.lambda_materialized;
-                if m.len() == arg_tys.len() && m.iter().any(|b| *b) {
-                    shape.materialized = Some(m.clone());
-                }
-            }
-
-            if shape.param_types.is_some()
-                && shape.receivers.is_some()
-                && shape.materialized.is_some()
-            {
-                break;
-            }
-        }
-        (shape.param_types.is_some() || shape.receivers.is_some() || shape.materialized.is_some())
-            .then_some(shape)
-    }
-
-    /// Lambda parameter types for an extension call before lambda bodies are typed. This binds the
-    /// selected extension's generic signature from the receiver plus already-typed non-lambda args
-    /// (`fold(0) { acc, x -> ... }` binds the accumulator from `0`). Public candidates are preferred;
-    /// non-public `@InlineOnly` candidates are considered only as a fallback for scope functions.
-    pub fn extension_lambda_param_types(
-        &self,
-        receiver: Ty,
-        name: &str,
-        arg_tys: &[Option<Ty>],
-    ) -> Option<Vec<Vec<Ty>>> {
-        let fs = FunctionSet {
-            overloads: self
-                .resolve_symbol(SymRecv::Value(receiver), name, &[], &[])
-                .map(Symbol::overloads)
-                .unwrap_or_default()
-                .into_iter()
-                .filter(FunctionInfo::is_extension)
-                .collect(),
-        };
-        for allow_must_inline in [false, true] {
-            for o in ranked_extension_overloads_by_recv(&self.src, receiver, &fs, allow_must_inline)
-            {
-                let Some(gsig) = o.generic_sig.as_ref() else {
-                    continue;
-                };
-                let Some(param_indices) = trailing_default_arg_indices(gsig.params.len(), arg_tys)
-                else {
-                    continue;
-                };
-                let mapped: Vec<Ty> = param_indices.iter().map(|&i| gsig.params[i]).collect();
-                let mut binds = std::collections::HashMap::new();
-                if let Some(recv_sig) = gsig.receiver {
-                    unify_ty(recv_sig, receiver, &mut binds);
-                }
-                for (ps, at) in mapped.iter().zip(arg_tys) {
-                    if let Some(t) = at {
-                        unify_ty(*ps, *t, &mut binds);
-                    }
-                }
-                let out: Vec<Vec<Ty>> = mapped
-                    .iter()
-                    .map(|ps| function_input_types(*ps, &binds))
-                    .collect();
-                if out.iter().any(|v| !v.is_empty()) {
-                    return Some(out);
-                }
-            }
-        }
-        None
-    }
-
-    pub fn extension_lambda_receivers(
-        &self,
-        receiver: Ty,
-        name: &str,
-        arg_tys: &[Option<Ty>],
-    ) -> Option<Vec<Option<Ty>>> {
-        let fs = FunctionSet {
-            overloads: self
-                .resolve_symbol(SymRecv::Value(receiver), name, &[], &[])
-                .map(Symbol::overloads)
-                .unwrap_or_default()
-                .into_iter()
-                .filter(FunctionInfo::is_extension)
-                .collect(),
-        };
-        for allow_must_inline in [false, true] {
-            for o in ranked_extension_overloads_by_recv(&self.src, receiver, &fs, allow_must_inline)
-            {
-                let Some(gsig) = o.generic_sig.as_ref() else {
-                    continue;
-                };
-                if gsig.params.is_empty() {
-                    continue;
-                }
-                let Some(param_indices) =
-                    trailing_default_arg_indices(gsig.params.len() - 1, arg_tys)
-                else {
-                    continue;
-                };
-                let mapped: Vec<(usize, Ty)> = param_indices
-                    .iter()
-                    .map(|&i| (i, gsig.params[i + 1]))
-                    .collect();
-                let mut binds = std::collections::HashMap::new();
-                unify_ty(gsig.params[0], receiver, &mut binds);
-                for ((_, ps), at) in mapped.iter().zip(arg_tys) {
-                    if let Some(t) = at {
-                        unify_ty(*ps, *t, &mut binds);
-                    }
-                }
-                let out: Vec<Option<Ty>> = mapped
-                    .iter()
-                    .map(|(logical_idx, ps)| {
-                        if let Some(recv) = o
-                            .call_sig
-                            .lambda_receivers
-                            .get(*logical_idx)
-                            .copied()
-                            .flatten()
-                        {
-                            return Some(recv);
-                        }
-                        if o.call_sig
-                            .lambda_receiver_params
-                            .get(*logical_idx)
-                            .copied()
-                            .unwrap_or(false)
-                        {
-                            return function_input_types(*ps, &binds).first().copied();
-                        }
-                        None
-                    })
-                    .collect();
-                if out.iter().any(Option::is_some) {
-                    return Some(out);
-                }
-            }
-        }
-        None
-    }
 }
 
 // --- Navigation helpers (member/constructor resolution expressed purely against the trait) --------
@@ -2060,7 +1766,7 @@ fn receiver_type_args_match(src: &dyn SymbolSource, decl_recv: Ty, recv: Ty) -> 
         })
 }
 
-fn source_receiver_rank(src: &dyn SymbolSource, recv: Ty, decl_recv: Ty) -> Option<u32> {
+pub(crate) fn source_receiver_rank(src: &dyn SymbolSource, recv: Ty, decl_recv: Ty) -> Option<u32> {
     // Same source type — rung 0. Plain `Ty` equality (interned, NO erasure): the exact receiver an
     // extension is declared on. This is the ONLY rank an ARRAY receiver (`IntArray.sum()`) can carry
     // besides the universal `Any` — an array has no class-name key for the supertype walk below, and its

@@ -5377,6 +5377,332 @@ impl<'a> Checker<'a> {
         )
     }
 
+    /// The federated symbol source (this module SHADOWING the classpath) — the source the resolver's
+    /// receiver-rank / extension-ranking helpers key on. Cheap to build (borrows the two child sources).
+    fn fed_source(&self) -> crate::symbol_source::CompositeSource<'_> {
+        crate::symbol_source::CompositeSource::new(vec![
+            &self.module as &dyn SymbolSource,
+            &*self.syms.libraries as &dyn SymbolSource,
+        ])
+    }
+
+    // Lambda call-SHAPE derivation over the resolver's overload family. These consume
+    // `resolve_symbol(...).overloads()` (the ONE resolution seam) and align the candidates' generic
+    // signatures / call-shape against a PARTIAL argument list (lambda slots not yet typed) — a checker
+    // concern (typing lambda arguments), so it lives here rather than on `SymbolResolver`.
+
+    /// Resolve `receiver.name(lambda)` where the return type binds from the lambda's return. Returns the
+    /// callable plus `is_member` (`true` = instance member → `invokevirtual`; `false` = extension → static
+    /// call with the receiver as `args[0]`).
+    fn lambda_return_overload(
+        &self,
+        receiver: Ty,
+        name: &str,
+        lambda_ret: Ty,
+        arg_tys: &[Ty],
+    ) -> Option<(crate::libraries::LibraryCallable, bool)> {
+        if arg_tys.len() != 1 {
+            return None;
+        }
+        let src = self.fed_source();
+        self.resolver()
+            .resolve_symbol(crate::symbol_resolver::SymRecv::TopLevel, name, &[], &[])
+            .map(crate::symbol_resolver::Symbol::overloads)
+            .unwrap_or_default()
+            .into_iter()
+            .find(|o| {
+                matches!(o.kind, crate::libraries::FnKind::Member | crate::libraries::FnKind::Extension)
+                    && !matches!(o.callable.origin, crate::libraries::Origin::Module { .. })
+                    && o.callable.ret == lambda_ret
+                    && match o.kind {
+                        crate::libraries::FnKind::Extension => o.receiver.is_none_or(|dr| {
+                            crate::symbol_resolver::source_receiver_rank(&src, receiver, dr).is_some()
+                        }),
+                        _ => true,
+                    }
+            })
+            .map(|o| {
+                crate::trace_compiler!(
+                    "resolve",
+                    "lambda-return {name} recv={receiver:?} lambda_ret={lambda_ret:?} -> {}.{}{} kind={:?}",
+                    o.callable.owner,
+                    o.callable.name,
+                    o.callable.descriptor,
+                    o.kind
+                );
+                let is_member = o.kind == crate::libraries::FnKind::Member;
+                (o.callable, is_member)
+            })
+    }
+
+    /// Parameter types for the lambda argument of a call selected by lambda return type
+    /// (`Iterable<T>.sumOf { … }`), read from the selected overload family.
+    fn lambda_return_overload_param_types(&self, receiver: Ty, name: &str) -> Option<Vec<Ty>> {
+        self.resolver()
+            .resolve_symbol(crate::symbol_resolver::SymRecv::TopLevel, name, &[], &[])
+            .map(crate::symbol_resolver::Symbol::overloads)
+            .unwrap_or_default()
+            .iter()
+            .filter(|o| {
+                o.is_extension()
+                    && o.receiver.is_none_or(|dr| {
+                        crate::symbol_resolver::source_receiver_rank(
+                            &*self.syms.libraries,
+                            receiver,
+                            dr,
+                        )
+                        .is_some()
+                    })
+            })
+            .find_map(|o| {
+                let gsig = o.generic_sig.as_ref()?;
+                let mut binds = std::collections::HashMap::new();
+                if let Some(recv_sig) = gsig.receiver {
+                    crate::symbol_resolver::unify_ty(recv_sig, receiver, &mut binds);
+                }
+                gsig.params
+                    .first()
+                    .map(|selector| crate::symbol_resolver::function_input_types(*selector, &binds))
+                    .filter(|params| !params.is_empty())
+            })
+    }
+
+    /// Lambda call-shape facts for a receiver-less top-level call, aligned to the PARTIAL argument list
+    /// (a generic HOF binds lambda parameter types from the already-typed non-lambda args).
+    fn top_level_lambda_shape(
+        &self,
+        name: &str,
+        arg_tys: &[Option<Ty>],
+    ) -> Option<crate::symbol_resolver::TopLevelLambdaShape> {
+        let fs = crate::libraries::FunctionSet {
+            overloads: self
+                .resolver()
+                .resolve_symbol(crate::symbol_resolver::SymRecv::TopLevel, name, &[], &[])
+                .map(crate::symbol_resolver::Symbol::overloads)
+                .unwrap_or_default(),
+        };
+        let has_exact = fs.has_top_level_arity(arg_tys.len());
+        let mut shape = crate::symbol_resolver::TopLevelLambdaShape::default();
+        for o in fs.top_level() {
+            if shape.param_types.is_none() {
+                if let Some(gsig) = o.generic_sig.as_ref() {
+                    if !(has_exact && gsig.params.len() != arg_tys.len()) {
+                        if let Some(map) = crate::symbol_resolver::trailing_default_arg_indices(
+                            gsig.params.len(),
+                            arg_tys,
+                        ) {
+                            let mut binds = std::collections::HashMap::new();
+                            for (ai, at) in arg_tys.iter().enumerate() {
+                                if let (Some(t), Some(ps)) = (at, gsig.params.get(map[ai])) {
+                                    crate::symbol_resolver::unify_ty(*ps, *t, &mut binds);
+                                }
+                            }
+                            let out: Vec<Vec<Ty>> = map
+                                .iter()
+                                .map(|&pi| {
+                                    gsig.params
+                                        .get(pi)
+                                        .map(|ps| {
+                                            crate::symbol_resolver::function_input_types(
+                                                *ps, &binds,
+                                            )
+                                        })
+                                        .unwrap_or_default()
+                                })
+                                .collect();
+                            if out
+                                .iter()
+                                .zip(arg_tys)
+                                .any(|(v, at)| at.is_none() && !v.is_empty())
+                            {
+                                shape.param_types = Some(out);
+                            }
+                        }
+                    }
+                }
+            }
+            if shape.receivers.is_none() {
+                let recvs = &o.call_sig.lambda_receivers;
+                if !(has_exact && recvs.len() != arg_tys.len()) {
+                    if let Some(map) =
+                        crate::symbol_resolver::trailing_default_arg_indices(recvs.len(), arg_tys)
+                    {
+                        let out: Vec<Option<Ty>> = map
+                            .iter()
+                            .map(|&pi| recvs.get(pi).cloned().flatten())
+                            .collect();
+                        if out.iter().any(Option::is_some) {
+                            shape.receivers = Some(out);
+                        }
+                    }
+                }
+            }
+            if shape.materialized.is_none() {
+                let m = &o.call_sig.lambda_materialized;
+                if m.len() == arg_tys.len() && m.iter().any(|b| *b) {
+                    shape.materialized = Some(m.clone());
+                }
+            }
+            if shape.param_types.is_some()
+                && shape.receivers.is_some()
+                && shape.materialized.is_some()
+            {
+                break;
+            }
+        }
+        (shape.param_types.is_some() || shape.receivers.is_some() || shape.materialized.is_some())
+            .then_some(shape)
+    }
+
+    /// Lambda parameter types for an extension call before lambda bodies are typed — binds the selected
+    /// extension's generic signature from the receiver plus already-typed non-lambda args.
+    fn extension_lambda_param_types(
+        &self,
+        receiver: Ty,
+        name: &str,
+        arg_tys: &[Option<Ty>],
+    ) -> Option<Vec<Vec<Ty>>> {
+        let src = self.fed_source();
+        let fs = crate::libraries::FunctionSet {
+            overloads: self
+                .resolver()
+                .resolve_symbol(
+                    crate::symbol_resolver::SymRecv::Value(receiver),
+                    name,
+                    &[],
+                    &[],
+                )
+                .map(crate::symbol_resolver::Symbol::overloads)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(crate::libraries::FunctionInfo::is_extension)
+                .collect(),
+        };
+        for allow_must_inline in [false, true] {
+            for o in crate::symbol_resolver::ranked_extension_overloads_by_recv(
+                &src,
+                receiver,
+                &fs,
+                allow_must_inline,
+            ) {
+                let Some(gsig) = o.generic_sig.as_ref() else {
+                    continue;
+                };
+                let Some(param_indices) = crate::symbol_resolver::trailing_default_arg_indices(
+                    gsig.params.len(),
+                    arg_tys,
+                ) else {
+                    continue;
+                };
+                let mapped: Vec<Ty> = param_indices.iter().map(|&i| gsig.params[i]).collect();
+                let mut binds = std::collections::HashMap::new();
+                if let Some(recv_sig) = gsig.receiver {
+                    crate::symbol_resolver::unify_ty(recv_sig, receiver, &mut binds);
+                }
+                for (ps, at) in mapped.iter().zip(arg_tys) {
+                    if let Some(t) = at {
+                        crate::symbol_resolver::unify_ty(*ps, *t, &mut binds);
+                    }
+                }
+                let out: Vec<Vec<Ty>> = mapped
+                    .iter()
+                    .map(|ps| crate::symbol_resolver::function_input_types(*ps, &binds))
+                    .collect();
+                if out.iter().any(|v| !v.is_empty()) {
+                    return Some(out);
+                }
+            }
+        }
+        None
+    }
+
+    /// Lambda RECEIVER types for an extension call before lambda bodies are typed (a `Recv.() -> R`
+    /// lambda parameter binds its implicit `this`).
+    fn extension_lambda_receivers(
+        &self,
+        receiver: Ty,
+        name: &str,
+        arg_tys: &[Option<Ty>],
+    ) -> Option<Vec<Option<Ty>>> {
+        let src = self.fed_source();
+        let fs = crate::libraries::FunctionSet {
+            overloads: self
+                .resolver()
+                .resolve_symbol(
+                    crate::symbol_resolver::SymRecv::Value(receiver),
+                    name,
+                    &[],
+                    &[],
+                )
+                .map(crate::symbol_resolver::Symbol::overloads)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(crate::libraries::FunctionInfo::is_extension)
+                .collect(),
+        };
+        for allow_must_inline in [false, true] {
+            for o in crate::symbol_resolver::ranked_extension_overloads_by_recv(
+                &src,
+                receiver,
+                &fs,
+                allow_must_inline,
+            ) {
+                let Some(gsig) = o.generic_sig.as_ref() else {
+                    continue;
+                };
+                if gsig.params.is_empty() {
+                    continue;
+                }
+                let Some(param_indices) = crate::symbol_resolver::trailing_default_arg_indices(
+                    gsig.params.len() - 1,
+                    arg_tys,
+                ) else {
+                    continue;
+                };
+                let mapped: Vec<(usize, Ty)> = param_indices
+                    .iter()
+                    .map(|&i| (i, gsig.params[i + 1]))
+                    .collect();
+                let mut binds = std::collections::HashMap::new();
+                crate::symbol_resolver::unify_ty(gsig.params[0], receiver, &mut binds);
+                for ((_, ps), at) in mapped.iter().zip(arg_tys) {
+                    if let Some(t) = at {
+                        crate::symbol_resolver::unify_ty(*ps, *t, &mut binds);
+                    }
+                }
+                let out: Vec<Option<Ty>> = mapped
+                    .iter()
+                    .map(|(logical_idx, ps)| {
+                        if let Some(recv) = o
+                            .call_sig
+                            .lambda_receivers
+                            .get(*logical_idx)
+                            .copied()
+                            .flatten()
+                        {
+                            return Some(recv);
+                        }
+                        if o.call_sig
+                            .lambda_receiver_params
+                            .get(*logical_idx)
+                            .copied()
+                            .unwrap_or(false)
+                        {
+                            return crate::symbol_resolver::function_input_types(*ps, &binds)
+                                .first()
+                                .copied();
+                        }
+                        None
+                    })
+                    .collect();
+                if out.iter().any(Option::is_some) {
+                    return Some(out);
+                }
+            }
+        }
+        None
+    }
+
     // Call-site sugar over the ONE resolution entry point [`SymbolResolver::resolve_symbol`]: each
     // states only the syntax it wrote (a value/type receiver + name + args + a call/read/write/ref
     // form) and reads the discovered [`Symbol`] variant it expects. Resolution itself lives entirely in
@@ -7364,9 +7690,7 @@ impl<'a> Checker<'a> {
             .iter()
             .map(|&x| (!matches!(self.file.expr(x), Expr::Lambda { .. })).then(|| self.expr(x)))
             .collect();
-        let pts = self
-            .resolver()
-            .extension_lambda_param_types(receiver, name, &partial);
+        let pts = self.extension_lambda_param_types(receiver, name, &partial);
         args.iter()
             .enumerate()
             .map(|(i, &x)| match pts.as_ref().and_then(|p| p.get(i)) {
@@ -10678,7 +11002,7 @@ impl<'a> Checker<'a> {
                                 let mut partial: Vec<Option<Ty>> =
                                     arg_tys.iter().map(|t| Some(*t)).collect();
                                 partial[last] = None;
-                                let shape = self.resolver().top_level_lambda_shape(&name, &partial);
+                                let shape = self.top_level_lambda_shape(&name, &partial);
                                 if let Some(pt) = shape
                                     .as_ref()
                                     .and_then(|s| s.param_types.as_ref())
@@ -11195,16 +11519,12 @@ impl<'a> Checker<'a> {
                 } else {
                     None
                 };
-                let ext_lambda_pts: Option<Vec<Vec<Ty>>> =
-                    ext_lambda_partial.as_ref().and_then(|partial| {
-                        self.resolver()
-                            .extension_lambda_param_types(rt, &name, partial)
-                    });
-                let ext_lambda_recvs: Option<Vec<Option<Ty>>> =
-                    ext_lambda_partial.as_ref().and_then(|partial| {
-                        self.resolver()
-                            .extension_lambda_receivers(rt, &name, partial)
-                    });
+                let ext_lambda_pts: Option<Vec<Vec<Ty>>> = ext_lambda_partial
+                    .as_ref()
+                    .and_then(|partial| self.extension_lambda_param_types(rt, &name, partial));
+                let ext_lambda_recvs: Option<Vec<Option<Ty>>> = ext_lambda_partial
+                    .as_ref()
+                    .and_then(|partial| self.extension_lambda_receivers(rt, &name, partial));
                 // Array/`String` `forEach`/`forEachIndexed` have no `Obj` generic signature; supply the
                 // lambda parameter types directly from the element (the index is `Int`).
                 let ext_lambda_pts = ext_lambda_pts.or_else(|| {
@@ -11292,9 +11612,7 @@ impl<'a> Checker<'a> {
                 // method, so the generic-signature passes above miss it — supply the selector's `it` from
                 // the receiver's element type, at the lambda argument's position.
                 let ext_lambda_pts = ext_lambda_pts.or_else(|| {
-                    let params = self
-                        .resolver()
-                        .lambda_return_overload_param_types(rt, &name)?;
+                    let params = self.lambda_return_overload_param_types(rt, &name)?;
                     Some(
                         args.iter()
                             .map(|&a| {
@@ -11760,9 +12078,8 @@ impl<'a> Checker<'a> {
                         None
                     }
                 }) {
-                    if let Some((c, is_member)) = self
-                        .resolver()
-                        .resolve_lambda_return_overload(rt, &name, lam_ret, &arg_tys)
+                    if let Some((c, is_member)) =
+                        self.lambda_return_overload(rt, &name, lam_ret, &arg_tys)
                     {
                         let ret = c.ret;
                         // An instance member has no other lowerer resolution path (records as a member);
@@ -12195,7 +12512,7 @@ impl<'a> Checker<'a> {
                     .as_ref()
                     // A library top-level function only when no user function shadows it.
                     .filter(|_| known_sig.is_none())
-                    .and_then(|partial| self.resolver().top_level_lambda_shape(&fname, partial));
+                    .and_then(|partial| self.top_level_lambda_shape(&fname, partial));
                 let toplevel_lambda_pts: Option<Vec<Vec<Ty>>> = toplevel_lambda_shape
                     .as_ref()
                     .and_then(|shape| shape.param_types.clone())
