@@ -7156,6 +7156,12 @@ fn ref_internal(t: Ty) -> String {
         // Erase a Kotlin built-in name (`kotlin/collections/MutableList`) to its JVM identity here at the
         // bytecode boundary, so `instanceof`/`checkcast`/method-owner refs never leak a Kotlin-only name.
         Ty::Obj(n, _) => crate::jvm::jvm_class_map::to_jvm_internal(n).to_string(),
+        // A function type's reference identity is its `kotlin/jvm/functions/FunctionN` interface, so
+        // `x is Function1<*, *>` / `x as (A) -> B` test/cast against that class, not `Object`.
+        Ty::Fun(_) => t
+            .function_interface_internal()
+            .unwrap_or("java/lang/Object")
+            .to_string(),
         _ => "java/lang/Object".to_string(),
     }
 }

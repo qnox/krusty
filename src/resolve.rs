@@ -3850,6 +3850,22 @@ pub(crate) fn typeref_leaf(r: &TypeRef, recurse: &mut dyn FnMut(&TypeRef) -> Ty)
     if let Some(t) = Ty::from_name(&r.name) {
         return Some(t);
     }
+    // Named functional-interface form `FunctionN<P1, …, PN, R>` — the explicit spelling of the arrow
+    // type `(P1, …, PN) -> R`. Resolve it to the SAME `Ty::Fun` the arrow form yields (last type arg
+    // is the return, the rest are parameters) so `x is Function1<*, *>`, a `val f: Function2<…>`, etc.
+    // all agree with the arrow form. Bare `Function` (no arity) and non-numeric suffixes fall through.
+    if let Some(suffix) = r.name.strip_prefix("Function") {
+        if let Ok(arity) = suffix.parse::<usize>() {
+            // Only `Function0..Function22` are ordinary `kotlin/jvm/functions/FunctionN` interfaces;
+            // higher arities use the distinct big-arity `FunctionN` interface krusty doesn't model, so
+            // leave those to fall through (unresolved → cleanly skipped, never a wrong `Object` test).
+            if arity <= 22 && r.targs.len() == arity + 1 {
+                let params: Vec<Ty> = r.targs[..arity].iter().map(&mut *recurse).collect();
+                let ret = recurse(&r.targs[arity]);
+                return Some(Ty::fun(params, ret));
+            }
+        }
+    }
     Ty::primitive_array_element(&r.name).map(Ty::array)
 }
 
