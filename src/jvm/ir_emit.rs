@@ -724,6 +724,15 @@ fn emit_class(
                     e.emit_value(a, &mut ctor);
                 }
             }
+            // A base whose primary ctor takes a value-class param has a PRIVATE primary; a subclass
+            // `super(…)` must reach it through the PUBLIC|SYNTHETIC `(…args, DefaultConstructorMarker)`
+            // accessor (a trailing `null` marker), never the inaccessible private primary.
+            let super_accessor = e.ir.value_param_ctors.contains(&c.superclass);
+            let mut super_param_tys = super_param_tys.clone();
+            if super_accessor {
+                ctor.aconst_null();
+                super_param_tys.push(Ty::obj("kotlin/jvm/internal/DefaultConstructorMarker"));
+            }
             let aw: i32 = super_param_tys.iter().map(|t| slot_words(*t) as i32).sum();
             let super_init = e.cw.methodref(
                 &c.superclass,
@@ -774,9 +783,13 @@ fn emit_class(
         ctor.ensure_locals(max_slot);
         ctor.link();
         // An `object`'s constructor is private; a `@JvmInline value class`'s is private too (instances are
-        // created via `constructor-impl`/`box-impl`, never `new`); a `C$Companion`'s is package-private (so
-        // the outer class's `<clinit>` can call it without nestmate attributes); a normal class's is public.
-        let ctor_access = if c.is_object || c.is_value {
+        // created via `constructor-impl`/`box-impl`, never `new`); a class whose primary ctor takes a
+        // value-class-typed parameter is private too (kotlinc routes construction through a synthetic
+        // `(…args, DefaultConstructorMarker)` accessor — emitted below); a `C$Companion`'s is
+        // package-private (so the outer class's `<clinit>` can call it without nestmate attributes); a
+        // normal class's is public.
+        let value_param_ctor = ir.value_param_ctors.contains(&c.fq_name);
+        let ctor_access = if c.is_object || c.is_value || value_param_ctor {
             0x0002
         } else if c.is_companion {
             0x0000
@@ -795,6 +808,12 @@ fn emit_class(
         // defaults, then `invokespecial` the real `<init>`).
         if let Some(defaults) = ir.class_ctor_defaults.get(&c.fq_name) {
             emit_ctor_default_stub(ir, &c.fq_name, &param_tys, defaults, &mut cw, bodies);
+        }
+        // A value-class-param primary ctor is private (above); kotlinc exposes a PUBLIC|SYNTHETIC accessor
+        // `<init>(…args, DefaultConstructorMarker)` that simply delegates to it, so Java/reflection can
+        // still construct the class.
+        if value_param_ctor {
+            emit_ctor_marker_accessor(&c.fq_name, &param_tys, &mut cw);
         }
     } // end `if c.has_primary_ctor`
 
@@ -895,6 +914,14 @@ fn emit_class(
                 for &a in &dargs {
                     e.emit_value(a, &mut sctor);
                 }
+            }
+            // A cross-class delegation target (`super(…)` to a base) whose primary ctor takes a value-class
+            // param has a PRIVATE primary — reach it through the `(…args, DefaultConstructorMarker)`
+            // accessor. A same-class `this(…)` to the own private primary stays direct (accessible).
+            let mut target_jvm_tys = target_jvm_tys;
+            if target_class != c.fq_name && e.ir.value_param_ctors.contains(&target_class) {
+                sctor.aconst_null();
+                target_jvm_tys.push(Ty::obj("kotlin/jvm/internal/DefaultConstructorMarker"));
             }
             let aw: i32 = target_jvm_tys.iter().map(|t| slot_words(*t) as i32).sum();
             let delegate_init = e.cw.methodref(
@@ -3301,6 +3328,41 @@ fn emit_ctor_default_stub(
     e.cw.add_method(0x1001 /* PUBLIC | SYNTHETIC */, "<init>", &desc, &code);
 }
 
+/// Emit the PUBLIC|SYNTHETIC accessor `<init>(…args, DefaultConstructorMarker)` for a class whose primary
+/// constructor is private (its parameters mention a value class). It delegates straight to the private
+/// `<init>` — `this` at slot 0, the real params, then the marker (unused); `invokespecial` the primary,
+/// return. Straight-line (no branches ⇒ no StackMapTable). Distinct from the default-arg overload, which
+/// carries the extra `int mask` and fills defaults.
+fn emit_ctor_marker_accessor(owner: &str, real_params: &[Ty], cw: &mut ClassWriter) {
+    let mut slot = 1u16; // slot 0 = `this`
+    let mut param_slots: Vec<(u16, Ty)> = Vec::new();
+    for t in real_params {
+        param_slots.push((slot, *t));
+        slot += slot_words(*t);
+    }
+    let total = slot + 1; // + the marker local
+    let mut code = CodeBuilder::new(total);
+    code.aload(0);
+    for &(pslot, pty) in &param_slots {
+        load(pty, pslot, &mut code);
+    }
+    let init_desc = method_descriptor(real_params, Ty::Unit);
+    let aw: i32 = 1 + real_params
+        .iter()
+        .map(|t| slot_words(*t) as i32)
+        .sum::<i32>();
+    let m = cw.methodref(owner, "<init>", &init_desc);
+    code.invokespecial(m, aw, 0);
+    code.ret_void();
+    code.ensure_locals(total);
+    code.link();
+
+    let mut stub_params = real_params.to_vec();
+    stub_params.push(Ty::obj("kotlin/jvm/internal/DefaultConstructorMarker"));
+    let desc = method_descriptor(&stub_params, Ty::Unit);
+    cw.add_method(0x1001 /* PUBLIC | SYNTHETIC */, "<init>", &desc, &code);
+}
+
 struct Emitter<'a> {
     ir: &'a IrFile,
     cw: &'a mut ClassWriter,
@@ -4518,10 +4580,20 @@ impl<'a> Emitter<'a> {
                 let owner = c.fq_name.clone();
                 // The constructor takes only the parameter fields (primary), or a secondary
                 // constructor's explicit parameter types; body properties are set inside it.
-                let field_tys: Vec<Ty> = match ctor_params {
+                let mut field_tys: Vec<Ty> = match ctor_params {
                     Some(ps) => jvm_tys(ps),
                     None => class_ctor_jvm_tys(c),
                 };
+                // A class whose primary ctor takes a value-class param has a PRIVATE primary + a
+                // PUBLIC|SYNTHETIC accessor `(…args, DefaultConstructorMarker)`. Construction from ANOTHER
+                // class must route through the accessor (a trailing `null` marker) — the private primary is
+                // inaccessible. Same-class construction (a secondary ctor, `box-impl`) keeps the primary.
+                let use_accessor = ctor_params.is_none()
+                    && self.owner != owner
+                    && self.ir.value_param_ctors.contains(&owner);
+                if use_accessor {
+                    field_tys.push(Ty::obj("kotlin/jvm/internal/DefaultConstructorMarker"));
+                }
                 let args = args.clone();
                 let aw: i32 = field_tys.iter().map(|t| slot_words(*t) as i32).sum();
                 let desc = method_descriptor(&field_tys, Ty::Unit);
@@ -4538,6 +4610,9 @@ impl<'a> Emitter<'a> {
                     for &(_, _, key) in &temps {
                         self.slots.remove(&key);
                     }
+                    if use_accessor {
+                        code.aconst_null();
+                    }
                     let m = self.cw.methodref(&owner, "<init>", &desc);
                     code.invokespecial(m, aw, 0);
                 } else {
@@ -4546,6 +4621,9 @@ impl<'a> Emitter<'a> {
                     code.dup();
                     for &a in &args {
                         self.emit_value(a, code);
+                    }
+                    if use_accessor {
+                        code.aconst_null();
                     }
                     let m = self.cw.methodref(&owner, "<init>", &desc);
                     code.invokespecial(m, aw, 0);
