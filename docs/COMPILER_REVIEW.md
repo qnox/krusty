@@ -3262,3 +3262,8 @@ Array size/get/set, string concatenation fallback, and `Any.toString`/`hashCode`
 
 The next cross-file cleanup routed serializer helpers, sibling-file property accessors, and sibling-file
 top-level calls through `emit_cross_file_call`; several raw virtual calls now reuse `emit_virtual_call`.
+
+### Virtual Call Emitter Sweep
+
+Progression accessors, delegated local property access, classpath property setters, safe calls, and
+selected operator-invoke paths now share `emit_virtual_call` instead of rebuilding `Callee::Virtual`.
