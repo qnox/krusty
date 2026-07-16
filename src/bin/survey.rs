@@ -5,7 +5,6 @@ use krusty::jvm::classpath::Classpath;
 use krusty::jvm::ir_emit::emit_all;
 use krusty::jvm::jvm_libraries::JvmLibraries;
 use krusty::jvm::names::file_class_name;
-use krusty::jvm::value_classes::lower_value_classes;
 use krusty::lexer::lex;
 use krusty::resolve::{check_file, collect_signatures_with_cp};
 use std::collections::HashMap;
@@ -84,21 +83,27 @@ fn first_error(src: &str, cp: &Rc<Classpath>, stem: &str) -> Option<String> {
         Some(ir) => ir,
         None => return Some(format!("lower: {}", krusty::ir_lower::lower_bail_reason())),
     };
-    emit_checked_ir(&mut ir, &facade, cp)
+    emit_checked_ir(&mut ir, &files[0], &facade, &syms, cp)
 }
 
-fn emit_checked_ir(ir: &mut IrFile, facade: &str, cp: &Rc<Classpath>) -> Option<String> {
-    let vc_lib = krusty::jvm::jvm_libraries::JvmLibraries::new(cp.clone());
-    let vc_resolver = krusty::symbol_resolver::SymbolResolver::new_scoped(&vc_lib, &[]);
-    if !lower_value_classes(ir, &vc_resolver) {
-        return Some("lower: value-class shape not lowered".into());
+fn emit_checked_ir(
+    ir: &mut IrFile,
+    file: &krusty::ast::File,
+    facade: &str,
+    syms: &krusty::resolve::SymbolTable,
+    cp: &Rc<Classpath>,
+) -> Option<String> {
+    // Shared post-lowering pass pipeline (jvm/backend.rs) — one definition, so the survey's skip
+    // reasons track exactly what the shipping backend declines.
+    match krusty::jvm::backend::run_backend_passes(ir, file, facade, syms) {
+        Err(krusty::jvm::backend::SkipReason::ValueClasses) => {
+            return Some("lower: value-class shape not lowered".into())
+        }
+        Err(krusty::jvm::backend::SkipReason::Suspend) => {
+            return Some("lower: suspend-function shape not lowered".into())
+        }
+        Ok(()) => {}
     }
-    if !krusty::jvm::suspend::lower_suspend(ir, facade) {
-        return Some("lower: suspend-function shape not lowered".into());
-    }
-    // Mirror the real backend's post-transform passes (jvm/backend.rs).
-    krusty::jvm::ir_emit::mark_must_inline_lambdas(ir);
-    krusty::jvm::ir_emit::reparent_lambda_impls(ir);
     match emit_all(ir, facade, &**cp, None) {
         Some(o) if !o.is_empty() => None,
         _ => Some(
@@ -162,7 +167,7 @@ fn first_error_with_coroutine_helpers(src: &str, cp: &Rc<Classpath>, stem: &str)
             Some(ir) => ir,
             None => return Some(format!("lower: {}", krusty::ir_lower::lower_bail_reason())),
         };
-        if let Some(err) = emit_checked_ir(&mut ir, &facade, cp) {
+        if let Some(err) = emit_checked_ir(&mut ir, file, &facade, &syms, cp) {
             return Some(err);
         }
     }
