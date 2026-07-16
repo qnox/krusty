@@ -210,12 +210,14 @@ fn splice_return_blocks(ir: &mut IrFile, b: ExprId) {
                 index,
                 ty,
                 init: Some(inner),
+                named,
             } => value_block(ir, inner).map(|(bs, bv)| {
                 new_stmts.extend(bs);
                 ir.add_expr(IrExpr::Variable {
                     index,
                     ty,
                     init: Some(bv),
+                    named,
                 })
             }),
             IrExpr::SetValue { var, value: inner } => value_block(ir, inner).map(|(bs, bv)| {
@@ -282,6 +284,7 @@ fn desugar_tail_suspend(ir: &mut IrFile, b: ExprId, suspend_set: &HashSet<u32>, 
                     index: tmp,
                     ty: ret_ty.clone(),
                     init: Some(e),
+                    named: false,
                 });
                 let get = ir.add_expr(IrExpr::GetValue(tmp));
                 let ret = ir.add_expr(IrExpr::Return(Some(get)));
@@ -333,6 +336,7 @@ fn desugar_value_try(ir: &mut IrFile, b: ExprId, suspend_set: &HashSet<u32>, ret
                     index: tmp,
                     ty: *ret_ty,
                     init: Some(dflt),
+                    named: false,
                 });
                 let new_body = assign_branch_to_tmp(ir, body, tmp, ret_ty, suspend_set);
                 let new_catches: Vec<crate::ir::IrCatch> = catches
@@ -398,6 +402,7 @@ fn desugar_value_when(ir: &mut IrFile, b: ExprId, suspend_set: &HashSet<u32>, re
                     index: tmp,
                     ty: *ret_ty,
                     init: Some(dflt),
+                    named: false,
                 });
                 let new_branches: Branches = branches
                     .into_iter()
@@ -458,6 +463,7 @@ fn assign_branch_to_tmp(
                 index: fresh,
                 ty: *ty,
                 init: Some(v),
+                named: false,
             });
             let get = ir.add_expr(IrExpr::GetValue(fresh));
             let set = ir.add_expr(IrExpr::SetValue {
@@ -621,8 +627,9 @@ fn hoist_stmt(
             init: Some(i),
             index,
             ty,
+            named,
         } if matches!(ir.exprs[*i as usize], IrExpr::When { .. }) => {
-            let (i, index, ty) = (*i, *index, *ty);
+            let (i, index, ty, named) = (*i, *index, *ty, *named);
             // `val a = if (susp()) x else y` — hoist the CONDITION suspension to a preceding temp, then
             // re-bind `a` to the When with the hoisted condition. A branch VALUE that suspends stays for
             // the flattener's `stmt_cond_suspension` (`val a = when { … -> susp() }`), which this arm still
@@ -633,6 +640,7 @@ fn hoist_stmt(
                         index,
                         ty,
                         init: Some(nw),
+                        named,
                     });
                     out.push(nv);
                 }
@@ -707,6 +715,7 @@ fn hoist_expr(
             index: tmp,
             ty,
             init: Some(e),
+            named: false,
         });
         prelude.push(var);
         return ir.add_expr(IrExpr::GetValue(tmp));
@@ -736,13 +745,19 @@ fn hoist_expr(
             };
             e
         }
-        IrExpr::Variable { index, ty, init } => {
+        IrExpr::Variable {
+            index,
+            ty,
+            init,
+            named,
+        } => {
             if let Some(i) = init {
                 let ni = hoist_expr(ir, i, suspend_set, orig_rets, prelude);
                 ir.exprs[e as usize] = IrExpr::Variable {
                     index,
                     ty,
                     init: Some(ni),
+                    named,
                 };
             }
             e
@@ -1063,6 +1078,7 @@ fn normalize_block_inits(ir: &mut IrFile, b: ExprId) {
             index,
             ref ty,
             init: Some(init),
+            named,
         } = ir.exprs[s as usize].clone()
         {
             if let IrExpr::Block {
@@ -1084,6 +1100,7 @@ fn normalize_block_inits(ir: &mut IrFile, b: ExprId) {
                         index,
                         ty: ty.clone(),
                         init: Some(inner),
+                        named,
                     });
                     out.push(nv);
                     continue;
@@ -1219,6 +1236,58 @@ fn build_state_machine(ir: &mut IrFile, facade: &str, fid: u32, b: ExprId, unit_
     head_writes.sort_unstable();
     head_writes.dedup();
     reads.retain(|idx| param_ty(*idx).is_some() || head_writes.binary_search(idx).is_ok());
+    // Named source variables declared anywhere in the body — the kotlinc scope-spill rule (below)
+    // applies only to these; a compiler temp follows pure liveness.
+    let mut named_vars: HashSet<u32> = HashSet::new();
+    collect_named_vars(ir, b, &mut named_vars);
+    // The coarse rule above keeps any local read at-or-after the FIRST suspending statement, but a
+    // COMPILER TEMP (elvis/safe-call materialization, a suspension hoist) is a value kotlinc holds
+    // on the operand stack — no `L$N` slot — unless a suspension genuinely sits between its write
+    // and a read. Statement-level crossing check: a suspension inside the temp's OWN initializer
+    // runs BEFORE the store (no read crosses it); a suspending statement strictly between the write
+    // statement and a read statement DOES cross; a read inside a suspending statement other than
+    // that proven-safe binding shape has unknowable intra-statement order — keep conservatively.
+    // (Named source variables keep the coarse treatment; kotlinc spills them by SCOPE anyway.)
+    let susp_outside_init = |wst: ExprId, idx: u32| -> bool {
+        let in_stmt = count_suspensions(ir, wst, &suspend_set);
+        let in_init =
+            find_var_init(ir, wst, idx).map_or(0, |init| count_suspensions(ir, init, &suspend_set));
+        in_stmt != in_init
+    };
+    reads.retain(|&idx| {
+        if param_ty(idx).is_some() || named_vars.contains(&idx) {
+            return true;
+        }
+        let Some(wi) = stmts.iter().position(|&st| stmt_writes(ir, st, idx)) else {
+            return true;
+        };
+        for (ri, &st) in stmts.iter().enumerate() {
+            if ri < wi || !expr_reads(ir, st, idx) {
+                continue;
+            }
+            if ri == wi {
+                // Read and write share a statement: safe only when every suspension in it is the
+                // temp's own initializer (evaluated before the store).
+                if susp_outside_init(st, idx) {
+                    return true;
+                }
+                continue;
+            }
+            // A suspending statement strictly between the write and this read → the value crosses.
+            if stmts[wi + 1..ri]
+                .iter()
+                .any(|&s2| expr_calls_suspend(ir, s2, &suspend_set))
+            {
+                return true;
+            }
+            // The write statement suspends outside the initializer, or the read statement itself
+            // suspends — intra-statement order unknown, keep.
+            if susp_outside_init(stmts[wi], idx) || expr_calls_suspend(ir, st, &suspend_set) {
+                return true;
+            }
+        }
+        false
+    });
     // kotlinc spills every named REFERENCE param/local IN SCOPE at a suspension point — regardless of
     // liveness (an unused param still gets an `L$N` slot) — excluding the binding of the LAST suspension
     // itself (not yet in scope there). Union that scope set with the liveness set above (which keeps
@@ -1234,8 +1303,11 @@ fn build_state_machine(ir: &mut IrFile, facade: &str, fid: u32, b: ExprId, unit_
     for &s in &stmts[..last_susp] {
         collect_live_writes(ir, s, &suspend_set, &mut scope_writes);
     }
+    // The scope rule covers NAMED source variables only: a compiler temp (elvis/safe-call
+    // materialization) is a value kotlinc holds on the operand stack — empty across a suspension
+    // unless still needed — so temps follow pure liveness (the `reads` set above).
     for w in scope_writes {
-        if find_local_ty(ir, b, w).is_some_and(|t| t.is_reference()) {
+        if named_vars.contains(&w) && find_local_ty(ir, b, w).is_some_and(|t| t.is_reference()) {
             spill_idx.push(w);
         }
     }
@@ -1401,6 +1473,7 @@ fn build_state_machine(ir: &mut IrFile, facade: &str, fid: u32, b: ExprId, unit_
             index: cont_v,
             ty: cont_ty.clone(),
             init: Some(get_or_create),
+            named: false,
         },
     );
     let suspended_call = k(
@@ -1422,6 +1495,7 @@ fn build_state_machine(ir: &mut IrFile, facade: &str, fid: u32, b: ExprId, unit_
             index: suspended_v,
             ty: object_ty(),
             init: Some(suspended_call),
+            named: false,
         },
     );
 
@@ -1434,6 +1508,7 @@ fn build_state_machine(ir: &mut IrFile, facade: &str, fid: u32, b: ExprId, unit_
             index: r_v,
             ty: object_ty(),
             init: Some(r_init),
+            named: false,
         },
     ));
     let is_param = |local: u32| param_caps.iter().any(|(p, _)| *p == local);
@@ -1467,6 +1542,7 @@ fn build_state_machine(ir: &mut IrFile, facade: &str, fid: u32, b: ExprId, unit_
                 index: local,
                 ty,
                 init: Some(init),
+                named: false,
             }
         };
         loop_stmts.push(k(ir, restore));
@@ -1758,6 +1834,7 @@ fn build_lambda_state_machine(
             index: suspended_v,
             ty: object_ty(),
             init: Some(suspended_call),
+            named: false,
         },
     );
 
@@ -1770,6 +1847,7 @@ fn build_lambda_state_machine(
             index: r_v,
             ty: object_ty(),
             init: Some(r_init),
+            named: false,
         },
     ));
     for (local, ty) in spilled.clone() {
@@ -1782,6 +1860,7 @@ fn build_lambda_state_machine(
                 index: local,
                 ty,
                 init: Some(init),
+                named: false,
             },
         ));
     }
@@ -1881,6 +1960,7 @@ fn build_lambda_state_machine(
                 index: 2 + i,
                 ty: cap_ty,
                 init: Some(getf_c),
+                named: false,
             },
         ));
     }
@@ -2035,6 +2115,7 @@ impl Flat<'_> {
             index: vv,
             ty: object_ty(),
             init: Some(call),
+            named: false,
         });
         out.push(var);
         let vr = self.gv(vv);
@@ -2084,6 +2165,7 @@ impl Flat<'_> {
                 index: local,
                 ty: ty.clone(),
                 init: Some(unb),
+                named: false,
             }));
         }
     }
@@ -2157,6 +2239,7 @@ impl Flat<'_> {
                 index,
                 ty,
                 init: Some(init),
+                ..
             } => is_suspend_call(self.ir, *init, self.suspend)
                 .then(|| (Some((*index, ty.clone())), *init)),
             _ => is_suspend_call(self.ir, stmt, self.suspend).then_some((None, stmt)),
@@ -2169,6 +2252,7 @@ impl Flat<'_> {
             index,
             ty,
             init: Some(init),
+            ..
         } = &self.ir.exprs[stmt as usize]
         else {
             return None;
@@ -2254,6 +2338,7 @@ impl Flat<'_> {
                         index: local,
                         ty: ty.clone(),
                         init: Some(*value),
+                        named: false,
                     }));
                 }
                 self.mark_assigned(local);
@@ -2358,6 +2443,7 @@ impl Flat<'_> {
                 index,
                 ty,
                 init: Some(init),
+                named,
             } = self.ir.exprs[stmt as usize].clone()
             {
                 if let IrExpr::Block {
@@ -2373,6 +2459,7 @@ impl Flat<'_> {
                             index,
                             ty,
                             init: Some(bv),
+                            named,
                         });
                         let mut spliced = bs;
                         spliced.push(rebind);
@@ -2803,6 +2890,80 @@ fn collect_reads(ir: &IrFile, e: ExprId, out: &mut Vec<u32>) {
 /// within the same iteration, so it never carries a value across the enclosing suspension; spilling such a
 /// local mis-frames the structural loop's back-edge. A write inside a SUSPENDING loop IS live (loop-carried
 /// across the inner suspension), so descend there.
+/// Whether the subtree under `e` writes local `idx` (declares it or `SetValue`s it).
+fn stmt_writes(ir: &IrFile, e: ExprId, idx: u32) -> bool {
+    match ir.exprs[e as usize] {
+        IrExpr::Variable { index, .. } if index == idx => return true,
+        IrExpr::SetValue { var, .. } if var == idx => return true,
+        _ => {}
+    }
+    let mut found = false;
+    for_each_child(&ir.exprs, e, &mut |c| {
+        if stmt_writes(ir, c, idx) {
+            found = true;
+        }
+    });
+    found
+}
+
+/// Whether the subtree under `e` reads local `idx` (a `GetValue(idx)` node).
+fn expr_reads(ir: &IrFile, e: ExprId, idx: u32) -> bool {
+    if matches!(ir.exprs[e as usize], IrExpr::GetValue(i) if i == idx) {
+        return true;
+    }
+    let mut found = false;
+    for_each_child(&ir.exprs, e, &mut |c| {
+        if expr_reads(ir, c, idx) {
+            found = true;
+        }
+    });
+    found
+}
+
+/// The initializer of the `IrExpr::Variable { index: idx, .. }` declaration under `e`, if any.
+fn find_var_init(ir: &IrFile, e: ExprId, idx: u32) -> Option<ExprId> {
+    if let IrExpr::Variable { index, init, .. } = ir.exprs[e as usize] {
+        if index == idx {
+            return init;
+        }
+    }
+    let mut found = None;
+    for_each_child(&ir.exprs, e, &mut |c| {
+        if found.is_none() {
+            found = find_var_init(ir, c, idx);
+        }
+    });
+    found
+}
+
+/// The number of suspend-call nodes in the subtree under `e`.
+fn count_suspensions(ir: &IrFile, e: ExprId, suspend_set: &HashSet<u32>) -> usize {
+    let mut n = usize::from(is_suspend_call(ir, e, suspend_set));
+    for_each_child(&ir.exprs, e, &mut |c| {
+        n += count_suspensions(ir, c, suspend_set);
+    });
+    n
+}
+
+/// Every NAMED source variable (`IrExpr::Variable { named: true, .. }`) declared anywhere under `e`
+/// — the set the suspend scope-spill rule applies to (compiler temps follow pure liveness).
+fn collect_named_vars(ir: &IrFile, e: ExprId, out: &mut HashSet<u32>) {
+    let mut stack = vec![e];
+    let mut seen: HashSet<u32> = HashSet::new();
+    while let Some(cur) = stack.pop() {
+        if !seen.insert(cur) {
+            continue;
+        }
+        if let IrExpr::Variable {
+            index, named: true, ..
+        } = ir.exprs[cur as usize]
+        {
+            out.insert(index);
+        }
+        for_each_child(&ir.exprs, cur, &mut |c| stack.push(c));
+    }
+}
+
 fn collect_live_writes(ir: &IrFile, e: ExprId, suspend_set: &HashSet<u32>, out: &mut Vec<u32>) {
     match ir.exprs[e as usize].clone() {
         IrExpr::Variable { index, init, .. } => {
@@ -2897,6 +3058,7 @@ fn build_get_or_create(
             index: tmp,
             ty: *cont_ty,
             init: Some(new),
+            named: false,
         })];
         for &(local, field) in param_caps {
             let recv = ir.add_expr(IrExpr::GetValue(tmp));
