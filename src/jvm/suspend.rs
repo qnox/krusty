@@ -1403,19 +1403,7 @@ fn build_state_machine(ir: &mut IrFile, facade: &str, fid: u32, b: ExprId, unit_
             init: Some(get_or_create),
         },
     );
-    let suspended_call = k(
-        ir,
-        IrExpr::Call {
-            callee: Callee::Static {
-                owner: "kotlin/coroutines/intrinsics/IntrinsicsKt".to_string(),
-                name: "getCOROUTINE_SUSPENDED".to_string(),
-                descriptor: "()Ljava/lang/Object;".to_string(),
-                inline: InlineKind::None,
-            },
-            dispatch_receiver: None,
-            args: vec![],
-        },
-    );
+    let suspended_call = coroutine_suspended(ir);
     let var_suspended = k(
         ir,
         IrExpr::Variable {
@@ -1739,19 +1727,7 @@ fn build_lambda_state_machine(
             value: result_param,
         },
     );
-    let suspended_call = k(
-        ir,
-        IrExpr::Call {
-            callee: Callee::Static {
-                owner: "kotlin/coroutines/intrinsics/IntrinsicsKt".to_string(),
-                name: "getCOROUTINE_SUSPENDED".to_string(),
-                descriptor: "()Ljava/lang/Object;".to_string(),
-                inline: InlineKind::None,
-            },
-            dispatch_receiver: None,
-            args: vec![],
-        },
-    );
+    let suspended_call = coroutine_suspended(ir);
     let var_suspended = k(
         ir,
         IrExpr::Variable {
@@ -3013,6 +2989,35 @@ pub(crate) fn zero_value(ir: &mut IrFile, ty: &Ty) -> ExprId {
     ir.add_expr(IrExpr::Const(c))
 }
 
+fn add_static_call(
+    ir: &mut IrFile,
+    owner: &str,
+    name: &str,
+    descriptor: &str,
+    args: Vec<ExprId>,
+) -> ExprId {
+    ir.add_expr(IrExpr::Call {
+        callee: Callee::Static {
+            owner: owner.to_string(),
+            name: name.to_string(),
+            descriptor: descriptor.to_string(),
+            inline: InlineKind::None,
+        },
+        dispatch_receiver: None,
+        args,
+    })
+}
+
+fn coroutine_suspended(ir: &mut IrFile) -> ExprId {
+    add_static_call(
+        ir,
+        "kotlin/coroutines/intrinsics/IntrinsicsKt",
+        "getCOROUTINE_SUSPENDED",
+        "()Ljava/lang/Object;",
+        vec![],
+    )
+}
+
 fn build_continuation_class(
     ir: &mut IrFile,
     internal: &str,
@@ -3140,16 +3145,7 @@ fn build_continuation_class(
                 );
                 let mut aargs = vec![recv];
                 aargs.extend(reentry_args);
-                ir.add_expr(IrExpr::Call {
-                    callee: Callee::Static {
-                        owner: owner.to_string(),
-                        name: access_name,
-                        descriptor: adesc,
-                        inline: crate::libraries::InlineKind::None,
-                    },
-                    dispatch_receiver: None,
-                    args: aargs,
-                })
+                add_static_call(ir, owner, &access_name, &adesc, aargs)
             } else {
                 ir.add_expr(IrExpr::Call {
                     callee: Callee::Virtual {
@@ -3288,16 +3284,13 @@ fn build_continuation_class(
 /// `kotlin.ResultKt.throwOnFailure(result)` — propagates a failed resume (a no-op on a normal value).
 fn throw_on_failure(ir: &mut IrFile, result_v: u32) -> ExprId {
     let r = ir.add_expr(IrExpr::GetValue(result_v));
-    ir.add_expr(IrExpr::Call {
-        callee: Callee::Static {
-            owner: "kotlin/ResultKt".to_string(),
-            name: "throwOnFailure".to_string(),
-            descriptor: "(Ljava/lang/Object;)V".to_string(),
-            inline: InlineKind::None,
-        },
-        dispatch_receiver: None,
-        args: vec![r],
-    })
+    add_static_call(
+        ir,
+        "kotlin/ResultKt",
+        "throwOnFailure",
+        "(Ljava/lang/Object;)V",
+        vec![r],
+    )
 }
 
 /// Wrap the state-dispatch `when` in `try { <dispatch> } catch (Throwable e) { when(this.label) {
