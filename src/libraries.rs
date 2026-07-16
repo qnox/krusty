@@ -1,16 +1,6 @@
-//! Platform-neutral library data shared by [`crate::symbol_source::SymbolSource`] providers. A source is
-//! the common denominator a front end needs from compiled libraries: the type universe and the *shape* of
-//! each type and top-level callable, whether the libraries are a JVM classpath (bytecode `.class` jars)
-//! or a klib (IR).
+//! Library metadata shared by symbol sources.
 //!
-//! The resolver and IR lowering depend **only** on this trait, never on the JVM backend: every
-//! `java/lang/…` name, descriptor parse, and classpath read lives behind a concrete implementation
-//! (`jvm::jvm_libraries::JvmLibraries`). Swapping in a klib-backed `SymbolSource` would let the same
-//! front end target Kotlin/JS without touching `resolve`/`ir_lower`.
-//!
-//! The surface is deliberately Kotlin-semantic — there is no "static" (a `Type.foo()` call is a
-//! companion-object member; a top-level/extension call is a package-level callable). The JVM
-//! realization of those (invokestatic on a facade, `@JvmStatic`, descriptors) lives in the impl.
+//! [`SemanticPlatform`] is for resolution and checking. [`TargetRuntime`] is for lowering and emit.
 
 use crate::types::Ty;
 pub use crate::types::Visibility;
@@ -157,27 +147,24 @@ pub enum RuntimeCtor {
     AssertionError,
 }
 
-/// Target/runtime services used after resolution, mostly by common IR lowering. This is deliberately
-/// separate from [`crate::symbol_source::SymbolSource`]: the resolver should see declarations and
-/// semantic library metadata, while target runtime class names/descriptors live here.
-pub trait TargetRuntime {
-    /// Runtime interface/class used to represent a function value of `arity` on this platform.
+/// Source-level services exposed by compiled libraries.
+pub trait SemanticPlatform: crate::symbol_source::SymbolSource {
+    /// Semantic interface/class used by the platform libraries to model a function value of `arity`.
     fn function_type(&self, _arity: usize) -> Option<Ty> {
         None
     }
 
-    /// The value-class underlying type for a semantic type, when this target knows it. The default has
-    /// no value classes; a platform provider recovers the erased underlying from its type metadata plus
+    /// The value-class underlying type for a semantic type, when this source knows it. The default has
+    /// no value classes; a library provider recovers the underlying from its type metadata plus
     /// any builtins whose source type is not represented as `Ty::Obj` (`UInt` → `Int`).
     fn value_underlying(&self, _ty: Ty) -> Option<Ty> {
         None
     }
 
-    /// Normalize a semantic type to the identity a target ABI uses when matching a call argument against
-    /// a library parameter. Targets that do not need ABI normalization return the type unchanged.
-    /// Reference (`Ty::Obj`) types are normalized and arrays recurse into their element; primitives,
-    /// `String`, and function types already compare exactly across the two sides.
-    fn abi_value_form(&self, ty: Ty) -> Ty {
+    /// Normalize a semantic type to the identity used when comparing source call arguments against
+    /// compiled-library signatures. This is not an emit descriptor; it is a semantic compatibility key.
+    /// Implementations that do not need library-name normalization return the type unchanged.
+    fn library_value_form(&self, ty: Ty) -> Ty {
         ty
     }
 
@@ -190,7 +177,7 @@ pub trait TargetRuntime {
     /// receiver-agnostic `resolve_symbols` overload (which carries no rung). Default: apply only on an exact
     /// type match (a target with no supertype model).
     fn extension_receiver_rank(&self, recv: Ty, decl_recv: Ty) -> Option<u32> {
-        (self.abi_value_form(recv) == self.abi_value_form(decl_recv)).then_some(0)
+        (self.library_value_form(recv) == self.library_value_form(decl_recv)).then_some(0)
     }
 
     /// If values of this type can be invoked like a Kotlin function, return their arity. Plain
@@ -226,6 +213,42 @@ pub trait TargetRuntime {
         None
     }
 
+    /// Resolve a built-in type's SIMPLE name (`List`, `Map`, `Comparable`) to its front-end internal
+    /// name, when the local type-reference resolver has no classpath/import context. The source owns
+    /// this because built-in identity may come from compiled library metadata.
+    /// `None` for a name that is not a platform/library built-in.
+    fn builtin_type_internal(&self, _simple_name: &str) -> Option<String> {
+        None
+    }
+
+    /// Whether a supertype (given by its front-end internal name) is a collection interface whose
+    /// element-access members a concrete class must bridge to. This is a semantic declaration fact
+    /// recovered from the library source; a backend later decides how to emit the bridge.
+    fn is_collection_interface(&self, _supertype_internal: &str) -> bool {
+        false
+    }
+
+    /// The accessor name a collection interface expects for a Kotlin collection PROPERTY
+    /// (`size` → `size`, `keys` → `keySet`). Kept semantic here because source checking/lowering must
+    /// identify the required member; descriptor construction stays in the backend ABI.
+    fn collection_property_accessor(&self, _property: &str) -> Option<String> {
+        None
+    }
+
+    /// The reified type-parameter formal NAMES a compiled generic signature declares, in order. The
+    /// source parses its own metadata/signature format; consumers bind names without parsing backend text.
+    fn signature_formal_names(&self, _signature: &str) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// Element type for platform iterable/range/progression values.
+    fn iterable_element_type(&self, _internal: &str) -> Option<Ty> {
+        None
+    }
+}
+
+/// Backend runtime/ABI services used by lowering and emit.
+pub trait TargetRuntime {
     /// Runtime implementation class constructed for a property reference on this platform.
     fn property_reference_impl(&self, _arity: usize, _mutable: bool) -> Option<PlatformCtor> {
         None
@@ -251,34 +274,6 @@ pub trait TargetRuntime {
     /// Platform method descriptor for lowered IR parameter and return types.
     fn method_descriptor(&self, _params: &[Ty], _ret: Ty) -> Option<String> {
         None
-    }
-
-    /// Resolve a built-in type's SIMPLE name (`List`, `Map`, `Comparable`) to its front-end internal
-    /// name, when the local type-reference resolver has no classpath/import context. The platform owns
-    /// this because built-in identity (and the read-only/mutable collection split) is target-defined.
-    /// `None` for a name that is not a platform built-in.
-    fn builtin_type_internal(&self, _simple_name: &str) -> Option<String> {
-        None
-    }
-
-    /// Whether a supertype (given by its front-end internal name) is a platform collection interface
-    /// whose element-access members a concrete class must bridge to. Drives collection accessor-bridge
-    /// synthesis; `false` on targets without such mapped interfaces.
-    fn is_collection_interface(&self, _supertype_internal: &str) -> bool {
-        false
-    }
-
-    /// The physical accessor a mapped collection interface expects for a Kotlin collection PROPERTY
-    /// (`size` → `size`, `keys` → `keySet`). `None` when the property needs no distinct accessor bridge.
-    fn collection_property_accessor(&self, _property: &str) -> Option<String> {
-        None
-    }
-
-    /// The reified type-parameter formal NAMES a platform generic signature declares, in order — used to
-    /// bind an inline function's reified formals to resolved type arguments. Empty when the platform has
-    /// no such signature encoding or the signature declares none.
-    fn signature_formal_names(&self, _signature: &str) -> Vec<String> {
-        Vec::new()
     }
 
     /// Runtime superclass used for synthesized function references on this platform.
@@ -366,9 +361,9 @@ pub trait TargetRuntime {
     }
 }
 
-pub trait CompilerPlatform: crate::symbol_source::SymbolSource + TargetRuntime {}
+pub trait CompilerPlatform: SemanticPlatform + TargetRuntime {}
 
-impl<T> CompilerPlatform for T where T: crate::symbol_source::SymbolSource + TargetRuntime {}
+impl<T> CompilerPlatform for T where T: SemanticPlatform + TargetRuntime {}
 
 impl LibraryMember {
     pub fn new(name: String, params: Vec<Ty>, ret: Ty, descriptor: String) -> Self {
@@ -1214,6 +1209,7 @@ pub fn coroutine_intrinsic(name: &str) -> Option<CoroutineIntrinsic> {
 pub struct EmptySymbolSource;
 
 impl crate::symbol_source::SymbolSource for EmptySymbolSource {}
+impl SemanticPlatform for EmptySymbolSource {}
 impl TargetRuntime for EmptySymbolSource {}
 
 #[cfg(test)]
@@ -1341,5 +1337,19 @@ mod tests {
             Some("getId-abc123")
         );
         assert!(t.value_class_property("missing").is_none());
+    }
+
+    #[test]
+    fn semantic_platform_does_not_require_runtime_abi() {
+        struct SemanticOnly;
+        impl crate::symbol_source::SymbolSource for SemanticOnly {}
+        impl super::SemanticPlatform for SemanticOnly {
+            fn platform_default_import_packages(&self) -> &'static [&'static str] {
+                &["kotlin"]
+            }
+        }
+
+        let source: &dyn super::SemanticPlatform = &SemanticOnly;
+        assert_eq!(source.platform_default_import_packages(), &["kotlin"]);
     }
 }

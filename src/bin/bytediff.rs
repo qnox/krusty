@@ -46,7 +46,8 @@ fn krusty_compile(src: &str, stem: &str, cp: &Rc<Classpath>) -> Option<Vec<(Stri
         return None;
     }
     let facade = file_class_name(stem, files[0].package.as_deref());
-    let mut ir = lower_file(&files[0], &info, &syms)?;
+    let runtime = JvmLibraries::new(cp.clone());
+    let mut ir = lower_file(&files[0], &info, &syms, &runtime)?;
     let vc_module = krusty::module_symbols::ModuleSymbols::new(&syms);
     let vc_resolver = krusty::symbol_resolver::SymbolResolver::new_scoped_with_module(
         &*syms.libraries,

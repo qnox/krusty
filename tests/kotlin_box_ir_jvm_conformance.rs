@@ -240,7 +240,8 @@ fn compile_source(
 
     let t4 = std::time::Instant::now();
     // Lower the checked file to krusty-ir, then emit JVM bytecode (the sole codegen path).
-    let mut ir = match lower_file(file, &info, &syms) {
+    let runtime = krusty::jvm::jvm_libraries::JvmLibraries::new(cp.clone());
+    let mut ir = match lower_file(file, &info, &syms, &runtime) {
         Some(ir) => ir,
         None => {
             T_EMIT.fetch_add(t4.elapsed().as_nanos() as u64, Ordering::Relaxed);
@@ -463,7 +464,8 @@ fn compile_blocks(
             return None;
         }
         let facade = file_class_name(&blocks[i].0, file.package.as_deref());
-        let mut ir = lower_file(file, &info, &syms)?;
+        let runtime = krusty::jvm::jvm_libraries::JvmLibraries::new(cp.clone());
+        let mut ir = lower_file(file, &info, &syms, &runtime)?;
         if !{
             let vc_module = krusty::module_symbols::ModuleSymbols::new(&syms);
             let vc_resolver = krusty::symbol_resolver::SymbolResolver::new_scoped_with_module(

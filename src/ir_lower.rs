@@ -17,8 +17,8 @@ use crate::ir::{
 };
 use crate::jvm::names::{property_getter_name, property_setter_name};
 use crate::libraries::{
-    CompilerPlatform, CountedLoopInfo, InlineKind, LibraryCallable, LibraryMember,
-    PlatformAccessor, PlatformCtor, RuntimeCtor, RuntimeOp,
+    CountedLoopInfo, InlineKind, LibraryCallable, LibraryMember, PlatformAccessor, PlatformCtor,
+    RuntimeCtor, RuntimeOp, SemanticPlatform, TargetRuntime,
 };
 use crate::resolve::{
     CtorDefaultValue, ExprLowering, InvokeKind, LambdaCapture, ResolvedCall, Signature,
@@ -88,11 +88,17 @@ impl LibraryDispatch {
 }
 
 /// Lower a checked file to IR, or `None` if it uses anything outside the core subset.
-pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Option<IrFile> {
+pub fn lower_file(
+    file: &ast::File,
+    info: &TypeInfo,
+    syms: &SymbolTable,
+    runtime: &dyn TargetRuntime,
+) -> Option<IrFile> {
     let mut lo = Lower {
         afile: file,
         info,
         syms,
+        runtime,
         fn_scope: crate::resolve::function_scope_packages(file, syms),
         ir: IrFile {
             package: file.package.clone(),
@@ -1295,17 +1301,17 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                                 let im_params: Option<Vec<_>> = im
                                     .params
                                     .iter()
-                                    .map(|t| lo.syms.libraries.type_descriptor(*t))
+                                    .map(|t| lo.runtime.type_descriptor(*t))
                                     .collect();
                                 let cm_params: Option<Vec<_>> = cm
                                     .params
                                     .iter()
-                                    .map(|t| lo.syms.libraries.type_descriptor(*t))
+                                    .map(|t| lo.runtime.type_descriptor(*t))
                                     .collect();
                                 if im.params.len() != cm.params.len()
                                     || im_params? != cm_params?
-                                    || lo.syms.libraries.type_descriptor(im.ret)?
-                                        != lo.syms.libraries.type_descriptor(cm.ret)?
+                                    || lo.runtime.type_descriptor(im.ret)?
+                                        != lo.runtime.type_descriptor(cm.ret)?
                                 {
                                     return None; // would need a bridge — skip, never miscompile
                                 }
@@ -1354,7 +1360,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                         // base in this file fills them with no cross-file `ExprId` deref.
                         let sargs = plan
                             .iter()
-                            .map(|dv| ctor_default_to_ir(&mut lo.ir, &*lo.syms.libraries, dv))
+                            .map(|dv| ctor_default_to_ir(&mut lo.ir, lo.runtime, dv))
                             .collect::<Option<Vec<_>>>()?;
                         (base_internal, sargs)
                     } else {
@@ -1576,11 +1582,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 // capture needs a shared mutable cell, otherwise the captured value.
                 let mut params: Vec<Ty> = Vec::new();
                 for cap in &local_fun.captures {
-                    params.push(captured_param_ir(
-                        &*lo.syms.libraries,
-                        cap.ty,
-                        cap.shared_cell,
-                    )?);
+                    params.push(captured_param_ir(lo.runtime, cap.ty, cap.shared_cell)?);
                 }
                 params.extend(local_fun.sig.params.iter().map(|t| stored_value_ty(*t)));
                 let ret = ty_to_ir(local_fun.sig.ret);
@@ -1989,8 +1991,8 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                         };
                         for (pname, sty, base_is_var) in sc.props.clone() {
                             if let Some((own_ty, own_is_var)) = lo.syms.prop_of(&internal, &pname) {
-                                let sty_desc = lo.syms.libraries.type_descriptor(sty)?;
-                                let own_desc = lo.syms.libraries.type_descriptor(own_ty)?;
+                                let sty_desc = lo.runtime.type_descriptor(sty)?;
+                                let own_desc = lo.runtime.type_descriptor(own_ty)?;
                                 if sty_desc != own_desc {
                                     let gname = property_getter_name(&pname);
                                     let super_ret = lo
@@ -2421,7 +2423,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                         let sname = property_setter_name(&p.name);
                         let (_, set_fid, _) = lo.classes[&internal].methods[&sname];
                         let sv = lo.syms.method_of(&delegate_internal, "setValue")?;
-                        let sv_desc = lo.syms.libraries.method_descriptor(&sv.params, sv.ret)?;
+                        let sv_desc = lo.runtime.method_descriptor(&sv.params, sv.ret)?;
                         let this_e = lo.emit_get_value(0);
                         let dele = lo.emit_get_field(this_e, class_id, field_idx);
                         let this_arg = lo.emit_get_value(0);
@@ -2433,7 +2435,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                         let value_arg = match sv.params.last() {
                             Some(vp)
                                 if vp.is_reference()
-                                    && lo.syms.libraries.scalar_value_repr(prop_ty).is_some() =>
+                                    && lo.runtime.scalar_value_repr(prop_ty).is_some() =>
                             {
                                 lo.emit_type_op(
                                     IrTypeOp::ImplicitCoercion,
@@ -2571,7 +2573,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                             .collect();
                     let sargs = defaults
                         .iter()
-                        .map(|dv| ctor_default_to_ir(&mut lo.ir, &*lo.syms.libraries, dv))
+                        .map(|dv| ctor_default_to_ir(&mut lo.ir, lo.runtime, dv))
                         .collect::<Option<Vec<_>>>()?;
                     lo.ir.classes[class_id as usize].super_args = sargs;
                 }
@@ -3699,8 +3701,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
             // own nullable-boxing codegen — erasing them to `int`/`long` would break it. Derived from the
             // unsigned `Ty` variants (their box-type internal names), not a hardcoded class-name list.
             let native_unsigned = [Ty::UInt, Ty::ULong].into_iter().any(|u| {
-                lo.syms
-                    .libraries
+                lo.runtime
                     .unsigned_integer_box_type(u)
                     .and_then(|b| b.obj_internal())
                     == Some(fq.as_str())
@@ -3723,7 +3724,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 // underlying stays the unboxed primitive (`value class Count(val n: Int)` → `int`). The
                 // unsigned builtins (`UInt`/`ULong`) never reach here — they are `Ty` variants, not `Obj`,
                 // so `referenced` (obj-internal names only) excludes them, keeping their dedicated handling.
-                let ir_under = match lo.syms.libraries.scalar_value_repr(under) {
+                let ir_under = match lo.runtime.scalar_value_repr(under) {
                     Some(scalar) => ty_to_ir(scalar),
                     None => Ty::nullable(ty_to_ir(under)),
                 };
@@ -3758,7 +3759,7 @@ fn collect_tparams(
     names: &[String],
     bounds: &[(String, ast::TypeRef)],
     non_null: &std::collections::HashSet<String>,
-    plat: &dyn CompilerPlatform,
+    plat: &dyn SemanticPlatform,
 ) -> Vec<(String, Ty, bool)> {
     names
         .iter()
@@ -3779,7 +3780,7 @@ fn collect_tparams(
 fn class_tparams(
     file: &ast::File,
     c: &ast::ClassDecl,
-    plat: &dyn CompilerPlatform,
+    plat: &dyn SemanticPlatform,
 ) -> Vec<(String, Ty, bool)> {
     // A value/inline class's generic underlying (`value class Foo<T : String>(val x: T)`) has a
     // box/unbox erasure krusty doesn't model — an `as T` there must keep bailing (skip the file),
@@ -4234,7 +4235,7 @@ fn body_prop_ty(
     file: &ast::File,
     info: &TypeInfo,
     p: &ast::PropDecl,
-    plat: &dyn CompilerPlatform,
+    plat: &dyn SemanticPlatform,
 ) -> Ty {
     let ty = if let Some(r) = p.ty.as_ref() {
         let base = ty_of(file, r, plat);
@@ -4273,7 +4274,7 @@ fn body_prop_ir_ty(
     file: &ast::File,
     info: &TypeInfo,
     p: &ast::PropDecl,
-    plat: &dyn CompilerPlatform,
+    plat: &dyn SemanticPlatform,
 ) -> Ty {
     let ir = ty_to_ir(body_prop_ty(file, info, p, plat));
     if p.ty.as_ref().is_some_and(|r| r.nullable) {
@@ -4352,9 +4353,9 @@ pub(crate) struct Lower<'a> {
     afile: &'a ast::File,
     info: &'a TypeInfo,
     syms: &'a SymbolTable,
-    /// The import-scoped package list for unqualified top-level/extension resolution — the same scope
-    /// the checker uses, so the lowerer resolves `@JvmName`-mangled library families identically. Built
-    /// once at construction; a scoped [`SymbolResolver`] is the ONE seam for library callable lookup.
+    runtime: &'a dyn TargetRuntime,
+    /// Import-scoped package list for unqualified top-level and extension resolution. The checker and
+    /// lowerer use the same scope so `@JvmName`-mangled library families resolve identically.
     fn_scope: Vec<String>,
     ir: IrFile,
     /// Top-level function ids keyed by (name, parameter types) so overloads (same name,
@@ -4544,15 +4545,13 @@ impl<'a> Lower<'a> {
             .find_map(|k| self.ext_prop_set_ids.get(&k).copied())
     }
 
-    /// The import-scoped [`SymbolResolver`] — the ONE seam the lowerer uses to look up library callables
-    /// (top-level, extension, member) instead of the raw receiver-indexed `functions()` query.
+    /// Import-scoped resolver used for library top-level, extension, and member lookups.
     fn resolver(&self) -> crate::symbol_resolver::SymbolResolver<'_> {
         crate::symbol_resolver::SymbolResolver::new_scoped(&*self.syms.libraries, &self.fn_scope)
     }
 
-    // Call-site sugar over the ONE resolution entry point [`SymbolResolver::resolve_symbol`]: the
-    // lowerer states only the syntax (a value/type receiver + name + args + a call/read/ref form) and
-    // reads the discovered [`Symbol`] variant it expects. Resolution lives in `resolve_symbol`.
+    // Call-site wrappers around `resolve_symbol`: the lowerer supplies syntax and reads the expected
+    // `Symbol` variant from the resolver.
     fn resolve_instance_member(
         &self,
         recv: Ty,
@@ -4983,7 +4982,7 @@ impl<'a> Lower<'a> {
             return None;
         }
         if let Some(gv) = self.syms.method_of(delegate_internal, "getValue") {
-            let desc = self.syms.libraries.method_descriptor(&gv.params, gv.ret)?;
+            let desc = self.runtime.method_descriptor(&gv.params, gv.ret)?;
             return Some((
                 delegate_internal.to_string(),
                 desc,
@@ -5005,7 +5004,7 @@ impl<'a> Lower<'a> {
     }
 
     fn scalar_value_repr(&self, ty: Ty) -> Option<Ty> {
-        self.syms.libraries.scalar_value_repr(ty)
+        self.runtime.scalar_value_repr(ty)
     }
 
     fn has_scalar_value_repr(&self, ty: Ty) -> bool {
@@ -5037,7 +5036,7 @@ impl<'a> Lower<'a> {
     }
 
     fn unsigned_integer_box_type(&self, ty: Ty) -> Option<Ty> {
-        self.syms.libraries.unsigned_integer_box_type(ty)
+        self.runtime.unsigned_integer_box_type(ty)
     }
 
     fn scalar_one_const(&self, ty: Ty) -> Option<IrConst> {
@@ -5107,7 +5106,7 @@ impl<'a> Lower<'a> {
     /// internal of a reference type (`kotlin/String` → `java/lang/String`), or the array descriptor used
     /// verbatim as a class constant (`Array<Any>::class` → `[Ljava/lang/Object;`).
     fn class_literal_ldc_internal(&self, ty: Ty) -> Option<String> {
-        let d = self.syms.libraries.type_descriptor(ty)?;
+        let d = self.runtime.type_descriptor(ty)?;
         Some(
             match d.strip_prefix('L').and_then(|s| s.strip_suffix(';')) {
                 Some(inner) => inner.to_string(),
@@ -5127,7 +5126,7 @@ impl<'a> Lower<'a> {
     }
 
     fn runtime_call(&mut self, op: RuntimeOp, ty: Ty, args: Vec<u32>) -> Option<u32> {
-        let c = self.syms.libraries.runtime_callable(op, ty)?;
+        let c = self.runtime.runtime_callable(op, ty)?;
         Some(self.emit_library_static_call(c, args, false))
     }
 
@@ -5168,7 +5167,7 @@ impl<'a> Lower<'a> {
             return Some(self.coerce_generic_read(mc, call_expr, ret));
         }
         let m = self.resolve_instance(&internal, name, &self.arg_tys(args))?;
-        let field = self.syms.libraries.object_instance_field(&internal)?;
+        let field = self.runtime.object_instance_field(&internal)?;
         let recv = self.platform_static_field(field);
         let mut a = Vec::new();
         for (i, &arg) in args.iter().enumerate() {
@@ -5184,7 +5183,7 @@ impl<'a> Lower<'a> {
     }
 
     fn mutable_local_ref_type(&self, elem: Ty) -> Option<Ty> {
-        self.syms.libraries.mutable_local_ref_type(elem)
+        self.runtime.mutable_local_ref_type(elem)
     }
 
     /// The `Ref` element type for a mutable value-class local captured by a closure. A value class is
@@ -5194,22 +5193,18 @@ impl<'a> Lower<'a> {
     /// value through the `Ref` (and `x!!` unboxes it).
     fn shared_cell_elem_ty(&self, kty: Ty) -> Ty {
         match self.value_class_underlying(kty) {
-            Some(u) if kty.is_nullable() && self.syms.libraries.scalar_value_repr(u).is_none() => {
-                kty
-            }
+            Some(u) if kty.is_nullable() && self.runtime.scalar_value_repr(u).is_none() => kty,
             Some(u) => u,
             None => kty,
         }
     }
 
     fn property_reference_impl(&self, arity: usize, mutable: bool) -> Option<PlatformCtor> {
-        self.syms.libraries.property_reference_impl(arity, mutable)
+        self.runtime.property_reference_impl(arity, mutable)
     }
 
     fn property_reference_signature(&self, getter_name: &str, ret: Ty) -> Option<String> {
-        self.syms
-            .libraries
-            .property_reference_signature(getter_name, ret)
+        self.runtime.property_reference_signature(getter_name, ret)
     }
 
     fn library_type_is_interface(&self, internal: &str) -> bool {
@@ -5739,7 +5734,7 @@ impl<'a> Lower<'a> {
             .and_then(|t| t.value_underlying)
         {
             if let [source_arg] = args {
-                let desc = self.syms.libraries.method_descriptor(&[under], under)?;
+                let desc = self.runtime.method_descriptor(&[under], under)?;
                 let arg = self.lower_arg(*source_arg, &ty_to_ir(under))?;
                 return Some(self.emit_static_call(
                     internal.to_string(),
@@ -5763,8 +5758,7 @@ impl<'a> Lower<'a> {
             {
                 let marker = Ty::obj("kotlin/jvm/internal/DefaultConstructorMarker");
                 let desc = self
-                    .syms
-                    .libraries
+                    .runtime
                     .method_descriptor(&[under, Ty::Int, marker], under)?;
                 let dummy = self.emit_const(IrConst::Null);
                 let mask = self.emit_const(IrConst::Int(1));
@@ -7274,7 +7268,7 @@ impl<'a> Lower<'a> {
         }
         for (mname, params, ret) in methods {
             let params_ir = tys_to_ir(&params);
-            let descriptor = self.syms.libraries.method_descriptor(&params, ret)?;
+            let descriptor = self.runtime.method_descriptor(&params, ret)?;
             let field = self.this_field(class_id, delegate_idx);
             let args: Vec<u32> = (0..params.len())
                 .map(|i| self.emit_get_value(i as u32 + 1))
@@ -7308,8 +7302,7 @@ impl<'a> Lower<'a> {
     /// target value-class type, then `unbox-impl`.
     fn unbox_unsigned(&mut self, val: u32, ty: Ty) -> Option<u32> {
         let c = self
-            .syms
-            .libraries
+            .runtime
             .runtime_callable(RuntimeOp::UnsignedUnbox, ty)?;
         let owner_ty = Ty::obj(&c.owner);
         let owner = owner_ty.obj_internal()?;
@@ -8578,6 +8571,12 @@ impl<'a> Lower<'a> {
         // elsewhere.
         if name == "compareTo" && self.has_scalar_value_repr(lt) {
             let at = self.info.ty(arg);
+            if lt == Ty::Char && at == Ty::Char {
+                let pir = ty_to_ir(Ty::Int);
+                let l = self.lower_arg(recv, &pir)?;
+                let r = self.lower_arg(arg, &pir)?;
+                return self.runtime_call(RuntimeOp::PrimitiveCompare, Ty::Int, vec![l, r]);
+            }
             if let Some(p) =
                 Ty::promote(lt, at).filter(|p| self.has_scalar_value_repr(*p) && *p != Ty::Boolean)
             {
@@ -9722,8 +9721,7 @@ impl<'a> Lower<'a> {
     ) -> Option<u32> {
         let synth_fq = class_internal(self.afile, &format!("{}$fnref${}", self.cur_fn_name, uniq));
         let superclass = self
-            .syms
-            .libraries
+            .runtime
             .function_reference_impl_type()?
             .obj_internal()?
             .to_string();
@@ -10580,11 +10578,7 @@ impl<'a> Lower<'a> {
         callable: &crate::libraries::LibraryCallable,
         args: &[AstExprId],
     ) -> Option<u32> {
-        if !self
-            .syms
-            .libraries
-            .is_reified_assert_fails_with_default(callable)
-        {
+        if !self.runtime.is_reified_assert_fails_with_default(callable) {
             return None;
         }
         let expected = self
@@ -10608,10 +10602,7 @@ impl<'a> Lower<'a> {
             ret: Ty::obj("kotlin/Any"),
         });
         let msg = self.ir_const_str("Expected an exception to be thrown.".to_string());
-        let assertion_ctor = self
-            .syms
-            .libraries
-            .runtime_ctor(RuntimeCtor::AssertionError)?;
+        let assertion_ctor = self.runtime.runtime_ctor(RuntimeCtor::AssertionError)?;
         let assertion =
             self.emit_new_external(assertion_ctor.internal, assertion_ctor.ctor_desc, vec![msg]);
         let throw_assertion = self.emit_throw(assertion);
@@ -10712,9 +10703,7 @@ impl<'a> Lower<'a> {
             return None;
         }
         let descriptor = if callable.descriptor.is_empty() {
-            self.syms
-                .libraries
-                .method_descriptor(&callable.params, Ty::Unit)?
+            self.runtime.method_descriptor(&callable.params, Ty::Unit)?
         } else {
             callable.descriptor.clone()
         };
@@ -12538,7 +12527,7 @@ impl<'a> Lower<'a> {
                     return Some(self.emit_virtual_call(
                         ld.delegate_internal.clone(),
                         "setValue".to_string(),
-                        self.syms.libraries.method_descriptor(&sv.params, sv.ret)?,
+                        self.runtime.method_descriptor(&sv.params, sv.ret)?,
                         false,
                         dele,
                         vec![null_a, pref, val],
@@ -13344,7 +13333,7 @@ impl<'a> Lower<'a> {
         // generic loop once that shape is supplied.
         if let Some(loop_info) = it_ty
             .obj_internal()
-            .and_then(|internal| self.syms.libraries.counted_loop_info(internal))
+            .and_then(|internal| self.runtime.counted_loop_info(internal))
         {
             return if loop_info.step.is_some() {
                 self.lower_foreach_progression(name, iterable, body, it_ty, loop_info, label)
@@ -15403,7 +15392,7 @@ impl<'a> Lower<'a> {
                 // recorded it; read `getstatic <internal>.INSTANCE`.
                 if let Some(ExprLowering::ObjectValue { internal }) = self.info.expr_lowers.get(&e)
                 {
-                    let field = self.syms.libraries.object_instance_field(internal)?;
+                    let field = self.runtime.object_instance_field(internal)?;
                     return Some(self.platform_static_field(field));
                 }
                 // A class NAME with a typed `companion object` used as a VALUE (`val c: I = C`): read its
@@ -15414,7 +15403,7 @@ impl<'a> Lower<'a> {
                     if let Some(cls) = self.syms.classes.get(&n) {
                         let comp_internal = format!("{}$Companion", cls.internal);
                         if self.syms.class_by_internal(&comp_internal).is_some() {
-                            let field = self.syms.libraries.companion_instance_field(
+                            let field = self.runtime.companion_instance_field(
                                 &cls.internal,
                                 &comp_internal,
                                 "Companion",
@@ -15436,8 +15425,7 @@ impl<'a> Lower<'a> {
                         self.emit_virtual_call(
                             ld.delegate_internal.clone(),
                             "getValue".to_string(),
-                            self.syms
-                                .libraries
+                            self.runtime
                                 .method_descriptor(&ld.getvalue_sig.params, ld.getvalue_sig.ret)?,
                             false,
                             dele,
@@ -15534,7 +15522,7 @@ impl<'a> Lower<'a> {
                         self.emit_external_static_field(
                             facade,
                             n.clone(),
-                            self.syms.libraries.type_descriptor(ty)?,
+                            self.runtime.type_descriptor(ty)?,
                         )
                     } else {
                         // A top-level property from ANOTHER file → call its facade's `getX()` (the field is
@@ -15720,7 +15708,7 @@ impl<'a> Lower<'a> {
                 // `getstatic <Outer$Nested>.INSTANCE`.
                 if let Some(ExprLowering::ObjectValue { internal }) = self.info.expr_lowers.get(&e)
                 {
-                    let field = self.syms.libraries.object_instance_field(internal)?;
+                    let field = self.runtime.object_instance_field(internal)?;
                     return Some(self.platform_static_field(field));
                 }
                 // A classpath EXTENSION property recorded by the checker (`d.elementDescriptors`) →
@@ -15751,7 +15739,7 @@ impl<'a> Lower<'a> {
                         .and_then(|c| c.fields.iter().find(|f| f.name == *name))
                     {
                         let descriptor =
-                            format!("(){}", self.syms.libraries.ir_type_descriptor(field.ty)?);
+                            format!("(){}", self.runtime.ir_type_descriptor(field.ty)?);
                         let a = self.expr(receiver)?;
                         return Some(self.emit_virtual_call(
                             internal.to_string(),
@@ -15836,7 +15824,7 @@ impl<'a> Lower<'a> {
                         return Some(self.emit_external_static_field(
                             internal,
                             name.clone(),
-                            self.syms.libraries.type_descriptor(*cty)?,
+                            self.runtime.type_descriptor(*cty)?,
                         ));
                     }
                     // `Kind.PENDING` on a CLASSPATH enum → `getstatic <internal>.PENDING:L<internal>;`.
@@ -15889,7 +15877,7 @@ impl<'a> Lower<'a> {
                 let rt = self.recv_ty(receiver);
                 // `e.ordinal` / `e.name` on an enum value: dispatched on the receiver's STATIC type while
                 // the platform owns the inherited accessor's physical name/descriptor.
-                if let Some(accessor) = self.syms.libraries.enum_member_accessor(&name) {
+                if let Some(accessor) = self.runtime.enum_member_accessor(&name) {
                     if let Some(ci) = self.class_of(rt) {
                         let cid = ci.id as usize;
                         if !self.ir.classes[cid].enum_entries.is_empty() {
@@ -16481,7 +16469,7 @@ impl<'a> Lower<'a> {
                 use crate::ast::RangeKind;
                 let lt = self.info.ty(lo);
                 let rt = self.info.ty(hi);
-                let range = self.syms.libraries.range_construction(lt, rt)?;
+                let range = self.runtime.range_construction(lt, rt)?;
                 let lo_v = self.lower_arg(lo, &ty_to_ir(range.elem))?;
                 let hi_v = self.lower_arg(hi, &ty_to_ir(range.elem))?;
                 match kind {
@@ -17066,7 +17054,7 @@ impl<'a> Lower<'a> {
                             Expr::Call { args, .. } => args,
                             _ => return None,
                         };
-                        let recv_field = self.syms.libraries.companion_instance_field(
+                        let recv_field = self.runtime.companion_instance_field(
                             &cf.class_internal,
                             &cf.companion_internal,
                             &cf.companion_field,
@@ -18176,9 +18164,7 @@ impl<'a> Lower<'a> {
                                         sup.clone(),
                                         false,
                                         sig.params.clone(),
-                                        self.syms
-                                            .libraries
-                                            .method_descriptor(&sig.params, sig.ret)?,
+                                        self.runtime.method_descriptor(&sig.params, sig.ret)?,
                                     ))
                                 } else {
                                     self.resolve_instance(sup, &name, &arg_tys).map(|m| {
@@ -18208,10 +18194,8 @@ impl<'a> Lower<'a> {
                                 };
                                 let iface = iface.clone();
                                 let sig = self.syms.method_of(&iface, &name)?;
-                                let descriptor = self
-                                    .syms
-                                    .libraries
-                                    .method_descriptor(&sig.params, sig.ret)?;
+                                let descriptor =
+                                    self.runtime.method_descriptor(&sig.params, sig.ret)?;
                                 (iface, true, sig.params.clone(), descriptor)
                             }
                         };
@@ -18327,7 +18311,7 @@ impl<'a> Lower<'a> {
                         let iterable = rty.array_elem().is_some()
                             || rty == Ty::String
                             || rty.obj_internal().map_or(false, |i| {
-                                self.syms.libraries.counted_loop_info(i).is_some()
+                                self.runtime.counted_loop_info(i).is_some()
                                     || self.resolve_instance(i, "iterator", &[]).is_some()
                                     || self.has_library_iterator_extension(receiver)
                             });
@@ -19485,7 +19469,7 @@ fn top_level_const_string_d(file: &ast::File, name: &str, depth: u32) -> Option<
 /// object singleton → `getstatic <internal>.INSTANCE`.
 fn ctor_default_to_ir(
     ir: &mut IrFile,
-    runtime: &dyn CompilerPlatform,
+    runtime: &dyn TargetRuntime,
     dv: &CtorDefaultValue,
 ) -> Option<ExprId> {
     let e = match dv {
@@ -20358,7 +20342,7 @@ fn class_applied_annotations(
 fn class_generic_sig(
     file: &ast::File,
     c: &ast::ClassDecl,
-    libraries: &dyn CompilerPlatform,
+    libraries: &dyn SemanticPlatform,
     class_names: &crate::resolve::ClassNames,
 ) -> Option<crate::ir::IrGenericSig> {
     // A CLASS with a PARAMETERIZED supertype (`object O : Operation<Result<Int>>`): carry the superclass
@@ -20474,7 +20458,7 @@ fn class_field_tparams(c: &ast::ClassDecl) -> Vec<(String, String)> {
 fn fn_generic_sig(
     file: &ast::File,
     f: &ast::FunDecl,
-    libraries: &dyn CompilerPlatform,
+    libraries: &dyn SemanticPlatform,
 ) -> Option<crate::ir::IrGenericSig> {
     if f.type_params.is_empty() {
         return None;
@@ -20513,7 +20497,7 @@ fn type_param_bounds_ir(
     file: &ast::File,
     names: &[String],
     bounds: &[(String, ast::TypeRef)],
-    libraries: &dyn CompilerPlatform,
+    libraries: &dyn SemanticPlatform,
 ) -> Option<Vec<(String, Ty)>> {
     let any = || Ty::obj("kotlin/Any");
     let mut out = Vec::with_capacity(names.len());
@@ -20523,8 +20507,7 @@ fn type_param_bounds_ir(
             Some((_, b)) if b.name == "Any" && !b.nullable => any(),
             // A primitive bound (`T : Int`) is specialized; its Signature bound is the boxed wrapper.
             Some((_, b))
-                if Ty::from_name(&b.name)
-                    .is_some_and(|t| libraries.scalar_value_repr(t).is_some()) =>
+                if Ty::from_name(&b.name).is_some_and(|t| t.scalar_value_repr().is_some()) =>
             {
                 ty_to_ir(Ty::from_name(&b.name).unwrap())
             }
@@ -20560,7 +20543,7 @@ fn ref_uses_tparam(r: &ast::TypeRef, tps: &[String]) -> bool {
 /// the outer and inner element types). `ty_of`/`ty_to_ir` erase a general `Obj`'s args; this rebuilds them
 /// recursively from the source `TypeRef` so the serialization extension can derive a nested element
 /// serializer (`ListSerializer(ListSerializer(StringSerializer))`). Additive metadata on the type only.
-fn field_ty_with_args(file: &ast::File, tr: &ast::TypeRef, plat: &dyn CompilerPlatform) -> Ty {
+fn field_ty_with_args(file: &ast::File, tr: &ast::TypeRef, plat: &dyn SemanticPlatform) -> Ty {
     let base = ty_to_ir(ty_of(file, tr, plat));
     // Rebuild the non-null type with recursively-preserved type arguments, then re-apply the source `?`
     // from the `TypeRef` (`ty_of` strips it from a reference type) — so a nullable element `String?` keeps
@@ -20583,7 +20566,7 @@ fn field_ty_with_args(file: &ast::File, tr: &ast::TypeRef, plat: &dyn CompilerPl
     }
 }
 
-fn ty_of(file: &ast::File, r: &ast::TypeRef, plat: &dyn CompilerPlatform) -> Ty {
+fn ty_of(file: &ast::File, r: &ast::TypeRef, plat: &dyn SemanticPlatform) -> Ty {
     // Function type, builtin scalar, or primitive array — the leaf shared by every type resolver.
     if let Some(t) = crate::resolve::typeref_leaf(r, &mut |x| ty_of(file, x, plat)) {
         // Nullable primitives/Unit are reference slots consistent with the checker.

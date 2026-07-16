@@ -1,19 +1,17 @@
 //! Call resolution — the binding layer that sits *above* a [`SymbolSource`].
 //!
-//! A [`SymbolSource`] is a pure, arg-INDEPENDENT metadata oracle: given a name (and optional receiver)
+//! A [`SymbolSource`] is an argument-independent metadata oracle: given a name (and optional receiver)
 //! it returns every overload with its raw signature and flags ([`crate::libraries::FunctionSet`]). It
 //! does no overload selection and no type-variable binding.
 //!
-//! [`SymbolResolver`] is the arg-DEPENDENT layer on top: given the actual argument types at a call site
-//! it selects the right overload and binds the generic receiver/parameter/return types. It is platform
-//! agnostic — it only ever talks to the oracle through the [`SymbolSource`] trait, so the same binding
-//! logic serves every backend (JVM today, JS later). The platform-specific bits (parsing a backend's
-//! generic-signature string into a signature `Ty`) live behind the trait; the binding *algorithm* over
-//! those `Ty` nodes lives here.
+//! [`SymbolResolver`] is the arg-dependent layer on top: given the actual argument types at a call site
+//! it selects the right overload and binds generic receiver/parameter/return types. It uses
+//! [`crate::libraries::SemanticPlatform`] for source-level library facts; backend descriptors and runtime
+//! ABI are not part of resolution.
 
 use crate::libraries::{
-    best_overload, CompilerPlatform, FnKind, FunctionInfo, FunctionSet, GenericSig, InlineKind,
-    LibraryCallable, LibraryMember, Origin, PropKind,
+    best_overload, FnKind, FunctionInfo, FunctionSet, GenericSig, InlineKind, LibraryCallable,
+    LibraryMember, Origin, PropKind, SemanticPlatform,
 };
 use crate::symbol_source::SymbolSource;
 use crate::types::Ty;
@@ -46,9 +44,8 @@ impl crate::assignable::TypeOracle for SourceOracle<'_> {
     }
 }
 
-/// [`crate::assignable::TypeOracle`] over a [`CompilerPlatform`]: adds value-class underlying and the
-/// target ABI class identity that library subtype checks rely on.
-pub(crate) struct PlatformOracle<'a>(pub &'a dyn CompilerPlatform);
+/// [`crate::assignable::TypeOracle`] over a [`SemanticPlatform`].
+pub(crate) struct PlatformOracle<'a>(pub &'a dyn SemanticPlatform);
 
 impl crate::assignable::TypeOracle for PlatformOracle<'_> {
     fn direct_supertypes(&self, internal: &str) -> Vec<String> {
@@ -63,7 +60,7 @@ impl crate::assignable::TypeOracle for PlatformOracle<'_> {
     fn canonical_class(&self, internal: &str) -> String {
         platform_class_identity(
             self.0
-                .abi_value_form(Ty::obj(internal))
+                .library_value_form(Ty::obj(internal))
                 .obj_internal()
                 .unwrap_or(internal),
         )
@@ -274,7 +271,7 @@ pub(crate) fn arg_fits(p: &Ty, a: &Ty) -> bool {
         || matches!((p, a), (Ty::Obj(pi, _), Ty::Obj(ai, _)) if pi == ai)
 }
 
-fn arg_fits_platform(lib: &dyn CompilerPlatform, param: &Ty, arg: &Ty) -> bool {
+fn arg_fits_platform(lib: &dyn SemanticPlatform, param: &Ty, arg: &Ty) -> bool {
     arg_fits(param, arg)
         || param
             .fun_arity()
@@ -359,11 +356,9 @@ fn callable_with_return(c: &LibraryCallable, ret: Ty, default_call: bool) -> Lib
 /// The arg-dependent binding layer over a [`SymbolSource`]: it selects overloads and binds generics for
 /// a specific call site. Holds the oracle by reference — cheap to construct per query.
 pub struct SymbolResolver<'a> {
-    /// The classpath platform — used ONLY for `TargetRuntime`/emit concerns (descriptors, value-class
-    /// underlying, receiver-rank). Symbol RESOLUTION never goes through it directly; it goes through `src`.
-    lib: &'a dyn CompilerPlatform,
-    /// The aggregated resolution source: the current MODULE over the CLASSPATH (module shadows a library
-    /// declaration of the same name). Every `resolve_symbols`/`resolve_type` query federates both.
+    /// Source-level library facts used during resolution.
+    lib: &'a dyn SemanticPlatform,
+    /// The aggregated resolution source: module declarations shadow library declarations of the same name.
     src: crate::symbol_source::CompositeSource<'a>,
     /// The packages in scope for TOP-LEVEL function resolution (same-package, star/explicit imports,
     /// defaults). `None` disables the filter (a context with no import scope — signature inference).
@@ -531,7 +526,7 @@ impl Symbol {
 }
 
 impl<'a> SymbolResolver<'a> {
-    pub fn new(lib: &'a dyn CompilerPlatform) -> Self {
+    pub fn new(lib: &'a dyn SemanticPlatform) -> Self {
         SymbolResolver {
             lib,
             src: crate::symbol_source::CompositeSource::new(vec![lib as &dyn SymbolSource]),
@@ -540,7 +535,7 @@ impl<'a> SymbolResolver<'a> {
     }
 
     /// A resolver whose top-level function resolution is restricted to `fn_scope`'s packages.
-    pub fn new_scoped(lib: &'a dyn CompilerPlatform, fn_scope: &'a [String]) -> Self {
+    pub fn new_scoped(lib: &'a dyn SemanticPlatform, fn_scope: &'a [String]) -> Self {
         SymbolResolver {
             lib,
             src: crate::symbol_source::CompositeSource::new(vec![lib as &dyn SymbolSource]),
@@ -550,7 +545,7 @@ impl<'a> SymbolResolver<'a> {
 
     /// The primary resolver: symbol resolution federates the current `module` over the classpath `lib`.
     pub fn new_scoped_with_module(
-        lib: &'a dyn CompilerPlatform,
+        lib: &'a dyn SemanticPlatform,
         module: &'a dyn SymbolSource,
         fn_scope: &'a [String],
     ) -> Self {
@@ -1159,20 +1154,20 @@ impl<'a> SymbolResolver<'a> {
 // The inherited-member walk over a library type's hierarchy — arg-dependent binding, so it lives in
 // this layer (not the oracle). `resolve` and `ir_lower` share one implementation, backend-agnostic.
 
-fn abi_form_args(lib: &dyn CompilerPlatform, args: &[Ty]) -> Option<Vec<Ty>> {
-    let out: Vec<Ty> = args.iter().map(|a| lib.abi_value_form(*a)).collect();
+fn abi_form_args(lib: &dyn SemanticPlatform, args: &[Ty]) -> Option<Vec<Ty>> {
+    let out: Vec<Ty> = args.iter().map(|a| lib.library_value_form(*a)).collect();
     (out.as_slice() != args).then_some(out)
 }
 
-fn params_match_abi_form(lib: &dyn CompilerPlatform, params: &[Ty], args: &[Ty]) -> bool {
+fn params_match_abi_form(lib: &dyn SemanticPlatform, params: &[Ty], args: &[Ty]) -> bool {
     params.len() == args.len()
         && params
             .iter()
             .zip(args)
-            .all(|(p, a)| lib.abi_value_form(*p) == *a)
+            .all(|(p, a)| lib.library_value_form(*p) == *a)
 }
 
-fn platform_subtype(lib: &dyn CompilerPlatform, sub: Ty, sup: Ty) -> bool {
+fn platform_subtype(lib: &dyn SemanticPlatform, sub: Ty, sup: Ty) -> bool {
     crate::assignable::is_subtype(
         &crate::assignable::TyCtx::new(),
         &PlatformOracle(lib),
@@ -1183,11 +1178,15 @@ fn platform_subtype(lib: &dyn CompilerPlatform, sub: Ty, sup: Ty) -> bool {
 
 /// Whether `arg` fits `param` after both are reduced to target ABI identity. The shared subtype
 /// relation handles identity plus reference widening through the symbol source.
-fn abi_arg_subtype_of_param(lib: &dyn CompilerPlatform, arg: Ty, param: Ty) -> bool {
-    platform_subtype(lib, lib.abi_value_form(arg), lib.abi_value_form(param))
+fn abi_arg_subtype_of_param(lib: &dyn SemanticPlatform, arg: Ty, param: Ty) -> bool {
+    platform_subtype(
+        lib,
+        lib.library_value_form(arg),
+        lib.library_value_form(param),
+    )
 }
 
-fn value_erased_args(lib: &dyn CompilerPlatform, args: &[Ty]) -> Vec<Ty> {
+fn value_erased_args(lib: &dyn SemanticPlatform, args: &[Ty]) -> Vec<Ty> {
     args.iter()
         .map(|&a| lib.value_underlying(a).unwrap_or(a))
         .collect()
@@ -1195,7 +1194,7 @@ fn value_erased_args(lib: &dyn CompilerPlatform, args: &[Ty]) -> Vec<Ty> {
 
 /// Resolve a constructor on a library type by argument types (with the type's own widening).
 fn resolve_constructor(
-    lib: &dyn CompilerPlatform,
+    lib: &dyn SemanticPlatform,
     internal: &str,
     args: &[Ty],
 ) -> Option<LibraryMember> {
@@ -1333,7 +1332,7 @@ pub struct SyntheticCtorCall {
 /// (absent from the public `constructors`) and ALSO a separate value-class marker overload
 /// `<init>(<params…>, marker)` (no mask); only the `arity + 2` shape is the default synthetic.
 pub fn synthetic_default_ctor(
-    lib: &dyn CompilerPlatform,
+    lib: &dyn SemanticPlatform,
     internal: &str,
     arity: usize,
 ) -> Option<(String, Vec<Ty>)> {
@@ -1350,7 +1349,7 @@ pub fn synthetic_default_ctor(
 /// ret)`, the parameter types being the source method's (WITHOUT the leading receiver and trailing
 /// mask/marker). Lets a call omit a defaulted argument. `None` when the class has no such synthetic.
 pub fn synthetic_default_member(
-    lib: &dyn CompilerPlatform,
+    lib: &dyn SemanticPlatform,
     owner: &str,
     name: &str,
     arity: usize,
@@ -1396,7 +1395,7 @@ pub fn synthetic_default_member(
 /// synthetic `DefaultConstructorMarker` overload (a value-class param, or omitted defaults). See
 /// [`SyntheticCtorCall`]. `None` when no marker overload fits.
 fn resolve_synthetic_constructor(
-    lib: &dyn CompilerPlatform,
+    lib: &dyn SemanticPlatform,
     internal: &str,
     args: &[Ty],
 ) -> Option<SyntheticCtorCall> {
@@ -1463,7 +1462,7 @@ fn resolve_synthetic_constructor(
 
 /// Resolve a companion member `Type.name(args)` (the receiver type must be public).
 fn resolve_companion(
-    lib: &dyn CompilerPlatform,
+    lib: &dyn SemanticPlatform,
     internal: &str,
     name: &str,
     args: &[Ty],
@@ -1480,7 +1479,7 @@ fn resolve_companion(
 /// `functions` query, whose Member overloads carry the breadth-first `receiver_rank`; the closest rung's
 /// best overload wins (most-derived first), exactly the inherited-member walk this used to do by hand.
 fn resolve_instance(
-    lib: &dyn CompilerPlatform,
+    lib: &dyn SemanticPlatform,
     internal: &str,
     name: &str,
     args: &[Ty],
@@ -1494,7 +1493,7 @@ fn resolve_instance(
 /// Resolve a library instance member for a BOUND callable reference (`"KOTLIN"::get`) — where there are
 /// no call arguments to drive overload resolution. Returns the UNIQUE fixed-arity overload of `name` on
 /// `internal`, or `None` when the member is absent, defaulted/vararg, or ambiguous.
-fn resolve_instance_ref(lib: &dyn CompilerPlatform, recv: Ty, name: &str) -> Option<LibraryMember> {
+fn resolve_instance_ref(lib: &dyn SemanticPlatform, recv: Ty, name: &str) -> Option<LibraryMember> {
     let mut fixed = lib
         .member_overloads(recv, name)
         .overloads
@@ -1536,7 +1535,7 @@ pub struct BoundPropertyRef {
 /// - the getter must dispatch with a plain `invokevirtual`: a concrete non-interface, non-value-class
 ///   owner and an unmangled getter (a value-class-typed property's `getX-<hash>` lives on an erased owner).
 fn resolve_property_ref(
-    lib: &dyn CompilerPlatform,
+    lib: &dyn SemanticPlatform,
     recv: Ty,
     name: &str,
 ) -> Option<BoundPropertyRef> {
@@ -1579,7 +1578,7 @@ pub struct ResolvedMember {
 /// returns may bind from the receiver (`List<Int>.get(Int): Int`) or, for erased-`Any` returns, from
 /// the call arguments (`decodeFromString(serializer, text): T`).
 fn resolve_instance_member(
-    lib: &dyn CompilerPlatform,
+    lib: &dyn SemanticPlatform,
     recv: Ty,
     name: &str,
     args: &[Ty],
@@ -1619,7 +1618,7 @@ fn resolve_instance_member(
 /// nullability, generic signature) is recovered exactly as before. `None` when no source exposes it as a
 /// property, or the resolved getter isn't a read-value member.
 fn property_getter_via_query(
-    lib: &dyn CompilerPlatform,
+    lib: &dyn SemanticPlatform,
     recv: Ty,
     property: &str,
 ) -> Option<ResolvedMember> {
@@ -1640,7 +1639,7 @@ fn property_getter_via_query(
 /// getter name first (no guessing); then the fallbacks — the semantic Kotlin name (a
 /// computed/builtin member), a `getX` physical getter, and a value-class-mangled getter.
 fn resolve_property_member(
-    lib: &dyn CompilerPlatform,
+    lib: &dyn SemanticPlatform,
     recv: Ty,
     property: &str,
 ) -> Option<ResolvedMember> {
@@ -1677,7 +1676,7 @@ fn resolve_property_member(
 /// setter is value-class `@JvmName`-mangled (`setId-<hash>` — left to the value-class path, which knows
 /// the logical type).
 fn resolve_property_setter(
-    lib: &dyn CompilerPlatform,
+    lib: &dyn SemanticPlatform,
     recv: Ty,
     property: &str,
 ) -> Option<LibraryCallable> {
@@ -1700,7 +1699,7 @@ fn resolve_property_setter(
 }
 
 fn select_instance_info(
-    lib: &dyn CompilerPlatform,
+    lib: &dyn SemanticPlatform,
     recv: Ty,
     name: &str,
     args: &[Ty],
@@ -1881,7 +1880,7 @@ struct ExtCtx<'a> {
 /// prepend the receiver in the JVM emit shape, so [`logical_value_params`] strips it). Overloads are tried
 /// closest-receiver-rank first, and within a rank by the ordered applicability passes below.
 fn select_overload(
-    lib: &dyn CompilerPlatform,
+    lib: &dyn SemanticPlatform,
     recv: Ty,
     name: &str,
     args: &[Ty],
@@ -2023,7 +2022,7 @@ fn select_overload(
 /// to `recv` and drop the leading receiver, preferring each parameter's value-class LOGICAL type over its
 /// erased underlying (`Id` over `kotlin/String`).
 fn logical_value_params(
-    lib: &dyn CompilerPlatform,
+    lib: &dyn SemanticPlatform,
     o: &FunctionInfo,
     recv: Ty,
     type_args: &[Ty],
@@ -2052,7 +2051,7 @@ fn logical_value_params(
     }
 }
 
-fn platform_arg_assignable(lib: &dyn CompilerPlatform, param: &Ty, arg: &Ty) -> bool {
+fn platform_arg_assignable(lib: &dyn SemanticPlatform, param: &Ty, arg: &Ty) -> bool {
     (*arg == Ty::Null && param.is_reference())
         || crate::assignable::is_assignable(
             &crate::assignable::TyCtx::new(),
@@ -2066,7 +2065,7 @@ fn platform_arg_assignable(lib: &dyn CompilerPlatform, param: &Ty, arg: &Ty) -> 
 /// exact, then `Any`-widened / function-arity, then a prefix under-application (omitted trailing params
 /// must be optional), then a trailing-lambda call that omits leading DEFAULTED params (`m.withLock { … }`).
 fn best_by_args<'a>(
-    lib: &dyn CompilerPlatform,
+    lib: &dyn SemanticPlatform,
     cands: &[(&'a FunctionInfo, Vec<Ty>)],
     args: &[Ty],
 ) -> Option<&'a FunctionInfo> {
@@ -2131,7 +2130,7 @@ fn best_by_args<'a>(
 /// be a decoded `Ty::Fun` (whose return/parameter types differ from the lambda's — the body adapts) or an
 /// erased `kotlin/jvm/functions/FunctionN` object; neither pairs with the argument under plain equality or
 /// `Any` widening, so arity alone drives the match.
-fn fun_arg_matches(lib: &dyn CompilerPlatform, param: &Ty, arg: &Ty) -> bool {
+fn fun_arg_matches(lib: &dyn SemanticPlatform, param: &Ty, arg: &Ty) -> bool {
     let Some(arg_arity) = arg.fun_arity() else {
         return false;
     };
@@ -2154,7 +2153,7 @@ fn fun_arg_matches(lib: &dyn CompilerPlatform, param: &Ty, arg: &Ty) -> bool {
 /// in the selector's return) is resolved: the lambda's return is just another parameter of the check. A
 /// type-variable / erased-`Any` parameter return (an ordinary generic HOF `(T) -> R`), or an unresolved
 /// lambda body, stays permissive so normal HOFs keep matching.
-fn fun_return_compatible(lib: &dyn CompilerPlatform, param: Ty, arg: Ty) -> bool {
+fn fun_return_compatible(lib: &dyn SemanticPlatform, param: Ty, arg: Ty) -> bool {
     let (Some(pr), Some(ar)) = (param.fun_ret(), arg.fun_ret()) else {
         return true;
     };
@@ -2246,12 +2245,14 @@ mod tests {
         }
     }
 
-    impl crate::libraries::TargetRuntime for FakeSource {
+    impl crate::libraries::SemanticPlatform for FakeSource {
         fn value_underlying(&self, ty: Ty) -> Option<Ty> {
             self.resolve_type(ty.obj_internal()?)
                 .and_then(|t| t.value_underlying)
         }
     }
+
+    impl crate::libraries::TargetRuntime for FakeSource {}
 
     fn top_level_default_uint_info() -> FunctionInfo {
         let callable = LibraryCallable {

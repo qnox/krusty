@@ -126,7 +126,8 @@ fn serializable_class_encode_round_trips() {
         let mut syms = collect_signatures_with_cp(&files, platform, &mut d);
         let info = check_file(&files[0], &mut syms, &mut d);
         assert!(!d.has_errors(), "krusty front-end could not handle Foo");
-        let mut ir = lower_file(&files[0], &info, &syms).expect("lower Foo");
+        let runtime = JvmLibraries::new(cp.clone());
+        let mut ir = lower_file(&files[0], &info, &syms, &runtime).expect("lower Foo");
         let ctx = PluginContext::from_source(&files[0], &ir);
         let mut host = PluginHost::new();
         host.register(Box::new(SerializationPlugin::default()));

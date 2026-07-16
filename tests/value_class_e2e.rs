@@ -34,7 +34,8 @@ fn value_class_synthesizes_box_unbox_constructor_impl() {
     let info = check_file(&files[0], &mut syms, &mut d);
     assert!(!d.has_errors(), "value-class file should check clean");
 
-    let mut ir = lower_file(&files[0], &info, &syms).expect("value class should lower");
+    let runtime = krusty::libraries::EmptySymbolSource;
+    let mut ir = lower_file(&files[0], &info, &syms, &runtime).expect("value class should lower");
     // The value-class `-impl` members are synthesized by the JVM pass (not `ir_lower`).
     assert!({
         let vc_module = krusty::module_symbols::ModuleSymbols::new(&syms);
@@ -106,7 +107,8 @@ fn value_class_is_property_uses_javabean_getter_name() {
     let info = check_file(&files[0], &mut syms, &mut d);
     assert!(!d.has_errors(), "value-class file should check clean");
 
-    let mut ir = lower_file(&files[0], &info, &syms).expect("value class should lower");
+    let runtime = krusty::libraries::EmptySymbolSource;
+    let mut ir = lower_file(&files[0], &info, &syms, &runtime).expect("value class should lower");
     assert!({
         let vc_module = krusty::module_symbols::ModuleSymbols::new(&syms);
         let vc_resolver = krusty::symbol_resolver::SymbolResolver::new_scoped_with_module(

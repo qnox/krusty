@@ -11,7 +11,7 @@ use std::collections::HashMap;
 
 use crate::ast::*;
 use crate::diag::{DiagSink, Span};
-use crate::libraries::{required_arity, CallSig, CompilerPlatform, EmptySymbolSource, ParamList};
+use crate::libraries::{required_arity, CallSig, EmptySymbolSource, ParamList, SemanticPlatform};
 use crate::symbol_source::SymbolSource;
 use crate::types::{Ty, Visibility};
 
@@ -289,7 +289,7 @@ impl ClassNames {
     }
     pub fn library_companion_const(
         &self,
-        src: &dyn CompilerPlatform,
+        src: &dyn SemanticPlatform,
         type_name: &str,
         const_name: &str,
     ) -> Option<crate::libraries::LibraryConst> {
@@ -329,7 +329,7 @@ pub struct SymbolTable {
     pub enums: HashMap<String, Vec<String>>,
     /// The target's compiled library set — a JVM classpath or a klib (empty unless the driver
     /// supplies one). The front end resolves external references only through this abstraction.
-    pub libraries: Box<dyn CompilerPlatform>,
+    pub libraries: Box<dyn SemanticPlatform>,
     /// Top-level extension functions: (erased receiver, method_name) → its overloads. The receiver is
     /// its [`Ty::erased_recv`] key (nullability/generics/type-params folded). Used to resolve
     /// `recv.method(args)` when no instance method matches. A `(recv, name)` may carry SEVERAL
@@ -916,7 +916,7 @@ fn resolve_name_against_imports(
     name: &str,
     explicit: &HashMap<String, String>,
     levels: &[Vec<String>],
-    libraries: &dyn CompilerPlatform,
+    libraries: &dyn SemanticPlatform,
 ) -> Option<String> {
     if let Some(fq) = explicit.get(name) {
         // A nested-type import (`import lib.Outer.Ws` → `lib/Outer$Ws`) resolves through the flat form.
@@ -964,8 +964,8 @@ fn resolve_name_against_imports(
 /// classpath `object` (`import a.b.Obj.name`), the object's internal name — so the light initializer
 /// inference can type an unqualified object-member call (`val logger = logger {}`). Recovers a nested
 /// owner (`a/b/Outer/Obj` → `a/b/Outer$Obj`) via `resolve_type`, since only [`SymbolSource`] is available
-/// here (not the richer `CompilerPlatform` `resolve_nested_internal` needs).
-fn object_member_import_sig(file: &File, name: &str, src: &dyn CompilerPlatform) -> Option<String> {
+/// here (not the richer `SemanticPlatform` `resolve_nested_internal` needs).
+fn object_member_import_sig(file: &File, name: &str, src: &dyn SemanticPlatform) -> Option<String> {
     let suffix = format!(".{name}");
     let fq = file
         .imports
@@ -984,7 +984,7 @@ fn object_member_import_sig(file: &File, name: &str, src: &dyn CompilerPlatform)
     }
 }
 
-fn resolve_nested_internal(internal: &str, libraries: &dyn CompilerPlatform) -> Option<String> {
+fn resolve_nested_internal(internal: &str, libraries: &dyn SemanticPlatform) -> Option<String> {
     // A `typealias` resolves to its target internal, not to the (classless) alias name.
     let resolved = |name: &str| -> Option<String> {
         let t = libraries.resolve_type(name)?;
@@ -1008,7 +1008,7 @@ fn resolve_dotted_classpath_type(
     class_names: &ClassNames,
     imap: &HashMap<String, String>,
     wilds: &[String],
-    libraries: &dyn CompilerPlatform,
+    libraries: &dyn SemanticPlatform,
 ) -> Option<String> {
     if !name.contains('.') {
         return None;
@@ -1086,7 +1086,7 @@ pub fn collect_signatures(files: &[File], diags: &mut DiagSink) -> SymbolTable {
 /// libraries (a JVM classpath, a klib), eliminating the need for any hardcoded type lists.
 pub fn collect_signatures_with_cp(
     files: &[File],
-    libraries: Box<dyn CompilerPlatform>,
+    libraries: Box<dyn SemanticPlatform>,
     diags: &mut DiagSink,
 ) -> SymbolTable {
     let platform_default_imports = libraries.platform_default_import_packages();
@@ -2303,13 +2303,22 @@ pub fn collect_signatures_with_cp(
                             (None, _) => p
                                 .init
                                 .map(|i| {
-                                    // `val a = other` referencing an already-collected top-level property.
-                                    if let Expr::Name(n) = file.expr(i) {
-                                        if let Some((t, _, _)) = table.props.get(n) {
-                                            return *t;
-                                        }
-                                    }
-                                    infer_lit_ty(file, i, &class_names, &fun_rets, &*libraries)
+                                    // Thread already-collected top-level properties into initializer
+                                    // inference, including nested reads such as `a.compareTo(b)`.
+                                    let props: Vec<(String, Ty, bool)> = table
+                                        .props
+                                        .iter()
+                                        .map(|(n, (t, v, _))| (n.clone(), *t, *v))
+                                        .collect();
+                                    infer_lit_ty_p(
+                                        file,
+                                        i,
+                                        &class_names,
+                                        &fun_rets,
+                                        &props,
+                                        &*libraries,
+                                        &|ci, cn| table.prop_of(ci, cn).map(|(pt, _)| pt),
+                                    )
                                 })
                                 .unwrap_or(Ty::Error),
                         }
@@ -3180,7 +3189,7 @@ fn infer_lit_ty(
     e: ExprId,
     class_names: &ClassNames,
     fun_rets: &HashMap<String, Ty>,
-    src: &dyn CompilerPlatform,
+    src: &dyn SemanticPlatform,
 ) -> Ty {
     infer_lit_ty_p(file, e, class_names, fun_rets, &[], src, &|_, _| None)
 }
@@ -3238,17 +3247,13 @@ fn infer_lit_ty_p(
     class_names: &ClassNames,
     fun_rets: &HashMap<String, Ty>,
     props: &[(String, Ty, bool)],
-    src: &dyn CompilerPlatform,
-    // Resolve a property `name` of a USER class (by JVM internal) being collected — the classpath
-    // `src` can't see the module's own classes, so a `param.member` initializer (`var c = from.i`,
-    // `from: SomeUserClass`) needs this to infer its type. Returns `None` for a classpath/unknown type.
+    src: &dyn SemanticPlatform,
+    // Resolve a property of a module class currently being collected. The library source cannot see
+    // module-local classes, so a `param.member` initializer needs this to infer its type.
     up: &dyn Fn(&str, &str) -> Option<Ty>,
 ) -> Ty {
-    // Resolve the (single) return type of `name` applied to `receiver` (a method/extension when
-    // `receiver` is `Some`, a top-level function when `None`) through the FEDERATED symbol source — the
-    // same classpath/stdlib resolution the full checker uses. Returns a type only when every applicable
-    // overload AGREES on the return type (no arg-based overload selection here); otherwise `None`, so the
-    // caller falls back to `Error` (skip) rather than guess. NO stdlib symbol names are hardcoded.
+    // Resolve the return type of `name` through the same scoped source the checker uses. This
+    // lightweight pass accepts only unambiguous overload sets; otherwise it leaves inference to checking.
     fn resolved_ret(
         resolver: &crate::symbol_resolver::SymbolResolver,
         name: &str,
@@ -3315,16 +3320,22 @@ fn infer_lit_ty_p(
                     return c.ty;
                 }
             }
-            // Property read (`s.length`, `list.size`, `vc.value`): resolve through the FEDERATED source —
-            // the same path the full checker uses, no hardcoded property names.
+            // Property read (`s.length`, `list.size`, `vc.value`). Use the scoped resolver so an
+            // imported extension property such as `Char.code` can resolve through its getter.
             let rt = infer_lit_ty_p(file, *receiver, class_names, fun_rets, props, src, up);
-            if let Some(m) = crate::symbol_resolver::SymbolResolver::new(src)
+            if let Some(m) = resolver
                 .resolve_symbol(crate::symbol_resolver::SymRecv::Value(rt), name, &[], &[])
                 .and_then(crate::symbol_resolver::Symbol::property)
             {
                 return m.ret;
             }
-            // A property of a USER class being collected (invisible to the classpath `src`).
+            if let Some(g) = resolver
+                .resolve_symbol(crate::symbol_resolver::SymRecv::Value(rt), name, &[], &[])
+                .and_then(crate::symbol_resolver::Symbol::extension_property_getter)
+            {
+                return g.ret;
+            }
+            // A property of a module class being collected, invisible to the library source.
             if let Some(internal) = rt.obj_internal() {
                 if let Some(t) = up(internal, name) {
                     return t;
@@ -4301,8 +4312,8 @@ pub(crate) fn function_scope_packages(file: &File, syms: &SymbolTable) -> Vec<St
     function_scope_packages_with(file, syms.libraries.platform_default_import_packages())
 }
 
-/// [`function_scope_packages`] against a platform's default-import list directly — for contexts that hold
-/// a `&dyn CompilerPlatform` (the pre-check property-type prepass) but no full `SymbolTable`.
+/// [`function_scope_packages`] with only a platform default-import list, for pre-check contexts that do
+/// not yet have a full `SymbolTable`.
 pub(crate) fn function_scope_packages_with(file: &File, platform_defaults: &[&str]) -> Vec<String> {
     let imports = import_map(file);
     let import_levels = import_levels(file, platform_defaults);
@@ -5288,7 +5299,7 @@ impl crate::assignable::TypeOracle for Checker<'_> {
             crate::symbol_resolver::platform_class_identity(
                 self.syms
                     .libraries
-                    .abi_value_form(Ty::obj(internal))
+                    .library_value_form(Ty::obj(internal))
                     .obj_internal()
                     .unwrap_or(internal),
             )
@@ -11723,6 +11734,12 @@ impl<'a> Checker<'a> {
                         return Ty::String;
                     }
                 }
+                if matches!(
+                    (rt, name.as_str(), arg_tys.as_slice()),
+                    (Ty::Char, "compareTo", [Ty::Char])
+                ) {
+                    return Ty::Int;
+                }
                 if let Some(m) = self.resolve_instance_member(rt, &name, &arg_tys) {
                     crate::trace_compiler!(
                         "resolve",
@@ -14248,8 +14265,9 @@ impl<'a> Checker<'a> {
                         Ty::String => Ty::Char, // iterating a String yields its chars
                         Ty::Error => Ty::Error,
                         Ty::Obj(internal, args) => {
-                            if let Some(info) = self.syms.libraries.counted_loop_info(internal) {
-                                info.elem
+                            if let Some(elem) = self.syms.libraries.iterable_element_type(internal)
+                            {
+                                elem
                             } else if self.resolve_instance(internal, "iterator", &[]).is_some() {
                                 args.first()
                                     .copied()

@@ -79,7 +79,8 @@ fn first_error(src: &str, cp: &Rc<Classpath>, stem: &str) -> Option<String> {
         return Some(d.diags[0].msg.clone());
     }
     let facade = file_class_name(stem, files[0].package.as_deref());
-    let mut ir = match lower_file(&files[0], &info, &syms) {
+    let runtime = JvmLibraries::new(cp.clone());
+    let mut ir = match lower_file(&files[0], &info, &syms, &runtime) {
         Some(ir) => ir,
         None => return Some(format!("lower: {}", krusty::ir_lower::lower_bail_reason())),
     };
@@ -153,7 +154,8 @@ fn first_error_with_coroutine_helpers(src: &str, cp: &Rc<Classpath>, stem: &str)
             return Some(d.diags[0].msg.clone());
         }
         let facade = file_class_name(&blocks[i].0, file.package.as_deref());
-        let mut ir = match lower_file(file, &info, &syms) {
+        let runtime = JvmLibraries::new(cp.clone());
+        let mut ir = match lower_file(file, &info, &syms, &runtime) {
             Some(ir) => ir,
             None => return Some(format!("lower: {}", krusty::ir_lower::lower_bail_reason())),
         };

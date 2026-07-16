@@ -45,7 +45,8 @@ fn main() {
             continue;
         }
         frontend_ok += 1;
-        if lower_file(&files1[0], &info, &syms).is_some() {
+        let runtime = krusty::libraries::EmptySymbolSource;
+        if lower_file(&files1[0], &info, &syms, &runtime).is_some() {
             lowered += 1;
         }
     }

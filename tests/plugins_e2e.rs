@@ -40,7 +40,8 @@ fn lower(src: &str) -> Option<(krusty::ast::File, krusty::ir::IrFile)> {
     if d.has_errors() {
         return None;
     }
-    let ir = lower_file(&files[0], &info, &syms)?;
+    let runtime = JvmLibraries::new(cp.clone());
+    let ir = lower_file(&files[0], &info, &syms, &runtime)?;
     let [file] = <[krusty::ast::File; 1]>::try_from(files).ok()?;
     Some((file, ir))
 }

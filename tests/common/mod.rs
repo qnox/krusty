@@ -179,7 +179,8 @@ pub fn compile_in_process(
         return None;
     }
     let facade = file_class_name(stem, file.package.as_deref());
-    let mut ir = krusty::ir_lower::lower_file(file, &info, &syms)?;
+    let runtime = krusty::jvm::jvm_libraries::JvmLibraries::new(cp.clone());
+    let mut ir = krusty::ir_lower::lower_file(file, &info, &syms, &runtime)?;
     // Compiler-extension plugins (kotlinx.serialization) — run them here exactly as the real backend
     // does (jvm/backend.rs), between lowering and the value-class pass. A no-op without `@Serializable`,
     // so non-serialization snippets are unaffected; with it, `compile_in_process` matches the binary.
@@ -279,7 +280,8 @@ pub fn backend_rejects_in_process(
         return None;
     }
     let facade = file_class_name(stem, file.package.as_deref());
-    let Some(mut ir) = krusty::ir_lower::lower_file(file, &info, &syms) else {
+    let runtime = krusty::jvm::jvm_libraries::JvmLibraries::new(cp.clone());
+    let Some(mut ir) = krusty::ir_lower::lower_file(file, &info, &syms, &runtime) else {
         return Some(true);
     };
     krusty::plugins::run_enabled(&mut ir, file);
@@ -327,7 +329,7 @@ pub fn lower_to_ir(
         cp_paths.push(p.to_path_buf());
     }
     let cp = std::rc::Rc::new(Classpath::new(cp_paths));
-    let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(cp));
+    let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(cp.clone()));
     let mut syms = collect_signatures_with_cp(&files, platform, &mut diags);
     if diags.has_errors() {
         return None;
@@ -337,7 +339,8 @@ pub fn lower_to_ir(
     if diags.has_errors() {
         return None;
     }
-    krusty::ir_lower::lower_file(file, &info, &syms)
+    let runtime = krusty::jvm::jvm_libraries::JvmLibraries::new(cp.clone());
+    krusty::ir_lower::lower_file(file, &info, &syms, &runtime)
 }
 
 /// Run the front end (`lex → parse → collect signatures → check`) on `src` and return every
