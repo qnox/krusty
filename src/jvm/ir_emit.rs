@@ -3130,7 +3130,6 @@ fn emit_default_stub(
     let method_name = f.name.clone();
     let real_params = jvm_tys(&f.params);
     let ret = ir_ty_to_jvm(&f.ret);
-    let n = real_params.len();
     let owner_ty = Ty::obj(owner);
 
     let mut e = Emitter {
@@ -3163,20 +3162,7 @@ fn emit_default_stub(
     e.next_slot = slot;
 
     let mut code = CodeBuilder::new(slot);
-    for (i, def) in defaults.iter().enumerate().take(n) {
-        if let Some(def_expr) = def {
-            let (pslot, pty) = param_slots[i];
-            code.iload(mask_slot);
-            code.push_int(1 << i, e.cw);
-            code.iand();
-            let skip = code.new_label();
-            e.frame(skip, vec![], &mut code);
-            code.ifeq(skip);
-            e.emit_value(*def_expr, &mut code);
-            store(pty, pslot, &mut code);
-            code.bind(skip);
-        }
-    }
+    emit_default_param_overwrites(&mut e, &mut code, defaults, &param_slots, mask_slot);
     code.aload(0);
     for &(pslot, pty) in &param_slots {
         load(pty, pslot, &mut code);
@@ -3229,6 +3215,29 @@ fn default_stub_access(ir: &IrFile, fid: u32) -> u16 {
     vis | 0x1008 // ACC_STATIC | ACC_SYNTHETIC
 }
 
+fn emit_default_param_overwrites(
+    e: &mut Emitter<'_>,
+    code: &mut CodeBuilder,
+    defaults: &[Option<u32>],
+    param_slots: &[(u16, Ty)],
+    mask_slot: u16,
+) {
+    for (i, def) in defaults.iter().enumerate().take(param_slots.len()) {
+        if let Some(def_expr) = def {
+            let (pslot, pty) = param_slots[i];
+            code.iload(mask_slot);
+            code.push_int(1 << i, e.cw);
+            code.iand();
+            let skip = code.new_label();
+            e.frame(skip, vec![], code);
+            code.ifeq(skip);
+            e.emit_value(*def_expr, code);
+            store(pty, pslot, code);
+            code.bind(skip);
+        }
+    }
+}
+
 /// Emit the `foo$default(params…, int mask, Object marker)` synthetic for a TOP-LEVEL facade function
 /// (kotlinc's default-argument ABI). Unlike [`emit_default_stub`] (an instance member) there is NO leading
 /// `self`: the real parameters occupy value-indices `0..n` (the STATIC layout the defaults were lowered
@@ -3247,7 +3256,6 @@ fn emit_facade_default_stub(
     let method_name = f.name.clone();
     let real_params = jvm_tys(&f.params);
     let ret = ir_ty_to_jvm(&f.ret);
-    let n = real_params.len();
 
     let mut e = Emitter {
         ir,
@@ -3278,20 +3286,7 @@ fn emit_facade_default_stub(
     e.next_slot = slot;
 
     let mut code = CodeBuilder::new(slot);
-    for (i, def) in defaults.iter().enumerate().take(n) {
-        if let Some(def_expr) = def {
-            let (pslot, pty) = param_slots[i];
-            code.iload(mask_slot);
-            code.push_int(1 << i, e.cw);
-            code.iand();
-            let skip = code.new_label();
-            e.frame(skip, vec![], &mut code);
-            code.ifeq(skip);
-            e.emit_value(*def_expr, &mut code);
-            store(pty, pslot, &mut code);
-            code.bind(skip);
-        }
-    }
+    emit_default_param_overwrites(&mut e, &mut code, defaults, &param_slots, mask_slot);
     for &(pslot, pty) in &param_slots {
         load(pty, pslot, &mut code);
     }
