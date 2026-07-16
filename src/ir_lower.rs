@@ -4809,6 +4809,14 @@ impl<'a> Lower<'a> {
         })
     }
 
+    fn emit_local_default_call(&mut self, fid: u32, args: Vec<u32>) -> u32 {
+        self.ir.add_expr(IrExpr::Call {
+            callee: Callee::LocalDefault(fid),
+            dispatch_receiver: None,
+            args,
+        })
+    }
+
     fn emit_external_call(
         &mut self,
         symbol: impl Into<String>,
@@ -8622,13 +8630,7 @@ impl<'a> Lower<'a> {
                 Some(tmp) => a.push(self.ir.add_expr(IrExpr::GetValue(*tmp))),
                 // The omitted trailing `vararg` slot gets an EMPTY array and NO mask bit (a vararg is
                 // passed through by `$default`, not filled from the mask).
-                None if vararg && k == n - 1 => {
-                    let zero = self.ir.add_expr(IrExpr::Const(IrConst::Int(0)));
-                    a.push(self.ir.add_expr(IrExpr::NewArray {
-                        array_type: ir_params[k],
-                        size: zero,
-                    }));
-                }
+                None if vararg && k == n - 1 => a.push(self.empty_array(ir_params[k])),
                 None => {
                     mask |= 1i32 << k;
                     a.push(self.zero_placeholder(ir_params[k]));
@@ -8636,11 +8638,7 @@ impl<'a> Lower<'a> {
             }
         }
         self.append_default_mask_marker(&mut a, mask);
-        let dcall = self.ir.add_expr(IrExpr::Call {
-            callee: Callee::LocalDefault(fid),
-            dispatch_receiver: None,
-            args: a,
-        });
+        let dcall = self.emit_local_default_call(fid, a);
         Some(self.wrap_arg_prelude(dcall, prelude))
     }
 
@@ -9585,11 +9583,7 @@ impl<'a> Lower<'a> {
         } else if vararg_tail {
             // A single dropped trailing `vararg`: pass an EMPTY array of its element type and call the
             // target directly (no `$default`). `target_params[m-1]` is the vararg's ARRAY type.
-            let zero = self.ir.add_expr(IrExpr::Const(IrConst::Int(0)));
-            a.push(self.ir.add_expr(IrExpr::NewArray {
-                array_type: ty_to_ir(target_params[m - 1]),
-                size: zero,
-            }));
+            a.push(self.empty_array(ty_to_ir(target_params[m - 1])));
             self.emit_local_call(fid, a)
         } else {
             // Trailing DEFAULTS: `foo$default(retained…, <placeholder>…, mask, null)` — each dropped slot
@@ -9602,22 +9596,14 @@ impl<'a> Lower<'a> {
                 if k == m - 1 && target_vararg {
                     // The dropped trailing vararg gets an EMPTY array and NO mask bit (passed through by
                     // `$default`, not filled from the mask).
-                    let zero = self.ir.add_expr(IrExpr::Const(IrConst::Int(0)));
-                    a.push(self.ir.add_expr(IrExpr::NewArray {
-                        array_type: ty_to_ir(pt),
-                        size: zero,
-                    }));
+                    a.push(self.empty_array(ty_to_ir(pt)));
                 } else {
                     mask |= 1i32 << k;
                     a.push(self.zero_placeholder(pt));
                 }
             }
             self.append_default_mask_marker(&mut a, mask);
-            self.ir.add_expr(IrExpr::Call {
-                callee: Callee::LocalDefault(fid),
-                dispatch_receiver: None,
-                args: a,
-            })
+            self.emit_local_default_call(fid, a)
         };
         // A `Unit`-returning invoke (a coercion, or the target itself returns `Unit`) yields the `Unit`
         // SINGLETON — a `kotlin/Unit` object, not `void` — to match the `FunctionN.invoke` SAM: run the
@@ -11277,6 +11263,11 @@ impl<'a> Lower<'a> {
     fn append_default_mask_marker(&mut self, out: &mut Vec<u32>, mask: i32) {
         out.push(self.ir.add_expr(IrExpr::Const(IrConst::Int(mask))));
         out.push(self.ir.add_expr(IrExpr::Const(IrConst::Null)));
+    }
+
+    fn empty_array(&mut self, array_type: Ty) -> u32 {
+        let size = self.ir.add_expr(IrExpr::Const(IrConst::Int(0)));
+        self.ir.add_expr(IrExpr::NewArray { array_type, size })
     }
 
     fn append_default_call_args(
