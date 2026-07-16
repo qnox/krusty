@@ -4811,6 +4811,19 @@ impl<'a> Lower<'a> {
         })
     }
 
+    fn emit_external_call(
+        &mut self,
+        symbol: impl Into<String>,
+        dispatch_receiver: Option<u32>,
+        args: Vec<u32>,
+    ) -> u32 {
+        self.ir.add_expr(IrExpr::Call {
+            callee: Callee::External(symbol.into()),
+            dispatch_receiver,
+            args,
+        })
+    }
+
     /// Resolve a delegate's `getValue` operator — a MEMBER on the delegate type, or a classpath
     /// EXTENSION (`Lazy.getValue` in `LazyKt`). Returns `(owner, descriptor, ret, inline, is_ext)`:
     /// a member is emitted `delegate.getValue(thisRef, prop)`; an extension is the static
@@ -5481,11 +5494,7 @@ impl<'a> Lower<'a> {
         let ga = self.ir.add_expr(IrExpr::GetValue(arr_v));
         let gi2 = self.ir.add_expr(IrExpr::GetValue(i_v));
         let gtmp = self.ir.add_expr(IrExpr::GetValue(tmp_v));
-        let set = self.ir.add_expr(IrExpr::Call {
-            callee: Callee::External("kotlin/Array.set".to_string()),
-            dispatch_receiver: Some(ga),
-            args: vec![gi2, gtmp],
-        });
+        let set = self.emit_external_call("kotlin/Array.set", Some(ga), vec![gi2, gtmp]);
         let wbody = self.ir.add_expr(IrExpr::Block {
             stmts: vec![var_tmp, set],
             value: None,
@@ -6042,11 +6051,7 @@ impl<'a> Lower<'a> {
         // reference overload returns `Object[]` and needs a `checkcast` to the element array type.
         let a0 = self.lower_arg(spread, &array_ir)?;
         let a1 = self.lower_arg(spread, &array_ir)?;
-        let size = self.ir.add_expr(IrExpr::Call {
-            callee: Callee::External("kotlin/Array.size".to_string()),
-            dispatch_receiver: Some(a1),
-            args: vec![],
-        });
+        let size = self.emit_external_call("kotlin/Array.size", Some(a1), vec![]);
         let copy = self.runtime_call(RuntimeOp::ArrayCopyOf, array_ir, vec![a0, size])?;
         let arg = if prim {
             copy // primitive `copyOf` already returns `[<prim>` — no cast
@@ -14510,11 +14515,7 @@ impl<'a> Lower<'a> {
         let size = if it_ty == Ty::String {
             self.lower_member_read_on(arr_g, it_ty, "length", None)?
         } else {
-            self.ir.add_expr(IrExpr::Call {
-                callee: Callee::External("kotlin/Array.size".to_string()),
-                dispatch_receiver: Some(arr_g),
-                args: vec![],
-            })
+            self.emit_external_call("kotlin/Array.size", Some(arr_g), vec![])
         };
         let var_n = self.ir.add_expr(IrExpr::Variable {
             index: n_v,
@@ -14537,11 +14538,7 @@ impl<'a> Lower<'a> {
         let elem_get = if it_ty == Ty::String {
             self.lower_library_instance_call_on(arr_g2, it_ty, "get", vec![gi2], &[Ty::Int])?
         } else {
-            self.ir.add_expr(IrExpr::Call {
-                callee: Callee::External("kotlin/Array.get".to_string()),
-                dispatch_receiver: Some(arr_g2),
-                args: vec![gi2],
-            })
+            self.emit_external_call("kotlin/Array.get", Some(arr_g2), vec![gi2])
         };
         let var_x = self.ir.add_expr(IrExpr::Variable {
             index: x_v,
@@ -14894,11 +14891,7 @@ impl<'a> Lower<'a> {
                 elem
             };
         let v = self.lower_arg(value, &ty_to_ir(value_ty))?;
-        Some(self.ir.add_expr(IrExpr::Call {
-            callee: Callee::External("kotlin/Array.set".to_string()),
-            dispatch_receiver: Some(a),
-            args: vec![i, v],
-        }))
+        Some(self.emit_external_call("kotlin/Array.set", Some(a), vec![i, v]))
     }
 
     /// Substitute a reified type-parameter reference (`is T`/`as T`/`T::class` inside an expanded
@@ -17138,11 +17131,7 @@ impl<'a> Lower<'a> {
                     if at.array_elem().is_some() {
                         let a = self.expr(array)?;
                         let i = self.expr(*index)?;
-                        return Some(self.ir.add_expr(IrExpr::Call {
-                            callee: Callee::External("kotlin/Array.get".to_string()),
-                            dispatch_receiver: Some(a),
-                            args: vec![i],
-                        }));
+                        return Some(self.emit_external_call("kotlin/Array.get", Some(a), vec![i]));
                     }
                     if at == Ty::String {
                         let a = self.expr(array)?;
@@ -17364,11 +17353,7 @@ impl<'a> Lower<'a> {
                     })
                 } else if rt.array_elem().is_some() && name == "size" {
                     let a = self.expr(receiver)?;
-                    self.ir.add_expr(IrExpr::Call {
-                        callee: Callee::External("kotlin/Array.size".to_string()),
-                        dispatch_receiver: Some(a),
-                        args: vec![],
-                    })
+                    self.emit_external_call("kotlin/Array.size", Some(a), vec![])
                 } else if let Some(rci) = self.class_of(rt) {
                     // Resolve the field through the superclass chain — it may be declared on a base
                     // class (`b.baseField`). `class` is the *owning* class (whose fieldref we emit).
@@ -17632,11 +17617,7 @@ impl<'a> Lower<'a> {
                     let mut acc = lower_concat_operand(self, operands[0])?;
                     for &op_e in &operands[1..] {
                         let r = lower_concat_operand(self, op_e)?;
-                        acc = self.ir.add_expr(IrExpr::Call {
-                            callee: Callee::External("kotlin/String.plus".to_string()),
-                            dispatch_receiver: Some(acc),
-                            args: vec![r],
-                        });
+                        acc = self.emit_external_call("kotlin/String.plus", Some(acc), vec![r]);
                     }
                     acc
                 } else {
@@ -20009,11 +19990,8 @@ impl<'a> Lower<'a> {
                         };
                         if let Some(op) = cmp {
                             let a = self.expr(receiver)?;
-                            let size = self.ir.add_expr(IrExpr::Call {
-                                callee: Callee::External("kotlin/Array.size".to_string()),
-                                dispatch_receiver: Some(a),
-                                args: vec![],
-                            });
+                            let size =
+                                self.emit_external_call("kotlin/Array.size", Some(a), vec![]);
                             return Some(match op {
                                 Some(c) => {
                                     let z = self.ir.add_expr(IrExpr::Const(IrConst::Int(0)));
@@ -20720,11 +20698,7 @@ impl<'a> Lower<'a> {
                         // `x.toString()`/`x.hashCode()` → the `kotlin/Any` virtual (dispatches to any
                         // override), not a by-index member — so it needs no class-side method-table entry.
                         let recv = self.expr(receiver)?;
-                        self.ir.add_expr(IrExpr::Call {
-                            callee: Callee::External(format!("kotlin/Any.{name}")),
-                            dispatch_receiver: Some(recv),
-                            args: vec![],
-                        })
+                        self.emit_external_call(format!("kotlin/Any.{name}"), Some(recv), vec![])
                     } else if let Some(r) = self.lower_library_default_member_call(
                         receiver,
                         self.recv_ty(receiver),
