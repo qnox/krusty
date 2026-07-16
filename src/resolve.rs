@@ -3256,15 +3256,11 @@ fn infer_lit_ty_p(
     ) -> Option<Ty> {
         let rets: Vec<Ty> = match receiver {
             Some(recv) => resolver
-                .instance_members(recv, name)
+                .resolve_symbol(crate::symbol_resolver::SymRecv::Value(recv), name, &[])
+                .map(crate::symbol_resolver::Symbol::overloads)
+                .unwrap_or_default()
                 .into_iter()
-                .map(|m| m.ret)
-                .chain(
-                    resolver
-                        .receiver_extensions(recv, name)
-                        .into_iter()
-                        .map(|o| o.callable.ret),
-                )
+                .map(|o| o.callable.ret)
                 .collect(),
             None => resolver
                 .top_level_function_set(name)
@@ -5680,7 +5676,15 @@ impl<'a> Checker<'a> {
                 } else {
                     let fi = self
                         .resolver()
-                        .exact_receiver_extensions(receiver_ty, CALLABLE_INVOKE_OPERATOR)
+                        .resolve_symbol(
+                            crate::symbol_resolver::SymRecv::Value(receiver_ty),
+                            CALLABLE_INVOKE_OPERATOR,
+                            &[],
+                        )
+                        .map(crate::symbol_resolver::Symbol::overloads)
+                        .unwrap_or_default()
+                        .into_iter()
+                        .filter(|o| o.is_extension() && o.receiver_rank == 0)
                         .find(|o| {
                             o.extension_value_params().len() == arg_tys.len()
                                 // A `suspend operator fun …invoke` would need continuation threading the
@@ -7961,7 +7965,14 @@ impl<'a> Checker<'a> {
                 // User-defined extension on a non-nullable primitive receiver: safe call is a no-op
                 // (primitives can never be null), so emit as a direct static call.
                 if !rt.is_reference() {
-                    if let Some(fi) = self.resolver().exact_receiver_extensions(rt, &name).next() {
+                    if let Some(fi) = self
+                        .resolver()
+                        .resolve_symbol(crate::symbol_resolver::SymRecv::Value(rt), &name, &[])
+                        .map(crate::symbol_resolver::Symbol::overloads)
+                        .unwrap_or_default()
+                        .into_iter()
+                        .find(|o| o.is_extension() && o.receiver_rank == 0)
+                    {
                         let logical = fi.extension_value_params().to_vec();
                         let arg_tys = args.as_deref().map_or_else(Vec::new, |a| self.arg_tys(a));
                         if logical.len() != arg_tys.len() {
@@ -8073,7 +8084,16 @@ impl<'a> Checker<'a> {
                 let result = if result == Ty::Error {
                     let arg_tys = args.as_deref().map_or_else(Vec::new, |a| self.arg_tys(a));
                     self.resolver()
-                        .receiver_extensions(rt.non_null(), &name)
+                        .resolve_symbol(
+                            crate::symbol_resolver::SymRecv::Value(rt.non_null()),
+                            &name,
+                            &[],
+                        )
+                        .map(crate::symbol_resolver::Symbol::overloads)
+                        .unwrap_or_default()
+                        .into_iter()
+                        .filter(crate::libraries::FunctionInfo::is_extension)
+                        .collect::<Vec<_>>()
                         .into_iter()
                         .find(|o| o.extension_value_params().len() == arg_tys.len())
                         .map(|fi| fi.callable.ret)
@@ -8327,8 +8347,13 @@ impl<'a> Checker<'a> {
                 if lt != Ty::Error && rt != Ty::Error && !lt.is_reference() {
                     let op_name = op.arith_operator_name();
                     if let Some(fname) = op_name {
-                        if let Some(fi) =
-                            self.resolver().exact_receiver_extensions(lt, fname).next()
+                        if let Some(fi) = self
+                            .resolver()
+                            .resolve_symbol(crate::symbol_resolver::SymRecv::Value(lt), fname, &[])
+                            .map(crate::symbol_resolver::Symbol::overloads)
+                            .unwrap_or_default()
+                            .into_iter()
+                            .find(|o| o.is_extension() && o.receiver_rank == 0)
                         {
                             // Only apply the extension when the RIGHT operand actually matches its
                             // parameter type; otherwise this is the builtin (`Int * Int` inside the body
@@ -10472,17 +10497,12 @@ impl<'a> Checker<'a> {
                     // with all-required parameters (a plain method) reorders the labelled arguments onto
                     // positions (the lowerer evaluates the receiver + args in source order). Members and
                     // extensions (module + classpath) both resolve through the federated resolver.
-                    let member_named = self
-                        .resolver()
-                        .instance_members(rt, name)
+                    self.resolver()
+                        .resolve_symbol(crate::symbol_resolver::SymRecv::Value(rt), name, &[])
+                        .map(crate::symbol_resolver::Symbol::overloads)
+                        .unwrap_or_default()
                         .iter()
-                        .any(|m| m.call_sig.has_param_names());
-                    let ext_named = self
-                        .resolver()
-                        .receiver_extensions(rt, name)
-                        .iter()
-                        .any(|o| o.call_sig.has_param_names());
-                    member_named || ext_named
+                        .any(|o| o.call_sig.has_param_names())
                 }
                 _ => false,
             };
@@ -11125,15 +11145,25 @@ impl<'a> Checker<'a> {
                         return None;
                     }
                     let has_lam = |lpt: &[Vec<Ty>]| lpt.iter().any(|v| !v.is_empty());
-                    if let Some(fi) = self.resolver().exact_receiver_extensions(rt, &name).next() {
+                    if let Some(fi) = self
+                        .resolver()
+                        .resolve_symbol(crate::symbol_resolver::SymRecv::Value(rt), &name, &[])
+                        .map(crate::symbol_resolver::Symbol::overloads)
+                        .unwrap_or_default()
+                        .into_iter()
+                        .find(|o| o.is_extension() && o.receiver_rank == 0)
+                    {
                         if has_lam(&fi.call_sig.lambda_param_types) {
                             return Some(fi.call_sig.lambda_param_types);
                         }
                     }
                     let fi = self
                         .resolver()
-                        .generic_receiver_extensions(rt, &name)
-                        .next()?;
+                        .resolve_symbol(crate::symbol_resolver::SymRecv::Value(rt), &name, &[])
+                        .map(crate::symbol_resolver::Symbol::overloads)
+                        .unwrap_or_default()
+                        .into_iter()
+                        .find(|o| o.is_extension() && o.receiver_rank == 1)?;
                     if !has_lam(&fi.call_sig.lambda_param_types) {
                         return None;
                     }
@@ -11193,7 +11223,12 @@ impl<'a> Checker<'a> {
                 let allow_lambda_mutation = ext_lambda_pts.is_some()
                     && self
                         .resolver()
-                        .receiver_extensions(rt, &name)
+                        .resolve_symbol(crate::symbol_resolver::SymRecv::Value(rt), &name, &[])
+                        .map(crate::symbol_resolver::Symbol::overloads)
+                        .unwrap_or_default()
+                        .into_iter()
+                        .filter(crate::libraries::FunctionInfo::is_extension)
+                        .collect::<Vec<_>>()
                         .iter()
                         .any(|o| o.flags.inline.can_inline());
                 let arg_tys: Vec<Ty> = self.with_lambda_mutation(allow_lambda_mutation, |c| {
@@ -11393,11 +11428,14 @@ impl<'a> Checker<'a> {
                     {
                         if let Some(fi) = self
                             .resolver()
-                            .instance_members(rt, &name)
+                            .resolve_symbol(crate::symbol_resolver::SymRecv::Value(rt), &name, &[])
+                            .map(crate::symbol_resolver::Symbol::overloads)
+                            .unwrap_or_default()
                             .into_iter()
-                            .find(|m| m.call_sig.has_param_names())
+                            .filter(|o| o.kind == crate::libraries::FnKind::Member)
+                            .find(|o| o.call_sig.has_param_names())
                         {
-                            let params = fi.params.clone();
+                            let params = fi.callable.params.clone();
                             // Honour the member's per-parameter DEFAULT flags (a data-class `copy` defaults
                             // every parameter to the receiver's property), so a named call may OMIT one —
                             // otherwise every label would be required and `r.copy(b = "y")` errors on `a`.
@@ -11421,7 +11459,7 @@ impl<'a> Checker<'a> {
                                     self.diags.error(span, format!("call to '{name}': {msg}"))
                                 }
                             }
-                            return fi.ret;
+                            return fi.callable.ret;
                         }
                     }
                     // A classpath Java object: resolve the instance method via the `.class` reader.
@@ -11472,8 +11510,11 @@ impl<'a> Checker<'a> {
                     // *infix* form (`a rem b`) while the dot form (`a.rem(b)`) keeps the builtin.
                     let user_ext = self
                         .resolver()
-                        .exact_receiver_extensions(rt, &name)
-                        .next()
+                        .resolve_symbol(crate::symbol_resolver::SymRecv::Value(rt), &name, &[])
+                        .map(crate::symbol_resolver::Symbol::overloads)
+                        .unwrap_or_default()
+                        .into_iter()
+                        .find(|o| o.is_extension() && o.receiver_rank == 0)
                         .is_some();
                     let infix_user_ext = self.file.infix_calls.contains(&call.0) && user_ext;
                     if !infix_user_ext && rt.is_numeric() {
@@ -11551,7 +11592,12 @@ impl<'a> Checker<'a> {
                 {
                     let sets: Vec<Vec<String>> = self
                         .resolver()
-                        .receiver_extensions(rt, &name)
+                        .resolve_symbol(crate::symbol_resolver::SymRecv::Value(rt), &name, &[])
+                        .map(crate::symbol_resolver::Symbol::overloads)
+                        .unwrap_or_default()
+                        .into_iter()
+                        .filter(crate::libraries::FunctionInfo::is_extension)
+                        .collect::<Vec<_>>()
                         .into_iter()
                         .filter(|o| o.call_sig.has_param_names())
                         .map(|o| o.call_sig.param_names)
@@ -11658,7 +11704,11 @@ impl<'a> Checker<'a> {
                     // none fits exactly, preserving the omitted-default / named-argument handling below.
                     let exts: Vec<_> = self
                         .resolver()
-                        .exact_receiver_extensions(rt, &name)
+                        .resolve_symbol(crate::symbol_resolver::SymRecv::Value(rt), &name, &[])
+                        .map(crate::symbol_resolver::Symbol::overloads)
+                        .unwrap_or_default()
+                        .into_iter()
+                        .filter(|o| o.is_extension() && o.receiver_rank == 0)
                         .collect();
                     let module_ext = exts
                         .iter()
@@ -11714,8 +11764,11 @@ impl<'a> Checker<'a> {
                 if erased_type_key(rt) != erased_type_key(Ty::obj("kotlin/Any")) {
                     let module_ext = self
                         .resolver()
-                        .generic_receiver_extensions(rt, &name)
-                        .next();
+                        .resolve_symbol(crate::symbol_resolver::SymRecv::Value(rt), &name, &[])
+                        .map(crate::symbol_resolver::Symbol::overloads)
+                        .unwrap_or_default()
+                        .into_iter()
+                        .find(|o| o.is_extension() && o.receiver_rank == 1);
                     if let Some(fi) = module_ext {
                         let logical = fi.extension_value_params().to_vec();
                         if logical.len() == arg_tys.len() {
@@ -13355,7 +13408,15 @@ impl<'a> Checker<'a> {
                         // A USER-defined `operator fun Recv.componentN()` extension (same module).
                         .or_else(|| {
                             self.resolver()
-                                .exact_receiver_extensions(it, &comp)
+                                .resolve_symbol(
+                                    crate::symbol_resolver::SymRecv::Value(it),
+                                    &comp,
+                                    &[],
+                                )
+                                .map(crate::symbol_resolver::Symbol::overloads)
+                                .unwrap_or_default()
+                                .into_iter()
+                                .filter(|o| o.is_extension() && o.receiver_rank == 0)
                                 .find(|o| o.extension_value_params().is_empty())
                                 .map(|o| o.callable.ret)
                         })

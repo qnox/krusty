@@ -8498,15 +8498,11 @@ impl<'a> Lower<'a> {
     ) -> Option<Vec<AstExprId>> {
         let sets: Vec<Vec<String>> = self
             .resolver()
-            .instance_members(rt, name)
+            .resolve_symbol(crate::symbol_resolver::SymRecv::Value(rt), name, &[])
+            .map(crate::symbol_resolver::Symbol::overloads)
+            .unwrap_or_default()
             .into_iter()
-            .map(|m| m.call_sig.param_names)
-            .chain(
-                self.resolver()
-                    .receiver_extensions(rt, name)
-                    .into_iter()
-                    .map(|o| o.call_sig.param_names),
-            )
+            .map(|o| o.call_sig.param_names)
             .filter(|names| !names.is_empty())
             .collect();
         let [param_names] = sets.as_slice() else {
@@ -11115,17 +11111,21 @@ impl<'a> Lower<'a> {
         );
         let fi = self
             .resolver()
-            .instance_members(rt, name)
+            .resolve_symbol(crate::symbol_resolver::SymRecv::Value(rt), name, &[])
+            .map(crate::symbol_resolver::Symbol::overloads)
+            .unwrap_or_default()
             .into_iter()
-            .find(|m| m.call_sig.can_map_omitted_args(m.params.len()))?;
+            .filter(|o| o.kind == crate::libraries::FnKind::Member)
+            .find(|o| o.call_sig.can_map_omitted_args(o.callable.params.len()))?;
         let cs = fi.call_sig;
         // The `@Metadata`/synthetic key on the JVM name: a value-class-param-MANGLED member (`copy` →
-        // `copy-<hash>`, with `copy-<hash>$default`) is looked up by its physical name.
-        let phys = fi.physical_name.clone().unwrap_or_else(|| fi.name.clone());
+        // `copy-<hash>`, with `copy-<hash>$default`) is looked up by its physical name — which the member
+        // query already resolved into the callable's name.
+        let phys = fi.callable.name.clone();
         // The member's LOGICAL return (e.g. `Int`) — a `suspend` `$default` descriptor erases its return to
         // `Object`, so record the logical type for the coroutine pass to unbox the suspension result by (a
         // hoisted `if (s.list() == 5)` else compares the erased `Object` against an int → VerifyError).
-        let logical_ret = fi.ret;
+        let logical_ret = fi.callable.ret;
         let arg_names = self.afile.call_arg_names.get(&call.0).cloned();
         // Only this path when an argument is actually OMITTED (else the plain member call is emitted).
         if arg_names.is_none() && args.len() == cs.param_names.len() {
