@@ -4817,6 +4817,21 @@ impl<'a> Lower<'a> {
         })
     }
 
+    fn emit_method_call(
+        &mut self,
+        class: u32,
+        index: u32,
+        receiver: u32,
+        args: Vec<Option<u32>>,
+    ) -> u32 {
+        self.ir.add_expr(IrExpr::MethodCall {
+            class,
+            index,
+            receiver,
+            args,
+        })
+    }
+
     fn emit_external_call(
         &mut self,
         symbol: impl Into<String>,
@@ -4958,12 +4973,7 @@ impl<'a> Lower<'a> {
         if let Some(internal) = ty.obj_internal().map(|s| s.to_string()) {
             if let Some((class, index, _, _)) = self.resolve_method(&internal, op) {
                 let recv = self.ir.add_expr(IrExpr::GetValue(var_slot));
-                return Some(self.ir.add_expr(IrExpr::MethodCall {
-                    class,
-                    index,
-                    receiver: recv,
-                    args: vec![],
-                }));
+                return Some(self.emit_method_call(class, index, recv, vec![]));
             }
         }
         // Top-level extension operator (`operator fun T?.inc()`). Only for a REFERENCE receiver — a
@@ -5071,12 +5081,7 @@ impl<'a> Lower<'a> {
             for (&arg, pt) in args.iter().zip(&params) {
                 a.push(Some(self.lower_arg(arg, pt)?));
             }
-            let mc = self.ir.add_expr(IrExpr::MethodCall {
-                class: class_id,
-                index,
-                receiver: recv,
-                args: a,
-            });
+            let mc = self.emit_method_call(class_id, index, recv, a);
             return Some(self.coerce_generic_read(mc, call_expr, ret));
         }
         let m = self.resolve_instance(&internal, name, &self.arg_tys(args))?;
@@ -6118,15 +6123,7 @@ impl<'a> Lower<'a> {
                 let (call, log_ty) =
                     if let Some((class, index, _, ret)) = self.resolve_method(&internal, &getter) {
                         // A user-class property getter (data class field).
-                        (
-                            self.ir.add_expr(IrExpr::MethodCall {
-                                class,
-                                index,
-                                receiver: recv,
-                                args: vec![],
-                            }),
-                            ret,
-                        )
+                        (self.emit_method_call(class, index, recv, vec![]), ret)
                     } else {
                         // A library member read through its getter (`IndexedValue.value` → `getValue()`).
                         let m = self.resolve_instance_member(it_ty, &getter, &[])?;
@@ -6153,15 +6150,7 @@ impl<'a> Lower<'a> {
                     .method_of(&internal, &comp)
                     .map(|s| s.ret)
                     .unwrap_or_else(|| Ty::obj("kotlin/Any"));
-                (
-                    self.ir.add_expr(IrExpr::MethodCall {
-                        class,
-                        index,
-                        receiver: recv,
-                        args: vec![],
-                    }),
-                    ret,
-                )
+                (self.emit_method_call(class, index, recv, vec![]), ret)
             } else if self.class_of(it_ty).is_none()
                 && self.syms.class_by_internal(&internal).is_some_and(|cs| {
                     cs.value_field.is_none()
@@ -7313,12 +7302,7 @@ impl<'a> Lower<'a> {
         }
         let rg2 = self.ir.add_expr(IrExpr::GetValue(r_idx));
         let unit = self.ir.add_expr(IrExpr::UnitInstance);
-        let call_is = self.ir.add_expr(IrExpr::MethodCall {
-            class: class_id,
-            index: 0,
-            receiver: rg2,
-            args: vec![Some(unit)],
-        });
+        let call_is = self.emit_method_call(class_id, 0, rg2, vec![Some(unit)]);
         inv_stmts.push(self.ir.add_expr(IrExpr::Return(Some(call_is))));
         let inv_body = self.ir.add_expr(IrExpr::Block {
             stmts: inv_stmts,
@@ -8715,12 +8699,7 @@ impl<'a> Lower<'a> {
             let tmp = (*slot)?;
             a.push(Some(self.ir.add_expr(IrExpr::GetValue(tmp))));
         }
-        let mcall = self.ir.add_expr(IrExpr::MethodCall {
-            class,
-            index,
-            receiver: recv_read,
-            args: a,
-        });
+        let mcall = self.emit_method_call(class, index, recv_read, a);
         Some(self.ir.add_expr(IrExpr::Block {
             stmts: prelude,
             value: Some(mcall),
@@ -9499,12 +9478,7 @@ impl<'a> Lower<'a> {
                 .map(|k| Some(self.ir.add_expr(IrExpr::GetValue(k))))
                 .collect();
             a.push(Some(arr));
-            self.ir.add_expr(IrExpr::MethodCall {
-                class: class_id,
-                index,
-                receiver: recv,
-                args: a,
-            })
+            self.emit_method_call(class_id, index, recv, a)
         } else {
             let fid = *self
                 .fun_ids
@@ -10155,12 +10129,7 @@ impl<'a> Lower<'a> {
         while arg_vs.len() < target_arity {
             arg_vs.push(None);
         }
-        let mc = self.ir.add_expr(IrExpr::MethodCall {
-            class: class_id,
-            index,
-            receiver: recv_v,
-            args: arg_vs,
-        });
+        let mc = self.emit_method_call(class_id, index, recv_v, arg_vs);
         let (stmts, impl_ret) = if ret == Ty::Unit {
             let unit = self.ir.add_expr(IrExpr::UnitInstance);
             let ret_e = self.ir.add_expr(IrExpr::Return(Some(unit)));
@@ -10215,12 +10184,7 @@ impl<'a> Lower<'a> {
         let args: Vec<Option<u32>> = (0..params.len())
             .map(|i| Some(self.ir.add_expr(IrExpr::GetValue((i + 1) as u32))))
             .collect();
-        let call = self.ir.add_expr(IrExpr::MethodCall {
-            class: class_id,
-            index,
-            receiver: recv,
-            args,
-        });
+        let call = self.emit_method_call(class_id, index, recv, args);
         // Wrap in an explicit return so the method's control flow terminates: `return this.<m>(args)`
         // for a value-returning target, or the call then a bare `return` for a `Unit`/void one.
         let stmts = if ret == Ty::Unit {
@@ -10387,12 +10351,7 @@ impl<'a> Lower<'a> {
                 for (k, &arg) in args.iter().enumerate() {
                     a.push(Some(self.lower_arg(arg, &params[k])?));
                 }
-                let call = self.ir.add_expr(IrExpr::MethodCall {
-                    class,
-                    index: midx,
-                    receiver: recv_v,
-                    args: a,
-                });
+                let call = self.emit_method_call(class, midx, recv_v, a);
                 return Some((call, ret));
             }
         }
@@ -11650,12 +11609,7 @@ impl<'a> Lower<'a> {
             if let Some((mclass, mindex, _, _)) =
                 self.resolve_method(recv_internal, &property_getter_name(name))
             {
-                let read = self.ir.add_expr(IrExpr::MethodCall {
-                    class: mclass,
-                    index: mindex,
-                    receiver: recv,
-                    args: vec![],
-                });
+                let read = self.emit_method_call(mclass, mindex, recv, vec![]);
                 return Some(self.coerce_generic_read(read, e, pty));
             }
         }
@@ -12078,12 +12032,7 @@ impl<'a> Lower<'a> {
             };
             a.push(Some(v));
         }
-        Some(self.ir.add_expr(IrExpr::MethodCall {
-            class,
-            index,
-            receiver: recv,
-            args: a,
-        }))
+        Some(self.emit_method_call(class, index, recv, a))
     }
 
     fn lower_this_member_call(
@@ -12102,12 +12051,12 @@ impl<'a> Lower<'a> {
                 if let Some(n_fixed) = vararg_arity(vararg, params.len(), args.len()) {
                     let recv = self.ir.add_expr(IrExpr::GetValue(this_v));
                     let a = self.lower_call_args_vararg(args, &params, vararg, n_fixed)?;
-                    return Some(self.ir.add_expr(IrExpr::MethodCall {
+                    return Some(self.emit_method_call(
                         class,
                         index,
-                        receiver: recv,
-                        args: a.into_iter().map(Some).collect(),
-                    }));
+                        recv,
+                        a.into_iter().map(Some).collect(),
+                    ));
                 }
                 // An implicit-receiver member call OMITTING one or more CONSTANT-default arguments
                 // (`resolveRoles(subjectId)` on `resolveRoles(id, filter = null)`): fill the omitted slots
@@ -12951,12 +12900,7 @@ impl<'a> Lower<'a> {
             if let [param] = params.as_slice() {
                 let r = self.expr(lhs)?;
                 let a = self.lower_arg(rhs, param)?;
-                return Some(self.ir.add_expr(IrExpr::MethodCall {
-                    class,
-                    index,
-                    receiver: r,
-                    args: vec![Some(a)],
-                }));
+                return Some(self.emit_method_call(class, index, r, vec![Some(a)]));
             }
         }
         // Classpath inline `MutableCollection.plusAssign` (`@InlineOnly`): emit an inline
@@ -13559,12 +13503,7 @@ impl<'a> Lower<'a> {
                             .cloned()
                             .unwrap_or_else(|| ty_to_ir(Ty::obj("kotlin/Any")));
                         let val = self.lower_arg(value, &pty)?;
-                        Some(self.ir.add_expr(IrExpr::MethodCall {
-                            class: sclass,
-                            index: sindex,
-                            receiver: recv,
-                            args: vec![Some(val)],
-                        }))
+                        Some(self.emit_method_call(sclass, sindex, recv, vec![Some(val)]))
                     }
                 }
             }
@@ -13629,12 +13568,7 @@ impl<'a> Lower<'a> {
                     } else {
                         let (gclass, gindex, _, _) =
                             self.resolve_method(&internal, &property_getter_name(&name))?;
-                        self.ir.add_expr(IrExpr::MethodCall {
-                            class: gclass,
-                            index: gindex,
-                            receiver: recv,
-                            args: vec![],
-                        })
+                        self.emit_method_call(gclass, gindex, recv, vec![])
                     };
                     let nv = self.scalar_update_value(cur_val, fty, op, one_c);
                     let recv2 = self.ir.add_expr(IrExpr::GetValue(this_v));
@@ -13648,12 +13582,7 @@ impl<'a> Lower<'a> {
                     } else {
                         let (sclass, sindex, _, _) =
                             self.resolve_method(&internal, &property_setter_name(&name))?;
-                        self.ir.add_expr(IrExpr::MethodCall {
-                            class: sclass,
-                            index: sindex,
-                            receiver: recv2,
-                            args: vec![Some(nv)],
-                        })
+                        self.emit_method_call(sclass, sindex, recv2, vec![Some(nv)])
                     });
                 }
                 let (v, ty) = self.lookup(&name)?;
