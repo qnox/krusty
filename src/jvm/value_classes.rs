@@ -535,13 +535,67 @@ pub fn lower_value_classes(
     // interface (so they're NOT in this set) and stay unmangled → an inconsistent override pair
     // (AbstractMethodError, box `overrideReturnNothing.kt`). Keeping interface getters unmangled keeps both
     // sides consistent.
-    let getter_mangle_owners: HashSet<String> = ir
+    // Per owner: the method names its supertype chain declares — `None` when any supertype is not a
+    // SAME-FILE class (a classpath/cross-file parent can't be inspected → conservatively skip getter
+    // mangling for that owner entirely). A getter that OVERRIDES a supertype declaration must keep the
+    // supertype's (unmangled) name — mangling one side of the pair is an AbstractMethodError (box
+    // `overrideReturnNothing.kt`); a class's OWN property getter mangles freely.
+    let super_member_names: HashMap<String, Option<HashSet<String>>> = ir
         .classes
         .iter()
-        .filter(|c| {
-            !c.is_value && !c.is_interface && c.supertypes.is_empty() && c.interfaces.is_empty()
+        .filter(|c| !c.is_value && !c.is_interface)
+        .map(|c| {
+            let mut names: HashSet<String> = HashSet::new();
+            let mut work: Vec<&str> = c
+                .interfaces
+                .iter()
+                .map(String::as_str)
+                .chain(c.supertypes.iter().filter_map(|t| t.obj_internal()))
+                .chain(
+                    (!c.superclass.is_empty()
+                        && c.superclass != "java/lang/Object"
+                        && c.superclass != "kotlin/Any")
+                        .then_some(c.superclass.as_str()),
+                )
+                .collect();
+            let mut known = true;
+            let mut seen: HashSet<&str> = HashSet::new();
+            while let Some(s) = work.pop() {
+                if s == "java/lang/Object" || s == "kotlin/Any" || !seen.insert(s) {
+                    continue;
+                }
+                match ir.classes.iter().find(|o| o.fq_name == s) {
+                    Some(sup) => {
+                        for &m in &sup.methods {
+                            if let Some(f) = ir.functions.get(m as usize) {
+                                names.insert(f.name.clone());
+                            }
+                        }
+                        work.extend(sup.interfaces.iter().map(String::as_str));
+                        work.extend(sup.supertypes.iter().filter_map(|t| t.obj_internal()));
+                        if !sup.superclass.is_empty()
+                            && sup.superclass != "java/lang/Object"
+                            && sup.superclass != "kotlin/Any"
+                        {
+                            work.push(sup.superclass.as_str());
+                        }
+                    }
+                    None => {
+                        known = false;
+                        break;
+                    }
+                }
+            }
+            crate::trace_compiler!(
+                "value_classes",
+                "super_member_names {} known={known} names={:?} ifaces={:?} super={:?}",
+                c.fq_name,
+                names,
+                c.interfaces,
+                c.superclass
+            );
+            (c.fq_name.clone(), known.then_some(names))
         })
-        .map(|c| c.fq_name.clone())
         .collect();
     for (fid, f) in ir.functions.iter_mut().enumerate() {
         let is_box_impl = f.name == "box-impl";
@@ -557,10 +611,14 @@ pub fn lower_value_classes(
         // and always mangles.
         let is_vc_field_getter = f.name.starts_with("get")
             && orig_params[fid].is_empty()
-            && !f
-                .dispatch_receiver
-                .as_ref()
-                .is_some_and(|r| getter_mangle_owners.contains(r));
+            && !f.dispatch_receiver.as_ref().is_some_and(|r| {
+                // Mangle this getter only when the owner's WHOLE supertype chain is same-file-known
+                // AND none of it declares a method of this name (i.e. the getter is the class's own,
+                // never an override).
+                super_member_names
+                    .get(r)
+                    .is_some_and(|sups| sups.as_ref().is_some_and(|names| !names.contains(&f.name)))
+            });
         let synthesized = matches!(
             f.name.as_str(),
             "box-impl"
