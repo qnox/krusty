@@ -19,7 +19,6 @@ use krusty::jvm::classpath::Classpath;
 use krusty::jvm::ir_emit::emit_all;
 use krusty::jvm::jvm_libraries::JvmLibraries;
 use krusty::jvm::names::file_class_name;
-use krusty::jvm::value_classes::lower_value_classes;
 use krusty::lexer::lex;
 use krusty::parser::parse;
 use krusty::resolve::{check_file, collect_signatures_with_cp};
@@ -48,21 +47,8 @@ fn krusty_compile(src: &str, stem: &str, cp: &Rc<Classpath>) -> Option<Vec<(Stri
     let facade = file_class_name(stem, files[0].package.as_deref());
     let runtime = JvmLibraries::new(cp.clone());
     let mut ir = lower_file(&files[0], &info, &syms, &runtime)?;
-    let vc_module = krusty::module_symbols::ModuleSymbols::new(&syms);
-    let vc_resolver = krusty::symbol_resolver::SymbolResolver::new_scoped_with_module(
-        &*syms.libraries,
-        &vc_module,
-        &[],
-    );
-    if !lower_value_classes(&mut ir, &vc_resolver) {
-        return None;
-    }
-    if !krusty::jvm::suspend::lower_suspend(&mut ir, &facade) {
-        return None;
-    }
-    // Mirror the real backend's post-transform passes (jvm/backend.rs).
-    krusty::jvm::ir_emit::mark_must_inline_lambdas(&mut ir);
-    krusty::jvm::ir_emit::reparent_lambda_impls(&mut ir);
+    // Shared post-lowering pass pipeline (jvm/backend.rs); unlowerable shape → nothing to diff.
+    krusty::jvm::backend::run_backend_passes(&mut ir, &files[0], &facade, &syms).ok()?;
     let out = emit_all(&ir, &facade, &**cp, None)?;
     if out.is_empty() {
         None

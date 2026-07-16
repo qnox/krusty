@@ -248,28 +248,12 @@ fn compile_source(
             return None;
         }
     };
-    if !{
-        let vc_module = krusty::module_symbols::ModuleSymbols::new(&syms);
-        let vc_resolver = krusty::symbol_resolver::SymbolResolver::new_scoped_with_module(
-            &*syms.libraries,
-            &vc_module,
-            &[],
-        );
-        krusty::jvm::value_classes::lower_value_classes(&mut ir, &vc_resolver)
-    } {
-        T_EMIT.fetch_add(t4.elapsed().as_nanos() as u64, Ordering::Relaxed);
-        return None; // value-class shape not yet lowered — skip, don't miscompile
-    }
-    // The CPS (suspend) transform — the real backend (jvm/backend.rs) runs it after the value-class pass.
-    // Without it the gate would compile `suspend` code with the wrong ABI (no continuation), diverging
-    // from what ships; an unsupported suspend shape returns false → skip (don't miscompile).
-    if !krusty::jvm::suspend::lower_suspend(&mut ir, &facade_name) {
+    // The real backend's shared post-lowering pass pipeline (jvm/backend.rs) — one definition, so the
+    // gate compiles exactly what ships. An unlowerable shape → skip, don't miscompile.
+    if krusty::jvm::backend::run_backend_passes(&mut ir, file, &facade_name, &syms).is_err() {
         T_EMIT.fetch_add(t4.elapsed().as_nanos() as u64, Ordering::Relaxed);
         return None;
     }
-    // Mirror the real backend's post-transform passes (jvm/backend.rs).
-    krusty::jvm::ir_emit::mark_must_inline_lambdas(&mut ir);
-    krusty::jvm::ir_emit::reparent_lambda_impls(&mut ir);
     let outputs: Vec<(String, Vec<u8>)> = match ir_emit::emit_all(&ir, &facade_name, &*cp, None) {
         Some(o) => o,
         None => {
@@ -469,23 +453,8 @@ fn compile_blocks(
         let facade = file_class_name(&blocks[i].0, file.package.as_deref());
         let runtime = krusty::jvm::jvm_libraries::JvmLibraries::new(cp.clone());
         let mut ir = lower_file(file, &info, &syms, &runtime)?;
-        if !{
-            let vc_module = krusty::module_symbols::ModuleSymbols::new(&syms);
-            let vc_resolver = krusty::symbol_resolver::SymbolResolver::new_scoped_with_module(
-                &*syms.libraries,
-                &vc_module,
-                &[],
-            );
-            krusty::jvm::value_classes::lower_value_classes(&mut ir, &vc_resolver)
-        } {
-            return None;
-        }
-        if !krusty::jvm::suspend::lower_suspend(&mut ir, &facade) {
-            return None; // suspend shape not yet lowered — skip, don't miscompile
-        }
-        // Mirror the real backend's post-transform passes (jvm/backend.rs).
-        krusty::jvm::ir_emit::mark_must_inline_lambdas(&mut ir);
-        krusty::jvm::ir_emit::reparent_lambda_impls(&mut ir);
+        // Shared post-lowering pass pipeline (jvm/backend.rs); unlowerable shape → skip, don't miscompile.
+        krusty::jvm::backend::run_backend_passes(&mut ir, file, &facade, &syms).ok()?;
         let out = ir_emit::emit_all(&ir, &facade, &*cp, None)?;
         all.extend(out);
     }

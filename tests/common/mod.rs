@@ -181,31 +181,10 @@ pub fn compile_in_process(
     let facade = file_class_name(stem, file.package.as_deref());
     let runtime = krusty::jvm::jvm_libraries::JvmLibraries::new(cp.clone());
     let mut ir = krusty::ir_lower::lower_file(file, &info, &syms, &runtime)?;
-    // Compiler-extension plugins (kotlinx.serialization) — run them here exactly as the real backend
-    // does (jvm/backend.rs), between lowering and the value-class pass. A no-op without `@Serializable`,
-    // so non-serialization snippets are unaffected; with it, `compile_in_process` matches the binary.
-    krusty::plugins::run_enabled(&mut ir, file);
-    if !{
-        let vc_module = krusty::module_symbols::ModuleSymbols::new(&syms);
-        let vc_resolver = krusty::symbol_resolver::SymbolResolver::new_scoped_with_module(
-            &*syms.libraries,
-            &vc_module,
-            &[],
-        );
-        krusty::jvm::value_classes::lower_value_classes(&mut ir, &vc_resolver)
-    } {
-        return None; // value-class shape not lowered — skip, don't miscompile
-    }
-    // The CPS (suspend) transform — the real backend (jvm/backend.rs) runs it right after the value-class
-    // pass. Without it here, a `suspend` snippet compiled in-process would diverge from the gate.
-    if !krusty::jvm::suspend::lower_suspend(&mut ir, &facade) {
-        return None; // suspend shape not lowered — skip, don't miscompile
-    }
-    // Mirror the real backend's post-transform passes (jvm/backend.rs): drop must-inline message-lambda
-    // impls, then reparent lambda impls into the class whose code emits their `invokedynamic` (the
-    // impls are PRIVATE — a cross-class handle is an IllegalAccessError).
-    krusty::jvm::ir_emit::mark_must_inline_lambdas(&mut ir);
-    krusty::jvm::ir_emit::reparent_lambda_impls(&mut ir);
+    // The real backend's shared post-lowering pass pipeline (plugins → value-classes → suspend →
+    // must-inline marks → lambda reparenting) — one definition, so `compile_in_process` can't drift
+    // from what ships. An unlowerable shape → skip, don't miscompile.
+    krusty::jvm::backend::run_backend_passes(&mut ir, file, &facade, &syms).ok()?;
     let outputs = krusty::jvm::ir_emit::emit_all(&ir, &facade, &*cp, None)?;
     if outputs.is_empty() {
         None
@@ -289,19 +268,7 @@ pub fn backend_rejects_in_process(
     let Some(mut ir) = krusty::ir_lower::lower_file(file, &info, &syms, &runtime) else {
         return Some(true);
     };
-    krusty::plugins::run_enabled(&mut ir, file);
-    if !{
-        let vc_module = krusty::module_symbols::ModuleSymbols::new(&syms);
-        let vc_resolver = krusty::symbol_resolver::SymbolResolver::new_scoped_with_module(
-            &*syms.libraries,
-            &vc_module,
-            &[],
-        );
-        krusty::jvm::value_classes::lower_value_classes(&mut ir, &vc_resolver)
-    } {
-        return Some(true);
-    }
-    if !krusty::jvm::suspend::lower_suspend(&mut ir, &facade) {
+    if krusty::jvm::backend::run_backend_passes(&mut ir, file, &facade, &syms).is_err() {
         return Some(true);
     }
     Some(krusty::jvm::ir_emit::emit_all(&ir, &facade, &*cp, None).is_none())

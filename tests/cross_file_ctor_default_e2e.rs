@@ -55,17 +55,8 @@ fn compile_two(a: &str, b: &str) -> Option<Vec<(String, Vec<u8>)>> {
         let facade = file_class_name(stems[i], file.package.as_deref());
         let runtime = krusty::jvm::jvm_libraries::JvmLibraries::new(cp.clone());
         let mut ir = krusty::ir_lower::lower_file(file, &info, &syms, &runtime)?;
-        if !{
-            let vc_module = krusty::module_symbols::ModuleSymbols::new(&syms);
-            let vc_resolver = krusty::symbol_resolver::SymbolResolver::new_scoped_with_module(
-                &*syms.libraries,
-                &vc_module,
-                &[],
-            );
-            krusty::jvm::value_classes::lower_value_classes(&mut ir, &vc_resolver)
-        } {
-            return None;
-        }
+        // Shared post-lowering pass pipeline (jvm/backend.rs); unlowerable shape → skip.
+        krusty::jvm::backend::run_backend_passes(&mut ir, file, &facade, &syms).ok()?;
         all.extend(krusty::jvm::ir_emit::emit_all(&ir, &facade, &*cp, None)?);
     }
     Some(all)
