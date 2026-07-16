@@ -302,7 +302,7 @@ fn ranked_extension_overloads_by_recv<'a>(
             o.is_extension() && (o.public() || (allow_must_inline && o.flags.inline.must_inline()))
         })
         .filter_map(|o| {
-            // The legacy `functions()` provider labels every candidate with the QUERIED receiver, not its
+            // The `functions()` provider labels every candidate with the QUERIED receiver, not its
             // own declared one — so `o.receiver` can't tell `IntArray.any` from `CharArray.any`. Rank by the
             // real declared receiver on the parsed generic signature; a candidate with no signature is
             // dropped (both callers gate on `generic_sig` anyway). This drops the non-applicable
@@ -541,7 +541,7 @@ impl<'a> SymbolResolver<'a> {
     /// `extension_receiver_rank` applicability [`select_overload`] uses). This replaces the receiver-indexed
     /// `functions(name, Some(recv))` extension lookup — `resolve_symbols` surfaces every extension (including
     /// value-class ones) by its LOGICAL `@Metadata` name + receiver, so no per-mangling special-case is
-    /// needed here (the mangling is a jvm-emit concern). Falls back to the legacy `functions()` extension
+    /// needed here (the mangling is a jvm-emit concern). Falls back to the `functions()` extension
     /// slice only when there is no import scope.
     pub(crate) fn receiver_extensions(&self, recv: Ty, name: &str) -> Vec<FunctionInfo> {
         let applies = |o: &FunctionInfo| {
@@ -1231,7 +1231,7 @@ impl<'a> SymbolResolver<'a> {
         // instance member taking a trailing lambda hit. Return the kind so the caller branches.
         // Candidates from the scope-pruned `resolve_symbols` seam, NOT the plain `functions(name, …)`
         // walk: a `@OverloadResolutionByLambdaReturnType` family carries a `@JvmName` (`sumOf` →
-        // `sumOfInt`) that the Kotlin name never matches, so the legacy walk returns nothing and the call
+        // `sumOfInt`) that the Kotlin name never matches, so the walk returns nothing and the call
         // bails ("not yet supported by the IR backend"). This mirrors `lambda_return_overload_param_types`.
         // Fall back to the receiver-indexed `functions()` only when there is no import scope.
         self.top_level_function_set(name)
@@ -1964,7 +1964,7 @@ fn property_getter_via_query(
 }
 
 /// Resolve a zero-arg property read on `recv`. The `@Metadata` `properties` query supplies the real
-/// getter name first (no guessing); then the legacy fallbacks — the semantic Kotlin name (a
+/// getter name first (no guessing); then the fallbacks — the semantic Kotlin name (a
 /// computed/builtin member), a `getX` physical getter, and a value-class-mangled getter.
 fn resolve_property_member(
     lib: &dyn CompilerPlatform,
@@ -2227,7 +2227,7 @@ fn select_overload(
     let allow_must_inline = ext.allow_must_inline;
     // EXTENSION candidates come from the ONE query — union `resolve_symbols`' function callables over the
     // in-scope packages (scope-pruned, tree-driven), so an unqualified extension binds only when its
-    // facade's package is imported. No import scope → the legacy whole-classpath `functions()` fallback
+    // facade's package is imported. No import scope → the whole-classpath `functions()` fallback
     // (removed once every consumer is scoped — task A). MEMBERS are always visible on their type.
     let fs = match kind {
         // A MEMBER's return can be RECEIVER-COUPLED (`Repo<Cfg>.byId(): Cfg`, a suspend `Continuation<T>`
