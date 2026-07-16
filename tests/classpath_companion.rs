@@ -54,7 +54,7 @@ fn classpath_class_companion_object_is_detected() {
         .expect("Random has a companion object");
     use krusty::symbol_resolver::{SymRecv, Symbol};
     let nextint = krusty::symbol_resolver::SymbolResolver::new(&libs)
-        .resolve_symbol(SymRecv::Type(&cty), "nextInt", &[Ty::Int])
+        .resolve_symbol(SymRecv::Type(&cty), "nextInt", &[Ty::Int], &[])
         .and_then(Symbol::instance);
     assert!(
         nextint.is_some(),

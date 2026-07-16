@@ -4546,7 +4546,7 @@ impl<'a> Lower<'a> {
     ) -> Option<crate::symbol_resolver::ResolvedMember> {
         use crate::symbol_resolver::{SymRecv, Symbol};
         self.resolver()
-            .resolve_symbol(SymRecv::Value(recv), name, args)
+            .resolve_symbol(SymRecv::Value(recv), name, args, &[])
             .and_then(Symbol::call)
     }
     fn resolve_property_member(
@@ -4556,7 +4556,7 @@ impl<'a> Lower<'a> {
     ) -> Option<crate::symbol_resolver::ResolvedMember> {
         use crate::symbol_resolver::{SymRecv, Symbol};
         self.resolver()
-            .resolve_symbol(SymRecv::Value(recv), name, &[])
+            .resolve_symbol(SymRecv::Value(recv), name, &[], &[])
             .and_then(Symbol::property)
     }
     fn resolve_property_ref(
@@ -4566,7 +4566,7 @@ impl<'a> Lower<'a> {
     ) -> Option<crate::symbol_resolver::BoundPropertyRef> {
         use crate::symbol_resolver::{SymRecv, Symbol};
         self.resolver()
-            .resolve_symbol(SymRecv::Value(recv), name, &[])
+            .resolve_symbol(SymRecv::Value(recv), name, &[], &[])
             .and_then(Symbol::property_ref)
     }
     fn resolve_instance_ref(
@@ -4576,7 +4576,7 @@ impl<'a> Lower<'a> {
     ) -> Option<crate::libraries::LibraryMember> {
         use crate::symbol_resolver::{SymRecv, Symbol};
         self.resolver()
-            .resolve_symbol(SymRecv::Value(recv), name, &[])
+            .resolve_symbol(SymRecv::Value(recv), name, &[], &[])
             .and_then(Symbol::method_ref)
     }
     fn resolve_property_setter(
@@ -4586,7 +4586,7 @@ impl<'a> Lower<'a> {
     ) -> Option<crate::libraries::LibraryCallable> {
         use crate::symbol_resolver::{SymRecv, Symbol};
         self.resolver()
-            .resolve_symbol(SymRecv::Value(recv), name, &[])
+            .resolve_symbol(SymRecv::Value(recv), name, &[], &[])
             .and_then(Symbol::property_setter)
     }
     fn resolve_instance(
@@ -4597,7 +4597,7 @@ impl<'a> Lower<'a> {
     ) -> Option<crate::libraries::LibraryMember> {
         use crate::symbol_resolver::{SymRecv, Symbol};
         self.resolver()
-            .resolve_symbol(SymRecv::Type(internal), name, args)
+            .resolve_symbol(SymRecv::Type(internal), name, args, &[])
             .and_then(Symbol::instance)
     }
     fn resolve_companion(
@@ -4608,7 +4608,7 @@ impl<'a> Lower<'a> {
     ) -> Option<crate::libraries::LibraryMember> {
         use crate::symbol_resolver::{SymRecv, Symbol};
         self.resolver()
-            .resolve_symbol(SymRecv::Type(internal), name, args)
+            .resolve_symbol(SymRecv::Type(internal), name, args, &[])
             .and_then(Symbol::companion)
     }
     fn resolve_constructor(
@@ -4618,7 +4618,7 @@ impl<'a> Lower<'a> {
     ) -> Option<crate::libraries::LibraryMember> {
         use crate::symbol_resolver::{SymRecv, Symbol};
         self.resolver()
-            .resolve_symbol(SymRecv::Type(internal), "", args)
+            .resolve_symbol(SymRecv::Type(internal), "", args, &[])
             .and_then(Symbol::constructor)
     }
     fn resolve_synthetic_constructor(
@@ -4628,7 +4628,7 @@ impl<'a> Lower<'a> {
     ) -> Option<crate::symbol_resolver::SyntheticCtorCall> {
         use crate::symbol_resolver::{SymRecv, Symbol};
         self.resolver()
-            .resolve_symbol(SymRecv::Type(internal), "", args)
+            .resolve_symbol(SymRecv::Type(internal), "", args, &[])
             .and_then(Symbol::synthetic_constructor)
     }
 
@@ -8476,7 +8476,7 @@ impl<'a> Lower<'a> {
         let sets: Vec<Vec<String>> = crate::libraries::FunctionSet {
             overloads: self
                 .resolver()
-                .resolve_symbol(crate::symbol_resolver::SymRecv::TopLevel, fname, &[])
+                .resolve_symbol(crate::symbol_resolver::SymRecv::TopLevel, fname, &[], &[])
                 .map(crate::symbol_resolver::Symbol::overloads)
                 .unwrap_or_default(),
         }
@@ -8502,7 +8502,7 @@ impl<'a> Lower<'a> {
     ) -> Option<Vec<AstExprId>> {
         let sets: Vec<Vec<String>> = self
             .resolver()
-            .resolve_symbol(crate::symbol_resolver::SymRecv::Value(rt), name, &[])
+            .resolve_symbol(crate::symbol_resolver::SymRecv::Value(rt), name, &[], &[])
             .map(crate::symbol_resolver::Symbol::overloads)
             .unwrap_or_default()
             .into_iter()
@@ -11115,7 +11115,7 @@ impl<'a> Lower<'a> {
         );
         let fi = self
             .resolver()
-            .resolve_symbol(crate::symbol_resolver::SymRecv::Value(rt), name, &[])
+            .resolve_symbol(crate::symbol_resolver::SymRecv::Value(rt), name, &[], &[])
             .map(crate::symbol_resolver::Symbol::overloads)
             .unwrap_or_default()
             .into_iter()
@@ -15340,7 +15340,12 @@ impl<'a> Lower<'a> {
                     || crate::libraries::FunctionSet {
                         overloads: self
                             .resolver()
-                            .resolve_symbol(crate::symbol_resolver::SymRecv::TopLevel, &name, &[])
+                            .resolve_symbol(
+                                crate::symbol_resolver::SymRecv::TopLevel,
+                                &name,
+                                &[],
+                                &[],
+                            )
                             .map(crate::symbol_resolver::Symbol::overloads)
                             .unwrap_or_default(),
                     }
@@ -15431,7 +15436,7 @@ impl<'a> Lower<'a> {
                 let tl: Vec<_> = crate::libraries::FunctionSet {
                     overloads: self
                         .resolver()
-                        .resolve_symbol(crate::symbol_resolver::SymRecv::TopLevel, &name, &[])
+                        .resolve_symbol(crate::symbol_resolver::SymRecv::TopLevel, &name, &[], &[])
                         .map(crate::symbol_resolver::Symbol::overloads)
                         .unwrap_or_default(),
                 }

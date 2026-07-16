@@ -3256,7 +3256,7 @@ fn infer_lit_ty_p(
     ) -> Option<Ty> {
         let rets: Vec<Ty> = match receiver {
             Some(recv) => resolver
-                .resolve_symbol(crate::symbol_resolver::SymRecv::Value(recv), name, &[])
+                .resolve_symbol(crate::symbol_resolver::SymRecv::Value(recv), name, &[], &[])
                 .map(crate::symbol_resolver::Symbol::overloads)
                 .unwrap_or_default()
                 .into_iter()
@@ -3264,7 +3264,7 @@ fn infer_lit_ty_p(
                 .collect(),
             None => crate::libraries::FunctionSet {
                 overloads: resolver
-                    .resolve_symbol(crate::symbol_resolver::SymRecv::TopLevel, name, &[])
+                    .resolve_symbol(crate::symbol_resolver::SymRecv::TopLevel, name, &[], &[])
                     .map(crate::symbol_resolver::Symbol::overloads)
                     .unwrap_or_default(),
             }
@@ -3319,7 +3319,7 @@ fn infer_lit_ty_p(
             // the same path the full checker uses, no hardcoded property names.
             let rt = infer_lit_ty_p(file, *receiver, class_names, fun_rets, props, src, up);
             if let Some(m) = crate::symbol_resolver::SymbolResolver::new(src)
-                .resolve_symbol(crate::symbol_resolver::SymRecv::Value(rt), name, &[])
+                .resolve_symbol(crate::symbol_resolver::SymRecv::Value(rt), name, &[], &[])
                 .and_then(crate::symbol_resolver::Symbol::property)
             {
                 return m.ret;
@@ -3422,7 +3422,15 @@ fn infer_lit_ty_p(
                         return t;
                     }
                     if !arg_tys.contains(&Ty::Error) {
-                        if let Some(c) = resolver.resolve_top_level_callable(n, &arg_tys, &[]) {
+                        if let Some(c) = resolver
+                            .resolve_symbol(
+                                crate::symbol_resolver::SymRecv::TopLevel,
+                                n,
+                                &arg_tys,
+                                &[],
+                            )
+                            .and_then(crate::symbol_resolver::Symbol::top_level_call)
+                        {
                             return c.ret;
                         }
                     }
@@ -3514,6 +3522,7 @@ fn infer_lit_ty_p(
                                         crate::symbol_resolver::SymRecv::Value(r),
                                         name,
                                         &arg_tys,
+                                        &[],
                                     )
                                     .and_then(crate::symbol_resolver::Symbol::call)
                                 {
@@ -3582,7 +3591,7 @@ fn infer_lit_ty_p(
         } if name != "class" => {
             let overloads = crate::libraries::FunctionSet {
                 overloads: resolver
-                    .resolve_symbol(crate::symbol_resolver::SymRecv::TopLevel, name, &[])
+                    .resolve_symbol(crate::symbol_resolver::SymRecv::TopLevel, name, &[], &[])
                     .map(crate::symbol_resolver::Symbol::overloads)
                     .unwrap_or_default(),
             };
@@ -5353,6 +5362,21 @@ impl<'a> Checker<'a> {
         )
     }
 
+    /// A resolver whose top-level scope is an EXPLICIT package `scope`, for a fully-qualified reference
+    /// (`kotlinx.coroutines.runBlocking`): the package is resolution SCOPE, not part of the name — a dotted
+    /// name can't be split into package/class by inspection (a package segment may be capitalized), so the
+    /// caller, which already resolved which prefix is the package, supplies it here.
+    fn resolver_in_scope<'s>(
+        &'s self,
+        scope: &'s [String],
+    ) -> crate::symbol_resolver::SymbolResolver<'s> {
+        crate::symbol_resolver::SymbolResolver::new_scoped_with_module(
+            &*self.syms.libraries,
+            &self.module,
+            scope,
+        )
+    }
+
     // Call-site sugar over the ONE resolution entry point [`SymbolResolver::resolve_symbol`]: each
     // states only the syntax it wrote (a value/type receiver + name + args + a call/read/write/ref
     // form) and reads the discovered [`Symbol`] variant it expects. Resolution itself lives entirely in
@@ -5365,7 +5389,7 @@ impl<'a> Checker<'a> {
     ) -> Option<crate::symbol_resolver::ResolvedMember> {
         use crate::symbol_resolver::{SymRecv, Symbol};
         self.resolver()
-            .resolve_symbol(SymRecv::Value(recv), name, args)
+            .resolve_symbol(SymRecv::Value(recv), name, args, &[])
             .and_then(Symbol::call)
     }
     fn resolve_property_member(
@@ -5375,7 +5399,7 @@ impl<'a> Checker<'a> {
     ) -> Option<crate::symbol_resolver::ResolvedMember> {
         use crate::symbol_resolver::{SymRecv, Symbol};
         self.resolver()
-            .resolve_symbol(SymRecv::Value(recv), name, &[])
+            .resolve_symbol(SymRecv::Value(recv), name, &[], &[])
             .and_then(Symbol::property)
     }
     fn resolve_property_setter(
@@ -5385,7 +5409,7 @@ impl<'a> Checker<'a> {
     ) -> Option<crate::libraries::LibraryCallable> {
         use crate::symbol_resolver::{SymRecv, Symbol};
         self.resolver()
-            .resolve_symbol(SymRecv::Value(recv), name, &[])
+            .resolve_symbol(SymRecv::Value(recv), name, &[], &[])
             .and_then(Symbol::property_setter)
     }
     fn resolve_property_ref(
@@ -5395,7 +5419,7 @@ impl<'a> Checker<'a> {
     ) -> Option<crate::symbol_resolver::BoundPropertyRef> {
         use crate::symbol_resolver::{SymRecv, Symbol};
         self.resolver()
-            .resolve_symbol(SymRecv::Value(recv), name, &[])
+            .resolve_symbol(SymRecv::Value(recv), name, &[], &[])
             .and_then(Symbol::property_ref)
     }
     fn resolve_instance_ref(
@@ -5405,7 +5429,7 @@ impl<'a> Checker<'a> {
     ) -> Option<crate::libraries::LibraryMember> {
         use crate::symbol_resolver::{SymRecv, Symbol};
         self.resolver()
-            .resolve_symbol(SymRecv::Value(recv), name, &[])
+            .resolve_symbol(SymRecv::Value(recv), name, &[], &[])
             .and_then(Symbol::method_ref)
     }
     fn resolve_instance(
@@ -5416,7 +5440,7 @@ impl<'a> Checker<'a> {
     ) -> Option<crate::libraries::LibraryMember> {
         use crate::symbol_resolver::{SymRecv, Symbol};
         self.resolver()
-            .resolve_symbol(SymRecv::Type(internal), name, args)
+            .resolve_symbol(SymRecv::Type(internal), name, args, &[])
             .and_then(Symbol::instance)
     }
     fn resolve_companion(
@@ -5427,7 +5451,7 @@ impl<'a> Checker<'a> {
     ) -> Option<crate::libraries::LibraryMember> {
         use crate::symbol_resolver::{SymRecv, Symbol};
         self.resolver()
-            .resolve_symbol(SymRecv::Type(internal), name, args)
+            .resolve_symbol(SymRecv::Type(internal), name, args, &[])
             .and_then(Symbol::companion)
     }
     fn resolve_constructor(
@@ -5437,7 +5461,7 @@ impl<'a> Checker<'a> {
     ) -> Option<crate::libraries::LibraryMember> {
         use crate::symbol_resolver::{SymRecv, Symbol};
         self.resolver()
-            .resolve_symbol(SymRecv::Type(internal), "", args)
+            .resolve_symbol(SymRecv::Type(internal), "", args, &[])
             .and_then(Symbol::constructor)
     }
     fn resolve_synthetic_constructor(
@@ -5447,7 +5471,7 @@ impl<'a> Checker<'a> {
     ) -> Option<crate::symbol_resolver::SyntheticCtorCall> {
         use crate::symbol_resolver::{SymRecv, Symbol};
         self.resolver()
-            .resolve_symbol(SymRecv::Type(internal), "", args)
+            .resolve_symbol(SymRecv::Type(internal), "", args, &[])
             .and_then(Symbol::synthetic_constructor)
     }
     /// Whether the current module declares a top-level function `name` (shadow-precedence test) — asked
@@ -5477,7 +5501,12 @@ impl<'a> Checker<'a> {
         crate::libraries::FunctionSet {
             overloads: self
                 .resolver()
-                .resolve_symbol(crate::symbol_resolver::SymRecv::TopLevel, "contract", &[])
+                .resolve_symbol(
+                    crate::symbol_resolver::SymRecv::TopLevel,
+                    "contract",
+                    &[],
+                    &[],
+                )
                 .map(crate::symbol_resolver::Symbol::overloads)
                 .unwrap_or_default(),
         }
@@ -5693,6 +5722,7 @@ impl<'a> Checker<'a> {
                         .resolve_symbol(
                             crate::symbol_resolver::SymRecv::Value(receiver_ty),
                             CALLABLE_INVOKE_OPERATOR,
+                            &[],
                             &[],
                         )
                         .map(crate::symbol_resolver::Symbol::overloads)
@@ -7981,7 +8011,7 @@ impl<'a> Checker<'a> {
                 if !rt.is_reference() {
                     if let Some(fi) = self
                         .resolver()
-                        .resolve_symbol(crate::symbol_resolver::SymRecv::Value(rt), &name, &[])
+                        .resolve_symbol(crate::symbol_resolver::SymRecv::Value(rt), &name, &[], &[])
                         .map(crate::symbol_resolver::Symbol::overloads)
                         .unwrap_or_default()
                         .into_iter()
@@ -8101,6 +8131,7 @@ impl<'a> Checker<'a> {
                         .resolve_symbol(
                             crate::symbol_resolver::SymRecv::Value(rt.non_null()),
                             &name,
+                            &[],
                             &[],
                         )
                         .map(crate::symbol_resolver::Symbol::overloads)
@@ -8363,7 +8394,12 @@ impl<'a> Checker<'a> {
                     if let Some(fname) = op_name {
                         if let Some(fi) = self
                             .resolver()
-                            .resolve_symbol(crate::symbol_resolver::SymRecv::Value(lt), fname, &[])
+                            .resolve_symbol(
+                                crate::symbol_resolver::SymRecv::Value(lt),
+                                fname,
+                                &[],
+                                &[],
+                            )
                             .map(crate::symbol_resolver::Symbol::overloads)
                             .unwrap_or_default()
                             .into_iter()
@@ -8912,6 +8948,7 @@ impl<'a> Checker<'a> {
                                 .resolve_symbol(
                                     crate::symbol_resolver::SymRecv::TopLevel,
                                     &name,
+                                    &[],
                                     &[],
                                 )
                                 .map(crate::symbol_resolver::Symbol::overloads)
@@ -10482,7 +10519,7 @@ impl<'a> Checker<'a> {
                         // top-level functions are covered by `module_declares`; this queries the federated
                         // library set for a classpath overload carrying names.
                         || crate::libraries::FunctionSet { overloads: self
-                            .resolver().resolve_symbol(crate::symbol_resolver::SymRecv::TopLevel, n, &[]).map(crate::symbol_resolver::Symbol::overloads).unwrap_or_default() }
+                            .resolver().resolve_symbol(crate::symbol_resolver::SymRecv::TopLevel, n, &[], &[]).map(crate::symbol_resolver::Symbol::overloads).unwrap_or_default() }
                             .top_level()
                             .any(|o| o.call_sig.has_param_names())
                         // A CLASSPATH CONSTRUCTOR whose `@Metadata` records parameter names
@@ -10519,7 +10556,7 @@ impl<'a> Checker<'a> {
                     // positions (the lowerer evaluates the receiver + args in source order). Members and
                     // extensions (module + classpath) both resolve through the federated resolver.
                     self.resolver()
-                        .resolve_symbol(crate::symbol_resolver::SymRecv::Value(rt), name, &[])
+                        .resolve_symbol(crate::symbol_resolver::SymRecv::Value(rt), name, &[], &[])
                         .map(crate::symbol_resolver::Symbol::overloads)
                         .unwrap_or_default()
                         .iter()
@@ -10574,9 +10611,17 @@ impl<'a> Checker<'a> {
                                 .get(&call.0)
                                 .map(|ts| ts.iter().map(|r| self.resolve_ty(r)).collect())
                                 .unwrap_or_default();
-                            if let Some(c) = self.resolver().resolve_top_level_callable_in_package(
-                                &name, &pkg, &arg_tys, &targs,
-                            ) {
+                            let pkg_scope = [pkg.clone()];
+                            if let Some(c) = self
+                                .resolver_in_scope(&pkg_scope)
+                                .resolve_symbol(
+                                    crate::symbol_resolver::SymRecv::TopLevel,
+                                    &name,
+                                    &arg_tys,
+                                    &targs,
+                                )
+                                .and_then(crate::symbol_resolver::Symbol::top_level_call)
+                            {
                                 if c.owner.rsplit_once('/').map(|(p, _)| p) == Some(pkg.as_str()) {
                                     crate::trace_compiler!(
                                         "resolve",
@@ -10643,10 +10688,16 @@ impl<'a> Checker<'a> {
                                     };
                                     let mut full = arg_tys.clone();
                                     full[last] = lam_ty;
-                                    if let Some(c) =
-                                        self.resolver().resolve_top_level_callable_in_package(
-                                            &name, &pkg, &full, &targs,
+                                    let pkg_scope = [pkg.clone()];
+                                    if let Some(c) = self
+                                        .resolver_in_scope(&pkg_scope)
+                                        .resolve_symbol(
+                                            crate::symbol_resolver::SymRecv::TopLevel,
+                                            &name,
+                                            &full,
+                                            &targs,
                                         )
+                                        .and_then(crate::symbol_resolver::Symbol::top_level_call)
                                     {
                                         if c.owner.rsplit_once('/').map(|(p, _)| p)
                                             == Some(pkg.as_str())
@@ -11168,7 +11219,7 @@ impl<'a> Checker<'a> {
                     let has_lam = |lpt: &[Vec<Ty>]| lpt.iter().any(|v| !v.is_empty());
                     if let Some(fi) = self
                         .resolver()
-                        .resolve_symbol(crate::symbol_resolver::SymRecv::Value(rt), &name, &[])
+                        .resolve_symbol(crate::symbol_resolver::SymRecv::Value(rt), &name, &[], &[])
                         .map(crate::symbol_resolver::Symbol::overloads)
                         .unwrap_or_default()
                         .into_iter()
@@ -11180,7 +11231,7 @@ impl<'a> Checker<'a> {
                     }
                     let fi = self
                         .resolver()
-                        .resolve_symbol(crate::symbol_resolver::SymRecv::Value(rt), &name, &[])
+                        .resolve_symbol(crate::symbol_resolver::SymRecv::Value(rt), &name, &[], &[])
                         .map(crate::symbol_resolver::Symbol::overloads)
                         .unwrap_or_default()
                         .into_iter()
@@ -11244,7 +11295,7 @@ impl<'a> Checker<'a> {
                 let allow_lambda_mutation = ext_lambda_pts.is_some()
                     && self
                         .resolver()
-                        .resolve_symbol(crate::symbol_resolver::SymRecv::Value(rt), &name, &[])
+                        .resolve_symbol(crate::symbol_resolver::SymRecv::Value(rt), &name, &[], &[])
                         .map(crate::symbol_resolver::Symbol::overloads)
                         .unwrap_or_default()
                         .into_iter()
@@ -11449,7 +11500,12 @@ impl<'a> Checker<'a> {
                     {
                         if let Some(fi) = self
                             .resolver()
-                            .resolve_symbol(crate::symbol_resolver::SymRecv::Value(rt), &name, &[])
+                            .resolve_symbol(
+                                crate::symbol_resolver::SymRecv::Value(rt),
+                                &name,
+                                &[],
+                                &[],
+                            )
                             .map(crate::symbol_resolver::Symbol::overloads)
                             .unwrap_or_default()
                             .into_iter()
@@ -11531,7 +11587,7 @@ impl<'a> Checker<'a> {
                     // *infix* form (`a rem b`) while the dot form (`a.rem(b)`) keeps the builtin.
                     let user_ext = self
                         .resolver()
-                        .resolve_symbol(crate::symbol_resolver::SymRecv::Value(rt), &name, &[])
+                        .resolve_symbol(crate::symbol_resolver::SymRecv::Value(rt), &name, &[], &[])
                         .map(crate::symbol_resolver::Symbol::overloads)
                         .unwrap_or_default()
                         .into_iter()
@@ -11613,7 +11669,7 @@ impl<'a> Checker<'a> {
                 {
                     let sets: Vec<Vec<String>> = self
                         .resolver()
-                        .resolve_symbol(crate::symbol_resolver::SymRecv::Value(rt), &name, &[])
+                        .resolve_symbol(crate::symbol_resolver::SymRecv::Value(rt), &name, &[], &[])
                         .map(crate::symbol_resolver::Symbol::overloads)
                         .unwrap_or_default()
                         .into_iter()
@@ -11725,7 +11781,7 @@ impl<'a> Checker<'a> {
                     // none fits exactly, preserving the omitted-default / named-argument handling below.
                     let exts: Vec<_> = self
                         .resolver()
-                        .resolve_symbol(crate::symbol_resolver::SymRecv::Value(rt), &name, &[])
+                        .resolve_symbol(crate::symbol_resolver::SymRecv::Value(rt), &name, &[], &[])
                         .map(crate::symbol_resolver::Symbol::overloads)
                         .unwrap_or_default()
                         .into_iter()
@@ -11785,7 +11841,7 @@ impl<'a> Checker<'a> {
                 if erased_type_key(rt) != erased_type_key(Ty::obj("kotlin/Any")) {
                     let module_ext = self
                         .resolver()
-                        .resolve_symbol(crate::symbol_resolver::SymRecv::Value(rt), &name, &[])
+                        .resolve_symbol(crate::symbol_resolver::SymRecv::Value(rt), &name, &[], &[])
                         .map(crate::symbol_resolver::Symbol::overloads)
                         .unwrap_or_default()
                         .into_iter()
@@ -12148,7 +12204,7 @@ impl<'a> Checker<'a> {
                 let top_level_functions = crate::libraries::FunctionSet {
                     overloads: self
                         .resolver()
-                        .resolve_symbol(crate::symbol_resolver::SymRecv::TopLevel, &fname, &[])
+                        .resolve_symbol(crate::symbol_resolver::SymRecv::TopLevel, &fname, &[], &[])
                         .map(crate::symbol_resolver::Symbol::overloads)
                         .unwrap_or_default(),
                 };
@@ -12894,6 +12950,7 @@ impl<'a> Checker<'a> {
                                         crate::symbol_resolver::SymRecv::TopLevel,
                                         &fname,
                                         &[],
+                                        &[],
                                     )
                                     .map(crate::symbol_resolver::Symbol::overloads)
                                     .unwrap_or_default(),
@@ -12918,9 +12975,15 @@ impl<'a> Checker<'a> {
                         }
                         None => (args.to_vec(), arg_tys.clone()),
                     };
-                    if let Some(c) =
-                        self.resolver()
-                            .resolve_top_level_callable(&fname, &arg_tys, &call_targs)
+                    if let Some(c) = self
+                        .resolver()
+                        .resolve_symbol(
+                            crate::symbol_resolver::SymRecv::TopLevel,
+                            &fname,
+                            &arg_tys,
+                            &call_targs,
+                        )
+                        .and_then(crate::symbol_resolver::Symbol::top_level_call)
                     {
                         // Record the resolved callable so the lowerer emits it without re-resolving
                         // (see [`TypeInfo::resolved_top_level`]).
@@ -13446,6 +13509,7 @@ impl<'a> Checker<'a> {
                                 .resolve_symbol(
                                     crate::symbol_resolver::SymRecv::Value(it),
                                     &comp,
+                                    &[],
                                     &[],
                                 )
                                 .map(crate::symbol_resolver::Symbol::overloads)
