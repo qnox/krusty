@@ -3345,3 +3345,11 @@ Lowerer branch, loop, jump, throw, and try nodes now go through
 range/progression loops, iterator loops, inline-lambda return bridges, safe calls, elvis/if/when
 expressions, asserts, and try/catch/finally lowering no longer rebuild those IR node shapes at
 their feature sites.
+
+### Data Literal Emitter Merge
+
+Lowerer literal/data construction now goes through
+`emit_const`/`emit_unit`/`emit_class_const`/`emit_new_array`/`emit_vararg`. Default arguments,
+property-reference metadata, class literals, array factories, vararg adaptation, string templates,
+primitive updates, assertions, suspend-lambda state machines, and call argument packing no longer
+rebuild those IR node shapes at their feature sites.
