@@ -576,6 +576,30 @@ impl<'a> SymbolResolver<'a> {
             .and_then(|t| t.value_underlying)
     }
 
+    /// Whether the type named `internal` — or anything in its (classpath) supertype chain — declares a
+    /// member named `name` (Kotlin/source or physical JVM name). Drives the OVERRIDE test for a class
+    /// whose supertype is not in the same file: an override is emitted without `ACC_FINAL` (kotlinc).
+    pub fn declares_member(&self, internal: &str, name: &str) -> bool {
+        let mut work = vec![internal.to_string()];
+        let mut seen = std::collections::HashSet::new();
+        while let Some(cur) = work.pop() {
+            if cur == "java/lang/Object" || cur == "kotlin/Any" || !seen.insert(cur.clone()) {
+                continue;
+            }
+            let Some(t) = self.src.resolve_type(&cur) else {
+                continue;
+            };
+            if t.members
+                .iter()
+                .any(|m| m.name == name || m.physical_name.as_deref() == Some(name))
+            {
+                return true;
+            }
+            work.extend(t.supertypes.iter().cloned());
+        }
+        false
+    }
+
     /// The unqualified-name resolution loop for this resolver's import scope — `resolve_symbols` per
     /// candidate fqn `pkg/name` over the federated source. THE way to resolve an unqualified name: the
     /// caller extracts `classifier`, `callables.functions` (∪ classifier constructors, then `invoke`), or
