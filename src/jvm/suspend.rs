@@ -1299,13 +1299,13 @@ fn build_state_machine(ir: &mut IrFile, facade: &str, fid: u32, b: ExprId, unit_
             spill_idx.push(this_offset + i as u32);
         }
     }
+    // The scope rule covers NAMED source variables only: a compiler temp (elvis/safe-call
+    // materialization) is a value kotlinc holds on the operand stack — empty across a suspension
+    // unless still needed — so temps follow pure liveness (the `reads` set above).
     let mut scope_writes: Vec<u32> = Vec::new();
     for &s in &stmts[..last_susp] {
         collect_live_writes(ir, s, &suspend_set, &mut scope_writes);
     }
-    // The scope rule covers NAMED source variables only: a compiler temp (elvis/safe-call
-    // materialization) is a value kotlinc holds on the operand stack — empty across a suspension
-    // unless still needed — so temps follow pure liveness (the `reads` set above).
     for w in scope_writes {
         if named_vars.contains(&w) && find_local_ty(ir, b, w).is_some_and(|t| t.is_reference()) {
             spill_idx.push(w);

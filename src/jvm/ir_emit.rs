@@ -959,10 +959,17 @@ fn emit_class(
         .filter(|s| s.owner.as_deref() == Some(c.fq_name.as_str()))
     {
         let desc = ir_type_desc(&s.ty);
-        if let Some(cv) = const_value_idx(ir, s.init, &mut cw) {
-            cw.add_field_const(0x0019, &s.name, &desc, cv); // PUBLIC | STATIC | FINAL
+        // A `private const val`/`private val` on an object/companion keeps its declared visibility
+        // (kotlinc: PRIVATE static final; const reads are inlined so no cross-class getstatic needs it).
+        let acc = if s.visibility.is_private() {
+            0x001A // PRIVATE | STATIC | FINAL
         } else {
-            cw.add_field(0x0019, &s.name, &desc);
+            0x0019 // PUBLIC | STATIC | FINAL
+        };
+        if let Some(cv) = const_value_idx(ir, s.init, &mut cw) {
+            cw.add_field_const(acc, &s.name, &desc, cv);
+        } else {
+            cw.add_field(acc, &s.name, &desc);
         }
     }
     // Constructor: super(); store each ctor *parameter* into its field; then run `init_body`
