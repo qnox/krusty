@@ -3172,11 +3172,17 @@ fn emit_default_stub(
     }
     let aw: i32 = real_params.iter().map(|t| slot_words(*t) as i32).sum();
     let desc = method_descriptor(&real_params, ret);
+    let is_private = ir.private_methods.contains(&fid);
     if is_interface {
         // The default stub is a STATIC interface method; it dispatches to the real (abstract) member via
         // `invokeinterface` on `$this`.
         let m = e.cw.interface_methodref(owner, &method_name, &desc);
         code.invokeinterface(m, aw, slot_words(ret) as i32);
+    } else if is_private {
+        // A PRIVATE member is non-virtual — `invokevirtual` on it fails resolution pre-nestmates
+        // (class-file major 52); kotlinc dispatches with `invokespecial`.
+        let m = e.cw.methodref(owner, &method_name, &desc);
+        code.invokespecial(m, aw, slot_words(ret) as i32);
     } else {
         let m = e.cw.methodref(owner, &method_name, &desc);
         code.invokevirtual(m, aw, slot_words(ret) as i32);
@@ -3191,11 +3197,25 @@ fn emit_default_stub(
     stub_params.push(Ty::obj("java/lang/Object"));
     let desc = method_descriptor(&stub_params, ret);
     e.cw.add_method(
-        0x1009, /* PUBLIC | STATIC | SYNTHETIC */
+        default_stub_access(ir, fid),
         &format!("{method_name}$default"),
         &desc,
         &code,
     );
+}
+
+/// The access flags of a member's `$default` synthetic: kotlinc mirrors the origin's visibility —
+/// with PRIVATE demoted to package-private (the stub is invoked from call sites that could not reach the
+/// private member itself) — always `| STATIC | SYNTHETIC`. Keyed on the IR's visibility model in ONE
+/// place: it currently distinguishes public vs private (`ir.private_methods`); when the IR carries
+/// protected/internal, their mappings extend here.
+fn default_stub_access(ir: &IrFile, fid: u32) -> u16 {
+    let vis = if ir.private_methods.contains(&fid) {
+        0x0000 // package-private
+    } else {
+        0x0001 // ACC_PUBLIC
+    };
+    vis | 0x1008 // ACC_STATIC | ACC_SYNTHETIC
 }
 
 /// Emit the `foo$default(params…, int mask, Object marker)` synthetic for a TOP-LEVEL facade function
@@ -3277,7 +3297,7 @@ fn emit_facade_default_stub(
     stub_params.push(marker);
     let desc = method_descriptor(&stub_params, ret);
     e.cw.add_method(
-        0x1009, /* PUBLIC | STATIC | SYNTHETIC */
+        default_stub_access(ir, fid),
         &format!("{method_name}$default"),
         &desc,
         &code,

@@ -1081,16 +1081,16 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
             // them; the fields are private). Getter returns the field; setter (var only) writes it.
             // Enums keep their existing shape (separate emit path); interfaces have no backing fields.
             if !c.is_interface() && !c.is_enum() {
-                let field_props: Vec<(String, bool)> = c
+                let field_props: Vec<(String, bool, bool)> = c
                     .props
                     .iter()
                     .filter(|p| p.is_property)
-                    .map(|p| (p.name.clone(), p.is_var))
+                    .map(|p| (p.name.clone(), p.is_var, p.visibility.is_private()))
                     .chain(
                         c.body_props
                             .iter()
                             .filter(|p| is_backing_field_prop(p))
-                            .map(|p| (p.name.clone(), p.is_var)),
+                            .map(|p| (p.name.clone(), p.is_var, p.visibility.is_private())),
                     )
                     .collect();
                 // An inner class's `this$0` occupies field index 0, so the declared properties' fields
@@ -1100,8 +1100,19 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 // synthesized accessors carry a JVM `Signature` (`getA()` → `()TA;`, `setA(TA;)V`).
                 let field_tp: std::collections::HashMap<String, String> =
                     class_field_tparams(c).into_iter().collect();
-                for (pi, (pname, is_var)) in field_props.iter().enumerate() {
+                // kotlinc emits NO accessor for a `private` property (in-class reads go straight to the
+                // field); synthesizing one is an extra public member → an ABI divergence. Kept when the
+                // class HAS a companion — a companion reads the outer's privates through the getter
+                // (kotlinc uses an `access$…` bridge krusty doesn't emit yet; box `classes/kt504.kt`).
+                // A value class also keeps its getter (its unboxed-support synthesis expects it).
+                let has_companion = !c.companion_methods.is_empty()
+                    || !c.companion_props.is_empty()
+                    || c.companion_base.is_some();
+                for (pi, (pname, is_var, is_private)) in field_props.iter().enumerate() {
                     let fidx = pi + field_offset;
+                    if *is_private && !c.is_value && !has_companion {
+                        continue;
+                    }
                     let fty = fields[fidx].1;
                     // Use the class field's IrType (carries declared `?` via `mark_nullable`), not the
                     // bare `Ty` — so a nullable value-class property getter erases consistently with the

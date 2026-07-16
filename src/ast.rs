@@ -495,6 +495,10 @@ pub struct PropParam {
     /// `true` for a `val`/`var` parameter (a property → backing field + accessor); `false` for a
     /// plain constructor parameter (in scope for `init`/body-property initializers, but not a field).
     pub is_property: bool,
+    /// Declaration visibility (`public` by default), from the constructor-parameter modifier list.
+    /// A `private` property's backing field gets NO accessor (kotlinc reads it directly in-class), so
+    /// the accessor synthesis skips it; `internal`/`protected` currently accessor like `public`.
+    pub visibility: Visibility,
     /// Default value (`class C(val x: Int = 5)`). Used to synthesize a no-arg constructor when
     /// all primary-constructor parameters have defaults.
     pub default: Option<ExprId>,
