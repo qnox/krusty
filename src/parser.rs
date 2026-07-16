@@ -2769,13 +2769,21 @@ impl<'a> Parser<'a> {
                         let id = self.file.add_decl(Decl::Class(nested));
                         self.file.decls.push(id);
                     }
+                    // A nested `object Foo(: Base())?` hoists to the file top level as `Outer.Foo`
+                    // (internal `Outer$Foo`), like a nested class — a sealed class's case objects
+                    // (`sealed class V { object Ok : V() }`) are exactly this shape.
+                    TokenKind::Ident if self.text() == "object" => {
+                        let mut nested = self.parse_object();
+                        nested.name = format!("{}.{}", name, nested.name);
+                        let id = self.file.add_decl(Decl::Class(nested));
+                        self.file.decls.push(id);
+                    }
                     TokenKind::Ident
-                        if self.text() == "object"
-                            || (self.text() == "annotation"
-                                && self
-                                    .t
-                                    .get(self.i + 1)
-                                    .map_or(false, |t| t.kind == TokenKind::KwClass)) =>
+                        if self.text() == "annotation"
+                            && self
+                                .t
+                                .get(self.i + 1)
+                                .map_or(false, |t| t.kind == TokenKind::KwClass) =>
                     {
                         let _ = self.parse_nested_type_decl();
                     }

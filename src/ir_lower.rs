@@ -1248,7 +1248,7 @@ pub fn lower_file(
                 // becomes a static field initialized in the outer class's `<clinit>`. Both are read as
                 // `getstatic C.X` (registered in `companion_consts`).
                 lo.ir.statics.push(crate::ir::IrStatic {
-                    visibility: crate::types::Visibility::Public,
+                    visibility: cp.visibility,
                     name: cp.name.clone(),
                     ty: ty_to_ir(cty),
                     init,
@@ -1273,7 +1273,7 @@ pub fn lower_file(
                     if let (Some(initx), false) = (bp.init, cty == Ty::Error) {
                         if let Some(init) = lo.lower_arg(initx, &ty_to_ir(cty)) {
                             lo.ir.statics.push(crate::ir::IrStatic {
-                                visibility: crate::types::Visibility::Public,
+                                visibility: bp.visibility,
                                 name: bp.name.clone(),
                                 ty: ty_to_ir(cty),
                                 init,
@@ -1290,10 +1290,13 @@ pub fn lower_file(
             // companion methods as instance methods) + a `Companion` field on the outer class. Also
             // synthesized for a method-LESS companion that declares a supertype (`companion object :
             // EmptyContinuation()`) — it must still be emitted (extending its base/interfaces) so the
-            // companion is usable as a value of that type.
+            // companion is usable as a value of that type — and for a PROPS-ONLY companion (`companion
+            // object { const val X = … }`): the consts hoist to the outer class, but kotlinc still
+            // emits the (member-less) `C$Companion` class + `Companion` field.
             if !c.companion_methods.is_empty()
                 || c.companion_base.is_some()
                 || !c.companion_supertypes.is_empty()
+                || !c.companion_props.is_empty()
             {
                 let comp_fq = format!("{internal}$Companion");
                 // The companion's declared supertypes (`companion object : Base, I`): make the synthesized
