@@ -533,6 +533,12 @@ pub fn lower_value_classes(
         // parameters/return stay boxed (a sibling member call passes `this` — a box — directly). The
         // SYNTHESIZED members (`-impl`, `equals`/`hashCode`/`toString`, the getter, `<init>`) operate on
         // the underlying representation, so they erase like any other function.
+        // A property GETTER (`getValue` on a value class, `getProperty` for a `val`) takes no value
+        // parameters — match it by the `get` prefix AND an empty parameter list, so it stays unmangled
+        // (krusty does not yet mangle a getter's value-class signature override-consistently). A user
+        // FUNCTION that merely starts with `get` but takes parameters (`suspend fun getById(id: ServerId)`)
+        // is a normal member and MUST mangle its value-class signature like any other method.
+        let is_vc_field_getter = f.name.starts_with("get") && orig_params[fid].is_empty();
         let synthesized = matches!(
             f.name.as_str(),
             "box-impl"
@@ -546,7 +552,7 @@ pub fn lower_value_classes(
                 | "hashCode"
                 | "toString"
                 | "<init>"
-        ) || f.name.starts_with("get");
+        ) || is_vc_field_getter;
         let vc_member = !synthesized && vc_methods.contains(&(fid as u32));
         // Mangle a USER function whose (pre-erasure) signature mentions a value class — kotlinc's
         // `base-<hash>`. Index-resolved `MethodCall`s pick this up automatically; name-resolved calls
