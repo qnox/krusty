@@ -70,3 +70,18 @@ fun box(): String = if (\"OK\".firstC == 'O') \"OK\" else \"no\"\n";
         "OK"
     );
 }
+
+#[test]
+fn string_length_member_precedes_extension_property() {
+    const SRC: &str = "val String.length: String get() = \"bad\"\n\
+fun box(): String {\n\
+  val s: String? = \"OK\"\n\
+  val direct = \"OK\".length\n\
+  val safe = s?.length ?: 0\n\
+  return if (direct == 2 && safe == 2) \"OK\" else \"no\"\n\
+}\n";
+    assert_eq!(
+        run(SRC).expect("String.length member keeps precedence"),
+        "OK"
+    );
+}

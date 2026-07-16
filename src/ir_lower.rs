@@ -10982,16 +10982,15 @@ impl<'a> Lower<'a> {
             Ty::Obj(i, _) => i.to_string(),
             _ => return None,
         };
-        let resolved = e
-            .and_then(|e| self.info.resolved_member(e).cloned())
-            // Reuse the getter the checker resolved for this property read (keyed by the access
-            // ExprId); resolve only when it was recorded through a different path.
-            .or_else(|| self.resolve_property_member(rt, name))
-            .map(|r| {
-                let m = r.member;
-                let physical_ret = m.physical_ret;
-                (m, physical_ret)
-            });
+        let resolved = match e {
+            Some(e) => self.info.resolved_member(e).cloned(),
+            None => self.resolve_property_member(rt, name),
+        }
+        .map(|r| {
+            let m = r.member;
+            let physical_ret = m.physical_ret;
+            (m, physical_ret)
+        });
         if let Some((m, physical_ret)) = resolved {
             let read =
                 self.emit_library_member_call(recv, internal, m, physical_ret, false, vec![]);
@@ -14505,6 +14504,7 @@ impl<'a> Lower<'a> {
     /// boxing (kotlinc's form) instead of boxing the member then unboxing it through the elvis.
     fn lower_safe_prop_member(
         &mut self,
+        source: AstExprId,
         receiver: AstExprId,
         name: &str,
     ) -> Option<(u32, u32, u32)> {
@@ -14535,7 +14535,7 @@ impl<'a> Lower<'a> {
                 self.emit_get_field(recv2, fclass, idx)
             }
         } else {
-            self.lower_member_read_on(recv2, recv_ty, name, None)?
+            self.lower_member_read_on(recv2, recv_ty, name, Some(source))?
         };
         Some((var, cond, member))
     }
@@ -14910,7 +14910,7 @@ impl<'a> Lower<'a> {
                                 read
                             } else {
                                 // A classpath property (`list?.size`) — a zero-arg accessor.
-                                self.lower_member_read_on(recv2, nn, &name, None)?
+                                self.lower_member_read_on(recv2, nn, &name, Some(e))?
                             }
                         }
                     }
@@ -14982,7 +14982,7 @@ impl<'a> Lower<'a> {
                     } = self.afile.expr(lhs).clone()
                     {
                         if let Some((var, cond, member)) =
-                            self.lower_safe_prop_member(receiver, &name)
+                            self.lower_safe_prop_member(lhs, receiver, &name)
                         {
                             // The member is the natural primitive; convert to the elvis result type if it
                             // differs (`s?.length ?: 0L` → `i2l`).
@@ -15812,6 +15812,19 @@ impl<'a> Lower<'a> {
                         ));
                     }
                 }
+                let rt = self.recv_ty(receiver);
+                if self.info.resolved_member(e).is_some() {
+                    let recv = self.expr(receiver)?;
+                    let recv = if rt.is_reference()
+                        && matches!(self.afile.expr(receiver), Expr::Name(n)
+                            if self.lookup(n).map_or(false, |(_, t)| t != rt))
+                    {
+                        self.emit_type_op(IrTypeOp::Cast, recv, ty_to_ir(rt))
+                    } else {
+                        recv
+                    };
+                    return self.lower_member_read_on(recv, rt, &name, Some(e));
+                }
                 // A `val` extension property read (`x.doubled`) → its static getter `getDoubled(x)`.
                 let rty = self.info.ty(receiver);
                 if let Some(gfid) = self.ext_prop_get_id(rty, &name) {
@@ -15935,7 +15948,6 @@ impl<'a> Lower<'a> {
                         }
                     }
                 }
-                let rt = self.recv_ty(receiver);
                 // `e.ordinal` / `e.name` on an enum value: dispatched on the receiver's STATIC type while
                 // the platform owns the inherited accessor's physical name/descriptor.
                 if let Some(accessor) = self.runtime.enum_member_accessor(&name) {

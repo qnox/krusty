@@ -8603,7 +8603,7 @@ impl<'a> Checker<'a> {
                     // e.g. `length` inside `"ab".run { length }` (`this` is `String`). Goes through the
                     // general member read so builtin/library members (`String.length`) resolve too.
                     if let Some(rt) = self.this_ty {
-                        if let Some(ty) = self.try_member_read(rt, &n, self.span(e)) {
+                        if let Some(ty) = self.try_member_read(rt, &n, self.span(e), Some(e)) {
                             return self.set(e, ty);
                         }
                     }
@@ -10751,6 +10751,11 @@ impl<'a> Checker<'a> {
             return Ty::Error;
         }
         if let (Ty::String, "length") = (rt, name) {
+            if let Some(m) = self.resolve_property_member(rt, name) {
+                if let Some(me) = mexpr {
+                    self.resolved_calls.insert(me, ResolvedCall::Member(m));
+                }
+            }
             return Ty::Int;
         }
         if let (Ty::Char, "code") = (rt, name) {
@@ -10765,7 +10770,11 @@ impl<'a> Checker<'a> {
         }
         if let Some(m) = self.resolve_instance_member(rt, name, &[]) {
             if m.ret.is_read_value_result() {
-                return m.ret;
+                let ret = m.ret;
+                if let Some(me) = mexpr {
+                    self.resolved_calls.insert(me, ResolvedCall::Member(m));
+                }
+                return ret;
             }
         }
         self.diags.error(
@@ -10778,11 +10787,21 @@ impl<'a> Checker<'a> {
     /// Probe a member read without emitting a diagnostic: returns `Some(ty)` if `recv.name` resolves,
     /// `None` otherwise (rolling back any error [`check_member`] would have reported). Used to resolve a
     /// bare name `length` inside a receiver-lambda body (`this`-relative) for an arbitrary receiver type.
-    fn try_member_read(&mut self, rt: Ty, name: &str, span: Span) -> Option<Ty> {
+    fn try_member_read(
+        &mut self,
+        rt: Ty,
+        name: &str,
+        span: Span,
+        mexpr: Option<ExprId>,
+    ) -> Option<Ty> {
         let n = self.diags.diags.len();
-        let t = self.check_member(rt, name, span, None);
+        let t = self.check_member(rt, name, span, mexpr);
         if self.diags.diags.len() > n || t == Ty::Error {
             self.diags.diags.truncate(n);
+            if let Some(e) = mexpr {
+                self.resolved_calls.remove(&e);
+                self.expr_lowers.remove(&e);
+            }
             return None;
         }
         Some(t)
@@ -14579,6 +14598,63 @@ mod tests {
             fun wr(a: Array<Int>) { a[0] = 5 }\n\
             fun sz(a: Array<Int>): Int = a.size\n\
             fun box(): String = \"OK\"");
+    }
+
+    #[test]
+    fn classpath_property_reads_record_resolved_members_for_lowering() {
+        let mut d = DiagSink::new();
+        let file = parse_file(
+            "val String.length: String get() = \"bad\"\n\
+             fun len(s: String, n: String?): Int = s.length + (n?.length ?: 0)",
+            &mut d,
+        );
+        let files = vec![file];
+        let cp = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(vec![]));
+        let mut syms = collect_signatures_with_cp(
+            &files,
+            Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(cp)),
+            &mut d,
+        );
+        let info = check_file(&files[0], &mut syms, &mut d);
+        assert!(
+            d.diags.is_empty(),
+            "unexpected diagnostics: {:?}",
+            d.diags.iter().map(|x| &x.msg).collect::<Vec<_>>()
+        );
+        let member = files[0]
+            .expr_arena
+            .iter()
+            .enumerate()
+            .find_map(|(idx, expr)| match expr {
+                Expr::Member { name, .. } if name == "length" => Some(ExprId(idx as u32)),
+                _ => None,
+            })
+            .expect("source should contain s.length member expression");
+        assert!(
+            matches!(
+                info.resolved_calls.get(&member),
+                Some(ResolvedCall::Member(_))
+            ),
+            "checker must record the selected classpath getter for lowering"
+        );
+        let safe_call = files[0]
+            .expr_arena
+            .iter()
+            .enumerate()
+            .find_map(|(idx, expr)| match expr {
+                Expr::SafeCall {
+                    name, args: None, ..
+                } if name == "length" => Some(ExprId(idx as u32)),
+                _ => None,
+            })
+            .expect("source should contain n?.length safe-call expression");
+        assert!(
+            matches!(
+                info.resolved_calls.get(&safe_call),
+                Some(ResolvedCall::Member(_))
+            ),
+            "checker must record the selected classpath getter for safe-call lowering"
+        );
     }
 
     fn err_contains(src: &str, needle: &str) {
