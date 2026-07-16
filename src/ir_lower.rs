@@ -11036,10 +11036,12 @@ impl<'a> Lower<'a> {
         call: AstExprId,
         args: &[AstExprId],
     ) -> Option<u32> {
+        // The receiver may be typed NULLABLE at this point (a smart-cast `if (x == null) throw` the
+        // lowerer doesn't re-narrow) — the member lives on the non-null class either way.
         let owner = self
             .class_of(rt)
             .map(|ci| ci.internal.clone())
-            .or_else(|| rt.obj_internal().map(str::to_string))?;
+            .or_else(|| rt.non_null().obj_internal().map(str::to_string))?;
         crate::trace_compiler!(
             "resolve",
             "lower_library_default_member_call {owner}.{name} args={} named={}",
