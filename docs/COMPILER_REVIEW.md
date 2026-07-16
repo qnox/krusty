@@ -3278,3 +3278,9 @@ share `empty_array` instead of rebuilding `0`-sized array literals inline.
 Classpath object construction now goes through `emit_new_external`; property references, constructors,
 assertion/runtime exceptions, range objects, and runtime collection helpers no longer rebuild
 `NewExternal` nodes at their feature sites.
+
+### Same-File Method Call Emitter Merge
+
+The next lowerer cleanup added `emit_method_call` for by-index same-file member calls and routed
+inc/dec, object-member, destructuring, callable-reference adapter, private-accessor, getter/setter,
+operator, and named-member paths through it.
