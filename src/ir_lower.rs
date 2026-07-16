@@ -17154,7 +17154,12 @@ impl<'a> Lower<'a> {
                             // captures, then the context sources, then the explicit arguments.
                             let ctx_sources = self.info.context_args.get(&e).cloned();
                             let ctx_n = ctx_sources.as_ref().map_or(0, |s| s.len());
-                            if args.len() + ncap + ctx_n == params.len() {
+                            // The call may OMIT trailing arguments whose parameters have defaults (the
+                            // checker allowed it only when `ctx_n == 0`). A local function is a plain
+                            // method with no `$default` synthetic, so fill each omitted parameter with its
+                            // default expression here (defaults never reference another parameter — the
+                            // resolver rejects those — so lowering them at the call site is sound).
+                            if args.len() + ncap + ctx_n <= params.len() {
                                 let mut a = Vec::new();
                                 for cap in &local_fun.captures {
                                     let (cv, _) = self.lookup(&cap.name)?;
@@ -17168,6 +17173,18 @@ impl<'a> Lower<'a> {
                                 }
                                 for (arg, pt) in args.iter().zip(&params[ncap + ctx_n..]) {
                                     a.push(self.lower_arg(*arg, pt)?);
+                                }
+                                // Fill omitted trailing value parameters with their default expressions.
+                                if a.len() < params.len() {
+                                    let crate::ast::Stmt::LocalFun(f) = self.afile.stmt(*stmt_id)
+                                    else {
+                                        return None;
+                                    };
+                                    for (i, pt) in params[a.len()..].iter().enumerate() {
+                                        let fp = f.params.get(args.len() + i)?;
+                                        let def = fp.default?;
+                                        a.push(self.lower_arg(def, pt)?);
+                                    }
                                 }
                                 return Some(self.emit_local_call(fid, a));
                             }
