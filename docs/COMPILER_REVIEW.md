@@ -3330,3 +3330,10 @@ Lowerer local reads and variable declarations now go through `emit_get_value`/`e
 Generated property accessors, constructor/init stores, lambda captures, suspend state machines,
 destructuring, default-call adapters, loops, callable references, safe calls, assignments, and
 inc/dec rewrites no longer rebuild `GetValue`/`Variable` IR nodes at their feature sites.
+
+### Scalar Operation Emitter Merge
+
+Lowerer slot writes, type operations, and primitive binary operations now go through
+`emit_set_value`/`emit_type_op`/`emit_primitive_bin_op`. Numeric updates, casts/coercions,
+range/progression loops, null/type tests, inline/safe-call rewrites, array element coercions,
+and comparison lowering no longer rebuild those IR node shapes at their feature sites.
