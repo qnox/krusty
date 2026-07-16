@@ -1085,7 +1085,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     .props
                     .iter()
                     .filter(|p| p.is_property)
-                    .map(|p| (p.name.clone(), p.is_var, p.is_private))
+                    .map(|p| (p.name.clone(), p.is_var, p.visibility.is_private()))
                     .chain(
                         c.body_props
                             .iter()
