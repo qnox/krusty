@@ -4887,6 +4887,27 @@ impl<'a> Lower<'a> {
             .add_expr(IrExpr::StaticInstance { owner, ty, field })
     }
 
+    fn emit_get_field(&mut self, receiver: u32, class: u32, index: u32) -> u32 {
+        self.ir.add_expr(IrExpr::GetField {
+            receiver,
+            class,
+            index,
+        })
+    }
+
+    fn emit_external_static_field(
+        &mut self,
+        owner: impl Into<String>,
+        name: impl Into<String>,
+        descriptor: impl Into<String>,
+    ) -> u32 {
+        self.ir.add_expr(IrExpr::ExternalStaticField {
+            owner: owner.into(),
+            name: name.into(),
+            descriptor: descriptor.into(),
+        })
+    }
+
     /// Resolve a delegate's `getValue` operator — a MEMBER on the delegate type, or a classpath
     /// EXTENSION (`Lazy.getValue` in `LazyKt`). Returns `(owner, descriptor, ret, inline, is_ext)`:
     /// a member is emitted `delegate.getValue(thisRef, prop)`; an extension is the static
@@ -5058,7 +5079,7 @@ impl<'a> Lower<'a> {
     }
 
     fn platform_static_field(&mut self, field: crate::libraries::PlatformField) -> u32 {
-        self.ir.add_expr(platform_field_expr(field))
+        self.emit_external_static_field(field.owner, field.name, field.descriptor)
     }
 
     /// Lower a bare-name call to a classpath `object` member imported unqualified (`import Obj.m; m(args)`,
@@ -7137,11 +7158,7 @@ impl<'a> Lower<'a> {
                 });
                 // Dispatch on `this.label`.
                 let lbl0r = self.ir.add_expr(IrExpr::GetValue(0));
-                let lbl0 = self.ir.add_expr(IrExpr::GetField {
-                    receiver: lbl0r,
-                    class: class_id,
-                    index: label_idx,
-                });
+                let lbl0 = self.emit_get_field(lbl0r, class_id, label_idx);
                 let c0 = self.ir.add_expr(IrExpr::Const(IrConst::Int(0)));
                 let cond0 = self.ir.add_expr(IrExpr::PrimitiveBinOp {
                     op: IrBinOp::Eq,
@@ -7149,11 +7166,7 @@ impl<'a> Lower<'a> {
                     rhs: c0,
                 });
                 let lbl1r = self.ir.add_expr(IrExpr::GetValue(0));
-                let lbl1 = self.ir.add_expr(IrExpr::GetField {
-                    receiver: lbl1r,
-                    class: class_id,
-                    index: label_idx,
-                });
+                let lbl1 = self.emit_get_field(lbl1r, class_id, label_idx);
                 let c1 = self.ir.add_expr(IrExpr::Const(IrConst::Int(1)));
                 let cond1 = self.ir.add_expr(IrExpr::PrimitiveBinOp {
                     op: IrBinOp::Eq,
@@ -7190,11 +7203,7 @@ impl<'a> Lower<'a> {
             for (i, (name, _, ty)) in captures.iter().enumerate() {
                 let lv = self.fresh_value();
                 let this = self.ir.add_expr(IrExpr::GetValue(0));
-                let getf = self.ir.add_expr(IrExpr::GetField {
-                    receiver: this,
-                    class: class_id,
-                    index: i as u32,
-                });
+                let getf = self.emit_get_field(this, class_id, i as u32);
                 stmts.push(self.ir.add_expr(IrExpr::Variable {
                     index: lv,
                     ty: ty_to_ir(*ty),
@@ -7208,11 +7217,7 @@ impl<'a> Lower<'a> {
                 let pty = params[i];
                 let lv = self.fresh_value();
                 let this = self.ir.add_expr(IrExpr::GetValue(0));
-                let getf = self.ir.add_expr(IrExpr::GetField {
-                    receiver: this,
-                    class: class_id,
-                    index: param_field_base + i as u32,
-                });
+                let getf = self.emit_get_field(this, class_id, param_field_base + i as u32);
                 stmts.push(self.ir.add_expr(IrExpr::Variable {
                     index: lv,
                     ty: ty_to_ir(pty),
@@ -7269,11 +7274,7 @@ impl<'a> Lower<'a> {
         let mut new_args: Vec<u32> = (0..n_cap)
             .map(|i| {
                 let this = self.ir.add_expr(IrExpr::GetValue(0));
-                self.ir.add_expr(IrExpr::GetField {
-                    receiver: this,
-                    class: class_id,
-                    index: i,
-                })
+                self.emit_get_field(this, class_id, i)
             })
             .collect();
         let comp_get = self.ir.add_expr(IrExpr::GetValue(completion_idx));
@@ -7330,11 +7331,7 @@ impl<'a> Lower<'a> {
         let mut create_new_args: Vec<u32> = (0..n_cap)
             .map(|i| {
                 let this = self.ir.add_expr(IrExpr::GetValue(0));
-                self.ir.add_expr(IrExpr::GetField {
-                    receiver: this,
-                    class: class_id,
-                    index: i,
-                })
+                self.emit_get_field(this, class_id, i)
             })
             .collect();
         // The completion parameter is already a `Continuation` (the ctor's last param) — no cast.
@@ -7659,11 +7656,7 @@ impl<'a> Lower<'a> {
     }
     fn this_field(&mut self, class_id: ClassId, i: u32) -> u32 {
         let this = self.ir.add_expr(IrExpr::GetValue(0));
-        self.ir.add_expr(IrExpr::GetField {
-            receiver: this,
-            class: class_id,
-            index: i,
-        })
+        self.emit_get_field(this, class_id, i)
     }
     /// The `Int` hash of a field value `v` of type `t` (Kotlin's per-field `.hashCode()`). A value-class
     /// field reads here as its erased underlying; the JVM value-class pass boxes it at the reference
@@ -7813,11 +7806,7 @@ impl<'a> Lower<'a> {
                     let defaults: Vec<Option<u32>> = (0..fields.len())
                         .map(|i| {
                             let this = self.ir.add_expr(IrExpr::GetValue(0));
-                            Some(self.ir.add_expr(IrExpr::GetField {
-                                receiver: this,
-                                class: class_id,
-                                index: i as u32,
-                            }))
+                            Some(self.emit_get_field(this, class_id, i as u32))
                         })
                         .collect();
                     self.ir.fn_params.insert(
@@ -7993,11 +7982,7 @@ impl<'a> Lower<'a> {
             for (i, (_, t)) in fields.iter().enumerate() {
                 let af = self.this_field(class_id, i as u32);
                 let o_local = self.ir.add_expr(IrExpr::GetValue(OV));
-                let bf = self.ir.add_expr(IrExpr::GetField {
-                    receiver: o_local,
-                    class: class_id,
-                    index: i as u32,
-                });
+                let bf = self.emit_get_field(o_local, class_id, i as u32);
                 let ne = self.field_ne(af, bf, *t)?;
                 let g = self.guard_return_false(ne);
                 stmts.push(g);
@@ -11386,11 +11371,8 @@ impl<'a> Lower<'a> {
         } else {
             callable.descriptor.clone()
         };
-        let out = self.ir.add_expr(IrExpr::ExternalStaticField {
-            owner: "java/lang/System".to_string(),
-            name: "out".to_string(),
-            descriptor: "Ljava/io/PrintStream;".to_string(),
-        });
+        let out =
+            self.emit_external_static_field("java/lang/System", "out", "Ljava/io/PrintStream;");
         let mut a = Vec::new();
         for (i, &arg) in args.iter().enumerate() {
             let pty = callable
@@ -11589,11 +11571,7 @@ impl<'a> Lower<'a> {
         } else {
             recv
         };
-        let read = self.ir.add_expr(IrExpr::GetField {
-            receiver: recv,
-            class,
-            index: idx,
-        });
+        let read = self.emit_get_field(recv, class, idx);
         Some(self.coerce_generic_read(read, e, pty))
     }
 
@@ -13525,11 +13503,7 @@ impl<'a> Lower<'a> {
                     });
                     let recv = self.ir.add_expr(IrExpr::GetValue(this_v));
                     let cur_val = if let Some((class, idx)) = own {
-                        self.ir.add_expr(IrExpr::GetField {
-                            receiver: recv,
-                            class,
-                            index: idx,
-                        })
+                        self.emit_get_field(recv, class, idx)
                     } else {
                         let (gclass, gindex, _, _) =
                             self.resolve_method(&internal, &property_getter_name(&name))?;
@@ -15616,18 +15590,10 @@ impl<'a> Lower<'a> {
                 {
                     self.emit_method_call(mclass, mindex, recv2, vec![])
                 } else {
-                    self.ir.add_expr(IrExpr::GetField {
-                        receiver: recv2,
-                        class: fclass,
-                        index: idx,
-                    })
+                    self.emit_get_field(recv2, fclass, idx)
                 }
             } else {
-                self.ir.add_expr(IrExpr::GetField {
-                    receiver: recv2,
-                    class: fclass,
-                    index: idx,
-                })
+                self.emit_get_field(recv2, fclass, idx)
             }
         } else {
             self.lower_member_read_on(recv2, recv_ty, name, None)?
@@ -16580,11 +16546,7 @@ impl<'a> Lower<'a> {
                                 return Some(self.ir.add_expr(IrExpr::GetValue(v)));
                             }
                             let this0 = self.ir.add_expr(IrExpr::GetValue(0));
-                            return Some(self.ir.add_expr(IrExpr::GetField {
-                                receiver: this0,
-                                class,
-                                index: 0,
-                            }));
+                            return Some(self.emit_get_field(this0, class, 0));
                         }
                         _ => return None,
                     }
@@ -16604,11 +16566,7 @@ impl<'a> Lower<'a> {
                 if n == "field" {
                     if let Some((class_id, fidx, _)) = self.cur_field {
                         let this_e = self.ir.add_expr(IrExpr::GetValue(0));
-                        return Some(self.ir.add_expr(IrExpr::GetField {
-                            receiver: this_e,
-                            class: class_id,
-                            index: fidx,
-                        }));
+                        return Some(self.emit_get_field(this_e, class_id, fidx));
                     }
                     // A top-level custom accessor reads the backing STATIC field.
                     if let Some((sidx, _)) = self.cur_static_field {
@@ -16759,11 +16717,11 @@ impl<'a> Lower<'a> {
                         // A `const val` from another file has a PUBLIC field and NO accessor — read it as
                         // `getstatic <facade>.X` (kotlinc inlines the constant; a field read is equivalent
                         // and avoids a `NoSuchMethodError` on the non-existent `getX`).
-                        self.ir.add_expr(IrExpr::ExternalStaticField {
-                            owner: facade,
-                            name: n.clone(),
-                            descriptor: self.syms.libraries.type_descriptor(ty)?,
-                        })
+                        self.emit_external_static_field(
+                            facade,
+                            n.clone(),
+                            self.syms.libraries.type_descriptor(ty)?,
+                        )
                     } else {
                         // A top-level property from ANOTHER file → call its facade's `getX()` (the field is
                         // private), reusing the backend-agnostic cross-file callee.
@@ -16833,11 +16791,7 @@ impl<'a> Lower<'a> {
                             return Some(self.emit_method_call(class, index, cast, vec![]));
                         }
                         let (fclass, idx, _) = self.resolve_field(&bi, &n)?;
-                        return Some(self.ir.add_expr(IrExpr::GetField {
-                            receiver: cast,
-                            class: fclass,
-                            index: idx,
-                        }));
+                        return Some(self.emit_get_field(cast, fclass, idx));
                     }
                     let read = if let Some(cur) = self.cur_class.clone() {
                         // An interface has no backing fields — its properties are abstract getters, so
@@ -16863,11 +16817,7 @@ impl<'a> Lower<'a> {
                             })
                         };
                         if let Some((class, idx)) = field {
-                            self.ir.add_expr(IrExpr::GetField {
-                                receiver: recv,
-                                class,
-                                index: idx,
-                            })
+                            self.emit_get_field(recv, class, idx)
                         } else if let Some((class, index, _, _)) =
                             self.resolve_method(&cur, &property_getter_name(&n))
                         {
@@ -16889,11 +16839,7 @@ impl<'a> Lower<'a> {
                                 }
                                 self.ir.add_expr(IrExpr::GetValue(v))
                             } else {
-                                self.ir.add_expr(IrExpr::GetField {
-                                    receiver: recv,
-                                    class: cur_id,
-                                    index: 0,
-                                })
+                                self.emit_get_field(recv, cur_id, 0)
                             };
                             // The outer backing field is private — read it through its synthesized getter.
                             let (class, index, _, _) =
@@ -16914,11 +16860,7 @@ impl<'a> Lower<'a> {
                                 self.emit_method_call(class, index, recv, vec![])
                             } else if let Some((fclass, idx, _)) = self.resolve_field(internal, &n)
                             {
-                                self.ir.add_expr(IrExpr::GetField {
-                                    receiver: recv,
-                                    class: fclass,
-                                    index: idx,
-                                })
+                                self.emit_get_field(recv, fclass, idx)
                             } else {
                                 self.lower_member_read_on(recv, this_ty, &n, Some(e))?
                             }
@@ -17085,11 +17027,11 @@ impl<'a> Lower<'a> {
                     // outer class C; the JVM initializes it from its `ConstantValue` attribute).
                     if let Some(cty) = self.companion_consts.get(&(internal.clone(), name.clone()))
                     {
-                        return Some(self.ir.add_expr(IrExpr::ExternalStaticField {
-                            owner: internal,
-                            name: name.clone(),
-                            descriptor: self.syms.libraries.type_descriptor(*cty)?,
-                        }));
+                        return Some(self.emit_external_static_field(
+                            internal,
+                            name.clone(),
+                            self.syms.libraries.type_descriptor(*cty)?,
+                        ));
                     }
                     // `Kind.PENDING` on a CLASSPATH enum → `getstatic <internal>.PENDING:L<internal>;`.
                     // The checker typed this `Obj(<internal>)`; resolve `<internal>` the same way it did
@@ -17110,11 +17052,11 @@ impl<'a> Lower<'a> {
                             .resolve_type(&enum_internal)
                             .is_some_and(|t| t.is_enum_entry(&name))
                         {
-                            return Some(self.ir.add_expr(IrExpr::ExternalStaticField {
-                                descriptor: format!("L{enum_internal};"),
-                                owner: enum_internal,
-                                name: name.clone(),
-                            }));
+                            return Some(self.emit_external_static_field(
+                                enum_internal.clone(),
+                                name.clone(),
+                                format!("L{enum_internal};"),
+                            ));
                         }
                     }
                 }
@@ -19271,11 +19213,7 @@ impl<'a> Lower<'a> {
                             (class, index)
                         };
                         let this = self.ir.add_expr(IrExpr::GetValue(0));
-                        let this0 = self.ir.add_expr(IrExpr::GetField {
-                            receiver: this,
-                            class: cur_id,
-                            index: 0,
-                        });
+                        let this0 = self.emit_get_field(this, cur_id, 0);
                         let a = self.lower_args(&args, &params)?;
                         self.emit_method_call(
                             class,

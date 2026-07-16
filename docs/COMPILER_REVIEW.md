@@ -3302,3 +3302,10 @@ constructors, and secondary-constructor paths no longer rebuild `IrExpr::New` at
 Same-file singleton and companion reads now go through `emit_static_instance`; object-member calls,
 property/function reference captures, reference singletons, bare object names, and companion dispatch no
 longer rebuild `IrExpr::StaticInstance` at their feature sites.
+
+### Field Read Emitter Merge
+
+Same-file field reads now go through `emit_get_field`, and classpath/static field reads go through
+`emit_external_static_field`. Suspend-lambda captures, data-class copy/default/equals paths, backing
+field reads, safe-call reads, labeled/inner `this` access, top-level consts, companion consts, enum
+entries, and `System.out` no longer rebuild those IR nodes at their feature sites.
