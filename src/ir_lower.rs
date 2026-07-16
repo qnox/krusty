@@ -1223,6 +1223,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 // becomes a static field initialized in the outer class's `<clinit>`. Both are read as
                 // `getstatic C.X` (registered in `companion_consts`).
                 lo.ir.statics.push(crate::ir::IrStatic {
+                    visibility: crate::types::Visibility::Public,
                     name: cp.name.clone(),
                     ty: ty_to_ir(cty),
                     init,
@@ -1247,6 +1248,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     if let (Some(initx), false) = (bp.init, cty == Ty::Error) {
                         if let Some(init) = lo.lower_arg(initx, &ty_to_ir(cty)) {
                             lo.ir.statics.push(crate::ir::IrStatic {
+                                visibility: crate::types::Visibility::Public,
                                 name: bp.name.clone(),
                                 ty: ty_to_ir(cty),
                                 init,
@@ -3514,6 +3516,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     let init = lo.lower_arg(p.init.unwrap(), &ir_ty)?;
                     let sidx = lo.ir.statics.len() as u32;
                     lo.ir.statics.push(crate::ir::IrStatic {
+                        visibility: crate::types::Visibility::Public,
                         name: p.name.clone(),
                         ty: ir_ty,
                         init,
@@ -3578,6 +3581,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     let ir_ty = body_prop_ir_ty(file, info, p, &*syms.libraries);
                     let init = lo.lower_arg(p.init.unwrap(), &ir_ty)?;
                     lo.ir.statics.push(crate::ir::IrStatic {
+                        visibility: p.visibility,
                         name: p.name.clone(),
                         ty: ir_ty,
                         init,
@@ -4840,7 +4844,24 @@ impl<'a> Lower<'a> {
     }
 
     fn emit_variable(&mut self, index: u32, ty: Ty, init: Option<u32>) -> u32 {
-        self.ir.add_expr(IrExpr::Variable { index, ty, init })
+        self.ir.add_expr(IrExpr::Variable {
+            index,
+            ty,
+            init,
+            named: false,
+        })
+    }
+
+    /// A NAMED source variable declaration (`val x = …`, a destructuring component, a loop
+    /// variable) — the suspend state machine spills these by SCOPE, not liveness (see
+    /// `IrExpr::Variable::named`).
+    fn emit_named_variable(&mut self, index: u32, ty: Ty, init: Option<u32>) -> u32 {
+        self.ir.add_expr(IrExpr::Variable {
+            index,
+            ty,
+            init,
+            named: true,
+        })
     }
 
     fn emit_set_value(&mut self, var: u32, value: u32) -> u32 {
@@ -5429,6 +5450,7 @@ impl<'a> Lower<'a> {
         let init_d = self.lower_arg(delegate_expr, &delegate_ir)?;
         let idx_d = self.ir.statics.len() as u32;
         self.ir.statics.push(crate::ir::IrStatic {
+            visibility: crate::types::Visibility::Public,
             name: format!("{}$delegate", p.name),
             owner: None,
             ty: delegate_ir,
@@ -5454,6 +5476,7 @@ impl<'a> Lower<'a> {
         let kprop_ty = ty_to_ir(Ty::obj("kotlin/reflect/KProperty"));
         let idx_p = self.ir.statics.len() as u32;
         self.ir.statics.push(crate::ir::IrStatic {
+            visibility: crate::types::Visibility::Public,
             name: format!("{}$kprop", p.name),
             owner: None,
             ty: kprop_ty,
@@ -6227,11 +6250,11 @@ impl<'a> Lower<'a> {
             self.scope.push((name.to_string(), holder, holder_ty));
             self.boxed_elem.insert(name.to_string(), elem_ty);
             let new_ref = self.ir.add_expr(IrExpr::RefNew { elem, init: call });
-            out.push(self.emit_variable(holder, ty_to_ir(holder_ty), Some(new_ref)));
+            out.push(self.emit_named_variable(holder, ty_to_ir(holder_ty), Some(new_ref)));
         } else {
             let v = self.fresh_value();
             self.scope.push((name.to_string(), v, log_ty));
-            out.push(self.emit_variable(v, ty_to_ir(log_ty), Some(call)));
+            out.push(self.emit_named_variable(v, ty_to_ir(log_ty), Some(call)));
         }
         Some(())
     }
@@ -10025,7 +10048,7 @@ impl<'a> Lower<'a> {
         let first = getter(self, &loop_info.first);
         let i_v = self.fresh_value();
         self.scope.push((name.to_string(), i_v, elem));
-        let var_i = self.emit_variable(i_v, elem_ir.clone(), Some(first));
+        let var_i = self.emit_named_variable(i_v, elem_ir.clone(), Some(first));
         // last = range.getLast()  (hoisted)
         let last = getter(self, &loop_info.last);
         let n_v = self.fresh_value();
@@ -10105,7 +10128,7 @@ impl<'a> Lower<'a> {
         let first = getter(self, &loop_info.first);
         let i_v = self.fresh_value();
         self.scope.push((name.to_string(), i_v, elem));
-        let var_i = self.emit_variable(i_v, elem_ir.clone(), Some(first));
+        let var_i = self.emit_named_variable(i_v, elem_ir.clone(), Some(first));
         // last = p.getLast()  (hoisted)
         let last = getter(self, &loop_info.last);
         let n_v = self.fresh_value();
@@ -10209,7 +10232,7 @@ impl<'a> Lower<'a> {
             let zero = self.emit_const(IrConst::Int(0));
             (
                 Some(v),
-                Some(self.emit_variable(v, ty_to_ir(Ty::Int), Some(zero))),
+                Some(self.emit_named_variable(v, ty_to_ir(Ty::Int), Some(zero))),
             )
         } else {
             (None, None)
@@ -10268,7 +10291,7 @@ impl<'a> Lower<'a> {
         };
         let x_v = self.fresh_value();
         self.scope.push((name.to_string(), x_v, elem));
-        let var_x = self.emit_variable(x_v, ty_to_ir(elem), Some(x_init));
+        let var_x = self.emit_named_variable(x_v, ty_to_ir(elem), Some(x_init));
 
         let mut out = vec![var_x];
         if self.append_body_stmts(body, &mut out).is_none() {
@@ -12271,7 +12294,7 @@ impl<'a> Lower<'a> {
                 // The slot defaults to `null` (kotlinc: `aconst_null; astore`); a read while still null
                 // throws via the `LateinitCheck` wrapper (see the local-read path).
                 let null = self.emit_const(IrConst::Null);
-                Some(self.emit_variable(v, ty_to_ir(kty), Some(null)))
+                Some(self.emit_named_variable(v, ty_to_ir(kty), Some(null)))
             }
             Stmt::Local { name, init, ty, .. } => {
                 let init_ty = self.info.ty(init);
@@ -12290,7 +12313,7 @@ impl<'a> Lower<'a> {
                     let seq = self.emit_block(vec![side], Some(unit_val));
                     let v = self.fresh_value();
                     self.scope.push((name.clone(), v, unit_ty));
-                    return Some(self.emit_variable(v, ty_to_ir(unit_ty), Some(seq)));
+                    return Some(self.emit_named_variable(v, ty_to_ir(unit_ty), Some(seq)));
                 }
                 // Use the declared type only when it's a builtin krusty `Ty`; for a user/class type
                 // (`val en: En`) `Ty::from_name` is `None`, so fall back to the checker's inferred
@@ -12364,7 +12387,11 @@ impl<'a> Lower<'a> {
                     // A single `Variable` (no scoping block) so the holder's slot lives in the enclosing
                     // scope — the closure's capture reads it later.
                     let new_ref = self.ir.add_expr(IrExpr::RefNew { elem, init: it });
-                    return Some(self.emit_variable(holder, ty_to_ir(holder_ty), Some(new_ref)));
+                    return Some(self.emit_named_variable(
+                        holder,
+                        ty_to_ir(holder_ty),
+                        Some(new_ref),
+                    ));
                 }
                 // A NESTED-array local (`val x: Array<Array<*>> = arrayOf(arrayOf(1))`): its outermost
                 // array-creating initializer builds over the DECLARED element (`Array<*>` = `Object[]`),
@@ -12421,7 +12448,7 @@ impl<'a> Lower<'a> {
                 if nullable {
                     var_ty = mark_nullable(var_ty);
                 }
-                Some(self.emit_variable(v, var_ty, Some(it)))
+                Some(self.emit_named_variable(v, var_ty, Some(it)))
             }
             Stmt::LocalDelegate {
                 is_var,
@@ -12475,7 +12502,7 @@ impl<'a> Lower<'a> {
                         ret_ty: prop_ty,
                     },
                 );
-                Some(self.emit_variable(dv, ty_to_ir(delegate_ty), Some(init)))
+                Some(self.emit_named_variable(dv, ty_to_ir(delegate_ty), Some(init)))
             }
             Stmt::Destructure { entries, init } => {
                 // A direct `stmt()` call wraps the bindings in a Block; the block builders use
