@@ -4882,6 +4882,11 @@ impl<'a> Lower<'a> {
         })
     }
 
+    fn emit_static_instance(&mut self, owner: u32, ty: u32, field: &'static str) -> u32 {
+        self.ir
+            .add_expr(IrExpr::StaticInstance { owner, ty, field })
+    }
+
     /// Resolve a delegate's `getValue` operator — a MEMBER on the delegate type, or a classpath
     /// EXTENSION (`Lazy.getValue` in `LazyKt`). Returns `(owner, descriptor, ret, inline, is_ext)`:
     /// a member is emitted `delegate.getValue(thisRef, prop)`; an extension is the static
@@ -5080,11 +5085,7 @@ impl<'a> Lower<'a> {
             if params.len() != args.len() {
                 return None;
             }
-            let recv = self.ir.add_expr(IrExpr::StaticInstance {
-                owner: cid,
-                ty: cid,
-                field: "INSTANCE",
-            });
+            let recv = self.emit_static_instance(cid, cid, "INSTANCE");
             let mut a: Vec<Option<u32>> = Vec::with_capacity(args.len());
             for (&arg, pt) in args.iter().zip(&params) {
                 a.push(Some(self.lower_arg(arg, pt)?));
@@ -9190,11 +9191,7 @@ impl<'a> Lower<'a> {
                         .filter(|&cid| self.ir.classes[cid as usize].is_object)
                     {
                         Some(cid) => {
-                            let inst = self.ir.add_expr(IrExpr::StaticInstance {
-                                owner: cid,
-                                ty: cid,
-                                field: "INSTANCE",
-                            });
+                            let inst = self.emit_static_instance(cid, cid, "INSTANCE");
                             (owner, Some(inst))
                         }
                         None => (owner, None),
@@ -9325,11 +9322,7 @@ impl<'a> Lower<'a> {
                 Some(vec![ty_to_ir(Ty::obj("kotlin/Any"))]),
             ))
         } else {
-            Some(self.ir.add_expr(IrExpr::StaticInstance {
-                owner: synth_id,
-                ty: synth_id,
-                field: "INSTANCE",
-            }))
+            Some(self.emit_static_instance(synth_id, synth_id, "INSTANCE"))
         }
     }
 
@@ -9461,11 +9454,7 @@ impl<'a> Lower<'a> {
             // A member of a same-file `object`: dispatch on its `INSTANCE` singleton.
             let cid = self.classes.get(internal)?.id;
             let (class_id, index, _fid, _) = self.resolve_method(internal, name)?;
-            let recv = self.ir.add_expr(IrExpr::StaticInstance {
-                owner: cid,
-                ty: cid,
-                field: "INSTANCE",
-            });
+            let recv = self.emit_static_instance(cid, cid, "INSTANCE");
             let mut a: Vec<Option<u32>> = (0..fixed as u32)
                 .map(|k| Some(self.ir.add_expr(IrExpr::GetValue(k))))
                 .collect();
@@ -9688,11 +9677,7 @@ impl<'a> Lower<'a> {
             runtime_retained: false,
         });
         let _ = e;
-        Some(self.ir.add_expr(IrExpr::StaticInstance {
-            owner: synth_id,
-            ty: synth_id,
-            field: "INSTANCE",
-        }))
+        Some(self.emit_static_instance(synth_id, synth_id, "INSTANCE"))
     }
 
     /// Lower a method reference `obj::m` (bound — the receiver is an in-scope value, captured) or
@@ -9752,11 +9737,7 @@ impl<'a> Lower<'a> {
                 let internal = class_internal(self.afile, &rn);
                 let cid = self.classes.get(&internal)?.id;
                 if self.ir.classes[cid as usize].is_object {
-                    let inst = self.ir.add_expr(IrExpr::StaticInstance {
-                        owner: cid,
-                        ty: cid,
-                        field: "INSTANCE",
-                    });
+                    let inst = self.emit_static_instance(cid, cid, "INSTANCE");
                     (Some(inst), Ty::obj(&internal))
                 } else {
                     (None, *params.first()?)
@@ -9893,11 +9874,7 @@ impl<'a> Lower<'a> {
             return None;
         }
         let cid = self.classes.get(internal)?.id;
-        let inst = self.ir.add_expr(IrExpr::StaticInstance {
-            owner: cid,
-            ty: cid,
-            field: "INSTANCE",
-        });
+        let inst = self.emit_static_instance(cid, cid, "INSTANCE");
         let (_, _, target_fid, _) = self.resolve_method(internal, name)?;
         let call_name = if self.ir.private_methods.contains(&target_fid) {
             self.ensure_private_accessor(internal, name)?
@@ -10299,11 +10276,7 @@ impl<'a> Lower<'a> {
                 vec![cap],
                 Some(vec![ty_to_ir(Ty::obj("kotlin/Any"))]),
             )),
-            None => Some(self.ir.add_expr(IrExpr::StaticInstance {
-                owner: synth_id,
-                ty: synth_id,
-                field: "INSTANCE",
-            })),
+            None => Some(self.emit_static_instance(synth_id, synth_id, "INSTANCE")),
         }
     }
 
@@ -16809,11 +16782,7 @@ impl<'a> Lower<'a> {
                     .map(|ci| ci.id)
                 {
                     // A bare `object` name → its singleton instance.
-                    self.ir.add_expr(IrExpr::StaticInstance {
-                        owner: class,
-                        ty: class,
-                        field: "INSTANCE",
-                    })
+                    self.emit_static_instance(class, class, "INSTANCE")
                 } else if n == "Unit" {
                     // The `Unit` singleton used as a value → `getstatic kotlin/Unit.INSTANCE`.
                     self.ir.add_expr(IrExpr::UnitInstance)
@@ -20354,11 +20323,8 @@ impl<'a> Lower<'a> {
                                 }
                                 let outer_id = self.classes[&internal].id;
                                 let comp_id = self.classes[&comp_fq].id;
-                                let recv = self.ir.add_expr(IrExpr::StaticInstance {
-                                    owner: outer_id,
-                                    ty: comp_id,
-                                    field: "Companion",
-                                });
+                                let recv =
+                                    self.emit_static_instance(outer_id, comp_id, "Companion");
                                 let a = self.lower_args(&args, &params)?;
                                 return Some(self.emit_method_call(
                                     class,

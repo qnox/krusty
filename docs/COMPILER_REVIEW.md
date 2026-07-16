@@ -3296,3 +3296,9 @@ index-set, and binary-operator paths.
 Same-file object construction now goes through `emit_new`; suspend-lambda factories, data-class copy,
 property/function reference wrappers, constructor references, inner/nested construction, primary/defaulted
 constructors, and secondary-constructor paths no longer rebuild `IrExpr::New` at their feature sites.
+
+### Same-File Static Instance Emitter Merge
+
+Same-file singleton and companion reads now go through `emit_static_instance`; object-member calls,
+property/function reference captures, reference singletons, bare object names, and companion dispatch no
+longer rebuild `IrExpr::StaticInstance` at their feature sites.
