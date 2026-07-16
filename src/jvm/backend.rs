@@ -84,6 +84,13 @@ impl Backend for JvmBackend {
         // Drop the dead standalone impl of a must-inline call's (`require`/`check`) message lambda — it is
         // spliced at the call site, so emitting it would only force a spurious facade class.
         crate::jvm::ir_emit::mark_must_inline_lambdas(&mut ir);
+        // A lambda impl method must be a member of the CLASS whose code emits its `invokedynamic` —
+        // the impl is PRIVATE (kotlinc's placement), so a cross-class handle would be an
+        // IllegalAccessError. Lowering attaches impls per `cur_class`, which misses code that ends up
+        // in a class only later: enum-entry constructor arguments (lowered class-less, emitted in the
+        // enum's `<clinit>`) and suspend-lambda state machines (bodies moved into the machine class by
+        // `lower_suspend`). Reparent those impls after all IR→IR transforms, before emit.
+        crate::jvm::ir_emit::reparent_lambda_impls(&mut ir);
         // `@kotlin.Metadata` for the facade: each top-level `suspend fun` is recorded with `IS_SUSPEND`
         // and its LOGICAL signature, so another krusty/kotlinc compilation resolves a call to it (a
         // suspend fn's physical method is `Object foo(…, Continuation)` — only `@Metadata` distinguishes
