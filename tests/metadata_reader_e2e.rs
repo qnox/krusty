@@ -10,7 +10,7 @@ use krusty::jvm::jvm_libraries::JvmLibraries;
 use krusty::jvm::metadata::{
     class_companion_name, class_functions, class_inline, package_functions,
 };
-use krusty::symbol_resolver::SymbolResolver;
+use krusty::symbol_resolver::{SymRecv, Symbol, SymbolResolver};
 use krusty::types::Ty;
 use std::rc::Rc;
 
@@ -118,7 +118,13 @@ fn result_get_or_throw_resolves_as_inline_extension() {
     let scope = vec!["kotlin".to_string()];
     let resolver = SymbolResolver::new_scoped(&libs, &scope);
     let c = resolver
-        .resolve_extension_inline_callable("getOrThrow", Ty::obj("kotlin/Result"), &[])
+        .resolve_symbol(
+            SymRecv::Value(Ty::obj("kotlin/Result")),
+            "getOrThrow",
+            &[],
+            &[],
+        )
+        .and_then(Symbol::extension_call)
         .expect("getOrThrow resolves on a Result receiver via @Metadata");
     assert_eq!(c.owner, "kotlin/ResultKt");
     assert_eq!(c.name, "getOrThrow");
@@ -128,7 +134,13 @@ fn result_get_or_throw_resolves_as_inline_extension() {
     // the @Metadata receiver class).
     assert!(
         resolver
-            .resolve_extension_inline_callable("getOrThrow", Ty::obj("kotlin/String"), &[])
+            .resolve_symbol(
+                SymRecv::Value(Ty::obj("kotlin/String")),
+                "getOrThrow",
+                &[],
+                &[],
+            )
+            .and_then(Symbol::extension_call)
             .is_none(),
         "getOrThrow must not bind a non-Result receiver"
     );

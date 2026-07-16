@@ -4976,12 +4976,15 @@ impl<'a> Lower<'a> {
                 false,
             ));
         }
-        let c = self.resolver().resolve_extension_callable(
-            "getValue",
-            delegate_ty,
-            &[Ty::obj("kotlin/Any"), Ty::obj("kotlin/reflect/KProperty")],
-            &[],
-        )?;
+        let c = self
+            .resolver()
+            .resolve_symbol(
+                crate::symbol_resolver::SymRecv::Value(delegate_ty),
+                "getValue",
+                &[Ty::obj("kotlin/Any"), Ty::obj("kotlin/reflect/KProperty")],
+                &[],
+            )
+            .and_then(crate::symbol_resolver::Symbol::extension_call)?;
         Some((c.owner, c.descriptor, c.ret, c.inline, true))
     }
 

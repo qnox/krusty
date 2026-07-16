@@ -5,7 +5,7 @@
 use krusty::jvm::classpath::Classpath;
 use krusty::jvm::jvm_libraries::JvmLibraries;
 use krusty::jvm::metadata::{package_functions, parse_builtins};
-use krusty::symbol_resolver::SymbolResolver;
+use krusty::symbol_resolver::{SymRecv, Symbol, SymbolResolver};
 use krusty::types::Ty;
 use std::rc::Rc;
 
@@ -176,24 +176,27 @@ fn plus_assign_receiver_is_mutable() {
     let libs = JvmLibraries::new(Rc::new(Classpath::new(vec![jar])));
     let scope = ["kotlin/collections".to_string()];
     let resolver = SymbolResolver::new_scoped(&libs, &scope);
-    let mutable = resolver.resolve_extension_callable(
-        "plusAssign",
-        Ty::obj("kotlin/collections/MutableCollection"),
-        &[Ty::Int],
-        &[],
-    );
+    let mutable = resolver
+        .resolve_symbol(
+            SymRecv::Value(Ty::obj("kotlin/collections/MutableCollection")),
+            "plusAssign",
+            &[Ty::Int],
+            &[],
+        )
+        .and_then(Symbol::extension_call);
     assert!(
         mutable.is_some(),
         "plusAssign must resolve for a MutableCollection receiver"
     );
     assert!(
         resolver
-            .resolve_extension_callable(
+            .resolve_symbol(
+                SymRecv::Value(Ty::obj("kotlin/collections/List")),
                 "plusAssign",
-                Ty::obj("kotlin/collections/List"),
                 &[Ty::Int],
                 &[],
             )
+            .and_then(Symbol::extension_call)
             .is_none(),
         "plusAssign must not bind a read-only List receiver"
     );
