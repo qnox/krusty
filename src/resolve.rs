@@ -11771,6 +11771,44 @@ impl<'a> Checker<'a> {
                     self.resolved_calls.insert(call, ResolvedCall::Member(m));
                     return ret;
                 }
+                // A CLASSPATH member call with NAMED or OMITTED defaulted arguments
+                // (`workspace.copy(owner = o)` on a classpath data class): the argument-fit
+                // resolution above can't match (1 supplied arg vs 7 parameters). Map the labels
+                // onto positions via the `@Metadata` parameter names + default flags, type-check
+                // each SUPPLIED argument against its mapped parameter, and leave emission to the
+                // lowerer's `name$default` synthetic path (`lower_library_default_member_call`).
+                {
+                    use crate::symbol_resolver::{SymRecv, Symbol};
+                    let member = self
+                        .resolver()
+                        .resolve_symbol(SymRecv::Value(rt), &name, &[], &[])
+                        .map(Symbol::overloads)
+                        .unwrap_or_default()
+                        .into_iter()
+                        .filter(|o| o.kind == crate::libraries::FnKind::Member)
+                        .find(|o| {
+                            (arg_names.is_some() || arg_tys.len() != o.callable.params.len())
+                                && o.call_sig.can_map_omitted_args(o.callable.params.len())
+                        });
+                    if let Some(fi) = member {
+                        if let Ok(slots) =
+                            map_call_sig_args(args, arg_names.as_deref(), &fi.call_sig)
+                        {
+                            let logical = &fi.callable.params;
+                            for (i, slot) in slots.iter().enumerate() {
+                                if let Some(a) = slot {
+                                    self.expect_assignable(
+                                        logical[i],
+                                        self.expr_types[a.0 as usize],
+                                        self.span(*a),
+                                        "argument",
+                                    );
+                                }
+                            }
+                            return fi.callable.ret;
+                        }
+                    }
+                }
                 // Instance method call on a class value: `p.method(args)` (own or inherited).
                 if let Ty::Obj(internal, _) = rt {
                     // A non-public member FUNCTION may be inaccessible from this site — kotlinc rejects it;
