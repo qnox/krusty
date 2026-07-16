@@ -5809,8 +5809,7 @@ impl<'a> Lower<'a> {
             .filter(|(_, s)| s.is_none())
             .map(|(i, _)| 1i32 << i)
             .sum();
-        a.push(self.ir.add_expr(IrExpr::Const(IrConst::Int(mask))));
-        a.push(self.ir.add_expr(IrExpr::Const(IrConst::Null))); // DefaultConstructorMarker
+        self.append_default_mask_marker(&mut a, mask);
         Some(self.ir.add_expr(IrExpr::NewExternal {
             internal: internal.to_string(),
             ctor_desc: desc,
@@ -8636,8 +8635,7 @@ impl<'a> Lower<'a> {
                 }
             }
         }
-        a.push(self.ir.add_expr(IrExpr::Const(IrConst::Int(mask))));
-        a.push(self.ir.add_expr(IrExpr::Const(IrConst::Null))); // omitted-default marker
+        self.append_default_mask_marker(&mut a, mask);
         let dcall = self.ir.add_expr(IrExpr::Call {
             callee: Callee::LocalDefault(fid),
             dispatch_receiver: None,
@@ -9614,8 +9612,7 @@ impl<'a> Lower<'a> {
                     a.push(self.zero_placeholder(pt));
                 }
             }
-            a.push(self.ir.add_expr(IrExpr::Const(IrConst::Int(mask))));
-            a.push(self.ir.add_expr(IrExpr::Const(IrConst::Null)));
+            self.append_default_mask_marker(&mut a, mask);
             self.ir.add_expr(IrExpr::Call {
                 callee: Callee::LocalDefault(fid),
                 dispatch_receiver: None,
@@ -11279,6 +11276,11 @@ impl<'a> Lower<'a> {
         self.ir.add_expr(IrExpr::Const(c))
     }
 
+    fn append_default_mask_marker(&mut self, out: &mut Vec<u32>, mask: i32) {
+        out.push(self.ir.add_expr(IrExpr::Const(IrConst::Int(mask))));
+        out.push(self.ir.add_expr(IrExpr::Const(IrConst::Null)));
+    }
+
     fn append_default_call_args(
         &mut self,
         out: &mut Vec<u32>,
@@ -11286,7 +11288,7 @@ impl<'a> Lower<'a> {
         args: &[AstExprId],
         trailing_lambda: bool,
     ) -> Option<()> {
-        if trailing_lambda && args.len() < params.len() {
+        let mask: i32 = if trailing_lambda && args.len() < params.len() {
             let prefix_len = args.len().checked_sub(1)?;
             let last = params.len() - 1;
             for j in 0..params.len() {
@@ -11299,8 +11301,7 @@ impl<'a> Lower<'a> {
                     out.push(self.zero_placeholder(params[j]));
                 }
             }
-            let mask: i32 = (prefix_len..last).map(|j| 1i32 << j).sum();
-            out.push(self.ir.add_expr(IrExpr::Const(IrConst::Int(mask))));
+            (prefix_len..last).map(|j| 1i32 << j).sum()
         } else if args.len() <= params.len() {
             for (i, &arg) in args.iter().enumerate() {
                 out.push(self.lower_arg(arg, &ty_to_ir(params[i]))?);
@@ -11308,12 +11309,11 @@ impl<'a> Lower<'a> {
             for &param in &params[args.len()..] {
                 out.push(self.zero_placeholder(param));
             }
-            let mask: i32 = (args.len()..params.len()).map(|j| 1i32 << j).sum();
-            out.push(self.ir.add_expr(IrExpr::Const(IrConst::Int(mask))));
+            (args.len()..params.len()).map(|j| 1i32 << j).sum()
         } else {
             return None;
-        }
-        out.push(self.ir.add_expr(IrExpr::Const(IrConst::Null)));
+        };
+        self.append_default_mask_marker(out, mask);
         Some(())
     }
 
@@ -11859,8 +11859,7 @@ impl<'a> Lower<'a> {
             .filter(|(_, s)| s.is_none())
             .map(|(i, _)| 1i32 << i)
             .sum();
-        a.push(self.ir.add_expr(IrExpr::Const(IrConst::Int(mask))));
-        a.push(self.ir.add_expr(IrExpr::Const(IrConst::Null))); // omitted-default marker
+        self.append_default_mask_marker(&mut a, mask);
         let call =
             self.emit_static_call(owner, format!("{phys}$default"), desc, InlineKind::None, a);
         // A `suspend` method's `$default` already spells the `Continuation` in its descriptor (BEFORE the
