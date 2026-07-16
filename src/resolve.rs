@@ -12371,7 +12371,29 @@ impl<'a> Checker<'a> {
                             return sig.ret;
                         }
                     }
-                    if args.len() != sig.params.len() {
+                    // A local function may OMIT trailing arguments whose parameters have defaults
+                    // (`fun bar(x: Int = 1); bar()`). krusty emits local functions as plain methods (no
+                    // `$default` synthetic), so the lowerer fills the omitted defaults at the call site.
+                    // Allow the short call only when every omitted trailing parameter has a default (and
+                    // no context parameters are in play — those took the branch above).
+                    // An omitted default is lowered at the CALL site (where the local function's own
+                    // parameters are NOT in scope), so a default that references another parameter can't be
+                    // filled here — leave those to be rejected (a shadowing outer variable of the same name
+                    // would otherwise be captured instead of the parameter).
+                    let omitted_all_default = ctx_count == 0
+                        && args.len() < sig.params.len()
+                        && matches!(self.file.stmt(stmt_id), Stmt::LocalFun(f) if {
+                            let pnames: std::collections::HashSet<&str> =
+                                f.params.iter().map(|p| p.name.as_str()).collect();
+                            f.params.len() == sig.params.len()
+                                && f.params[args.len()..].iter().all(|p| {
+                                    p.default
+                                        .is_some_and(|dx| !expr_refs_param(self.file, dx, &pnames))
+                                })
+                        });
+                    if args.len() > sig.params.len()
+                        || (args.len() < sig.params.len() && !omitted_all_default)
+                    {
                         let arg_tys = self.arg_tys(args); // still record types for lowering
                         self.diags.error(
                             span,
@@ -12382,13 +12404,13 @@ impl<'a> Checker<'a> {
                             ),
                         );
                     } else {
-                        // Type each argument against the declared parameter. A LAMBDA argument passed
-                        // to a function-typed parameter must be checked WITH that parameter's block
-                        // parameter types (`check_lambda_with_types`) — exactly as a top-level call
-                        // does — so a destructured / `it` lambda parameter gets its real type instead
-                        // of the erased `Any`. Other arguments type normally.
-                        for (i, p) in sig.params.iter().enumerate() {
-                            let a = args[i];
+                        // Type each PROVIDED argument against its declared parameter (omitted trailing
+                        // parameters use their defaults). A LAMBDA argument passed to a function-typed
+                        // parameter must be checked WITH that parameter's block parameter types
+                        // (`check_lambda_with_types`) — exactly as a top-level call does — so a
+                        // destructured / `it` lambda parameter gets its real type instead of erased `Any`.
+                        for (i, &a) in args.iter().enumerate() {
+                            let p = sig.params[i];
                             let aty = match p {
                                 Ty::Fun(fs) if matches!(self.file.expr(a), Expr::Lambda { .. }) => {
                                     let pts = fs.params.clone();
@@ -12396,7 +12418,7 @@ impl<'a> Checker<'a> {
                                 }
                                 _ => self.expr(a),
                             };
-                            self.expect_assignable(*p, aty, self.span(a), "argument");
+                            self.expect_assignable(p, aty, self.span(a), "argument");
                         }
                     }
                     let ret = sig.ret;
