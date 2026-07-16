@@ -10743,16 +10743,14 @@ impl<'a> Lower<'a> {
         });
         let getter = |this: &mut Self, accessor: &PlatformAccessor| {
             let recv = this.ir.add_expr(IrExpr::GetValue(r_v));
-            this.ir.add_expr(IrExpr::Call {
-                callee: Callee::Virtual {
-                    owner: internal.clone(),
-                    name: accessor.name.clone(),
-                    descriptor: accessor.descriptor.clone(),
-                    interface: false,
-                },
-                dispatch_receiver: Some(recv),
-                args: vec![],
-            })
+            this.emit_virtual_call(
+                internal.clone(),
+                accessor.name.clone(),
+                accessor.descriptor.clone(),
+                false,
+                recv,
+                vec![],
+            )
         };
         // i = p.getFirst()
         let first = getter(self, &loop_info.first);
@@ -13478,17 +13476,14 @@ impl<'a> Lower<'a> {
                     let dele = self.ir.add_expr(IrExpr::GetValue(dslot));
                     let null_a = self.ir.add_expr(IrExpr::Const(IrConst::Null));
                     let pref = self.make_local_propref(&ld)?;
-                    return Some(self.ir.add_expr(IrExpr::Call {
-                        callee: crate::ir::Callee::Virtual {
-                            owner: ld.delegate_internal.clone(),
-                            name: "setValue".to_string(),
-                            descriptor:
-                                self.syms.libraries.method_descriptor(&sv.params, sv.ret)?,
-                            interface: false,
-                        },
-                        dispatch_receiver: Some(dele),
-                        args: vec![null_a, pref, val],
-                    }));
+                    return Some(self.emit_virtual_call(
+                        ld.delegate_internal.clone(),
+                        "setValue".to_string(),
+                        self.syms.libraries.method_descriptor(&sv.params, sv.ret)?,
+                        false,
+                        dele,
+                        vec![null_a, pref, val],
+                    ));
                 }
                 // A boxed mutable-capture local: write through its `Ref` holder's `element`.
                 if let Some(elem) = self.boxed_elem.get(&name).cloned() {
@@ -14702,16 +14697,14 @@ impl<'a> Lower<'a> {
                     let is_iface = self.library_type_is_interface(&setter.owner);
                     let r = self.expr(receiver)?;
                     let v = self.lower_arg(value, &pty)?;
-                    return Some(self.ir.add_expr(IrExpr::Call {
-                        callee: Callee::Virtual {
-                            owner: setter.owner,
-                            name: setter.name,
-                            descriptor: setter.descriptor,
-                            interface: is_iface,
-                        },
-                        dispatch_receiver: Some(r),
-                        args: vec![v],
-                    }));
+                    return Some(self.emit_virtual_call(
+                        setter.owner,
+                        setter.name,
+                        setter.descriptor,
+                        is_iface,
+                        r,
+                        vec![v],
+                    ));
                 }
             }
         }
@@ -15564,16 +15557,14 @@ impl<'a> Lower<'a> {
                 let owner = member
                     .owner
                     .unwrap_or_else(|| rt.obj_internal().unwrap_or("kotlin/Any").to_string());
-                let call = self.ir.add_expr(IrExpr::Call {
-                    callee: Callee::Virtual {
-                        owner,
-                        name: member.name,
-                        descriptor: member.descriptor,
-                        interface: member.is_interface,
-                    },
-                    dispatch_receiver: Some(recv),
-                    args: a,
-                });
+                let call = self.emit_virtual_call(
+                    owner,
+                    member.name,
+                    member.descriptor,
+                    member.is_interface,
+                    recv,
+                    a,
+                );
                 Some(self.coerce_to_static(call, ret, physical_ret))
             }
             InvokeKind::ExtensionOperator { receiver_ty: rt } => {
@@ -16162,16 +16153,14 @@ impl<'a> Lower<'a> {
                                     }
                                     let owner = m.owner.clone().unwrap_or_else(|| internal.clone());
                                     let is_iface = self.library_type_is_interface(&owner);
-                                    self.ir.add_expr(IrExpr::Call {
-                                        callee: Callee::Virtual {
-                                            owner,
-                                            name: m.name,
-                                            descriptor: m.descriptor,
-                                            interface: is_iface,
-                                        },
-                                        dispatch_receiver: Some(recv2),
-                                        args: a,
-                                    })
+                                    self.emit_virtual_call(
+                                        owner,
+                                        m.name,
+                                        m.descriptor,
+                                        is_iface,
+                                        recv2,
+                                        a,
+                                    )
                                 } else {
                                     // A stdlib EXTENSION via safe call (`s?.uppercase()`) — inline it on
                                     // the non-null receiver, the same path as the qualified call.
@@ -16807,20 +16796,18 @@ impl<'a> Lower<'a> {
                     let dele = self.ir.add_expr(IrExpr::GetValue(dslot));
                     let null_a = self.ir.add_expr(IrExpr::Const(IrConst::Null));
                     let pref = self.make_local_propref(&ld)?;
-                    return Some(self.ir.add_expr(IrExpr::Call {
-                        callee: crate::ir::Callee::Virtual {
-                            owner: ld.delegate_internal.clone(),
-                            name: "getValue".to_string(),
-                            descriptor:
-                                self.syms.libraries.method_descriptor(
-                                    &ld.getvalue_sig.params,
-                                    ld.getvalue_sig.ret,
-                                )?,
-                            interface: false,
-                        },
-                        dispatch_receiver: Some(dele),
-                        args: vec![null_a, pref],
-                    }));
+                    return Some(
+                        self.emit_virtual_call(
+                            ld.delegate_internal.clone(),
+                            "getValue".to_string(),
+                            self.syms
+                                .libraries
+                                .method_descriptor(&ld.getvalue_sig.params, ld.getvalue_sig.ret)?,
+                            false,
+                            dele,
+                            vec![null_a, pref],
+                        ),
+                    );
                 }
                 // A boxed mutable-capture local: read through its `Ref` holder's `element`.
                 if let Some(elem) = self.boxed_elem.get(&n).cloned() {
