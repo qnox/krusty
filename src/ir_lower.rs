@@ -1512,6 +1512,11 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 lo.ext_fun_ids
                     .entry((recv_key, f.name.clone()))
                     .or_insert(id);
+                // A `private` top-level extension is `private static` on the facade (kotlinc); a
+                // class-body caller goes through the `access$<name>` bridge (see `emit_pass`).
+                if f.visibility.is_private() {
+                    lo.ir.private_methods.insert(id);
+                }
             } else {
                 let want: Vec<Ty> = f
                     .params
@@ -1551,6 +1556,11 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     param_checks,
                 });
                 lo.fun_ids.insert((f.name.clone(), sig.params.clone()), id);
+                // A `private` top-level function is `private static` on the facade (kotlinc); a
+                // class-body caller goes through the `access$<name>` bridge (see `emit_pass`).
+                if f.visibility.is_private() {
+                    lo.ir.private_methods.insert(id);
+                }
                 // Emit a JVM generic `Signature` for a type-parameterized function (kotlinc does), so the
                 // bytecode matches for generics. `None` for non-generic / not-yet-modeled shapes.
                 if let Some(s) = fn_generic_sig(file, f, &*lo.syms.libraries) {
@@ -6508,17 +6518,21 @@ impl<'a> Lower<'a> {
         if !is_anon_fun && body_has_bare_return(self.afile, body) {
             self.ir.inline_only_fns.insert(fid);
         }
-        // A lambda inside a class member captures the enclosing `this` and reads its (private) members,
-        // so its impl method must live ON THAT CLASS — not the file facade (which can't touch C's
-        // privates). Register it as a class method; the facade skips it and `invokedynamic` targets it on
-        // the class. (Skip an inline-only impl — it is spliced, never emitted as a standalone method.)
-        if captures_this && !self.ir.inline_only_fns.contains(&fid) {
+        // A lambda impl method lives ON THE CLASS declaring the enclosing member (kotlinc's placement:
+        // same class as the `invokedynamic` call site, so a PRIVATE impl — and any enclosing-`this`
+        // member access — resolves without bridges); a top-level declaration's lambda keeps its impl on
+        // the file facade. (Skip an inline-only impl — it is spliced, never emitted as a standalone
+        // method.)
+        if !self.ir.inline_only_fns.contains(&fid) {
             if let Some(internal) = self.cur_class.clone() {
                 if let Some(cid) = self.classes.get(&internal).map(|ci| ci.id) {
                     self.ir.classes[cid as usize].methods.push(fid);
                 }
             }
         }
+        // kotlinc emits every standalone lambda impl `private static final` — it is reachable only
+        // through the same-class `invokedynamic`, never part of the public ABI.
+        self.ir.private_methods.insert(fid);
         Some(self.ir.add_expr(IrExpr::Lambda {
             impl_fn: fid,
             arity: arity as u8,

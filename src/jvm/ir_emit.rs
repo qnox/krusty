@@ -62,6 +62,68 @@ pub struct KotlinMetadata {
 /// leftover impl would only force a spurious facade class (`OrganizationIdKt` holding a dead
 /// `$lambda$0`) that kotlinc never emits. Safe because a `MustInline` callee is guaranteed spliced (or
 /// the whole file is skipped — then nothing is emitted anyway).
+/// Reparent lambda impl methods into the CLASS whose code emits their `invokedynamic`. An impl is
+/// PRIVATE (kotlinc's placement: same class as the call site), so a cross-class method handle would
+/// throw `IllegalAccessError`. Lowering attaches impls per `cur_class`; this pass covers the code
+/// that reaches a class only later: enum-entry constructor arguments (lowered class-less, emitted in
+/// the enum's `<clinit>`) and suspend-lambda state-machine bodies (moved into the machine class).
+/// Transitive: an impl reparented into a class drags the impls of its own nested lambdas along.
+pub fn reparent_lambda_impls(ir: &mut IrFile) {
+    let mut owned: std::collections::HashSet<u32> = ir
+        .classes
+        .iter()
+        .flat_map(|c| c.methods.iter().copied())
+        .collect();
+    for cid in 0..ir.classes.len() {
+        // Class-context roots whose code emits inside this class: member/method bodies (covers a
+        // suspend machine's `invokeSuspend`), the instance initializer, super/delegate arguments,
+        // and enum-entry constructor arguments (emitted in `<clinit>`).
+        let c = &ir.classes[cid];
+        let mut roots: Vec<crate::ir::ExprId> = Vec::new();
+        for &fid in &c.methods {
+            if let Some(b) = ir.functions.get(fid as usize).and_then(|f| f.body) {
+                roots.push(b);
+            }
+        }
+        roots.extend(c.init_body);
+        roots.extend(c.super_args.iter().copied());
+        for sc in &c.secondary_ctors {
+            roots.extend(sc.body);
+            roots.extend(sc.delegate_args.iter().copied());
+        }
+        for en in &c.enum_entries {
+            roots.extend(en.args.iter().copied());
+        }
+        let mut seen: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        let mut stack = roots;
+        while let Some(cur) = stack.pop() {
+            if !seen.insert(cur) {
+                continue;
+            }
+            if let IrExpr::Lambda { impl_fn, .. } = &ir.exprs[cur as usize] {
+                let fid = *impl_fn;
+                // Only a free (facade-owned) standalone impl moves; one already owned by a class —
+                // including THIS one — stays. A spliced (inline-only) impl never emits a method.
+                if !owned.contains(&fid)
+                    && !ir.inline_only_fns.contains(&fid)
+                    && ir
+                        .functions
+                        .get(fid as usize)
+                        .is_some_and(|f| f.dispatch_receiver.is_none())
+                {
+                    owned.insert(fid);
+                    ir.classes[cid].methods.push(fid);
+                    // The impl's own body now emits in this class too — walk it for nested lambdas.
+                    if let Some(b) = ir.functions.get(fid as usize).and_then(|f| f.body) {
+                        stack.push(b);
+                    }
+                }
+            }
+            crate::ir::for_each_child(&ir.exprs, cur, &mut |ch| stack.push(ch));
+        }
+    }
+}
+
 pub fn mark_must_inline_lambdas(ir: &mut IrFile) {
     let mut dead: Vec<u32> = Vec::new();
     for i in 0..ir.exprs.len() {
@@ -182,6 +244,66 @@ fn emit_pass(
         .flat_map(|c| c.methods.iter().copied())
         .collect();
     let mut cw = ClassWriter::new(facade, "java/lang/Object");
+    // PRIVATE facade functions a CLASS body calls (`Callee::Local` from a lambda impl, a
+    // continuation class, or any class member): a cross-class private invokestatic is illegal, so
+    // kotlinc emits a `public static final synthetic access$<name>` forwarding bridge on the facade
+    // and the class calls that (the `Callee::Local` emit arm does the routing).
+    let facade_access_bridges: std::collections::HashSet<u32> = {
+        let mut roots: Vec<crate::ir::ExprId> = Vec::new();
+        for c in &ir.classes {
+            for &fid in &c.methods {
+                if let Some(b) = ir.functions.get(fid as usize).and_then(|f| f.body) {
+                    roots.push(b);
+                }
+            }
+            roots.extend(c.init_body);
+            roots.extend(c.super_args.iter().copied());
+            for sc in &c.secondary_ctors {
+                roots.extend(sc.body);
+                roots.extend(sc.delegate_args.iter().copied());
+            }
+            for en in &c.enum_entries {
+                roots.extend(en.args.iter().copied());
+            }
+        }
+        let mut out = std::collections::HashSet::new();
+        let mut seen: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        let mut stack = roots;
+        while let Some(cur) = stack.pop() {
+            if !seen.insert(cur) {
+                continue;
+            }
+            if let crate::ir::IrExpr::Call {
+                callee: Callee::Local(fid),
+                ..
+            } = &ir.exprs[cur as usize]
+            {
+                if ir.private_methods.contains(fid) && !class_member_fids.contains(fid) {
+                    out.insert(*fid);
+                }
+            }
+            crate::ir::for_each_child(&ir.exprs, cur, &mut |ch| stack.push(ch));
+        }
+        // A function-reference class dispatching to a PRIVATE facade function (its `invoke` is
+        // synthesized bytecode, not IR) needs the same bridge.
+        for c in &ir.classes {
+            if let Some(fr) = &c.func_ref {
+                if fr.call_owner.is_empty() {
+                    for (i, f) in ir.functions.iter().enumerate() {
+                        if f.name == fr.call_name
+                            && f.params.len() == fr.target_param_tys.len()
+                            && f.dispatch_receiver.is_none()
+                            && ir.private_methods.contains(&(i as u32))
+                            && !class_member_fids.contains(&(i as u32))
+                        {
+                            out.insert(i as u32);
+                        }
+                    }
+                }
+            }
+        }
+        out
+    };
     let mut facade_has_method = false;
     for (i, f) in ir.functions.iter().enumerate() {
         if class_member_fids.contains(&(i as u32)) {
@@ -198,6 +320,30 @@ fn emit_pass(
         }
         emit_method(ir, i as u32, facade, facade, &mut cw, false, bodies);
         facade_has_method = true;
+        if facade_access_bridges.contains(&(i as u32)) {
+            let param_tys = jvm_tys(&f.params);
+            let ret = ir_ty_to_jvm(&f.ret);
+            let desc = method_descriptor(&param_tys, ret);
+            let words: u16 = param_tys.iter().map(|t| slot_words(*t)).sum();
+            let mut g = CodeBuilder::new(words);
+            let mut slot: u16 = 0;
+            for &t in &param_tys {
+                load(t, slot, &mut g);
+                slot += slot_words(t);
+            }
+            let m = cw.methodref(facade, &f.name, &desc);
+            let aw: i32 = words as i32;
+            g.invokestatic(m, aw, slot_words(ret) as i32);
+            emit_return(ret, &mut g);
+            g.ensure_locals(words);
+            g.link();
+            cw.add_method(
+                0x1019, /* PUBLIC | STATIC | FINAL | SYNTHETIC */
+                &format!("access${}", f.name),
+                &desc,
+                &g,
+            );
+        }
         // A top-level function (or extension) with SIMPLE parameter defaults gets kotlinc's
         // `foo$default(params…, int mask, Object marker)` synthetic (dispatches to the real method,
         // filling the masked slots from the defaults), so an omitted-argument caller — same-file or
@@ -670,7 +816,7 @@ fn emit_class(
         return emit_prop_ref_class(c, facade);
     }
     if c.func_ref.is_some() {
-        return emit_func_ref_class(c, facade);
+        return emit_func_ref_class(ir, c, facade);
     }
     let mut cw = ClassWriter::new(&c.fq_name, &c.superclass);
     // Access: an extended or abstract class must not be `final`; a class with an abstract method
@@ -1606,7 +1752,18 @@ fn emit_toplevel_prop_ref_class(
 /// erased `invoke(Object…)Object` casts/unboxes its args and dispatches to the target, boxing the
 /// result (or returning the `Unit` singleton for a `void` target). Reference EQUALITY (`::f == ::f`,
 /// `a::m != b::m`) is inherited from `FunctionReferenceImpl` (compares owner/name/signature/receiver).
-fn emit_func_ref_class(c: &crate::ir::IrClass, facade: &str) -> Vec<u8> {
+/// Whether the facade declares a PRIVATE top-level function `name` with `arity` parameters — the
+/// target of a function reference that must route through the `access$<name>` bridge.
+fn private_facade_fn(ir: &IrFile, name: &str, arity: usize) -> bool {
+    ir.functions.iter().enumerate().any(|(i, f)| {
+        f.name == name
+            && f.params.len() == arity
+            && f.dispatch_receiver.is_none()
+            && ir.private_methods.contains(&(i as u32))
+    })
+}
+
+fn emit_func_ref_class(ir: &IrFile, c: &crate::ir::IrClass, facade: &str) -> Vec<u8> {
     use crate::ir::FrDispatch;
     let fr = c.func_ref.as_ref().unwrap();
     // An empty `owner_class`/`call_owner` is the facade sentinel (a top-level function lives on the
@@ -1817,9 +1974,19 @@ fn emit_func_ref_class(c: &crate::ir::IrClass, facade: &str) -> Vec<u8> {
     } else {
         slot_words(target_ret_jvm) as i32
     };
+    // A reference to a PRIVATE same-file top-level function can't invokestatic it from this
+    // (separate) class — call kotlinc's `access$<name>` facade bridge instead (`emit_pass` emits it
+    // for exactly these referenced targets).
+    let static_call_name = if fr.call_owner.is_empty()
+        && private_facade_fn(ir, &fr.call_name, fr.target_param_tys.len())
+    {
+        format!("access${}", fr.call_name)
+    } else {
+        fr.call_name.clone()
+    };
     match fr.dispatch {
         FrDispatch::Static | FrDispatch::StaticBound => {
-            let m = cw.methodref(call_owner, &fr.call_name, &call_desc);
+            let m = cw.methodref(call_owner, &static_call_name, &call_desc);
             inv.invokestatic(m, call_arg_words, ret_words);
         }
         // A bound reference to a mapped-builtin member (`"KOTLIN"::get`) invokes the same PHYSICAL JVM
@@ -3064,18 +3231,25 @@ fn emit_method(
             0
         }
     } else {
-        // A `static` method is `public static final` (kotlinc) — EXCEPT on an interface, where a `final`
+        // A `static` method is `<vis> static final` (kotlinc) — EXCEPT on an interface, where a `final`
         // static method is illegal (`ClassFormatError`), or a value class's `constructor-impl`/
         // `<name>-impl` delegate members, which kotlinc emits `public static` (non-`final`) and marks via
-        // `open_methods`. `box-impl`/`equals-impl0` stay `public static final` (not opened).
+        // `open_methods`. `box-impl`/`equals-impl0` stay `public static final` (not opened). Visibility
+        // derives from the member's own (a private declaration — or a lambda impl, which kotlinc always
+        // emits private — is `ACC_PRIVATE`).
         let owner_is_iface = ir
             .classes
             .iter()
             .any(|o| o.fq_name == owner && o.is_interface);
-        if owner_is_iface || ir.open_methods.contains(&fid) {
-            0x0009 // PUBLIC | STATIC
+        let vis = if ir.private_methods.contains(&fid) {
+            0x0002
         } else {
-            0x0019 // PUBLIC | STATIC | FINAL
+            0x0001
+        };
+        if owner_is_iface || ir.open_methods.contains(&fid) {
+            vis | 0x0008 // <vis> | STATIC
+        } else {
+            vis | 0x0018 // <vis> | STATIC | FINAL
         }
     };
     // A value class's `box-impl`/`unbox-impl` are compiler-manufactured box adapters — kotlinc marks them
@@ -4909,7 +5083,16 @@ impl<'a> Emitter<'a> {
                     let f = &self.ir.functions[*fid as usize];
                     let param_tys = jvm_tys(&f.params);
                     let ret = ir_ty_to_jvm(&f.ret);
-                    let name = f.name.clone();
+                    // A PRIVATE facade function can't be invoked from another class (a lambda impl on
+                    // its enclosing class, a continuation class, any class member) — kotlinc routes
+                    // those callers through the `access$<name>` bridge (emitted by `emit_pass` when
+                    // referenced; see `facade_access_bridges`).
+                    let name = if self.owner != self.facade && self.ir.private_methods.contains(fid)
+                    {
+                        format!("access${}", f.name)
+                    } else {
+                        f.name.clone()
+                    };
                     let args = args.clone();
                     self.emit_operands(&args, code);
                     let aw: i32 = param_tys.iter().map(|t| slot_words(*t) as i32).sum();
