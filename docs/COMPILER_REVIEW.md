@@ -3353,3 +3353,11 @@ Lowerer literal/data construction now goes through
 property-reference metadata, class literals, array factories, vararg adaptation, string templates,
 primitive updates, assertions, suspend-lambda state machines, and call argument packing no longer
 rebuild those IR node shapes at their feature sites.
+
+### Field And Static Emitter Sweep
+
+Top-level static reads now go through `emit_get_static`, and the remaining setup-time field/static
+accesses route through the existing field/static helpers. Synthesized property accessors, delegated
+property accessors, constructor parameter stores, interface-delegation stores, init/property stores,
+enum-entry subclass init, computed top-level accessors, top-level delegated properties, and smart-cast
+static reads no longer bypass the lowerer's shared field/static emission layer.
