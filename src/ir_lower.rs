@@ -2451,11 +2451,11 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                                 if vp.is_reference()
                                     && lo.syms.libraries.scalar_value_repr(prop_ty).is_some() =>
                             {
-                                lo.ir.add_expr(IrExpr::TypeOp {
-                                    op: IrTypeOp::ImplicitCoercion,
-                                    arg: value_arg,
-                                    type_operand: ty_to_ir(*vp),
-                                })
+                                lo.emit_type_op(
+                                    IrTypeOp::ImplicitCoercion,
+                                    value_arg,
+                                    ty_to_ir(*vp),
+                                )
                             }
                             _ => value_arg,
                         };
@@ -4879,6 +4879,22 @@ impl<'a> Lower<'a> {
         self.ir.add_expr(IrExpr::Variable { index, ty, init })
     }
 
+    fn emit_set_value(&mut self, var: u32, value: u32) -> u32 {
+        self.ir.add_expr(IrExpr::SetValue { var, value })
+    }
+
+    fn emit_type_op(&mut self, op: IrTypeOp, arg: u32, type_operand: Ty) -> u32 {
+        self.ir.add_expr(IrExpr::TypeOp {
+            op,
+            arg,
+            type_operand,
+        })
+    }
+
+    fn emit_primitive_bin_op(&mut self, op: IrBinOp, lhs: u32, rhs: u32) -> u32 {
+        self.ir.add_expr(IrExpr::PrimitiveBinOp { op, lhs, rhs })
+    }
+
     fn emit_set_field(&mut self, receiver: u32, class: u32, index: u32, value: u32) -> u32 {
         self.ir.add_expr(IrExpr::SetField {
             receiver,
@@ -4970,11 +4986,11 @@ impl<'a> Lower<'a> {
             _ => self.info.ty(operand),
         };
         if self.has_scalar_value_repr(operand_repr) && !operand_repr.is_reference() {
-            self.ir.add_expr(IrExpr::TypeOp {
-                op: IrTypeOp::ImplicitCoercion,
+            self.emit_type_op(
+                IrTypeOp::ImplicitCoercion,
                 arg,
-                type_operand: ty_to_ir(Ty::obj("kotlin/Any")),
-            })
+                ty_to_ir(Ty::obj("kotlin/Any")),
+            )
         } else {
             arg
         }
@@ -5028,11 +5044,7 @@ impl<'a> Lower<'a> {
     }
 
     fn implicit_coercion(&mut self, arg: u32, ty: Ty) -> u32 {
-        self.ir.add_expr(IrExpr::TypeOp {
-            op: IrTypeOp::ImplicitCoercion,
-            arg,
-            type_operand: ty_to_ir(ty),
-        })
+        self.emit_type_op(IrTypeOp::ImplicitCoercion, arg, ty_to_ir(ty))
     }
 
     fn scalar_update_value(&mut self, current: u32, ty: Ty, op: IrBinOp, one: IrConst) -> u32 {
@@ -5043,7 +5055,7 @@ impl<'a> Lower<'a> {
             current
         };
         let rhs = self.ir.add_expr(IrExpr::Const(one));
-        let sum = self.ir.add_expr(IrExpr::PrimitiveBinOp { op, lhs, rhs });
+        let sum = self.emit_primitive_bin_op(op, lhs, rhs);
         if arithmetic_ty != ty {
             self.implicit_coercion(sum, ty)
         } else {
@@ -5068,13 +5080,9 @@ impl<'a> Lower<'a> {
         if ty.is_unsigned() {
             let call = self.runtime_call(RuntimeOp::UnsignedCompare, ty, vec![lhs, rhs])?;
             let zero = self.ir.add_expr(IrExpr::Const(IrConst::Int(0)));
-            Some(self.ir.add_expr(IrExpr::PrimitiveBinOp {
-                op,
-                lhs: call,
-                rhs: zero,
-            }))
+            Some(self.emit_primitive_bin_op(op, call, zero))
         } else {
-            Some(self.ir.add_expr(IrExpr::PrimitiveBinOp { op, lhs, rhs }))
+            Some(self.emit_primitive_bin_op(op, lhs, rhs))
         }
     }
 
@@ -5525,11 +5533,7 @@ impl<'a> Lower<'a> {
         // cond: i < n
         let gi = self.emit_get_value(i_v);
         let gn = self.emit_get_value(n_v);
-        let cond = self.ir.add_expr(IrExpr::PrimitiveBinOp {
-            op: IrBinOp::Lt,
-            lhs: gi,
-            rhs: gn,
-        });
+        let cond = self.emit_primitive_bin_op(IrBinOp::Lt, gi, gn);
         // body: a[i] = <lambda body with the index param bound to i>
         let pname = ast::first_lambda_param_or_it(&params);
         let depth = self.scope.len();
@@ -5550,15 +5554,8 @@ impl<'a> Lower<'a> {
         // update: i = i + 1
         let gi3 = self.emit_get_value(i_v);
         let one = self.ir.add_expr(IrExpr::Const(IrConst::Int(1)));
-        let inc_val = self.ir.add_expr(IrExpr::PrimitiveBinOp {
-            op: IrBinOp::Add,
-            lhs: gi3,
-            rhs: one,
-        });
-        let inc = self.ir.add_expr(IrExpr::SetValue {
-            var: i_v,
-            value: inc_val,
-        });
+        let inc_val = self.emit_primitive_bin_op(IrBinOp::Add, gi3, one);
+        let inc = self.emit_set_value(i_v, inc_val);
         let wh = self.ir.add_expr(IrExpr::While {
             cond,
             body: wbody,
@@ -5911,18 +5908,10 @@ impl<'a> Lower<'a> {
             self.ir.logical_types.insert(call, ty_to_ir(st));
         }
         if self.has_scalar_value_repr(st) && phys.is_erased_top() {
-            return self.ir.add_expr(IrExpr::TypeOp {
-                op: IrTypeOp::ImplicitCoercion,
-                arg: call,
-                type_operand: ty_to_ir(st),
-            });
+            return self.emit_type_op(IrTypeOp::ImplicitCoercion, call, ty_to_ir(st));
         }
         if st.is_reference() && !st.is_erased_top() && st != Ty::Null && st.non_null() != phys {
-            return self.ir.add_expr(IrExpr::TypeOp {
-                op: IrTypeOp::Cast,
-                arg: call,
-                type_operand: ty_to_ir(st),
-            });
+            return self.emit_type_op(IrTypeOp::Cast, call, ty_to_ir(st));
         }
         call
     }
@@ -6088,11 +6077,7 @@ impl<'a> Lower<'a> {
         let arg = if prim {
             copy // primitive `copyOf` already returns `[<prim>` — no cast
         } else {
-            self.ir.add_expr(IrExpr::TypeOp {
-                op: IrTypeOp::Cast,
-                arg: copy,
-                type_operand: array_ir,
-            })
+            self.emit_type_op(IrTypeOp::Cast, copy, array_ir)
         };
         Some(self.emit_local_call(fid, vec![arg]))
     }
@@ -6460,11 +6445,7 @@ impl<'a> Lower<'a> {
                 && !matches!(sig.ret, Ty::Null)
                 && !sig.ret.is_erased_top()
             {
-                self.ir.add_expr(IrExpr::TypeOp {
-                    op: IrTypeOp::Cast,
-                    arg: ve,
-                    type_operand: ty_to_ir(sig.ret),
-                })
+                self.emit_type_op(IrTypeOp::Cast, ve, ty_to_ir(sig.ret))
             } else {
                 ve
             };
@@ -6955,11 +6936,7 @@ impl<'a> Lower<'a> {
                 // the flattener's `stmt_cond_suspension` handles — not a raw `return box(When)`.
                 b_stmts.push(self.emit_variable(tmp_idx, body_ty, Some(b_val)));
                 let tmpg = self.emit_get_value(tmp_idx);
-                let boxed = self.ir.add_expr(IrExpr::TypeOp {
-                    op: IrTypeOp::ImplicitCoercion,
-                    arg: tmpg,
-                    type_operand: object_ir.clone(),
-                });
+                let boxed = self.emit_type_op(IrTypeOp::ImplicitCoercion, tmpg, object_ir.clone());
                 b_stmts.push(self.emit_return(Some(boxed)));
                 self.emit_block(b_stmts, None)
             } else {
@@ -6973,11 +6950,7 @@ impl<'a> Lower<'a> {
                 }
                 // Thread `this` (as Continuation) as the callee's trailing argument.
                 let this_for_cont = self.emit_get_value(0);
-                let this_cont = self.ir.add_expr(IrExpr::TypeOp {
-                    op: IrTypeOp::Cast,
-                    arg: this_for_cont,
-                    type_operand: cont_ir.clone(),
-                });
+                let this_cont = self.emit_type_op(IrTypeOp::Cast, this_for_cont, cont_ir.clone());
                 // For a same-file callee (`Local`) the CPS descriptor comes from the callee's
                 // pass-rewritten signature; a classpath (`Static`) / sibling (`CrossFile`) callee is
                 // resolved by its LOGICAL signature, so ask the target runtime for the physical CPS form.
@@ -7016,11 +6989,7 @@ impl<'a> Lower<'a> {
                 let r_var = self.emit_variable(r_idx, object_ir.clone(), Some(tail));
                 let rg = self.emit_get_value(r_idx);
                 let sg = self.emit_get_value(susp_idx);
-                let is_eq = self.ir.add_expr(IrExpr::PrimitiveBinOp {
-                    op: IrBinOp::RefEq,
-                    lhs: rg,
-                    rhs: sg,
-                });
+                let is_eq = self.emit_primitive_bin_op(IrBinOp::RefEq, rg, sg);
                 let sg2 = self.emit_get_value(susp_idx);
                 let ret_susp = self.emit_return(Some(sg2));
                 let ret_susp_b = self.emit_block(vec![ret_susp], None);
@@ -7034,17 +7003,10 @@ impl<'a> Lower<'a> {
                 let tail_at = |this: &mut Self, src: u32| -> Vec<u32> {
                     if let (Some((a_idx, a_ty)), Some(te)) = (&bound, tail_expr) {
                         let srcg = this.emit_get_value(src);
-                        let unb = this.ir.add_expr(IrExpr::TypeOp {
-                            op: IrTypeOp::ImplicitCoercion,
-                            arg: srcg,
-                            type_operand: a_ty.clone(),
-                        });
+                        let unb = this.emit_type_op(IrTypeOp::ImplicitCoercion, srcg, a_ty.clone());
                         let bind = this.emit_variable(*a_idx, a_ty.clone(), Some(unb));
-                        let boxed = this.ir.add_expr(IrExpr::TypeOp {
-                            op: IrTypeOp::ImplicitCoercion,
-                            arg: te,
-                            type_operand: object_ir.clone(),
-                        });
+                        let boxed =
+                            this.emit_type_op(IrTypeOp::ImplicitCoercion, te, object_ir.clone());
                         vec![bind, this.emit_return(Some(boxed))]
                     } else {
                         let g = this.emit_get_value(src);
@@ -7063,19 +7025,11 @@ impl<'a> Lower<'a> {
                 let lbl0r = self.emit_get_value(0);
                 let lbl0 = self.emit_get_field(lbl0r, class_id, label_idx);
                 let c0 = self.ir.add_expr(IrExpr::Const(IrConst::Int(0)));
-                let cond0 = self.ir.add_expr(IrExpr::PrimitiveBinOp {
-                    op: IrBinOp::Eq,
-                    lhs: lbl0,
-                    rhs: c0,
-                });
+                let cond0 = self.emit_primitive_bin_op(IrBinOp::Eq, lbl0, c0);
                 let lbl1r = self.emit_get_value(0);
                 let lbl1 = self.emit_get_field(lbl1r, class_id, label_idx);
                 let c1 = self.ir.add_expr(IrExpr::Const(IrConst::Int(1)));
-                let cond1 = self.ir.add_expr(IrExpr::PrimitiveBinOp {
-                    op: IrBinOp::Eq,
-                    lhs: lbl1,
-                    rhs: c1,
-                });
+                let cond1 = self.emit_primitive_bin_op(IrBinOp::Eq, lbl1, c1);
                 let msg = self.ir.add_expr(IrExpr::Const(IrConst::String(
                     "call to 'resume' before 'invoke' with coroutine".to_string(),
                 )));
@@ -7129,11 +7083,8 @@ impl<'a> Lower<'a> {
                 // The body always diverges (throws/returns) — no trailing return.
                 stmts.push(body_val);
             } else {
-                let boxed = self.ir.add_expr(IrExpr::TypeOp {
-                    op: IrTypeOp::ImplicitCoercion,
-                    arg: body_val,
-                    type_operand: object_ir.clone(),
-                });
+                let boxed =
+                    self.emit_type_op(IrTypeOp::ImplicitCoercion, body_val, object_ir.clone());
                 stmts.push(self.emit_return(Some(boxed)));
             }
             self.emit_block(stmts, None)
@@ -7167,22 +7118,14 @@ impl<'a> Lower<'a> {
             })
             .collect();
         let comp_get = self.emit_get_value(completion_idx);
-        new_args.push(self.ir.add_expr(IrExpr::TypeOp {
-            op: IrTypeOp::Cast,
-            arg: comp_get,
-            type_operand: cont_ir.clone(),
-        }));
+        new_args.push(self.emit_type_op(IrTypeOp::Cast, comp_get, cont_ir.clone()));
         let new_inst = self.emit_new(class_id, new_args, None);
         let r_idx = arity as u32 + 2;
         let mut inv_stmts = vec![self.emit_variable(r_idx, lambda_ty.clone(), Some(new_inst))];
         // Store each own parameter (coerced from the erased `Object` argument) into its field.
         for (i, pty) in params.iter().enumerate() {
             let pv = self.emit_get_value(1 + i as u32);
-            let coerced = self.ir.add_expr(IrExpr::TypeOp {
-                op: IrTypeOp::ImplicitCoercion,
-                arg: pv,
-                type_operand: ty_to_ir(*pty),
-            });
+            let coerced = self.emit_type_op(IrTypeOp::ImplicitCoercion, pv, ty_to_ir(*pty));
             let rg = self.emit_get_value(r_idx);
             inv_stmts.push(self.emit_set_field(rg, class_id, param_field_base + i as u32, coerced));
         }
@@ -7218,11 +7161,7 @@ impl<'a> Lower<'a> {
         let mut create_stmts = vec![self.emit_variable(cr_idx, lambda_ty, Some(create_new))];
         for (i, pty) in params.iter().enumerate() {
             let pv = self.emit_get_value(1 + i as u32);
-            let coerced = self.ir.add_expr(IrExpr::TypeOp {
-                op: IrTypeOp::ImplicitCoercion,
-                arg: pv,
-                type_operand: ty_to_ir(*pty),
-            });
+            let coerced = self.emit_type_op(IrTypeOp::ImplicitCoercion, pv, ty_to_ir(*pty));
             let rg = self.emit_get_value(cr_idx);
             create_stmts.push(self.emit_set_field(
                 rg,
@@ -7503,11 +7442,7 @@ impl<'a> Lower<'a> {
             .runtime_callable(RuntimeOp::UnsignedUnbox, ty)?;
         let owner_ty = Ty::obj(&c.owner);
         let owner = owner_ty.obj_internal()?;
-        let cast = self.ir.add_expr(IrExpr::TypeOp {
-            op: IrTypeOp::Cast,
-            arg: val,
-            type_operand: ty_to_ir(owner_ty),
-        });
+        let cast = self.emit_type_op(IrTypeOp::Cast, val, ty_to_ir(owner_ty));
         Some(self.emit_virtual_call(owner.to_string(), c.name, c.descriptor, false, cast, vec![]))
     }
 
@@ -7570,19 +7505,11 @@ impl<'a> Lower<'a> {
             Ty::Double | Ty::Float => {
                 let cmp = self.runtime_call(RuntimeOp::PrimitiveCompare, t, vec![a, b])?;
                 let z = self.ir.add_expr(IrExpr::Const(IrConst::Int(0)));
-                Some(self.ir.add_expr(IrExpr::PrimitiveBinOp {
-                    op: IrBinOp::Ne,
-                    lhs: cmp,
-                    rhs: z,
-                }))
+                Some(self.emit_primitive_bin_op(IrBinOp::Ne, cmp, z))
             }
             // Int/Long/… → native compare; reference (incl. an array property, which a data class
             // compares by reference, not content) → `!Intrinsics.areEqual` via the reference Ne path.
-            _ => Some(self.ir.add_expr(IrExpr::PrimitiveBinOp {
-                op: IrBinOp::Ne,
-                lhs: a,
-                rhs: b,
-            })),
+            _ => Some(self.emit_primitive_bin_op(IrBinOp::Ne, a, b)),
         }
     }
     /// `if (cond) return false` — a no-`else` statement-`when` whose only branch diverges.
@@ -7753,20 +7680,9 @@ impl<'a> Lower<'a> {
                     let h = self.field_hash(fv, f.1, ni)?;
                     let prev = self.emit_get_value(RV);
                     let c31 = self.ir.add_expr(IrExpr::Const(IrConst::Int(31)));
-                    let mul = self.ir.add_expr(IrExpr::PrimitiveBinOp {
-                        op: IrBinOp::Mul,
-                        lhs: prev,
-                        rhs: c31,
-                    });
-                    let add = self.ir.add_expr(IrExpr::PrimitiveBinOp {
-                        op: IrBinOp::Add,
-                        lhs: mul,
-                        rhs: h,
-                    });
-                    stmts.push(self.ir.add_expr(IrExpr::SetValue {
-                        var: RV,
-                        value: add,
-                    }));
+                    let mul = self.emit_primitive_bin_op(IrBinOp::Mul, prev, c31);
+                    let add = self.emit_primitive_bin_op(IrBinOp::Add, mul, h);
+                    stmts.push(self.emit_set_value(RV, add));
                 }
                 let getr = self.emit_get_value(RV);
                 stmts.push(self.emit_return(Some(getr)));
@@ -7793,29 +7709,17 @@ impl<'a> Lower<'a> {
             // `this === other` referential-identity fast-path.
             let this0 = self.emit_get_value(0);
             let other0 = self.emit_get_value(1);
-            let ident = self.ir.add_expr(IrExpr::PrimitiveBinOp {
-                op: IrBinOp::RefEq,
-                lhs: this0,
-                rhs: other0,
-            });
+            let ident = self.emit_primitive_bin_op(IrBinOp::RefEq, this0, other0);
             let id_guard = self.guard_return_bool(ident, true);
             stmts.push(id_guard);
             // `other !is T` → return false.
             let other = self.emit_get_value(1);
-            let not_inst = self.ir.add_expr(IrExpr::TypeOp {
-                op: IrTypeOp::NotInstanceOf,
-                arg: other,
-                type_operand: class_ty.clone(),
-            });
+            let not_inst = self.emit_type_op(IrTypeOp::NotInstanceOf, other, class_ty.clone());
             let g = self.guard_return_false(not_inst);
             stmts.push(g);
             // `val o = other as T` — one checkcast, stored to the local.
             let other_v = self.emit_get_value(1);
-            let ocast = self.ir.add_expr(IrExpr::TypeOp {
-                op: IrTypeOp::Cast,
-                arg: other_v,
-                type_operand: class_ty.clone(),
-            });
+            let ocast = self.emit_type_op(IrTypeOp::Cast, other_v, class_ty.clone());
             stmts.push(self.emit_variable(OV, class_ty.clone(), Some(ocast)));
             for (i, (_, t)) in fields.iter().enumerate() {
                 let af = self.this_field(class_id, i as u32);
@@ -8830,10 +8734,7 @@ impl<'a> Lower<'a> {
                 let l = self.expr(recv)?;
                 let rt = if shift { Ty::Int } else { lt };
                 let r = self.lower_arg(arg, &ty_to_ir(rt))?;
-                return Some(
-                    self.ir
-                        .add_expr(IrExpr::PrimitiveBinOp { op, lhs: l, rhs: r }),
-                );
+                return Some(self.emit_primitive_bin_op(op, l, r));
             }
         }
         if lt == Ty::Boolean {
@@ -8846,10 +8747,7 @@ impl<'a> Lower<'a> {
             if let Some(op) = bop {
                 let l = self.expr(recv)?;
                 let r = self.lower_arg(arg, &ty_to_ir(Ty::Boolean))?;
-                return Some(
-                    self.ir
-                        .add_expr(IrExpr::PrimitiveBinOp { op, lhs: l, rhs: r }),
-                );
+                return Some(self.emit_primitive_bin_op(op, l, r));
             }
         }
         let op = BinOp::from_arith_operator_name(name)?;
@@ -8885,30 +8783,16 @@ impl<'a> Lower<'a> {
         let op_ty = Ty::promote(lrep, rrep).unwrap_or(Ty::Int);
         let op_ir = ty_to_ir(op_ty);
         if lrep != op_ty {
-            l = self.ir.add_expr(IrExpr::TypeOp {
-                op: IrTypeOp::ImplicitCoercion,
-                arg: l,
-                type_operand: op_ir,
-            });
+            l = self.emit_type_op(IrTypeOp::ImplicitCoercion, l, op_ir);
         }
         if rrep != op_ty {
-            r = self.ir.add_expr(IrExpr::TypeOp {
-                op: IrTypeOp::ImplicitCoercion,
-                arg: r,
-                type_operand: op_ir,
-            });
+            r = self.emit_type_op(IrTypeOp::ImplicitCoercion, r, op_ir);
         }
-        let raw = self.ir.add_expr(IrExpr::PrimitiveBinOp {
-            op: irop,
-            lhs: l,
-            rhs: r,
-        });
+        let raw = self.emit_primitive_bin_op(irop, l, r);
         Some(match self.scalar_value_repr(result_ty) {
-            Some(rep) if rep != op_ty => self.ir.add_expr(IrExpr::TypeOp {
-                op: IrTypeOp::ImplicitCoercion,
-                arg: raw,
-                type_operand: ty_to_ir(result_ty),
-            }),
+            Some(rep) if rep != op_ty => {
+                self.emit_type_op(IrTypeOp::ImplicitCoercion, raw, ty_to_ir(result_ty))
+            }
             _ => raw,
         })
     }
@@ -9227,11 +9111,7 @@ impl<'a> Lower<'a> {
         let mut collected = Vec::with_capacity(n - fixed);
         for k in fixed..n {
             let v = self.emit_get_value(k as u32);
-            collected.push(self.ir.add_expr(IrExpr::TypeOp {
-                op: IrTypeOp::ImplicitCoercion,
-                arg: v,
-                type_operand: elem_ir,
-            }));
+            collected.push(self.emit_type_op(IrTypeOp::ImplicitCoercion, v, elem_ir));
         }
         let arr = self.ir.add_expr(IrExpr::Vararg {
             array_type: ty_to_ir(arr_ty),
@@ -10323,26 +10203,15 @@ impl<'a> Lower<'a> {
         let one = self
             .ir
             .add_expr(IrExpr::Const(self.scalar_one_const(elem)?));
-        let inc = self.ir.add_expr(IrExpr::PrimitiveBinOp {
-            op: IrBinOp::Add,
-            lhs: gi2,
-            rhs: one,
-        });
-        let incs = self.ir.add_expr(IrExpr::SetValue {
-            var: i_v,
-            value: inc,
-        });
+        let inc = self.emit_primitive_bin_op(IrBinOp::Add, gi2, one);
+        let incs = self.emit_set_value(i_v, inc);
         // Break when the counter reaches the inclusive last *before* incrementing, so a range ending at
         // `Int.MAX_VALUE`/`Long.MAX_VALUE` doesn't wrap past it and loop forever (same overflow-safe
         // counted-loop shape as `Stmt::For`). The break + increment are the `update` (the `continue`
         // target), so a `continue` also hits the bound check rather than skipping to the wrapping `i++`.
         let ic = self.emit_get_value(i_v);
         let ec = self.emit_get_value(n_v);
-        let at_end = self.ir.add_expr(IrExpr::PrimitiveBinOp {
-            op: IrBinOp::Eq,
-            lhs: ic,
-            rhs: ec,
-        });
+        let at_end = self.emit_primitive_bin_op(IrBinOp::Eq, ic, ec);
         let brk = self.ir.add_expr(IrExpr::Break { label: None });
         let if_break = self.ir.add_expr(IrExpr::When {
             branches: vec![(Some(at_end), brk)],
@@ -10430,35 +10299,15 @@ impl<'a> Lower<'a> {
         // at the bytecode level; iterating is correct for either direction.
         let sg1 = self.emit_get_value(s_v);
         let z1 = zero_step(self);
-        let step_pos = self.ir.add_expr(IrExpr::PrimitiveBinOp {
-            op: IrBinOp::Gt,
-            lhs: sg1,
-            rhs: z1,
-        });
+        let step_pos = self.emit_primitive_bin_op(IrBinOp::Gt, sg1, z1);
         let i_le = cmp(self, IrBinOp::Le, i_v, n_v)?;
-        let asc = self.ir.add_expr(IrExpr::PrimitiveBinOp {
-            op: IrBinOp::And,
-            lhs: step_pos,
-            rhs: i_le,
-        });
+        let asc = self.emit_primitive_bin_op(IrBinOp::And, step_pos, i_le);
         let sg2 = self.emit_get_value(s_v);
         let z2 = zero_step(self);
-        let step_neg = self.ir.add_expr(IrExpr::PrimitiveBinOp {
-            op: IrBinOp::Lt,
-            lhs: sg2,
-            rhs: z2,
-        });
+        let step_neg = self.emit_primitive_bin_op(IrBinOp::Lt, sg2, z2);
         let i_ge = cmp(self, IrBinOp::Ge, i_v, n_v)?;
-        let desc = self.ir.add_expr(IrExpr::PrimitiveBinOp {
-            op: IrBinOp::And,
-            lhs: step_neg,
-            rhs: i_ge,
-        });
-        let cond = self.ir.add_expr(IrExpr::PrimitiveBinOp {
-            op: IrBinOp::Or,
-            lhs: asc,
-            rhs: desc,
-        });
+        let desc = self.emit_primitive_bin_op(IrBinOp::And, step_neg, i_ge);
+        let cond = self.emit_primitive_bin_op(IrBinOp::Or, asc, desc);
         // body (the loop variable is the counter `i`)
         let mut out = Vec::new();
         if self.append_body_stmts(body, &mut out).is_none() {
@@ -10469,26 +10318,15 @@ impl<'a> Lower<'a> {
         // increment keeps a progression ending at `MAX_VALUE`/`MIN_VALUE` from wrapping past it.
         let ic = self.emit_get_value(i_v);
         let ec = self.emit_get_value(n_v);
-        let at_end = self.ir.add_expr(IrExpr::PrimitiveBinOp {
-            op: IrBinOp::Eq,
-            lhs: ic,
-            rhs: ec,
-        });
+        let at_end = self.emit_primitive_bin_op(IrBinOp::Eq, ic, ec);
         let brk = self.ir.add_expr(IrExpr::Break { label: None });
         let if_break = self.ir.add_expr(IrExpr::When {
             branches: vec![(Some(at_end), brk)],
         });
         let gi2 = self.emit_get_value(i_v);
         let gs = self.emit_get_value(s_v);
-        let inc = self.ir.add_expr(IrExpr::PrimitiveBinOp {
-            op: IrBinOp::Add,
-            lhs: gi2,
-            rhs: gs,
-        });
-        let incs = self.ir.add_expr(IrExpr::SetValue {
-            var: i_v,
-            value: inc,
-        });
+        let inc = self.emit_primitive_bin_op(IrBinOp::Add, gi2, gs);
+        let incs = self.emit_set_value(i_v, inc);
         let update = self.emit_block(vec![if_break, incs], None);
         let wbody = self.emit_block(out, None);
         let wh = self.ir.add_expr(IrExpr::While {
@@ -10597,17 +10435,9 @@ impl<'a> Lower<'a> {
             // `Integer` unbox a plain JVM-scalar coercion would emit.
             self.unbox_unsigned(next_call, elem)?
         } else if self.has_scalar_value_repr(elem) {
-            self.ir.add_expr(IrExpr::TypeOp {
-                op: IrTypeOp::ImplicitCoercion,
-                arg: next_call,
-                type_operand: ty_to_ir(elem),
-            })
+            self.emit_type_op(IrTypeOp::ImplicitCoercion, next_call, ty_to_ir(elem))
         } else if !elem.is_erased_top() {
-            self.ir.add_expr(IrExpr::TypeOp {
-                op: IrTypeOp::Cast,
-                arg: next_call,
-                type_operand: ty_to_ir(elem),
-            })
+            self.emit_type_op(IrTypeOp::Cast, next_call, ty_to_ir(elem))
         } else {
             next_call
         };
@@ -10624,15 +10454,8 @@ impl<'a> Lower<'a> {
         let update = idx_v.map(|iv| {
             let g = self.emit_get_value(iv);
             let one = self.ir.add_expr(IrExpr::Const(IrConst::Int(1)));
-            let inc = self.ir.add_expr(IrExpr::PrimitiveBinOp {
-                op: IrBinOp::Add,
-                lhs: g,
-                rhs: one,
-            });
-            self.ir.add_expr(IrExpr::SetValue {
-                var: iv,
-                value: inc,
-            })
+            let inc = self.emit_primitive_bin_op(IrBinOp::Add, g, one);
+            self.emit_set_value(iv, inc)
         });
         let wbody = self.emit_block(out, None);
         let wh = self.ir.add_expr(IrExpr::While {
@@ -10818,17 +10641,9 @@ impl<'a> Lower<'a> {
             // A `Unit` value flowing into a reference target (`fun f(): Any? = unitExpr`, `Unit?`).
             Some(self.unit_value_after_effect(e))
         } else if self.has_scalar_value_repr(at) && target_ref {
-            Some(self.ir.add_expr(IrExpr::TypeOp {
-                op: IrTypeOp::ImplicitCoercion,
-                arg: e,
-                type_operand: target.clone(),
-            }))
+            Some(self.emit_type_op(IrTypeOp::ImplicitCoercion, e, target.clone()))
         } else if at.is_reference() && !target_ref && *target != Ty::Unit && *target != Ty::Error {
-            Some(self.ir.add_expr(IrExpr::TypeOp {
-                op: IrTypeOp::ImplicitCoercion,
-                arg: e,
-                type_operand: target.clone(),
-            }))
+            Some(self.emit_type_op(IrTypeOp::ImplicitCoercion, e, target.clone()))
         } else if self.has_scalar_value_repr(at)
             && !target_ref
             && *target != Ty::Error
@@ -10837,20 +10652,12 @@ impl<'a> Lower<'a> {
         {
             // Primitive numeric widening/narrowing (`Int` → `Long`, `Double` → `Int`): emit a
             // coercion (the backend does the `i2l`/`d2i`/… conversion).
-            Some(self.ir.add_expr(IrExpr::TypeOp {
-                op: IrTypeOp::ImplicitCoercion,
-                arg: e,
-                type_operand: target.clone(),
-            }))
+            Some(self.emit_type_op(IrTypeOp::ImplicitCoercion, e, target.clone()))
         } else if at.is_erased_top() && target_ref && !ir_type_is_object(target) {
             // A generic type-parameter return is erased to `Object` in the JVM signature; flowing it
             // into a more specific reference target needs a `checkcast` (kotlinc inserts one — the
             // value really is the target type at runtime). `as`-style, but never null here.
-            Some(self.ir.add_expr(IrExpr::TypeOp {
-                op: IrTypeOp::Cast,
-                arg: e,
-                type_operand: target.clone(),
-            }))
+            Some(self.emit_type_op(IrTypeOp::Cast, e, target.clone()))
         } else {
             Some(e)
         }
@@ -11127,38 +10934,22 @@ impl<'a> Lower<'a> {
         let is_null = |this: &mut Self, slot: u32| {
             let g = this.emit_get_value(slot);
             let n = this.ir.add_expr(IrExpr::Const(IrConst::Null));
-            this.ir.add_expr(IrExpr::PrimitiveBinOp {
-                op: IrBinOp::RefEq,
-                lhs: g,
-                rhs: n,
-            })
+            this.emit_primitive_bin_op(IrBinOp::RefEq, g, n)
         };
         // Both non-null: unbox each to its own primitive, promote to the common type, primitive-compare
         // (IEEE for Float/Double — `dcmpl`/`fcmpl`, so `-0.0 == 0.0` and `NaN != NaN`).
         let unbox_to_common = |this: &mut Self, slot: u32, p: Ty| {
             let g = this.emit_get_value(slot);
-            let prim = this.ir.add_expr(IrExpr::TypeOp {
-                op: IrTypeOp::ImplicitCoercion,
-                arg: g,
-                type_operand: ty_to_ir(p),
-            });
+            let prim = this.emit_type_op(IrTypeOp::ImplicitCoercion, g, ty_to_ir(p));
             if p == common {
                 prim
             } else {
-                this.ir.add_expr(IrExpr::TypeOp {
-                    op: IrTypeOp::ImplicitCoercion,
-                    arg: prim,
-                    type_operand: cir,
-                })
+                this.emit_type_op(IrTypeOp::ImplicitCoercion, prim, cir)
             }
         };
         let a_unb = unbox_to_common(self, avar_i, lp);
         let b_unb = unbox_to_common(self, bvar_i, rp);
-        let cmp = self.ir.add_expr(IrExpr::PrimitiveBinOp {
-            op: IrBinOp::Eq,
-            lhs: a_unb,
-            rhs: b_unb,
-        });
+        let cmp = self.emit_primitive_bin_op(IrBinOp::Eq, a_unb, b_unb);
         // `if (b == null) false else cmp` (reached only when `a` is non-null).
         let b_null2 = is_null(self, bvar_i);
         let false_c = self.ir.add_expr(IrExpr::Const(IrConst::Boolean(false)));
@@ -11199,11 +10990,7 @@ impl<'a> Lower<'a> {
         // A primitive out of an erased reference unboxes through the value-class pass's `ImplicitCoercion`
         // channel — the emitter decides (box/unbox/nothing) from the value's actual type.
         if self.has_scalar_value_repr(logical) && physical.is_reference() {
-            self.ir.add_expr(IrExpr::TypeOp {
-                op: IrTypeOp::ImplicitCoercion,
-                arg: read,
-                type_operand: ty_to_ir(logical),
-            })
+            self.emit_type_op(IrTypeOp::ImplicitCoercion, read, ty_to_ir(logical))
         } else if logical.is_reference()
             && !matches!(logical, Ty::Null)
             && physical.is_reference()
@@ -11213,11 +11000,7 @@ impl<'a> Lower<'a> {
             // NO erasure OR value-class decision here — a plain `Cast`. The value-class PASS rewrites a
             // `Cast` to a value class into box/unbox; the EMITTER emits the `checkcast` for a genuine
             // erased-top narrowing and NOTHING otherwise (both keyed on the value's physical type).
-            self.ir.add_expr(IrExpr::TypeOp {
-                op: IrTypeOp::Cast,
-                arg: read,
-                type_operand: ty_to_ir(logical),
-            })
+            self.emit_type_op(IrTypeOp::Cast, read, ty_to_ir(logical))
         } else {
             read
         }
@@ -11261,11 +11044,7 @@ impl<'a> Lower<'a> {
         // Smartcast: if the receiver's slot type isn't the owning class, checkcast it so `getfield` is
         // valid (an erased generic / `Any?` local narrowed by `is`).
         let recv = if recv_slot_ty.is_some_and(|t| t != Ty::obj(&owner_internal)) {
-            self.ir.add_expr(IrExpr::TypeOp {
-                op: IrTypeOp::Cast,
-                arg: recv,
-                type_operand: ty_to_ir(Ty::obj(&owner_internal)),
-            })
+            self.emit_type_op(IrTypeOp::Cast, recv, ty_to_ir(Ty::obj(&owner_internal)))
         } else {
             recv
         };
@@ -11837,11 +11616,8 @@ impl<'a> Lower<'a> {
         // unboxed primitive — matching the checker, so `it + 1` is primitive math.
         let (rty, recv_val) = match rty.nullable_primitive() {
             Some(prim) => {
-                let unboxed = self.ir.add_expr(IrExpr::TypeOp {
-                    op: IrTypeOp::ImplicitCoercion,
-                    arg: recv_val,
-                    type_operand: ty_to_ir(prim),
-                });
+                let unboxed =
+                    self.emit_type_op(IrTypeOp::ImplicitCoercion, recv_val, ty_to_ir(prim));
                 (prim, unboxed)
             }
             None => (rty, recv_val),
@@ -12290,10 +12066,7 @@ impl<'a> Lower<'a> {
         }
         for (pv, tmp) in ctx.param_vals.iter().zip(&temps) {
             let read = self.emit_get_value(*tmp);
-            stmts.push(self.ir.add_expr(IrExpr::SetValue {
-                var: *pv,
-                value: read,
-            }));
+            stmts.push(self.emit_set_value(*pv, read));
         }
         stmts.push(self.ir.add_expr(IrExpr::Continue {
             label: Some(ctx.label.clone()),
@@ -12614,10 +12387,7 @@ impl<'a> Lower<'a> {
                                 } else {
                                     val
                                 };
-                                stmts.push(self.ir.add_expr(IrExpr::SetValue {
-                                    var: slot,
-                                    value: val,
-                                }));
+                                stmts.push(self.emit_set_value(slot, val));
                             } else {
                                 stmts.push(self.expr(e)?);
                             }
@@ -12643,10 +12413,7 @@ impl<'a> Lower<'a> {
                             Some(e) => self.expr(e)?,
                             None => self.ir.add_expr(IrExpr::UnitInstance),
                         };
-                        stmts.push(self.ir.add_expr(IrExpr::SetValue {
-                            var: slot,
-                            value: val,
-                        }));
+                        stmts.push(self.emit_set_value(slot, val));
                     } else if let Some(e) = e {
                         // `return someUnitExpr` — run the expression for its side effects.
                         stmts.push(self.expr(e)?);
@@ -13007,7 +12774,7 @@ impl<'a> Lower<'a> {
                     // typed `var` gets the `checkcast` kotlinc inserts (else the slot frame is
                     // inconsistent: `String?` at init vs `Object` after the assignment).
                     let val = self.lower_arg(value, &ty_to_ir(sty))?;
-                    Some(self.ir.add_expr(IrExpr::SetValue { var: v, value: val }))
+                    Some(self.emit_set_value(v, val))
                 } else if let Some((this_v, class, idx, field_ty)) = own_field {
                     let recv = self.emit_get_value(this_v);
                     let val = self.lower_arg(value, &field_ty)?;
@@ -13131,16 +12898,13 @@ impl<'a> Lower<'a> {
                 let (v, ty) = self.lookup(&name)?;
                 // A user `inc`/`dec` operator on a non-numeric variable → `x = x.inc()`.
                 if let Some(call) = self.lower_member_inc_dec(v, ty, dec) {
-                    return Some(self.ir.add_expr(IrExpr::SetValue {
-                        var: v,
-                        value: call,
-                    }));
+                    return Some(self.emit_set_value(v, call));
                 }
                 let one = self.scalar_one_const(ty)?;
                 let op = if dec { IrBinOp::Sub } else { IrBinOp::Add };
                 let cur = self.emit_get_value(v);
                 let nv = self.scalar_update_value(cur, ty, op, one);
-                Some(self.ir.add_expr(IrExpr::SetValue { var: v, value: nv }))
+                Some(self.emit_set_value(v, nv))
             }
             // `receiver.field = value` → `IrSetField` (var property of a class in this IR).
             Stmt::AssignMember {
@@ -13351,11 +13115,7 @@ impl<'a> Lower<'a> {
                     } else {
                         (gi, c)
                     };
-                    self.ir.add_expr(IrExpr::PrimitiveBinOp {
-                        op: IrBinOp::Lt,
-                        lhs,
-                        rhs,
-                    })
+                    self.emit_primitive_bin_op(IrBinOp::Lt, lhs, rhs)
                 } else {
                     let gi = self.emit_get_value(i_v);
                     let ge = self.emit_get_value(end_v.unwrap());
@@ -13376,17 +13136,10 @@ impl<'a> Lower<'a> {
                     IrBinOp::Add
                 };
                 let gi2 = self.emit_get_value(i_v);
-                let inc_val = self.ir.add_expr(IrExpr::PrimitiveBinOp {
-                    op: inc_op,
-                    lhs: gi2,
-                    rhs: step,
-                });
+                let inc_val = self.emit_primitive_bin_op(inc_op, gi2, step);
                 // The increment is the loop `update` (runs at the `continue` target), not a body stmt —
                 // so `continue` advances the counter instead of skipping it.
-                let inc = self.ir.add_expr(IrExpr::SetValue {
-                    var: i_v,
-                    value: inc_val,
-                });
+                let inc = self.emit_set_value(i_v, inc_val);
                 // Non-overflowing loop: break when the counter reaches the (inclusive) bound, *before*
                 // the increment — so `0..Int.MAX_VALUE` / `x downTo Int.MIN_VALUE` don't wrap past it and
                 // loop forever. The break + increment are the loop `update` (the `continue` target), so a
@@ -13401,11 +13154,7 @@ impl<'a> Lower<'a> {
                     let end_v = end_v.unwrap();
                     let ic = self.emit_get_value(i_v);
                     let ec = self.emit_get_value(end_v);
-                    let at_end = self.ir.add_expr(IrExpr::PrimitiveBinOp {
-                        op: IrBinOp::Eq,
-                        lhs: ic,
-                        rhs: ec,
-                    });
+                    let at_end = self.emit_primitive_bin_op(IrBinOp::Eq, ic, ec);
                     let brk = self.ir.add_expr(IrExpr::Break { label: None });
                     let if_break = self.ir.add_expr(IrExpr::When {
                         branches: vec![(Some(at_end), brk)],
@@ -13627,10 +13376,7 @@ impl<'a> Lower<'a> {
         let body_stmt = if self.info.ty(lbody) == Ty::Nothing {
             body_val
         } else {
-            self.ir.add_expr(IrExpr::SetValue {
-                var: result_slot,
-                value: body_val,
-            })
+            self.emit_set_value(result_slot, body_val)
         };
         let brk_stmt = self.ir.add_expr(IrExpr::Break {
             label: Some(brk.clone()),
@@ -13737,17 +13483,9 @@ impl<'a> Lower<'a> {
         let elem_val = if elem.is_unsigned() {
             self.unbox_unsigned(next_call, elem)?
         } else if self.has_scalar_value_repr(elem) {
-            self.ir.add_expr(IrExpr::TypeOp {
-                op: IrTypeOp::ImplicitCoercion,
-                arg: next_call,
-                type_operand: ty_to_ir(elem),
-            })
+            self.emit_type_op(IrTypeOp::ImplicitCoercion, next_call, ty_to_ir(elem))
         } else if elem != Ty::obj("kotlin/Any") {
-            self.ir.add_expr(IrExpr::TypeOp {
-                op: IrTypeOp::Cast,
-                arg: next_call,
-                type_operand: ty_to_ir(elem),
-            })
+            self.emit_type_op(IrTypeOp::Cast, next_call, ty_to_ir(elem))
         } else {
             next_call
         };
@@ -13793,11 +13531,11 @@ impl<'a> Lower<'a> {
             ("addAll", "(Ljava/util/Collection;)Z", part_g)
         } else {
             // `add(Object)` takes a reference — box a value/primitive result.
-            let boxed = self.ir.add_expr(IrExpr::TypeOp {
-                op: IrTypeOp::ImplicitCoercion,
-                arg: part_g,
-                type_operand: ty_to_ir(Ty::obj("kotlin/Any")),
-            });
+            let boxed = self.emit_type_op(
+                IrTypeOp::ImplicitCoercion,
+                part_g,
+                ty_to_ir(Ty::obj("kotlin/Any")),
+            );
             ("add", "(Ljava/lang/Object;)Z", boxed)
         };
         let add_call = self.emit_virtual_call(
@@ -13882,11 +13620,7 @@ impl<'a> Lower<'a> {
         // condition: i < n
         let gi = self.emit_get_value(i_v);
         let gn = self.emit_get_value(n_v);
-        let cond = self.ir.add_expr(IrExpr::PrimitiveBinOp {
-            op: IrBinOp::Lt,
-            lhs: gi,
-            rhs: gn,
-        });
+        let cond = self.emit_primitive_bin_op(IrBinOp::Lt, gi, gn);
         // loop var `x = arr[i]`, bound for the body
         let x_v = self.fresh_value();
         self.scope.push((name.to_string(), x_v, elem));
@@ -13905,15 +13639,8 @@ impl<'a> Lower<'a> {
         }
         let gi3 = self.emit_get_value(i_v);
         let one = self.ir.add_expr(IrExpr::Const(IrConst::Int(1)));
-        let inc = self.ir.add_expr(IrExpr::PrimitiveBinOp {
-            op: IrBinOp::Add,
-            lhs: gi3,
-            rhs: one,
-        });
-        let incs = self.ir.add_expr(IrExpr::SetValue {
-            var: i_v,
-            value: inc,
-        });
+        let inc = self.emit_primitive_bin_op(IrBinOp::Add, gi3, one);
+        let incs = self.emit_set_value(i_v, inc);
         let wbody = self.emit_block(out, None);
         let wh = self.ir.add_expr(IrExpr::While {
             cond,
@@ -14717,10 +14444,7 @@ impl<'a> Lower<'a> {
                 if unit_ret {
                     self.emit_block(vec![body_val, brk], None)
                 } else {
-                    let assign = self.ir.add_expr(IrExpr::SetValue {
-                        var: slot,
-                        value: body_val,
-                    });
+                    let assign = self.emit_set_value(slot, body_val);
                     self.emit_block(vec![assign, brk], None)
                 }
             };
@@ -14931,10 +14655,7 @@ impl<'a> Lower<'a> {
                 self.scope.truncate(depth);
                 let body_val = body_val?;
                 // Normal fall-through: the body's own value is the result.
-                let assign = self.ir.add_expr(IrExpr::SetValue {
-                    var: result_slot,
-                    value: body_val,
-                });
+                let assign = self.emit_set_value(result_slot, body_val);
                 let brk_stmt = self.ir.add_expr(IrExpr::Break {
                     label: Some(brk.clone()),
                 });
@@ -15012,11 +14733,7 @@ impl<'a> Lower<'a> {
         let var = self.emit_variable(v, mark_nullable(ty_to_ir(rty)), Some(rv));
         let get1 = self.emit_get_value(v);
         let nullc = self.ir.add_expr(IrExpr::Const(IrConst::Null));
-        let cond = self.ir.add_expr(IrExpr::PrimitiveBinOp {
-            op: IrBinOp::Ne,
-            lhs: get1,
-            rhs: nullc,
-        });
+        let cond = self.emit_primitive_bin_op(IrBinOp::Ne, get1, nullc);
         let recv2 = self.emit_get_value(v);
         let member = if let Some((fclass, idx, _)) = self.resolve_field(&internal, name) {
             let owner_internal = self.ir.classes[fclass as usize].fq_name.clone();
@@ -15104,11 +14821,7 @@ impl<'a> Lower<'a> {
                 // and is physically `Object`) needs the `checkcast Throwable` kotlinc inserts — the JVM
                 // `athrow` requires a `Throwable` on the stack.
                 let v = if self.info.ty(operand).is_erased_top() {
-                    self.ir.add_expr(IrExpr::TypeOp {
-                        op: IrTypeOp::Cast,
-                        arg: v,
-                        type_operand: ty_to_ir(Ty::obj("kotlin/Throwable")),
-                    })
+                    self.emit_type_op(IrTypeOp::Cast, v, ty_to_ir(Ty::obj("kotlin/Throwable")))
                 } else {
                     v
                 };
@@ -15254,11 +14967,7 @@ impl<'a> Lower<'a> {
                     // `Int?!!` narrows to the unboxed primitive — unbox the wrapper after the null check.
                     let result = self.info.ty(e);
                     if self.has_scalar_value_repr(result) {
-                        self.ir.add_expr(IrExpr::TypeOp {
-                            op: IrTypeOp::ImplicitCoercion,
-                            arg: asserted,
-                            type_operand: ty_to_ir(result),
-                        })
+                        self.emit_type_op(IrTypeOp::ImplicitCoercion, asserted, ty_to_ir(result))
                     } else {
                         asserted
                     }
@@ -15342,11 +15051,7 @@ impl<'a> Lower<'a> {
                 let var = self.emit_variable(v, mark_nullable(ty_to_ir(rty)), Some(rv));
                 let get1 = self.emit_get_value(v);
                 let nullc = self.ir.add_expr(IrExpr::Const(IrConst::Null));
-                let cond = self.ir.add_expr(IrExpr::PrimitiveBinOp {
-                    op: IrBinOp::Ne,
-                    lhs: get1,
-                    rhs: nullc,
-                });
+                let cond = self.emit_primitive_bin_op(IrBinOp::Ne, get1, nullc);
                 let recv2 = self.emit_get_value(v);
                 // A safe-call scope function (`s?.let { it… }`, `s?.run { … }`): inline it with the
                 // non-null receiver `recv2`; the surrounding null-check + nullable-wrap below make the
@@ -15444,11 +15149,7 @@ impl<'a> Lower<'a> {
                 // A nullable-primitive result (`s?.length` : `Int?`): box the primitive member value so
                 // both `when` branches are the wrapper reference (the other branch is `null`).
                 let member = if result_ty.nullable_primitive().is_some() {
-                    self.ir.add_expr(IrExpr::TypeOp {
-                        op: IrTypeOp::ImplicitCoercion,
-                        arg: member,
-                        type_operand: ty_to_ir(result_ty),
-                    })
+                    self.emit_type_op(IrTypeOp::ImplicitCoercion, member, ty_to_ir(result_ty))
                 } else if result_ty.obj_internal().is_some_and(|i| {
                     self.syms
                         .classes
@@ -15458,11 +15159,11 @@ impl<'a> Lower<'a> {
                     // A nullable VALUE-CLASS result (`a?.foo()` : `Z?`): the member returns the unboxed
                     // underlying, but the `when` merges it with a `null` branch — coerce to the NULLABLE
                     // value class so the JVM value-class pass `box-impl`s it (both branches then references).
-                    self.ir.add_expr(IrExpr::TypeOp {
-                        op: IrTypeOp::ImplicitCoercion,
-                        arg: member,
-                        type_operand: mark_nullable(ty_to_ir(result_ty)),
-                    })
+                    self.emit_type_op(
+                        IrTypeOp::ImplicitCoercion,
+                        member,
+                        mark_nullable(ty_to_ir(result_ty)),
+                    )
                 } else if result_ty == Ty::Unit {
                     // A `Unit` result (`x?.let { for … }`): run the member for effect, then yield
                     // `Unit.INSTANCE` so this branch matches the `null` branch (both references).
@@ -15510,11 +15211,11 @@ impl<'a> Lower<'a> {
                         {
                             // The member is the natural primitive; convert to the elvis result type if it
                             // differs (`s?.length ?: 0L` → `i2l`).
-                            let member = self.ir.add_expr(IrExpr::TypeOp {
-                                op: IrTypeOp::ImplicitCoercion,
-                                arg: member,
-                                type_operand: ty_to_ir(result_ty),
-                            });
+                            let member = self.emit_type_op(
+                                IrTypeOp::ImplicitCoercion,
+                                member,
+                                ty_to_ir(result_ty),
+                            );
                             let rv = self.lower_arg(rhs, &ty_to_ir(result_ty))?;
                             let when = self.ir.add_expr(IrExpr::When {
                                 branches: vec![(Some(cond), member), (None, rv)],
@@ -15554,11 +15255,7 @@ impl<'a> Lower<'a> {
                 let var = self.emit_variable(v, ty_to_ir(lty), Some(lv));
                 let get1 = self.emit_get_value(v);
                 let nullc = self.ir.add_expr(IrExpr::Const(IrConst::Null));
-                let cond = self.ir.add_expr(IrExpr::PrimitiveBinOp {
-                    op: IrBinOp::Ne,
-                    lhs: get1,
-                    rhs: nullc,
-                });
+                let cond = self.emit_primitive_bin_op(IrBinOp::Ne, get1, nullc);
                 // When the elvis result is a primitive (a nullable-primitive lhs, `Int? ?: 0`), the
                 // non-null lhs unboxes to the primitive and the rhs coerces to it too.
                 let result_ty = self.info.ty(e);
@@ -15568,17 +15265,13 @@ impl<'a> Lower<'a> {
                     // result if it differs (`Int? ?: 0.0` → unbox to `Int`, then `i2d` to `Double`) —
                     // unboxing `Integer` straight to `Double` would be an invalid checkcast.
                     if let Some(lp) = lty.nullable_primitive() {
-                        get2 = self.ir.add_expr(IrExpr::TypeOp {
-                            op: IrTypeOp::ImplicitCoercion,
-                            arg: get2,
-                            type_operand: ty_to_ir(lp),
-                        });
+                        get2 = self.emit_type_op(IrTypeOp::ImplicitCoercion, get2, ty_to_ir(lp));
                         if lp != result_ty {
-                            get2 = self.ir.add_expr(IrExpr::TypeOp {
-                                op: IrTypeOp::ImplicitCoercion,
-                                arg: get2,
-                                type_operand: ty_to_ir(result_ty),
-                            });
+                            get2 = self.emit_type_op(
+                                IrTypeOp::ImplicitCoercion,
+                                get2,
+                                ty_to_ir(result_ty),
+                            );
                         }
                     }
                 }
@@ -16050,11 +15743,7 @@ impl<'a> Lower<'a> {
                     }
                     if narrowed != slot_ty && narrowed != Ty::Error {
                         if self.has_scalar_value_repr(narrowed) && slot_ty.is_reference() {
-                            self.ir.add_expr(IrExpr::TypeOp {
-                                op: IrTypeOp::ImplicitCoercion,
-                                arg: read,
-                                type_operand: ty_to_ir(narrowed),
-                            })
+                            self.emit_type_op(IrTypeOp::ImplicitCoercion, read, ty_to_ir(narrowed))
                         } else if narrowed.is_reference()
                             && slot_ty.is_reference()
                             && !matches!(narrowed, Ty::Null)
@@ -16065,11 +15754,7 @@ impl<'a> Lower<'a> {
                             // `checkcast Object` it would emit erases the value and breaks verification.
                             && narrowed.obj_internal() != Some("kotlin/Any")
                         {
-                            self.ir.add_expr(IrExpr::TypeOp {
-                                op: IrTypeOp::Cast,
-                                arg: read,
-                                type_operand: ty_to_ir(narrowed),
-                            })
+                            self.emit_type_op(IrTypeOp::Cast, read, ty_to_ir(narrowed))
                         } else {
                             read
                         }
@@ -16101,11 +15786,7 @@ impl<'a> Lower<'a> {
                         && sty.is_reference()
                         && !narrowed.is_unsigned()
                     {
-                        self.ir.add_expr(IrExpr::TypeOp {
-                            op: IrTypeOp::ImplicitCoercion,
-                            arg: read,
-                            type_operand: ty_to_ir(narrowed),
-                        })
+                        self.emit_type_op(IrTypeOp::ImplicitCoercion, read, ty_to_ir(narrowed))
                     } else {
                         read
                     }
@@ -16175,11 +15856,7 @@ impl<'a> Lower<'a> {
                     // member exists only on `B` — `checkcast` the receiver to `B`, then read the member
                     // (backing field or getter) on `B`.
                     if let Some(bi) = self.info.narrowed_this_member.get(&e).cloned() {
-                        let cast = self.ir.add_expr(IrExpr::TypeOp {
-                            op: IrTypeOp::Cast,
-                            arg: recv,
-                            type_operand: ty_to_ir(Ty::obj(&bi)),
-                        });
+                        let cast = self.emit_type_op(IrTypeOp::Cast, recv, ty_to_ir(Ty::obj(&bi)));
                         // `B`'s backing field is private, and `this` is the ENCLOSING class (a
                         // different class), so read through the property getter — a direct `getfield`
                         // would be an `IllegalAccessError`. Fall back to a direct field read only when
@@ -16276,11 +15953,7 @@ impl<'a> Lower<'a> {
                         .and_then(|i| self.syms.prop_of(i, &n))
                         .map_or(false, |(t, _)| t.is_reference());
                     if self.has_scalar_value_repr(narrowed) && field_is_ref {
-                        self.ir.add_expr(IrExpr::TypeOp {
-                            op: IrTypeOp::ImplicitCoercion,
-                            arg: read,
-                            type_operand: ty_to_ir(narrowed),
-                        })
+                        self.emit_type_op(IrTypeOp::ImplicitCoercion, read, ty_to_ir(narrowed))
                     } else {
                         read
                     }
@@ -16503,11 +16176,7 @@ impl<'a> Lower<'a> {
                 if rt == Ty::Char && name == "code" {
                     // `c.code` → the `Char`'s code unit as an `Int` (a no-op coercion on the JVM stack).
                     let c = self.expr(receiver)?;
-                    self.ir.add_expr(IrExpr::TypeOp {
-                        op: IrTypeOp::ImplicitCoercion,
-                        arg: c,
-                        type_operand: ty_to_ir(Ty::Int),
-                    })
+                    self.emit_type_op(IrTypeOp::ImplicitCoercion, c, ty_to_ir(Ty::Int))
                 } else if rt.array_elem().is_some() && name == "size" {
                     let a = self.expr(receiver)?;
                     self.emit_external_call("kotlin/Array.size", Some(a), vec![])
@@ -16544,11 +16213,7 @@ impl<'a> Lower<'a> {
                         && matches!(self.afile.expr(receiver), Expr::Name(n)
                             if self.lookup(n).map_or(false, |(_, t)| t != rt))
                     {
-                        self.ir.add_expr(IrExpr::TypeOp {
-                            op: IrTypeOp::Cast,
-                            arg: recv,
-                            type_operand: ty_to_ir(rt),
-                        })
+                        self.emit_type_op(IrTypeOp::Cast, recv, ty_to_ir(rt))
                     } else {
                         recv
                     };
@@ -16666,11 +16331,7 @@ impl<'a> Lower<'a> {
                                 let r = self.lower_arg(rhs, param)?;
                                 let cmp = self.emit_method_call(class, index, l, vec![Some(r)]);
                                 let zero = self.ir.add_expr(IrExpr::Const(IrConst::Int(0)));
-                                return Some(self.ir.add_expr(IrExpr::PrimitiveBinOp {
-                                    op: bin_to_ir(op)?,
-                                    lhs: cmp,
-                                    rhs: zero,
-                                }));
+                                return Some(self.emit_primitive_bin_op(bin_to_ir(op)?, cmp, zero));
                             }
                         }
                         // A CLASSPATH `Comparable` type (`class Money : Comparable<Money>` compiled
@@ -16691,11 +16352,7 @@ impl<'a> Lower<'a> {
                                 &[rt],
                             ) {
                                 let zero = self.ir.add_expr(IrExpr::Const(IrConst::Int(0)));
-                                return Some(self.ir.add_expr(IrExpr::PrimitiveBinOp {
-                                    op: bin_to_ir(op)?,
-                                    lhs: cmp,
-                                    rhs: zero,
-                                }));
+                                return Some(self.emit_primitive_bin_op(bin_to_ir(op)?, cmp, zero));
                             }
                         }
                     }
@@ -16805,31 +16462,15 @@ impl<'a> Lower<'a> {
                         && (rt == Ty::Int || rt == Ty::Char)
                     {
                         let int_ir = ty_to_ir(Ty::Int);
-                        let li = self.ir.add_expr(IrExpr::TypeOp {
-                            op: IrTypeOp::ImplicitCoercion,
-                            arg: l,
-                            type_operand: int_ir.clone(),
-                        });
+                        let li = self.emit_type_op(IrTypeOp::ImplicitCoercion, l, int_ir.clone());
                         let ri = if rt == Ty::Char {
-                            self.ir.add_expr(IrExpr::TypeOp {
-                                op: IrTypeOp::ImplicitCoercion,
-                                arg: r,
-                                type_operand: int_ir,
-                            })
+                            self.emit_type_op(IrTypeOp::ImplicitCoercion, r, int_ir)
                         } else {
                             r
                         };
-                        let raw = self.ir.add_expr(IrExpr::PrimitiveBinOp {
-                            op: irop,
-                            lhs: li,
-                            rhs: ri,
-                        });
+                        let raw = self.emit_primitive_bin_op(irop, li, ri);
                         return Some(if self.info.ty(e) == Ty::Char {
-                            self.ir.add_expr(IrExpr::TypeOp {
-                                op: IrTypeOp::ImplicitCoercion,
-                                arg: raw,
-                                type_operand: ty_to_ir(Ty::Char),
-                            })
+                            self.emit_type_op(IrTypeOp::ImplicitCoercion, raw, ty_to_ir(Ty::Char))
                         } else {
                             raw
                         });
@@ -16839,18 +16480,10 @@ impl<'a> Lower<'a> {
                         let p = Ty::promote(lt, rt)?;
                         let pir = ty_to_ir(p);
                         if lt != p {
-                            l = self.ir.add_expr(IrExpr::TypeOp {
-                                op: IrTypeOp::ImplicitCoercion,
-                                arg: l,
-                                type_operand: pir.clone(),
-                            });
+                            l = self.emit_type_op(IrTypeOp::ImplicitCoercion, l, pir.clone());
                         }
                         if rt != p {
-                            r = self.ir.add_expr(IrExpr::TypeOp {
-                                op: IrTypeOp::ImplicitCoercion,
-                                arg: r,
-                                type_operand: pir,
-                            });
+                            r = self.emit_type_op(IrTypeOp::ImplicitCoercion, r, pir);
                         }
                     } else if matches!(op, BinOp::Eq | BinOp::Ne)
                         && lt.is_reference() != rt.is_reference()
@@ -16872,23 +16505,12 @@ impl<'a> Lower<'a> {
                             let var = self.emit_variable(v, ty_to_ir(w_ty), Some(wv));
                             let getn = self.emit_get_value(v);
                             let nullc = self.ir.add_expr(IrExpr::Const(IrConst::Null));
-                            let isnull = self.ir.add_expr(IrExpr::PrimitiveBinOp {
-                                op: IrBinOp::Eq,
-                                lhs: getn,
-                                rhs: nullc,
-                            });
+                            let isnull = self.emit_primitive_bin_op(IrBinOp::Eq, getn, nullc);
                             let getw = self.emit_get_value(v);
-                            let unboxed = self.ir.add_expr(IrExpr::TypeOp {
-                                op: IrTypeOp::ImplicitCoercion,
-                                arg: getw,
-                                type_operand: ty_to_ir(wp),
-                            });
+                            let unboxed =
+                                self.emit_type_op(IrTypeOp::ImplicitCoercion, getw, ty_to_ir(wp));
                             let pv = self.lower_arg(p_e, &ty_to_ir(wp))?;
-                            let cmp = self.ir.add_expr(IrExpr::PrimitiveBinOp {
-                                op: irop,
-                                lhs: unboxed,
-                                rhs: pv,
-                            });
+                            let cmp = self.emit_primitive_bin_op(irop, unboxed, pv);
                             let fixed = self
                                 .ir
                                 .add_expr(IrExpr::Const(IrConst::Boolean(op == BinOp::Ne)));
@@ -16900,24 +16522,12 @@ impl<'a> Lower<'a> {
                         // A general `Any == 5`: box the primitive operand → structural `Intrinsics.areEqual`.
                         let obj = ty_to_ir(Ty::obj("kotlin/Any"));
                         if self.has_scalar_value_repr(lt) {
-                            l = self.ir.add_expr(IrExpr::TypeOp {
-                                op: IrTypeOp::ImplicitCoercion,
-                                arg: l,
-                                type_operand: obj,
-                            });
+                            l = self.emit_type_op(IrTypeOp::ImplicitCoercion, l, obj);
                         } else {
-                            r = self.ir.add_expr(IrExpr::TypeOp {
-                                op: IrTypeOp::ImplicitCoercion,
-                                arg: r,
-                                type_operand: obj,
-                            });
+                            r = self.emit_type_op(IrTypeOp::ImplicitCoercion, r, obj);
                         }
                     }
-                    self.ir.add_expr(IrExpr::PrimitiveBinOp {
-                        op: irop,
-                        lhs: l,
-                        rhs: r,
-                    })
+                    self.emit_primitive_bin_op(irop, l, r)
                 }
             }
             Expr::If {
@@ -16999,30 +16609,30 @@ impl<'a> Lower<'a> {
                         let opnd_ty = ty_to_ir(Ty::obj("kotlin/Any"));
                         let g1 = self.emit_get_value(v);
                         let nullc = self.ir.add_expr(IrExpr::Const(IrConst::Null));
-                        let null_test = self.ir.add_expr(IrExpr::PrimitiveBinOp {
-                            op: if negated {
+                        let null_test = self.emit_primitive_bin_op(
+                            if negated {
                                 IrBinOp::RefNe
                             } else {
                                 IrBinOp::RefEq
                             },
-                            lhs: g1,
-                            rhs: nullc,
-                        });
+                            g1,
+                            nullc,
+                        );
                         let g2 = self.emit_get_value(v);
-                        let inst = self.ir.add_expr(IrExpr::TypeOp {
-                            op: if negated {
+                        let inst = self.emit_type_op(
+                            if negated {
                                 IrTypeOp::NotInstanceOf
                             } else {
                                 IrTypeOp::InstanceOf
                             },
-                            arg: g2,
-                            type_operand: inst_operand,
-                        });
-                        let combined = self.ir.add_expr(IrExpr::PrimitiveBinOp {
-                            op: if negated { IrBinOp::And } else { IrBinOp::Or },
-                            lhs: null_test,
-                            rhs: inst,
-                        });
+                            g2,
+                            inst_operand,
+                        );
+                        let combined = self.emit_primitive_bin_op(
+                            if negated { IrBinOp::And } else { IrBinOp::Or },
+                            null_test,
+                            inst,
+                        );
                         let temp = self.emit_variable(v, opnd_ty, Some(arg));
                         return Some(self.emit_block(vec![temp], Some(combined)));
                     }
@@ -17052,11 +16662,7 @@ impl<'a> Lower<'a> {
                 } else {
                     ty_to_ir(target)
                 };
-                self.ir.add_expr(IrExpr::TypeOp {
-                    op,
-                    arg,
-                    type_operand,
-                })
+                self.emit_type_op(op, arg, type_operand)
             }
             Expr::InRange {
                 value,
@@ -17081,11 +16687,7 @@ impl<'a> Lower<'a> {
                         // `!in` → `!contains(...)`, emitted as `contains == false` (the lowering has no
                         // logical-not node — see the primitive `UnOp::Not` path).
                         let f = self.ir.add_expr(IrExpr::Const(IrConst::Boolean(false)));
-                        return Some(self.ir.add_expr(IrExpr::PrimitiveBinOp {
-                            op: IrBinOp::Eq,
-                            lhs: contains_v,
-                            rhs: f,
-                        }));
+                        return Some(self.emit_primitive_bin_op(IrBinOp::Eq, contains_v, f));
                     }
                     return Some(contains_v);
                 }
@@ -17132,11 +16734,7 @@ impl<'a> Lower<'a> {
                         vv,
                         hi,
                     )?;
-                    self.ir.add_expr(IrExpr::PrimitiveBinOp {
-                        op: IrBinOp::Or,
-                        lhs: c1,
-                        rhs: c2,
-                    })
+                    self.emit_primitive_bin_op(IrBinOp::Or, c1, c2)
                 } else {
                     // lo <= value  &&  value (< | <=) hi
                     let c1 = cmp(self, IrBinOp::Le, lo, vv)?;
@@ -17146,19 +16744,11 @@ impl<'a> Lower<'a> {
                         vv,
                         hi,
                     )?;
-                    let in_chain = self.ir.add_expr(IrExpr::PrimitiveBinOp {
-                        op: IrBinOp::And,
-                        lhs: c1,
-                        rhs: c2,
-                    });
+                    let in_chain = self.emit_primitive_bin_op(IrBinOp::And, c1, c2);
                     if negated {
                         // float `!in`: negate the boolean `in` result (`in == false`).
                         let f = self.ir.add_expr(IrExpr::Const(IrConst::Boolean(false)));
-                        self.ir.add_expr(IrExpr::PrimitiveBinOp {
-                            op: IrBinOp::Eq,
-                            lhs: in_chain,
-                            rhs: f,
-                        })
+                        self.emit_primitive_bin_op(IrBinOp::Eq, in_chain, f)
                     } else {
                         in_chain
                     }
@@ -17244,10 +16834,7 @@ impl<'a> Lower<'a> {
                 if !ty.is_numeric_or_char() {
                     if prefix {
                         let call = self.lower_member_inc_dec(v, ty, dec)?;
-                        let set = self.ir.add_expr(IrExpr::SetValue {
-                            var: v,
-                            value: call,
-                        });
+                        let set = self.emit_set_value(v, call);
                         let value = self.emit_get_value(v);
                         return Some(self.emit_block(vec![set], Some(value)));
                     }
@@ -17256,10 +16843,7 @@ impl<'a> Lower<'a> {
                     let old = self.emit_get_value(v);
                     let var_decl = self.emit_variable(tmp, ty_to_ir(ty), Some(old));
                     let call = self.lower_member_inc_dec(v, ty, dec)?;
-                    let set = self.ir.add_expr(IrExpr::SetValue {
-                        var: v,
-                        value: call,
-                    });
+                    let set = self.emit_set_value(v, call);
                     let value = self.emit_get_value(tmp);
                     return Some(self.emit_block(vec![var_decl, set], Some(value)));
                 }
@@ -17271,10 +16855,7 @@ impl<'a> Lower<'a> {
                     // even at the boundary (`Byte` 127++: new = narrow(128) = -128; narrow(-128 - 1) = 127).
                     let cur = self.emit_get_value(v);
                     let narrowed = self.scalar_update_value(cur, ty, op, IrConst::Int(1));
-                    let set = self.ir.add_expr(IrExpr::SetValue {
-                        var: v,
-                        value: narrowed,
-                    });
+                    let set = self.emit_set_value(v, narrowed);
                     let value = if prefix {
                         self.emit_get_value(v)
                     } else {
@@ -17288,12 +16869,8 @@ impl<'a> Lower<'a> {
                 // i = i ± 1 (no temp: wraparound is consistent for Int/Long/Float/Double)
                 let cur = self.emit_get_value(v);
                 let one1 = self.ir.add_expr(IrExpr::Const(one.clone()));
-                let nv = self.ir.add_expr(IrExpr::PrimitiveBinOp {
-                    op,
-                    lhs: cur,
-                    rhs: one1,
-                });
-                let set = self.ir.add_expr(IrExpr::SetValue { var: v, value: nv });
+                let nv = self.emit_primitive_bin_op(op, cur, one1);
+                let set = self.emit_set_value(v, nv);
                 // value: new `i` (prefix), or new `i` ∓ 1 = old `i` (postfix).
                 let read = self.emit_get_value(v);
                 let value = if prefix {
@@ -17301,11 +16878,7 @@ impl<'a> Lower<'a> {
                 } else {
                     let one2 = self.ir.add_expr(IrExpr::Const(one));
                     let undo = if dec { IrBinOp::Add } else { IrBinOp::Sub };
-                    self.ir.add_expr(IrExpr::PrimitiveBinOp {
-                        op: undo,
-                        lhs: read,
-                        rhs: one2,
-                    })
+                    self.emit_primitive_bin_op(undo, read, one2)
                 };
                 self.emit_block(vec![set], Some(value))
             }
@@ -17329,20 +16902,12 @@ impl<'a> Lower<'a> {
                         // target was already rejected by the checker).
                         let target = self.ty_ref(&non_null_ref)?;
                         let unit = self.ir.add_expr(IrExpr::UnitInstance);
-                        self.ir.add_expr(IrExpr::TypeOp {
-                            op: IrTypeOp::Cast,
-                            arg: unit,
-                            type_operand: ty_to_ir(target),
-                        })
+                        self.emit_type_op(IrTypeOp::Cast, unit, ty_to_ir(target))
                     } else if let Some(target) = self.ty_ref(&non_null_ref) {
                         // `as? T` (reference target): the singleton is-a `T` (true for `Any`/`Unit`) →
                         // keep it, else `null`.
                         let u1 = self.ir.add_expr(IrExpr::UnitInstance);
-                        let is_t = self.ir.add_expr(IrExpr::TypeOp {
-                            op: IrTypeOp::InstanceOf,
-                            arg: u1,
-                            type_operand: ty_to_ir(target),
-                        });
+                        let is_t = self.emit_type_op(IrTypeOp::InstanceOf, u1, ty_to_ir(target));
                         let u2 = self.ir.add_expr(IrExpr::UnitInstance);
                         let nullc = self.ir.add_expr(IrExpr::Const(IrConst::Null));
                         self.ir.add_expr(IrExpr::When {
@@ -17384,27 +16949,15 @@ impl<'a> Lower<'a> {
                     let mut oty = ty_to_ir(operand_ty);
                     if self.has_scalar_value_repr(operand_ty) {
                         let any = ty_to_ir(Ty::obj("kotlin/Any"));
-                        v = self.ir.add_expr(IrExpr::TypeOp {
-                            op: IrTypeOp::ImplicitCoercion,
-                            arg: v,
-                            type_operand: any,
-                        });
+                        v = self.emit_type_op(IrTypeOp::ImplicitCoercion, v, any);
                         oty = any;
                     }
                     let ov = self.fresh_value();
                     let var_t = self.emit_variable(ov, oty, Some(v));
                     let g1 = self.emit_get_value(ov);
-                    let is_t = self.ir.add_expr(IrExpr::TypeOp {
-                        op: IrTypeOp::InstanceOf,
-                        arg: g1,
-                        type_operand: target_ir.clone(),
-                    });
+                    let is_t = self.emit_type_op(IrTypeOp::InstanceOf, g1, target_ir.clone());
                     let g2 = self.emit_get_value(ov);
-                    let cast_t = self.ir.add_expr(IrExpr::TypeOp {
-                        op: IrTypeOp::Cast,
-                        arg: g2,
-                        type_operand: target_ir,
-                    });
+                    let cast_t = self.emit_type_op(IrTypeOp::Cast, g2, target_ir);
                     let nullc = self.ir.add_expr(IrExpr::Const(IrConst::Null));
                     let when = self.ir.add_expr(IrExpr::When {
                         branches: vec![(Some(is_t), cast_t), (None, nullc)],
@@ -17448,11 +17001,11 @@ impl<'a> Lower<'a> {
                         }
                     };
                     if let Some(target) = target {
-                        return Some(self.ir.add_expr(IrExpr::TypeOp {
-                            op: IrTypeOp::ImplicitCoercion,
+                        return Some(self.emit_type_op(
+                            IrTypeOp::ImplicitCoercion,
                             arg,
-                            type_operand: ty_to_ir(target),
-                        }));
+                            ty_to_ir(target),
+                        ));
                     }
                 }
                 // `x as T` — a cast to a type parameter in scope. The IR keeps `T` (with its bound) as
@@ -17468,11 +17021,7 @@ impl<'a> Lower<'a> {
                         IrTypeOp::Cast
                     };
                     let type_operand = Ty::ty_param(name, *bound);
-                    return Some(self.ir.add_expr(IrExpr::TypeOp {
-                        op,
-                        arg,
-                        type_operand,
-                    }));
+                    return Some(self.emit_type_op(op, arg, type_operand));
                 }
                 // A GENUINE primitive operand cast to a DIFFERENT primitive (`1 as Byte`, `1.0 as Int`):
                 // NOT a numeric conversion (`i2b` would be wrong) — box it to its own wrapper, then the
@@ -17487,16 +17036,12 @@ impl<'a> Lower<'a> {
                         self.has_scalar_value_repr(*t) && !t.is_unsigned() && *t != operand_repr
                     }) {
                         let any = ty_to_ir(Ty::obj("kotlin/Any"));
-                        let boxed = self.ir.add_expr(IrExpr::TypeOp {
-                            op: IrTypeOp::ImplicitCoercion,
-                            arg,
-                            type_operand: any,
-                        });
-                        return Some(self.ir.add_expr(IrExpr::TypeOp {
-                            op: IrTypeOp::ImplicitCoercion,
-                            arg: boxed,
-                            type_operand: ty_to_ir(tprim),
-                        }));
+                        let boxed = self.emit_type_op(IrTypeOp::ImplicitCoercion, arg, any);
+                        return Some(self.emit_type_op(
+                            IrTypeOp::ImplicitCoercion,
+                            boxed,
+                            ty_to_ir(tprim),
+                        ));
                     }
                 }
                 // `x as Int` (non-null primitive target) is an unbox: `checkcast Integer; intValue()`,
@@ -17506,11 +17051,11 @@ impl<'a> Lower<'a> {
                     if let Some(prim) = Ty::from_name(&ty.name)
                         .filter(|t| self.has_scalar_value_repr(*t) && !t.is_unsigned())
                     {
-                        return Some(self.ir.add_expr(IrExpr::TypeOp {
-                            op: IrTypeOp::ImplicitCoercion,
+                        return Some(self.emit_type_op(
+                            IrTypeOp::ImplicitCoercion,
                             arg,
-                            type_operand: ty_to_ir(prim),
-                        }));
+                            ty_to_ir(prim),
+                        ));
                     }
                 }
                 // `x as Foo?` is a plain `checkcast Foo` (a reference target; `null` passes the
@@ -17538,11 +17083,7 @@ impl<'a> Lower<'a> {
                 } else {
                     IrTypeOp::Cast
                 };
-                self.ir.add_expr(IrExpr::TypeOp {
-                    op,
-                    arg,
-                    type_operand,
-                })
+                self.emit_type_op(op, arg, type_operand)
             }
             Expr::Unary { op, operand } => {
                 use crate::ast::UnOp;
@@ -17570,19 +17111,11 @@ impl<'a> Lower<'a> {
                             Ty::Float => self.ir.add_expr(IrExpr::Const(IrConst::Float(0.0))),
                             _ => self.ir.add_expr(IrExpr::Const(IrConst::Int(0))),
                         };
-                        self.ir.add_expr(IrExpr::PrimitiveBinOp {
-                            op: IrBinOp::Sub,
-                            lhs: zero,
-                            rhs: v,
-                        })
+                        self.emit_primitive_bin_op(IrBinOp::Sub, zero, v)
                     }
                     UnOp::Not => {
                         let f = self.ir.add_expr(IrExpr::Const(IrConst::Boolean(false)));
-                        self.ir.add_expr(IrExpr::PrimitiveBinOp {
-                            op: IrBinOp::Eq,
-                            lhs: v,
-                            rhs: f,
-                        })
+                        self.emit_primitive_bin_op(IrBinOp::Eq, v, f)
                     }
                     // Unary `+` is identity on numerics — emit the operand unchanged. A non-numeric
                     // operand (a user `unaryPlus` operator) isn't modeled → skip the file.
@@ -17692,30 +17225,18 @@ impl<'a> Lower<'a> {
                                     (Some((v, _)), _) => {
                                         let s = self.emit_get_value(v);
                                         let cv = self.expr(c)?;
-                                        self.ir.add_expr(IrExpr::PrimitiveBinOp {
-                                            op: IrBinOp::Eq,
-                                            lhs: s,
-                                            rhs: cv,
-                                        })
+                                        self.emit_primitive_bin_op(IrBinOp::Eq, s, cv)
                                     }
                                     (None, Some(subj)) => {
                                         let s = self.expr(subj)?;
                                         let cv = self.expr(c)?;
-                                        self.ir.add_expr(IrExpr::PrimitiveBinOp {
-                                            op: IrBinOp::Eq,
-                                            lhs: s,
-                                            rhs: cv,
-                                        })
+                                        self.emit_primitive_bin_op(IrBinOp::Eq, s, cv)
                                     }
                                     (None, None) => self.expr(c)?,
                                 }
                             };
                             cond = Some(match cond {
-                                Some(prev) => self.ir.add_expr(IrExpr::PrimitiveBinOp {
-                                    op: IrBinOp::Or,
-                                    lhs: prev,
-                                    rhs: test,
-                                }),
+                                Some(prev) => self.emit_primitive_bin_op(IrBinOp::Or, prev, test),
                                 None => test,
                             });
                         }
@@ -18122,11 +17643,11 @@ impl<'a> Lower<'a> {
                                 }
                                 if let Some(p) = targ_prim {
                                     let v = self.lower_arg(arg, &ty_to_ir(p))?;
-                                    elements.push(self.ir.add_expr(IrExpr::TypeOp {
-                                        op: IrTypeOp::ImplicitCoercion,
-                                        arg: v,
-                                        type_operand: elem_ir.clone(),
-                                    }));
+                                    elements.push(self.emit_type_op(
+                                        IrTypeOp::ImplicitCoercion,
+                                        v,
+                                        elem_ir.clone(),
+                                    ));
                                 } else {
                                     elements.push(self.lower_arg(arg, &elem_ir)?);
                                 }
@@ -18290,11 +17811,8 @@ impl<'a> Lower<'a> {
                         if let Some(bi) = self.info.narrowed_this_member.get(&e).cloned() {
                             self.lookup("this").and_then(|(this_v, _)| {
                                 let recv = self.emit_get_value(this_v);
-                                let cast = self.ir.add_expr(IrExpr::TypeOp {
-                                    op: IrTypeOp::Cast,
-                                    arg: recv,
-                                    type_operand: ty_to_ir(Ty::obj(&bi)),
-                                });
+                                let cast =
+                                    self.emit_type_op(IrTypeOp::Cast, recv, ty_to_ir(Ty::obj(&bi)));
                                 let (class, index, mfid, _) = self.resolve_method(&bi, &fname)?;
                                 let params = self.ir.functions[mfid as usize].params.clone();
                                 let vararg = self.syms.method_is_vararg(&bi, &fname);
@@ -18429,11 +17947,11 @@ impl<'a> Lower<'a> {
                                 if bound == Some(Ty::Long) {
                                     if let Expr::IntLit(v) = *self.afile.expr(arg) {
                                         let lc = self.ir.add_expr(IrExpr::Const(IrConst::Long(v)));
-                                        elements.push(self.ir.add_expr(IrExpr::TypeOp {
-                                            op: IrTypeOp::ImplicitCoercion,
-                                            arg: lc,
-                                            type_operand: elem_ir.clone(),
-                                        }));
+                                        elements.push(self.emit_type_op(
+                                            IrTypeOp::ImplicitCoercion,
+                                            lc,
+                                            elem_ir.clone(),
+                                        ));
                                         continue;
                                     }
                                 }
@@ -18694,11 +18212,11 @@ impl<'a> Lower<'a> {
                             for (i, &arg) in args.iter().enumerate() {
                                 if let Some(p) = arg_prims[i] {
                                     let v = self.lower_arg(arg, &ty_to_ir(p))?;
-                                    a.push(self.ir.add_expr(IrExpr::TypeOp {
-                                        op: IrTypeOp::ImplicitCoercion,
-                                        arg: v,
-                                        type_operand: field_tys[i].clone(),
-                                    }));
+                                    a.push(self.emit_type_op(
+                                        IrTypeOp::ImplicitCoercion,
+                                        v,
+                                        field_tys[i].clone(),
+                                    ));
                                 } else {
                                     a.push(self.lower_arg(arg, &field_tys[i])?);
                                 }
@@ -19030,11 +18548,7 @@ impl<'a> Lower<'a> {
                             return Some(match op {
                                 Some(c) => {
                                     let z = self.ir.add_expr(IrExpr::Const(IrConst::Int(0)));
-                                    self.ir.add_expr(IrExpr::PrimitiveBinOp {
-                                        op: c,
-                                        lhs: size,
-                                        rhs: z,
-                                    })
+                                    self.emit_primitive_bin_op(c, size, z)
                                 }
                                 None => size,
                             });
@@ -19453,11 +18967,7 @@ impl<'a> Lower<'a> {
                                 } else {
                                     IrBinOp::Add
                                 };
-                                return Some(self.ir.add_expr(IrExpr::PrimitiveBinOp {
-                                    op,
-                                    lhs: r,
-                                    rhs: o,
-                                }));
+                                return Some(self.emit_primitive_bin_op(op, r, o));
                             }
                             if is_conversion_call_name(&name) {
                                 let target = self.info.ty(e);
@@ -19481,11 +18991,11 @@ impl<'a> Lower<'a> {
                                 if self.has_scalar_value_repr(rrepr)
                                     && self.has_scalar_value_repr(trepr)
                                 {
-                                    return Some(self.ir.add_expr(IrExpr::TypeOp {
-                                        op: IrTypeOp::ImplicitCoercion,
-                                        arg: r,
-                                        type_operand: ty_to_ir(trepr),
-                                    }));
+                                    return Some(self.emit_type_op(
+                                        IrTypeOp::ImplicitCoercion,
+                                        r,
+                                        ty_to_ir(trepr),
+                                    ));
                                 }
                             }
                             // Any other unsigned conversion (e.g. unsigned→float) isn't modeled — bail.
@@ -19513,11 +19023,11 @@ impl<'a> Lower<'a> {
                                 return None;
                             }
                             let r = self.expr(receiver)?;
-                            return Some(self.ir.add_expr(IrExpr::TypeOp {
-                                op: IrTypeOp::ImplicitCoercion,
-                                arg: r,
-                                type_operand: ty_to_ir(target),
-                            }));
+                            return Some(self.emit_type_op(
+                                IrTypeOp::ImplicitCoercion,
+                                r,
+                                ty_to_ir(target),
+                            ));
                         }
                     }
                     // (`a.compareTo(b)` on a primitive is handled by the shared `lower_prim_op_method`
@@ -19535,11 +19045,7 @@ impl<'a> Lower<'a> {
                             } else {
                                 IrConst::Int(-1)
                             }));
-                            return Some(self.ir.add_expr(IrExpr::PrimitiveBinOp {
-                                op: IrBinOp::BitXor,
-                                lhs: l,
-                                rhs: neg1,
-                            }));
+                            return Some(self.emit_primitive_bin_op(IrBinOp::BitXor, l, neg1));
                         }
                     }
                     if let Expr::Name(rn) = self.afile.expr(receiver).clone() {
@@ -19798,11 +19304,11 @@ impl<'a> Lower<'a> {
                                     // wrapper for the erased `Object` parameter.
                                     let e = elem_prim.unwrap();
                                     let v = self.lower_arg(arg, &ty_to_ir(e))?;
-                                    a.push(self.ir.add_expr(IrExpr::TypeOp {
-                                        op: IrTypeOp::ImplicitCoercion,
-                                        arg: v,
-                                        type_operand: ty_to_ir(*p),
-                                    }));
+                                    a.push(self.emit_type_op(
+                                        IrTypeOp::ImplicitCoercion,
+                                        v,
+                                        ty_to_ir(*p),
+                                    ));
                                 }
                                 Some(p) => a.push(self.lower_arg(arg, &ty_to_ir(*p))?),
                                 None => a.push(self.expr(arg)?),
