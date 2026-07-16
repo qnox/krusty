@@ -376,8 +376,9 @@ pub struct SymbolResolver<'a> {
 pub enum SymRecv<'q> {
     Value(Ty),
     Type(&'q str),
-    /// No receiver — a plain `name(args)` resolved against the import scope's top-level (and
-    /// same-facade extension) functions.
+    /// No receiver — a plain `name(args)` resolved against the import scope's top-level (and same-facade
+    /// extension) functions. A DOTTED `name` (`kotlinx.coroutines.runBlocking`) is a fully-qualified
+    /// reference: it resolves against its own package, not the import scope.
     TopLevel,
 }
 
@@ -399,6 +400,9 @@ pub struct MemberFacets {
     /// whole family (named-arg mapping, defaults, return agreement, member-vs-extension dispatch) filters
     /// this by [`FunctionInfo::kind`]/`receiver_rank`.
     pub overloads: Vec<FunctionInfo>,
+    /// For a receiver-less [`SymRecv::TopLevel`] name: the single top-level callable selected against
+    /// `args`/`type_args` (default/vararg-aware), ready for the emit seam. `None` for a value/type receiver.
+    pub top_level_call: Option<LibraryCallable>,
 }
 
 pub enum Symbol {
@@ -459,6 +463,13 @@ impl Symbol {
         match self {
             Symbol::Member(f) => f.overloads,
             _ => Vec::new(),
+        }
+    }
+    /// The selected receiver-less top-level callable ([`SymRecv::TopLevel`]).
+    pub fn top_level_call(self) -> Option<LibraryCallable> {
+        match self {
+            Symbol::Member(f) => f.top_level_call,
+            _ => None,
         }
     }
     /// The object/companion instance member this resolved to (`Type.name(args)`).
@@ -565,7 +576,13 @@ impl<'a> SymbolResolver<'a> {
     /// whose type has no constructor, an `invoke` on a property, …). `args` select a callable overload /
     /// constructor; they do not change WHAT the name is. This and [`resolve_type`] are the resolver's two
     /// resolution entry points.
-    pub fn resolve_symbol(&self, recv: SymRecv, name: &str, args: &[Ty]) -> Option<Symbol> {
+    pub fn resolve_symbol(
+        &self,
+        recv: SymRecv,
+        name: &str,
+        args: &[Ty],
+        type_args: &[Ty],
+    ) -> Option<Symbol> {
         match recv {
             SymRecv::Value(ty) => {
                 // Resolve every facet the name supports on this receiver; a name can support several (a
@@ -612,13 +629,19 @@ impl<'a> SymbolResolver<'a> {
                     method_ref,
                     property_ref,
                     overloads,
+                    top_level_call: None,
                 })))
             }
             SymRecv::TopLevel => {
-                // A receiver-less name: its top-level (and same-facade extension) overloads, from the ONE
-                // `resolve_symbols` seam over the import scope. The caller filters by `FnKind` and selects.
-                let overloads = function_set_from_symbols(self.symbols_in_scope(name)).overloads;
-                if overloads.is_empty() {
+                // A receiver-less name: its top-level (and same-facade extension) overloads over this
+                // resolver's scope. A fully-qualified `pkg.name(args)` resolves by constructing a resolver
+                // scoped to `pkg` (the package is scope, not part of the name) and calling this. The caller
+                // reads `overloads` to inspect the family, or `top_level_call` for the arg/type-arg selected
+                // callable (default/vararg-aware) ready to emit.
+                let fs = function_set_from_symbols(self.symbols_in_scope(name));
+                let top_level_call = self.pick_top_level(name, &fs, args, type_args);
+                let overloads = fs.overloads;
+                if overloads.is_empty() && top_level_call.is_none() {
                     return None;
                 }
                 Some(Symbol::Member(Box::new(MemberFacets {
@@ -628,6 +651,7 @@ impl<'a> SymbolResolver<'a> {
                     method_ref: None,
                     property_ref: None,
                     overloads,
+                    top_level_call,
                 })))
             }
             SymRecv::Type(internal) => {
@@ -652,44 +676,8 @@ impl<'a> SymbolResolver<'a> {
         }
     }
 
-    /// Resolve a receiver-less top-level library callable for a concrete call site. This is the
-    /// compatibility boundary for the older arg-dependent selector while checker/lowerer are moved to
-    /// `FunctionSet`-backed resolution.
-    pub fn resolve_top_level_callable(
-        &self,
-        name: &str,
-        args: &[Ty],
-        type_args: &[Ty],
-    ) -> Option<LibraryCallable> {
-        // FQN-driven resolution: union `resolve_symbols`' callables over the in-scope packages (the ONE
-        // query), then keep the top-level overloads below.
-        let fs = FunctionSet {
-            overloads: self
-                .resolve_symbol(SymRecv::TopLevel, name, &[])
-                .map(Symbol::overloads)
-                .unwrap_or_default(),
-        };
-        self.pick_top_level(name, &fs, args, type_args)
-    }
-
-    /// Resolve a FULLY-QUALIFIED top-level call `pkg.name(args)` where `pkg` is a package path the source
-    /// wrote explicitly (`kotlin.math.max`, `kotlinx.coroutines.runBlocking`). The name need NOT be in the
-    /// import scope — a FQ reference names its package directly — so overloads come from `resolve_symbols`
-    /// on the ONE `pkg` (the FQN seam), not from the in-scope union.
-    pub fn resolve_top_level_callable_in_package(
-        &self,
-        name: &str,
-        pkg: &str,
-        args: &[Ty],
-        type_args: &[Ty],
-    ) -> Option<LibraryCallable> {
-        let scope = [pkg.to_string()];
-        let fs = function_set_from_symbols(resolve_symbols_in_scope(&self.src, name, &scope));
-        self.pick_top_level(name, &fs, args, type_args)
-    }
-
-    /// Overload-resolve a top-level call against an already-built [`FunctionSet`] (from the in-scope union
-    /// or an explicit FQ package). Shared tail of [`Self::resolve_top_level_callable`].
+    /// Overload-resolve a top-level call against an already-built [`FunctionSet`] (from the resolver's
+    /// scope). The [`SymRecv::TopLevel`] arm of [`Self::resolve_symbol`] uses this to fill `top_level_call`.
     fn pick_top_level(
         &self,
         name: &str,
@@ -993,10 +981,11 @@ impl<'a> SymbolResolver<'a> {
         // the UNDERLYING array facade (`ArraysKt.copyInto$default([I…)`, receiver `[I`) — the same erased
         // shape the base carries — so the plain-array `$default` binds and the value-class emit pass is not
         // engaged, exactly as the removed receiver-indexed `functions(…, Some(recv))` lookup resolved it.
-        let fs = self
-            .resolve_symbol(SymRecv::TopLevel, &format!("{name}$default"), &[])
-            .map(Symbol::overloads)
-            .unwrap_or_default();
+        // Resolve overloads DIRECTLY from the scope, not through `resolve_symbol(TopLevel)`: this runs
+        // inside `pick_top_level`, which the TopLevel arm calls — routing back through `resolve_symbol`
+        // would recurse without bound.
+        let fs =
+            function_set_from_symbols(self.symbols_in_scope(&format!("{name}$default"))).overloads;
         for o in &fs {
             if !o.public() && !o.flags.inline.must_inline() {
                 continue;
@@ -1093,12 +1082,9 @@ impl<'a> SymbolResolver<'a> {
         args: &[Ty],
         type_args: &[Ty],
     ) -> Option<LibraryCallable> {
-        let fsd = FunctionSet {
-            overloads: self
-                .resolve_symbol(SymRecv::TopLevel, &format!("{name}$default"), &[])
-                .map(Symbol::overloads)
-                .unwrap_or_default(),
-        };
+        // Direct scope resolution, not `resolve_symbol(TopLevel)`: runs inside `pick_top_level` (see
+        // `resolve_top_level_default_callable`) — routing back through `resolve_symbol` would recurse.
+        let fsd = function_set_from_symbols(self.symbols_in_scope(&format!("{name}$default")));
         for o in fsd.top_level() {
             let c = &o.callable;
             if !o.public() && !o.flags.inline.must_inline() {
@@ -1119,15 +1105,13 @@ impl<'a> SymbolResolver<'a> {
                 // Among same-arity candidates, prefer one whose return is a bare type PARAMETER (the
                 // generic `fun <T> …(): T` form we need to bind), so a same-name/same-arity non-generic
                 // sibling doesn't cross-bind.
-                let bases: Vec<FunctionInfo> = FunctionSet {
-                    overloads: self
-                        .resolve_symbol(SymRecv::TopLevel, name, &[])
-                        .map(Symbol::overloads)
-                        .unwrap_or_default(),
-                }
-                .into_top_level()
-                .filter(|b| b.generic_sig.is_some() && b.callable.params.len() == params.len())
-                .collect();
+                let bases: Vec<FunctionInfo> =
+                    function_set_from_symbols(self.symbols_in_scope(name))
+                        .into_top_level()
+                        .filter(|b| {
+                            b.generic_sig.is_some() && b.callable.params.len() == params.len()
+                        })
+                        .collect();
                 bases
                     .iter()
                     .find(|b| b.generic_sig.as_ref().is_some_and(|g| g.ret.is_ty_param()))
@@ -1224,7 +1208,7 @@ impl<'a> SymbolResolver<'a> {
         // `sumOfInt`) that the Kotlin name never matches, so the walk returns nothing and the call
         // bails ("not yet supported by the IR backend"). This mirrors `lambda_return_overload_param_types`.
         // Fall back to the receiver-indexed `functions()` only when there is no import scope.
-        FunctionSet { overloads: self.resolve_symbol(SymRecv::TopLevel, name, &[]).map(Symbol::overloads).unwrap_or_default() }
+        FunctionSet { overloads: self.resolve_symbol(SymRecv::TopLevel, name, &[], &[]).map(Symbol::overloads).unwrap_or_default() }
             .overloads
             .into_iter()
             .find(|o| {
@@ -1257,7 +1241,7 @@ impl<'a> SymbolResolver<'a> {
     pub fn lambda_return_overload_param_types(&self, receiver: Ty, name: &str) -> Option<Vec<Ty>> {
         FunctionSet {
             overloads: self
-                .resolve_symbol(SymRecv::TopLevel, name, &[])
+                .resolve_symbol(SymRecv::TopLevel, name, &[], &[])
                 .map(Symbol::overloads)
                 .unwrap_or_default(),
         }
@@ -1295,7 +1279,7 @@ impl<'a> SymbolResolver<'a> {
         // (`kotlinx.coroutines.runBlocking { … }`) still yields its lambda facts.
         let fs = FunctionSet {
             overloads: self
-                .resolve_symbol(SymRecv::TopLevel, name, &[])
+                .resolve_symbol(SymRecv::TopLevel, name, &[], &[])
                 .map(Symbol::overloads)
                 .unwrap_or_default(),
         };
@@ -1383,7 +1367,7 @@ impl<'a> SymbolResolver<'a> {
     ) -> Option<Vec<Vec<Ty>>> {
         let fs = FunctionSet {
             overloads: self
-                .resolve_symbol(SymRecv::Value(receiver), name, &[])
+                .resolve_symbol(SymRecv::Value(receiver), name, &[], &[])
                 .map(Symbol::overloads)
                 .unwrap_or_default()
                 .into_iter()
@@ -1430,7 +1414,7 @@ impl<'a> SymbolResolver<'a> {
     ) -> Option<Vec<Option<Ty>>> {
         let fs = FunctionSet {
             overloads: self
-                .resolve_symbol(SymRecv::Value(receiver), name, &[])
+                .resolve_symbol(SymRecv::Value(receiver), name, &[], &[])
                 .map(Symbol::overloads)
                 .unwrap_or_default()
                 .into_iter()
@@ -2695,7 +2679,8 @@ mod tests {
         let scope = vec![String::new()];
         let resolver = SymbolResolver::new_scoped(&source, &scope);
         let call = resolver
-            .resolve_top_level_callable("make", &[], &[])
+            .resolve_symbol(SymRecv::TopLevel, "make", &[], &[])
+            .and_then(Symbol::top_level_call)
             .expect("default callable should resolve");
         assert!(call.default_call);
         assert_eq!(call.ret, Ty::UInt);
@@ -2712,7 +2697,8 @@ mod tests {
         let scope = vec![String::new()];
         let resolver = SymbolResolver::new_scoped(&source, &scope);
         let call = resolver
-            .resolve_top_level_callable("maybe", &[], &[])
+            .resolve_symbol(SymRecv::TopLevel, "maybe", &[], &[])
+            .and_then(Symbol::top_level_call)
             .expect("nullable callable should resolve");
         assert_eq!(call.ret, Ty::nullable(Ty::String));
         assert_eq!(call.physical_ret, Ty::String);
