@@ -7,6 +7,61 @@ use crate::diag::DiagSink;
 use crate::jvm::names::{file_class_name, type_descriptor};
 use crate::resolve::{SymbolTable, TypeInfo};
 
+/// Why [`run_backend_passes`] declined a file: the named pass met a shape it can't lower yet, so the
+/// caller must skip (or diagnose) the file rather than miscompile it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkipReason {
+    /// `lower_value_classes` — a `@JvmInline value class` shape not yet supported.
+    ValueClasses,
+    /// `lower_suspend` — a `suspend fun` shape not yet supported.
+    Suspend,
+}
+
+/// THE post-lowering, pre-emit JVM pass pipeline — the single definition every consumer (the real
+/// backend, `tests/common`, the conformance harness, `bytediff`, `survey`) must call, so a newly
+/// added pass lands in all of them by construction. Hand-replicating this sequence has twice
+/// produced false-green test runs (a pass added here but missed in a replica → IllegalAccessError
+/// miscompiles the gate never saw); a unit test below bans direct calls to the individual passes.
+///
+/// Runs, in order:
+/// 1. `plugins::run_enabled` — compiler-extension plugins (kotlinx.serialization) synthesize
+///    declarations from the file's annotations; no-op without a trigger annotation.
+/// 2. `lower_value_classes` — realize `@JvmInline value class`es as their unboxed underlying type
+///    (the IR keeps them as plain classes so JS / a native-value-type JVM are unaffected).
+/// 3. `lower_suspend` — realize `suspend fun`s as their continuation-passing-style ABI.
+/// 4. `mark_must_inline_lambdas` — drop the dead standalone impl of a must-inline call's
+///    (`require`/`check`) message lambda; it is spliced at the call site.
+/// 5. `reparent_lambda_impls` — a lambda impl method must be a member of the CLASS whose code emits
+///    its `invokedynamic` (the impl is PRIVATE, kotlinc's placement, so a cross-class handle would
+///    be an IllegalAccessError). Lowering attaches impls per `cur_class`, which misses code that
+///    ends up in a class only later: enum-entry constructor arguments and suspend-lambda state
+///    machines. Runs after all IR→IR transforms, before emit.
+///
+/// Per-site concerns (timing counters, bail-reason strings, diagnostics) stay at the call sites.
+pub fn run_backend_passes(
+    ir: &mut crate::ir::IrFile,
+    file: &File,
+    facade: &str,
+    syms: &SymbolTable,
+) -> Result<(), SkipReason> {
+    crate::plugins::run_enabled(ir, file);
+    let vc_module = crate::module_symbols::ModuleSymbols::new(syms);
+    let vc_resolver = crate::symbol_resolver::SymbolResolver::new_scoped_with_module(
+        &*syms.libraries,
+        &vc_module,
+        &[],
+    );
+    if !crate::jvm::value_classes::lower_value_classes(ir, &vc_resolver) {
+        return Err(SkipReason::ValueClasses);
+    }
+    if !crate::jvm::suspend::lower_suspend(ir, facade) {
+        return Err(SkipReason::Suspend);
+    }
+    crate::jvm::ir_emit::mark_must_inline_lambdas(ir);
+    crate::jvm::ir_emit::reparent_lambda_impls(ir);
+    Ok(())
+}
+
 /// The JVM backend holds the shared classpath (`Rc`, same instance as `JvmLibraries`) so the emitter
 /// can read inline-function bodies for the bytecode inliner.
 pub struct JvmBackend {
@@ -84,46 +139,19 @@ impl Backend for JvmBackend {
             );
             return outputs;
         };
-        // Compiler-extension plugins (kotlinx.serialization): synthesize declarations from the file's
-        // annotations before the JVM IR transforms. No-op when no trigger annotation is present.
-        crate::plugins::run_enabled(&mut ir, file);
-        // JVM-only IR→IR transform: realize `@JvmInline value class`es as their unboxed underlying type
-        // (the IR keeps them as plain classes so JS / a native-value-type JVM are unaffected). A
-        // value-class shape it can't yet lower → skip the file (same as any unsupported construct).
-        let vc_module = crate::module_symbols::ModuleSymbols::new(syms);
-        let vc_resolver = crate::symbol_resolver::SymbolResolver::new_scoped_with_module(
-            &*syms.libraries,
-            &vc_module,
-            &[],
-        );
-        if !crate::jvm::value_classes::lower_value_classes(&mut ir, &vc_resolver) {
+        // The shared post-lowering pass pipeline (see `run_backend_passes`); an unlowerable shape →
+        // diagnose and skip the file rather than miscompile.
+        if let Err(reason) = run_backend_passes(&mut ir, file, &facade_name, syms) {
+            let what = match reason {
+                SkipReason::ValueClasses => "value-class",
+                SkipReason::Suspend => "suspend-function",
+            };
             diags.error(
                 crate::diag::Span::new(0, 0),
-                "krusty: this value-class shape is not yet supported by the IR backend".to_string(),
+                format!("krusty: this {what} shape is not yet supported by the IR backend"),
             );
             return outputs;
         }
-        // JVM-only IR→IR transform: realize `suspend fun`s as their continuation-passing-style ABI
-        // (the IR keeps them as plain functions so JS / other backends are unaffected). A suspend shape
-        // it can't yet lower → skip the file rather than miscompile.
-        if !crate::jvm::suspend::lower_suspend(&mut ir, &facade_name) {
-            diags.error(
-                crate::diag::Span::new(0, 0),
-                "krusty: this suspend-function shape is not yet supported by the IR backend"
-                    .to_string(),
-            );
-            return outputs;
-        }
-        // Drop the dead standalone impl of a must-inline call's (`require`/`check`) message lambda — it is
-        // spliced at the call site, so emitting it would only force a spurious facade class.
-        crate::jvm::ir_emit::mark_must_inline_lambdas(&mut ir);
-        // A lambda impl method must be a member of the CLASS whose code emits its `invokedynamic` —
-        // the impl is PRIVATE (kotlinc's placement), so a cross-class handle would be an
-        // IllegalAccessError. Lowering attaches impls per `cur_class`, which misses code that ends up
-        // in a class only later: enum-entry constructor arguments (lowered class-less, emitted in the
-        // enum's `<clinit>`) and suspend-lambda state machines (bodies moved into the machine class by
-        // `lower_suspend`). Reparent those impls after all IR→IR transforms, before emit.
-        crate::jvm::ir_emit::reparent_lambda_impls(&mut ir);
         // `@kotlin.Metadata` for the facade: each top-level `suspend fun` is recorded with `IS_SUSPEND`
         // and its LOGICAL signature, so another krusty/kotlinc compilation resolves a call to it (a
         // suspend fn's physical method is `Object foo(…, Continuation)` — only `@Metadata` distinguishes
@@ -267,5 +295,76 @@ mod tests {
                 .map(|(facade, _, _, _)| facade),
             Some(&"p/AKt".to_string())
         );
+    }
+
+    /// The post-lowering JVM pass pipeline (plugins → value-classes → suspend → must-inline marks →
+    /// lambda reparenting) must run through `run_backend_passes` everywhere — every hand-replicated
+    /// copy is a site where a NEW pass silently goes missing (twice this produced false-green test
+    /// runs: IllegalAccessError miscompiles the gate never saw). This test bans direct calls to the
+    /// individual passes outside their defining module and the shared pipeline itself.
+    #[test]
+    fn backend_passes_are_only_called_via_run_backend_passes() {
+        // token that marks a CALL of the pass → files allowed to contain it (the defining module's
+        // internal/recursive uses, and the shared pipeline in this file).
+        let rules: &[(&str, &[&str])] = &[
+            (
+                "lower_value_classes(",
+                &["src/jvm/value_classes.rs", "src/jvm/backend.rs"],
+            ),
+            (
+                "lower_suspend(",
+                &["src/jvm/suspend.rs", "src/jvm/backend.rs"],
+            ),
+            (
+                "mark_must_inline_lambdas(",
+                &["src/jvm/ir_emit.rs", "src/jvm/backend.rs"],
+            ),
+            (
+                "reparent_lambda_impls(",
+                &["src/jvm/ir_emit.rs", "src/jvm/backend.rs"],
+            ),
+            (
+                "run_enabled(",
+                &["src/plugins/mod.rs", "src/jvm/backend.rs"],
+            ),
+        ];
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut offenders = Vec::new();
+        for dir in ["src", "tests"] {
+            visit(&root.join(dir), &mut |path, text| {
+                let rel = path
+                    .strip_prefix(root)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                for (token, allowed) in rules {
+                    if text.contains(token) && !allowed.contains(&rel.as_str()) {
+                        offenders.push(format!("{rel}: calls `{token}…)` directly"));
+                    }
+                }
+            });
+        }
+        assert!(
+            offenders.is_empty(),
+            "backend passes must go through jvm::backend::run_backend_passes (so a new pass lands \
+             in every pipeline by construction), but:\n  {}",
+            offenders.join("\n  ")
+        );
+    }
+
+    fn visit(dir: &std::path::Path, f: &mut impl FnMut(&std::path::Path, &str)) {
+        let Ok(rd) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                visit(&p, f);
+            } else if p.extension().is_some_and(|x| x == "rs") {
+                if let Ok(text) = std::fs::read_to_string(&p) {
+                    f(&p, &text);
+                }
+            }
+        }
     }
 }
