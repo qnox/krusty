@@ -10011,7 +10011,13 @@ impl<'a> Checker<'a> {
         type_args: &[Ty],
     ) -> Option<crate::libraries::LibraryCallable> {
         self.resolver()
-            .resolve_extension_callable(name, receiver, arg_tys, type_args)
+            .resolve_symbol(
+                crate::symbol_resolver::SymRecv::Value(receiver),
+                name,
+                arg_tys,
+                type_args,
+            )
+            .and_then(crate::symbol_resolver::Symbol::extension_call)
     }
 
     fn library_extension_inline_return(
@@ -10021,7 +10027,13 @@ impl<'a> Checker<'a> {
         arg_tys: &[Ty],
     ) -> Option<Ty> {
         self.resolver()
-            .resolve_extension_inline_callable(name, receiver, arg_tys)
+            .resolve_symbol(
+                crate::symbol_resolver::SymRecv::Value(receiver),
+                name,
+                arg_tys,
+                &[],
+            )
+            .and_then(crate::symbol_resolver::Symbol::extension_call)
             .map(|c| c.ret)
     }
 
@@ -10380,7 +10392,11 @@ impl<'a> Checker<'a> {
             }
             return Some(ret);
         }
-        if let Some(getter) = self.resolver().resolve_extension_property_getter(name, rt) {
+        if let Some(getter) = self
+            .resolver()
+            .resolve_symbol(crate::symbol_resolver::SymRecv::Value(rt), name, &[], &[])
+            .and_then(crate::symbol_resolver::Symbol::extension_property_getter)
+        {
             let ret = getter.ret;
             if let Some(e) = mexpr {
                 self.expr_lowers.insert(

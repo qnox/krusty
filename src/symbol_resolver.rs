@@ -403,6 +403,13 @@ pub struct MemberFacets {
     /// For a receiver-less [`SymRecv::TopLevel`] name: the single top-level callable selected against
     /// `args`/`type_args` (default/vararg-aware), ready for the emit seam. `None` for a value/type receiver.
     pub top_level_call: Option<LibraryCallable>,
+    /// For a value receiver: the classpath EXTENSION callable `recv.name(args)` selected against
+    /// `args`/`type_args` (default/vararg-aware; admits `@InlineOnly` splice candidates), ready for the emit
+    /// seam. A same-module extension is `None` (it emits through the module path, not a library callable).
+    pub extension_call: Option<LibraryCallable>,
+    /// For a value receiver: the getter of a classpath EXTENSION PROPERTY `recv.name` (`@Metadata` accessor,
+    /// most-specific applicable receiver rung). `None` when no in-scope extension property matches.
+    pub extension_property_getter: Option<LibraryCallable>,
 }
 
 pub enum Symbol {
@@ -469,6 +476,20 @@ impl Symbol {
     pub fn top_level_call(self) -> Option<LibraryCallable> {
         match self {
             Symbol::Member(f) => f.top_level_call,
+            _ => None,
+        }
+    }
+    /// The selected classpath extension callable for `recv.name(args)`.
+    pub fn extension_call(self) -> Option<LibraryCallable> {
+        match self {
+            Symbol::Member(f) => f.extension_call,
+            _ => None,
+        }
+    }
+    /// The getter of a classpath extension property `recv.name`.
+    pub fn extension_property_getter(self) -> Option<LibraryCallable> {
+        match self {
+            Symbol::Member(f) => f.extension_property_getter,
             _ => None,
         }
     }
@@ -593,6 +614,42 @@ impl<'a> SymbolResolver<'a> {
                 let write = resolve_property_setter(self.lib, ty, name);
                 let method_ref = resolve_instance_ref(self.lib, ty, name);
                 let property_ref = resolve_property_ref(self.lib, ty, name);
+                // The classpath EXTENSION callable for `recv.name(args)`: one extension selection (admits
+                // `@InlineOnly` splice candidates — a plain and an inline call resolve identically, only the
+                // emitter differs). A same-module extension emits through the module path, not a library
+                // callable, so it is dropped here.
+                let extension_call = select_overload(
+                    self.lib,
+                    ty,
+                    name,
+                    args,
+                    type_args,
+                    FnKind::Extension,
+                    ExtCtx {
+                        allow_must_inline: true,
+                        fn_scope: self.fn_scope,
+                    },
+                )
+                .filter(|o| !matches!(o.callable.origin, Origin::Module { .. }))
+                .and_then(|o| self.build_extension_callable(name, ty, args, type_args, &o));
+                // The getter of an in-scope classpath extension PROPERTY `recv.name` — its `@Metadata`
+                // accessor at the most-specific applicable receiver rung, read-value results only.
+                let extension_property_getter = self
+                    .symbols_in_scope(name)
+                    .into_iter()
+                    .flat_map(|(_, r)| match r.callables {
+                        crate::libraries::Callables::Properties(p) => p.overloads,
+                        _ => Vec::new(),
+                    })
+                    .filter(|p| p.kind == PropKind::Extension)
+                    .filter_map(|p| {
+                        let decl_recv = ty_subst(p.receiver?, &std::collections::HashMap::new());
+                        let rank = source_receiver_rank(&self.src, ty, decl_recv)?;
+                        Some((rank, p))
+                    })
+                    .min_by_key(|(rank, _)| *rank)
+                    .map(|(_, p)| p.getter)
+                    .filter(|c| c.ret.is_read_value_result());
                 // EVERY overload named `name` applicable to the receiver: instance members and operators
                 // (the receiver-aware member query, federated over module + libraries) UNION the in-scope
                 // extension functions whose declared receiver is in the receiver's supertype closure. This
@@ -619,6 +676,8 @@ impl<'a> SymbolResolver<'a> {
                     && method_ref.is_none()
                     && property_ref.is_none()
                     && overloads.is_empty()
+                    && extension_call.is_none()
+                    && extension_property_getter.is_none()
                 {
                     return None;
                 }
@@ -630,6 +689,8 @@ impl<'a> SymbolResolver<'a> {
                     property_ref,
                     overloads,
                     top_level_call: None,
+                    extension_call,
+                    extension_property_getter,
                 })))
             }
             SymRecv::TopLevel => {
@@ -652,6 +713,8 @@ impl<'a> SymbolResolver<'a> {
                     property_ref: None,
                     overloads,
                     top_level_call,
+                    extension_call: None,
+                    extension_property_getter: None,
                 })))
             }
             SymRecv::Type(internal) => {
@@ -798,67 +861,6 @@ impl<'a> SymbolResolver<'a> {
         })
     }
 
-    /// Resolve an extension library callable for a concrete receiver call site. The primary path uses
-    /// the receiver-aware [`FunctionSet`] overloads; the compatibility fallback preserves the old
-    /// descriptor/default-argument handling until those cases are represented directly in `FunctionInfo`.
-    pub fn resolve_extension_callable(
-        &self,
-        name: &str,
-        receiver: Ty,
-        args: &[Ty],
-        type_args: &[Ty],
-    ) -> Option<LibraryCallable> {
-        // One extension resolution admits `@InlineOnly` (`must_inline`) candidates: a regular and an
-        // inline call resolve identically; only the emitter differs (it splices when `inline` is set).
-        let o = select_overload(
-            self.lib,
-            receiver,
-            name,
-            args,
-            type_args,
-            FnKind::Extension,
-            ExtCtx {
-                allow_must_inline: true,
-                fn_scope: self.fn_scope,
-            },
-        )?;
-        // A same-module extension is emitted through the module-native path (the lowerer's `ext_fun_ids`
-        // / IR inliner), NOT as a resolved LIBRARY callable — its facade is the file being compiled, which
-        // has no emit owner here. Only a classpath extension yields a library callable for the emit seam.
-        if matches!(o.callable.origin, Origin::Module { .. }) {
-            return None;
-        }
-        self.build_extension_callable(name, receiver, args, type_args, &o)
-    }
-
-    /// Resolve an extension callable for the bytecode inliner. Same overload selection as ordinary extension
-    /// calls, but also admits non-public `@InlineOnly` candidates (the caller splices, never emits a call).
-    pub fn resolve_extension_inline_callable(
-        &self,
-        name: &str,
-        receiver: Ty,
-        args: &[Ty],
-    ) -> Option<LibraryCallable> {
-        let o = select_overload(
-            self.lib,
-            receiver,
-            name,
-            args,
-            &[],
-            FnKind::Extension,
-            ExtCtx {
-                allow_must_inline: true,
-                fn_scope: self.fn_scope,
-            },
-        )?;
-        // Same-module extensions emit through the module path, not the library callable seam (see
-        // [`Self::resolve_extension_callable`]).
-        if matches!(o.callable.origin, Origin::Module { .. }) {
-            return None;
-        }
-        self.build_extension_callable(name, receiver, args, &[], &o)
-    }
-
     /// Shape a selected extension overload into a [`LibraryCallable`] for the call site. An EXACT call binds
     /// the generic return directly. A call that OMITS trailing defaults picks the emit form by a Kotlin ABI
     /// fact — an `inline` function has no `$default` synthetic (kotlinc materializes defaults by inlining),
@@ -931,37 +933,6 @@ impl<'a> SymbolResolver<'a> {
             return Some(callable);
         }
         None
-    }
-
-    /// Resolve a classpath/library extension property getter for `receiver.property`.
-    /// The source supplies the platform getter spelling (`getProperty` on JVM); this layer then uses
-    /// the same extension-call selector as ordinary extension calls and returns only read-value results.
-    pub fn resolve_extension_property_getter(
-        &self,
-        property: &str,
-        receiver: Ty,
-    ) -> Option<LibraryCallable> {
-        // Resolve the extension property through the ONE query — union `resolve_symbols`' property overloads
-        // over the import scope. Its getter is the REAL `@Metadata` accessor (public-facade owner, exact
-        // `JvmPropertySignature` name) — never a `getX` guess. Pick the most-specific applicable receiver
-        // rung. The getter's `ret` is already the property's declared type (normalized — a primitive stays
-        // `Ty::Int`, not a boxed `kotlin/Int`), so it is used directly.
-        let p = self
-            .symbols_in_scope(property)
-            .into_iter()
-            .flat_map(|(_, r)| match r.callables {
-                crate::libraries::Callables::Properties(p) => p.overloads,
-                _ => Vec::new(),
-            })
-            .filter(|p| p.kind == PropKind::Extension)
-            .filter_map(|p| {
-                let decl_recv = ty_subst(p.receiver?, &std::collections::HashMap::new());
-                let rank = source_receiver_rank(&self.src, receiver, decl_recv)?;
-                Some((rank, p))
-            })
-            .min_by_key(|(rank, _)| *rank)?
-            .1;
-        Some(p.getter).filter(|c| c.ret.is_read_value_result())
     }
 
     /// Find the `name$default` synthetic callable for a defaulted extension call — the emit-shaped callable
@@ -2714,7 +2685,8 @@ mod tests {
         let scope = vec![String::new()];
         let resolver = SymbolResolver::new_scoped(&source, &scope);
         let call = resolver
-            .resolve_extension_callable("maybeSuffix", Ty::String, &[], &[])
+            .resolve_symbol(SymRecv::Value(Ty::String), "maybeSuffix", &[], &[])
+            .and_then(Symbol::extension_call)
             .expect("nullable extension callable should resolve");
         assert_eq!(call.ret, Ty::nullable(Ty::String));
         assert_eq!(call.physical_ret, Ty::String);
