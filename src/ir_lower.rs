@@ -4916,6 +4916,54 @@ impl<'a> Lower<'a> {
         self.ir.add_expr(IrExpr::Block { stmts, value })
     }
 
+    fn emit_when(&mut self, branches: Vec<(Option<u32>, u32)>) -> u32 {
+        self.ir.add_expr(IrExpr::When { branches })
+    }
+
+    fn emit_while(
+        &mut self,
+        cond: u32,
+        body: u32,
+        update: Option<u32>,
+        post_test: bool,
+        label: Option<String>,
+    ) -> u32 {
+        self.ir.add_expr(IrExpr::While {
+            cond,
+            body,
+            update,
+            post_test,
+            label,
+        })
+    }
+
+    fn emit_break(&mut self, label: Option<String>) -> u32 {
+        self.ir.add_expr(IrExpr::Break { label })
+    }
+
+    fn emit_continue(&mut self, label: Option<String>) -> u32 {
+        self.ir.add_expr(IrExpr::Continue { label })
+    }
+
+    fn emit_throw(&mut self, operand: u32) -> u32 {
+        self.ir.add_expr(IrExpr::Throw { operand })
+    }
+
+    fn emit_try(
+        &mut self,
+        body: u32,
+        catches: Vec<IrCatch>,
+        finally: Option<u32>,
+        result: Ty,
+    ) -> u32 {
+        self.ir.add_expr(IrExpr::Try {
+            body,
+            catches,
+            finally,
+            result,
+        })
+    }
+
     fn emit_external_static_field(
         &mut self,
         owner: impl Into<String>,
@@ -5556,13 +5604,7 @@ impl<'a> Lower<'a> {
         let one = self.ir.add_expr(IrExpr::Const(IrConst::Int(1)));
         let inc_val = self.emit_primitive_bin_op(IrBinOp::Add, gi3, one);
         let inc = self.emit_set_value(i_v, inc_val);
-        let wh = self.ir.add_expr(IrExpr::While {
-            cond,
-            body: wbody,
-            update: Some(inc),
-            post_test: false,
-            label: None,
-        });
+        let wh = self.emit_while(cond, wbody, Some(inc), false, None);
         let result = self.emit_get_value(arr_v);
         Some(self.emit_block(vec![var_n, var_arr, var_i, wh], Some(result)))
     }
@@ -6994,9 +7036,7 @@ impl<'a> Lower<'a> {
                 let ret_susp = self.emit_return(Some(sg2));
                 let ret_susp_b = self.emit_block(vec![ret_susp], None);
                 let empty = self.emit_block(vec![], None);
-                let susp_when = self.ir.add_expr(IrExpr::When {
-                    branches: vec![(Some(is_eq), ret_susp_b), (None, empty)],
-                });
+                let susp_when = self.emit_when(vec![(Some(is_eq), ret_susp_b), (None, empty)]);
                 // After the suspend call completes (synchronously here), bind the result `a` and run the
                 // tail expression; with no binding the lambda simply returns the suspension value. `tail_at`
                 // builds `[ (val a = unbox(src);) return box(tail_expr | src) ]` for a result at value `src`.
@@ -7038,11 +7078,10 @@ impl<'a> Lower<'a> {
                     .libraries
                     .runtime_ctor(RuntimeCtor::IllegalStateException)?;
                 let exc = self.emit_new_external(exc_ctor.internal, exc_ctor.ctor_desc, vec![msg]);
-                let throw = self.ir.add_expr(IrExpr::Throw { operand: exc });
+                let throw = self.emit_throw(exc);
                 let else_b = self.emit_block(vec![throw], None);
-                let dispatch = self.ir.add_expr(IrExpr::When {
-                    branches: vec![(Some(cond0), s0), (Some(cond1), s1), (None, else_b)],
-                });
+                let dispatch =
+                    self.emit_when(vec![(Some(cond0), s0), (Some(cond1), s1), (None, else_b)]);
                 self.next_value = saved_next_sm;
                 self.emit_block(vec![susp_var, dispatch], None)
             }
@@ -7521,9 +7560,7 @@ impl<'a> Lower<'a> {
         let f = self.ir.add_expr(IrExpr::Const(IrConst::Boolean(b)));
         let ret = self.emit_return(Some(f));
         let blk = self.emit_block(vec![ret], None);
-        self.ir.add_expr(IrExpr::When {
-            branches: vec![(Some(cond), blk)],
-        })
+        self.emit_when(vec![(Some(cond), blk)])
     }
 
     /// Synthesize a `data class`'s `componentN`/`toString`/`hashCode`/`equals` as IR methods over the
@@ -10212,19 +10249,11 @@ impl<'a> Lower<'a> {
         let ic = self.emit_get_value(i_v);
         let ec = self.emit_get_value(n_v);
         let at_end = self.emit_primitive_bin_op(IrBinOp::Eq, ic, ec);
-        let brk = self.ir.add_expr(IrExpr::Break { label: None });
-        let if_break = self.ir.add_expr(IrExpr::When {
-            branches: vec![(Some(at_end), brk)],
-        });
+        let brk = self.emit_break(None);
+        let if_break = self.emit_when(vec![(Some(at_end), brk)]);
         let update = self.emit_block(vec![if_break, incs], None);
         let wbody = self.emit_block(out, None);
-        let wh = self.ir.add_expr(IrExpr::While {
-            cond,
-            body: wbody,
-            update: Some(update),
-            post_test: false,
-            label,
-        });
+        let wh = self.emit_while(cond, wbody, Some(update), false, label);
         self.scope.truncate(depth);
         Some(self.emit_block(vec![var_r, var_i, var_n, wh], None))
     }
@@ -10319,23 +10348,15 @@ impl<'a> Lower<'a> {
         let ic = self.emit_get_value(i_v);
         let ec = self.emit_get_value(n_v);
         let at_end = self.emit_primitive_bin_op(IrBinOp::Eq, ic, ec);
-        let brk = self.ir.add_expr(IrExpr::Break { label: None });
-        let if_break = self.ir.add_expr(IrExpr::When {
-            branches: vec![(Some(at_end), brk)],
-        });
+        let brk = self.emit_break(None);
+        let if_break = self.emit_when(vec![(Some(at_end), brk)]);
         let gi2 = self.emit_get_value(i_v);
         let gs = self.emit_get_value(s_v);
         let inc = self.emit_primitive_bin_op(IrBinOp::Add, gi2, gs);
         let incs = self.emit_set_value(i_v, inc);
         let update = self.emit_block(vec![if_break, incs], None);
         let wbody = self.emit_block(out, None);
-        let wh = self.ir.add_expr(IrExpr::While {
-            cond,
-            body: wbody,
-            update: Some(update),
-            post_test: false,
-            label,
-        });
+        let wh = self.emit_while(cond, wbody, Some(update), false, label);
         self.scope.truncate(depth);
         Some(self.emit_block(vec![var_r, var_i, var_n, var_s, wh], None))
     }
@@ -10458,13 +10479,7 @@ impl<'a> Lower<'a> {
             self.emit_set_value(iv, inc)
         });
         let wbody = self.emit_block(out, None);
-        let wh = self.ir.add_expr(IrExpr::While {
-            cond,
-            body: wbody,
-            update,
-            post_test: false,
-            label,
-        });
+        let wh = self.emit_while(cond, wbody, update, false, label);
         self.scope.truncate(depth);
         let mut stmts = Vec::new();
         if let Some(vi) = var_idx {
@@ -10777,20 +10792,20 @@ impl<'a> Lower<'a> {
             .runtime_ctor(RuntimeCtor::AssertionError)?;
         let assertion =
             self.emit_new_external(assertion_ctor.internal, assertion_ctor.ctor_desc, vec![msg]);
-        let throw_assertion = self.ir.add_expr(IrExpr::Throw { operand: assertion });
+        let throw_assertion = self.emit_throw(assertion);
         let body = self.emit_block(vec![invoke], Some(throw_assertion));
         let catch_var = self.fresh_value();
         let caught = self.emit_get_value(catch_var);
-        Some(self.ir.add_expr(IrExpr::Try {
+        Some(self.emit_try(
             body,
-            catches: vec![IrCatch {
+            vec![IrCatch {
                 var: catch_var,
                 exc_internal,
                 body: caught,
             }],
-            finally: None,
-            result: ty_to_ir(callable.ret),
-        }))
+            None,
+            ty_to_ir(callable.ret),
+        ))
     }
 
     /// The `kotlin.assert` codegen intrinsic. kotlinc does NOT inline the stdlib body (which reads
@@ -10840,13 +10855,11 @@ impl<'a> Lower<'a> {
                 vec![],
             )
         };
-        let throw = self.ir.add_expr(IrExpr::Throw { operand: assertion });
+        let throw = self.emit_throw(assertion);
         let throw_block = self.emit_block(vec![throw], None);
         let empty = self.emit_block(vec![], None);
         // `if (cond) {} else { throw }` ≡ `if (!cond) throw`.
-        let check = self.ir.add_expr(IrExpr::When {
-            branches: vec![(Some(cond), empty), (None, throw_block)],
-        });
+        let check = self.emit_when(vec![(Some(cond), empty), (None, throw_block)]);
         // `// ASSERTIONS_MODE: always-enable` — the check runs UNCONDITIONALLY (no per-class guard).
         if self.afile.assert_always_enabled {
             return Some(check);
@@ -10864,9 +10877,7 @@ impl<'a> Lower<'a> {
             vec![],
         );
         // `if (enabled) { <check> }` — no else; the whole `assert` is a `Unit` statement.
-        Some(self.ir.add_expr(IrExpr::When {
-            branches: vec![(Some(enabled), check)],
-        }))
+        Some(self.emit_when(vec![(Some(enabled), check)]))
     }
 
     /// Lower Kotlin console intrinsics to `System.out.print*`; returns `None` for other callables.
@@ -10953,21 +10964,15 @@ impl<'a> Lower<'a> {
         // `if (b == null) false else cmp` (reached only when `a` is non-null).
         let b_null2 = is_null(self, bvar_i);
         let false_c = self.ir.add_expr(IrExpr::Const(IrConst::Boolean(false)));
-        let inner = self.ir.add_expr(IrExpr::When {
-            branches: vec![(Some(b_null2), false_c), (None, cmp)],
-        });
+        let inner = self.emit_when(vec![(Some(b_null2), false_c), (None, cmp)]);
         // `if (a == null) (b == null) else <inner>`.
         let a_null = is_null(self, avar_i);
         let b_null1 = is_null(self, bvar_i);
-        let mut eq = self.ir.add_expr(IrExpr::When {
-            branches: vec![(Some(a_null), b_null1), (None, inner)],
-        });
+        let mut eq = self.emit_when(vec![(Some(a_null), b_null1), (None, inner)]);
         if negated {
             let t = self.ir.add_expr(IrExpr::Const(IrConst::Boolean(true)));
             let f = self.ir.add_expr(IrExpr::Const(IrConst::Boolean(false)));
-            eq = self.ir.add_expr(IrExpr::When {
-                branches: vec![(Some(eq), f), (None, t)],
-            });
+            eq = self.emit_when(vec![(Some(eq), f), (None, t)]);
         }
         Some(self.emit_block(vec![avar, bvar], Some(eq)))
     }
@@ -12029,13 +12034,7 @@ impl<'a> Lower<'a> {
         self.cur_tailrec = None;
         let loop_body = loop_body?;
         let cond = self.ir.add_expr(IrExpr::Const(IrConst::Boolean(true)));
-        let whilexpr = self.ir.add_expr(IrExpr::While {
-            cond,
-            body: loop_body,
-            update: None,
-            post_test: false,
-            label: Some(label),
-        });
+        let whilexpr = self.emit_while(cond, loop_body, None, false, Some(label));
         let body = self.emit_block(vec![whilexpr], None);
         self.ir.functions[fid as usize].body = Some(body);
         Some(())
@@ -12068,9 +12067,7 @@ impl<'a> Lower<'a> {
             let read = self.emit_get_value(*tmp);
             stmts.push(self.emit_set_value(*pv, read));
         }
-        stmts.push(self.ir.add_expr(IrExpr::Continue {
-            label: Some(ctx.label.clone()),
-        }));
+        stmts.push(self.emit_continue(Some(ctx.label.clone())));
         Some(self.emit_block(stmts, None))
     }
 
@@ -12087,9 +12084,7 @@ impl<'a> Lower<'a> {
                 let c = self.expr(cond)?;
                 let t = self.lower_tail_expr(then_branch, ret_ty)?;
                 let el = self.lower_tail_expr(eb, ret_ty)?;
-                Some(self.ir.add_expr(IrExpr::When {
-                    branches: vec![(Some(c), t), (None, el)],
-                }))
+                Some(self.emit_when(vec![(Some(c), t), (None, el)]))
             }
             Expr::Call { callee, args } if self.is_tail_self_call(callee, &args) => {
                 self.tail_update_continue(&args)
@@ -12210,20 +12205,10 @@ impl<'a> Lower<'a> {
                 match else_branch {
                     Some(eb) => {
                         let (el, ed) = self.lower_tail_unit_expr(eb)?;
-                        Some((
-                            self.ir.add_expr(IrExpr::When {
-                                branches: vec![(Some(c), t), (None, el)],
-                            }),
-                            td && ed,
-                        ))
+                        Some((self.emit_when(vec![(Some(c), t), (None, el)]), td && ed))
                     }
                     // No `else`: a false condition falls through past the `when` → never diverges.
-                    None => Some((
-                        self.ir.add_expr(IrExpr::When {
-                            branches: vec![(Some(c), t)],
-                        }),
-                        false,
-                    )),
+                    None => Some((self.emit_when(vec![(Some(c), t)]), false)),
                 }
             }
             Expr::Call { callee, args } if self.is_tail_self_call(callee, &args) => {
@@ -12392,7 +12377,7 @@ impl<'a> Lower<'a> {
                                 stmts.push(self.expr(e)?);
                             }
                         }
-                        stmts.push(self.ir.add_expr(IrExpr::Break { label: Some(brk) }));
+                        stmts.push(self.emit_break(Some(brk)));
                         return Some(self.emit_block(stmts, None));
                     }
                 }
@@ -12418,7 +12403,7 @@ impl<'a> Lower<'a> {
                         // `return someUnitExpr` — run the expression for its side effects.
                         stmts.push(self.expr(e)?);
                     }
-                    stmts.push(self.ir.add_expr(IrExpr::Break { label: Some(label) }));
+                    stmts.push(self.emit_break(Some(label)));
                     return Some(self.emit_block(stmts, None));
                 }
                 let v = match e {
@@ -13000,13 +12985,7 @@ impl<'a> Lower<'a> {
                 self.append_body_stmts(body, &mut out)?;
                 self.scope.truncate(depth);
                 let b = self.emit_block(out, None);
-                Some(self.ir.add_expr(IrExpr::While {
-                    cond: c,
-                    body: b,
-                    update: None,
-                    post_test: false,
-                    label,
-                }))
+                Some(self.emit_while(c, b, None, false, label))
             }
             Stmt::DoWhile { body, cond, label } => {
                 let depth = self.scope.len();
@@ -13017,16 +12996,10 @@ impl<'a> Lower<'a> {
                 // can't see body-local declarations (Kotlin scopes them to the body).
                 let c = self.expr(cond)?;
                 let b = self.emit_block(out, None);
-                Some(self.ir.add_expr(IrExpr::While {
-                    cond: c,
-                    body: b,
-                    update: None,
-                    post_test: true,
-                    label,
-                }))
+                Some(self.emit_while(c, b, None, true, label))
             }
-            Stmt::Break(label) => Some(self.ir.add_expr(IrExpr::Break { label })),
-            Stmt::Continue(label) => Some(self.ir.add_expr(IrExpr::Continue { label })),
+            Stmt::Break(label) => Some(self.emit_break(label)),
+            Stmt::Continue(label) => Some(self.emit_continue(label)),
             // `for (i in a..b [step s])` over an `Int` range → a counted `while`. The bound is
             // hoisted to a local (evaluated once, per Kotlin); the step defaults to 1.
             Stmt::For {
@@ -13155,20 +13128,12 @@ impl<'a> Lower<'a> {
                     let ic = self.emit_get_value(i_v);
                     let ec = self.emit_get_value(end_v);
                     let at_end = self.emit_primitive_bin_op(IrBinOp::Eq, ic, ec);
-                    let brk = self.ir.add_expr(IrExpr::Break { label: None });
-                    let if_break = self.ir.add_expr(IrExpr::When {
-                        branches: vec![(Some(at_end), brk)],
-                    });
+                    let brk = self.emit_break(None);
+                    let if_break = self.emit_when(vec![(Some(at_end), brk)]);
                     self.emit_block(vec![if_break, inc], None)
                 };
                 let wbody = self.emit_block(out, None);
-                let wh = self.ir.add_expr(IrExpr::While {
-                    cond,
-                    body: wbody,
-                    update: Some(update),
-                    post_test: false,
-                    label,
-                });
+                let wh = self.emit_while(cond, wbody, Some(update), false, label);
                 self.scope.truncate(depth);
                 let mut prologue = vec![var_i];
                 if let Some(ve) = var_end {
@@ -13378,18 +13343,10 @@ impl<'a> Lower<'a> {
         } else {
             self.emit_set_value(result_slot, body_val)
         };
-        let brk_stmt = self.ir.add_expr(IrExpr::Break {
-            label: Some(brk.clone()),
-        });
+        let brk_stmt = self.emit_break(Some(brk.clone()));
         let loop_body = self.emit_block(vec![body_stmt, brk_stmt], None);
         let cond = self.ir.add_expr(IrExpr::Const(IrConst::Boolean(true)));
-        let whilew = self.ir.add_expr(IrExpr::While {
-            cond,
-            body: loop_body,
-            update: None,
-            post_test: false,
-            label: Some(brk),
-        });
+        let whilew = self.emit_while(cond, loop_body, None, false, Some(brk));
         let m2 = self.emit_get_value(mutex_slot);
         let null2 = self.ir.add_expr(IrExpr::Const(IrConst::Null));
         let unlock_call = self.emit_virtual_call(
@@ -13402,12 +13359,7 @@ impl<'a> Lower<'a> {
         );
         let try_body = self.emit_block(vec![whilew], None);
         let fin = self.emit_block(vec![unlock_call], None);
-        let tryf = self.ir.add_expr(IrExpr::Try {
-            body: try_body,
-            catches: vec![],
-            finally: Some(fin),
-            result: Ty::Unit,
-        });
+        let tryf = self.emit_try(try_body, vec![], Some(fin), Ty::Unit);
         let get = self.emit_get_value(result_slot);
         Some(self.emit_block(vec![var_mutex, lock_call, var_result, tryf], Some(get)))
     }
@@ -13551,13 +13503,7 @@ impl<'a> Lower<'a> {
         wstmts.push(var_part);
         wstmts.push(add_call);
         let wbody = self.emit_block(wstmts, None);
-        let wh = self.ir.add_expr(IrExpr::While {
-            cond,
-            body: wbody,
-            update: None,
-            post_test: false,
-            label: None,
-        });
+        let wh = self.emit_while(cond, wbody, None, false, None);
         let acc_read = self.emit_get_value(acc_v);
         Some(self.emit_block(vec![var_acc, var_it, wh], Some(acc_read)))
     }
@@ -13642,13 +13588,7 @@ impl<'a> Lower<'a> {
         let inc = self.emit_primitive_bin_op(IrBinOp::Add, gi3, one);
         let incs = self.emit_set_value(i_v, inc);
         let wbody = self.emit_block(out, None);
-        let wh = self.ir.add_expr(IrExpr::While {
-            cond,
-            body: wbody,
-            update: Some(incs),
-            post_test: false,
-            label,
-        });
+        let wh = self.emit_while(cond, wbody, Some(incs), false, label);
         self.scope.truncate(depth);
         let mut stmts = Vec::new();
         if let Some(va) = var_arr {
@@ -14438,9 +14378,7 @@ impl<'a> Lower<'a> {
             let loop_body = if body_diverges {
                 body_val
             } else {
-                let brk = self.ir.add_expr(IrExpr::Break {
-                    label: Some(label.clone()),
-                });
+                let brk = self.emit_break(Some(label.clone()));
                 if unit_ret {
                     self.emit_block(vec![body_val, brk], None)
                 } else {
@@ -14449,13 +14387,7 @@ impl<'a> Lower<'a> {
                 }
             };
             let cond = self.ir.add_expr(IrExpr::Const(IrConst::Boolean(true)));
-            let loopw = self.ir.add_expr(IrExpr::While {
-                cond,
-                body: loop_body,
-                update: None,
-                post_test: false,
-                label: Some(label),
-            });
+            let loopw = self.emit_while(cond, loop_body, None, false, Some(label));
             if !unit_ret {
                 // Initialize the result slot to a type default so its frame type is consistent at the
                 // loop head (an uninitialized slot is `top` there but the body assigns it → mismatch).
@@ -14656,18 +14588,10 @@ impl<'a> Lower<'a> {
                 let body_val = body_val?;
                 // Normal fall-through: the body's own value is the result.
                 let assign = self.emit_set_value(result_slot, body_val);
-                let brk_stmt = self.ir.add_expr(IrExpr::Break {
-                    label: Some(brk.clone()),
-                });
+                let brk_stmt = self.emit_break(Some(brk.clone()));
                 let loop_body = self.emit_block(vec![assign, brk_stmt], None);
                 let cond = self.ir.add_expr(IrExpr::Const(IrConst::Boolean(true)));
-                let loopw = self.ir.add_expr(IrExpr::While {
-                    cond,
-                    body: loop_body,
-                    update: None,
-                    post_test: false,
-                    label: Some(brk),
-                });
+                let loopw = self.emit_while(cond, loop_body, None, false, Some(brk));
                 stmts.push(loopw);
                 let get = self.emit_get_value(result_slot);
                 return Some(self.emit_block(stmts, Some(get)));
@@ -14679,18 +14603,10 @@ impl<'a> Lower<'a> {
             self.inline_lambda_ret.pop();
             self.scope.truncate(depth);
             let body_val = body_val?;
-            let brk_stmt = self.ir.add_expr(IrExpr::Break {
-                label: Some(brk.clone()),
-            });
+            let brk_stmt = self.emit_break(Some(brk.clone()));
             let loop_body = self.emit_block(vec![body_val, brk_stmt], None);
             let cond = self.ir.add_expr(IrExpr::Const(IrConst::Boolean(true)));
-            let loopw = self.ir.add_expr(IrExpr::While {
-                cond,
-                body: loop_body,
-                update: None,
-                post_test: false,
-                label: Some(brk),
-            });
+            let loopw = self.emit_while(cond, loop_body, None, false, Some(brk));
             stmts.push(loopw);
             let unit = self.ir.add_expr(IrExpr::UnitInstance);
             return Some(self.emit_block(stmts, Some(unit)));
@@ -14825,7 +14741,7 @@ impl<'a> Lower<'a> {
                 } else {
                     v
                 };
-                self.ir.add_expr(IrExpr::Throw { operand: v })
+                self.emit_throw(v)
             }
             // `return value` in expression position (`x ?: return null`). Only the simple function-return
             // case is modeled here; an enclosing `finally`, an `inline fun` expansion frame, or a label
@@ -14856,13 +14772,13 @@ impl<'a> Lower<'a> {
                 if !self.try_finally_stack.is_empty() {
                     return None;
                 }
-                self.ir.add_expr(IrExpr::Break { label })
+                self.emit_break(label)
             }
             Expr::Continue { label } => {
                 if !self.try_finally_stack.is_empty() {
                     return None;
                 }
-                self.ir.add_expr(IrExpr::Continue { label })
+                self.emit_continue(label)
             }
             // `try { … } catch (e: E) { … } … [finally { f }]` (nested try already rejected by checker).
             Expr::Try {
@@ -14939,12 +14855,7 @@ impl<'a> Lower<'a> {
                     Some(f) => Some(self.expr(f)?),
                     None => None,
                 };
-                self.ir.add_expr(IrExpr::Try {
-                    body: body_ir?,
-                    catches: ir_catches,
-                    finally: fin,
-                    result,
-                })
+                self.emit_try(body_ir?, ir_catches, fin, result)
             }
             // `operand!!` — assert non-null. On a reference, `Intrinsics.checkNotNull` throws if null
             // and yields the value; on a (non-null) primitive it is a no-op.
@@ -14959,7 +14870,7 @@ impl<'a> Lower<'a> {
                         "()V".to_string(),
                         vec![],
                     );
-                    return Some(self.ir.add_expr(IrExpr::Throw { operand: exc }));
+                    return Some(self.emit_throw(exc));
                 }
                 let v = self.expr(operand)?;
                 if self.info.ty(operand).is_reference() {
@@ -15181,16 +15092,12 @@ impl<'a> Lower<'a> {
                 // { member }` — and yield `null` unconditionally; the `null` is only ever observed when the
                 // receiver was null (else control left via the `return`/`throw`).
                 if result_ty.non_null() == Ty::Nothing || (from_scope_fn && lambda_body_diverges) {
-                    let guard = self.ir.add_expr(IrExpr::When {
-                        branches: vec![(Some(cond), member)],
-                    });
+                    let guard = self.emit_when(vec![(Some(cond), member)]);
                     let nullv = self.ir.add_expr(IrExpr::Const(IrConst::Null));
                     return Some(self.emit_block(vec![var, guard], Some(nullv)));
                 }
                 let nullb = self.ir.add_expr(IrExpr::Const(IrConst::Null));
-                let when = self.ir.add_expr(IrExpr::When {
-                    branches: vec![(Some(cond), member), (None, nullb)],
-                });
+                let when = self.emit_when(vec![(Some(cond), member), (None, nullb)]);
                 self.emit_block(vec![var], Some(when))
             }
             // `a ?: b` → `{ val t = a; if (t != null) t else b }` (t bound once, so `a` runs once).
@@ -15217,9 +15124,7 @@ impl<'a> Lower<'a> {
                                 ty_to_ir(result_ty),
                             );
                             let rv = self.lower_arg(rhs, &ty_to_ir(result_ty))?;
-                            let when = self.ir.add_expr(IrExpr::When {
-                                branches: vec![(Some(cond), member), (None, rv)],
-                            });
+                            let when = self.emit_when(vec![(Some(cond), member), (None, rv)]);
                             return Some(self.emit_block(vec![var], Some(when)));
                         }
                     }
@@ -15276,9 +15181,7 @@ impl<'a> Lower<'a> {
                     }
                 }
                 let rv = self.lower_arg(rhs, &ty_to_ir(result_ty))?;
-                let when = self.ir.add_expr(IrExpr::When {
-                    branches: vec![(Some(cond), get2), (None, rv)],
-                });
+                let when = self.emit_when(vec![(Some(cond), get2), (None, rv)]);
                 self.emit_block(vec![var], Some(when))
             }
             // A block in expression position: `{ stmt; …; trailing }`; value is the trailing expr.
@@ -16259,9 +16162,7 @@ impl<'a> Lower<'a> {
                             let t = konst(self, true);
                             (t, r)
                         };
-                        return Some(self.ir.add_expr(IrExpr::When {
-                            branches: vec![(Some(l), then_e), (None, else_e)],
-                        }));
+                        return Some(self.emit_when(vec![(Some(l), then_e), (None, else_e)]));
                     }
                 }
                 // Unsigned `+`/`-`/`*`/`==`/`!=` match the signed two's-complement opcodes, but
@@ -16514,9 +16415,7 @@ impl<'a> Lower<'a> {
                             let fixed = self
                                 .ir
                                 .add_expr(IrExpr::Const(IrConst::Boolean(op == BinOp::Ne)));
-                            let when = self.ir.add_expr(IrExpr::When {
-                                branches: vec![(Some(isnull), fixed), (None, cmp)],
-                            });
+                            let when = self.emit_when(vec![(Some(isnull), fixed), (None, cmp)]);
                             return Some(self.emit_block(vec![var], Some(when)));
                         }
                         // A general `Any == 5`: box the primitive operand → structural `Intrinsics.areEqual`.
@@ -16570,7 +16469,7 @@ impl<'a> Lower<'a> {
                     }
                     None => vec![(Some(c), t)],
                 };
-                self.ir.add_expr(IrExpr::When { branches })
+                self.emit_when(branches)
             }
             // `x is T` / `x !is T` / `x as T` → the existing `IrTypeOp` node (no new node).
             Expr::Is {
@@ -16910,9 +16809,7 @@ impl<'a> Lower<'a> {
                         let is_t = self.emit_type_op(IrTypeOp::InstanceOf, u1, ty_to_ir(target));
                         let u2 = self.ir.add_expr(IrExpr::UnitInstance);
                         let nullc = self.ir.add_expr(IrExpr::Const(IrConst::Null));
-                        self.ir.add_expr(IrExpr::When {
-                            branches: vec![(Some(is_t), u2), (None, nullc)],
-                        })
+                        self.emit_when(vec![(Some(is_t), u2), (None, nullc)])
                     } else {
                         // `as? Prim` (`Unit` is never a primitive wrapper) → always `null`.
                         self.ir.add_expr(IrExpr::Const(IrConst::Null))
@@ -16959,9 +16856,7 @@ impl<'a> Lower<'a> {
                     let g2 = self.emit_get_value(ov);
                     let cast_t = self.emit_type_op(IrTypeOp::Cast, g2, target_ir);
                     let nullc = self.ir.add_expr(IrExpr::Const(IrConst::Null));
-                    let when = self.ir.add_expr(IrExpr::When {
-                        branches: vec![(Some(is_t), cast_t), (None, nullc)],
-                    });
+                    let when = self.emit_when(vec![(Some(is_t), cast_t), (None, nullc)]);
                     return Some(self.emit_block(vec![var_t], Some(when)));
                 }
                 let arg = self.expr(operand)?;
@@ -17243,7 +17138,7 @@ impl<'a> Lower<'a> {
                         branches.push((cond, body));
                     }
                 }
-                let when = self.ir.add_expr(IrExpr::When { branches });
+                let when = self.emit_when(branches);
                 // Prepend the subject-temp declaration (if any) so it's evaluated before the arms.
                 match subj_tmp {
                     Some((_, var)) => self.emit_block(vec![var], Some(when)),
