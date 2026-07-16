@@ -12341,6 +12341,24 @@ impl<'a> Lower<'a> {
         if r.name == "Unit" {
             return Some(Ty::obj("kotlin/Unit"));
         }
+        // A function type — the arrow form `(A) -> B` (parser name `<fun>`, params in `fun_params`) or
+        // the named `FunctionN<…>` form. Both test/cast against `kotlin/jvm/functions/FunctionN`, whose
+        // identity depends only on the arity (param/return types are erased for `instanceof`/`checkcast`),
+        // so build a `Ty::Fun` of the right arity with erased `Any` slots.
+        if (r.name == "<fun>" || !r.fun_params.is_empty()) && r.fun_params.len() <= 22 {
+            let params = vec![Ty::obj("kotlin/Any"); r.fun_params.len()];
+            return Some(Ty::fun(params, Ty::obj("kotlin/Any")));
+        }
+        if let Some(suffix) = r.name.strip_prefix("Function") {
+            if let Ok(arity) = suffix.parse::<usize>() {
+                // Match the checker's `typeref_leaf`: only `Function0..Function22` map to an ordinary
+                // `FunctionN` interface (higher arities are the big-arity `FunctionN`, left unresolved).
+                if arity <= 22 && r.targs.len() == arity + 1 {
+                    let params = vec![Ty::obj("kotlin/Any"); arity];
+                    return Some(Ty::fun(params, Ty::obj("kotlin/Any")));
+                }
+            }
+        }
         let t = if let Some(p) = Ty::from_name(&r.name) {
             p
         } else if let Some(elem) = Ty::primitive_array_element(&r.name) {
