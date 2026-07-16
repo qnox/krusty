@@ -376,6 +376,9 @@ pub struct SymbolResolver<'a> {
 pub enum SymRecv<'q> {
     Value(Ty),
     Type(&'q str),
+    /// No receiver — a plain `name(args)` resolved against the import scope's top-level (and
+    /// same-facade extension) functions.
+    TopLevel,
 }
 
 /// What a name DENOTES on its receiver — the declared thing the resolver found, NOT how it is used.
@@ -611,6 +614,22 @@ impl<'a> SymbolResolver<'a> {
                     overloads,
                 })))
             }
+            SymRecv::TopLevel => {
+                // A receiver-less name: its top-level (and same-facade extension) overloads, from the ONE
+                // `resolve_symbols` seam over the import scope. The caller filters by `FnKind` and selects.
+                let overloads = function_set_from_symbols(self.symbols_in_scope(name)).overloads;
+                if overloads.is_empty() {
+                    return None;
+                }
+                Some(Symbol::Member(Box::new(MemberFacets {
+                    call: None,
+                    read: None,
+                    write: None,
+                    method_ref: None,
+                    property_ref: None,
+                    overloads,
+                })))
+            }
             SymRecv::Type(internal) => {
                 if name.is_empty() {
                     // `Type(args)` — the type's constructor, real or synthesized.
@@ -633,13 +652,6 @@ impl<'a> SymbolResolver<'a> {
         }
     }
 
-    /// All TOP-LEVEL (and same-facade extension) function overloads of `name`, resolved through the ONE
-    /// `resolve_symbols` seam over this resolver's import scope (empty when there is no scope). Callers
-    /// filter by [`FnKind`] as they need (`TopLevel` for a plain call, etc.).
-    pub(crate) fn top_level_function_set(&self, name: &str) -> FunctionSet {
-        function_set_from_symbols(self.symbols_in_scope(name))
-    }
-
     /// Resolve a receiver-less top-level library callable for a concrete call site. This is the
     /// compatibility boundary for the older arg-dependent selector while checker/lowerer are moved to
     /// `FunctionSet`-backed resolution.
@@ -651,7 +663,12 @@ impl<'a> SymbolResolver<'a> {
     ) -> Option<LibraryCallable> {
         // FQN-driven resolution: union `resolve_symbols`' callables over the in-scope packages (the ONE
         // query), then keep the top-level overloads below.
-        let fs = self.top_level_function_set(name);
+        let fs = FunctionSet {
+            overloads: self
+                .resolve_symbol(SymRecv::TopLevel, name, &[])
+                .map(Symbol::overloads)
+                .unwrap_or_default(),
+        };
         self.pick_top_level(name, &fs, args, type_args)
     }
 
@@ -977,8 +994,9 @@ impl<'a> SymbolResolver<'a> {
         // shape the base carries — so the plain-array `$default` binds and the value-class emit pass is not
         // engaged, exactly as the removed receiver-indexed `functions(…, Some(recv))` lookup resolved it.
         let fs = self
-            .top_level_function_set(&format!("{name}$default"))
-            .overloads;
+            .resolve_symbol(SymRecv::TopLevel, &format!("{name}$default"), &[])
+            .map(Symbol::overloads)
+            .unwrap_or_default();
         for o in &fs {
             if !o.public() && !o.flags.inline.must_inline() {
                 continue;
@@ -1075,7 +1093,12 @@ impl<'a> SymbolResolver<'a> {
         args: &[Ty],
         type_args: &[Ty],
     ) -> Option<LibraryCallable> {
-        let fsd = self.top_level_function_set(&format!("{name}$default"));
+        let fsd = FunctionSet {
+            overloads: self
+                .resolve_symbol(SymRecv::TopLevel, &format!("{name}$default"), &[])
+                .map(Symbol::overloads)
+                .unwrap_or_default(),
+        };
         for o in fsd.top_level() {
             let c = &o.callable;
             if !o.public() && !o.flags.inline.must_inline() {
@@ -1096,11 +1119,15 @@ impl<'a> SymbolResolver<'a> {
                 // Among same-arity candidates, prefer one whose return is a bare type PARAMETER (the
                 // generic `fun <T> …(): T` form we need to bind), so a same-name/same-arity non-generic
                 // sibling doesn't cross-bind.
-                let bases: Vec<FunctionInfo> = self
-                    .top_level_function_set(name)
-                    .into_top_level()
-                    .filter(|b| b.generic_sig.is_some() && b.callable.params.len() == params.len())
-                    .collect();
+                let bases: Vec<FunctionInfo> = FunctionSet {
+                    overloads: self
+                        .resolve_symbol(SymRecv::TopLevel, name, &[])
+                        .map(Symbol::overloads)
+                        .unwrap_or_default(),
+                }
+                .into_top_level()
+                .filter(|b| b.generic_sig.is_some() && b.callable.params.len() == params.len())
+                .collect();
                 bases
                     .iter()
                     .find(|b| b.generic_sig.as_ref().is_some_and(|g| g.ret.is_ty_param()))
@@ -1197,7 +1224,7 @@ impl<'a> SymbolResolver<'a> {
         // `sumOfInt`) that the Kotlin name never matches, so the walk returns nothing and the call
         // bails ("not yet supported by the IR backend"). This mirrors `lambda_return_overload_param_types`.
         // Fall back to the receiver-indexed `functions()` only when there is no import scope.
-        self.top_level_function_set(name)
+        FunctionSet { overloads: self.resolve_symbol(SymRecv::TopLevel, name, &[]).map(Symbol::overloads).unwrap_or_default() }
             .overloads
             .into_iter()
             .find(|o| {
@@ -1228,25 +1255,30 @@ impl<'a> SymbolResolver<'a> {
     /// Parameter types for the lambda argument of a call selected by lambda return type
     /// (`Iterable<T>.sumOf { … }`), read from the selected overload family.
     pub fn lambda_return_overload_param_types(&self, receiver: Ty, name: &str) -> Option<Vec<Ty>> {
-        self.top_level_function_set(name)
-            .overloads
-            .iter()
-            .filter(|o| {
-                o.is_extension()
-                    && o.receiver
-                        .is_none_or(|dr| source_receiver_rank(self.lib, receiver, dr).is_some())
-            })
-            .find_map(|o| {
-                let gsig = o.generic_sig.as_ref()?;
-                let mut binds = std::collections::HashMap::new();
-                if let Some(recv_sig) = gsig.receiver {
-                    unify_ty(recv_sig, receiver, &mut binds);
-                }
-                gsig.params
-                    .first()
-                    .map(|selector| function_input_types(*selector, &binds))
-                    .filter(|params| !params.is_empty())
-            })
+        FunctionSet {
+            overloads: self
+                .resolve_symbol(SymRecv::TopLevel, name, &[])
+                .map(Symbol::overloads)
+                .unwrap_or_default(),
+        }
+        .overloads
+        .iter()
+        .filter(|o| {
+            o.is_extension()
+                && o.receiver
+                    .is_none_or(|dr| source_receiver_rank(self.lib, receiver, dr).is_some())
+        })
+        .find_map(|o| {
+            let gsig = o.generic_sig.as_ref()?;
+            let mut binds = std::collections::HashMap::new();
+            if let Some(recv_sig) = gsig.receiver {
+                unify_ty(recv_sig, receiver, &mut binds);
+            }
+            gsig.params
+                .first()
+                .map(|selector| function_input_types(*selector, &binds))
+                .filter(|params| !params.is_empty())
+        })
     }
 
     /// Lambda call-shape facts for a receiver-less top-level call. This is arg-dependent because a
@@ -1261,7 +1293,12 @@ impl<'a> SymbolResolver<'a> {
         // Lambda-SHAPE info for a name the caller already validated resolves (via import scope OR an
         // explicit FQ package). UNSCOPED over the federated source so a fully-qualified, unimported callee
         // (`kotlinx.coroutines.runBlocking { … }`) still yields its lambda facts.
-        let fs = self.top_level_function_set(name);
+        let fs = FunctionSet {
+            overloads: self
+                .resolve_symbol(SymRecv::TopLevel, name, &[])
+                .map(Symbol::overloads)
+                .unwrap_or_default(),
+        };
         // The default-omitted trailing-lambda alignment (`runBlocking { … }`) applies ONLY when NO overload
         // of this name matches the provided argument count exactly. A name WITH an exact-arity overload
         // (`run { … }`) always uses that overload's own parameter positions — never an alignment against a
