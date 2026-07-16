@@ -1112,11 +1112,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                         // A plain field read; if the field is `lateinit` the backend's `GetField`
                         // emission inserts the uninitialized null-check throw (so does every other read).
                         let this_e = lo.emit_get_value(0);
-                        let gf = lo.ir.add_expr(IrExpr::GetField {
-                            receiver: this_e,
-                            class: id,
-                            index: fidx as u32,
-                        });
+                        let gf = lo.emit_get_field(this_e, id, fidx as u32);
                         let ret = lo.emit_return(Some(gf));
                         let body = lo.emit_block(vec![ret], None);
                         let mi = method_fids.len() as u32;
@@ -1148,12 +1144,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                         if !methods.contains_key(&sname) {
                             let this_e = lo.emit_get_value(0);
                             let v = lo.emit_get_value(1);
-                            let sf = lo.ir.add_expr(IrExpr::SetField {
-                                receiver: this_e,
-                                class: id,
-                                index: fidx as u32,
-                                value: v,
-                            });
+                            let sf = lo.emit_set_field(this_e, id, fidx as u32, v);
                             let body = lo.emit_block(vec![sf], None);
                             let mi = method_fids.len() as u32;
                             let fid = lo.ir.add_fun(IrFunction {
@@ -2385,11 +2376,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     let (gv_owner, gv_desc, gv_ret, gv_inline, gv_is_ext) =
                         lo.delegate_getvalue_info(dty, &delegate_internal)?;
                     let this_e = lo.emit_get_value(0);
-                    let dele = lo.ir.add_expr(IrExpr::GetField {
-                        receiver: this_e,
-                        class: class_id,
-                        index: field_idx,
-                    });
+                    let dele = lo.emit_get_field(this_e, class_id, field_idx);
                     let this_arg = lo.emit_get_value(0);
                     let pref = make_propref(&mut lo);
                     let call = if gv_is_ext {
@@ -2423,11 +2410,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                         let sv = lo.syms.method_of(&delegate_internal, "setValue")?;
                         let sv_desc = lo.syms.libraries.method_descriptor(&sv.params, sv.ret)?;
                         let this_e = lo.emit_get_value(0);
-                        let dele = lo.ir.add_expr(IrExpr::GetField {
-                            receiver: this_e,
-                            class: class_id,
-                            index: field_idx,
-                        });
+                        let dele = lo.emit_get_field(this_e, class_id, field_idx);
                         let this_arg = lo.emit_get_value(0);
                         let pref = make_propref(&mut lo);
                         let value_arg = lo.emit_get_value(1);
@@ -2796,12 +2779,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                             let (pv, _) = lo.lookup(&name)?;
                             let recv = lo.emit_get_value(this_v);
                             let val = lo.emit_get_value(pv);
-                            stmts.push(lo.ir.add_expr(IrExpr::SetField {
-                                receiver: recv,
-                                class: class_id,
-                                index: idx,
-                                value: val,
-                            }));
+                            stmts.push(lo.emit_set_field(recv, class_id, idx, val));
                         }
                         // These stores ARE the param→field stores — backend must not auto-store too.
                         lo.ir.classes[class_id as usize].explicit_param_stores = true;
@@ -2821,12 +2799,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                         let (pv, _) = lo.lookup(dname)?;
                         let this_e = lo.emit_get_value(this_v);
                         let val_e = lo.emit_get_value(pv);
-                        let sf = lo.ir.add_expr(IrExpr::SetField {
-                            receiver: this_e,
-                            class: class_id,
-                            index: fidx,
-                            value: val_e,
-                        });
+                        let sf = lo.emit_set_field(this_e, class_id, fidx, val_e);
                         stmts.push(sf);
                     }
                     // Expression delegates (`: I by Impl()`): evaluate the expression once into its
@@ -2843,12 +2816,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                             .clone();
                         let val_e = lo.lower_arg(*e, &fty)?;
                         let this_e = lo.emit_get_value(this_v);
-                        let sf = lo.ir.add_expr(IrExpr::SetField {
-                            receiver: this_e,
-                            class: class_id,
-                            index: fidx,
-                            value: val_e,
-                        });
+                        let sf = lo.emit_set_field(this_e, class_id, fidx, val_e);
                         stmts.push(sf);
                     }
                     for step in &c.init_order {
@@ -2894,12 +2862,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                                     lo.lower_arg(init_e, &field_ty)
                                 })?;
                                 let recv = lo.emit_get_value(this_v);
-                                stmts.push(lo.ir.add_expr(IrExpr::SetField {
-                                    receiver: recv,
-                                    class: class_id,
-                                    index: field_idx,
-                                    value: val,
-                                }));
+                                stmts.push(lo.emit_set_field(recv, class_id, field_idx, val));
                             }
                             ast::ClassInit::Block(e) => {
                                 // An `init { … }` block: lower its statements for effect.
@@ -2956,12 +2919,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                             .clone();
                         let val = lo.lower_arg(p.delegate.unwrap(), &field_ty)?;
                         let recv = lo.emit_get_value(this_v);
-                        stmts.push(lo.ir.add_expr(IrExpr::SetField {
-                            receiver: recv,
-                            class: class_id,
-                            index: field_idx,
-                            value: val,
-                        }));
+                        stmts.push(lo.emit_set_field(recv, class_id, field_idx, val));
                     }
                     let body = lo.emit_block(stmts, None);
                     lo.ir.classes[class_id as usize].init_body = Some(body);
@@ -3427,12 +3385,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                                 let init = eprops[fi].init.unwrap();
                                 let val = lo.lower_arg(init, &ty_to_ir(*fty))?;
                                 let recv = lo.emit_get_value(this_v);
-                                stmts.push(lo.ir.add_expr(IrExpr::SetField {
-                                    receiver: recv,
-                                    class: sub_id,
-                                    index: fi as u32,
-                                    value: val,
-                                }));
+                                stmts.push(lo.emit_set_field(recv, sub_id, fi as u32, val));
                             }
                             let blk = lo.emit_block(stmts, None);
                             lo.ir.classes[sub_id as usize].init_body = Some(blk);
@@ -3569,7 +3522,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                             lo.lower_body(&getter, &ir_ty, gfid)?;
                         } else {
                             // Default getter: `return field` → `getstatic; areturn`.
-                            let read = lo.ir.add_expr(IrExpr::GetStatic(sidx));
+                            let read = lo.emit_get_static(sidx);
                             let ret = lo.emit_return(Some(read));
                             let body = lo.emit_block(vec![ret], None);
                             lo.ir.functions[gfid as usize].body = Some(body);
@@ -3596,10 +3549,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                         } else {
                             // Default setter: `field = value` → `putstatic; return`.
                             let val = lo.emit_get_value(v_v);
-                            let set = lo.ir.add_expr(IrExpr::SetStatic {
-                                index: sidx,
-                                value: val,
-                            });
+                            let set = lo.emit_set_static(sidx, val);
                             let ret = lo.emit_return(None);
                             let body = lo.emit_block(vec![set, ret], None);
                             lo.ir.functions[sfid as usize].body = Some(body);
@@ -4912,6 +4862,10 @@ impl<'a> Lower<'a> {
         })
     }
 
+    fn emit_get_static(&mut self, index: u32) -> u32 {
+        self.ir.add_expr(IrExpr::GetStatic(index))
+    }
+
     fn emit_set_static(&mut self, index: u32, value: u32) -> u32 {
         self.ir.add_expr(IrExpr::SetStatic { index, value })
     }
@@ -5502,9 +5456,9 @@ impl<'a> Lower<'a> {
 
         // getX(): a member → `x$delegate.getValue(null, x$kprop)`; an extension → the static
         // `getValue(x$delegate, null, x$kprop)`.
-        let get_d = self.ir.add_expr(IrExpr::GetStatic(idx_d));
+        let get_d = self.emit_get_static(idx_d);
         let null_a = self.emit_const(IrConst::Null);
-        let get_p = self.ir.add_expr(IrExpr::GetStatic(idx_p));
+        let get_p = self.emit_get_static(idx_p);
         let call = if gv_is_ext {
             self.emit_static_call(
                 gv_owner,
@@ -15537,7 +15491,7 @@ impl<'a> Lower<'a> {
                     }
                     // A top-level custom accessor reads the backing STATIC field.
                     if let Some((sidx, _)) = self.cur_static_field {
-                        return Some(self.ir.add_expr(IrExpr::GetStatic(sidx)));
+                        return Some(self.emit_get_static(sidx));
                     }
                 }
                 // A CLASSPATH `object` referenced as a value (`EmptyCoroutineContext`) — the checker
@@ -15652,7 +15606,7 @@ impl<'a> Lower<'a> {
                     // (`fun m() = MAX`) → inline the literal, like kotlinc.
                     self.emit_const(c)
                 } else if let Some(&(idx, sty)) = self.statics.get(&n) {
-                    let read = self.ir.add_expr(IrExpr::GetStatic(idx));
+                    let read = self.emit_get_static(idx);
                     // Smart-cast of a top-level `val` to a scalar (`val x: Any; if (x is Double) …`)
                     // unboxes the reference field read, mirroring the local-variable path above.
                     let narrowed = self.info.ty(e);
