@@ -602,7 +602,15 @@ fn emit_class(
         .methods
         .iter()
         .any(|&fid| ir.functions[fid as usize].body.is_none());
-    let mut access = 0x0001 | 0x0020; // PUBLIC | SUPER
+    // A synthesized `$fn$1` continuation class is PACKAGE-PRIVATE in kotlinc (`0x0030` FINAL|SUPER) —
+    // it is only touched by its own file's classes. Detected by its superclass; everything about its
+    // member access follows kotlinc's continuation layout below.
+    let is_continuation = c.superclass == "kotlin/coroutines/jvm/internal/ContinuationImpl";
+    let mut access = if is_continuation {
+        0x0020 // SUPER (package-private)
+    } else {
+        0x0001 | 0x0020 // PUBLIC | SUPER
+    };
     if !extended && !has_abstract {
         access |= 0x0010;
     } // FINAL
@@ -637,7 +645,17 @@ fn emit_class(
         // non-private field → `ACC_PUBLIC` (read/written cross-class, e.g. a coroutine continuation's
         // `result`/`label`).
         let private = field.is_private;
-        let acc = (if private { 0x0002 } else { 0x0001 }) | if field.is_final { 0x0010 } else { 0 };
+        let acc = if is_continuation {
+            // kotlinc's continuation field layout: everything package-private; `result` is SYNTHETIC,
+            // the captured receiver `this$0` is FINAL|SYNTHETIC; `label` and the `L$N` spills are plain.
+            match name.as_str() {
+                "result" => 0x1000,
+                "this$0" => 0x1010,
+                _ => 0x0000,
+            }
+        } else {
+            (if private { 0x0002 } else { 0x0001 }) | if field.is_final { 0x0010 } else { 0 }
+        };
         // A field typed by a bare type parameter (`val a: A`) carries a `Signature` (`TA;`), like kotlinc.
         let field_sig = ir
             .field_signatures
@@ -852,7 +870,9 @@ fn emit_class(
         let value_param_ctor = ir.value_param_ctors.contains(&c.fq_name);
         let ctor_access = if c.is_object || c.is_value || value_param_ctor {
             0x0002
-        } else if c.is_companion {
+        } else if c.is_companion || is_continuation {
+            // A companion's ctor is package-private (called from the outer `<clinit>`); so is a
+            // continuation class's (constructed only by its own file's suspend function).
             0x0000
         } else {
             0x0001
