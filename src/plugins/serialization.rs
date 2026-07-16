@@ -1183,6 +1183,7 @@ impl IrPlugin for SerializationPlugin {
                     index: desc_local,
                     ty: class_ty("kotlinx/serialization/descriptors/SerialDescriptor"),
                     init: Some(d),
+                    named: false,
                 })];
             } else {
                 let pgsd_name =
@@ -1202,6 +1203,7 @@ impl IrPlugin for SerializationPlugin {
                     index: desc_local,
                     ty: class_ty(pgsd_internal),
                     init: Some(pgsd),
+                    named: false,
                 });
                 init_stmts = vec![dvar];
                 for (i, (pname, _)) in foo_fields.iter().enumerate() {
@@ -1515,6 +1517,7 @@ impl IrPlugin for SerializationPlugin {
                             index: 3,
                             ty: class_ty("kotlinx/serialization/encoding/CompositeEncoder"),
                             init: Some(begin),
+                            named: false,
                         });
                         let mut stmts = vec![cvar];
                         let mut bail = false;
@@ -1849,6 +1852,7 @@ impl IrPlugin for SerializationPlugin {
                                 index: 2,
                                 ty: class_ty("kotlinx/serialization/encoding/CompositeDecoder"),
                                 init: Some(begin),
+                                named: false,
                             });
                             let mut stmts = vec![cvar];
                             // index local (3) — declared before the field locals so emit's slot order
@@ -1859,6 +1863,7 @@ impl IrPlugin for SerializationPlugin {
                                 index: 3,
                                 ty: class_ty("kotlin/Int"),
                                 init: Some(izero),
+                                named: false,
                             }));
                             // field locals (4 + k), defaulted. An OPTIONAL element (a constant default)
                             // starts at its DEFAULT value, so an element omitted from the input (never
@@ -1879,6 +1884,7 @@ impl IrPlugin for SerializationPlugin {
                                     index: slots[k],
                                     ty: ty.clone(),
                                     init: Some(init),
+                                    named: false,
                                 }));
                             }
                             // loop body: i = c.decodeElementIndex(desc); when(i){…}

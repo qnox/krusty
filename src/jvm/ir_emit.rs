@@ -478,10 +478,57 @@ fn emit_statics(ir: &IrFile, facade: &str, cw: &mut ClassWriter, bodies: &dyn Me
         }
         cw.add_field(acc, &s.name, &desc);
     }
+    // Which statics a CLASS body (a different JVM class than the facade) reads/writes — a PRIVATE
+    // top-level property has no public accessors, so those references need kotlinc's `access$get<X>$p` /
+    // `access$set<X>$p` bridges (emitted below, only when actually referenced).
+    let mut cross_get: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    let mut cross_set: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    {
+        let mut roots: Vec<u32> = Vec::new();
+        for c in &ir.classes {
+            for &fid in &c.methods {
+                if let Some(b) = ir.functions.get(fid as usize).and_then(|f| f.body) {
+                    roots.push(b);
+                }
+            }
+            roots.extend(c.init_body);
+            roots.extend(c.super_args.iter().copied());
+            for sc in &c.secondary_ctors {
+                roots.extend(sc.body);
+                roots.extend(sc.delegate_args.iter().copied());
+            }
+            for en in &c.enum_entries {
+                roots.extend(en.args.iter().copied());
+            }
+        }
+        let mut seen: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        let mut stack = roots;
+        while let Some(cur) = stack.pop() {
+            if !seen.insert(cur) {
+                continue;
+            }
+            match &ir.exprs[cur as usize] {
+                IrExpr::GetStatic(i) => {
+                    cross_get.insert(*i);
+                }
+                IrExpr::SetStatic { index, .. } => {
+                    cross_set.insert(*index);
+                }
+                _ => {}
+            }
+            crate::ir::for_each_child(&ir.exprs, cur, &mut |ch| stack.push(ch));
+        }
+    }
     // Accessors: a plain top-level `val`/`var` gets a `public static final getX()` (and `setX()` for a
     // `var`), so other classes read/write it the way kotlinc compiles cross-file property access. A
-    // `const val` is `public static final` with no accessor (kotlinc inlines const reads).
-    for s in &facade_statics {
+    // `const val` is `public static final` with no accessor (kotlinc inlines const reads). A PRIVATE
+    // property gets NO public accessors — only the `access$…$p` bridges, and only when referenced.
+    for (sidx, s) in ir
+        .statics
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| s.owner.is_none())
+    {
         // A `const val` inlines (no accessor); a CUSTOM-accessor property emits its `getX`/`setX` as
         // ordinary facade methods (from `ir.functions`), so skip the trivial auto-accessor here.
         if s.is_const || s.custom_accessor {
@@ -489,6 +536,39 @@ fn emit_statics(ir: &IrFile, facade: &str, cw: &mut ClassWriter, bodies: &dyn Me
         }
         let jt = ir_ty_to_jvm(&s.ty);
         let desc = type_descriptor(jt);
+        if s.visibility.is_private() {
+            if cross_get.contains(&(sidx as u32)) {
+                let mut g = CodeBuilder::new(0);
+                let fref = cw.fieldref(facade, &s.name, &desc);
+                g.getstatic(fref, slot_words(jt) as i32);
+                emit_return(jt, &mut g);
+                g.ensure_locals(0);
+                g.link();
+                cw.add_method(
+                    0x1019, /* PUBLIC | STATIC | FINAL | SYNTHETIC */
+                    &format!("access${}$p", property_getter_name(&s.name)),
+                    &format!("(){desc}"),
+                    &g,
+                );
+            }
+            if s.is_var && cross_set.contains(&(sidx as u32)) {
+                let words = slot_words(jt);
+                let mut st = CodeBuilder::new(words);
+                load(jt, 0, &mut st);
+                let fref = cw.fieldref(facade, &s.name, &desc);
+                st.putstatic(fref, slot_words(jt) as i32);
+                st.ret_void();
+                st.ensure_locals(words);
+                st.link();
+                cw.add_method(
+                    0x1019,
+                    &format!("access${}$p", property_setter_name(&s.name)),
+                    &format!("({desc})V"),
+                    &st,
+                );
+            }
+            continue;
+        }
         let mut g = CodeBuilder::new(0);
         let fref = cw.fieldref(facade, &s.name, &desc);
         g.getstatic(fref, slot_words(jt) as i32);
@@ -4283,7 +4363,9 @@ impl<'a> Emitter<'a> {
                 }
                 None => code.ret_void(),
             },
-            IrExpr::Variable { index, ty, init } => {
+            IrExpr::Variable {
+                index, ty, init, ..
+            } => {
                 // Emit the initializer BEFORE allocating the slot, so the variable's slot isn't
                 // claimed in StackMapTable frames recorded inside a branchy initializer (where the
                 // verifier still sees it as `top`).
@@ -4397,16 +4479,21 @@ impl<'a> Emitter<'a> {
                 let is_const = s.is_const;
                 let facade = self.facade.clone();
                 self.emit_value(value, code);
-                // Within the facade write the field directly; from another class go through `setX()`.
+                // Within the facade write the field directly; from another class go through `setX()` —
+                // or, for a PRIVATE top-level property (no public setter), the `access$set<X>$p` bridge.
+                let private = self.ir.statics[index as usize].visibility.is_private();
                 if self.owner == facade || is_const {
                     let fref = self.cw.fieldref(&facade, &name, &type_descriptor(jt));
                     code.putstatic(fref, slot_words(jt) as i32);
                 } else {
-                    let m = self.cw.methodref(
-                        &facade,
-                        &property_setter_name(&name),
-                        &format!("({})V", type_descriptor(jt)),
-                    );
+                    let sname = if private {
+                        format!("access${}$p", property_setter_name(&name))
+                    } else {
+                        property_setter_name(&name)
+                    };
+                    let m =
+                        self.cw
+                            .methodref(&facade, &sname, &format!("({})V", type_descriptor(jt)));
                     code.invokestatic(m, slot_words(jt) as i32, 0);
                 }
             }
@@ -4658,15 +4745,21 @@ impl<'a> Emitter<'a> {
                 // Within the facade (or a `const val`, which is public) read the field directly; from
                 // another class a plain top-level property is private, so go through `getX()` — kotlinc's
                 // cross-file property-access compilation.
+                let private = self.ir.statics[*i as usize].visibility.is_private();
                 if self.owner == facade || is_const {
                     let fref = self.cw.fieldref(&facade, &name, &type_descriptor(jt));
                     code.getstatic(fref, slot_words(jt) as i32);
                 } else {
-                    let m = self.cw.methodref(
-                        &facade,
-                        &property_getter_name(&name),
-                        &format!("(){}", type_descriptor(jt)),
-                    );
+                    // A PRIVATE top-level property has no public getter; cross-class reads inside the
+                    // file go through kotlinc's `access$get<X>$p` bridge.
+                    let gname = if private {
+                        format!("access${}$p", property_getter_name(&name))
+                    } else {
+                        property_getter_name(&name)
+                    };
+                    let m =
+                        self.cw
+                            .methodref(&facade, &gname, &format!("(){}", type_descriptor(jt)));
                     code.invokestatic(m, 0, slot_words(jt) as i32);
                 }
             }

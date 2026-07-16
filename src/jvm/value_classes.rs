@@ -3105,6 +3105,7 @@ fn box_wrap_nullable(ir: &mut IrFile, id: ExprId, x: &str, under: &HashMap<Strin
         index: slot,
         ty: u.clone(),
         init: Some(orig_id),
+        named: false,
     });
     let get_for_test = ir.exprs.len() as ExprId;
     ir.exprs.push(IrExpr::GetValue(slot));

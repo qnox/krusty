@@ -198,6 +198,13 @@ pub enum IrExpr {
         index: u32,
         ty: Ty,
         init: Option<ExprId>,
+        /// `true` for a NAMED source variable (`val x = …`, a destructuring component, a loop
+        /// variable); `false` for a compiler-introduced temp (elvis/safe-call materialization,
+        /// suspension hoists). The suspend state machine spills every named reference variable in
+        /// scope at a suspension point (kotlinc's rule — liveness-irrelevant), but a temp only by
+        /// LIVENESS: kotlinc holds those values on the operand stack, which is empty across a
+        /// suspension unless the value is still needed.
+        named: bool,
     },
     /// A built-in primitive binary operator (`+`/`-`/`<`/`==`/…) on numeric/boolean operands. One
     /// parameterized node (not one-per-intrinsic): Kotlin IR models these as `IrCall` to the
@@ -880,6 +887,10 @@ pub struct IrStatic {
     /// = a specific class — a `companion object`'s `const val` lives on the OUTER class (kotlinc emits
     /// `public static final` + `ConstantValue` there), not the facade.
     pub owner: Option<String>,
+    /// Declaration visibility (`public` by default). A PRIVATE top-level property gets NO public
+    /// accessors; cross-class reads inside the file go through a synthesized `access$get<X>$p` bridge
+    /// (kotlinc's shape).
+    pub visibility: crate::types::Visibility,
     /// `true` when this backing field has a CUSTOM accessor (`val x = init get() = field…`): the field
     /// is still emitted + initialized in `<clinit>`, but the trivial `getX`/`setX` accessors are NOT
     /// auto-generated here — the custom `getX`/`setX` are emitted as ordinary facade methods (their
