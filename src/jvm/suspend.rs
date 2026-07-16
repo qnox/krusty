@@ -70,28 +70,35 @@ pub fn lower_suspend(ir: &mut IrFile, facade: &str) -> bool {
     );
     for fid in fids {
         let body = ir.functions[fid as usize].body;
+        // A pure TAIL-CALL forward (`suspend fun f(…) = g(…)` where `g` is the sole suspension) needs NO
+        // state machine — kotlinc forwards `$completion` to the callee and returns its result. Detect it on
+        // the RAW body, before splice/hoist/desugar reshape the tail suspension into a bound resume point.
+        // The call `ExprId` is stable across the later `shift_locals`, so remember it and thread
+        // `$completion` in below. When it matches, the splice/hoist/desugar normalizations are all skipped.
+        let forward = body.and_then(|b| tail_forward_call(ir, b, &suspend_set));
         // Normalize `return { stmts…; value }` into `stmts…; return value`. An elvis / safe-call subject
         // that suspends lowers to a value-position `Block` binding a temp (`{ val t = susp()…; when{…} }`);
         // hoisting can't see into a value block, so the suspension would hide there and the flattener bail.
         // Splicing lifts the block's statements to the top level where the hoister/flattener handle them.
-        if let Some(b) = body {
+        if let (Some(b), None) = (body, forward) {
             splice_return_blocks(ir, b);
         }
         // Hoist a suspension nested at an unconditional position in an expression (`foo() + 2`) into a
         // preceding `val tmp = foo()` temp, so the flattener only meets suspensions at handled positions.
-        if let Some(b) = body {
+        if let (Some(b), None) = (body, forward) {
             hoist_suspensions(ir, b, &suspend_set, &orig_rets);
         }
         // Desugar `return <suspend call>` (incl. an `= <suspend call>` expression body) into
         // `val tmp = <suspend call>; return tmp` so a tail-position suspension becomes a uniform
         // bound-local point. Uses the function's (pre-CPS) declared return type for `tmp`.
         let ret_ty = ir.functions[fid as usize].ret.clone();
-        if let Some(b) = body {
+        if let (Some(b), None) = (body, forward) {
             desugar_value_try(ir, b, &suspend_set, &ret_ty);
             desugar_value_when(ir, b, &suspend_set, &ret_ty);
             desugar_tail_suspend(ir, b, &suspend_set, &ret_ty);
         }
-        let has_susp = body.is_some_and(|b| expr_calls_suspend(ir, b, &suspend_set));
+        let has_susp =
+            forward.is_none() && body.is_some_and(|b| expr_calls_suspend(ir, b, &suspend_set));
         crate::trace_compiler!(
             "suspend",
             "fn fid={fid} name={} has_susp={has_susp}",
@@ -116,7 +123,14 @@ pub fn lower_suspend(ir: &mut IrFile, facade: &str) -> bool {
             rewrite_current_continuation(ir, b, p_old);
         }
 
-        if !has_susp {
+        if let (Some(call), Some(b)) = (forward, body) {
+            // Tail-call forward: thread the function's own `$completion` (value-index `p_old`) into the
+            // callee and return its `Object` result directly. No state machine, no continuation class —
+            // exactly kotlinc's tail-call optimization.
+            let cont = ir.add_expr(IrExpr::GetValue(p_old));
+            append_continuation(ir, call, cont);
+            make_forward_body(ir, b);
+        } else if !has_susp {
             // Leaf: box the returns (no state machine). The CPS method returns `Object`, so an expression
             // / statement body that falls through (no `return`) must get a terminal return — a value body
             // returns its boxed value, a `Unit` body runs for effect then returns `Unit.INSTANCE`.
@@ -861,6 +875,70 @@ fn suspend_call_fid(ir: &IrFile, e: ExprId, suspend_set: &HashSet<u32>) -> Optio
 /// resolver). The flattener threads the continuation into every such call uniformly.
 fn is_suspend_call(ir: &IrFile, e: ExprId, suspend_set: &HashSet<u32>) -> bool {
     suspend_call_fid(ir, e, suspend_set).is_some() || ir.suspend_calls.contains_key(&e)
+}
+
+/// Whether EXACTLY ONE suspend call is reachable from `e`. Iterative with a visited set (the expr arena
+/// can share/deeply-nest nodes — a recursive walk overflows the stack) and early-exits once a second is
+/// seen (the caller only needs the "== 1" answer).
+fn exactly_one_suspend_call(ir: &IrFile, e: ExprId, set: &HashSet<u32>) -> bool {
+    let mut seen: HashSet<ExprId> = HashSet::new();
+    let mut stack = vec![e];
+    let mut count = 0usize;
+    while let Some(cur) = stack.pop() {
+        if !seen.insert(cur) {
+            continue;
+        }
+        if is_suspend_call(ir, cur, set) {
+            count += 1;
+            if count > 1 {
+                return false;
+            }
+        }
+        for_each_child(&ir.exprs, cur, &mut |c| stack.push(c));
+    }
+    count == 1
+}
+
+/// If the suspend body is a pure TAIL-CALL forward — its result is a single suspend call in tail position
+/// and NOTHING else in the body suspends — return that call's `ExprId`. kotlinc emits NO state machine /
+/// continuation class for such a function: it forwards its own `$completion` to the callee and returns the
+/// callee's `Object` result directly. Detected BEFORE `desugar_tail_suspend` (which would otherwise bind
+/// the tail into a resume point and force a state machine). Conservative — only the plain
+/// `return <suspend call>` / trailing-value shapes, never an `if`/`when`/multi-return body.
+fn tail_forward_call(ir: &IrFile, b: ExprId, set: &HashSet<u32>) -> Option<ExprId> {
+    if !exactly_one_suspend_call(ir, b, set) {
+        return None;
+    }
+    let tail = match &ir.exprs[b as usize] {
+        IrExpr::Return(Some(e)) => *e,
+        IrExpr::Block { value: Some(v), .. } => *v,
+        IrExpr::Block {
+            value: None, stmts, ..
+        } => match stmts.last() {
+            Some(&last) => match ir.exprs[last as usize] {
+                IrExpr::Return(Some(e)) => e,
+                _ => return None,
+            },
+            None => return None,
+        },
+        _ => return None,
+    };
+    is_suspend_call(ir, tail, set).then_some(tail)
+}
+
+/// Rewrite the body's tail (a trailing `value` or `return <call>`) so it `return`s the forwarded suspend
+/// call directly — the CPS `Object` result, unboxed and unwrapped (no state machine). A trailing VALUE is
+/// promoted to a `Return`; an existing `return <call>` is already in the right shape.
+fn make_forward_body(ir: &mut IrFile, b: ExprId) {
+    if let IrExpr::Block {
+        stmts,
+        value: Some(v),
+    } = ir.exprs[b as usize].clone()
+    {
+        let mut stmts = stmts;
+        stmts.push(ir.add_expr(IrExpr::Return(Some(v))));
+        ir.exprs[b as usize] = IrExpr::Block { stmts, value: None };
+    }
 }
 
 /// The CPS form of a logical method descriptor: append the trailing `Continuation` parameter and erase
