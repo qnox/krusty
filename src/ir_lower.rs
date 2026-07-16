@@ -2468,16 +2468,14 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                             }
                             _ => value_arg,
                         };
-                        let call = lo.ir.add_expr(IrExpr::Call {
-                            callee: crate::ir::Callee::Virtual {
-                                owner: delegate_internal.clone(),
-                                name: "setValue".to_string(),
-                                descriptor: sv_desc,
-                                interface: false,
-                            },
-                            dispatch_receiver: Some(dele),
-                            args: vec![this_arg, pref, value_arg],
-                        });
+                        let call = lo.emit_virtual_call(
+                            delegate_internal.clone(),
+                            "setValue".to_string(),
+                            sv_desc,
+                            false,
+                            dele,
+                            vec![this_arg, pref, value_arg],
+                        );
                         let body = lo.ir.add_expr(IrExpr::Block {
                             stmts: vec![call],
                             value: None,
@@ -4820,6 +4818,27 @@ impl<'a> Lower<'a> {
         self.ir.add_expr(IrExpr::Call {
             callee: Callee::External(symbol.into()),
             dispatch_receiver,
+            args,
+        })
+    }
+
+    fn emit_cross_file_call(
+        &mut self,
+        facade: String,
+        name: String,
+        params: Vec<Ty>,
+        ret: Ty,
+        args: Vec<u32>,
+    ) -> u32 {
+        let callee = Callee::CrossFile {
+            facade,
+            name,
+            params,
+            ret,
+        };
+        self.ir.add_expr(IrExpr::Call {
+            callee,
+            dispatch_receiver: None,
             args,
         })
     }
@@ -8263,16 +8282,13 @@ impl<'a> Lower<'a> {
             "kotlinx/serialization/KSerializer",
             &[Ty::obj(c_internal)],
         ));
-        self.ir.add_expr(IrExpr::Call {
-            callee: Callee::CrossFile {
-                facade: c_internal.to_string(),
-                name: "serializer".to_string(),
-                params: vec![],
-                ret,
-            },
-            dispatch_receiver: None,
-            args: vec![],
-        })
+        self.emit_cross_file_call(
+            c_internal.to_string(),
+            "serializer".to_string(),
+            vec![],
+            ret,
+            vec![],
+        )
     }
 
     /// Whether classpath type `internal` is a kotlinx `StringFormat` — detected structurally by the
@@ -10608,16 +10624,14 @@ impl<'a> Lower<'a> {
         });
         let getter = |this: &mut Self, accessor: &PlatformAccessor| {
             let recv = this.ir.add_expr(IrExpr::GetValue(r_v));
-            this.ir.add_expr(IrExpr::Call {
-                callee: Callee::Virtual {
-                    owner: internal.clone(),
-                    name: accessor.name.clone(),
-                    descriptor: accessor.descriptor.clone(),
-                    interface: false,
-                },
-                dispatch_receiver: Some(recv),
-                args: vec![],
-            })
+            this.emit_virtual_call(
+                internal.clone(),
+                accessor.name.clone(),
+                accessor.descriptor.clone(),
+                false,
+                recv,
+                vec![],
+            )
         };
         // i = range.getFirst()
         let first = getter(self, &loop_info.first);
@@ -13549,16 +13563,13 @@ impl<'a> Lower<'a> {
                         return None;
                     }
                     let val = self.lower_arg(value, &ty_to_ir(ty))?;
-                    Some(self.ir.add_expr(IrExpr::Call {
-                        callee: Callee::CrossFile {
-                            facade,
-                            name: property_setter_name(&name),
-                            params: vec![ty_to_ir(ty)],
-                            ret: Ty::Unit,
-                        },
-                        dispatch_receiver: None,
-                        args: vec![val],
-                    }))
+                    Some(self.emit_cross_file_call(
+                        facade,
+                        property_setter_name(&name),
+                        vec![ty_to_ir(ty)],
+                        Ty::Unit,
+                        vec![val],
+                    ))
                 } else {
                     // `this` is an external receiver (an inlined `apply`/`run` whose backing field is
                     // private) — write through the property setter `setX(v)`.
@@ -16494,16 +16505,14 @@ impl<'a> Lower<'a> {
                                 } else {
                                     self.lower_arg(recv, &ty_to_ir(Ty::obj("kotlin/Any")))?
                                 };
-                                Some(self.ir.add_expr(IrExpr::Call {
-                                    callee: Callee::Virtual {
-                                        owner: "java/lang/Object".to_string(),
-                                        name: "getClass".to_string(),
-                                        descriptor: "()Ljava/lang/Class;".to_string(),
-                                        interface: false,
-                                    },
-                                    dispatch_receiver: Some(r),
-                                    args: vec![],
-                                }))
+                                Some(self.emit_virtual_call(
+                                    "java/lang/Object".to_string(),
+                                    "getClass".to_string(),
+                                    "()Ljava/lang/Class;".to_string(),
+                                    false,
+                                    r,
+                                    vec![],
+                                ))
                             }
                         };
                     }
@@ -16920,16 +16929,13 @@ impl<'a> Lower<'a> {
                     } else {
                         // A top-level property from ANOTHER file → call its facade's `getX()` (the field is
                         // private), reusing the backend-agnostic cross-file callee.
-                        self.ir.add_expr(IrExpr::Call {
-                            callee: Callee::CrossFile {
-                                facade,
-                                name: property_getter_name(&n),
-                                params: vec![],
-                                ret: ty_to_ir(ty),
-                            },
-                            dispatch_receiver: None,
-                            args: vec![],
-                        })
+                        self.emit_cross_file_call(
+                            facade,
+                            property_getter_name(&n),
+                            vec![],
+                            ty_to_ir(ty),
+                            vec![],
+                        )
                     }
                 } else if let Some(class) = self
                     .classes
@@ -17185,16 +17191,14 @@ impl<'a> Lower<'a> {
                         let descriptor =
                             format!("(){}", self.syms.libraries.ir_type_descriptor(field.ty)?);
                         let a = self.expr(receiver)?;
-                        return Some(self.ir.add_expr(IrExpr::Call {
-                            callee: Callee::Virtual {
-                                owner: internal.to_string(),
-                                name: name.clone(),
-                                descriptor,
-                                interface: true,
-                            },
-                            dispatch_receiver: Some(a),
-                            args: vec![],
-                        }));
+                        return Some(self.emit_virtual_call(
+                            internal.to_string(),
+                            name.clone(),
+                            descriptor,
+                            true,
+                            a,
+                            vec![],
+                        ));
                     }
                 }
                 // A `val` extension property read (`x.doubled`) → its static getter `getDoubled(x)`.
@@ -17330,16 +17334,14 @@ impl<'a> Lower<'a> {
                             // Read the owner before the mutable `self.expr` borrow (drops `ci`'s borrow).
                             let owner = self.ir.classes[cid].fq_name.clone();
                             let recv = self.expr(receiver)?;
-                            return Some(self.ir.add_expr(IrExpr::Call {
-                                callee: Callee::Virtual {
-                                    owner,
-                                    name: accessor.name,
-                                    descriptor: accessor.descriptor,
-                                    interface: false,
-                                },
-                                dispatch_receiver: Some(recv),
-                                args: vec![],
-                            }));
+                            return Some(self.emit_virtual_call(
+                                owner,
+                                accessor.name,
+                                accessor.descriptor,
+                                false,
+                                recv,
+                                vec![],
+                            ));
                         }
                     }
                 }
@@ -19152,16 +19154,13 @@ impl<'a> Lower<'a> {
                         for (arg, pt) in args.iter().zip(&fi.callable.params) {
                             a.push(self.lower_arg(*arg, &ty_to_ir(*pt))?);
                         }
-                        let call = self.ir.add_expr(IrExpr::Call {
-                            callee: Callee::CrossFile {
-                                facade,
-                                name: fname.clone(),
-                                params: tys_to_ir(&fi.callable.params),
-                                ret: ty_to_ir(fi.callable.ret),
-                            },
-                            dispatch_receiver: None,
-                            args: a,
-                        });
+                        let call = self.emit_cross_file_call(
+                            facade,
+                            fname.clone(),
+                            tys_to_ir(&fi.callable.params),
+                            ty_to_ir(fi.callable.ret),
+                            a,
+                        );
                         // A cross-file `suspend fun` call: record it so the coroutine pass threads the
                         // continuation (the callee, in another file, is absent from this file's
                         // `suspend_funs`). The logical return type is the resolved callable's.
@@ -20296,16 +20295,13 @@ impl<'a> Lower<'a> {
                                     for arg in &args {
                                         a.push(self.lower_arg(*arg, &kser)?);
                                     }
-                                    return Some(self.ir.add_expr(IrExpr::Call {
-                                        callee: Callee::CrossFile {
-                                            facade: internal,
-                                            name: "serializer".to_string(),
-                                            params: vec![kser; args.len()],
-                                            ret,
-                                        },
-                                        dispatch_receiver: None,
-                                        args: a,
-                                    }));
+                                    return Some(self.emit_cross_file_call(
+                                        internal,
+                                        "serializer".to_string(),
+                                        vec![kser; args.len()],
+                                        ret,
+                                        a,
+                                    ));
                                 }
                             }
                         }
@@ -20958,16 +20954,14 @@ impl<'a> Lower<'a> {
                                 None => a.push(self.expr(arg)?),
                             }
                         }
-                        let call = self.ir.add_expr(IrExpr::Call {
-                            callee: Callee::Virtual {
-                                owner: c.owner,
-                                name: c.name,
-                                descriptor: c.descriptor,
-                                interface,
-                            },
-                            dispatch_receiver: Some(recv),
-                            args: a,
-                        });
+                        let call = self.emit_virtual_call(
+                            c.owner,
+                            c.name,
+                            c.descriptor,
+                            interface,
+                            recv,
+                            a,
+                        );
                         self.coerce_generic_read(call, e, phys)
                     } else {
                         // A private `@InlineOnly` extension (scope fn / `String.uppercase()`) is recorded

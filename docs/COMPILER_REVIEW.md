@@ -3257,3 +3257,8 @@ extensions, and same-file extension calls through it. The lowerer now has one pl
 The next neutral-IR cleanup added `emit_external_call` for backend-resolved Kotlin intrinsic symbols.
 Array size/get/set, string concatenation fallback, and `Any.toString`/`hashCode` now share the same
 `Callee::External` call construction instead of rebuilding the node at each feature-specific site.
+
+### Cross-File Facade Call Emitter Merge
+
+The next cross-file cleanup routed serializer helpers, sibling-file property accessors, and sibling-file
+top-level calls through `emit_cross_file_call`; several raw virtual calls now reuse `emit_virtual_call`.
