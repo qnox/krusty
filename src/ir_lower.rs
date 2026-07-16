@@ -2391,11 +2391,11 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                             .ir
                             .add_expr(IrExpr::Const(IrConst::String(prop_sig.clone())));
                         let flag = lo.ir.add_expr(IrExpr::Const(IrConst::Int(0)));
-                        lo.ir.add_expr(IrExpr::NewExternal {
-                            internal: propref_impl.internal.clone(),
-                            ctor_desc: propref_impl.ctor_desc.clone(),
-                            args: vec![cls, nm, sigc, flag],
-                        })
+                        lo.emit_new_external(
+                            propref_impl.internal.clone(),
+                            propref_impl.ctor_desc.clone(),
+                            vec![cls, nm, sigc, flag],
+                        )
                     };
                     // getX(): a member → `this.x$delegate.getValue(this, propref)`; a classpath
                     // extension (`Lazy.getValue`) → the static `getValue(x$delegate, this, propref)`.
@@ -4851,6 +4851,14 @@ impl<'a> Lower<'a> {
         })
     }
 
+    fn emit_new_external(&mut self, internal: String, ctor_desc: String, args: Vec<u32>) -> u32 {
+        self.ir.add_expr(IrExpr::NewExternal {
+            internal,
+            ctor_desc,
+            args,
+        })
+    }
+
     /// Resolve a delegate's `getValue` operator — a MEMBER on the delegate type, or a classpath
     /// EXTENSION (`Lazy.getValue` in `LazyKt`). Returns `(owner, descriptor, ret, inline, is_ext)`:
     /// a member is emitted `delegate.getValue(thisRef, prop)`; an extension is the static
@@ -5324,11 +5332,11 @@ impl<'a> Lower<'a> {
         let signature = self.property_reference_signature(&getter_name, ld.ret_ty)?;
         let sig = self.ir.add_expr(IrExpr::Const(IrConst::String(signature)));
         let flag = self.ir.add_expr(IrExpr::Const(IrConst::Int(0)));
-        Some(self.ir.add_expr(IrExpr::NewExternal {
-            internal: propref_impl.internal,
-            ctor_desc: propref_impl.ctor_desc,
-            args: vec![cls, nm, sig, flag],
-        }))
+        Some(self.emit_new_external(
+            propref_impl.internal,
+            propref_impl.ctor_desc,
+            vec![cls, nm, sig, flag],
+        ))
     }
 
     /// Lower a top-level delegated property `val x: T by Del()` (pass 2). Model: two synthetic statics —
@@ -5384,11 +5392,11 @@ impl<'a> Lower<'a> {
         let sig_c = self.ir.add_expr(IrExpr::Const(IrConst::String(sig_str)));
         let flag_c = self.ir.add_expr(IrExpr::Const(IrConst::Int(1)));
         let propref_impl = self.property_reference_impl(0, false)?;
-        let propref = self.ir.add_expr(IrExpr::NewExternal {
-            internal: propref_impl.internal,
-            ctor_desc: propref_impl.ctor_desc,
-            args: vec![facade_cls, name_c, sig_c, flag_c],
-        });
+        let propref = self.emit_new_external(
+            propref_impl.internal,
+            propref_impl.ctor_desc,
+            vec![facade_cls, name_c, sig_c, flag_c],
+        );
         let kprop_ty = ty_to_ir(Ty::obj("kotlin/reflect/KProperty"));
         let idx_p = self.ir.statics.len() as u32;
         self.ir.statics.push(crate::ir::IrStatic {
@@ -5747,11 +5755,7 @@ impl<'a> Lower<'a> {
                 let pty = ty_to_ir(*pty);
                 a.push(self.lower_arg(*arg, &pty)?);
             }
-            return Some(self.ir.add_expr(IrExpr::NewExternal {
-                internal: internal.to_string(),
-                ctor_desc: ctor.descriptor,
-                args: a,
-            }));
+            return Some(self.emit_new_external(internal.to_string(), ctor.descriptor, a));
         }
         // A SYNTHETIC `<init>` overload carrying a trailing `DefaultConstructorMarker`: a value-class-typed
         // parameter (`Rec(id: Vid, …)` → `<init>(String, …, marker)`, caller appends `null`), or omitted
@@ -5770,11 +5774,7 @@ impl<'a> Lower<'a> {
                 a.push(self.ir.add_expr(IrExpr::Const(IrConst::Int(mask))));
             }
             a.push(self.ir.add_expr(IrExpr::Const(IrConst::Null))); // DefaultConstructorMarker
-            return Some(self.ir.add_expr(IrExpr::NewExternal {
-                internal: internal.to_string(),
-                ctor_desc: sc.descriptor,
-                args: a,
-            }));
+            return Some(self.emit_new_external(internal.to_string(), sc.descriptor, a));
         }
         None
     }
@@ -5818,11 +5818,7 @@ impl<'a> Lower<'a> {
             .map(|(i, _)| 1i32 << i)
             .sum();
         self.append_default_mask_marker(&mut a, mask);
-        Some(self.ir.add_expr(IrExpr::NewExternal {
-            internal: internal.to_string(),
-            ctor_desc: desc,
-            args: a,
-        }))
+        Some(self.emit_new_external(internal.to_string(), desc, a))
     }
 
     /// A call to a type-parameter-returning function whose erased `Object` result needs a coercion
@@ -7173,11 +7169,7 @@ impl<'a> Lower<'a> {
                     .syms
                     .libraries
                     .runtime_ctor(RuntimeCtor::IllegalStateException)?;
-                let exc = self.ir.add_expr(IrExpr::NewExternal {
-                    internal: exc_ctor.internal,
-                    ctor_desc: exc_ctor.ctor_desc,
-                    args: vec![msg],
-                });
+                let exc = self.emit_new_external(exc_ctor.internal, exc_ctor.ctor_desc, vec![msg]);
                 let throw = self.ir.add_expr(IrExpr::Throw { operand: exc });
                 let else_b = self.ir.add_expr(IrExpr::Block {
                     stmts: vec![throw],
@@ -11346,11 +11338,8 @@ impl<'a> Lower<'a> {
             .syms
             .libraries
             .runtime_ctor(RuntimeCtor::AssertionError)?;
-        let assertion = self.ir.add_expr(IrExpr::NewExternal {
-            internal: assertion_ctor.internal,
-            ctor_desc: assertion_ctor.ctor_desc,
-            args: vec![msg],
-        });
+        let assertion =
+            self.emit_new_external(assertion_ctor.internal, assertion_ctor.ctor_desc, vec![msg]);
         let throw_assertion = self.ir.add_expr(IrExpr::Throw { operand: assertion });
         let body = self.ir.add_expr(IrExpr::Block {
             stmts: vec![invoke],
@@ -11408,17 +11397,17 @@ impl<'a> Lower<'a> {
                 args: Vec::new(),
                 ret: Ty::obj("kotlin/Any"),
             });
-            self.ir.add_expr(IrExpr::NewExternal {
-                internal: "java/lang/AssertionError".to_string(),
-                ctor_desc: "(Ljava/lang/Object;)V".to_string(),
-                args: vec![msg],
-            })
+            self.emit_new_external(
+                "java/lang/AssertionError".to_string(),
+                "(Ljava/lang/Object;)V".to_string(),
+                vec![msg],
+            )
         } else {
-            self.ir.add_expr(IrExpr::NewExternal {
-                internal: "java/lang/AssertionError".to_string(),
-                ctor_desc: "()V".to_string(),
-                args: vec![],
-            })
+            self.emit_new_external(
+                "java/lang/AssertionError".to_string(),
+                "()V".to_string(),
+                vec![],
+            )
         };
         let throw = self.ir.add_expr(IrExpr::Throw { operand: assertion });
         let throw_block = self.ir.add_expr(IrExpr::Block {
@@ -14292,11 +14281,8 @@ impl<'a> Lower<'a> {
         let iter_iface = self.library_type_is_interface(&iter_internal);
 
         // acc = new ArrayList()
-        let acc_new = self.ir.add_expr(IrExpr::NewExternal {
-            internal: "java/util/ArrayList".to_string(),
-            ctor_desc: "()V".to_string(),
-            args: vec![],
-        });
+        let acc_new =
+            self.emit_new_external("java/util/ArrayList".to_string(), "()V".to_string(), vec![]);
         let acc_v = self.fresh_value();
         let acc_ty = Ty::obj("java/util/ArrayList");
         let var_acc = self.ir.add_expr(IrExpr::Variable {
@@ -15974,11 +15960,11 @@ impl<'a> Lower<'a> {
                 // `checkNotNull` call (which is `(Object)V` and so appears to fall through, leaving a
                 // handler placed right after it with an inconsistent frame).
                 if self.info.ty(operand) == Ty::Null {
-                    let exc = self.ir.add_expr(IrExpr::NewExternal {
-                        internal: "java/lang/NullPointerException".to_string(),
-                        ctor_desc: "()V".to_string(),
-                        args: vec![],
-                    });
+                    let exc = self.emit_new_external(
+                        "java/lang/NullPointerException".to_string(),
+                        "()V".to_string(),
+                        vec![],
+                    );
                     return Some(self.ir.add_expr(IrExpr::Throw { operand: exc }));
                 }
                 let v = self.expr(operand)?;
@@ -18050,11 +18036,11 @@ impl<'a> Lower<'a> {
                             for _ in 0..range.through.trailing_nulls {
                                 args.push(self.ir.add_expr(IrExpr::Const(IrConst::Null)));
                             }
-                            self.ir.add_expr(IrExpr::NewExternal {
-                                internal: range.through.internal,
-                                ctor_desc: range.through.ctor_desc,
+                            self.emit_new_external(
+                                range.through.internal,
+                                range.through.ctor_desc,
                                 args,
-                            })
+                            )
                         }
                     }
                     RangeKind::Until => {
