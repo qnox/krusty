@@ -3009,16 +3009,80 @@ fn build_continuation_class(
                 &p_jvm,
                 super::ir_emit::ir_ty_to_jvm(&object_ty()),
             );
-            ir.add_expr(IrExpr::Call {
-                callee: Callee::Virtual {
-                    owner: owner.to_string(),
-                    name,
-                    descriptor,
-                    interface: false,
-                },
-                dispatch_receiver: Some(recv),
-                args: reentry_args,
-            })
+            // A PRIVATE member can't be invoked from the continuation class (a separate class,
+            // pre-nestmates). kotlinc emits a `PUBLIC|STATIC|FINAL|SYNTHETIC access$<name>` bridge on the
+            // owner that `invokespecial`s the private member; the continuation calls the bridge.
+            let owner_cid = ir.classes.iter().position(|c| c.fq_name == owner);
+            let owner_midx = owner_cid
+                .and_then(|cid| ir.classes[cid].methods.iter().position(|&m| m == outer_fid));
+            if let (true, Some(cid), Some(midx)) = (
+                ir.private_methods.contains(&outer_fid),
+                owner_cid,
+                owner_midx,
+            ) {
+                let access_name = format!("access${name}");
+                // Bridge body (static frame): 0 = the owner receiver, 1..=n the value params,
+                // n+1 the continuation — `return receiver.<private m>(args…, cont)` (the private
+                // `MethodCall` emits as `invokespecial`).
+                let recv0 = ir.add_expr(IrExpr::GetValue(0));
+                let margs: Vec<Option<ExprId>> = (1..=params.len() + 1)
+                    .map(|i| Some(ir.add_expr(IrExpr::GetValue(i as u32))))
+                    .collect();
+                let call = ir.add_expr(IrExpr::MethodCall {
+                    class: cid as u32,
+                    index: midx as u32,
+                    receiver: recv0,
+                    args: margs,
+                });
+                let aret = ir.add_expr(IrExpr::Return(Some(call)));
+                let abody = ir.add_expr(IrExpr::Block {
+                    stmts: vec![aret],
+                    value: None,
+                });
+                let mut aparams = vec![Ty::obj(owner)];
+                aparams.extend(params.iter().copied());
+                aparams.push(continuation_ty());
+                let afid = ir.add_fun(IrFunction {
+                    name: access_name.clone(),
+                    params: aparams.clone(),
+                    ret: object_ty(),
+                    body: Some(abody),
+                    is_static: true,
+                    dispatch_receiver: Some(owner.to_string()),
+                    param_checks: Vec::new(),
+                });
+                ir.classes[cid].methods.push(afid);
+                ir.synthetic_methods.insert(afid); // kotlinc: 0x1019 PUBLIC|STATIC|FINAL|SYNTHETIC
+                let a_jvm: Vec<crate::types::Ty> =
+                    aparams.iter().map(super::ir_emit::ir_ty_to_jvm).collect();
+                let adesc = crate::jvm::names::method_descriptor(
+                    &a_jvm,
+                    super::ir_emit::ir_ty_to_jvm(&object_ty()),
+                );
+                let mut aargs = vec![recv];
+                aargs.extend(reentry_args);
+                ir.add_expr(IrExpr::Call {
+                    callee: Callee::Static {
+                        owner: owner.to_string(),
+                        name: access_name,
+                        descriptor: adesc,
+                        inline: crate::libraries::InlineKind::None,
+                    },
+                    dispatch_receiver: None,
+                    args: aargs,
+                })
+            } else {
+                ir.add_expr(IrExpr::Call {
+                    callee: Callee::Virtual {
+                        owner: owner.to_string(),
+                        name,
+                        descriptor,
+                        interface: false,
+                    },
+                    dispatch_receiver: Some(recv),
+                    args: reentry_args,
+                })
+            }
         }
     };
     let ret = ir.add_expr(IrExpr::Return(Some(call_outer)));
