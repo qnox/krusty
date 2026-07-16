@@ -94,6 +94,11 @@ mod tests {
     }
 
     #[test]
+    fn synthetics_registry_uses_only_ir_contract_dependencies() {
+        assert_allowed_crate_modules("src/synthetics.rs", &["ast", "ir", "types"]);
+    }
+
+    #[test]
     fn dependency_collector_handles_rust_paths_and_ignores_test_modules() {
         let source = r#"
             use crate::{ast, jvm::names};
