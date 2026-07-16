@@ -17,8 +17,9 @@
 //!     PoC keeps them as `return` so the surface — not the runtime — is what is under test.
 
 use crate::ir::{Callee, ExprId, IrConst, IrCtorArg, IrExpr, IrFile, IrFunction, IrTypeOp};
-use crate::jvm::names::{property_getter_name, type_descriptor};
+use crate::jvm::names::type_descriptor;
 use crate::libraries::InlineKind;
+use crate::names::property_getter_name;
 use crate::plugins::{synthetic_class, IrPlugin, PluginContext};
 use crate::types::Ty;
 

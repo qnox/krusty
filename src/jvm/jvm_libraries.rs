@@ -2299,6 +2299,10 @@ impl crate::libraries::TargetRuntime for JvmLibraries {
         Some(type_descriptor(crate::jvm::ir_emit::ir_ty_to_jvm(&ty)))
     }
 
+    fn ir_value_type(&self, ty: Ty) -> Ty {
+        crate::jvm::ir_emit::ir_ty_to_jvm(&ty)
+    }
+
     fn method_descriptor(&self, params: &[Ty], ret: Ty) -> Option<String> {
         Some(method_descriptor(params, ret))
     }

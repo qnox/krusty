@@ -1,124 +1,246 @@
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
     use std::fs;
     use std::path::{Path, PathBuf};
 
     #[test]
-    fn frontend_facade_has_no_backend_edges() {
-        assert_no_patterns(
+    fn frontend_facade_uses_only_frontend_dependencies() {
+        assert_allowed_crate_modules(
             "src/frontend.rs",
             &[
-                "crate::backend",
-                "crate::compiler",
-                "crate::ir",
-                "crate::ir_lower",
-                "crate::jvm",
-                "crate::js",
+                "ast",
+                "diag",
+                "features",
+                "lexer",
+                "libraries",
+                "parser",
+                "resolve",
             ],
         );
     }
 
     #[test]
-    fn backend_contract_has_no_frontend_or_target_edges() {
-        assert_no_patterns(
-            "src/backend.rs",
-            &[
-                "check_file",
-                "collect_signatures",
-                "crate::compiler",
-                "crate::frontend",
-                "crate::ir_lower",
-                "crate::jvm",
-                "crate::js",
-                "crate::lexer",
-                "crate::parser",
-            ],
-        );
+    fn backend_contract_uses_only_data_contract_dependencies() {
+        assert_allowed_crate_modules("src/backend.rs", &["ast", "diag", "resolve"]);
     }
 
     #[test]
-    fn compiler_driver_has_no_concrete_target_edges() {
-        assert_no_patterns(
+    fn compiler_driver_uses_only_frontend_and_backend_contracts() {
+        assert_allowed_crate_modules(
             "src/compiler.rs",
-            &["crate::ir_lower", "crate::jvm", "crate::js"],
+            &["ast", "backend", "diag", "frontend", "resolve"],
         );
     }
 
     #[test]
-    fn lsp_facade_has_no_backend_or_target_edges() {
-        assert_no_patterns(
+    fn lsp_facade_uses_only_frontend_analysis_dependencies() {
+        assert_allowed_crate_modules(
             "src/lsp.rs",
-            &[
-                "crate::backend",
-                "crate::compiler",
-                "crate::ir",
-                "crate::ir_lower",
-                "crate::jvm",
-                "crate::js",
-            ],
+            &["ast", "diag", "frontend", "libraries", "resolve"],
         );
     }
 
     #[test]
-    fn target_modules_do_not_depend_on_compiler_driver() {
-        for path in rust_files_under("src/jvm")
-            .into_iter()
-            .chain(rust_files_under("src/js"))
-        {
-            assert_file_has_no_patterns(&path, &["crate::compiler"]);
+    fn jvm_target_modules_use_only_jvm_side_dependencies() {
+        let allowed = [
+            "ast",
+            "backend",
+            "diag",
+            "ir",
+            "ir_lower",
+            "jvm",
+            "libraries",
+            "lru",
+            "metadata",
+            "module_symbols",
+            "names",
+            "plugins",
+            "resolve",
+            "symbol_resolver",
+            "symbol_source",
+            "toolchain",
+            "trace",
+            "trace_compiler",
+            "types",
+        ];
+        for path in rust_files_under("src/jvm") {
+            assert_allowed_crate_modules_in_file(&path, &allowed);
         }
     }
 
     #[test]
-    fn ir_lower_has_only_allowlisted_target_edges() {
-        assert_only_allowlisted_patterns(
+    fn js_target_modules_use_only_js_side_dependencies() {
+        assert_allowed_crate_modules_in_tree("src/js", &["ir", "js", "types"]);
+    }
+
+    #[test]
+    fn ir_lower_uses_only_common_lowering_dependencies() {
+        assert_allowed_crate_modules(
             "src/ir_lower.rs",
-            "crate::jvm",
             &[
-                "use crate::jvm::names::{property_getter_name, property_setter_name};",
-                "crate::jvm::suspend::zero_value",
+                "ast",
+                "ir",
+                "libraries",
+                "module_symbols",
+                "names",
+                "resolve",
+                "symbol_resolver",
+                "synthetics",
+                "trace_compiler",
+                "types",
             ],
         );
     }
 
-    fn assert_no_patterns(relative: &str, patterns: &[&str]) {
-        assert_file_has_no_patterns(&source_path(relative), patterns);
+    #[test]
+    fn dependency_collector_handles_rust_paths_and_ignores_test_modules() {
+        let source = r#"
+            use crate::{ast, jvm::names};
+
+            fn f() {
+                let _ = crate :: js :: SOME;
+            }
+
+            #[cfg(test)]
+            mod tests {
+                use crate::frontend;
+            }
+        "#;
+
+        assert_eq!(
+            crate_modules(source),
+            BTreeSet::from(["ast".to_string(), "js".to_string(), "jvm".to_string()])
+        );
     }
 
-    fn assert_file_has_no_patterns(path: &Path, patterns: &[&str]) {
+    fn assert_allowed_crate_modules(relative: &str, allowed: &[&str]) {
+        assert_allowed_crate_modules_in_file(&source_path(relative), allowed);
+    }
+
+    fn assert_allowed_crate_modules_in_tree(relative: &str, allowed: &[&str]) {
+        for path in rust_files_under(relative) {
+            assert_allowed_crate_modules_in_file(&path, allowed);
+        }
+    }
+
+    fn assert_allowed_crate_modules_in_file(path: &Path, allowed: &[&str]) {
         let text = fs::read_to_string(path)
             .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()));
-        let offenders: Vec<_> = patterns
+        let allowed: BTreeSet<_> = allowed.iter().copied().collect();
+        let actual = crate_modules(&text);
+        let offenders: Vec<_> = actual
             .iter()
-            .copied()
-            .filter(|pattern| text.contains(pattern))
+            .filter(|module| !allowed.contains(module.as_str()))
+            .map(String::as_str)
             .collect();
         assert!(
             offenders.is_empty(),
-            "{} contains forbidden dependency markers: {}",
+            "{} uses crate modules outside its dependency budget: {}",
             path.display(),
             offenders.join(", ")
         );
     }
 
-    fn assert_only_allowlisted_patterns(relative: &str, pattern: &str, allowlist: &[&str]) {
-        let path = source_path(relative);
-        let text = fs::read_to_string(&path)
-            .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()));
-        let offenders: Vec<_> = text
-            .lines()
-            .enumerate()
-            .filter(|(_, line)| line.contains(pattern))
-            .filter(|(_, line)| !allowlist.iter().any(|allowed| line.contains(allowed)))
-            .map(|(idx, line)| format!("{}:{}", idx + 1, line.trim()))
-            .collect();
-        assert!(
-            offenders.is_empty(),
-            "{} contains unallowlisted `{}` references:\n{}",
-            path.display(),
-            pattern,
-            offenders.join("\n")
-        );
+    fn crate_modules(text: &str) -> BTreeSet<String> {
+        let file =
+            syn::parse_file(text).unwrap_or_else(|err| panic!("failed to parse Rust: {err}"));
+        let mut modules = BTreeSet::new();
+        let mut visitor = CrateDependencyVisitor {
+            modules: &mut modules,
+        };
+        syn::visit::visit_file(&mut visitor, &file);
+        modules
+    }
+
+    struct CrateDependencyVisitor<'a> {
+        modules: &'a mut BTreeSet<String>,
+    }
+
+    impl<'ast> syn::visit::Visit<'ast> for CrateDependencyVisitor<'_> {
+        fn visit_item_mod(&mut self, item: &'ast syn::ItemMod) {
+            if has_cfg_test(&item.attrs) {
+                return;
+            }
+            syn::visit::visit_item_mod(self, item);
+        }
+
+        fn visit_item_use(&mut self, item: &'ast syn::ItemUse) {
+            collect_use_tree(&item.tree, &mut Vec::new(), self.modules);
+        }
+
+        fn visit_path(&mut self, path: &'ast syn::Path) {
+            collect_path_module(path, self.modules);
+            syn::visit::visit_path(self, path);
+        }
+    }
+
+    fn collect_path_module(path: &syn::Path, modules: &mut BTreeSet<String>) {
+        let mut segments = path.segments.iter();
+        if segments
+            .next()
+            .is_some_and(|segment| segment.ident == "crate")
+        {
+            if let Some(module) = segments.next() {
+                modules.insert(module.ident.to_string());
+            }
+        }
+    }
+
+    fn collect_use_tree(
+        tree: &syn::UseTree,
+        prefix: &mut Vec<String>,
+        modules: &mut BTreeSet<String>,
+    ) {
+        match tree {
+            syn::UseTree::Path(path) => {
+                prefix.push(path.ident.to_string());
+                collect_prefixed_module(prefix, modules);
+                collect_use_tree(&path.tree, prefix, modules);
+                prefix.pop();
+            }
+            syn::UseTree::Name(name) => collect_terminal_use(&name.ident, prefix, modules),
+            syn::UseTree::Rename(rename) => collect_terminal_use(&rename.ident, prefix, modules),
+            syn::UseTree::Glob(_) => collect_prefixed_module(prefix, modules),
+            syn::UseTree::Group(group) => {
+                for item in &group.items {
+                    collect_use_tree(item, prefix, modules);
+                }
+            }
+        }
+    }
+
+    fn collect_terminal_use(ident: &syn::Ident, prefix: &[String], modules: &mut BTreeSet<String>) {
+        if prefix.first().is_some_and(|segment| segment == "crate") {
+            if let Some(module) = prefix.get(1) {
+                modules.insert(module.clone());
+            } else if ident != "crate" {
+                modules.insert(ident.to_string());
+            }
+        }
+    }
+
+    fn collect_prefixed_module(prefix: &[String], modules: &mut BTreeSet<String>) {
+        if prefix.first().is_some_and(|segment| segment == "crate") {
+            if let Some(module) = prefix.get(1) {
+                modules.insert(module.clone());
+            }
+        }
+    }
+
+    fn has_cfg_test(attrs: &[syn::Attribute]) -> bool {
+        attrs.iter().any(|attr| {
+            attr.path().is_ident("cfg") && {
+                let mut found = false;
+                let _ = attr.parse_nested_meta(|meta| {
+                    if meta.path.is_ident("test") {
+                        found = true;
+                    }
+                    Ok(())
+                });
+                found
+            }
+        })
     }
 
     fn rust_files_under(relative: &str) -> Vec<PathBuf> {

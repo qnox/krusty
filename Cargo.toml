@@ -30,6 +30,7 @@ dhat-heap = ["dep:dhat"]
 [dev-dependencies]
 rayon = "1"
 libc = "0.2"
+syn = { version = "2", features = ["full", "visit"] }
 # Sampling profiler → flamegraph SVG (gated behind KRUSTY_FLAMEGRAPH in the conformance harness).
 pprof = { version = "0.15", features = ["flamegraph"] }
 

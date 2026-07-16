@@ -29,6 +29,7 @@ pub mod lru;
 pub mod lsp;
 pub mod metadata;
 pub mod module_symbols;
+pub mod names;
 pub mod parser;
 pub mod plugins;
 pub mod resolve;

@@ -15,11 +15,11 @@ use crate::ir::{
     Callee, ClassId, ExprId, FnParamInfo, IrBinOp, IrCatch, IrClass, IrConst, IrCtorArg,
     IrEnumEntry, IrExpr, IrField, IrFile, IrFunction, IrTypeOp,
 };
-use crate::jvm::names::{property_getter_name, property_setter_name};
 use crate::libraries::{
     CountedLoopInfo, InlineKind, LibraryCallable, LibraryMember, PlatformAccessor, PlatformCtor,
     RuntimeCtor, RuntimeOp, SemanticPlatform, TargetRuntime,
 };
+use crate::names::{property_getter_name, property_setter_name};
 use crate::resolve::{
     CtorDefaultValue, ExprLowering, InvokeKind, LambdaCapture, ResolvedCall, Signature,
     StmtLowering, SymbolTable, TypeInfo,
@@ -4833,6 +4833,10 @@ impl<'a> Lower<'a> {
 
     fn emit_const(&mut self, value: IrConst) -> u32 {
         self.ir.add_expr(IrExpr::Const(value))
+    }
+
+    fn emit_zero_value(&mut self, ty: Ty) -> u32 {
+        self.emit_const(IrConst::zero_for_value_type(self.runtime.ir_value_type(ty)))
     }
 
     fn emit_unit(&mut self) -> u32 {
@@ -13197,7 +13201,7 @@ impl<'a> Lower<'a> {
                 .insert(lock_call, ty_to_ir(lock_m.ret));
         }
         let result_slot = self.fresh_value();
-        let dflt = crate::jvm::suspend::zero_value(&mut self.ir, &rty);
+        let dflt = self.emit_zero_value(rty);
         let var_result = self.emit_variable(result_slot, ty_to_ir(rty), Some(dflt));
         let brk = format!("$withlock${}", self.fresh_value());
         self.inline_lambda_ret
@@ -14443,7 +14447,7 @@ impl<'a> Lower<'a> {
             if lam_ret != Ty::Unit && lam_ret != Ty::Nothing {
                 let brk = format!("$lamret${}", self.fresh_value());
                 let result_slot = self.fresh_value();
-                let dflt = crate::jvm::suspend::zero_value(&mut self.ir, &lam_ret);
+                let dflt = self.emit_zero_value(lam_ret);
                 let decl = self.emit_variable(result_slot, ty_to_ir(lam_ret), Some(dflt));
                 stmts.push(decl);
                 self.inline_lambda_ret

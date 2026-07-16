@@ -271,6 +271,11 @@ pub trait TargetRuntime {
         self.type_descriptor(ty)
     }
 
+    /// Physical value type used for an IR value on this target.
+    fn ir_value_type(&self, ty: Ty) -> Ty {
+        ty
+    }
+
     /// Platform method descriptor for lowered IR parameter and return types.
     fn method_descriptor(&self, _params: &[Ty], _ret: Ty) -> Option<String> {
         None
