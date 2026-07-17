@@ -21,8 +21,8 @@ use crate::libraries::{
 };
 use crate::names::{property_getter_name, property_setter_name};
 use crate::resolve::{
-    CtorDefaultValue, ExprLowering, InvokeKind, LambdaCapture, ResolvedCall, Signature,
-    StmtLowering, SymbolTable, TypeInfo,
+    CtorDefaultValue, DelegateGetValueTarget, ExprLowering, InvokeKind, LambdaCapture,
+    ResolvedCall, Signature, StmtLowering, SymbolTable, TypeInfo,
 };
 use crate::types::Ty;
 
@@ -465,7 +465,7 @@ pub fn lower_file(
                 if is_value_cls(di) || syms.method_of(di, "provideDelegate").is_some() {
                     return None;
                 }
-                let (_, _, gv_ret, _, _) = lo.delegate_getvalue_info(dt, di)?;
+                let (_, _, gv_ret, _, _) = lo.delegate_getvalue_info(p.delegate.unwrap(), di)?;
                 let prop_ty = syms
                     .classes
                     .get(&c.name)
@@ -1661,7 +1661,7 @@ pub fn lower_file(
                 } else {
                     let delegate_ty = info.ty(p.delegate?);
                     let internal = delegate_ty.obj_internal()?;
-                    lo.delegate_getvalue_info(delegate_ty, internal)?.2
+                    lo.delegate_getvalue_info(p.delegate?, internal)?.2
                 };
                 let fid = lo.ir.add_fun(IrFunction {
                     name: property_getter_name(&p.name),
@@ -2420,11 +2420,9 @@ pub fn lower_file(
                             vec![cls, nm, sigc, flag],
                         )
                     };
-                    // getX(): a member → `this.x$delegate.getValue(this, propref)`; a classpath
-                    // extension (`Lazy.getValue`) → the static `getValue(x$delegate, this, propref)`.
-                    let dty = lo.info.ty(p.delegate?);
+                    // getX() calls either the delegate member or the checker-recorded classpath extension.
                     let (gv_owner, gv_desc, gv_ret, gv_inline, gv_is_ext) =
-                        lo.delegate_getvalue_info(dty, &delegate_internal)?;
+                        lo.delegate_getvalue_info(p.delegate?, &delegate_internal)?;
                     let this_e = lo.emit_get_value(0);
                     let dele = lo.emit_get_field(this_e, class_id, field_idx);
                     let this_arg = lo.emit_get_value(0);
@@ -5004,42 +5002,25 @@ impl<'a> Lower<'a> {
         })
     }
 
-    /// Resolve a delegate's `getValue` operator — a MEMBER on the delegate type, or a classpath
-    /// EXTENSION (`Lazy.getValue` in `LazyKt`). Returns `(owner, descriptor, ret, inline, is_ext)`:
-    /// a member is emitted `delegate.getValue(thisRef, prop)`; an extension is the static
-    /// `getValue(delegate, thisRef, prop)` (spliced when `@InlineOnly`). Shared by all delegate paths.
+    /// Returns the already-checked `getValue` target for a delegated property.
     fn delegate_getvalue_info(
         &self,
-        delegate_ty: Ty,
+        delegate_expr: AstExprId,
         delegate_internal: &str,
     ) -> Option<(String, String, Ty, InlineKind, bool)> {
-        // A property-reference delegate (`by ::x` / `by obj::x`) resolves getValue on a
-        // `kotlin/reflect/KProperty{0,1}`; its `@InlineOnly` body reflects on the reference and does
-        // not splice to correct bytecode here — leave those to skip (dedicated support is separate).
-        // Checked FIRST: a KProperty `getValue` could be found by the member lookup below too.
+        // Property-reference delegates need dedicated bytecode support.
         if delegate_internal.starts_with("kotlin/reflect/") {
             return None;
         }
-        if let Some(gv) = self.syms.method_of(delegate_internal, "getValue") {
-            let desc = self.runtime.method_descriptor(&gv.params, gv.ret)?;
-            return Some((
-                delegate_internal.to_string(),
-                desc,
-                gv.ret,
-                InlineKind::None,
-                false,
-            ));
+        match self.info.delegate_getvalue(delegate_expr)? {
+            DelegateGetValueTarget::Member { owner, params, ret } => {
+                let desc = self.runtime.method_descriptor(params, *ret)?;
+                Some((owner.clone(), desc, *ret, InlineKind::None, false))
+            }
+            DelegateGetValueTarget::Extension(c) => {
+                Some((c.owner.clone(), c.descriptor.clone(), c.ret, c.inline, true))
+            }
         }
-        let c = self
-            .resolver()
-            .resolve_symbol(
-                crate::symbol_resolver::SymRecv::Value(delegate_ty),
-                "getValue",
-                &[Ty::obj("kotlin/Any"), Ty::obj("kotlin/reflect/KProperty")],
-                &[],
-            )
-            .and_then(crate::symbol_resolver::Symbol::extension_call)?;
-        Some((c.owner, c.descriptor, c.ret, c.inline, true))
     }
 
     fn scalar_value_repr(&self, ty: Ty) -> Option<Ty> {
@@ -5473,7 +5454,7 @@ impl<'a> Lower<'a> {
         // `getValue` is a MEMBER operator on the delegate, or a classpath EXTENSION operator
         // (`operator fun Lazy<T>.getValue(...)` in `LazyKt`, `@InlineOnly` → `this.value`).
         let (gv_owner, gv_desc, gv_ret, gv_inline, gv_is_ext) =
-            self.delegate_getvalue_info(delegate_ty, &delegate_internal)?;
+            self.delegate_getvalue_info(delegate_expr, &delegate_internal)?;
         let prop_ty =
             p.ty.as_ref()
                 .map(|r| ty_of(self.afile, r, &*self.syms.libraries))
@@ -12492,12 +12473,35 @@ impl<'a> Lower<'a> {
                 {
                     return None;
                 }
-                let gv = self.syms.method_of(&delegate_internal, "getValue")?;
+                let (gv, gv_ret) = match self.info.delegate_getvalue(delegate)? {
+                    DelegateGetValueTarget::Member { owner, params, ret } => {
+                        if owner != &delegate_internal {
+                            return None;
+                        }
+                        (
+                            Signature {
+                                params: params.clone(),
+                                ret: *ret,
+                                vararg: false,
+                                required: params.len(),
+                                param_defaults: Vec::new(),
+                                param_names: Vec::new(),
+                                lambda_param_types: Vec::new(),
+                                lambda_recv: Vec::new(),
+                                is_inline: false,
+                                is_final: true,
+                                is_suspend: false,
+                            },
+                            *ret,
+                        )
+                    }
+                    DelegateGetValueTarget::Extension(_) => return None,
+                };
                 let prop_ty = ty
                     .as_ref()
                     .map(|r| ty_of(self.afile, r, &*self.syms.libraries))
-                    .unwrap_or(gv.ret);
-                if gv.ret != prop_ty || prop_ty.obj_internal().is_some_and(is_value_cls) {
+                    .unwrap_or(gv_ret);
+                if gv_ret != prop_ty || prop_ty.obj_internal().is_some_and(is_value_cls) {
                     return None;
                 }
                 let setvalue_sig = if is_var {
