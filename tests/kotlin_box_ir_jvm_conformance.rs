@@ -418,14 +418,14 @@ fn compile_blocks(
         return None;
     }
     // Cross-file maps: each top-level (non-extension) function/property → its file's facade.
-    let mut fns: Vec<(String, String)> = Vec::new();
+    let mut fns: Vec<(u32, u32, String, String)> = Vec::new();
     let mut props: Vec<(String, String)> = Vec::new();
     for (i, file) in files.iter().enumerate() {
         let facade = file_class_name(&blocks[i].0, file.package.as_deref());
         for &d in &file.decls {
             match file.decl(d) {
                 Decl::Fun(f) if f.receiver.is_none() && !f.is_inline => {
-                    fns.push((f.name.clone(), facade.clone()))
+                    fns.push((i as u32, d.0, f.name.clone(), facade.clone()))
                 }
                 Decl::Property(p) if p.receiver.is_none() => {
                     props.push((p.name.clone(), facade.clone()))
@@ -434,7 +434,9 @@ fn compile_blocks(
             }
         }
     }
-    for (name, facade) in fns {
+    for (file_index, decl_id, name, facade) in fns {
+        syms.fn_facades_by_decl
+            .insert((file_index, decl_id), facade.clone());
         syms.fn_facades.insert(name, facade);
     }
     for (name, facade) in props {
@@ -446,13 +448,14 @@ fn compile_blocks(
 
     let mut all = Vec::new();
     for (i, file) in files.iter().enumerate() {
+        diags.set_file(i as u32);
         let info = check_file(file, &mut syms, &mut diags);
         if diags.has_errors() {
             return None;
         }
         let facade = file_class_name(&blocks[i].0, file.package.as_deref());
         let runtime = krusty::jvm::jvm_libraries::JvmLibraries::new(cp.clone());
-        let mut ir = lower_file(file, &info, &syms, &runtime)?;
+        let mut ir = krusty::ir_lower::lower_file_at(file, i as u32, &info, &syms, &runtime)?;
         // Shared post-lowering pass pipeline (jvm/backend.rs); unlowerable shape → skip, don't miscompile.
         krusty::jvm::backend::run_backend_passes(&mut ir, file, &facade, &syms).ok()?;
         let out = ir_emit::emit_all(&ir, &facade, &*cp, None)?;

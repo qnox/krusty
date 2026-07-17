@@ -533,6 +533,11 @@ pub struct FunctionInfo {
     /// The source-level call shape (defaults, named params, lambda param types, vararg) the checker needs
     /// beyond the erased descriptor. `Default` (empty) when the source doesn't provide it.
     pub call_sig: CallSig,
+    /// Number of leading context parameters in the logical parameter list.
+    pub context_count: usize,
+    /// Source declaration key for a callable from the current compilation module. Classpath callables
+    /// leave this unset.
+    pub source_key: Option<(u32, u32)>,
 }
 
 impl FunctionInfo {
@@ -556,6 +561,8 @@ impl FunctionInfo {
             overload_rank: 0,
             generic_sig: None,
             call_sig: CallSig::default(),
+            context_count: 0,
+            source_key: None,
         }
     }
 

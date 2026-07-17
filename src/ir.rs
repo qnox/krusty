@@ -1212,18 +1212,9 @@ pub fn toplevel_default_stub_safe(ir: &IrFile, fid: u32) -> bool {
     {
         return false;
     }
-    // An OVERLOADED top-level function (same name, multiple facade overloads) needs overload-aware routing
-    // — the `$default` synthetics share the name `<name>$default` (distinct only by descriptor), and the
-    // call site can't pick among them here. Skip (the omitted-default call falls back / skips).
-    if ir
-        .functions
-        .iter()
-        .filter(|g| g.dispatch_receiver.is_none() && g.name == f.name)
-        .count()
-        > 1
-    {
-        return false;
-    }
+    // Overloaded top-level functions may all have `<name>$default` siblings; the descriptor selects the
+    // concrete overload, just as it does for the real method. The lowerer reaches this path only after the
+    // checker has selected a source declaration / function id.
     let n = f.params.len() as u32;
     let Some(defaults) = ir.param_defaults(fid) else {
         return false;
@@ -1536,14 +1527,14 @@ mod tests {
     }
 
     #[test]
-    fn toplevel_default_stub_safe_rejects_overloaded_and_unsafe_default() {
+    fn toplevel_default_stub_safe_allows_overloaded_and_rejects_unsafe_default() {
         let mut f = IrFile::default();
         let fid = add_toplevel_fn(&mut f, "over", Ty::Int);
         add_toplevel_fn(&mut f, "over", Ty::String);
         let def = f.add_expr(IrExpr::Const(IrConst::Int(0)));
         f.fn_params
             .insert(fid, FnParamInfo::defaults(Vec::new(), vec![Some(def)]));
-        assert!(!toplevel_default_stub_safe(&f, fid));
+        assert!(toplevel_default_stub_safe(&f, fid));
 
         let mut g = IrFile::default();
         let gid = add_toplevel_fn(&mut g, "spill", Ty::Int);

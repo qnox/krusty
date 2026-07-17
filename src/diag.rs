@@ -53,6 +53,10 @@ impl DiagSink {
         self.current_file = index;
     }
 
+    pub fn current_file(&self) -> u32 {
+        self.current_file
+    }
+
     pub fn error(&mut self, span: Span, msg: impl Into<String>) {
         self.diags.push(Diagnostic {
             span,
