@@ -3959,8 +3959,8 @@ pub struct TypeInfo {
     /// [`ResolvedCall`] for the target kinds and the typed accessors ([`Self::resolved_member`],
     /// [`Self::resolved_top_level`], …).
     pub resolved_calls: HashMap<ExprId, ResolvedCall>,
-    /// For a resolved classpath member or extension call, maps callee parameter slots to source
-    /// arguments. `None` means the target default-call ABI fills that slot.
+    /// For a resolved classpath member, extension, or top-level call, maps callee parameter slots to
+    /// source arguments. `None` means the target default-call ABI fills that slot.
     pub resolved_call_arg_slots: HashMap<ExprId, Vec<Option<ExprId>>>,
     /// Extension callables the checker resolved for a SYNTHESIZED call that has no source-call `ExprId` —
     /// a destructuring `componentN`, a `for`-loop `iterator`, a `+=` `plusAssign` — keyed by the receiver
@@ -13406,12 +13406,15 @@ impl<'a> Checker<'a> {
                         .cloned()
                         .map(|ts| ts.iter().map(|r| self.resolve_ty(r)).collect())
                         .unwrap_or_default();
-                    // NAMED arguments to a classpath function (`describe(count = 3, name = "hi")`):
-                    // reorder the arguments into PARAMETER order using the callee's `@Metadata` names, so
-                    // overload resolution and per-argument checking pair against the right parameters. Falls
-                    // back to source order when there are no labels or the callee has no usable single
-                    // overload with names (`supports_named` already rejected truly unsupported callees).
-                    let (sel_args, arg_tys): (Vec<ExprId>, Vec<Ty>) = match arg_names
+                    // NAMED arguments to a classpath function (`describe(count = 3, name = "hi")`): map
+                    // labels through the callee's `@Metadata` names so overload resolution and
+                    // per-argument checking pair against parameter slots. Lowering uses the recorded slots
+                    // to preserve source evaluation order while emitting parameter order.
+                    let (sel_args, arg_tys, resolved_slots): (
+                        Vec<ExprId>,
+                        Vec<Ty>,
+                        Option<Vec<Option<ExprId>>>,
+                    ) = match arg_names
                         .as_ref()
                         .filter(|ns| ns.iter().any(Option::is_some))
                     {
@@ -13434,19 +13437,20 @@ impl<'a> Checker<'a> {
                             match pnames.as_slice() {
                                 [pn] => match map_call_args(args, Some(names), pn, pn.len(), &[]) {
                                     Ok(slots) if slots.iter().all(Option::is_some) => {
-                                        let sa: Vec<ExprId> = slots.into_iter().flatten().collect();
+                                        let sa: Vec<ExprId> =
+                                            slots.iter().copied().flatten().collect();
                                         let at = sa
                                             .iter()
                                             .map(|a| self.expr_types[a.0 as usize])
                                             .collect();
-                                        (sa, at)
+                                        (sa, at, Some(slots))
                                     }
-                                    _ => (args.to_vec(), arg_tys.clone()),
+                                    _ => (args.to_vec(), arg_tys.clone(), None),
                                 },
-                                _ => (args.to_vec(), arg_tys.clone()),
+                                _ => (args.to_vec(), arg_tys.clone(), None),
                             }
                         }
-                        None => (args.to_vec(), arg_tys.clone()),
+                        None => (args.to_vec(), arg_tys.clone(), None),
                     };
                     if let Some(c) = self
                         .resolver()
@@ -13462,6 +13466,9 @@ impl<'a> Checker<'a> {
                         // (see [`TypeInfo::resolved_top_level`]).
                         self.resolved_calls
                             .insert(call, ResolvedCall::TopLevel(c.clone()));
+                        if let Some(slots) = resolved_slots {
+                            self.resolved_call_arg_slots.insert(call, slots);
+                        }
                         let last_is_array =
                             c.params.last().is_some_and(|p| p.array_elem().is_some());
                         let vararg = last_is_array
@@ -14611,6 +14618,36 @@ mod tests {
     struct FakeMemberPlatform;
 
     impl crate::symbol_source::SymbolSource for FakeMemberPlatform {
+        fn resolve_symbols(&self, fqn: &str) -> crate::libraries::ResolvedSymbols {
+            if fqn != "knownTop" {
+                return crate::libraries::ResolvedSymbols::default();
+            }
+            let callable = crate::libraries::LibraryCallable::library(
+                "test/TopKt",
+                "knownTop",
+                vec![Ty::String, Ty::Int],
+                Ty::String,
+                Ty::String,
+                "(Ljava/lang/String;I)Ljava/lang/String;",
+            );
+            let mut info = crate::libraries::FunctionInfo::plain(
+                crate::libraries::FnKind::TopLevel,
+                None,
+                callable,
+            );
+            info.call_sig = CallSig {
+                param_names: vec!["a".to_string(), "b".to_string()],
+                required: 2,
+                ..Default::default()
+            };
+            crate::libraries::ResolvedSymbols {
+                classifier: None,
+                callables: crate::libraries::Callables::Functions(crate::libraries::FunctionSet {
+                    overloads: vec![info],
+                }),
+            }
+        }
+
         fn resolve_type(&self, internal: &str) -> Option<crate::libraries::LibraryType> {
             (internal == "kotlin/String").then(|| crate::libraries::LibraryType {
                 is_public: true,
@@ -14920,6 +14957,55 @@ mod tests {
             panic!("checker must record overloaded classpath member calls for lowering");
         };
         assert_eq!(selected.member.params, vec![Ty::Int]);
+    }
+
+    #[test]
+    fn classpath_top_level_named_calls_record_arg_slots_for_lowering() {
+        let mut d = DiagSink::new();
+        let file = parse_file("fun direct(): String = knownTop(b = 2, a = \"x\")", &mut d);
+        let files = vec![file];
+        let mut syms = collect_signatures_with_cp(&files, Box::new(FakeMemberPlatform), &mut d);
+        let info = check_file(&files[0], &mut syms, &mut d);
+        assert!(
+            d.diags.is_empty(),
+            "unexpected diagnostics: {:?}",
+            d.diags.iter().map(|x| &x.msg).collect::<Vec<_>>()
+        );
+
+        let call = files[0]
+            .expr_arena
+            .iter()
+            .enumerate()
+            .find_map(|(idx, expr)| match expr {
+                Expr::Call { callee, .. } => match files[0].expr(*callee) {
+                    Expr::Name(name) if name == "knownTop" => Some(ExprId(idx as u32)),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .expect("source should contain knownTop() call");
+        assert!(
+            matches!(
+                info.resolved_calls.get(&call),
+                Some(ResolvedCall::TopLevel(_))
+            ),
+            "checker must record the selected classpath top-level callable for lowering"
+        );
+        let slots = info
+            .resolved_call_arg_slots
+            .get(&call)
+            .expect("classpath top-level named call should record argument slots");
+        let values: Vec<_> = slots
+            .iter()
+            .map(|slot| {
+                slot.map(|arg| match files[0].expr(arg) {
+                    Expr::StringLit(v) => v.clone(),
+                    Expr::IntLit(v) => v.to_string(),
+                    other => panic!("unexpected argument expression in slot: {other:?}"),
+                })
+            })
+            .collect();
+        assert_eq!(values, vec![Some("x".to_string()), Some("2".to_string())]);
     }
 
     #[test]

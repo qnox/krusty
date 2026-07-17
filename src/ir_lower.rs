@@ -8400,103 +8400,40 @@ impl<'a> Lower<'a> {
         Some(self.emit_block(prelude, Some(ecall)))
     }
 
-    /// Reorder a NAMED-argument call to a CLASSPATH top-level function (`foo(b = …, a = …)`) into
-    /// declared-parameter order, so the positional lowering below sees the arguments positionally. The
-    /// parameter names come from the callee's `@Metadata` (a classpath function isn't in `fun_ids`/
-    /// `fn_facades`, so the same-file/module named-arg paths don't apply). Returns the reordered AST
-    /// argument ids, or `None` when this isn't a uniquely-resolvable classpath named call (then the caller
-    /// leaves the args untouched). Conservative: requires a SINGLE top-level overload carrying names, an
-    /// exact-arity call (no omitted defaults), every label to be a known parameter, and — when reordering
-    /// changes evaluation order — every argument to be side-effect-free (a const/name), matching
-    /// `lower_args_defaulted`.
-    fn reorder_classpath_named_args(
-        &self,
-        call: AstExprId,
-        fname: &str,
-        args: &[AstExprId],
-    ) -> Option<Vec<AstExprId>> {
-        // The single classpath top-level overload with recorded parameter names (federated library set —
-        // a classpath function is not a module function, so `ModuleSymbols` wouldn't surface it).
-        let sets: Vec<Vec<String>> = crate::libraries::FunctionSet {
-            overloads: self
-                .resolver()
-                .resolve_symbol(crate::symbol_resolver::SymRecv::TopLevel, fname, &[], &[])
-                .map(crate::symbol_resolver::Symbol::overloads)
-                .unwrap_or_default(),
-        }
-        .into_top_level_with_param_names()
-        .map(|o| o.call_sig.param_names)
-        .collect();
-        let [param_names] = sets.as_slice() else {
-            return None;
-        };
-        self.reorder_by_param_names(call, args, param_names)
-    }
-
-    /// Map a named/positional argument list onto `param_names`-ordered positions (the shared core of the
-    /// top-level and member classpath named-argument reorders). Requires an exact-arity call (no omitted
-    /// defaults), every label to name a parameter, and — when the placement reorders evaluation — every
-    /// argument to be side-effect-free (a const/name), matching `lower_args_defaulted`. `None` otherwise.
-    fn reorder_by_param_names(
-        &self,
+    /// Lower source-order arguments into temporaries, then load them in checker-resolved parameter-slot
+    /// order. This preserves Kotlin's left-to-right evaluation while keeping name resolution in the
+    /// checker.
+    fn lower_args_from_resolved_slots(
+        &mut self,
         call: AstExprId,
         args: &[AstExprId],
-        param_names: &[String],
-    ) -> Option<Vec<AstExprId>> {
-        let names = self.afile.call_arg_names.get(&call.0)?;
-        let n = param_names.len();
-        if args.len() != n {
+        params: &[Ty],
+    ) -> Option<(Vec<u32>, Vec<u32>)> {
+        let slots = self.info.resolved_call_arg_slots.get(&call)?.clone();
+        if slots.len() != args.len() || slots.iter().any(Option::is_none) {
             return None;
         }
-        let has_trailing_lambda = self.afile.call_has_trailing_lambda.contains(&call.0);
-        let mut slot: Vec<Option<AstExprId>> = vec![None; n];
-        let mut pos = 0usize;
-        let mut arg_slot: Vec<usize> = Vec::with_capacity(args.len());
-        for (i, &arg) in args.iter().enumerate() {
-            match names.get(i).and_then(|o| o.as_ref()) {
-                None => {
-                    // A SYNTACTIC trailing lambda is the one unnamed argument Kotlin allows after named
-                    // arguments; it binds to the LAST parameter, not the next positional slot (`pos` may
-                    // already be taken by a reordered named argument).
-                    if has_trailing_lambda && i == args.len() - 1 && n > 0 && slot[n - 1].is_none()
-                    {
-                        slot[n - 1] = Some(arg);
-                        arg_slot.push(n - 1);
-                    } else if pos >= n || slot[pos].is_some() {
-                        return None;
-                    } else {
-                        slot[pos] = Some(arg);
-                        arg_slot.push(pos);
-                        pos += 1;
-                    }
-                }
-                Some(nm) => {
-                    let idx = param_names.iter().position(|p| p == nm)?;
-                    if slot[idx].is_some() {
-                        return None;
-                    }
-                    slot[idx] = Some(arg);
-                    arg_slot.push(idx);
-                }
+        if params.len() != slots.len() {
+            return None;
+        }
+        let mut slot_temp: Vec<Option<u32>> = vec![None; params.len()];
+        let mut prelude = Vec::new();
+        for &arg in args {
+            let slot_idx = slots.iter().position(|slot| *slot == Some(arg))?;
+            if slot_temp[slot_idx].is_some() {
+                return None;
             }
+            let ir_ty = ty_to_ir(params[slot_idx]);
+            let value = self.lower_arg(arg, &ir_ty)?;
+            let tmp = self.fresh_value();
+            prelude.push(self.emit_variable(tmp, ir_ty, Some(value)));
+            slot_temp[slot_idx] = Some(tmp);
         }
-        // Reordering changes evaluation order; only proceed when each argument is side-effect-free. The
-        // trailing lambda is exempt: it is the last source argument AND fills the last slot, so it never
-        // evaluates out of order.
-        let reordered = arg_slot.windows(2).any(|w| w[0] > w[1]);
-        if reordered
-            && args.iter().enumerate().any(|(i, &a)| {
-                let is_trailing_lambda = has_trailing_lambda
-                    && i == args.len() - 1
-                    && matches!(self.afile.expr(a), Expr::Lambda { .. });
-                !is_trailing_lambda
-                    && !is_const_literal(self.afile, a)
-                    && !matches!(self.afile.expr(a), Expr::Name(_))
-            })
-        {
-            return None;
+        let mut lowered = Vec::with_capacity(params.len());
+        for tmp in slot_temp {
+            lowered.push(self.emit_get_value(tmp?));
         }
-        slot.into_iter().collect()
+        Some((lowered, prelude))
     }
 
     /// The receiver's class type for member access. The checker types a bare `object` name as
@@ -17210,20 +17147,6 @@ impl<'a> Lower<'a> {
                     {
                         return self.lower_object_member_call(internal.clone(), &fname, &args, e);
                     }
-                    // NAMED-ARGUMENT call to a CLASSPATH top-level function (`foo(b = …, a = …)`): reorder
-                    // the arguments into parameter order (from the callee's `@Metadata` names) so the
-                    // positional lowering below sees them positionally. Same-file/module functions have
-                    // their own named-arg handling and are skipped here (this fires only for a name that is
-                    // neither a local nor module-declared). `None` → leave the args untouched.
-                    let args = if self.afile.call_arg_names.contains_key(&e.0)
-                        && self.lookup(&fname).is_none()
-                        && !self.module_declares(&fname)
-                    {
-                        self.reorder_classpath_named_args(e, &fname, &args)
-                            .unwrap_or(args)
-                    } else {
-                        args
-                    };
                     let one_lambda_arg = self.single_lambda_arg(&args);
                     // Reified free function `serializer<T>()` (kotlinx.serialization.serializer): a
                     // `reified inline` that can't be called directly (throws at runtime) — desugar to
@@ -17727,6 +17650,7 @@ impl<'a> Lower<'a> {
                             && (c.params.len() != args.len()
                                 || self.info.ty(args[args.len() - 1]) != *c.params.last().unwrap());
                         let mut a = Vec::new();
+                        let mut arg_prelude = Vec::new();
                         // Context parameters (`context(a: A) fun f()`): the checker resolved each leading
                         // context parameter to an in-scope source (`"this"` = the enclosing implicit
                         // receiver, or a named local). Load and PREPEND them so the emitted argument list
@@ -17810,11 +17734,23 @@ impl<'a> Lower<'a> {
                             if c.params.len() != ctx_n + args.len() {
                                 return None;
                             }
-                            for (i, &arg) in args.iter().enumerate() {
-                                a.push(self.lower_arg(arg, &ty_to_ir(c.params[ctx_n + i]))?);
+                            if ctx_n == 0 && self.info.resolved_call_arg_slots.contains_key(&e) {
+                                let (slot_args, prelude) =
+                                    self.lower_args_from_resolved_slots(e, &args, &c.params)?;
+                                a.extend(slot_args);
+                                arg_prelude = prelude;
+                            } else {
+                                for (i, &arg) in args.iter().enumerate() {
+                                    a.push(self.lower_arg(arg, &ty_to_ir(c.params[ctx_n + i]))?);
+                                }
                             }
                         }
                         let call = self.emit_library_static_call(c, a, call_suspend);
+                        let call = if arg_prelude.is_empty() {
+                            call
+                        } else {
+                            self.wrap_arg_prelude(call, arg_prelude)
+                        };
                         // A spliced inline fn leaves its erased return on the stack. Refine it the same
                         // way as a type-parameter-returning source function: checkcast a stricter
                         // reference, but do not eagerly unbox nullable generic returns (`T?`), because
