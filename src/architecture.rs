@@ -74,6 +74,28 @@ mod tests {
     }
 
     #[test]
+    fn jvm_backend_adapter_uses_only_frontend_handoff_and_jvm_dependencies() {
+        assert_allowed_crate_modules(
+            "src/jvm/backend.rs",
+            &[
+                "ast",
+                "backend",
+                "diag",
+                "frontend",
+                "ir",
+                "ir_lower",
+                "jvm",
+                "metadata",
+                "module_symbols",
+                "plugins",
+                "symbol_resolver",
+                "trace_compiler",
+                "types",
+            ],
+        );
+    }
+
+    #[test]
     fn js_facade_has_no_crate_dependencies() {
         assert_allowed_crate_modules("src/js/mod.rs", &[]);
     }

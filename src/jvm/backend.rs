@@ -4,9 +4,8 @@
 use crate::ast::{Decl, File};
 use crate::backend::{Artifact, Backend};
 use crate::diag::DiagSink;
-use crate::frontend::CheckedFile;
+use crate::frontend::{CheckedFile, FrontendSymbols};
 use crate::jvm::names::{file_class_name, type_descriptor};
-use crate::resolve::SymbolTable;
 use crate::types::Ty;
 
 /// Why [`run_backend_passes`] declined a file: the named pass met a shape it can't lower yet, so the
@@ -44,7 +43,7 @@ pub fn run_backend_passes(
     ir: &mut crate::ir::IrFile,
     file: &File,
     facade: &str,
-    syms: &SymbolTable,
+    syms: &FrontendSymbols,
 ) -> Result<(), SkipReason> {
     crate::plugins::run_enabled(ir, file, jvm_plugin_type_descriptor);
     let vc_module = crate::module_symbols::ModuleSymbols::new(syms);
@@ -80,7 +79,7 @@ impl JvmBackend {
     }
 }
 
-pub fn prepare_module_symbols(files: &[File], stems: &[String], syms: &mut SymbolTable) {
+pub fn prepare_module_symbols(files: &[File], stems: &[String], syms: &mut FrontendSymbols) {
     if files.len() <= 1 {
         return;
     }
