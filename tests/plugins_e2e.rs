@@ -66,7 +66,7 @@ fn serialization_plugin_runs_on_real_lowered_ir() {
 
     let mut ctx = PluginContext::default();
     ctx.class_annotations
-        .insert(foo_id, vec![SERIALIZABLE_FQ.to_string()]);
+        .insert(foo_id, vec![SERIALIZABLE_FQ.to_string()].into());
 
     let mut host = PluginHost::new();
     host.register(Box::new(SerializationPlugin::default()));
