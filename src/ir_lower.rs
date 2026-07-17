@@ -384,7 +384,7 @@ pub fn lower_file(
                 && top_suspend
                     .iter()
                     .chain(member_suspend.iter())
-                    .any(|n| crate::resolve::expr_uses_name_pub(file, e, n))
+                    .any(|n| file.expr_uses_name(e, n))
             {
                 return None;
             }
@@ -1999,14 +1999,12 @@ pub fn lower_file(
                                 bd.base_class.is_some()
                                     || bd.methods.iter().any(|m| match &m.body {
                                         FunBody::Expr(e) | FunBody::Block(e) => {
-                                            crate::resolve::expr_uses_name_pub(file, *e, fname)
+                                            file.expr_uses_name(*e, fname)
                                         }
                                         FunBody::None => false,
                                     })
                                     || bd.body_props.iter().any(|p| {
-                                        p.init.map_or(false, |e| {
-                                            crate::resolve::expr_uses_name_pub(file, e, fname)
-                                        })
+                                        p.init.map_or(false, |e| file.expr_uses_name(e, fname))
                                     })
                             });
                             if unsafe_base {
@@ -4196,7 +4194,7 @@ fn delegate_getvalue_uses_property(file: &ast::File, internal: &str) -> bool {
                 ast::FunBody::Expr(e) | ast::FunBody::Block(e) => *e,
                 ast::FunBody::None => continue,
             };
-            if crate::resolve::expr_uses_name_pub(file, body, &param.name) {
+            if file.expr_uses_name(body, &param.name) {
                 return true;
             }
         }
@@ -6365,9 +6363,9 @@ impl<'a> Lower<'a> {
         let mut captures: Vec<(String, u32, Ty)> = Vec::new();
         for (name, v, ty) in self.scope.iter().rev() {
             let used = if deep {
-                crate::resolve::expr_uses_name_deep(self.afile, body, name)
+                self.afile.expr_uses_name_deep(body, name)
             } else {
-                crate::resolve::expr_uses_name_pub(self.afile, body, name)
+                self.afile.expr_uses_name(body, name)
             };
             if !bind_names.contains(name) && !captures.iter().any(|(n, _, _)| n == name) && used {
                 captures.push((name.clone(), *v, *ty));
@@ -6766,7 +6764,7 @@ impl<'a> Lower<'a> {
         for (name, v, ty) in self.scope.iter().rev() {
             if !bind_names.contains(name)
                 && !captures.iter().any(|(n, _, _)| n == name)
-                && crate::resolve::expr_uses_name_pub(self.afile, body, name)
+                && self.afile.expr_uses_name(body, name)
             {
                 captures.push((name.clone(), *v, *ty));
             }
@@ -11996,7 +11994,7 @@ impl<'a> Lower<'a> {
                 // Base case: a non-recursive value. If it still references the function (a non-tail
                 // self-call, e.g. `f(x) + 1`), we can't loop-ize it — skip the file rather than recurse.
                 let ctx_name = self.cur_tailrec.as_ref()?.name.clone();
-                if crate::resolve::expr_uses_name_pub(self.afile, e, &ctx_name) {
+                if self.afile.expr_uses_name(e, &ctx_name) {
                     return None;
                 }
                 let v = self.lower_arg(e, ret_ty)?;
@@ -12044,9 +12042,10 @@ impl<'a> Lower<'a> {
             stmts.len().saturating_sub(1)
         };
         for &s in &stmts[..non_tail] {
-            if self.afile.any_child_stmt(s, &mut |e| {
-                crate::resolve::expr_uses_name_pub(self.afile, e, &name)
-            }) {
+            if self
+                .afile
+                .any_child_stmt(s, &mut |e| self.afile.expr_uses_name(e, &name))
+            {
                 self.scope.truncate(depth);
                 return None;
             }
@@ -12081,9 +12080,10 @@ impl<'a> Lower<'a> {
         // A non-`Expr` tail statement (assignment, etc.) is never a tail self-call — bail if it still
         // references the function, else lower it normally (the loop's `return` exits afterward).
         let name = self.cur_tailrec.as_ref()?.name.clone();
-        if self.afile.any_child_stmt(s, &mut |e| {
-            crate::resolve::expr_uses_name_pub(self.afile, e, &name)
-        }) {
+        if self
+            .afile
+            .any_child_stmt(s, &mut |e| self.afile.expr_uses_name(e, &name))
+        {
             return None;
         }
         let mut tmp = Vec::new();
@@ -12120,7 +12120,7 @@ impl<'a> Lower<'a> {
             _ => {
                 // Base case: run for effect. A lingering self-call here is non-tail → bail.
                 let name = self.cur_tailrec.as_ref()?.name.clone();
-                if crate::resolve::expr_uses_name_pub(self.afile, e, &name) {
+                if self.afile.expr_uses_name(e, &name) {
                     return None;
                 }
                 let v = self.expr(e)?;
@@ -12223,7 +12223,7 @@ impl<'a> Lower<'a> {
                             }
                         }
                         let name = self.cur_tailrec.as_ref().unwrap().name.clone();
-                        if crate::resolve::expr_uses_name_pub(self.afile, ve, &name) {
+                        if self.afile.expr_uses_name(ve, &name) {
                             return None;
                         }
                     }
