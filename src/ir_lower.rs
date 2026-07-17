@@ -432,7 +432,7 @@ pub fn lower_file_at(
                 .props
                 .iter()
                 .filter(|p| p.is_property)
-                .map(|p| (p.name.clone(), lo.field_ty(file, &p.ty)))
+                .map(|p| (p.name.clone(), lo.field_ty_in(file, &p.ty, &c.name)))
                 .collect();
             if let Some(outer) = &inner_outer {
                 ctor_fields.insert(0, ("this$0".to_string(), Ty::obj(outer)));
@@ -451,7 +451,7 @@ pub fn lower_file_at(
                     // getter return type — matching an overridden interface member's descriptor.
                     let ty =
                         p.ty.as_ref()
-                            .map(|r| lo.field_ty(file, r))
+                            .map(|r| lo.field_ty_in(file, r, &c.name))
                             .unwrap_or_else(|| info.ty(p.init.unwrap()));
                     (p.name.clone(), ty)
                 })
@@ -791,8 +791,9 @@ pub fn lower_file_at(
                         check: None,
                     })
                     .chain(c.props.iter().map(|p| {
-                        // Use `field_ty` so a classpath-typed param matches the field/getter (not erased `Any`).
-                        let t = ty_to_ir(lo.field_ty(file, &p.ty));
+                        // Use `field_ty_in` so a classpath- OR enclosing-nested-typed param matches the
+                        // field/getter (not erased `Any`).
+                        let t = ty_to_ir(lo.field_ty_in(file, &p.ty, &c.name));
                         let t = if p.ty.nullable { mark_nullable(t) } else { t };
                         // A non-null reference param gets an `Intrinsics.checkNotNullParameter` guard at
                         // `<init>` entry (kotlinc does); primitives, nullable, and class type-params skip it.
@@ -11812,6 +11813,26 @@ impl<'a> Lower<'a> {
     /// A field's declared type: `ty_of` (file-local classes + built-ins), falling back to the
     /// classpath-aware [`ty_ref`] when `ty_of` erases a CLASSPATH reference type to `Any` (it doesn't
     /// consult imports). Keeps the field decl, constructor parameter and getter agreeing on the real type.
+    /// Like [`field_ty`], but also resolves an UNQUALIFIED reference to one of the ENCLOSING class's
+    /// nested types (`val inner: Inner` inside `Outer` → `Outer$Inner`) — Kotlin's nested-type scoping,
+    /// which the checker already applies (resolve.rs ~1504) but `field_ty`/`ty_of` (top-level + imports
+    /// only) miss, erasing the field/getter/componentN to `Object`. `enclosing` is the outer class's
+    /// source name (`Outer`, or `Outer.Mid` for a deeper nesting).
+    fn field_ty_in(&self, file: &ast::File, r: &ast::TypeRef, enclosing: &str) -> Ty {
+        let base = self.field_ty(file, r);
+        if (base.is_erased_top() || base == Ty::Error) && !r.name.contains('.') {
+            let nested = format!("{enclosing}.{}", r.name);
+            if file
+                .decls
+                .iter()
+                .any(|&d| matches!(file.decl(d), ast::Decl::Class(nc) if nc.name == nested))
+            {
+                return Ty::obj(&class_internal(file, &nested));
+            }
+        }
+        base
+    }
+
     fn field_ty(&self, file: &ast::File, r: &ast::TypeRef) -> Ty {
         let base = ty_of(file, r, &*self.syms.libraries);
         // A property of type `Unit` holds the `kotlin/Unit` singleton (its value), so its field, ctor

@@ -9,6 +9,21 @@ fn run(src: &str) -> Option<String> {
 }
 
 #[test]
+fn unqualified_nested_type_field_resolves() {
+    // A field typed by an UNQUALIFIED reference to the enclosing class's nested type (`val inner: Inner`
+    // inside `Outer`) must resolve to `Outer$Inner`, not erase to `Object` — its getter/componentN/copy
+    // and the ctor param all carry the concrete type (Kotlin's nested-type scoping).
+    const SRC: &str = "data class Outer(val inner: Inner, val n: Int) {\n\
+        \x20 data class Inner(val x: Int)\n\
+        }\n\
+        fun box(): String {\n\
+        \x20 val o = Outer(Outer.Inner(7), 1)\n\
+        \x20 return if (o.inner.x == 7 && o.component1().x == 7) \"OK\" else \"fail\"\n\
+        }\n";
+    assert_eq!(run(SRC).expect("unqualified nested-type field"), "OK");
+}
+
+#[test]
 fn enum_ctor_property_private_field_read_through_getter() {
     // kotlinc emits an enum ctor property as a PRIVATE field + `getX()`. A bodied-entry override (a
     // subclass) AND a cross-class reader must read it through the getter, not a `getfield` on the now-

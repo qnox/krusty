@@ -1662,12 +1662,20 @@ impl IrPlugin for SerializationPlugin {
             }
 
             // `$childSerializers` cache — a `private static final Lazy[]` + the public synthetic
-            // `access$get$childSerializers$cp()` accessor kotlinc emits when a prop needs a non-trivial
-            // (collection) element serializer. Each slot is `LazyKt.lazyOf(<element serializer>)`, else null.
+            // `access$get$childSerializers$cp()` accessor kotlinc emits when a prop's serializer is
+            // ALLOCATED rather than a singleton: a collection (`ArrayListSerializer(…)`) or an ENUM
+            // (`EnumSerializer(…)`). A primitive/`String` (singleton `INSTANCE`) or a nested `@Serializable`
+            // CLASS (singleton `$$serializer.INSTANCE`) is NOT cached. Each slot is `LazyKt.lazyOf(…)`, else null.
+            let enum_internals: std::collections::HashSet<String> = ir
+                .classes
+                .iter()
+                .filter(|c| !c.enum_entries.is_empty())
+                .map(|c| c.fq_name.clone())
+                .collect();
             let needs_cache = |ty: &Ty| -> bool {
-                ty.kotlin_class_internal()
-                    .and_then(collection_serializer_builder)
-                    .is_some()
+                let internal = ty.kotlin_class_internal();
+                internal.and_then(collection_serializer_builder).is_some()
+                    || internal.is_some_and(|i| enum_internals.contains(i))
             };
             if plain_data_class && foo_fields.iter().any(|(_, ty)| needs_cache(ty)) {
                 let lazy_arr_ty = Ty::obj_args("kotlin/Array", &[class_ty("kotlin/Lazy")]);
