@@ -222,6 +222,8 @@ mod data_copy_e2e;
 mod dataclass_hash_and_sam_e2e;
 #[path = "decl_body_on_next_line_e2e.rs"]
 mod decl_body_on_next_line_e2e;
+#[path = "deep_nested_type_e2e.rs"]
+mod deep_nested_type_e2e;
 #[path = "default_args_member_e2e.rs"]
 mod default_args_member_e2e;
 #[path = "default_args_synthetic_e2e.rs"]

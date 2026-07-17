@@ -2511,6 +2511,19 @@ impl<'a> Parser<'a> {
 
     /// v0 class: `class Name(val/var p: Type, ...)` with an optional empty body `{}`.
     /// Every primary-constructor parameter must be a `val`/`var` property (no plain params yet).
+    /// Extend the names of nested types hoisted DURING a child class's parse (decls `start..`) with the
+    /// enclosing class's name, so `A { B { C } }` yields the FULL path `A.B.C` (internal `A$B$C`) instead
+    /// of the truncated `B.C` the immediate-parent prefix alone produces. Applied at each level, this
+    /// builds the complete path incrementally.
+    fn reprefix_hoisted(&mut self, outer: &str, start: usize) {
+        for k in start..self.file.decls.len() {
+            let did = self.file.decls[k];
+            if let crate::ast::Decl::Class(nc) = self.file.decl_mut(did) {
+                nc.name = format!("{outer}.{}", nc.name);
+            }
+        }
+    }
+
     fn parse_class(&mut self) -> ClassDecl {
         let annotations = self.take_pending_annotations();
         let annotation_args = self.take_pending_annotation_args();
@@ -2708,7 +2721,9 @@ impl<'a> Parser<'a> {
                         // additionally captures the enclosing instance (`inner_of` → a synthetic `this$0`
                         // field + outer-as-first-constructor-parameter).
                         let is_inner = mods.iter().any(|m| m == "inner");
+                        let start = self.file.decls.len();
                         let mut nested = self.parse_class();
+                        self.reprefix_hoisted(&name, start);
                         nested.name = format!("{}.{}", name, nested.name);
                         if is_inner {
                             nested.inner_of = Some(name.clone());
@@ -2726,7 +2741,9 @@ impl<'a> Parser<'a> {
                                 .map_or(false, |t| t.kind == TokenKind::KwClass) =>
                     {
                         self.bump(); // 'data'
+                        let start = self.file.decls.len();
                         let mut nested = self.parse_class();
+                        self.reprefix_hoisted(&name, start);
                         nested.is_data = true;
                         nested.name = format!("{}.{}", name, nested.name);
                         let id = self.file.add_decl(Decl::Class(nested));
@@ -2746,7 +2763,9 @@ impl<'a> Parser<'a> {
                         if self.text() == "sealed" {
                             self.bump();
                         }
+                        let start = self.file.decls.len();
                         let mut nested = self.parse_interface();
+                        self.reprefix_hoisted(&name, start);
                         nested.name = format!("{}.{}", name, nested.name);
                         let id = self.file.add_decl(Decl::Class(nested));
                         self.file.decls.push(id);
@@ -2761,7 +2780,9 @@ impl<'a> Parser<'a> {
                                 .get(self.i + 1)
                                 .map_or(false, |t| t.kind == TokenKind::KwClass) =>
                     {
+                        let start = self.file.decls.len();
                         let mut nested = self.parse_enum();
+                        self.reprefix_hoisted(&name, start);
                         nested.name = format!("{}.{}", name, nested.name);
                         let id = self.file.add_decl(Decl::Class(nested));
                         self.file.decls.push(id);
@@ -2770,7 +2791,9 @@ impl<'a> Parser<'a> {
                     // (internal `Outer$Foo`), like a nested class — a sealed class's case objects
                     // (`sealed class V { object Ok : V() }`) are exactly this shape.
                     TokenKind::Ident if self.text() == "object" => {
+                        let start = self.file.decls.len();
                         let mut nested = self.parse_object();
+                        self.reprefix_hoisted(&name, start);
                         nested.name = format!("{}.{}", name, nested.name);
                         let id = self.file.add_decl(Decl::Class(nested));
                         self.file.decls.push(id);
