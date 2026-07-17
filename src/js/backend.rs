@@ -1,8 +1,8 @@
 use crate::ast::File;
 use crate::backend::{Artifact, Backend};
 use crate::diag::DiagSink;
-use crate::libraries::TargetRuntime;
 use crate::resolve::{SymbolTable, TypeInfo};
+use crate::runtime::TargetRuntime;
 
 pub struct JsBackend<R> {
     runtime: R,

@@ -33,6 +33,7 @@ pub mod names;
 pub mod parser;
 pub mod plugins;
 pub mod resolve;
+pub mod runtime;
 pub mod symbol_resolver;
 pub mod symbol_source;
 pub mod synthetics;
