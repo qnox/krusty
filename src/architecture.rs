@@ -35,10 +35,7 @@ mod tests {
 
     #[test]
     fn compiler_driver_uses_only_frontend_and_backend_contracts() {
-        assert_allowed_crate_modules(
-            "src/compiler.rs",
-            &["ast", "backend", "diag", "frontend", "resolve"],
-        );
+        assert_allowed_crate_modules("src/compiler.rs", &["ast", "backend", "diag", "frontend"]);
     }
 
     #[test]
