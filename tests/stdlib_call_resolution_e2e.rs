@@ -11,7 +11,7 @@
 use super::common;
 
 use krusty::diag::DiagSink;
-use krusty::resolve::{check_file, collect_signatures_with_cp};
+use krusty::frontend::{check_file, collect_signatures_with_cp};
 use krusty::symbol_source::SymbolSource;
 
 /// Compile-check `src` against the shared toolchain classpath; return any error diagnostics' messages.

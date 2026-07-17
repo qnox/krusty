@@ -5,9 +5,9 @@
 //! no classpath needed (the member resolved on `it` is a builtin), so it runs everywhere.
 
 use krusty::diag::DiagSink;
+use krusty::frontend::{check_file, collect_signatures};
 use krusty::lexer::lex;
 use krusty::parser::parse;
-use krusty::resolve::{check_file, collect_signatures};
 
 fn errors(src: &str) -> Vec<String> {
     let mut d = DiagSink::new();

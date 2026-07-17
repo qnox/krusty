@@ -29,13 +29,13 @@ use std::time::{Duration, Instant};
 use rayon::prelude::*;
 
 use krusty::diag::DiagSink;
+use krusty::frontend::{check_file, collect_signatures_with_cp};
 use krusty::ir_lower::lower_file;
 use krusty::jvm::classpath::Classpath;
 use krusty::jvm::classreader::parse_class;
 use krusty::jvm::ir_emit;
 use krusty::jvm::names::file_class_name;
 use krusty::lexer::lex;
-use krusty::resolve::{check_file, collect_signatures_with_cp};
 
 use super::common;
 

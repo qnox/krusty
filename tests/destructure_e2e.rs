@@ -2,9 +2,9 @@
 //! the krusty binary, run on a real JVM. A type without `componentN` operators is cleanly rejected.
 
 use krusty::diag::DiagSink;
+use krusty::frontend::{check_file, collect_signatures};
 use krusty::lexer::lex;
 use krusty::parser::parse;
-use krusty::resolve::{check_file, collect_signatures};
 
 use super::common;
 

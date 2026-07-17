@@ -96,6 +96,7 @@ fn serializable_class_encode_round_trips() {
     // 1. krusty compiles `@Serializable Foo` (plugin emits the $serializer), in-process.
     let classes_dir = {
         use krusty::diag::DiagSink;
+        use krusty::frontend::{check_file, collect_signatures_with_cp};
         use krusty::ir_lower::lower_file;
         use krusty::jvm::classpath::Classpath;
         use krusty::jvm::jvm_libraries::JvmLibraries;
@@ -103,7 +104,6 @@ fn serializable_class_encode_round_trips() {
         use krusty::lexer::lex;
         use krusty::parser::parse;
         use krusty::plugins::{serialization::SerializationPlugin, PluginContext, PluginHost};
-        use krusty::resolve::{check_file, collect_signatures_with_cp};
 
         let cp = Rc::new(Classpath::new(vec![
             stdlib.clone(),

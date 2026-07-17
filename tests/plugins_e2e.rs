@@ -9,13 +9,13 @@
 use std::rc::Rc;
 
 use krusty::diag::DiagSink;
+use krusty::frontend::{check_file, collect_signatures_with_cp};
 use krusty::ir_lower::lower_file;
 use krusty::jvm::jvm_libraries::JvmLibraries;
 use krusty::lexer::lex;
 use krusty::parser::parse;
 use krusty::plugins::serialization::{SerializationPlugin, SERIALIZABLE_FQ};
 use krusty::plugins::{PluginContext, PluginHost};
-use krusty::resolve::{check_file, collect_signatures_with_cp};
 
 use super::common;
 

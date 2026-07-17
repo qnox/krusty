@@ -138,8 +138,8 @@ pub fn compile_in_process(
     jdk_modules: Option<&std::path::Path>,
 ) -> Option<Vec<(String, Vec<u8>)>> {
     use krusty::diag::DiagSink;
+    use krusty::frontend::{check_file, collect_signatures_with_cp};
     use krusty::jvm::names::file_class_name;
-    use krusty::resolve::{check_file, collect_signatures_with_cp};
 
     let _pg = ProfGuard::new("krusty");
     let mut diags = DiagSink::new();
@@ -227,8 +227,8 @@ pub fn backend_rejects_in_process(
     jdk_modules: Option<&std::path::Path>,
 ) -> Option<bool> {
     use krusty::diag::DiagSink;
+    use krusty::frontend::{check_file, collect_signatures_with_cp};
     use krusty::jvm::names::file_class_name;
-    use krusty::resolve::{check_file, collect_signatures_with_cp};
 
     let mut diags = DiagSink::new();
     let features = krusty::features::LangFeatures::from_source(src);
@@ -285,7 +285,7 @@ pub fn lower_to_ir(
     jdk_modules: Option<&std::path::Path>,
 ) -> Option<krusty::ir::IrFile> {
     use krusty::diag::DiagSink;
-    use krusty::resolve::{check_file, collect_signatures_with_cp};
+    use krusty::frontend::{check_file, collect_signatures_with_cp};
 
     let mut diags = DiagSink::new();
     let features = krusty::features::LangFeatures::from_source(src);
@@ -323,7 +323,7 @@ pub fn compile_js_in_process(
     jdk_modules: Option<&std::path::Path>,
 ) -> Option<String> {
     use krusty::diag::DiagSink;
-    use krusty::resolve::collect_signatures_with_cp;
+    use krusty::frontend::collect_signatures_with_cp;
 
     let mut diags = DiagSink::new();
     let features = krusty::features::LangFeatures::from_source(src);
@@ -370,7 +370,7 @@ pub fn front_end_diagnostics(
     jdk_modules: Option<&std::path::Path>,
 ) -> Vec<String> {
     use krusty::diag::DiagSink;
-    use krusty::resolve::{check_file, collect_signatures_with_cp};
+    use krusty::frontend::{check_file, collect_signatures_with_cp};
 
     let mut diags = DiagSink::new();
     let features = krusty::features::LangFeatures::from_source(src);
@@ -1069,7 +1069,7 @@ pub fn run_box_against(tag: &str, lib_src: &str, main: &str) -> Option<String> {
 #[allow(dead_code)]
 pub fn checker_diags_against(tag: &str, lib_src: &str, main: &str) -> Option<Vec<String>> {
     use krusty::diag::DiagSink;
-    use krusty::resolve::{check_file, collect_signatures_with_cp};
+    use krusty::frontend::{check_file, collect_signatures_with_cp};
     let libout = compile_lib(tag, lib_src)?;
     let stdlib = stdlib_jar()?;
     let mut cp_paths = vec![libout, stdlib];
