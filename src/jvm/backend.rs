@@ -4,8 +4,9 @@
 use crate::ast::{Decl, File};
 use crate::backend::{Artifact, Backend};
 use crate::diag::DiagSink;
+use crate::frontend::CheckedFile;
 use crate::jvm::names::{file_class_name, type_descriptor};
-use crate::resolve::{SymbolTable, TypeInfo};
+use crate::resolve::SymbolTable;
 use crate::types::Ty;
 
 /// Why [`run_backend_passes`] declined a file: the named pass met a shape it can't lower yet, so the
@@ -123,14 +124,15 @@ impl Backend for JvmBackend {
 
     fn lower_file(
         &self,
-        file: &File,
-        info: &TypeInfo,
-        syms: &SymbolTable,
+        checked: CheckedFile<'_>,
         stem: &str,
         state: &mut JvmState,
         diags: &mut DiagSink,
     ) -> Vec<Artifact> {
         let mut outputs = Vec::new();
+        let file = checked.file;
+        let info = checked.info;
+        let syms = checked.symbols;
 
         // Lower the checked file to the backend-agnostic IR, then emit JVM bytecode from it.
         // (The legacy direct AST emitter has been removed — IR is the sole JVM codegen path.)

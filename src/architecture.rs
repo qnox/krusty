@@ -29,8 +29,8 @@ mod tests {
     }
 
     #[test]
-    fn backend_contract_uses_only_data_contract_dependencies() {
-        assert_allowed_crate_modules("src/backend.rs", &["ast", "diag", "resolve"]);
+    fn backend_contract_uses_only_frontend_handoff_dependencies() {
+        assert_allowed_crate_modules("src/backend.rs", &["diag", "frontend"]);
     }
 
     #[test]
@@ -55,6 +55,7 @@ mod tests {
             "ast",
             "backend",
             "diag",
+            "frontend",
             "ir",
             "ir_lower",
             "jvm",
@@ -92,16 +93,7 @@ mod tests {
     fn js_backend_adapter_uses_only_common_backend_dependencies() {
         assert_allowed_crate_modules(
             "src/js/backend.rs",
-            &[
-                "ast",
-                "backend",
-                "diag",
-                "ir_lower",
-                "js",
-                "libraries",
-                "resolve",
-                "runtime",
-            ],
+            &["backend", "diag", "frontend", "ir_lower", "runtime"],
         );
     }
 

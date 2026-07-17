@@ -2,9 +2,8 @@
 //!
 //! A backend consumes checked frontend output and emits target artifacts.
 
-use crate::ast::File;
 use crate::diag::DiagSink;
-use crate::resolve::{SymbolTable, TypeInfo};
+use crate::frontend::CheckedFile;
 
 /// One emitted artifact: a target-relative path and its bytes (e.g. `Foo.class`, a `.wasm` module).
 pub type Artifact = (String, Vec<u8>);
@@ -16,9 +15,7 @@ pub trait Backend {
     /// Lower one checked file to artifacts.
     fn lower_file(
         &self,
-        file: &File,
-        info: &TypeInfo,
-        syms: &SymbolTable,
+        checked: CheckedFile<'_>,
         stem: &str,
         state: &mut Self::State,
         diags: &mut DiagSink,

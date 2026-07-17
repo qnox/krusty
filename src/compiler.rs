@@ -3,7 +3,7 @@
 use crate::ast::File;
 use crate::backend::{Artifact, Backend};
 use crate::diag::DiagSink;
-use crate::frontend::check_file;
+use crate::frontend::{check_file, CheckedFile};
 use crate::resolve::SymbolTable;
 
 /// Check each parsed file and hand it to the backend.
@@ -23,7 +23,16 @@ pub fn compile<B: Backend>(
         if diags.has_errors() {
             continue;
         }
-        outputs.extend(backend.lower_file(file, &info, syms, &stems[i], &mut state, diags));
+        outputs.extend(backend.lower_file(
+            CheckedFile {
+                file,
+                info: &info,
+                symbols: syms,
+            },
+            &stems[i],
+            &mut state,
+            diags,
+        ));
     }
     if !diags.has_errors() {
         outputs.extend(backend.finalize(state, module_name));
@@ -44,14 +53,12 @@ mod tests {
 
         fn lower_file(
             &self,
-            file: &File,
-            _info: &crate::resolve::TypeInfo,
-            _syms: &SymbolTable,
+            checked: CheckedFile<'_>,
             stem: &str,
             state: &mut Self::State,
             _diags: &mut DiagSink,
         ) -> Vec<Artifact> {
-            *state += file.decls.len();
+            *state += checked.file.decls.len();
             vec![(format!("{stem}.out"), Vec::new())]
         }
 
