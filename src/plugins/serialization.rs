@@ -1626,6 +1626,15 @@ impl IrPlugin for SerializationPlugin {
                 deser_params.push(class_ty(
                     "kotlinx/serialization/internal/SerializationConstructorMarker",
                 ));
+                // A value-class field is stored unboxed, so kotlinc treats the deser ctor as a
+                // value-class-param ctor and appends a trailing `DefaultConstructorMarker` (its ABI
+                // disambiguator — mirrors the primary ctor's `value_param_ctors` marker accessor).
+                let has_value_field = foo_fields
+                    .iter()
+                    .any(|(_, ty)| value_class_underlying(ir, ty).is_some());
+                if has_value_field {
+                    deser_params.push(class_ty("kotlin/jvm/internal/DefaultConstructorMarker"));
+                }
                 let this = ir.add_expr(IrExpr::GetValue(0));
                 let mut deser_stmts = Vec::with_capacity(foo_fields.len());
                 for i in 0..foo_fields.len() {

@@ -211,6 +211,52 @@ fn serializable_enum_relocates_serializer_to_companion() {
 }
 
 #[test]
+fn deser_ctor_appends_marker_for_value_class_field() {
+    // A `@Serializable` data class with a value-class-typed field: kotlinc appends a trailing
+    // `DefaultConstructorMarker` to the synthetic deserialization ctor (its value-class-param ABI
+    // disambiguator), on top of the usual `SerializationConstructorMarker`.
+    let Some((_file, mut ir)) =
+        lower("@JvmInline value class V(val s: String)\nclass D(val v: V, val n: Int)")
+    else {
+        eprintln!("skipping: no stdlib jar / class outside IR subset");
+        return;
+    };
+    let d_id = ir
+        .classes
+        .iter()
+        .position(|c| c.fq_name.ends_with("D"))
+        .expect("lowered D class present") as u32;
+
+    let mut ctx = PluginContext::default();
+    ctx.class_annotations
+        .insert(d_id, vec![SERIALIZABLE_FQ.to_string()].into());
+    let mut host = PluginHost::new();
+    host.register(Box::new(SerializationPlugin::default()));
+    host.run(&mut ir, &ctx);
+
+    let deser = ir.classes[d_id as usize]
+        .secondary_ctors
+        .iter()
+        .find(|sc| sc.synthetic)
+        .expect("synthetic deserialization ctor synthesized");
+    let last_two: Vec<Option<&str>> = deser
+        .params
+        .iter()
+        .rev()
+        .take(2)
+        .map(|t| t.obj_internal())
+        .collect();
+    assert_eq!(
+        last_two,
+        vec![
+            Some("kotlin/jvm/internal/DefaultConstructorMarker"),
+            Some("kotlinx/serialization/internal/SerializationConstructorMarker"),
+        ],
+        "deser ctor ends with SerializationConstructorMarker then DefaultConstructorMarker"
+    );
+}
+
+#[test]
 fn value_class_serializer_omits_write_self() {
     // A `@JvmInline value class` serializes its sole underlying value inline — kotlinc emits NO
     // `write$Self` helper for it (unlike a plain data class). krusty must match: emitting one is a

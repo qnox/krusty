@@ -781,6 +781,29 @@ pub fn lower_value_classes(
         }
     }
 
+    // 1a′. A `@Serializable` property's `get<X>$annotations()` marker follows its getter's value-class
+    //      mangle: when `getX` mangled to `getX-<hash>`, kotlinc names the marker `getX-<hash>$annotations`.
+    //      The marker is a static (no dispatch receiver), so its owner comes from the class method list.
+    if !mangle_map.is_empty() {
+        let mut renames: Vec<(u32, String)> = Vec::new();
+        for c in &ir.classes {
+            for &fid in &c.methods {
+                let Some(f) = ir.functions.get(fid as usize) else {
+                    continue;
+                };
+                let Some(base) = f.name.strip_suffix("$annotations") else {
+                    continue;
+                };
+                if let Some(mangled) = mangle_map.get(&(c.fq_name.clone(), base.to_string(), 0)) {
+                    renames.push((fid, format!("{mangled}$annotations")));
+                }
+            }
+        }
+        for (fid, name) in renames {
+            ir.functions[fid as usize].name = name;
+        }
+    }
+
     // 1b. Rewrite name-resolved calls to a mangled method (`super.f(vc)`, an interface method) — its
     //     name gets the `-<hash>` suffix and its descriptor's value-class types erase to the underlying.
     if !mangle_map.is_empty() {
