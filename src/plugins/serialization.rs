@@ -1,4 +1,4 @@
-//! Reference native plugin — `kotlinx.serialization`. See `docs/PLUGIN_API.md`.
+//! Reference native plugin for `kotlinx.serialization`. See `docs/PLUGIN_API.md`.
 //!
 //! For a `@Serializable class Foo(val a: Int, val b: String)`, kotlinc's serialization plugin
 //! synthesizes (across its FIR + IR backend extensions):
@@ -7,17 +7,11 @@
 //!     with `getDescriptor`, `serialize`, `deserialize`, `childSerializers`;
 //!   - `Foo.serializer()` returning that `KSerializer` (kotlinc puts it on `Foo.Companion`).
 //!
-//! Phase split mirrors kotlinc:
-//!   - `generate_declarations` (FIR decl-gen) — the `$serializer` object, its members' signatures,
-//!     and the `serializer()` accessor whose body reads the `$serializer` singleton.
-//!   - `transform_bodies` (IR backend) — fills `childSerializers` with a REAL array of one element
-//!     serializer per primary-constructor property (so its arity genuinely tracks the field list),
-//!     and `serialize`/`deserialize` with placeholder bodies. In production those two call the real
-//!     published `kotlinx-serialization-core` runtime (`Encoder`/`Decoder`/`SerialDescriptor`); the
-//!     PoC keeps them as `return` so the surface — not the runtime — is what is under test.
+//! `generate_declarations` creates the `$serializer` object, its member signatures, and the
+//! `serializer()` accessor. `transform_bodies` fills descriptor, serializer-list, serialize, and
+//! deserialize bodies.
 
 use crate::ir::{Callee, ExprId, IrConst, IrCtorArg, IrExpr, IrFile, IrFunction, IrTypeOp};
-use crate::jvm::names::type_descriptor;
 use crate::libraries::InlineKind;
 use crate::names::property_getter_name;
 use crate::plugins::{synthetic_class, IrPlugin, PluginContext};
@@ -52,9 +46,9 @@ pub enum SerializationAbi {
 }
 
 impl SerializationAbi {
-    /// Pick the ABI from a `kotlinx-serialization-core` version string (`"1.8.1"`, `"1.5.0"`). As a
-    /// kotlinc drop-in, krusty derives this from the runtime jar on `-classpath` — NOT a krusty flag —
-    /// so the same inputs kotlinc gets select the same codegen. `< 1.6` → `V1_0`, else `V1_6Plus`.
+    /// Pick the ABI from a `kotlinx-serialization-core` version string (`"1.8.1"`, `"1.5.0"`).
+    /// krusty derives this from the runtime jar on `-classpath`, so the same inputs kotlinc gets
+    /// select the same codegen. `< 1.6` → `V1_0`, else `V1_6Plus`.
     pub fn from_core_version(version: &str) -> SerializationAbi {
         let mut parts = version.split('.').map(|p| p.parse::<u32>().unwrap_or(0));
         let major = parts.next().unwrap_or(0);
@@ -186,11 +180,9 @@ fn specialize_reified_placeholders(ir: &mut IrFile) {
     }
 }
 
-/// The JVM descriptor for a property type (just what `serialize`'s getter calls need). A nullable
-/// primitive is carried as its boxed type (`Int?` → `Ljava/lang/Integer;`), matching the getter krusty
-/// emits for a nullable primitive property.
-fn ty_descriptor(ty: &Ty) -> String {
-    type_descriptor(*ty)
+/// The target descriptor for a property getter result.
+fn ty_descriptor(ctx: &PluginContext, ty: &Ty) -> Option<String> {
+    ctx.target_type_descriptor(*ty)
 }
 
 /// The `CompositeDecoder.decode<T>Element` method + descriptor for a property type, or `None` for a
@@ -441,7 +433,7 @@ fn element_serializer_expr(ir: &mut IrFile, ty: &Ty) -> Option<ExprId> {
     // needed; (b) an ABSTRACT `@Serializable` class (`Poly`/`Poly<*>`) — gated on the generated
     // `serializer()` accessor so a plain abstract base isn't mis-serialized.
     // Scope: matches only a FILE-DECLARED class in `ir.classes`. A stdlib collection interface
-    // (`kotlin/collections/List`, …) is NOT an `ir.classes` entry, so it never lands here — it keeps its
+    // (`kotlin/collections/List`, …) is not an `ir.classes` entry, so it never lands here — it keeps its
     // builtin/None handling below (a `List` field has no element serializer yet → a clean `null`).
     // An INTERFACE is open-polymorphic whether or not it is `sealed` here: a `@Serializable` SEALED
     // interface was already claimed by the SealedClassSerializer branch above (which requires the
@@ -969,8 +961,7 @@ impl IrPlugin for SerializationPlugin {
         "kotlinx.serialization"
     }
 
-    /// FIR declaration generation: the `$serializer` object + members + the `serializer()` accessor.
-    /// PRODUCTION NOTE: hosted at the signature phase so `Foo.serializer()` in user code resolves.
+    /// Generate the `$serializer` object, its members, and the `serializer()` accessor.
     fn generate_declarations(&self, ir: &mut IrFile, ctx: &PluginContext) {
         for class_id in ctx.classes_with_simple("Serializable") {
             let class_fq = ir.classes[class_id as usize].fq_name.clone();
@@ -1090,8 +1081,8 @@ impl IrPlugin for SerializationPlugin {
                 });
             }
             ser.ctor_param_count = n_tp as u32;
-            // The N constructor params ARE the type-param serializers (`is_field=false`: stored manually in
-            // <init> to fields `1..=N`, NOT auto-stored — field 0 is the descriptor, built in <init>).
+            // The N constructor params are type-param serializers (`is_field=false`): stored manually in
+            // <init> to fields `1..=N`; field 0 is the descriptor, built in <init>.
             ser.ctor_args = vec![
                 IrCtorArg {
                     ty: kserializer_of(class_ty("kotlin/Any")),
@@ -1251,10 +1242,9 @@ impl IrPlugin for SerializationPlugin {
             let ser_idx = ser_id as usize;
             ir.classes[ser_idx].init_body = Some(init);
 
-            // `serializer()` accessor. Non-generic: returns the `$serializer` singleton
-            // (`Foo$serializer.INSTANCE`). Generic: `serializer(KSerializer typeSerial0…)` → a fresh
-            // `new C$serializer(typeSerial0…)`. kotlinc emits it on `Foo.Companion`; the PoC attaches it
-            // to the class as a static member.
+            // `serializer()` accessor. Non-generic returns the `$serializer` singleton
+            // (`Foo$serializer.INSTANCE`). Generic form creates a fresh serializer with type
+            // serializers as constructor arguments.
             let (acc_params, acc_body) = if is_generic {
                 let args: Vec<ExprId> = (0..n_tp)
                     .map(|k| ir.add_expr(IrExpr::GetValue(k as u32)))
@@ -1463,11 +1453,14 @@ impl IrPlugin for SerializationPlugin {
                             args: vec![desc],
                         });
                         let vrecv = ir.add_expr(IrExpr::GetValue(2));
+                        let Some(getter_desc) = ty_descriptor(ctx, &uty) else {
+                            continue;
+                        };
                         let v = ir.add_expr(IrExpr::Call {
                             callee: Callee::Virtual {
                                 owner: class_internal.clone(),
                                 name: property_getter_name(&pname),
-                                descriptor: format!("(){}", ty_descriptor(&uty)),
+                                descriptor: format!("(){getter_desc}"),
                                 interface: false,
                             },
                             dispatch_receiver: Some(vrecv),
@@ -1529,11 +1522,15 @@ impl IrPlugin for SerializationPlugin {
                             // Read the property via its PUBLIC getter (`value.getX()`) — the backing
                             // field is private, so a separate `$serializer` class can't read it directly.
                             let vrecv = ir.add_expr(IrExpr::GetValue(2));
+                            let Some(getter_desc) = ty_descriptor(ctx, ty) else {
+                                bail = true;
+                                break;
+                            };
                             let v = ir.add_expr(IrExpr::Call {
                                 callee: Callee::Virtual {
                                     owner: class_internal.clone(),
                                     name: property_getter_name(pname),
-                                    descriptor: format!("(){}", ty_descriptor(ty)),
+                                    descriptor: format!("(){getter_desc}"),
                                     interface: false,
                                 },
                                 dispatch_receiver: Some(vrecv),
@@ -1685,11 +1682,15 @@ impl IrPlugin for SerializationPlugin {
                                     // accessor, and kotlinc's own `write$Self` likewise reads the field twice
                                     // (`self.x != default` then `encode…(self.x)`), so this is equivalent.
                                     let vr = ir.add_expr(IrExpr::GetValue(2));
+                                    let Some(getter_desc) = ty_descriptor(ctx, ty) else {
+                                        bail = true;
+                                        break;
+                                    };
                                     let cur = ir.add_expr(IrExpr::Call {
                                         callee: Callee::Virtual {
                                             owner: class_internal.clone(),
                                             name: property_getter_name(pname),
-                                            descriptor: format!("(){}", ty_descriptor(ty)),
+                                            descriptor: format!("(){getter_desc}"),
                                             interface: false,
                                         },
                                         dispatch_receiver: Some(vr),
@@ -2202,6 +2203,14 @@ mod tests {
     use super::*;
     use crate::plugins::{synthetic_class, PluginHost};
 
+    fn jvm_type_descriptor(ty: Ty) -> Option<String> {
+        Some(crate::jvm::names::type_descriptor(ty))
+    }
+
+    fn plugin_context() -> PluginContext {
+        PluginContext::default().with_target_type_descriptor(jvm_type_descriptor)
+    }
+
     /// Build `@Serializable class <name>(<one val per field type>)` as IR + an annotation table.
     fn serializable_class(name: &str, field_types: &[&str]) -> (IrFile, PluginContext, u32) {
         let mut ir = IrFile::default();
@@ -2213,7 +2222,7 @@ mod tests {
             .collect();
         c.ctor_param_count = field_types.len() as u32;
         let id = ir.add_class(c);
-        let mut ctx = PluginContext::default();
+        let mut ctx = plugin_context();
         ctx.class_annotations
             .insert(id, vec![SERIALIZABLE_FQ.to_string()]);
         (ir, ctx, id)
@@ -2310,7 +2319,7 @@ mod tests {
         ];
         outer.ctor_param_count = 2;
         let outer_id = ir.add_class(outer);
-        let mut ctx = PluginContext::default();
+        let mut ctx = plugin_context();
         ctx.class_annotations
             .insert(inner_id, vec![SERIALIZABLE_FQ.to_string()]);
         ctx.class_annotations
@@ -2457,7 +2466,7 @@ mod tests {
     #[test]
     fn multiple_serializable_classes_each_get_a_serializer() {
         let mut ir = IrFile::default();
-        let mut ctx = PluginContext::default();
+        let mut ctx = plugin_context();
         for (name, n) in [("demo/A", 1usize), ("demo/B", 2)] {
             let mut c = synthetic_class(name);
             c.fields = (0..n)
@@ -2487,7 +2496,7 @@ mod tests {
         };
         assert!(names(SerializationAbi::V1_0).contains(&"write$Self".to_string()));
         assert!(names(SerializationAbi::V1_6Plus).contains(&"write$Self$app".to_string()));
-        // ...and the two versions do NOT produce the same helper name.
+        // The two versions produce different helper names.
         assert!(!names(SerializationAbi::V1_0).contains(&"write$Self$app".to_string()));
     }
 
@@ -2549,21 +2558,31 @@ mod tests {
 
     #[test]
     fn property_descriptor_uses_shared_jvm_mapping() {
-        assert_eq!(ty_descriptor(&Ty::Int), "I");
-        assert_eq!(ty_descriptor(&Ty::nullable(Ty::Int)), "Ljava/lang/Integer;");
-        assert_eq!(ty_descriptor(&Ty::nullable(Ty::Long)), "Ljava/lang/Long;");
+        let ctx = plugin_context();
+        assert_eq!(ty_descriptor(&ctx, &Ty::Int).as_deref(), Some("I"));
         assert_eq!(
-            ty_descriptor(&Ty::nullable(Ty::Char)),
-            "Ljava/lang/Character;"
+            ty_descriptor(&ctx, &Ty::nullable(Ty::Int)).as_deref(),
+            Some("Ljava/lang/Integer;")
         );
         assert_eq!(
-            ty_descriptor(&Ty::nullable(Ty::Boolean)),
-            "Ljava/lang/Boolean;"
+            ty_descriptor(&ctx, &Ty::nullable(Ty::Long)).as_deref(),
+            Some("Ljava/lang/Long;")
         );
-        assert_eq!(ty_descriptor(&Ty::String), "Ljava/lang/String;");
         assert_eq!(
-            ty_descriptor(&Ty::obj("kotlin/collections/List")),
-            "Ljava/util/List;"
+            ty_descriptor(&ctx, &Ty::nullable(Ty::Char)).as_deref(),
+            Some("Ljava/lang/Character;")
+        );
+        assert_eq!(
+            ty_descriptor(&ctx, &Ty::nullable(Ty::Boolean)).as_deref(),
+            Some("Ljava/lang/Boolean;")
+        );
+        assert_eq!(
+            ty_descriptor(&ctx, &Ty::String).as_deref(),
+            Some("Ljava/lang/String;")
+        );
+        assert_eq!(
+            ty_descriptor(&ctx, &Ty::obj("kotlin/collections/List")).as_deref(),
+            Some("Ljava/util/List;")
         );
     }
 

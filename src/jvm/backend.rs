@@ -6,6 +6,7 @@ use crate::backend::{Artifact, Backend};
 use crate::diag::DiagSink;
 use crate::jvm::names::{file_class_name, type_descriptor};
 use crate::resolve::{SymbolTable, TypeInfo};
+use crate::types::Ty;
 
 /// Why [`run_backend_passes`] declined a file: the named pass met a shape it can't lower yet, so the
 /// caller must skip (or diagnose) the file rather than miscompile it.
@@ -44,7 +45,7 @@ pub fn run_backend_passes(
     facade: &str,
     syms: &SymbolTable,
 ) -> Result<(), SkipReason> {
-    crate::plugins::run_enabled(ir, file);
+    crate::plugins::run_enabled(ir, file, jvm_plugin_type_descriptor);
     let vc_module = crate::module_symbols::ModuleSymbols::new(syms);
     let vc_resolver = crate::symbol_resolver::SymbolResolver::new_scoped_with_module(
         &*syms.libraries,
@@ -60,6 +61,10 @@ pub fn run_backend_passes(
     crate::jvm::ir_emit::mark_must_inline_lambdas(ir);
     crate::jvm::ir_emit::reparent_lambda_impls(ir);
     Ok(())
+}
+
+fn jvm_plugin_type_descriptor(ty: Ty) -> Option<String> {
+    Some(type_descriptor(ty))
 }
 
 /// The JVM backend holds the shared classpath (`Rc`, same instance as `JvmLibraries`) so the emitter

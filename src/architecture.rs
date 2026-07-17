@@ -107,6 +107,24 @@ mod tests {
     }
 
     #[test]
+    fn native_plugins_use_only_plugin_and_ir_contract_dependencies() {
+        assert_allowed_crate_modules_in_tree(
+            "src/plugins",
+            &[
+                "ast",
+                "diag",
+                "ir",
+                "libraries",
+                "lexer",
+                "names",
+                "parser",
+                "plugins",
+                "types",
+            ],
+        );
+    }
+
+    #[test]
     fn dependency_collector_handles_rust_paths_and_ignores_test_modules() {
         let source = r#"
             use crate::{ast, jvm::names};
