@@ -252,7 +252,7 @@ impl Default for KspHost {
 
 /// Lift `IrClass`es + an annotation side table into the `KsClass` symbol view a processor reads.
 /// (Production: an adapter over the resolved `SymbolTable`/`TypeInfo`, exposed via the shim.)
-pub fn symbols_from_ir(ir: &IrFile, ctx: &super::PluginContext) -> Vec<KsClass> {
+pub fn symbols_from_ir(ir: &IrFile, ctx: &super::PluginContext<'_>) -> Vec<KsClass> {
     ir.classes
         .iter()
         .enumerate()
@@ -261,7 +261,7 @@ pub fn symbols_from_ir(ir: &IrFile, ctx: &super::PluginContext) -> Vec<KsClass> 
             annotations: ctx
                 .class_annotations
                 .get(&(i as u32))
-                .cloned()
+                .map(|annotations| annotations.as_slice().to_vec())
                 .unwrap_or_default(),
             properties: c
                 .fields
@@ -332,12 +332,12 @@ mod tests {
         }
     }
 
-    fn annotated_foo() -> (IrFile, PluginContext) {
+    fn annotated_foo() -> (IrFile, PluginContext<'static>) {
         let mut ir = IrFile::default();
         let id = ir.add_class(synthetic_class("demo/Foo"));
         let mut ctx = PluginContext::default();
         ctx.class_annotations
-            .insert(id, vec![GEN_BUILDER.to_string()]);
+            .insert(id, vec![GEN_BUILDER.to_string()].into());
         (ir, ctx)
     }
 
@@ -394,7 +394,7 @@ mod tests {
         for name in ["demo/A", "demo/B", "demo/C"] {
             let id = ir.add_class(synthetic_class(name));
             ctx.class_annotations
-                .insert(id, vec![GEN_BUILDER.to_string()]);
+                .insert(id, vec![GEN_BUILDER.to_string()].into());
         }
         let mut host = KspHost::new();
         host.register(Box::new(BuilderProcessor));

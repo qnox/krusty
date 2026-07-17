@@ -108,6 +108,7 @@ pub fn lower_file(
         fun_ids: HashMap::new(),
         ext_fun_ids: HashMap::new(),
         ext_fun_id_by_arity: HashMap::new(),
+        ext_fun_id_by_sig: HashMap::new(),
         ext_prop_get_ids: HashMap::new(),
         companion_consts: HashMap::new(),
         const_lits: HashMap::new(),
@@ -746,10 +747,6 @@ pub fn lower_file(
                 .collect();
             let id = lo.ir.add_class(IrClass {
                 fq_name: internal.clone(),
-                serial_names: serial_names_of(file, c),
-                custom_serializer: lo.custom_serializer_of(c),
-                field_serializers: lo.field_serializers_of(c),
-                contextual_fields: lo.contextual_fields_of(c),
                 is_value: c.is_value,
                 type_param_bounds: c
                     .type_param_bounds
@@ -1410,10 +1407,6 @@ pub fn lower_file(
                         ("kotlin/Any".to_string(), Vec::new())
                     };
                 let comp_id = lo.ir.add_class(IrClass {
-                    serial_names: Vec::new(),
-                    custom_serializer: None,
-                    field_serializers: Vec::new(),
-                    contextual_fields: Vec::new(),
                     fq_name: comp_fq.clone(),
                     is_value: false,
                     type_param_bounds: vec![],
@@ -1622,6 +1615,8 @@ pub fn lower_file(
                 });
                 lo.ext_fun_id_by_arity
                     .insert((recv_key, f.name.clone(), arity), id);
+                lo.ext_fun_id_by_sig
+                    .insert((recv_key, f.name.clone(), sig.params.clone()), id);
                 lo.ext_fun_ids
                     .entry((recv_key, f.name.clone()))
                     .or_insert(id);
@@ -3430,10 +3425,6 @@ pub fn lower_file(
                             prop_fields.push((p.name.clone(), ty));
                         }
                         let sub_id = lo.ir.add_class(IrClass {
-                            serial_names: Vec::new(),
-                            custom_serializer: None,
-                            field_serializers: Vec::new(),
-                            contextual_fields: Vec::new(),
                             fq_name: sub_fq.clone(),
                             is_value: false,
                             type_param_bounds: vec![],
@@ -4492,6 +4483,9 @@ pub(crate) struct Lower<'a> {
     /// Every extension overload id keyed additionally by its logical parameter arity, so a call resolves
     /// `fun R.f()` vs `fun R.f(x)` to the right emitted static method. Filled alongside `ext_fun_ids`.
     ext_fun_id_by_arity: HashMap<(Ty, String, usize), u32>,
+    /// Every extension overload id keyed by the full selected source signature. Source expressions whose
+    /// checker handoff carries params use this instead of reselecting from receiver/name.
+    ext_fun_id_by_sig: HashMap<(Ty, String, Vec<Ty>), u32>,
     /// Top-level extension PROPERTIES (`val/var Recv.name: T get() = … [set(v) = …]`), keyed by
     /// `(erased receiver, name)` → the synthesized static getter (`getName(Recv): T`) / setter
     /// (`setName(Recv, T)`) FunId.
@@ -7000,10 +6994,6 @@ impl<'a> Lower<'a> {
             .collect();
         let class = IrClass {
             fq_name: internal.clone(),
-            serial_names: Vec::new(),
-            custom_serializer: None,
-            field_serializers: Vec::new(),
-            contextual_fields: Vec::new(),
             is_value: false,
             type_param_bounds: vec![],
             type_params: Vec::new(),
@@ -7955,89 +7945,6 @@ impl<'a> Lower<'a> {
         None
     }
 
-    /// Per-property explicit serializers from `@Serializable(with = X::class)` on constructor
-    /// properties of `c`, as `(property_name, X_internal)`. Mirrors [`custom_serializer_of`] but per
-    /// field; `X`'s internal name comes from the symbol table (annotation args aren't type-checked).
-    fn field_serializers_of(&self, c: &ast::ClassDecl) -> Vec<(String, String)> {
-        c.props
-            .iter()
-            .filter_map(|p| {
-                let i = p
-                    .annotations
-                    .iter()
-                    .position(|a| a.rsplit(['/', '.']).next() == Some("Serializable"))?;
-                let arg = p.annotation_args.get(i).and_then(|args| args.first())?;
-                if let Expr::CallableRef {
-                    receiver: Some(r),
-                    name,
-                } = self.afile.expr(*arg)
-                {
-                    if name == "class" {
-                        if let Expr::Name(x) = self.afile.expr(*r) {
-                            return Some((p.name.clone(), self.syms.class_names.get(x)?.clone()));
-                        }
-                    }
-                }
-                None
-            })
-            .collect()
-    }
-
-    /// Property names whose element serializer is CONTEXTUAL: a property carrying `@Contextual`, or one
-    /// whose type is named in a file-level `@file:UseContextualSerialization(<type>::class)`. Matching is
-    /// by type NAME (typealias-expanded on both sides), so `@file:UseContextualSerialization(MyDate::class)`
-    /// (where `typealias MyDate = java.time.LocalDate`) covers both a `MyDate` and a `java.time.LocalDate`
-    /// property. The plugin emits `ContextualSerializer(<type>::class)` for these (descriptor kind CONTEXTUAL).
-    fn contextual_fields_of(&self, c: &ast::ClassDecl) -> Vec<String> {
-        // Canonical (typealias-expanded) type names named by the file's `@UseContextualSerialization`.
-        // Matching is on the FULL canonical name (never a bare simple name), so a same-simple-name class
-        // in a different package is NOT mis-marked contextual.
-        let mut names: std::collections::HashSet<String> = std::collections::HashSet::new();
-        for (ann, args) in &self.afile.file_annotations {
-            if ann != "UseContextualSerialization" {
-                continue;
-            }
-            for &arg in args {
-                if let Expr::CallableRef {
-                    receiver: Some(r),
-                    name,
-                } = self.afile.expr(arg)
-                {
-                    if name == "class" {
-                        if let Expr::Name(x) = self.afile.expr(*r) {
-                            names.insert(self.canonical_type_name(x));
-                        }
-                    }
-                }
-            }
-        }
-        c.props
-            .iter()
-            .filter_map(|p| {
-                let has_contextual = p
-                    .annotations
-                    .iter()
-                    .any(|a| a.rsplit(['/', '.']).next() == Some("Contextual"));
-                if has_contextual || names.contains(&self.canonical_type_name(&p.ty.name)) {
-                    Some(p.name.clone())
-                } else {
-                    None
-                }
-            })
-            .collect()
-    }
-
-    /// A type name's `typealias` target (`MyDate` → `java.time.LocalDate`) or the name unchanged. Lets a
-    /// contextual-type reference match a property declared via either the alias or the underlying type,
-    /// while comparing FULL names only (so `java.time.LocalDate` never matches `other.pkg.LocalDate`).
-    fn canonical_type_name(&self, name: &str) -> String {
-        self.afile
-            .type_aliases
-            .iter()
-            .find_map(|(a, t)| (a == name).then(|| t.clone()))
-            .unwrap_or_else(|| name.to_string())
-    }
-
     fn class_decl(&self, name: &str) -> Option<&ast::ClassDecl> {
         self.afile
             .decls
@@ -8046,6 +7953,23 @@ impl<'a> Lower<'a> {
                 Decl::Class(c) if c.name == name => Some(c),
                 _ => None,
             })
+    }
+
+    fn class_decl_by_internal(&self, internal: &str) -> Option<&ast::ClassDecl> {
+        self.afile
+            .decls
+            .iter()
+            .find_map(|&d| match self.afile.decl(d) {
+                Decl::Class(c) if class_internal(self.afile, &c.name) == internal => Some(c),
+                _ => None,
+            })
+    }
+
+    fn serializable_uses_companion_accessor(&self, c: &ast::ClassDecl) -> bool {
+        c.kind == crate::ast::ClassKind::Class
+            && !c.is_sealed()
+            && c.type_params.is_empty()
+            && self.custom_serializer_of(c).is_none()
     }
 
     /// The IR fq name of a `@Serializable` USER class for `ty` (the value/type-arg of a reified
@@ -8075,16 +7999,8 @@ impl<'a> Lower<'a> {
             &[Ty::obj(c_internal)],
         ));
         let companion_routed = self
-            .classes
-            .get(c_internal)
-            .map(|ci| &self.ir.classes[ci.id as usize])
-            .is_some_and(|c| {
-                !c.is_sealed
-                    && !c.is_object
-                    && c.enum_entries.is_empty()
-                    && c.type_params.is_empty()
-                    && c.custom_serializer.is_none()
-            });
+            .class_decl_by_internal(c_internal)
+            .is_some_and(|c| self.serializable_uses_companion_accessor(c));
         if companion_routed {
             let comp = format!("{c_internal}$Companion");
             let recv = self.ir.add_expr(IrExpr::ExternalStaticInstance {
@@ -8975,10 +8891,6 @@ impl<'a> Lower<'a> {
             .internal;
         let synth_id = self.ir.add_class(IrClass {
             fq_name: synth_fq,
-            serial_names: Vec::new(),
-            custom_serializer: None,
-            field_serializers: Vec::new(),
-            contextual_fields: Vec::new(),
             is_value: false,
             type_param_bounds: vec![],
             type_params: Vec::new(),
@@ -9067,10 +8979,6 @@ impl<'a> Lower<'a> {
         let superclass = self.property_reference_impl(0, false)?.internal;
         let synth_id = self.ir.add_class(IrClass {
             fq_name: synth_fq,
-            serial_names: Vec::new(),
-            custom_serializer: None,
-            field_serializers: Vec::new(),
-            contextual_fields: Vec::new(),
             is_value: false,
             type_param_bounds: vec![],
             type_params: Vec::new(),
@@ -9317,10 +9225,6 @@ impl<'a> Lower<'a> {
         self.lambda_seq += 1;
         let synth_id = self.ir.add_class(IrClass {
             fq_name: synth_fq,
-            serial_names: Vec::new(),
-            custom_serializer: None,
-            field_serializers: Vec::new(),
-            contextual_fields: Vec::new(),
             is_value: false,
             type_param_bounds: vec![],
             type_params: Vec::new(),
@@ -9895,10 +9799,6 @@ impl<'a> Lower<'a> {
             .to_string();
         let synth_id = self.ir.add_class(IrClass {
             fq_name: synth_fq,
-            serial_names: Vec::new(),
-            custom_serializer: None,
-            field_serializers: Vec::new(),
-            contextual_fields: Vec::new(),
             is_value: false,
             type_param_bounds: vec![],
             type_params: Vec::new(),
@@ -9979,27 +9879,100 @@ impl<'a> Lower<'a> {
         Some((c, i, f, cur_id))
     }
 
-    /// Emit `recv.name(args)` on an already-lowered receiver value `recv_v` of type `recv_ty`, resolving
-    /// a USER-class member, a same-module EXTENSION operator, or a LIBRARY member. Returns the call value
-    /// and its result type, or `None` when none applies. Used by the reference-range `in` desugaring and
-    /// the multi-index subscript operator.
+    /// Emit `recv.name(args)` on an already-lowered receiver. Source expressions consume checker-recorded
+    /// library members; synthetic callers still use the temporary library fallback.
     fn lower_op_call(
         &mut self,
         recv_v: u32,
         recv_ty: Ty,
         name: &str,
         args: &[AstExprId],
+        source_expr: Option<AstExprId>,
     ) -> Option<(u32, Ty)> {
-        let internal = recv_ty.obj_internal()?.to_string();
-        if let Some((class, midx, fid, ret)) = self.resolve_method(&internal, name) {
-            let params = self.ir.functions[fid as usize].params.clone();
-            if params.len() == args.len() {
-                let mut a = Vec::new();
-                for (k, &arg) in args.iter().enumerate() {
-                    a.push(Some(self.lower_arg(arg, &params[k])?));
+        let internal = recv_ty.kotlin_class_internal()?.to_string();
+        if let Some(source_expr) = source_expr {
+            return match self.info.resolved_calls.get(&source_expr).cloned()? {
+                ResolvedCall::Member(resolved) => {
+                    let member = resolved.member;
+                    if member.name != name || member.params.len() != args.len() {
+                        return None;
+                    }
+                    let physical_ret = member.physical_ret;
+                    let mut a = Vec::new();
+                    for (k, &arg) in args.iter().enumerate() {
+                        a.push(self.lower_arg(arg, &ty_to_ir(member.params[k]))?);
+                    }
+                    let ret = resolved.ret;
+                    let suspend = resolved.suspend;
+                    let call =
+                        self.emit_library_member_call(recv_v, internal, member, ret, suspend, a);
+                    Some((self.coerce_to_static(call, ret, physical_ret), ret))
                 }
-                let call = self.emit_method_call(class, midx, recv_v, a);
-                return Some((call, ret));
+                ResolvedCall::ModuleMember {
+                    owner,
+                    name: target,
+                    params: selected_params,
+                    ret: selected_ret,
+                } => {
+                    if target != name || owner != internal {
+                        return None;
+                    }
+                    let (class, midx, fid, ret) =
+                        self.resolve_method_exact(&owner, name, &selected_params, selected_ret)?;
+                    let params = self.ir.functions[fid as usize].params.clone();
+                    if params != selected_params || params.len() != args.len() {
+                        return None;
+                    }
+                    let mut a = Vec::new();
+                    for (k, &arg) in args.iter().enumerate() {
+                        a.push(Some(self.lower_arg(arg, &params[k])?));
+                    }
+                    let call = self.emit_method_call(class, midx, recv_v, a);
+                    Some((call, ret))
+                }
+                ResolvedCall::ModuleExtension {
+                    receiver,
+                    name: target,
+                    params: selected_params,
+                    ret: selected_ret,
+                } => {
+                    if target != name || receiver.erased_recv() != recv_ty.erased_recv() {
+                        return None;
+                    }
+                    let fid = *self.ext_fun_id_by_sig.get(&(
+                        receiver.erased_recv(),
+                        target.to_string(),
+                        selected_params.clone(),
+                    ))?;
+                    let params = self.ir.functions[fid as usize].params.clone();
+                    let ret = self.ir.functions[fid as usize].ret;
+                    if ret != selected_ret
+                        || params.len() != args.len() + 1
+                        || params.get(1..) != Some(selected_params.as_slice())
+                    {
+                        return None;
+                    }
+                    let mut a = vec![recv_v];
+                    for (k, &arg) in args.iter().enumerate() {
+                        a.push(self.lower_arg(arg, &params[k + 1])?);
+                    }
+                    let call = self.emit_local_call(fid, a);
+                    Some((call, ret))
+                }
+                _ => None,
+            };
+        }
+        if let Some(obj_internal) = recv_ty.obj_internal() {
+            if let Some((class, midx, fid, ret)) = self.resolve_method(obj_internal, name) {
+                let params = self.ir.functions[fid as usize].params.clone();
+                if params.len() == args.len() {
+                    let mut a = Vec::new();
+                    for (k, &arg) in args.iter().enumerate() {
+                        a.push(Some(self.lower_arg(arg, &params[k])?));
+                    }
+                    let call = self.emit_method_call(class, midx, recv_v, a);
+                    return Some((call, ret));
+                }
             }
         }
         // A same-module EXTENSION operator (`operator fun Recv.rangeTo(o)`): lowered as a static function
@@ -10089,6 +10062,19 @@ impl<'a> Lower<'a> {
             }
         }
         None
+    }
+
+    fn resolve_method_exact(
+        &self,
+        internal: &str,
+        name: &str,
+        params: &[Ty],
+        ret: Ty,
+    ) -> Option<(ClassId, u32, u32, Ty)> {
+        let (class, midx, fid, found_ret) = self.resolve_method(internal, name)?;
+        let found_params = &self.ir.functions[fid as usize].params;
+        (found_params.as_slice() == params && found_ret == ret)
+            .then_some((class, midx, fid, found_ret))
     }
 
     /// Find an inherited interface method that declares default arguments.
@@ -13098,7 +13084,7 @@ impl<'a> Lower<'a> {
                     let recv_v = self.expr(array)?;
                     let mut set_args = indices.clone();
                     set_args.push(value);
-                    if let Some((v, _)) = self.lower_op_call(recv_v, rt, "set", &set_args) {
+                    if let Some((v, _)) = self.lower_op_call(recv_v, rt, "set", &set_args, None) {
                         return Some(v);
                     }
                     set_bail("stmt AssignIndex(multi)");
@@ -14079,7 +14065,7 @@ impl<'a> Lower<'a> {
         // rather than fall through to the `aastore` intrinsic (which would store into a non-array).
         if at.array_elem().is_none() && at.obj_internal().is_some() {
             let recv_v = self.expr(array)?;
-            if let Some((v, _)) = self.lower_op_call(recv_v, at, "set", &[index, value]) {
+            if let Some((v, _)) = self.lower_op_call(recv_v, at, "set", &[index, value], None) {
                 return Some(v);
             }
             return None;
@@ -16066,15 +16052,9 @@ impl<'a> Lower<'a> {
                         let i = self.expr(*index)?;
                         return Some(self.emit_external_call("kotlin/Array.get", Some(a), vec![i]));
                     }
-                    if at == Ty::String {
-                        let a = self.expr(array)?;
-                        let i = self.expr(*index)?;
-                        let args = vec![i];
-                        return self.lower_library_instance_call_on(a, at, "get", args, &[Ty::Int]);
-                    }
                 }
                 let recv_v = self.expr(array)?;
-                if let Some((v, ret)) = self.lower_op_call(recv_v, at, "get", &indices) {
+                if let Some((v, ret)) = self.lower_op_call(recv_v, at, "get", &indices, Some(e)) {
                     return Some(self.coerce_generic_read(v, e, ret));
                 }
                 set_bail("expr Index");
@@ -16790,9 +16770,9 @@ impl<'a> Lower<'a> {
                 if start_ty.is_reference() {
                     let recv0 = self.expr(start)?;
                     let (range_v, range_ty) =
-                        self.lower_op_call(recv0, start_ty, "rangeTo", &[end])?;
+                        self.lower_op_call(recv0, start_ty, "rangeTo", &[end], None)?;
                     let (contains_v, _) =
-                        self.lower_op_call(range_v, range_ty, "contains", &[value])?;
+                        self.lower_op_call(range_v, range_ty, "contains", &[value], None)?;
                     if negated {
                         // `!in` → `!contains(...)`, emitted as `contains == false` (the lowering has no
                         // logical-not node — see the primitive `UnOp::Not` path).
@@ -18922,12 +18902,8 @@ impl<'a> Lower<'a> {
                             // A PLAIN non-generic `@Serializable` class routes `serializer()` through its
                             // `Companion` (where the plugin relocates the accessor); an enum / sealed /
                             // generic class keeps the static form (the plugin leaves those static).
-                            let companion_routed = cd.is_some_and(|cd| {
-                                cd.kind == crate::ast::ClassKind::Class
-                                    && !cd.is_sealed()
-                                    && cd.type_params.is_empty()
-                                    && self.custom_serializer_of(cd).is_none()
-                            });
+                            let companion_routed =
+                                cd.is_some_and(|cd| self.serializable_uses_companion_accessor(cd));
                             if is_serializable && self.lookup(&cls).is_none() {
                                 if let Some(internal) = self
                                     .classes
@@ -19970,17 +19946,6 @@ fn widen_const_to(c: crate::ir::IrConst, t: Ty) -> crate::ir::IrConst {
         (Ty::Float, IrConst::Long(v)) => IrConst::Float(v as f32),
         (_, c) => c,
     }
-}
-
-fn serial_names_of(file: &ast::File, c: &ast::ClassDecl) -> Vec<(String, String)> {
-    c.props
-        .iter()
-        .filter_map(|p| {
-            let i = p.annotations.iter().position(|a| a == "SerialName")?;
-            let arg = p.annotation_args.get(i).and_then(|args| args.first())?;
-            Some((p.name.clone(), const_string_value(file, *arg)?))
-        })
-        .collect()
 }
 
 fn is_const_literal(file: &ast::File, e: AstExprId) -> bool {

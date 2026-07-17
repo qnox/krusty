@@ -45,7 +45,8 @@ pub fn run_backend_passes(
     facade: &str,
     syms: &FrontendSymbols,
 ) -> Result<(), SkipReason> {
-    crate::plugins::run_enabled(ir, file, jvm_plugin_type_descriptor);
+    let resolve_class_name = |name: &str| syms.class_names.get(name).cloned();
+    crate::plugins::run_enabled(ir, file, &resolve_class_name, jvm_plugin_type_descriptor);
     let vc_module = crate::module_symbols::ModuleSymbols::new(syms);
     let vc_resolver = crate::symbol_resolver::SymbolResolver::new_scoped_with_module(
         &*syms.libraries,

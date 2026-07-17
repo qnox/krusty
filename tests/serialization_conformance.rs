@@ -155,9 +155,15 @@ fn runtime_jars() -> Option<(PathBuf, PathBuf, PathBuf)> {
     Some((core, json, std))
 }
 
+fn krusty_binary() -> PathBuf {
+    option_env!("CARGO_BIN_EXE_krusty")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/debug/krusty"))
+}
+
 /// Compile `src` with the krusty binary against `cp`; returns (ok, stderr).
 fn krusty_compile(src: &str, cp: &str, out: &str) -> (bool, String) {
-    let bin = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/debug/krusty");
+    let bin = krusty_binary();
     if !bin.exists() {
         return (false, "krusty binary not built".into());
     }
@@ -177,9 +183,8 @@ fn jimage() -> Option<PathBuf> {
     p.exists().then_some(p)
 }
 
-/// Plugin wired into the real compile path: the krusty BINARY compiling `@Serializable Foo` emits
-/// the `Foo$serializer` class (not just in-process tests). Proves the extension works in a normal
-/// `krusty -cp … Foo.kt` invocation.
+/// Plugin wired into the real compile path: the krusty binary compiling `@Serializable Foo` emits
+/// the `Foo$$serializer` class.
 #[test]
 fn binary_compiles_serializable_and_emits_serializer() {
     let Some((core, json, std)) = runtime_jars() else {
@@ -190,7 +195,7 @@ fn binary_compiles_serializable_and_emits_serializer() {
         eprintln!("skipping: no JAVA_HOME/lib/modules");
         return;
     };
-    let bin = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/debug/krusty");
+    let bin = krusty_binary();
     if !bin.exists() {
         eprintln!("skipping: krusty binary not built");
         return;
@@ -233,7 +238,7 @@ fn classpath_ctor_with_null_arg_resolves() {
         eprintln!("skipping: no JAVA_HOME/lib/modules");
         return;
     };
-    let bin = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/debug/krusty");
+    let bin = krusty_binary();
     if !bin.exists() {
         eprintln!("skipping: krusty binary not built");
         return;
@@ -313,7 +318,7 @@ fn manual_serializer_blockers_are_still_present() {
     let cp = format!("{}:{}:{}", core.display(), json.display(), std.display());
     let src = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/serialization/ManualSerializer.kt");
-    let bin = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/debug/krusty");
+    let bin = krusty_binary();
     if !bin.exists() {
         eprintln!("skipping: krusty binary not built");
         return;

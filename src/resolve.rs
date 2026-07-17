@@ -2035,14 +2035,9 @@ pub fn collect_signatures_with_cp(
                         })
                         .collect();
                     // PLUGIN SIGNATURE PHASE (kotlinx.serialization): a `@Serializable class C` gains a
-                    // synthesized `static serializer(): KSerializer<C>`. The plugin emits its IR body at
-                    // the backend phase (after lowering), but its SIGNATURE must be visible to the
-                    // type-checker NOW so user references `C.serializer()` resolve. The lowering emits the
-                    // call by signature (`invokestatic C.serializer()`); the plugin supplies the method
-                    // before emit. Mirrors kotlinc's FIR declaration-generation extension point. The
-                    // detection matches the PLUGIN's exactly (simple name of the annotation, fq or not —
-                    // `plugins::PluginContext::classes_with_simple("Serializable")`), so the checker
-                    // exposes `serializer()` IFF the plugin will emit it (never a missing method at emit).
+                    // synthesized `serializer(): KSerializer<C>` signature before checking, so source
+                    // references `C.serializer()` resolve. The plugin later chooses the physical placement
+                    // (Companion for plain classes, static for the remaining supported shapes) before emit.
                     if c.annotations
                         .iter()
                         .any(|a| a.rsplit(['/', '.']).next() == Some("Serializable"))
@@ -4024,6 +4019,21 @@ pub enum ResolvedCall {
     /// A library EXTENSION call `recv.name(args)` → `invokestatic facade.name(recv, args)`. The checker
     /// is the sole resolver: the lowerer READS this callable and emits it (never re-resolving).
     Extension(crate::libraries::LibraryCallable),
+    /// A same-module member operator selected by the checker for a source expression. Lowering links
+    /// this exact owner/signature to the current file's IR method id; it must not re-select by name.
+    ModuleMember {
+        owner: String,
+        name: String,
+        params: Vec<Ty>,
+        ret: Ty,
+    },
+    /// A same-module extension operator selected by the checker for a source expression.
+    ModuleExtension {
+        receiver: Ty,
+        name: String,
+        params: Vec<Ty>,
+        ret: Ty,
+    },
     /// An INSTANCE MEMBER selected by lambda-return overload resolution (`recv.run2 { … }`). The lowerer
     /// has no resolution path for it (it is selected by the lambda's return type, not by normal member
     /// lookup), so the checker resolves and records it and the lowerer only READS it — emits
@@ -7938,9 +7948,9 @@ impl<'a> Checker<'a> {
                     }
                     // `str[i]` is the `String.get(Int): Char` operator.
                     if at == Ty::String {
-                        if let Some(ret) =
-                            self.resolve_instance_member(at, "get", &its).map(|m| m.ret)
-                        {
+                        if let Some(m) = self.resolve_instance_member(at, "get", &its) {
+                            let ret = m.ret;
+                            self.resolved_calls.insert(e, ResolvedCall::Member(m));
                             return self.set(e, ret);
                         }
                     }
@@ -7955,6 +7965,15 @@ impl<'a> Checker<'a> {
                             for (i, &pt) in sig.params.iter().enumerate() {
                                 self.expect_assignable(pt, its[i], self.span(indices[i]), "index");
                             }
+                            self.resolved_calls.insert(
+                                e,
+                                ResolvedCall::ModuleMember {
+                                    owner: internal.to_string(),
+                                    name: "get".to_string(),
+                                    params: sig.params.clone(),
+                                    ret: sig.ret,
+                                },
+                            );
                             return self.set(e, sig.ret);
                         }
                     }
@@ -7970,11 +7989,22 @@ impl<'a> Checker<'a> {
                     for (i, &pt) in sig.params.iter().enumerate() {
                         self.expect_assignable(pt, its[i], self.span(indices[i]), "index");
                     }
+                    self.resolved_calls.insert(
+                        e,
+                        ResolvedCall::ModuleExtension {
+                            receiver: at,
+                            name: "get".to_string(),
+                            params: sig.params.clone(),
+                            ret: sig.ret,
+                        },
+                    );
                     return self.set(e, sig.ret);
                 }
                 // A library `get(i, j, …)` member (`List.get(Int)`, `Map.get(K)`).
                 if let Some(m) = self.resolve_instance_member(at, "get", &its) {
-                    return self.set(e, m.ret);
+                    let ret = m.ret;
+                    self.resolved_calls.insert(e, ResolvedCall::Member(m));
+                    return self.set(e, ret);
                 }
                 self.diags.error(
                     self.span(e),
@@ -12494,8 +12524,8 @@ impl<'a> Checker<'a> {
                     }
                 }
                 // `(suspend (…)->T).startCoroutine(completion)` — a `kotlin.coroutines` extension intrinsic
-                // (recognized via the registry). Receiver is a suspend function value; the call starts the
-                // coroutine and returns `Unit`; lowering asks the target runtime for the physical helper.
+                // (recognized via the registry). Receiver is a suspend function value; semantically the
+                // call starts the coroutine and returns `Unit`.
                 if matches!(rt, Ty::Fun(s) if s.suspend)
                     && crate::libraries::coroutine_intrinsic(&name)
                         == Some(crate::libraries::CoroutineIntrinsic::StartCoroutine)
@@ -14572,7 +14602,7 @@ impl<'a> Checker<'a> {
             .collect();
 
         // Captured outer locals: lifted to extra leading parameters. A captured var whose cell must be
-        // shared is marked explicitly; the target runtime chooses the holder representation.
+        // shared is marked explicitly; later lowering/backend code chooses the holder representation.
         let mut captured_locals: Vec<(String, Ty)> = Vec::new();
         if !outer_names.is_empty() {
             if let FunBody::Expr(e) | FunBody::Block(e) = &f.body {
@@ -14730,7 +14760,7 @@ mod tests {
 
     impl crate::symbol_source::SymbolSource for FakeMemberPlatform {
         fn resolve_symbols(&self, fqn: &str) -> crate::libraries::ResolvedSymbols {
-            if fqn == "BoxedComparable" {
+            if matches!(fqn, "BoxedComparable" | "BoxedIndex") {
                 return crate::libraries::ResolvedSymbols {
                     classifier: self.resolve_type(fqn),
                     callables: crate::libraries::Callables::None,
@@ -14803,7 +14833,7 @@ mod tests {
         }
 
         fn resolve_type(&self, internal: &str) -> Option<crate::libraries::LibraryType> {
-            matches!(internal, "kotlin/String" | "BoxedComparable").then(|| {
+            matches!(internal, "kotlin/String" | "BoxedComparable" | "BoxedIndex").then(|| {
                 crate::libraries::LibraryType {
                     is_public: true,
                     kind: crate::libraries::TypeKind::Class,
@@ -14842,6 +14872,40 @@ mod tests {
                     overloads: vec![crate::libraries::FunctionInfo::plain(
                         crate::libraries::FnKind::Member,
                         Some(Ty::obj("BoxedComparable")),
+                        callable,
+                    )],
+                };
+            }
+            if recv == Ty::obj("BoxedIndex") && name == "get" {
+                let callable = crate::libraries::LibraryCallable::library(
+                    "BoxedIndex",
+                    "get",
+                    vec![Ty::Int],
+                    Ty::String,
+                    Ty::String,
+                    "(I)Ljava/lang/String;",
+                );
+                return crate::libraries::FunctionSet {
+                    overloads: vec![crate::libraries::FunctionInfo::plain(
+                        crate::libraries::FnKind::Member,
+                        Some(Ty::obj("BoxedIndex")),
+                        callable,
+                    )],
+                };
+            }
+            if recv == Ty::String && name == "get" {
+                let callable = crate::libraries::LibraryCallable::library(
+                    "kotlin/String",
+                    "get",
+                    vec![Ty::Int],
+                    Ty::Char,
+                    Ty::Char,
+                    "(I)C",
+                );
+                return crate::libraries::FunctionSet {
+                    overloads: vec![crate::libraries::FunctionInfo::plain(
+                        crate::libraries::FnKind::Member,
+                        Some(Ty::String),
                         callable,
                     )],
                 };
@@ -15162,6 +15226,140 @@ mod tests {
         };
         assert_eq!(selected.member.name, "compareTo");
         assert_eq!(selected.ret, Ty::Int);
+    }
+
+    #[test]
+    fn classpath_index_operator_records_resolved_member_for_lowering() {
+        let mut d = DiagSink::new();
+        let file = parse_file("fun first(xs: BoxedIndex): String = xs[0]", &mut d);
+        let files = vec![file];
+        let mut syms = collect_signatures_with_cp(&files, Box::new(FakeMemberPlatform), &mut d);
+        let info = check_file(&files[0], &mut syms, &mut d);
+        assert!(
+            d.diags.is_empty(),
+            "unexpected diagnostics: {:?}",
+            d.diags.iter().map(|x| &x.msg).collect::<Vec<_>>()
+        );
+
+        let index = files[0]
+            .expr_arena
+            .iter()
+            .enumerate()
+            .find_map(|(idx, expr)| match expr {
+                Expr::Index { .. } => Some(ExprId(idx as u32)),
+                _ => None,
+            })
+            .expect("source should contain xs[0] index expression");
+        let Some(ResolvedCall::Member(selected)) = info.resolved_calls.get(&index) else {
+            panic!("checker must record classpath get selected for index lowering");
+        };
+        assert_eq!(selected.member.name, "get");
+        assert_eq!(selected.ret, Ty::String);
+    }
+
+    #[test]
+    fn classpath_string_index_operator_records_resolved_member_for_lowering() {
+        let mut d = DiagSink::new();
+        let file = parse_file("fun first(s: String): Char = s[0]", &mut d);
+        let files = vec![file];
+        let mut syms = collect_signatures_with_cp(&files, Box::new(FakeMemberPlatform), &mut d);
+        let info = check_file(&files[0], &mut syms, &mut d);
+        assert!(
+            d.diags.is_empty(),
+            "unexpected diagnostics: {:?}",
+            d.diags.iter().map(|x| &x.msg).collect::<Vec<_>>()
+        );
+
+        let index = files[0]
+            .expr_arena
+            .iter()
+            .enumerate()
+            .find_map(|(idx, expr)| match expr {
+                Expr::Index { .. } => Some(ExprId(idx as u32)),
+                _ => None,
+            })
+            .expect("source should contain s[0] index expression");
+        let Some(ResolvedCall::Member(selected)) = info.resolved_calls.get(&index) else {
+            panic!("checker must record classpath String.get selected for index lowering");
+        };
+        assert_eq!(selected.member.name, "get");
+        assert_eq!(selected.ret, Ty::Char);
+    }
+
+    #[test]
+    fn module_index_operator_records_member_for_lowering() {
+        let mut d = DiagSink::new();
+        let file = parse_file(
+            "class Box { operator fun get(i: Int): String = \"x\" }\n\
+             fun first(b: Box): String = b[0]",
+            &mut d,
+        );
+        let files = vec![file];
+        let mut syms = collect_signatures(&files, &mut d);
+        let info = check_file(&files[0], &mut syms, &mut d);
+        assert!(
+            d.diags.is_empty(),
+            "unexpected diagnostics: {:?}",
+            d.diags.iter().map(|x| &x.msg).collect::<Vec<_>>()
+        );
+
+        let index = files[0]
+            .expr_arena
+            .iter()
+            .enumerate()
+            .find_map(|(idx, expr)| match expr {
+                Expr::Index { .. } => Some(ExprId(idx as u32)),
+                _ => None,
+            })
+            .expect("source should contain b[0] index expression");
+        assert!(
+            matches!(
+                info.resolved_calls.get(&index),
+                Some(ResolvedCall::ModuleMember { owner, name, params, ret })
+                    if owner == "Box" && name == "get" && params == &vec![Ty::Int] && *ret == Ty::String
+            ),
+            "checker must record same-module member get selected for index lowering"
+        );
+    }
+
+    #[test]
+    fn module_index_operator_records_extension_for_lowering() {
+        let mut d = DiagSink::new();
+        let file = parse_file(
+            "class Box\n\
+             operator fun Box.get(i: Int): String = \"x\"\n\
+             fun first(b: Box): String = b[0]",
+            &mut d,
+        );
+        let files = vec![file];
+        let mut syms = collect_signatures(&files, &mut d);
+        let info = check_file(&files[0], &mut syms, &mut d);
+        assert!(
+            d.diags.is_empty(),
+            "unexpected diagnostics: {:?}",
+            d.diags.iter().map(|x| &x.msg).collect::<Vec<_>>()
+        );
+
+        let index = files[0]
+            .expr_arena
+            .iter()
+            .enumerate()
+            .find_map(|(idx, expr)| match expr {
+                Expr::Index { .. } => Some(ExprId(idx as u32)),
+                _ => None,
+            })
+            .expect("source should contain b[0] index expression");
+        assert!(
+            matches!(
+                info.resolved_calls.get(&index),
+                Some(ResolvedCall::ModuleExtension { receiver, name, params, ret })
+                    if *receiver == Ty::obj("Box")
+                        && name == "get"
+                        && params == &vec![Ty::Int]
+                        && *ret == Ty::String
+            ),
+            "checker must record same-module extension get selected for index lowering"
+        );
     }
 
     #[test]
