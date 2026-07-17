@@ -315,6 +315,49 @@ pub fn lower_to_ir(
     krusty::ir_lower::lower_file(file, &info, &syms, &runtime)
 }
 
+#[allow(dead_code)]
+pub fn compile_js_in_process(
+    src: &str,
+    stem: &str,
+    cp_jars: &[PathBuf],
+    jdk_modules: Option<&std::path::Path>,
+) -> Option<String> {
+    use krusty::diag::DiagSink;
+    use krusty::resolve::collect_signatures_with_cp;
+
+    let mut diags = DiagSink::new();
+    let features = krusty::features::LangFeatures::from_source(src);
+    let toks = krusty::lexer::lex(src, &mut diags);
+    let files = vec![krusty::parser::parse_with_features(
+        src, &toks, &mut diags, &features,
+    )];
+    if diags.has_errors() {
+        return None;
+    }
+    let mut cp_paths: Vec<PathBuf> = cp_jars.to_vec();
+    if let Some(p) = jdk_modules {
+        cp_paths.push(p.to_path_buf());
+    }
+    let cp = std::rc::Rc::new(Classpath::new(cp_paths));
+    let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(cp.clone()));
+    let mut syms = collect_signatures_with_cp(&files, platform, &mut diags);
+    if diags.has_errors() {
+        return None;
+    }
+    let stems = vec![stem.to_string()];
+    let runtime = krusty::jvm::jvm_libraries::JvmLibraries::new(cp);
+    let backend = krusty::js::JsBackend::new(runtime);
+    let outputs =
+        krusty::compiler::compile(&files, &stems, &mut syms, &backend, "main", &mut diags);
+    if diags.has_errors() {
+        return None;
+    }
+    outputs
+        .into_iter()
+        .find(|(path, _)| path == &format!("{stem}.js"))
+        .and_then(|(_, bytes)| String::from_utf8(bytes).ok())
+}
+
 /// Run the front end (`lex → parse → collect signatures → check`) on `src` and return every
 /// diagnostic message it produced (parse errors, then resolve/check errors). Empty ⇒ the snippet is
 /// accepted. Lets tests exercise ERROR paths — assert a bad snippet yields a diagnostic (optionally
