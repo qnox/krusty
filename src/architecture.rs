@@ -119,11 +119,11 @@ mod tests {
             "src/ir_lower.rs",
             &[
                 "ast",
+                "frontend",
                 "ir",
                 "libraries",
                 "module_symbols",
                 "names",
-                "resolve",
                 "runtime",
                 "symbol_resolver",
                 "synthetics",

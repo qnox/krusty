@@ -9,16 +9,18 @@
 use std::collections::HashMap;
 
 use crate::ast::{self, BinOp, Decl, Expr, ExprId as AstExprId, FunBody, Stmt, TemplatePart};
+use crate::frontend::{
+    function_scope_packages, map_param_list_args, qualified_path, typeref_leaf, ClassNames,
+    CtorDefaultValue, DelegateGetValueTarget, ExprLowering, FrontendSymbols, FrontendTypeInfo,
+    InlineCall, InvokeKind, LambdaCapture, LambdaInfo, ReceiverLambda, ResolvedCall, Signature,
+    StmtLowering,
+};
 use crate::ir::{
     Callee, ClassId, ExprId, FnParamInfo, IrBinOp, IrCatch, IrClass, IrConst, IrCtorArg,
     IrEnumEntry, IrExpr, IrField, IrFile, IrFunction, IrTypeOp,
 };
 use crate::libraries::{InlineKind, LibraryCallable, LibraryMember, SemanticPlatform};
 use crate::names::{property_getter_name, property_setter_name};
-use crate::resolve::{
-    CtorDefaultValue, DelegateGetValueTarget, ExprLowering, InvokeKind, LambdaCapture,
-    ResolvedCall, Signature, StmtLowering, SymbolTable, TypeInfo,
-};
 use crate::runtime::{
     CountedLoopInfo, PlatformAccessor, PlatformCtor, PlatformField, RuntimeCtor, RuntimeOp,
     TargetRuntime,
@@ -89,8 +91,8 @@ impl LibraryDispatch {
 /// Lower a checked file to IR, or `None` if it uses anything outside the core subset.
 pub fn lower_file(
     file: &ast::File,
-    info: &TypeInfo,
-    syms: &SymbolTable,
+    info: &FrontendTypeInfo,
+    syms: &FrontendSymbols,
     runtime: &dyn TargetRuntime,
 ) -> Option<IrFile> {
     let mut lo = Lower {
@@ -98,7 +100,7 @@ pub fn lower_file(
         info,
         syms,
         runtime,
-        fn_scope: crate::resolve::function_scope_packages(file, syms),
+        fn_scope: function_scope_packages(file, syms),
         ir: IrFile {
             package: file.package.clone(),
             ..Default::default()
@@ -4265,7 +4267,7 @@ fn is_lateinit_prop(p: &ast::PropDecl) -> bool {
 /// `val xx get() = x`) or the initializer.
 fn body_prop_ty(
     file: &ast::File,
-    info: &TypeInfo,
+    info: &FrontendTypeInfo,
     p: &ast::PropDecl,
     plat: &dyn SemanticPlatform,
 ) -> Ty {
@@ -4304,7 +4306,7 @@ fn stored_value_ty(ty: Ty) -> Ty {
 
 fn body_prop_ir_ty(
     file: &ast::File,
-    info: &TypeInfo,
+    info: &FrontendTypeInfo,
     p: &ast::PropDecl,
     plat: &dyn SemanticPlatform,
 ) -> Ty {
@@ -4383,8 +4385,8 @@ struct TailrecCtx {
 
 pub(crate) struct Lower<'a> {
     afile: &'a ast::File,
-    info: &'a TypeInfo,
-    syms: &'a SymbolTable,
+    info: &'a FrontendTypeInfo,
+    syms: &'a FrontendSymbols,
     runtime: &'a dyn TargetRuntime,
     /// Import-scoped package list for unqualified top-level and extension resolution. The checker and
     /// lowerer use the same scope so `@JvmName`-mangled library families resolve identically.
@@ -4395,7 +4397,7 @@ pub(crate) struct Lower<'a> {
     fun_ids: HashMap<(String, Vec<Ty>), u32>,
     /// Top-level extension functions, keyed by `(erased receiver, name)` ([`Ty::erased_recv`]) —
     /// separate from `fun_ids` since `fun Int.foo()` and `fun String.foo()` share a name but differ by
-    /// receiver. Same key scheme as `SymbolTable::ext_funs` so the two never disagree. Holds the FIRST
+    /// receiver. Same key scheme as `FrontendSymbols::ext_funs` so the two never disagree. Holds the FIRST
     /// overload's id (the common case is a single overload); an extension overloaded by arity is
     /// disambiguated at the call site through [`Self::ext_fun_id_by_arity`].
     ext_fun_ids: HashMap<(Ty, String), u32>,
@@ -4557,7 +4559,7 @@ impl<'a> Lower<'a> {
     /// Candidate `(erased receiver, name)` keys for an extension-property lookup, most-specific first.
     /// A property with a type-parameter receiver (`val <T> T.p` / `val <T> Array<T>.p`) is registered
     /// under an `Any`-erased receiver, so a concrete receiver must fall back through the generalized
-    /// keys to find it — mirroring [`SymbolTable::ext_prop`] so the checker and lowerer agree.
+    /// keys to find it — mirroring [`FrontendSymbols::ext_prop`] so the checker and lowerer agree.
     fn ext_prop_keys(recv: Ty, name: &str) -> Vec<(Ty, String)> {
         recv.erased_recv_candidates()
             .into_iter()
@@ -5641,10 +5643,7 @@ impl<'a> Lower<'a> {
         match self.afile.expr(receiver) {
             Expr::Name(outer) => self.resolve_qualified_nested(&format!("{outer}.{name}")),
             Expr::Member { .. } => {
-                let internal = format!(
-                    "{}/{name}",
-                    crate::resolve::qualified_path(self.afile, receiver)?
-                );
+                let internal = format!("{}/{name}", qualified_path(self.afile, receiver)?);
                 self.syms
                     .libraries
                     .resolve_type(&internal)
@@ -5671,7 +5670,7 @@ impl<'a> Lower<'a> {
         if self.lookup(&root).is_some() {
             return None;
         }
-        let pkg = crate::resolve::qualified_path(self.afile, receiver)?;
+        let pkg = qualified_path(self.afile, receiver)?;
         let arg_tys = self.arg_tys(args);
         // A trailing lambda was typed against its (receiver/suspend SAM) block parameter by the checker,
         // so its stored type already carries the right arity for overload resolution here.
@@ -5837,7 +5836,7 @@ impl<'a> Lower<'a> {
             .libraries
             .resolve_type(internal)
             .and_then(|t| t.constructor_named_params(args.len()))?;
-        let slots = crate::resolve::map_param_list_args(args, Some(&names), &ctor_params).ok()?;
+        let slots = map_param_list_args(args, Some(&names), &ctor_params).ok()?;
         if slots.iter().all(Option::is_some) {
             // Every parameter supplied — reorder onto positions and use the plain positional path.
             let ordered: Vec<AstExprId> = slots.into_iter().flatten().collect();
@@ -6661,14 +6660,10 @@ impl<'a> Lower<'a> {
             // The checker's `Invoke` lowering carries suspend-ness reliably (the receiver's static
             // type may be `Error` at the call site): a suspend function VALUE, or a suspend `invoke`
             // operator on a class receiver.
-            if let Some(crate::resolve::ExprLowering::Invoke { kind, .. }) =
-                self.info.expr_lowers.get(&call)
-            {
+            if let Some(ExprLowering::Invoke { kind, .. }) = self.info.expr_lowers.get(&call) {
                 match kind {
-                    crate::resolve::InvokeKind::Function { suspend, .. } if *suspend => {
-                        return true
-                    }
-                    crate::resolve::InvokeKind::Operator {
+                    InvokeKind::Function { suspend, .. } if *suspend => return true,
+                    InvokeKind::Operator {
                         receiver_ty,
                         member: None,
                     } if receiver_ty
@@ -6677,7 +6672,7 @@ impl<'a> Lower<'a> {
                     {
                         return true
                     }
-                    crate::resolve::InvokeKind::Operator {
+                    InvokeKind::Operator {
                         member: Some(member),
                         ..
                     } if member.suspend => return true,
@@ -11400,7 +11395,7 @@ impl<'a> Lower<'a> {
     /// against it, then yield the body value (`run`/`with`) or the receiver (`apply`/`also`). The
     /// receiver lambda runs in the caller, so `cur_class` is cleared — its members are reached through
     /// the implicit-`this` paths (member/getter/extension), never the enclosing class's private fields.
-    fn lower_receiver_lambda(&mut self, rl: crate::resolve::ReceiverLambda) -> Option<u32> {
+    fn lower_receiver_lambda(&mut self, rl: ReceiverLambda) -> Option<u32> {
         let rty = self.info.ty(rl.receiver);
         let recv = self.expr(rl.receiver)?;
         let depth = self.scope.len();
@@ -15119,7 +15114,7 @@ impl<'a> Lower<'a> {
                 // A class literal (the checker recorded bound-vs-unbound). UNBOUND `T::class` → a `Class`
                 // constant; BOUND `expr::class` → `expr.getClass()` (evaluated once).
                 if name == "class" {
-                    if let Some(crate::resolve::ExprLowering::ClassLiteral { unbound }) =
+                    if let Some(ExprLowering::ClassLiteral { unbound }) =
                         self.info.expr_lowers.get(&e).cloned()
                     {
                         // `T::class` on a REIFIED type parameter: inside an expanded `<reified T>` inline
@@ -17064,7 +17059,7 @@ impl<'a> Lower<'a> {
                 ) =>
             {
                 match self.info.expr_lowers.get(&e).cloned()? {
-                    ExprLowering::InlineCall(crate::resolve::InlineCall::ValueCompanion(cf)) => {
+                    ExprLowering::InlineCall(InlineCall::ValueCompanion(cf)) => {
                         let args = match self.afile.expr(e).clone() {
                             Expr::Call { args, .. } => args,
                             _ => return None,
@@ -17095,7 +17090,7 @@ impl<'a> Lower<'a> {
                             ir_args,
                         ))?
                     }
-                    ExprLowering::InlineCall(crate::resolve::InlineCall::ReceiverLambda(rl)) => {
+                    ExprLowering::InlineCall(InlineCall::ReceiverLambda(rl)) => {
                         self.lower_receiver_lambda(rl)?
                     }
                     _ => return None,
@@ -19597,7 +19592,7 @@ fn captured_param_ir(runtime: &dyn TargetRuntime, ty: Ty, shared_cell: bool) -> 
     }
 }
 
-fn lambda_info(info: &TypeInfo, e: AstExprId) -> crate::resolve::LambdaInfo {
+fn lambda_info(info: &FrontendTypeInfo, e: AstExprId) -> LambdaInfo {
     match info.expr_lowers.get(&e) {
         Some(ExprLowering::Lambda(li)) => *li,
         _ => Default::default(),
@@ -19619,7 +19614,7 @@ fn vararg_arity(vararg: bool, n_params: usize, n_args: usize) -> Option<usize> {
 fn shared_cell_vars_for_body(
     file: &ast::File,
     body: &FunBody,
-    info: &TypeInfo,
+    info: &FrontendTypeInfo,
 ) -> std::collections::HashSet<String> {
     let root = match body {
         FunBody::Expr(e) | FunBody::Block(e) => *e,
@@ -19636,7 +19631,7 @@ fn shared_cell_vars_for_body(
 fn closure_captured_names_for_body(
     file: &ast::File,
     body: &FunBody,
-    info: &TypeInfo,
+    info: &FrontendTypeInfo,
 ) -> std::collections::HashSet<String> {
     let root = match body {
         FunBody::Expr(e) | FunBody::Block(e) => *e,
@@ -19650,7 +19645,7 @@ fn closure_captured_names_for_body(
 fn collect_closure_captured_expr(
     file: &ast::File,
     e: AstExprId,
-    info: &TypeInfo,
+    info: &FrontendTypeInfo,
     in_closure: bool,
     out: &mut std::collections::HashSet<String>,
 ) {
@@ -19692,7 +19687,7 @@ fn collect_closure_captured_expr(
 fn collect_closure_captured_stmt(
     file: &ast::File,
     s: ast::StmtId,
-    info: &TypeInfo,
+    info: &FrontendTypeInfo,
     in_closure: bool,
     out: &mut std::collections::HashSet<String>,
 ) {
@@ -19725,7 +19720,7 @@ fn collect_closure_captured_stmt(
 fn shared_cell_vars_for_expr(
     file: &ast::File,
     root: AstExprId,
-    info: &TypeInfo,
+    info: &FrontendTypeInfo,
 ) -> std::collections::HashSet<String> {
     let mut reassigned = std::collections::HashSet::new();
     collect_reassigned_names(file, root, &mut reassigned);
@@ -19738,7 +19733,7 @@ fn shared_cell_vars_for_expr(
 fn collect_shared_cell_expr(
     file: &ast::File,
     e: AstExprId,
-    info: &TypeInfo,
+    info: &FrontendTypeInfo,
     reassigned: &std::collections::HashSet<String>,
     scopes: &mut Vec<std::collections::HashMap<String, bool>>,
     out: &mut std::collections::HashSet<String>,
@@ -19795,7 +19790,7 @@ fn collect_shared_cell_expr(
 fn collect_shared_cell_stmt(
     file: &ast::File,
     s: crate::ast::StmtId,
-    info: &TypeInfo,
+    info: &FrontendTypeInfo,
     reassigned: &std::collections::HashSet<String>,
     scopes: &mut Vec<std::collections::HashMap<String, bool>>,
     out: &mut std::collections::HashSet<String>,
@@ -20263,7 +20258,7 @@ fn build_applied_annotations(
 fn class_field_annotations(
     file: &ast::File,
     c: &ast::ClassDecl,
-    syms: &crate::resolve::SymbolTable,
+    syms: &FrontendSymbols,
 ) -> Vec<crate::ir::FieldAnnotations> {
     let mut out = Vec::new();
     for e in &c.enum_entries {
@@ -20307,7 +20302,7 @@ enum Retention {
 /// non-constant argument.
 fn resolve_field_annotation(
     file: &ast::File,
-    syms: &crate::resolve::SymbolTable,
+    syms: &FrontendSymbols,
     name: &str,
     args: &[AstExprId],
 ) -> Option<(crate::ir::AppliedAnnotation, Retention)> {
@@ -20349,7 +20344,7 @@ fn class_generic_sig(
     file: &ast::File,
     c: &ast::ClassDecl,
     libraries: &dyn SemanticPlatform,
-    class_names: &crate::resolve::ClassNames,
+    class_names: &ClassNames,
 ) -> Option<crate::ir::IrGenericSig> {
     // A CLASS with a PARAMETERIZED supertype (`object O : Operation<Result<Int>>`): carry the superclass
     // + interfaces as `Ty`s (with their type arguments) so the backend can format a class `Signature` a
@@ -20393,11 +20388,7 @@ fn class_generic_sig(
 /// A supertype / type-argument `TypeRef` resolved to a platform-agnostic `Ty` carrying its type arguments
 /// (`Operation<Result<Int>>` → `Obj("Operation", [Obj("kotlin/Result", [Int])])`). `None` when a name
 /// can't be resolved to an internal (then no class `Signature` is emitted — a safe fallback).
-fn supertype_ty(
-    tr: &ast::TypeRef,
-    file: &ast::File,
-    class_names: &crate::resolve::ClassNames,
-) -> Option<Ty> {
+fn supertype_ty(tr: &ast::TypeRef, file: &ast::File, class_names: &ClassNames) -> Option<Ty> {
     if let Some(t) = Ty::from_name(&tr.name) {
         return Some(t); // a builtin scalar / String / Any / Unit
     }
@@ -20418,7 +20409,7 @@ fn supertype_ty(
 fn resolve_super_internal(
     name: &str,
     file: &ast::File,
-    class_names: &crate::resolve::ClassNames,
+    class_names: &ClassNames,
 ) -> Option<String> {
     if file
         .decls
@@ -20574,7 +20565,7 @@ fn field_ty_with_args(file: &ast::File, tr: &ast::TypeRef, plat: &dyn SemanticPl
 
 fn ty_of(file: &ast::File, r: &ast::TypeRef, plat: &dyn SemanticPlatform) -> Ty {
     // Function type, builtin scalar, or primitive array — the leaf shared by every type resolver.
-    if let Some(t) = crate::resolve::typeref_leaf(r, &mut |x| ty_of(file, x, plat)) {
+    if let Some(t) = typeref_leaf(r, &mut |x| ty_of(file, x, plat)) {
         // Nullable primitives/Unit are reference slots consistent with the checker.
         if r.nullable {
             return t.nullable_non_ref().unwrap_or(t);
