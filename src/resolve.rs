@@ -8791,7 +8791,8 @@ impl<'a> Checker<'a> {
                         }
                         // A CLASSPATH `Comparable` type (`class Money : Comparable<Money>` compiled
                         // separately): its `operator fun compareTo(o): Int` is on the classpath, not in
-                        // `method_of`. Resolve it through the library set; lowering re-resolves the call.
+                        // `method_of`. Resolve it through the library set and record the selected member
+                        // for lowering.
                         // Only a REFERENCE right operand: an erased generic `Comparable<Double>.compareTo`
                         // takes `Object`, so a PRIMITIVE argument would need a box the lowering path here
                         // doesn't apply — leave that to the existing generic handling / a sound skip.
@@ -8802,14 +8803,15 @@ impl<'a> Checker<'a> {
                                         "resolve",
                                         "classpath compareTo drives comparison on {internal}"
                                     );
+                                    self.resolved_calls.insert(e, ResolvedCall::Member(m));
                                     return self.set(e, Ty::Boolean);
                                 }
                             }
                         }
                     }
                     // A library operator function on a reference receiver: `a + b` desugars to `a.plus(b)`,
-                    // resolved as a stdlib member/extension (`List + element` → `CollectionsKt.plus`). Use
-                    // its (parameterized) return type. The lowering re-resolves to emit the call.
+                    // resolved as a stdlib member/extension (`List + element` → `CollectionsKt.plus`).
+                    // Record the selected callable so lowering emits the same target.
                     let op_name = op.arith_operator_name();
                     // Resolve `a + b` (etc.) as `a.plus(b)` through the library set. Overload selection
                     // picks the most specific candidate (`list + list` → the `Iterable` concat overload,
@@ -14728,6 +14730,12 @@ mod tests {
 
     impl crate::symbol_source::SymbolSource for FakeMemberPlatform {
         fn resolve_symbols(&self, fqn: &str) -> crate::libraries::ResolvedSymbols {
+            if fqn == "BoxedComparable" {
+                return crate::libraries::ResolvedSymbols {
+                    classifier: self.resolve_type(fqn),
+                    callables: crate::libraries::Callables::None,
+                };
+            }
             let (kind, receiver, owner, name, params, ret, descriptor) = match fqn {
                 "knownTop" => (
                     crate::libraries::FnKind::TopLevel,
@@ -14795,30 +14803,49 @@ mod tests {
         }
 
         fn resolve_type(&self, internal: &str) -> Option<crate::libraries::LibraryType> {
-            (internal == "kotlin/String").then(|| crate::libraries::LibraryType {
-                is_public: true,
-                kind: crate::libraries::TypeKind::Class,
-                supertypes: vec![],
-                constructors: vec![],
-                members: vec![],
-                companion: vec![],
-                companion_consts: HashMap::new(),
-                sam_method: None,
-                companion_object: None,
-                value_companion_fns: vec![],
-                value_underlying: None,
-                alias_target: None,
-                type_params: vec![],
-                sealed_subclasses: vec![],
-                enum_entries: vec![],
-                value_ctor_has_default: false,
-                ctor_named_params: vec![],
-                value_class_properties: vec![],
-                retention: None,
+            matches!(internal, "kotlin/String" | "BoxedComparable").then(|| {
+                crate::libraries::LibraryType {
+                    is_public: true,
+                    kind: crate::libraries::TypeKind::Class,
+                    supertypes: vec![],
+                    constructors: vec![],
+                    members: vec![],
+                    companion: vec![],
+                    companion_consts: HashMap::new(),
+                    sam_method: None,
+                    companion_object: None,
+                    value_companion_fns: vec![],
+                    value_underlying: None,
+                    alias_target: None,
+                    type_params: vec![],
+                    sealed_subclasses: vec![],
+                    enum_entries: vec![],
+                    value_ctor_has_default: false,
+                    ctor_named_params: vec![],
+                    value_class_properties: vec![],
+                    retention: None,
+                }
             })
         }
 
         fn member_overloads(&self, recv: Ty, name: &str) -> crate::libraries::FunctionSet {
+            if recv == Ty::obj("BoxedComparable") && name == "compareTo" {
+                let callable = crate::libraries::LibraryCallable::library(
+                    "BoxedComparable",
+                    "compareTo",
+                    vec![Ty::obj("BoxedComparable")],
+                    Ty::Int,
+                    Ty::Int,
+                    "(LBoxedComparable;)I",
+                );
+                return crate::libraries::FunctionSet {
+                    overloads: vec![crate::libraries::FunctionInfo::plain(
+                        crate::libraries::FnKind::Member,
+                        Some(Ty::obj("BoxedComparable")),
+                        callable,
+                    )],
+                };
+            }
             if recv != Ty::String || !matches!(name, "known" | "choose" | "tie") {
                 return crate::libraries::FunctionSet::default();
             }
@@ -15103,6 +15130,38 @@ mod tests {
             panic!("checker must record overloaded classpath member calls for lowering");
         };
         assert_eq!(selected.member.params, vec![Ty::Int]);
+    }
+
+    #[test]
+    fn classpath_compare_operator_records_resolved_member_for_lowering() {
+        let mut d = DiagSink::new();
+        let file = parse_file(
+            "fun less(a: BoxedComparable, b: BoxedComparable): Boolean = a < b",
+            &mut d,
+        );
+        let files = vec![file];
+        let mut syms = collect_signatures_with_cp(&files, Box::new(FakeMemberPlatform), &mut d);
+        let info = check_file(&files[0], &mut syms, &mut d);
+        assert!(
+            d.diags.is_empty(),
+            "unexpected diagnostics: {:?}",
+            d.diags.iter().map(|x| &x.msg).collect::<Vec<_>>()
+        );
+
+        let comparison = files[0]
+            .expr_arena
+            .iter()
+            .enumerate()
+            .find_map(|(idx, expr)| match expr {
+                Expr::Binary { op: BinOp::Lt, .. } => Some(ExprId(idx as u32)),
+                _ => None,
+            })
+            .expect("source should contain a < b comparison");
+        let Some(ResolvedCall::Member(selected)) = info.resolved_calls.get(&comparison) else {
+            panic!("checker must record classpath compareTo selected for relational lowering");
+        };
+        assert_eq!(selected.member.name, "compareTo");
+        assert_eq!(selected.ret, Ty::Int);
     }
 
     #[test]
