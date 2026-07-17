@@ -134,6 +134,14 @@ mod tests {
     }
 
     #[test]
+    fn module_symbols_uses_only_frontend_symbol_handoff_dependencies() {
+        assert_allowed_crate_modules(
+            "src/module_symbols.rs",
+            &["frontend", "libraries", "symbol_source", "types"],
+        );
+    }
+
+    #[test]
     fn synthetics_registry_uses_only_ir_contract_dependencies() {
         assert_allowed_crate_modules("src/synthetics.rs", &["ast", "ir", "types"]);
     }

@@ -1,27 +1,28 @@
 //! `ModuleSymbols` — the current compilation's own declarations exposed as a [`SymbolSource`].
 //!
-//! It wraps the user-declared half of a [`SymbolTable`] (top-level functions, classes, extensions) and
-//! answers the same `seed`/`functions`/`resolve_type` queries a compiled library does — so module code
-//! federates with libraries through one [`crate::symbol_source::CompositeSource`] instead of the
+//! It wraps the user-declared half of [`crate::frontend::FrontendSymbols`] (top-level functions,
+//! classes, extensions) and answers the same `seed`/`functions`/`resolve_type` queries a compiled
+//! library does — so module code federates with libraries through one
+//! [`crate::symbol_source::CompositeSource`] instead of the
 //! scattered "user-first, else library" branching. Every callable is stamped [`Origin::Module`] so the
 //! lowerer can pick the same-file / cross-file / library emit form from resolution alone.
 
+use crate::frontend::{pick_overload, FrontendClassSig, FrontendSymbols, Signature};
 use crate::libraries::{
     FnFlags, FnKind, FunctionInfo, FunctionSet, InlineKind, LibraryCallable, LibraryMember,
     LibraryType, Origin,
 };
-use crate::resolve::{ClassSig, Signature, SymbolTable};
 use crate::symbol_source::SymbolSource;
 use crate::types::Ty;
 use std::collections::HashMap;
 
-/// The current module's declarations as a [`SymbolSource`]. Borrows the [`SymbolTable`]; cheap.
+/// The current module's declarations as a [`SymbolSource`]. Borrows the frontend symbols; cheap.
 pub struct ModuleSymbols<'a> {
-    syms: &'a SymbolTable,
+    syms: &'a FrontendSymbols,
 }
 
 impl<'a> ModuleSymbols<'a> {
-    pub fn new(syms: &'a SymbolTable) -> Self {
+    pub fn new(syms: &'a FrontendSymbols) -> Self {
         ModuleSymbols { syms }
     }
 
@@ -31,8 +32,8 @@ impl<'a> ModuleSymbols<'a> {
         self.syms.fn_facades.get(name).cloned()
     }
 
-    /// The user [`ClassSig`] whose JVM internal name is `internal`, if any.
-    fn class_by_internal(&self, internal: &str) -> Option<&'a ClassSig> {
+    /// The user [`FrontendClassSig`] whose JVM internal name is `internal`, if any.
+    fn class_by_internal(&self, internal: &str) -> Option<&'a FrontendClassSig> {
         self.syms.classes.values().find(|c| c.internal == internal)
     }
 
@@ -81,18 +82,18 @@ impl<'a> ModuleSymbols<'a> {
         }
     }
 
-    /// Select the top-level overload of `name` matching `arg_tys` (Kotlin overload resolution via
-    /// [`crate::resolve::pick_overload`]) and return it as a [`FunctionInfo`]. The source owns the
-    /// selection, so callers need not touch `syms.funs` or re-run the picker themselves.
+    /// Select the top-level overload of `name` matching `arg_tys` and return it as a [`FunctionInfo`].
+    /// The source owns the selection, so callers need not touch `syms.funs` or re-run the picker
+    /// themselves.
     pub fn resolve_top_level(&self, name: &str, arg_tys: &[Ty]) -> Option<FunctionInfo> {
-        let i = crate::resolve::pick_overload(self.syms.funs.get(name)?, arg_tys)?;
+        let i = pick_overload(self.syms.funs.get(name)?, arg_tys)?;
         self.module_top_level(name).into_iter().nth(i)
     }
 
     /// The module's TOP-LEVEL function overloads of `name` as [`FunctionInfo`]s — every `fun name(...)`
     /// declared at file scope, each stamped with its declaring facade [`Origin::Module`]. The building
-    /// block `resolve_symbols`/`resolve_top_level` share, so the source answers a name WITHOUT the removed
-    /// receiver-indexed `functions()` seam.
+    /// block `resolve_symbols`/`resolve_top_level` share, so the source answers a name without the old
+    /// receiver-indexed `functions()` API.
     fn module_top_level(&self, name: &str) -> Vec<FunctionInfo> {
         let mut overloads = Vec::new();
         if let Some(sigs) = self.syms.funs.get(name) {
@@ -157,7 +158,8 @@ impl<'a> ModuleSymbols<'a> {
 }
 
 /// A user [`Signature`] as a [`LibraryMember`] — the module-source shape of a class method. Carries the
-/// source call-shape (`call_sig`) so a named / omitted-default member call resolves through the type seam.
+/// source call-shape (`call_sig`) so a named / omitted-default member call resolves through the type
+/// interface.
 fn lib_member(name: &str, sig: &Signature) -> LibraryMember {
     let mut m = LibraryMember::new(name.to_string(), sig.params.clone(), sig.ret, String::new());
     m.suspend = sig.is_suspend;
@@ -361,8 +363,8 @@ mod tests {
         }
     }
 
-    fn class(internal: &str) -> ClassSig {
-        ClassSig {
+    fn class(internal: &str) -> FrontendClassSig {
+        FrontendClassSig {
             internal: internal.to_string(),
             props: vec![],
             ctor_params: vec![],
@@ -392,7 +394,7 @@ mod tests {
 
     #[test]
     fn top_level_functions_are_module_origin_with_semantic_shape() {
-        let mut st = SymbolTable::default();
+        let mut st = FrontendSymbols::default();
         st.funs
             .insert("twice".into(), vec![sig(vec![Ty::Int], Ty::Int)]);
         let m = ModuleSymbols::new(&st);
@@ -407,7 +409,7 @@ mod tests {
 
     #[test]
     fn call_sig_mirrors_the_source_signature() {
-        let mut st = SymbolTable::default();
+        let mut st = FrontendSymbols::default();
         let mut s = sig(vec![Ty::Int, Ty::Int], Ty::Int);
         s.required = 1;
         s.param_defaults = vec![false, true];
@@ -424,7 +426,7 @@ mod tests {
 
     #[test]
     fn top_level_overloads_all_returned() {
-        let mut st = SymbolTable::default();
+        let mut st = FrontendSymbols::default();
         st.funs.insert(
             "f".into(),
             vec![sig(vec![Ty::Int], Ty::Int), sig(vec![Ty::String], Ty::Int)],
@@ -435,7 +437,7 @@ mod tests {
 
     #[test]
     fn cross_file_facade_flows_into_origin() {
-        let mut st = SymbolTable::default();
+        let mut st = FrontendSymbols::default();
         st.funs.insert("helper".into(), vec![sig(vec![], Ty::Unit)]);
         st.fn_facades.insert("helper".into(), "pkg/AKt".into());
         let m = ModuleSymbols::new(&st);
@@ -451,7 +453,7 @@ mod tests {
 
     #[test]
     fn members_walk_user_hierarchy_depth_first_with_rank() {
-        let mut st = SymbolTable::default();
+        let mut st = FrontendSymbols::default();
         let mut base = class("demo/Base");
         base.methods.insert("greet".into(), sig(vec![], Ty::String));
         let mut sub = class("demo/Sub");
@@ -476,14 +478,14 @@ mod tests {
 
     #[test]
     fn extension_prepends_receiver_and_keys_by_erased_receiver() {
-        let mut st = SymbolTable::default();
+        let mut st = FrontendSymbols::default();
         let recv = Ty::obj("demo/Point");
         st.ext_funs.insert(
             (recv.erased_recv(), "shifted".into()),
             vec![sig(vec![Ty::Int], recv)],
         );
         let m = ModuleSymbols::new(&st);
-        // A module extension is surfaced through the `resolve_symbols` fqn seam (receiver as an attribute).
+        // A module extension is surfaced through `resolve_symbols` by fqn, with the receiver as an attribute.
         let fs = match m.resolve_symbols("shifted").callables {
             crate::libraries::Callables::Functions(f) => f.overloads,
             _ => Vec::new(),
@@ -498,7 +500,7 @@ mod tests {
 
     #[test]
     fn resolve_type_builds_shape_with_ctor_and_members() {
-        let mut st = SymbolTable::default();
+        let mut st = FrontendSymbols::default();
         let mut c = class("demo/Point");
         c.ctor_params = vec![Ty::Int, Ty::Int];
         c.methods.insert("sum".into(), sig(vec![], Ty::Int));
