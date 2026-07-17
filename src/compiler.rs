@@ -29,6 +29,7 @@ pub fn compile<B: Backend>(
                 symbols: syms,
             },
             &stems[i],
+            module_name,
             &mut state,
             diags,
         ));
@@ -54,6 +55,7 @@ mod tests {
             &self,
             checked: CheckedFile<'_>,
             stem: &str,
+            _module_name: &str,
             state: &mut Self::State,
             _diags: &mut DiagSink,
         ) -> Vec<Artifact> {

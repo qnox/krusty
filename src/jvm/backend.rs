@@ -43,9 +43,10 @@ pub fn run_backend_passes(
     ir: &mut crate::ir::IrFile,
     file: &File,
     facade: &str,
+    module_name: &str,
     syms: &FrontendSymbols,
 ) -> Result<(), SkipReason> {
-    crate::plugins::run_enabled(ir, file, jvm_plugin_type_descriptor);
+    crate::plugins::run_enabled(ir, file, module_name, jvm_plugin_type_descriptor);
     let vc_module = crate::module_symbols::ModuleSymbols::new(syms);
     let vc_resolver = crate::symbol_resolver::SymbolResolver::new_scoped_with_module(
         &*syms.libraries,
@@ -125,6 +126,7 @@ impl Backend for JvmBackend {
         &self,
         checked: CheckedFile<'_>,
         stem: &str,
+        module_name: &str,
         state: &mut JvmState,
         diags: &mut DiagSink,
     ) -> Vec<Artifact> {
@@ -147,7 +149,7 @@ impl Backend for JvmBackend {
         };
         // The shared post-lowering pass pipeline (see `run_backend_passes`); an unlowerable shape →
         // diagnose and skip the file rather than miscompile.
-        if let Err(reason) = run_backend_passes(&mut ir, file, &facade_name, syms) {
+        if let Err(reason) = run_backend_passes(&mut ir, file, &facade_name, module_name, syms) {
             let what = match reason {
                 SkipReason::ValueClasses => "value-class",
                 SkipReason::Suspend => "suspend-function",

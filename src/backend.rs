@@ -17,6 +17,7 @@ pub trait Backend {
         &self,
         checked: CheckedFile<'_>,
         stem: &str,
+        module_name: &str,
         state: &mut Self::State,
         diags: &mut DiagSink,
     ) -> Vec<Artifact>;

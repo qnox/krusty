@@ -23,6 +23,7 @@ where
         &self,
         checked: CheckedFile<'_>,
         stem: &str,
+        _module_name: &str,
         _state: &mut Self::State,
         diags: &mut DiagSink,
     ) -> Vec<Artifact> {

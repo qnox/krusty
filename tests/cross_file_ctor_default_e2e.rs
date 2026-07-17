@@ -56,7 +56,7 @@ fn compile_two(a: &str, b: &str) -> Option<Vec<(String, Vec<u8>)>> {
         let runtime = krusty::jvm::jvm_libraries::JvmLibraries::new(cp.clone());
         let mut ir = krusty::ir_lower::lower_file(file, &info, &syms, &runtime)?;
         // Shared post-lowering pass pipeline (jvm/backend.rs); unlowerable shape → skip.
-        krusty::jvm::backend::run_backend_passes(&mut ir, file, &facade, &syms).ok()?;
+        krusty::jvm::backend::run_backend_passes(&mut ir, file, &facade, "main", &syms).ok()?;
         all.extend(krusty::jvm::ir_emit::emit_all(&ir, &facade, &*cp, None)?);
     }
     Some(all)

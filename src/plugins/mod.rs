@@ -153,6 +153,7 @@ pub trait IrPlugin {
 pub fn run_enabled(
     ir: &mut IrFile,
     file: &crate::ast::File,
+    module_name: &str,
     target_type_descriptor: fn(Ty) -> Option<String>,
 ) {
     let ctx =
@@ -160,8 +161,13 @@ pub fn run_enabled(
     if ctx.classes_with_simple("Serializable").is_empty() {
         return;
     }
+    // The `write$Self$<module>` helper is mangled with the compilation's module name (kotlinc's
+    // >=1.6 ABI); thread it through so it matches the real Gradle module, not the "main" default.
     let mut host = PluginHost::new();
-    host.register(Box::new(serialization::SerializationPlugin::default()));
+    host.register(Box::new(serialization::SerializationPlugin::new(
+        serialization::SerializationAbi::default(),
+        module_name,
+    )));
     host.run(ir, &ctx);
 }
 

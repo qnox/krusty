@@ -250,7 +250,8 @@ fn compile_source(
     };
     // The real backend's shared post-lowering pass pipeline (jvm/backend.rs) — one definition, so the
     // gate compiles exactly what ships. An unlowerable shape → skip, don't miscompile.
-    if krusty::jvm::backend::run_backend_passes(&mut ir, file, &facade_name, &syms).is_err() {
+    if krusty::jvm::backend::run_backend_passes(&mut ir, file, &facade_name, "main", &syms).is_err()
+    {
         T_EMIT.fetch_add(t4.elapsed().as_nanos() as u64, Ordering::Relaxed);
         return None;
     }
@@ -454,7 +455,7 @@ fn compile_blocks(
         let runtime = krusty::jvm::jvm_libraries::JvmLibraries::new(cp.clone());
         let mut ir = lower_file(file, &info, &syms, &runtime)?;
         // Shared post-lowering pass pipeline (jvm/backend.rs); unlowerable shape → skip, don't miscompile.
-        krusty::jvm::backend::run_backend_passes(&mut ir, file, &facade, &syms).ok()?;
+        krusty::jvm::backend::run_backend_passes(&mut ir, file, &facade, "main", &syms).ok()?;
         let out = ir_emit::emit_all(&ir, &facade, &*cp, None)?;
         all.extend(out);
     }

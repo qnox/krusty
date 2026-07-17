@@ -94,11 +94,21 @@ impl SerializationPlugin {
         }
     }
 
-    /// The per-class write-helper name for the target ABI.
+    /// The per-class write-helper name for the target ABI. On core >= 1.6 the module name is mangled
+    /// into the suffix with every non-`[A-Za-z0-9]` character replaced by `_` (kotlinc sanitizes the
+    /// module name so it is a legal JVM method-name segment — `com.infragnite.x-httpclient` →
+    /// `com_infragnite_x_httpclient`).
     fn write_self_name(&self) -> String {
         match self.abi {
             SerializationAbi::V1_0 => "write$Self".to_string(),
-            SerializationAbi::V1_6Plus => format!("write$Self${}", self.module),
+            SerializationAbi::V1_6Plus => {
+                let mangled: String = self
+                    .module
+                    .chars()
+                    .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+                    .collect();
+                format!("write$Self${mangled}")
+            }
         }
     }
 }

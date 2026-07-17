@@ -184,7 +184,7 @@ pub fn compile_in_process(
     // The real backend's shared post-lowering pass pipeline (plugins → value-classes → suspend →
     // must-inline marks → lambda reparenting) — one definition, so `compile_in_process` can't drift
     // from what ships. An unlowerable shape → skip, don't miscompile.
-    krusty::jvm::backend::run_backend_passes(&mut ir, file, &facade, &syms).ok()?;
+    krusty::jvm::backend::run_backend_passes(&mut ir, file, &facade, "main", &syms).ok()?;
     let outputs = krusty::jvm::ir_emit::emit_all(&ir, &facade, &*cp, None)?;
     if outputs.is_empty() {
         None
@@ -268,7 +268,7 @@ pub fn backend_rejects_in_process(
     let Some(mut ir) = krusty::ir_lower::lower_file(file, &info, &syms, &runtime) else {
         return Some(true);
     };
-    if krusty::jvm::backend::run_backend_passes(&mut ir, file, &facade, &syms).is_err() {
+    if krusty::jvm::backend::run_backend_passes(&mut ir, file, &facade, "main", &syms).is_err() {
         return Some(true);
     }
     Some(krusty::jvm::ir_emit::emit_all(&ir, &facade, &*cp, None).is_none())
