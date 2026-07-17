@@ -1,7 +1,8 @@
 //! Named arguments to a CLASSPATH (kotlinc-compiled) top-level function: `describe(count = 3,
 //! name = "hi")` calls a library function out of declared order. krusty must read the parameter NAMES
-//! from the callee's `@Metadata` (`ValueParameter.name`), reorder the arguments into parameter order,
-//! and emit a correct `invokestatic` — verified by running the result on a real JVM.
+//! from the callee's `@Metadata` (`ValueParameter.name`), map source arguments to parameter slots,
+//! preserve source evaluation order, and emit a correct `invokestatic` — verified by running the result
+//! on a real JVM.
 //!
 //! This is the general feature that compose-ui DEP cases need (they call androidx functions with
 //! named args). The dependency is compiled by the REAL kotlinc, so its `@Metadata` is authoritative.
@@ -46,6 +47,43 @@ fn named_args_to_classpath_top_level_fn_reorder_and_run() {
 
     // 3. The reordered call verifies and returns the right string on a real JVM (the lib dir is on the
     //    runtime classpath — `describe` is a real `invokestatic`, not inlined).
+    let Some(out) = common::run_box(&classes, "MainKt", &[libout.clone(), stdlib_path]) else {
+        eprintln!("skipping: box runner unavailable");
+        return;
+    };
+    assert_eq!(out.trim(), "OK", "box() returned {out:?}");
+}
+
+#[test]
+fn classpath_top_level_named_args_preserve_source_eval_order() {
+    let Some(java_home) = env("KRUSTY_REF_JAVA_HOME").or_else(|| env("JAVA_HOME")) else {
+        eprintln!("skipping: set JAVA_HOME");
+        return;
+    };
+    let Some(stdlib_path) = common::stdlib_jar() else {
+        eprintln!("skipping: no kotlin-stdlib jar");
+        return;
+    };
+    let jdk_modules = std::path::PathBuf::from(format!("{java_home}/lib/modules"));
+
+    let Some(libout) = common::compile_lib(
+        "named_args_eval_order",
+        "package lib\nfun join(a: String, b: String): String = a + \":\" + b\n",
+    ) else {
+        return;
+    };
+
+    let main_src = "import lib.join\n\
+        var seq: Int = 0\n\
+        fun next(label: String): String { seq = seq + 1; return label + seq }\n\
+        fun box(): String {\n\
+        \x20   val r = join(b = next(\"b\"), a = next(\"a\"))\n\
+        \x20   return if (r == \"a2:b1\") \"OK\" else \"fail:\" + r\n\
+        }\n";
+    let cp = vec![libout.clone(), stdlib_path.clone()];
+    let classes = common::compile_in_process(main_src, "Main", &cp, Some(&jdk_modules))
+        .expect("krusty(main) failed to compile side-effecting classpath named-argument call");
+
     let Some(out) = common::run_box(&classes, "MainKt", &[libout.clone(), stdlib_path]) else {
         eprintln!("skipping: box runner unavailable");
         return;
