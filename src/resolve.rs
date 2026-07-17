@@ -1597,19 +1597,24 @@ pub fn collect_signatures_with_cp(
                             // `getValue` return type.
                             match &bp.ty {
                                 Some(r) => ty_of_ref(r, &class_names, &ctp, diags),
-                                None => infer_lit_ty_p(
-                                    file,
-                                    de,
-                                    &class_names,
-                                    &fun_rets,
-                                    &init_scope,
-                                    &*libraries,
-                                    &|ci, cn| table.prop_of(ci, cn).map(|(pt, _)| pt),
-                                )
-                                .obj_internal()
-                                .and_then(|i| table.method_of(i, "getValue"))
-                                .map(|s| s.ret)
-                                .unwrap_or(Ty::Error),
+                                None => {
+                                    let dt = infer_lit_ty_p(
+                                        file,
+                                        de,
+                                        &class_names,
+                                        &fun_rets,
+                                        &init_scope,
+                                        &*libraries,
+                                        &|ci, cn| table.prop_of(ci, cn).map(|(pt, _)| pt),
+                                    );
+                                    delegated_getvalue_ret_for_signature(
+                                        file,
+                                        &table,
+                                        &*libraries,
+                                        dt,
+                                    )
+                                    .unwrap_or(Ty::Error)
+                                }
                             }
                         } else {
                             match (&bp.ty, &bp.getter) {
@@ -2286,11 +2291,12 @@ pub fn collect_signatures_with_cp(
                     let ty = if let Some(de) = p.delegate {
                         match &p.ty {
                             Some(r) => ty_of_ref(r, &class_names, &Default::default(), diags),
-                            None => infer_lit_ty(file, de, &class_names, &fun_rets, &*libraries)
-                                .obj_internal()
-                                .and_then(|i| table.method_of(i, "getValue"))
-                                .map(|s| s.ret)
-                                .unwrap_or(Ty::Error),
+                            None => {
+                                let dt =
+                                    infer_lit_ty(file, de, &class_names, &fun_rets, &*libraries);
+                                delegated_getvalue_ret_for_signature(file, &table, &*libraries, dt)
+                                    .unwrap_or(Ty::Error)
+                            }
                         }
                     } else {
                         // Type from the annotation, else a light inference from a literal initializer (or,
@@ -3111,6 +3117,32 @@ fn infer_lit_ty(
     src: &dyn SemanticPlatform,
 ) -> Ty {
     infer_lit_ty_p(file, e, class_names, fun_rets, &[], src, &|_, _| None)
+}
+
+fn delegated_getvalue_ret_for_signature(
+    file: &File,
+    table: &SymbolTable,
+    libraries: &dyn SemanticPlatform,
+    delegate_ty: Ty,
+) -> Option<Ty> {
+    let internal = delegate_ty.obj_internal()?;
+    if internal.starts_with("kotlin/reflect/") {
+        return None;
+    }
+    if let Some(sig) = table.method_of(internal, "getValue") {
+        return Some(sig.ret);
+    }
+    let module = crate::module_symbols::ModuleSymbols::new(table);
+    let scope = function_scope_packages_with(file, libraries.platform_default_import_packages());
+    crate::symbol_resolver::SymbolResolver::new_scoped_with_module(libraries, &module, &scope)
+        .resolve_symbol(
+            crate::symbol_resolver::SymRecv::Value(delegate_ty),
+            "getValue",
+            &[Ty::obj("kotlin/Any"), Ty::obj("kotlin/reflect/KProperty")],
+            &[],
+        )
+        .and_then(crate::symbol_resolver::Symbol::extension_call)
+        .map(|c| c.ret)
 }
 
 /// The array type produced by a creation-builtin call in the lightweight inferer: a primitive
@@ -3967,6 +3999,8 @@ pub struct TypeInfo {
     /// name. The lowerer reads the callable here instead of re-resolving; it carries `inline`, so the
     /// backend splices when needed.
     pub synthetic_ext_calls: HashMap<(ExprId, String), crate::libraries::LibraryCallable>,
+    /// Delegated-property `getValue` targets selected by the checker, keyed by the delegate expression.
+    pub delegate_getvalue_targets: HashMap<ExprId, DelegateGetValueTarget>,
     /// For a call to a function with CONTEXT PARAMETERS (`context(a: A) fun f()`) where the context
     /// arguments are supplied IMPLICITLY, the in-scope source that fills each leading context parameter,
     /// in order — either the sentinel `"this"` (the enclosing implicit receiver, e.g. a `with` block's
@@ -3995,6 +4029,25 @@ pub enum ResolvedCall {
     /// lookup), so the checker resolves and records it and the lowerer only READS it — emits
     /// `invokevirtual`. Distinct from [`Self::Member`] because it carries a raw `LibraryCallable`.
     LambdaReturnMember(crate::libraries::LibraryCallable),
+}
+
+#[derive(Clone, Debug)]
+pub enum DelegateGetValueTarget {
+    Member {
+        owner: String,
+        params: Vec<Ty>,
+        ret: Ty,
+    },
+    Extension(Box<crate::libraries::LibraryCallable>),
+}
+
+impl DelegateGetValueTarget {
+    pub fn ret(&self) -> Ty {
+        match self {
+            Self::Member { ret, .. } => *ret,
+            Self::Extension(c) => c.ret,
+        }
+    }
 }
 
 impl TypeInfo {
@@ -4035,6 +4088,9 @@ impl TypeInfo {
         name: &str,
     ) -> Option<&crate::libraries::LibraryCallable> {
         self.synthetic_ext_calls.get(&(recv, name.to_string()))
+    }
+    pub fn delegate_getvalue(&self, delegate: ExprId) -> Option<&DelegateGetValueTarget> {
+        self.delegate_getvalue_targets.get(&delegate)
     }
 }
 
@@ -4301,6 +4357,7 @@ fn make_checker<'a>(file: &'a File, syms: &'a SymbolTable, diags: &'a mut DiagSi
         resolved_calls: HashMap::new(),
         resolved_call_arg_slots: HashMap::new(),
         synthetic_ext_calls: HashMap::new(),
+        delegate_getvalue_targets: HashMap::new(),
         super_ctor_params: HashMap::new(),
         context_args: HashMap::new(),
         fn_reassigned: std::collections::HashSet::new(),
@@ -4799,7 +4856,8 @@ pub fn check_file(file: &File, syms: &mut SymbolTable, diags: &mut DiagSink) -> 
                     // A delegated member property's delegate expression (`by Del()`) — type-check it so
                     // its (and its sub-expressions') types are recorded for the `x$delegate` field lowering.
                     if let Some(de) = bp.delegate {
-                        c.expr(de);
+                        let dt = c.expr(de);
+                        c.record_delegate_getvalue(de, dt);
                     }
                     // A property's accessor bodies are checked like methods, with `field` bound to
                     // the backing-field type (the implicit-`this` scope of props is already active).
@@ -5011,7 +5069,8 @@ pub fn check_file(file: &File, syms: &mut SymbolTable, diags: &mut DiagSink) -> 
                 // A delegated property's delegate expression (`by Del()`) must be type-checked so its
                 // (and its sub-expressions') types are recorded for the lowering of `x$delegate`.
                 if let Some(de) = p.delegate {
-                    let _ = c.expr(de);
+                    let dt = c.expr(de);
+                    c.record_delegate_getvalue(de, dt);
                 }
                 if let Some(init) = p.init {
                     let it = c.expr(init);
@@ -5043,6 +5102,7 @@ pub fn check_file(file: &File, syms: &mut SymbolTable, diags: &mut DiagSink) -> 
         resolved_calls,
         resolved_call_arg_slots,
         synthetic_ext_calls,
+        delegate_getvalue_targets,
         context_args,
         super_ctor_params,
         ..
@@ -5089,6 +5149,7 @@ pub fn check_file(file: &File, syms: &mut SymbolTable, diags: &mut DiagSink) -> 
         resolved_calls,
         resolved_call_arg_slots,
         synthetic_ext_calls,
+        delegate_getvalue_targets,
         context_args,
     }
 }
@@ -5166,6 +5227,7 @@ struct Checker<'a> {
     resolved_calls: HashMap<ExprId, ResolvedCall>,
     resolved_call_arg_slots: HashMap<ExprId, Vec<Option<ExprId>>>,
     synthetic_ext_calls: HashMap<(ExprId, String), crate::libraries::LibraryCallable>,
+    delegate_getvalue_targets: HashMap<ExprId, DelegateGetValueTarget>,
     /// Implicit context arguments per call (see [`TypeInfo::context_args`]).
     context_args: HashMap<ExprId, Vec<String>>,
     /// Names reassigned anywhere in the function body currently being checked (including inside its
@@ -10356,6 +10418,37 @@ impl<'a> Checker<'a> {
         }
     }
 
+    fn record_delegate_getvalue(&mut self, delegate: ExprId, delegate_ty: Ty) -> Option<Ty> {
+        if let Some(internal) = delegate_ty.obj_internal() {
+            if internal.starts_with("kotlin/reflect/") {
+                return None;
+            }
+            if let Some(sig) = self.syms.method_of(internal, "getValue") {
+                self.delegate_getvalue_targets.insert(
+                    delegate,
+                    DelegateGetValueTarget::Member {
+                        owner: internal.to_string(),
+                        params: sig.params.clone(),
+                        ret: sig.ret,
+                    },
+                );
+                return Some(sig.ret);
+            }
+        }
+        let callable = self.library_extension_callable(
+            "getValue",
+            delegate_ty,
+            &[Ty::obj("kotlin/Any"), Ty::obj("kotlin/reflect/KProperty")],
+            &[],
+        )?;
+        let ret = callable.ret;
+        self.delegate_getvalue_targets.insert(
+            delegate,
+            DelegateGetValueTarget::Extension(Box::new(callable)),
+        );
+        Some(ret)
+    }
+
     fn library_extension_callable(
         &self,
         name: &str,
@@ -13901,13 +13994,10 @@ impl<'a> Checker<'a> {
                 // Type-check the delegate; the property's type is the annotation, else the delegate's
                 // `getValue` return type.
                 let dt = self.expr(delegate);
+                let delegate_ret = self.record_delegate_getvalue(delegate, dt);
                 let prop_ty = match ty.as_ref() {
                     Some(r) => self.resolve_ty(r),
-                    None => dt
-                        .obj_internal()
-                        .and_then(|i| self.syms.method_of(i, "getValue"))
-                        .map(|s| s.ret)
-                        .unwrap_or(Ty::Error),
+                    None => delegate_ret.unwrap_or(Ty::Error),
                 };
                 self.declare(&name, prop_ty, is_var);
             }
@@ -14625,8 +14715,10 @@ mod tests {
 
     impl crate::symbol_source::SymbolSource for FakeMemberPlatform {
         fn resolve_symbols(&self, fqn: &str) -> crate::libraries::ResolvedSymbols {
-            let (owner, name, params, ret, descriptor) = match fqn {
+            let (kind, receiver, owner, name, params, ret, descriptor) = match fqn {
                 "knownTop" => (
+                    crate::libraries::FnKind::TopLevel,
+                    None,
                     "test/TopKt",
                     "knownTop",
                     vec![Ty::String, Ty::Int],
@@ -14634,11 +14726,26 @@ mod tests {
                     "(Ljava/lang/String;I)Ljava/lang/String;",
                 ),
                 "Foo" => (
+                    crate::libraries::FnKind::TopLevel,
+                    None,
                     "test/TopKt",
                     "Foo",
                     vec![Ty::String],
                     Ty::String,
                     "(Ljava/lang/String;)Ljava/lang/String;",
+                ),
+                "test/getValue" => (
+                    crate::libraries::FnKind::Extension,
+                    Some(Ty::obj("test/Delegate")),
+                    "test/DelegateKt",
+                    "getValue",
+                    vec![
+                        Ty::obj("test/Delegate"),
+                        Ty::nullable(Ty::obj("kotlin/Any")),
+                        Ty::obj("kotlin/reflect/KProperty"),
+                    ],
+                    Ty::String,
+                    "(LDelegate;Ljava/lang/Object;Lkotlin/reflect/KProperty;)Ljava/lang/String;",
                 ),
                 _ => return crate::libraries::ResolvedSymbols::default(),
             };
@@ -14650,18 +14757,20 @@ mod tests {
                 ret,
                 descriptor,
             );
-            let mut info = crate::libraries::FunctionInfo::plain(
-                crate::libraries::FnKind::TopLevel,
-                None,
-                callable,
-            );
+            let mut info = crate::libraries::FunctionInfo::plain(kind, receiver, callable);
             info.call_sig = CallSig {
                 param_names: if name == "knownTop" {
                     vec!["a".to_string(), "b".to_string()]
+                } else if name == "getValue" {
+                    vec!["thisRef".to_string(), "property".to_string()]
                 } else {
                     vec!["s".to_string()]
                 },
-                required: if name == "knownTop" { 2 } else { 1 },
+                required: if matches!(name, "knownTop" | "getValue") {
+                    2
+                } else {
+                    1
+                },
                 ..Default::default()
             };
             crate::libraries::ResolvedSymbols {
@@ -15102,6 +15211,113 @@ mod tests {
                 Some(ExprLowering::ClasspathTopLevelFunctionRef(_))
             ),
             "constructor refs must not record a classpath top-level callable"
+        );
+    }
+
+    #[test]
+    fn delegated_properties_record_classpath_extension_getvalue_for_lowering() {
+        let mut d = DiagSink::new();
+        let file = parse_file(
+            "package test\nclass Delegate\nval prop: String by Delegate()",
+            &mut d,
+        );
+        let files = vec![file];
+        let mut syms = collect_signatures_with_cp(&files, Box::new(FakeMemberPlatform), &mut d);
+        let info = check_file(&files[0], &mut syms, &mut d);
+        assert!(
+            d.diags.is_empty(),
+            "unexpected diagnostics: {:?}",
+            d.diags.iter().map(|x| &x.msg).collect::<Vec<_>>()
+        );
+
+        let delegate_expr = files[0]
+            .decls
+            .iter()
+            .find_map(|decl| match files[0].decl(*decl) {
+                Decl::Property(prop) if prop.name == "prop" => prop.delegate,
+                _ => None,
+            })
+            .expect("source should contain delegated property");
+        let target = info
+            .delegate_getvalue(delegate_expr)
+            .expect("checker must record delegated getValue target for lowering");
+        let DelegateGetValueTarget::Extension(callable) = target else {
+            panic!("expected classpath extension getValue target, got {target:?}");
+        };
+        assert_eq!(callable.owner, "test/DelegateKt");
+        assert_eq!(callable.name, "getValue");
+        assert_eq!(callable.ret, Ty::String);
+        assert!(
+            info.synthetic_ext(delegate_expr, "getValue").is_none(),
+            "delegated getValue must use the dedicated target map"
+        );
+    }
+
+    #[test]
+    fn unannotated_delegated_properties_infer_classpath_extension_getvalue_return() {
+        let mut d = DiagSink::new();
+        let file = parse_file(
+            "package test\nclass Delegate\nval prop by Delegate()",
+            &mut d,
+        );
+        let files = vec![file];
+        let mut syms = collect_signatures_with_cp(&files, Box::new(FakeMemberPlatform), &mut d);
+        let info = check_file(&files[0], &mut syms, &mut d);
+        assert!(
+            d.diags.is_empty(),
+            "unexpected diagnostics: {:?}",
+            d.diags.iter().map(|x| &x.msg).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            syms.props.get("prop").map(|(ty, _, _)| *ty),
+            Some(Ty::String)
+        );
+
+        let delegate_expr = files[0]
+            .decls
+            .iter()
+            .find_map(|decl| match files[0].decl(*decl) {
+                Decl::Property(prop) if prop.name == "prop" => prop.delegate,
+                _ => None,
+            })
+            .expect("source should contain delegated property");
+        assert_eq!(
+            info.delegate_getvalue(delegate_expr)
+                .expect("checker must record delegated getValue")
+                .ret(),
+            Ty::String
+        );
+    }
+
+    #[test]
+    fn local_delegated_properties_infer_classpath_extension_getvalue_return() {
+        let mut d = DiagSink::new();
+        let file = parse_file(
+            "package test\nclass Delegate\nfun box(): String { val prop by Delegate(); return prop }",
+            &mut d,
+        );
+        let files = vec![file];
+        let mut syms = collect_signatures_with_cp(&files, Box::new(FakeMemberPlatform), &mut d);
+        let info = check_file(&files[0], &mut syms, &mut d);
+        assert!(
+            d.diags.is_empty(),
+            "unexpected diagnostics: {:?}",
+            d.diags.iter().map(|x| &x.msg).collect::<Vec<_>>()
+        );
+
+        let delegate_expr = files[0]
+            .stmt_arena
+            .iter()
+            .find_map(|stmt| match stmt {
+                Stmt::LocalDelegate { name, delegate, .. } if name == "prop" => Some(*delegate),
+                _ => None,
+            })
+            .expect("source should contain local delegated property");
+        assert_eq!(
+            info.delegate_getvalue(delegate_expr)
+                .expect("checker must record local delegated getValue")
+                .ret(),
+            Ty::String
         );
     }
 
