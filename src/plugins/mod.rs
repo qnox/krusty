@@ -108,14 +108,17 @@ impl PluginContext {
             .as_deref()
             .map(|p| format!("{}/", p.replace('.', "/")))
             .unwrap_or_default();
-        // Key by fully-qualified internal name (`pkg/Foo`), matching IrClass.fq_name exactly.
+        // Key by fully-qualified internal name (`pkg/Foo`), matching IrClass.fq_name exactly. A NESTED
+        // class is hoisted with a dot-separated name (`Outer.Inner`) but its IrClass.fq_name uses `$`
+        // (`pkg/Outer$Inner`), so normalize `.`→`$` to match.
         let by_fq: HashMap<String, &Vec<String>> = file
             .decl_arena
             .iter()
             .filter_map(|d| match d {
-                crate::ast::Decl::Class(c) if !c.annotations.is_empty() => {
-                    Some((format!("{pkg_prefix}{}", c.name), &c.annotations))
-                }
+                crate::ast::Decl::Class(c) if !c.annotations.is_empty() => Some((
+                    format!("{pkg_prefix}{}", c.name.replace('.', "$")),
+                    &c.annotations,
+                )),
                 _ => None,
             })
             .collect();

@@ -1541,11 +1541,13 @@ impl IrPlugin for SerializationPlugin {
             // `access$get$childSerializers$cp()` accessor) when a property needs a NON-trivial element
             // serializer (a collection / nullable — not a plain primitive/`String`, whose serializer is
             // referenced directly). Each slot is `LazyKt.lazyOf(<element serializer>)`, `null` otherwise.
+            // A prop needs a CACHED element serializer only when it is non-trivial — a collection
+            // (`List`/`Set`/`Map`). A plain primitive/`String` (even nullable) is referenced inline by
+            // kotlinc, not cached, so `is_nullable` must NOT trigger the cache.
             let needs_cache = |ty: &Ty| -> bool {
                 ty.kotlin_class_internal()
                     .and_then(collection_serializer_builder)
                     .is_some()
-                    || is_nullable(ty)
             };
             if plain_data_class && foo_fields.iter().any(|(_, ty)| needs_cache(ty)) {
                 let lazy_arr_ty = Ty::obj_args("kotlin/Array", &[class_ty("kotlin/Lazy")]);

@@ -1192,6 +1192,11 @@ fn emit_class(
         // defaults, then `invokespecial` the real `<init>`).
         if let Some(defaults) = ir.class_ctor_defaults.get(&c.fq_name) {
             emit_ctor_default_stub(ir, &c.fq_name, &param_tys, defaults, &mut cw, bodies);
+            // When EVERY primary-ctor parameter has a default, kotlinc also emits a genuine no-arg
+            // `<init>()` convenience ctor delegating to the `$default` overload with a full mask.
+            if !param_tys.is_empty() && defaults.iter().all(Option::is_some) {
+                emit_ctor_no_arg_convenience(&c.fq_name, &param_tys, &mut cw);
+            }
         }
         // A value-class-param primary ctor is private (above); kotlinc exposes a PUBLIC|SYNTHETIC accessor
         // `<init>(…args, DefaultConstructorMarker)` that simply delegates to it, so Java/reflection can
@@ -3802,6 +3807,36 @@ fn emit_ctor_default_stub(
     stub_params.push(marker);
     let desc = method_descriptor(&stub_params, Ty::Unit);
     e.cw.add_method(0x1001 /* PUBLIC | SYNTHETIC */, "<init>", &desc, &code);
+}
+
+/// Emit the genuine no-arg `<init>()` convenience ctor kotlinc synthesizes when EVERY primary-ctor
+/// parameter has a default: push a zero for each param, a full mask (`(1<<n)-1`), a `null` marker, and
+/// `invokespecial` the `$default` ctor `<init>(params…, int, DefaultConstructorMarker)V`. Straight-line
+/// (no branches ⇒ no StackMapTable).
+fn emit_ctor_no_arg_convenience(owner: &str, real_params: &[Ty], cw: &mut ClassWriter) {
+    let mut code = CodeBuilder::new(1);
+    code.aload(0);
+    for &t in real_params {
+        push_zero(t, &mut code, cw);
+    }
+    let n = real_params.len();
+    let full_mask: i32 = if n >= 32 { -1 } else { (1i32 << n) - 1 };
+    code.push_int(full_mask, cw);
+    code.aconst_null();
+    let mut stub_params = real_params.to_vec();
+    stub_params.push(Ty::Int);
+    stub_params.push(Ty::obj("kotlin/jvm/internal/DefaultConstructorMarker"));
+    let init_desc = method_descriptor(&stub_params, Ty::Unit);
+    let aw: i32 = 1 + stub_params
+        .iter()
+        .map(|t| slot_words(*t) as i32)
+        .sum::<i32>();
+    let m = cw.methodref(owner, "<init>", &init_desc);
+    code.invokespecial(m, aw, 0);
+    code.ret_void();
+    code.ensure_locals(1);
+    code.link();
+    cw.add_method(0x0001 /* PUBLIC */, "<init>", "()V", &code);
 }
 
 /// Emit the PUBLIC|SYNTHETIC accessor `<init>(…args, DefaultConstructorMarker)` for a class whose primary
