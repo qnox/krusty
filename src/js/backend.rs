@@ -1,7 +1,6 @@
-use crate::ast::File;
 use crate::backend::{Artifact, Backend};
 use crate::diag::DiagSink;
-use crate::resolve::{SymbolTable, TypeInfo};
+use crate::frontend::CheckedFile;
 use crate::runtime::TargetRuntime;
 
 pub struct JsBackend<R> {
@@ -22,14 +21,14 @@ where
 
     fn lower_file(
         &self,
-        file: &File,
-        info: &TypeInfo,
-        syms: &SymbolTable,
+        checked: CheckedFile<'_>,
         stem: &str,
         _state: &mut Self::State,
         diags: &mut DiagSink,
     ) -> Vec<Artifact> {
-        let Some(ir) = crate::ir_lower::lower_file(file, info, syms, &self.runtime) else {
+        let Some(ir) =
+            crate::ir_lower::lower_file(checked.file, checked.info, checked.symbols, &self.runtime)
+        else {
             diags.error(
                 crate::diag::Span::new(0, 0),
                 "krusty: this construct is not yet supported by the IR backend".to_string(),

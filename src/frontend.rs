@@ -10,6 +10,13 @@ use crate::resolve::{SymbolTable, TypeInfo};
 
 pub use crate::resolve::{check_file, collect_signatures, collect_signatures_with_cp};
 
+/// A single parsed file together with the frontend facts needed by a backend.
+pub struct CheckedFile<'a> {
+    pub file: &'a File,
+    pub info: &'a TypeInfo,
+    pub symbols: &'a SymbolTable,
+}
+
 /// Lex and parse one source string with an explicit feature set.
 pub fn parse_source(src: &str, features: &LangFeatures, diags: &mut DiagSink) -> File {
     let tokens = crate::lexer::lex(src, diags);
