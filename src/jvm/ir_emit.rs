@@ -3003,15 +3003,17 @@ fn emit_enum_class(
     // (bridges emitted after the methods below — `emit_bridges` references emitted method refs)
     let n_params = c.ctor_param_count as usize;
     let user_tys: Vec<Ty> = field_tys[..n_params].to_vec();
-    // User (primary-constructor) fields — public so the IR's direct cross-class reads work.
+    // Property backing fields are private (kotlinc), reached through the synthesized `getX()`/`setX()`
+    // accessors — for both the primary-constructor fields and body member-property fields
+    // (`enum class E { A; val x = … }`), initialized in the constructor via `init_body`.
+    let enum_field_acc = |f: &IrField| {
+        (if f.is_private { 0x0002 } else { 0x0001 }) | if f.is_final { 0x0010 } else { 0 }
+    };
     for (f, t) in c.fields[..n_params].iter().zip(&user_tys) {
-        cw.add_field(0x0001, &f.name, &type_descriptor(*t));
+        cw.add_field(enum_field_acc(f), &f.name, &type_descriptor(*t));
     }
-    // Body member-property backing fields (`enum class E { A; val x = … }`) — public, like the primary
-    // fields above, so the IR's direct cross-class reads resolve; initialized in the constructor via
-    // `init_body`.
     for (f, t) in c.fields[n_params..].iter().zip(&field_tys[n_params..]) {
-        cw.add_field(0x0001, &f.name, &type_descriptor(*t));
+        cw.add_field(enum_field_acc(f), &f.name, &type_descriptor(*t));
     }
     // One static-final constant per entry, plus the private `$VALUES` array.
     for entry in &c.enum_entries {

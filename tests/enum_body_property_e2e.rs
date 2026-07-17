@@ -9,6 +9,22 @@ fn run(src: &str) -> Option<String> {
 }
 
 #[test]
+fn enum_ctor_property_private_field_read_through_getter() {
+    // kotlinc emits an enum ctor property as a PRIVATE field + `getX()`. A bodied-entry override (a
+    // subclass) AND a cross-class reader must read it through the getter, not a `getfield` on the now-
+    // private field (which would be an `IllegalAccessError` — box `enum/kt2350`).
+    const SRC: &str = "enum class A(val b: String) {\n\
+        \x20 E1(\"e1\") { override fun t() = b },\n\
+        \x20 E2(\"e2\") { override fun t() = b.uppercase() };\n\
+        \x20 abstract fun t(): String\n\
+        }\n\
+        class Reader { fun read(a: A): String = a.b }\n\
+        fun box(): String =\n\
+        \x20 if (A.E1.t() == \"e1\" && A.E2.t() == \"E2\" && Reader().read(A.E1) == \"e1\") \"OK\" else \"fail\"\n";
+    assert_eq!(run(SRC).expect("enum private-field getter routing"), "OK");
+}
+
+#[test]
 fn enum_body_property_reads_ctor_param() {
     const SRC: &str = "enum class E(val a: Int) {\n\
         \x20 X(3),\n\

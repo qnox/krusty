@@ -1134,8 +1134,9 @@ pub fn lower_file_at(
             }
             // Synthesize `getX()`/`setX()` accessors for each backing-field property (kotlinc emits
             // them; the fields are private). Getter returns the field; setter (var only) writes it.
-            // Enums keep their existing shape (separate emit path); interfaces have no backing fields.
-            if !c.is_interface() && !c.is_enum() {
+            // Interfaces have no backing fields. An enum's ctor properties get getters here too (kotlinc
+            // emits `private` fields + `getX()`); `emit_enum_class` emits those fields private to match.
+            if !c.is_interface() {
                 let field_props: Vec<(String, bool, bool)> = c
                     .props
                     .iter()
@@ -3510,16 +3511,11 @@ pub fn lower_file_at(
                                 super_internal: Some(internal.clone()),
                             },
                         );
-                        // A body that reads a prop resolves it as a subclass field → `cur_class` must be
-                        // the subclass; a property-less entry keeps the enum scope (unchanged behavior).
-                        // (When the subclass scope is used, a bare read of an INHERITED enum constructor
-                        // property routes through its `getX()` getter; a shape that resolution can't
-                        // reach cleanly skips the file — never a miscompile.)
-                        let body_cur = if prop_fields.is_empty() {
-                            internal.clone()
-                        } else {
-                            sub_fq.clone()
-                        };
+                        // An override body reads through the SUBCLASS scope: an own property resolves to a
+                        // subclass field, and a bare read of an INHERITED enum constructor property routes
+                        // through its `getX()` getter (the enum's backing fields are now private, so a
+                        // subclass `getfield` on them would be an `IllegalAccessError` — box `enum/kt2350`).
+                        let body_cur = sub_fq.clone();
                         // Subclass ctor init: `this.<prop> = <init>` for each property (run after super()).
                         if !prop_fields.is_empty() {
                             lo.scope.clear();
