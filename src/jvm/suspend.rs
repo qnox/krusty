@@ -115,6 +115,32 @@ pub fn lower_suspend(ir: &mut IrFile, facade: &str) -> bool {
                     // carries its suspensions in the block's VALUE, not its statements.
                     w.walk(b);
                     let out = w.out;
+                    if std::env::var("KRUSTY_DBG").is_ok() {
+                        eprintln!(
+                            "DBG capture fid={fid} name={} body={:?}",
+                            ir.functions[fid as usize].name, ir.exprs[b as usize]
+                        );
+                        if let IrExpr::Block { ref stmts, .. } = ir.exprs[b as usize] {
+                            for &st in stmts {
+                                eprintln!("DBG capture stmt={:?}", ir.exprs[st as usize]);
+                                if let IrExpr::Return(Some(v)) = ir.exprs[st as usize] {
+                                    let mut v2 = v;
+                                    if let IrExpr::TypeOp { arg, .. } = ir.exprs[v as usize] {
+                                        v2 = arg;
+                                    }
+                                    eprintln!("DBG capture retval={:?}", ir.exprs[v2 as usize]);
+                                    if let IrExpr::Block { ref stmts, .. } = ir.exprs[v2 as usize] {
+                                        for &st2 in stmts {
+                                            eprintln!(
+                                                "DBG capture   inner={:?}",
+                                                ir.exprs[st2 as usize]
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                     ir.pre_splice_scopes.insert(fid, out);
                 }
             }
@@ -1570,7 +1596,8 @@ fn build_state_machine(ir: &mut IrFile, facade: &str, fid: u32, b: ExprId, unit_
     let state_scopes = std::mem::take(&mut flat.state_scope);
     if std::env::var("KRUSTY_DBG").is_ok() {
         eprintln!(
-            "DBG sm fid={fid} scopes_map={} state_scopes={:?}",
+            "DBG sm fid={fid} name={} scopes_map={} state_scopes={:?}",
+            flat.ir.functions[fid as usize].name,
             flat.scopes.len(),
             state_scopes
                 .iter()

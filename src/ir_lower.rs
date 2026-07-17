@@ -11085,6 +11085,12 @@ impl<'a> Lower<'a> {
             args.len(),
             self.afile.call_arg_names.contains_key(&call.0)
         );
+        // An INLINE callee (`Mutex.withLock` with its defaulted `owner`) must NOT route through the
+        // `$default` synthetic — kotlinc always splices it; the dedicated inline lowerings
+        // (`lower_suspend_withlock`, the splicer) handle it downstream.
+        if !matches!(member.inline, crate::libraries::InlineKind::None) {
+            return None;
+        }
         let phys = member.name.clone();
         let logical_ret = resolved.ret;
         let (desc, real, _ret, suspend) = crate::symbol_resolver::synthetic_default_member(
@@ -18447,7 +18453,9 @@ impl<'a> Lower<'a> {
                             }
                         }
                     }
-                    // `mutex.withLock { body }` (a `suspend inline fun`) WHERE THE BODY SUSPENDS.
+                    // `mutex.withLock { body }` (a `suspend inline fun`) — kotlinc ALWAYS splices an
+                    // inline fn (a non-suspending body still surrounds suspending lock()/unlock()),
+                    // so route every shape through the dedicated lowering, never `withLock$default`.
                     if self.cur_fn_suspend
                         && name == "withLock"
                         && args.len() == 1
@@ -18457,10 +18465,8 @@ impl<'a> Lower<'a> {
                             .is_some_and(|c| c.owner.starts_with("kotlinx/coroutines/sync/"))
                     {
                         if let Expr::Lambda { body: lbody, .. } = self.afile.expr(args[0]).clone() {
-                            if self.ast_body_suspends(lbody) {
-                                if let Some(v) = self.lower_suspend_withlock(e, receiver, lbody) {
-                                    return Some(v);
-                                }
+                            if let Some(v) = self.lower_suspend_withlock(e, receiver, lbody) {
+                                return Some(v);
                             }
                         }
                     }
