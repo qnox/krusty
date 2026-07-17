@@ -206,6 +206,7 @@ fn serializer_of(
         c.fq_name == class_fq
             && !c.is_sealed
             && !c.is_object
+            && !c.is_value
             && c.enum_entries.is_empty()
             && c.custom_serializer.is_none()
             && c.type_params.is_empty()
@@ -1408,7 +1409,10 @@ impl IrPlugin for SerializationPlugin {
             // `serializer(KSerializer…)` on the Companion still has a dispatch gap, and an `object` is its
             // own singleton (a synthesized Companion would duplicate its `<clinit>`), so both keep the
             // static form (see `serializer_of`).
-            if is_generic || ir.classes[class_id as usize].is_object {
+            if is_generic
+                || ir.classes[class_id as usize].is_object
+                || ir.classes[class_id as usize].is_value
+            {
                 let accessor = ir.add_fun(IrFunction {
                     name: "serializer".to_string(),
                     params: acc_params,
@@ -1479,6 +1483,48 @@ impl IrPlugin for SerializationPlugin {
                 // kotlinc emits the marker as `public static` (NOT final).
                 ir.open_methods.insert(marker);
                 ir.classes[class_id as usize].methods.push(marker);
+            }
+
+            // ABI-only deserialization ctor `G(int seqMask, <fields…>, SerializationConstructorMarker)`
+            // (krusty's `deserialize()` uses the primary ctor): a Super-delegate secondary ctor whose body
+            // sets each field from its arg (fields start at param 2, after the seq-mask). Only on a plain
+            // data class — a value class / object compile their serializer differently.
+            let plain_data_class =
+                !ir.classes[class_id as usize].is_value && !ir.classes[class_id as usize].is_object;
+            // A value-class field is stored UNBOXED, so its param + `putfield` use the underlying type.
+            let deser_field_tys: Vec<Ty> = foo_fields
+                .iter()
+                .map(|(_, ty)| value_class_underlying(ir, ty).unwrap_or(*ty))
+                .collect();
+            let mut deser_params = vec![Ty::Int];
+            deser_params.extend(deser_field_tys.iter().cloned());
+            deser_params.push(class_ty(
+                "kotlinx/serialization/internal/SerializationConstructorMarker",
+            ));
+            let this = ir.add_expr(IrExpr::GetValue(0));
+            let mut deser_stmts = Vec::with_capacity(foo_fields.len());
+            for i in 0..foo_fields.len() {
+                let arg = ir.add_expr(IrExpr::GetValue(i as u32 + 2));
+                deser_stmts.push(ir.add_expr(IrExpr::SetField {
+                    receiver: this,
+                    class: class_id,
+                    index: i as u32,
+                    value: arg,
+                }));
+            }
+            let deser_body = ir.add_expr(IrExpr::Block {
+                stmts: deser_stmts,
+                value: None,
+            });
+            if plain_data_class {
+                ir.classes[class_id as usize]
+                    .secondary_ctors
+                    .push(crate::ir::IrSecondaryCtor {
+                        params: deser_params,
+                        delegate_args: vec![],
+                        body: Some(deser_body),
+                        delegate: crate::ir::CtorDelegateTarget::Super,
+                    });
             }
         }
     }

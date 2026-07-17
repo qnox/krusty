@@ -7897,6 +7897,7 @@ impl<'a> Lower<'a> {
             .is_some_and(|c| {
                 !c.is_sealed
                     && !c.is_object
+                    && !c.is_value
                     && c.enum_entries.is_empty()
                     && c.type_params.is_empty()
                     && c.custom_serializer.is_none()
@@ -18550,6 +18551,7 @@ impl<'a> Lower<'a> {
                             let companion_routed = cd.is_some_and(|cd| {
                                 cd.kind == crate::ast::ClassKind::Class
                                     && !cd.is_sealed()
+                                    && !cd.is_value
                                     && cd.type_params.is_empty()
                                     && self.custom_serializer_of(cd).is_none()
                             });
