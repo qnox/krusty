@@ -51,3 +51,27 @@ Decoded from `IdentityLinkService.link` bytecode (kotlinc 2.4):
   (JAVA_HOME required) after every stage — the corpus is the never-miscompile detector.
 - Gate: `./gradlew :mission:mission-core:krustyVerify -Pkrusty.binary=…` in the infragnite
   worktree; target 96 → 106 GREEN.
+
+## Endgame (remaining 7 files, ±1-3 slots)
+
+kc putfield dumps show one coherent rule left: kotlinc NAMES every spliced-inline local (`$iv`
+family: `?.let` receiver, `firstOrNull` chain receivers, `withLock` receiver ✓done + its result,
+suspend-HOF accumulator/iterator, for-loop iterator) and spills them by SCOPE like any named var;
+unnamed stack temps never get slots. krusty should therefore:
+
+1. NAME each splice-materialization local at its lowering site (mirroring kotlinc's `$iv` vars) —
+   AND wrap sites that emit the local as a SIBLING statement (for-loop iterator ~ir_lower:10386,
+   accumulate_hof acc/it ~13345) in their own `Block` so the scope closes with the loop
+   (naming them without the block leaked scope to function end and over-spilled 4 files).
+2. THEN drop unnamed temps from the scope lists entirely (remove the pending-read liveness
+   inclusion in `ScopeWalk::snapshot`) — kotlinc-shaped code has no crossing temps once the splice
+   locals are named; a krusty-only crossing temp would then fail loudly in the box corpus rather
+   than silently diverge.
+3. MissionChangeService is a different shape: private ctor-properties in a class WITH a companion
+   keep public getters (kt504 guard); kotlinc emits instance `access$get<X>$p` bridges instead —
+   extend the existing facade-bridge machinery to instance properties.
+
+Verify per file against the kc `putfield L$*` dumps (javap -c) before/after each site change;
+files: WorkspaceService, MissionBackupService, ResourceAggregationService, MissionActionService
+(over-spill), MissionDriftService, MissionDeploymentOptionsService (under-spill),
+MissionChangeService (getters).
