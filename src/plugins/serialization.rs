@@ -868,13 +868,20 @@ fn value_class_underlying(ir: &IrFile, ty: &Ty) -> Option<Ty> {
             return None;
         }
         let fq = ty.kotlin_class_internal()?;
-        let c = ir.classes.iter().find(|c| c.fq_name == fq)?;
-        if !c.is_value {
-            return None;
+        // A same-file value class: recurse through its declared single field.
+        if let Some(c) = ir.classes.iter().find(|c| c.fq_name == fq) {
+            if !c.is_value {
+                return None;
+            }
+            let u = c.fields.first()?.ty;
+            return Some(rec(ir, &u, depth + 1).unwrap_or(u));
         }
-        let u = c.fields.first()?.ty;
-        // Unwrap a further value-class layer; else this layer's underlying IS the terminal type.
-        Some(rec(ir, &u, depth + 1).unwrap_or(u))
+        // A CROSS-FILE `@JvmInline value class` (its `@Metadata`-decoded underlying, carrying nullability)
+        // — so a serialized data class with an imported value-class field still recognizes it.
+        if let Some(u) = ir.external_value_classes.get(fq) {
+            return Some(rec(ir, u, depth + 1).unwrap_or(*u));
+        }
+        None
     }
     rec(ir, ty, 0)
 }
