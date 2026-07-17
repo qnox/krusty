@@ -1297,6 +1297,7 @@ impl IrPlugin for SerializationPlugin {
                 },
             ];
             ir.synthetic_classes.insert(ser_fq.clone());
+            ir.deprecated_classes.insert(ser_fq.clone());
             let ser_id = ir.add_class(ser);
 
             // Build the `descriptor` field in <init>: `descriptor = PluginGeneratedSerialDescriptor(
@@ -1530,6 +1531,7 @@ impl IrPlugin for SerializationPlugin {
                 });
                 ir.open_methods.insert(marker);
                 ir.synthetic_methods.insert(marker);
+                ir.deprecated_methods.insert(marker);
                 ir.classes[class_id as usize].methods.push(marker);
             }
 

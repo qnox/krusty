@@ -970,6 +970,13 @@ pub struct IrFile {
     /// Internal names of classes kotlinc marks `ACC_SYNTHETIC` (0x1000) on the class itself — e.g. a
     /// `@Serializable` class's generated `$$serializer` object.
     pub synthetic_classes: std::collections::HashSet<String>,
+    /// `FunId`s of methods carrying a `Deprecated` classfile attribute (from `@Deprecated`) — e.g. a
+    /// `@Serializable` class's `get<Prop>$annotations()` markers, which kotlinc deprecates HIDDEN. ASM
+    /// surfaces the attribute as `ACC_DEPRECATED` (0x20000) in the access int, so the ABI gate compares it.
+    pub deprecated_methods: std::collections::HashSet<u32>,
+    /// Internal names of classes carrying a `Deprecated` classfile attribute (from `@Deprecated`) — e.g. a
+    /// `@Serializable` class's generated `$$serializer` object, which kotlinc deprecates HIDDEN.
+    pub deprecated_classes: std::collections::HashSet<String>,
     /// Internal names of classes whose primary constructor has a value-class-typed parameter (a
     /// `data class Server(val id: ServerId, …)`). kotlinc makes such a primary `<init>` PRIVATE and adds a
     /// PUBLIC|SYNTHETIC accessor `<init>(…args, DefaultConstructorMarker)` that delegates to it — its ABI

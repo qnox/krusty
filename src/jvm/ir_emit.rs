@@ -912,6 +912,9 @@ fn emit_class(
         access |= 0x1000;
     } // ACC_SYNTHETIC (a `$$serializer` object)
     cw.set_access(access);
+    if ir.deprecated_classes.contains(&c.fq_name) {
+        cw.set_deprecated();
+    } // Deprecated attribute (a HIDDEN-deprecated `$$serializer` object)
     let raw_class_sig = ir.class_signatures.get(&c.fq_name);
     let jvm_sig = raw_class_sig.and_then(jvm_class_signature);
     crate::trace_compiler!(
@@ -3452,13 +3455,11 @@ fn emit_method_inner(
         .signatures
         .get(&fid)
         .and_then(|g| jvm_method_signature(g, f));
-    e.cw.add_method_sig(
-        access,
-        &f.name,
-        &method_descriptor(&param_tys, ret),
-        &code,
-        signature.as_deref(),
-    );
+    let desc = method_descriptor(&param_tys, ret);
+    e.cw.add_method_sig(access, &f.name, &desc, &code, signature.as_deref());
+    if ir.deprecated_methods.contains(&fid) {
+        e.cw.mark_method_deprecated(&f.name, &desc);
+    }
 }
 
 /// Format a function's backend-agnostic [`crate::ir::IrGenericSig`] into a JVM generic `Signature`
