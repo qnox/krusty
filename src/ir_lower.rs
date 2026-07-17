@@ -11247,8 +11247,28 @@ impl<'a> Lower<'a> {
             &phys,
             slots.len(),
         )?;
+        // Evaluate the PROVIDED arguments in SOURCE order (each into a temp), then feed them to the
+        // `$default` synthetic in PARAMETER order — kotlinc's evaluation-order semantics for a named
+        // call whose labels don't follow declaration order (`copy(createdAt = now(), status = P)`),
+        // where a side-effecting argument must not be reordered past a later one.
+        let mut prelude: Vec<u32> = Vec::new();
+        let mut arg_temps: std::collections::HashMap<AstExprId, u32> =
+            std::collections::HashMap::new();
+        for (i, slot) in slots.iter().enumerate() {
+            if let Some(arg) = slot {
+                let v = self.lower_arg(*arg, &ty_to_ir(real[i]))?;
+                let tmp = self.fresh_value();
+                prelude.push(self.emit_variable(tmp, ty_to_ir(real[i]), Some(v)));
+                arg_temps.insert(*arg, tmp);
+            }
+        }
         let mut a = vec![recv];
-        a.extend(self.lower_call_slot_args(args, &slots, &real)?);
+        for (i, slot) in slots.iter().enumerate() {
+            match slot {
+                Some(arg) => a.push(self.emit_get_value(arg_temps[arg])),
+                None => a.push(self.zero_placeholder(real[i])),
+            }
+        }
         let mask: i32 = slots
             .iter()
             .enumerate()
@@ -11261,7 +11281,13 @@ impl<'a> Lower<'a> {
         if suspend {
             self.ir.suspend_calls.insert(call, ty_to_ir(logical_ret));
         }
-        Some(call)
+        // No reordering happened without a prelude — return the call directly. Otherwise the temps
+        // must be declared before the call (a `Block` whose value is the call).
+        if prelude.is_empty() {
+            Some(call)
+        } else {
+            Some(self.emit_block(prelude, Some(call)))
+        }
     }
 
     /// Lower a CALL `recv.name(args)` that resolves to a top-level EXTENSION function on `rt` — the

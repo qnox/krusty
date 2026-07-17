@@ -12026,7 +12026,20 @@ impl<'a> Checker<'a> {
                                     );
                                 }
                             }
-                            return fi.callable.ret;
+                            // Record the resolved member AND the argument→slot mapping so the lowerer
+                            // emits this through the member's `name$default` synthetic — without the
+                            // slot record it would see fewer args than parameters and bail.
+                            let ret = fi.callable.ret;
+                            self.resolved_calls.insert(
+                                call,
+                                ResolvedCall::Member(crate::symbol_resolver::ResolvedMember {
+                                    member: fi.member_with_return(ret),
+                                    ret,
+                                    suspend: fi.flags.suspend,
+                                }),
+                            );
+                            self.resolved_call_arg_slots.insert(call, slots);
+                            return ret;
                         }
                     }
                 }
