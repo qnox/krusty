@@ -12,8 +12,8 @@ use crate::ast::{self, BinOp, Decl, Expr, ExprId as AstExprId, FunBody, Stmt, Te
 use crate::frontend::{
     function_scope_packages, map_param_list_args, qualified_path, typeref_leaf, ClassNames,
     CtorDefaultValue, DelegateGetValueTarget, ExprLowering, FrontendSymbols, FrontendTypeInfo,
-    InlineCall, InvokeKind, LambdaCapture, LambdaInfo, ReceiverLambda, ResolvedCall, Signature,
-    StmtLowering,
+    InlineCall, InvokeKind, LambdaCapture, LambdaInfo, ReceiverLambda, ResolvedCall,
+    ResolvedLocalFunctionCall, Signature, StmtLowering,
 };
 use crate::ir::{
     Callee, ClassId, ExprId, FnParamInfo, IrBinOp, IrCatch, IrClass, IrConst, IrCtorArg,
@@ -4548,7 +4548,7 @@ pub(crate) struct Lower<'a> {
     /// bound to the `Ref$XxxRef` HOLDER value; reads/writes go through `RefGet`/`RefSet` with this type.
     boxed_elem: HashMap<String, Ty>,
     /// A local function's `StmtId` → its lifted static `FunId` (a private method on the facade). A
-    /// selected `ExprLowering::LocalFunction` lowers to `Callee::Local(fid)`.
+    /// checker-selected local-function call target lowers to `Callee::Local(fid)`.
     local_fun_ids: HashMap<crate::ast::StmtId, u32>,
     /// Return type of the function currently being lowered — used to coerce `return` values (e.g. a
     /// generic-erased `Object` return gets the `checkcast` kotlinc inserts).
@@ -11302,6 +11302,53 @@ impl<'a> Lower<'a> {
         }
     }
 
+    /// Lower a checker-resolved local function call. Local functions are lifted to private static IR
+    /// functions; captures and implicit context parameters become leading arguments.
+    fn lower_local_function_call(
+        &mut self,
+        target: &ResolvedLocalFunctionCall,
+        args: &[AstExprId],
+    ) -> Option<u32> {
+        if args.len() != target.provided_arg_count {
+            return None;
+        }
+        let stmt_id = target.stmt_id;
+        let fid = *self.local_fun_ids.get(&stmt_id)?;
+        let params = self.ir.functions[fid as usize].params.clone();
+        let local_fun = self.info.local_fun(stmt_id)?;
+        let ncap = local_fun.captures.len();
+        let ctx_n = target.context_args.len();
+        if ncap + target.sig.params.len() != params.len()
+            || args.len() + ctx_n > target.sig.params.len()
+        {
+            return None;
+        }
+
+        let mut lowered = Vec::new();
+        for cap in &local_fun.captures {
+            let (cv, _) = self.lookup(&cap.name)?;
+            lowered.push(self.emit_get_value(cv));
+        }
+        for src in &target.context_args {
+            let (v, _) = self.lookup(src)?;
+            lowered.push(self.emit_get_value(v));
+        }
+        for (arg, pt) in args.iter().zip(&params[ncap + ctx_n..]) {
+            lowered.push(self.lower_arg(*arg, pt)?);
+        }
+        if lowered.len() < params.len() {
+            let crate::ast::Stmt::LocalFun(f) = self.afile.stmt(stmt_id) else {
+                return None;
+            };
+            for (i, pt) in params[lowered.len()..].iter().enumerate() {
+                let fp = f.params.get(ctx_n + args.len() + i)?;
+                let def = fp.default?;
+                lowered.push(self.lower_arg(def, pt)?);
+            }
+        }
+        Some(self.emit_local_call(fid, lowered))
+    }
+
     /// Lower a CALL `recv.name(args)` that resolves to a top-level EXTENSION function on `rt` — the
     /// shared path behind a qualified `recv.name(args)` and a receiver-lambda / extension-fn body's
     /// implicit `this.name(args)` (`"ab".run { uppercase() }`, `fun String.shout() = uppercase()`).
@@ -17520,56 +17567,8 @@ impl<'a> Lower<'a> {
                         }
                     }
                     // A call to a lifted local function — the checker mapped this call to its decl.
-                    // Prepend the captured outer locals (the enclosing scope holds each captured var's
-                    // value, or its `Ref` holder when boxed), then the declared arguments.
-                    if let Some(ExprLowering::LocalFunction { stmt_id }) =
-                        self.info.expr_lowers.get(&e)
-                    {
-                        if let Some(&fid) = self.local_fun_ids.get(stmt_id) {
-                            let params = self.ir.functions[fid as usize].params.clone();
-                            let local_fun = self.info.local_fun(*stmt_id)?;
-                            let ncap = local_fun.captures.len();
-                            // Context parameters (`context(a: A) fun f() = a`): the checker resolved
-                            // each leading context parameter to an in-scope source. The lifted method's
-                            // params are [captures..., context params..., value params...]; load the
-                            // captures, then the context sources, then the explicit arguments.
-                            let ctx_sources = self.info.context_args.get(&e).cloned();
-                            let ctx_n = ctx_sources.as_ref().map_or(0, |s| s.len());
-                            // The call may OMIT trailing arguments whose parameters have defaults (the
-                            // checker allowed it only when `ctx_n == 0`). A local function is a plain
-                            // method with no `$default` synthetic, so fill each omitted parameter with its
-                            // default expression here (defaults never reference another parameter — the
-                            // resolver rejects those — so lowering them at the call site is sound).
-                            if args.len() + ncap + ctx_n <= params.len() {
-                                let mut a = Vec::new();
-                                for cap in &local_fun.captures {
-                                    let (cv, _) = self.lookup(&cap.name)?;
-                                    a.push(self.emit_get_value(cv));
-                                }
-                                if let Some(sources) = &ctx_sources {
-                                    for src in sources {
-                                        let (v, _) = self.lookup(src)?;
-                                        a.push(self.emit_get_value(v));
-                                    }
-                                }
-                                for (arg, pt) in args.iter().zip(&params[ncap + ctx_n..]) {
-                                    a.push(self.lower_arg(*arg, pt)?);
-                                }
-                                // Fill omitted trailing value parameters with their default expressions.
-                                if a.len() < params.len() {
-                                    let crate::ast::Stmt::LocalFun(f) = self.afile.stmt(*stmt_id)
-                                    else {
-                                        return None;
-                                    };
-                                    for (i, pt) in params[a.len()..].iter().enumerate() {
-                                        let fp = f.params.get(args.len() + i)?;
-                                        let def = fp.default?;
-                                        a.push(self.lower_arg(def, pt)?);
-                                    }
-                                }
-                                return Some(self.emit_local_call(fid, a));
-                            }
-                        }
+                    if let Some(target) = self.info.resolved_local_function(e).cloned() {
+                        return self.lower_local_function_call(&target, &args);
                     }
                     // A call `param(args)` where `param` is a lambda parameter of the `inline fun`
                     // currently being expanded: inline the passed lambda's body in place.

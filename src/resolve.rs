@@ -4034,11 +4034,22 @@ pub enum ResolvedCall {
         params: Vec<Ty>,
         ret: Ty,
     },
+    /// A local function selected by the checker. The lowerer reads this target and only maps the
+    /// declaration id to the lifted IR function; it must not re-resolve the call by name.
+    LocalFunction(Box<ResolvedLocalFunctionCall>),
     /// An INSTANCE MEMBER selected by lambda-return overload resolution (`recv.run2 { … }`). The lowerer
     /// has no resolution path for it (it is selected by the lambda's return type, not by normal member
     /// lookup), so the checker resolves and records it and the lowerer only READS it — emits
     /// `invokevirtual`. Distinct from [`Self::Member`] because it carries a raw `LibraryCallable`.
     LambdaReturnMember(crate::libraries::LibraryCallable),
+}
+
+#[derive(Clone, Debug)]
+pub struct ResolvedLocalFunctionCall {
+    pub stmt_id: StmtId,
+    pub sig: Signature,
+    pub provided_arg_count: usize,
+    pub context_args: Vec<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -4087,6 +4098,13 @@ impl TypeInfo {
     pub fn resolved_extension(&self, e: ExprId) -> Option<&crate::libraries::LibraryCallable> {
         match self.resolved_calls.get(&e) {
             Some(ResolvedCall::Extension(c)) => Some(c),
+            _ => None,
+        }
+    }
+    /// The resolved local function declaration selected at call `e`, if any.
+    pub fn resolved_local_function(&self, e: ExprId) -> Option<&ResolvedLocalFunctionCall> {
+        match self.resolved_calls.get(&e) {
+            Some(ResolvedCall::LocalFunction(c)) => Some(c),
             _ => None,
         }
     }
@@ -5990,9 +6008,27 @@ impl<'a> Checker<'a> {
     fn mark_receiver_lambda(&mut self, e: ExprId, receiver: Ty) {
         self.update_lambda_info(e, |info| info.receiver = Some(receiver));
     }
-    fn mark_local_function_expr(&mut self, e: ExprId, stmt_id: StmtId) {
+    fn mark_local_function_ref(&mut self, e: ExprId, stmt_id: StmtId) {
         self.expr_lowers
             .insert(e, ExprLowering::LocalFunction { stmt_id });
+    }
+    fn mark_local_function_call(
+        &mut self,
+        call: ExprId,
+        stmt_id: StmtId,
+        sig: Signature,
+        provided_arg_count: usize,
+        context_args: Vec<String>,
+    ) {
+        self.resolved_calls.insert(
+            call,
+            ResolvedCall::LocalFunction(Box::new(ResolvedLocalFunctionCall {
+                stmt_id,
+                sig,
+                provided_arg_count,
+                context_args,
+            })),
+        );
     }
     /// Select the Kotlin invoke-operator convention for `receiver(args)`. One entry point covers both
     /// a function-value receiver (`Ty::Fun`) and a non-function receiver with a member `operator fun
@@ -6111,11 +6147,18 @@ impl<'a> Checker<'a> {
         }
         Some(ret)
     }
-    fn local_function_expr_count(&self) -> usize {
-        self.expr_lowers
+    fn local_function_use_count(&self) -> usize {
+        let refs = self
+            .expr_lowers
             .values()
             .filter(|v| matches!(v, ExprLowering::LocalFunction { .. }))
-            .count()
+            .count();
+        let calls = self
+            .resolved_calls
+            .values()
+            .filter(|v| matches!(v, ResolvedCall::LocalFunction(_)))
+            .count();
+        refs + calls
     }
     fn declare(&mut self, name: &str, ty: Ty, is_var: bool) {
         self.scopes.last_mut().unwrap().insert(
@@ -7899,12 +7942,12 @@ impl<'a> Checker<'a> {
                 // emit a backing-field read from the lambda class. Clear it so `field` inside a
                 // lambda body is unresolved (→ the property skips) rather than miscompiled.
                 let saved_field = self.field_ty.take();
-                let lc_before = self.local_function_expr_count();
+                let lc_before = self.local_function_use_count();
                 let bret = self.expr(body);
                 // A non-inlined lambda that calls a local function would dispatch it on the lambda
                 // class (the local fun lives on the enclosing facade/class) — reject rather than
                 // miscompile (the recursive nested-closure case).
-                if self.local_function_expr_count() > lc_before {
+                if self.local_function_use_count() > lc_before {
                     self.diags.error(
                         self.file.expr_spans[e.0 as usize],
                         "krusty: a lambda that calls a local function is not supported".to_string(),
@@ -9259,7 +9302,7 @@ impl<'a> Checker<'a> {
                     // find the lifted static method and prepend its captures.
                     if let Some((stmt_id, sig)) = self.lookup_local_fun(&name) {
                         if sig.requires_all_args() {
-                            self.mark_local_function_expr(e, stmt_id);
+                            self.mark_local_function_ref(e, stmt_id);
                             return self.set(e, Ty::fun(sig.params.clone(), sig.ret));
                         }
                     }
@@ -12628,8 +12671,13 @@ impl<'a> Checker<'a> {
                                 };
                                 self.expect_assignable(p, aty, self.span(*a), "argument");
                             }
-                            self.context_args.insert(call, sources);
-                            self.mark_local_function_expr(call, stmt_id);
+                            self.mark_local_function_call(
+                                call,
+                                stmt_id,
+                                sig.clone(),
+                                args.len(),
+                                sources,
+                            );
                             return sig.ret;
                         }
                     }
@@ -12684,7 +12732,7 @@ impl<'a> Checker<'a> {
                         }
                     }
                     let ret = sig.ret;
-                    self.mark_local_function_expr(call, stmt_id);
+                    self.mark_local_function_call(call, stmt_id, sig, args.len(), Vec::new());
                     return ret;
                 }
                 if let ("with", [receiver, lambda], false) =
@@ -14749,6 +14797,122 @@ mod tests {
     fn ok(src: &str) {
         let (errs, _) = check(src);
         assert!(errs.is_empty(), "unexpected errors: {errs:?}");
+    }
+
+    #[test]
+    fn local_function_calls_record_resolved_target_for_lowering() {
+        let mut d = DiagSink::new();
+        let file = parse_file(
+            r#"
+fun box(): String {
+    val base = 40
+    fun f(x: Int = 2) = base + x
+    return f().toString()
+}
+"#,
+            &mut d,
+        );
+        let files = vec![file];
+        let mut syms = collect_signatures(&files, &mut d);
+        let info = check_file(&files[0], &mut syms, &mut d);
+        assert!(
+            d.diags.is_empty(),
+            "unexpected diagnostics: {:?}",
+            d.diags.iter().map(|x| &x.msg).collect::<Vec<_>>()
+        );
+
+        let call = files[0]
+            .expr_arena
+            .iter()
+            .enumerate()
+            .find_map(|(idx, expr)| match expr {
+                Expr::Call { callee, .. } => match files[0].expr(*callee) {
+                    Expr::Name(name) if name == "f" => Some(ExprId(idx as u32)),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .expect("source should contain f() local function call");
+        let target_stmt = files[0]
+            .stmt_arena
+            .iter()
+            .enumerate()
+            .find_map(|(idx, stmt)| match stmt {
+                Stmt::LocalFun(f) if f.name == "f" => Some(StmtId(idx as u32)),
+                _ => None,
+            })
+            .expect("source should contain f local function declaration");
+
+        let Some(ResolvedCall::LocalFunction(target)) = info.resolved_calls.get(&call) else {
+            panic!("checker must record the selected local function target for lowering");
+        };
+        assert_eq!(target.stmt_id, target_stmt);
+        assert_eq!(target.sig.params, vec![Ty::Int]);
+        assert_eq!(target.sig.ret, Ty::Int);
+        assert_eq!(target.provided_arg_count, 0);
+        assert!(target.context_args.is_empty());
+        assert!(
+            !matches!(
+                info.expr_lowers.get(&call),
+                Some(ExprLowering::LocalFunction { .. })
+            ),
+            "ordinary local function calls must not duplicate the target in expr_lowers"
+        );
+    }
+
+    #[test]
+    fn local_function_calls_record_shadowed_declaration_target() {
+        let mut d = DiagSink::new();
+        let file = parse_file(
+            r#"
+fun box(): String {
+    fun f(x: Int = 1) = x
+    fun g(): Int {
+        fun f(x: Int = 2) = x + 10
+        return f()
+    }
+    return g().toString()
+}
+"#,
+            &mut d,
+        );
+        let files = vec![file];
+        let mut syms = collect_signatures(&files, &mut d);
+        let info = check_file(&files[0], &mut syms, &mut d);
+        assert!(
+            d.diags.is_empty(),
+            "unexpected diagnostics: {:?}",
+            d.diags.iter().map(|x| &x.msg).collect::<Vec<_>>()
+        );
+
+        let inner_f_stmt = files[0]
+            .stmt_arena
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, stmt)| match stmt {
+                Stmt::LocalFun(f) if f.name == "f" => Some(StmtId(idx as u32)),
+                _ => None,
+            })
+            .next_back()
+            .expect("source should contain inner f local function declaration");
+        let f_call = files[0]
+            .expr_arena
+            .iter()
+            .enumerate()
+            .find_map(|(idx, expr)| match expr {
+                Expr::Call { callee, .. } => match files[0].expr(*callee) {
+                    Expr::Name(name) if name == "f" => Some(ExprId(idx as u32)),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .expect("source should contain f() local function call");
+
+        let Some(ResolvedCall::LocalFunction(target)) = info.resolved_calls.get(&f_call) else {
+            panic!("checker must record the selected local function target for lowering");
+        };
+        assert_eq!(target.stmt_id, inner_f_stmt);
+        assert_eq!(target.provided_arg_count, 0);
     }
 
     fn parse_file(src: &str, d: &mut DiagSink) -> File {
