@@ -135,6 +135,7 @@ pub fn lower_file(
         computed_setters: HashMap::new(),
         cur_static_field: None,
         lateinit_locals: HashMap::new(),
+        in_suspend_lambda_body: false,
         closure_captured_names: std::collections::HashSet::new(),
         local_delegated: HashMap::new(),
         cur_tailrec: None,
@@ -4577,6 +4578,10 @@ pub(crate) struct Lower<'a> {
     /// bails — see `closure_captured_names`), so every entry here is a plain value slot read via
     /// `GetValue`.
     lateinit_locals: HashMap<u32, String>,
+    /// Whether we are lowering a SUSPEND LAMBDA's body (the general lambda-mode machine): its
+    /// `invokeSuspend` flattener models fewer shapes than a named fn's (no try/finally), so some
+    /// splices (`withLock` with a non-suspending body) stay on their call-based fallback there.
+    in_suspend_lambda_body: bool,
     /// Names referenced (read or written) inside a NON-inline closure (a non-inline lambda or a local
     /// function) in the body currently being lowered. A `lateinit var` local among them is not modeled
     /// (its slot / uninitialized-guard aren't threaded through the closure's captured representation), so
@@ -6985,10 +6990,13 @@ impl<'a> Lower<'a> {
             // call emits without the trailing `Continuation` and fails at runtime (`NoSuchMethodError`).
             let saved_cur_suspend = self.cur_fn_suspend;
             self.cur_fn_suspend = true;
+            let saved_in_sl = self.in_suspend_lambda_body;
+            self.in_suspend_lambda_body = true;
             // Evaluate WITHOUT `?` so the `cur_fn_suspend` / `scope` state is always restored, even when the
             // body bails (an early `?` here would leak `cur_fn_suspend = true` into the enclosing method).
             let body_val = self.expr(body);
             self.cur_fn_suspend = saved_cur_suspend;
+            self.in_suspend_lambda_body = saved_in_sl;
             self.scope = saved_scope_sm;
             let body_val = body_val?;
             needs_pass_sm = true;
@@ -18465,8 +18473,13 @@ impl<'a> Lower<'a> {
                             .is_some_and(|c| c.owner.starts_with("kotlinx/coroutines/sync/"))
                     {
                         if let Expr::Lambda { body: lbody, .. } = self.afile.expr(args[0]).clone() {
-                            if let Some(v) = self.lower_suspend_withlock(e, receiver, lbody) {
-                                return Some(v);
+                            // Inside a SUSPEND LAMBDA a non-suspending-body withLock keeps the
+                            // `withLock\$default` call — the lambda machine doesn't model the
+                            // splice's try/finally; a suspending body has no fallback anyway.
+                            if self.ast_body_suspends(lbody) || !self.in_suspend_lambda_body {
+                                if let Some(v) = self.lower_suspend_withlock(e, receiver, lbody) {
+                                    return Some(v);
+                                }
                             }
                         }
                     }
