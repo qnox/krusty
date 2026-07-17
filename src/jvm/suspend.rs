@@ -1499,9 +1499,16 @@ fn build_state_machine(ir: &mut IrFile, facade: &str, fid: u32, b: ExprId, unit_
             }
         }
     }
+    // Fold the field layout only over suspensions still PRESENT in the final (post-transform)
+    // body — a desugared-away call's captured list must not size the class (kotlinc's field count
+    // reflects the suspensions its machine actually has).
+    let mut live_calls: HashSet<ExprId> = HashSet::new();
+    collect_suspend_calls(ir, b, &suspend_set, &mut live_calls);
     let mut layout = SpillLayout::default();
-    for list in susp_scopes.values() {
-        layout.add_list(list);
+    for (call, list) in &susp_scopes {
+        if live_calls.contains(call) {
+            layout.add_list(list);
+        }
     }
 
     let cont_id = build_continuation_class(
@@ -1865,9 +1872,13 @@ fn build_lambda_state_machine(
             w.walk_stmts(&stmts);
             w.out
         });
+    let mut live_calls: HashSet<ExprId> = HashSet::new();
+    collect_suspend_calls(ir, b, &suspend_set, &mut live_calls);
     let mut layout = SpillLayout::default();
-    for list in susp_scopes.values() {
-        layout.add_list(list);
+    for (call, list) in &susp_scopes {
+        if live_calls.contains(call) {
+            layout.add_list(list);
+        }
     }
 
     // Append `result`, `label`, then the positional spill slots — after the captures/parameters.
@@ -3325,6 +3336,21 @@ impl ScopeWalk<'_> {
             }
         }
     }
+}
+
+/// Collect every suspend-call expression id reachable under `e` (the final, post-transform body).
+fn collect_suspend_calls(
+    ir: &IrFile,
+    e: ExprId,
+    suspend_set: &HashSet<u32>,
+    out: &mut HashSet<ExprId>,
+) {
+    if is_suspend_call(ir, e, suspend_set) {
+        out.insert(e);
+    }
+    for_each_child(&ir.exprs, e, &mut |c| {
+        collect_suspend_calls(ir, c, suspend_set, out)
+    });
 }
 
 /// Every NAMED source variable (`IrExpr::Variable { named: true, .. }`) declared anywhere under `e`
