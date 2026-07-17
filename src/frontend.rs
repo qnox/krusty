@@ -6,15 +6,14 @@ use crate::ast::File;
 use crate::diag::DiagSink;
 use crate::features::LangFeatures;
 use crate::libraries::{EmptySymbolSource, SemanticPlatform};
-use crate::resolve::TypeInfo;
-
 pub use crate::resolve::SymbolTable as FrontendSymbols;
+pub use crate::resolve::TypeInfo as FrontendTypeInfo;
 pub use crate::resolve::{check_file, collect_signatures, collect_signatures_with_cp};
 
 /// A single parsed file together with the frontend facts needed by a backend.
 pub struct CheckedFile<'a> {
     pub file: &'a File,
-    pub info: &'a TypeInfo,
+    pub info: &'a FrontendTypeInfo,
     pub symbols: &'a FrontendSymbols,
 }
 
@@ -35,7 +34,7 @@ pub fn analyze_source(
     src: &str,
     platform: Box<dyn SemanticPlatform>,
     diags: &mut DiagSink,
-) -> (File, Option<FrontendSymbols>, Option<TypeInfo>) {
+) -> (File, Option<FrontendSymbols>, Option<FrontendTypeInfo>) {
     let mut files = vec![parse_source_with_detected_features(src, diags)];
     if diags.has_errors() {
         return (files.pop().unwrap_or_default(), None, None);
@@ -54,7 +53,7 @@ pub fn analyze_source(
 pub fn analyze_source_standalone(
     src: &str,
     diags: &mut DiagSink,
-) -> (File, Option<FrontendSymbols>, Option<TypeInfo>) {
+) -> (File, Option<FrontendSymbols>, Option<FrontendTypeInfo>) {
     analyze_source(src, Box::new(EmptySymbolSource), diags)
 }
 
