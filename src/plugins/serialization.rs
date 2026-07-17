@@ -1617,9 +1617,15 @@ impl IrPlugin for SerializationPlugin {
             // `ACC_SYNTHETIC`. A value-class field is stored UNBOXED, so its param + `putfield` use the
             // underlying type.
             if plain_data_class {
+                // A value-class field unboxes to its underlying in the deser ctor ONLY when that underlying
+                // is NON-nullable; a nullable-underlying value class (`VC(val s: String?)`) stays BOXED
+                // (its marker-style synthetic ctor can't unbox — kotlinc keeps the `VC` type).
                 let deser_field_tys: Vec<Ty> = foo_fields
                     .iter()
-                    .map(|(_, ty)| value_class_underlying(ir, ty).unwrap_or(*ty))
+                    .map(|(_, ty)| match value_class_underlying(ir, ty) {
+                        Some(u) if !u.is_nullable() => u,
+                        _ => *ty,
+                    })
                     .collect();
                 let mut deser_params = vec![Ty::Int];
                 deser_params.extend(deser_field_tys.iter().cloned());

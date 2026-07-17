@@ -562,6 +562,8 @@ mod nullable_primitive_box_e2e;
 mod nullable_ref_arg_to_erased_param_e2e;
 #[path = "nullable_unit_e2e.rs"]
 mod nullable_unit_e2e;
+#[path = "nullable_vc_default_stub_e2e.rs"]
+mod nullable_vc_default_stub_e2e;
 #[path = "number_and_ctor_coverage_e2e.rs"]
 mod number_and_ctor_coverage_e2e;
 #[path = "number_assignability_e2e.rs"]

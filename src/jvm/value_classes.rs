@@ -689,6 +689,9 @@ pub fn lower_value_classes(
         }
         out
     };
+    // `(fid, param idx, boxed value-class Ty)` for nullable-underlying value-class params — the base
+    // method unboxes them (below), but its `$default` stub + call site keep them boxed (recorded here).
+    let mut default_boxed: Vec<(u32, usize, Ty)> = Vec::new();
     for (fid, f) in ir.functions.iter_mut().enumerate() {
         let is_box_impl = f.name == "box-impl";
         // A USER value-class member function's body runs on the BOXED object; its value-class-typed
@@ -757,8 +760,11 @@ pub fn lower_value_classes(
                 f.name = mangled;
             }
         }
-        for p in &mut f.params {
+        for (idx, p) in f.params.iter_mut().enumerate() {
             if !(vc_member && is_vc_ty(p)) {
+                if vc_underlying_nullable(p, &under) {
+                    default_boxed.push((fid as u32, idx, *p));
+                }
                 *p = erase(p, &under);
             }
         }
@@ -779,6 +785,12 @@ pub fn lower_value_classes(
                 }
             }
         }
+    }
+    for (fid, idx, ty) in default_boxed {
+        ir.default_stub_boxed_params
+            .entry(fid)
+            .or_default()
+            .push((idx, ty));
     }
 
     // 1a′. A `@Serializable` property's `get<X>$annotations()` marker follows its getter's value-class
@@ -1151,6 +1163,12 @@ pub fn lower_value_classes(
         // `constructor-impl`s by `synth_value_members`, so this only touches regular classes.
         for sc in &mut c.secondary_ctors {
             for p in &mut sc.params {
+                // A SYNTHETIC marker ctor (the serialization deser ctor, disambiguated by a trailing
+                // `DefaultConstructorMarker` rather than `-<hash>` mangling) keeps a nullable-underlying
+                // value-class param BOXED — kotlinc can't unbox it there without the mangling.
+                if sc.synthetic && vc_underlying_nullable(p, &under) {
+                    continue;
+                }
                 *p = erase(p, &under);
             }
         }

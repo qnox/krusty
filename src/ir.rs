@@ -967,6 +967,12 @@ pub struct IrFile {
     /// Methods kotlinc marks `ACC_BRIDGE` (0x40) — e.g. a `@Serializable` serializer's
     /// `typeParametersSerializers`. The JVM backend ORs `0x40` for a `FunId` in this set.
     pub bridge_methods: std::collections::HashSet<u32>,
+    /// Per-method (`FunId`) `(param index, boxed value-class type)` for params whose value class has a
+    /// NULLABLE underlying: the base (mangled) method unboxes them, but its `<name>$default` synthetic
+    /// keeps them BOXED (kotlinc — a `$default` can't disambiguate the unboxed signature without the
+    /// `-<hash>` mangling). Recorded by the value-class pass BEFORE erasure; read by `emit_default_stub`
+    /// (signature + box-on-fill + unbox-on-delegate) AND the `$default` CALL site (boxed arg + descriptor).
+    pub default_stub_boxed_params: std::collections::HashMap<u32, Vec<(usize, crate::types::Ty)>>,
     /// Internal names of classes kotlinc marks `ACC_SYNTHETIC` (0x1000) on the class itself — e.g. a
     /// `@Serializable` class's generated `$$serializer` object.
     pub synthetic_classes: std::collections::HashSet<String>,
