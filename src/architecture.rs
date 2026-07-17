@@ -175,12 +175,55 @@ mod tests {
     }
 
     #[test]
+    fn frontend_tools_use_only_their_declared_frontend_handoff_dependencies() {
+        assert_allowed_crate_modules("src/bin/check.rs", &["diag", "frontend", "lexer", "parser"]);
+        assert_allowed_crate_modules(
+            "src/bin/blockers.rs",
+            &["diag", "frontend", "lexer", "parser"],
+        );
+        assert_allowed_crate_modules(
+            "src/bin/irbail.rs",
+            &[
+                "diag",
+                "frontend",
+                "ir_lower",
+                "lexer",
+                "libraries",
+                "parser",
+            ],
+        );
+        assert_allowed_crate_modules(
+            "src/bin/bytediff.rs",
+            &["diag", "frontend", "ir_lower", "jvm", "lexer", "parser"],
+        );
+        assert_allowed_crate_modules(
+            "src/bin/survey.rs",
+            &[
+                "ast",
+                "conformance",
+                "diag",
+                "features",
+                "frontend",
+                "ir",
+                "ir_lower",
+                "jvm",
+                "lexer",
+                "parser",
+                "toolchain",
+            ],
+        );
+    }
+
+    #[test]
     fn dependency_collector_handles_rust_paths_and_ignores_test_modules() {
         let source = r#"
             use crate::{ast, jvm::names};
+            use krusty;
+            use krusty::diag;
 
             fn f() {
                 let _ = crate :: js :: SOME;
+                let _ = krusty::frontend::analyze_source_standalone;
             }
 
             #[cfg(test)]
@@ -191,7 +234,13 @@ mod tests {
 
         assert_eq!(
             crate_modules(source),
-            BTreeSet::from(["ast".to_string(), "js".to_string(), "jvm".to_string()])
+            BTreeSet::from([
+                "ast".to_string(),
+                "diag".to_string(),
+                "frontend".to_string(),
+                "js".to_string(),
+                "jvm".to_string(),
+            ])
         );
     }
 
@@ -258,10 +307,7 @@ mod tests {
 
     fn collect_path_module(path: &syn::Path, modules: &mut BTreeSet<String>) {
         let mut segments = path.segments.iter();
-        if segments
-            .next()
-            .is_some_and(|segment| segment.ident == "crate")
-        {
+        if segments.next().is_some_and(is_crate_root) {
             if let Some(module) = segments.next() {
                 modules.insert(module.ident.to_string());
             }
@@ -292,21 +338,35 @@ mod tests {
     }
 
     fn collect_terminal_use(ident: &syn::Ident, prefix: &[String], modules: &mut BTreeSet<String>) {
-        if prefix.first().is_some_and(|segment| segment == "crate") {
+        if prefix
+            .first()
+            .is_some_and(|segment| is_crate_root_name(segment))
+        {
             if let Some(module) = prefix.get(1) {
                 modules.insert(module.clone());
-            } else if ident != "crate" {
+            } else if !is_crate_root_name(&ident.to_string()) {
                 modules.insert(ident.to_string());
             }
         }
     }
 
     fn collect_prefixed_module(prefix: &[String], modules: &mut BTreeSet<String>) {
-        if prefix.first().is_some_and(|segment| segment == "crate") {
+        if prefix
+            .first()
+            .is_some_and(|segment| is_crate_root_name(segment))
+        {
             if let Some(module) = prefix.get(1) {
                 modules.insert(module.clone());
             }
         }
+    }
+
+    fn is_crate_root(segment: &syn::PathSegment) -> bool {
+        is_crate_root_name(&segment.ident.to_string())
+    }
+
+    fn is_crate_root_name(segment: &str) -> bool {
+        segment == "crate" || segment == env!("CARGO_PKG_NAME")
     }
 
     fn has_cfg_test(attrs: &[syn::Attribute]) -> bool {

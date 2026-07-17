@@ -1,8 +1,8 @@
-//! Throwaway analysis: bucket first-error failures by the source line at the error span.
+//! Bucket first-error failures by the source line at the error span.
 use krusty::diag::{line_col, DiagSink};
+use krusty::frontend::{check_file, collect_signatures};
 use krusty::lexer::lex;
 use krusty::parser::parse;
-use krusty::resolve::{check_file, collect_signatures};
 use std::collections::HashMap;
 
 fn first_error(src: &str) -> Option<(String, u32)> {

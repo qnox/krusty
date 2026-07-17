@@ -1,7 +1,7 @@
 use krusty::diag::DiagSink;
+use krusty::frontend::{check_file, collect_signatures};
 use krusty::lexer::lex;
 use krusty::parser::parse;
-use krusty::resolve::{check_file, collect_signatures};
 
 fn main() {
     for path in std::env::args().skip(1) {
