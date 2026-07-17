@@ -3158,8 +3158,12 @@ impl ScopeWalk<'_> {
     fn snapshot(&mut self, call: ExprId) {
         let mut list: Vec<(u32, Ty)> = self.params.to_vec();
         for &(l, ty, named) in &self.scope {
-            let live = named || self.pending.iter().any(|&p| expr_reads(self.ir, p, l));
-            if live {
+            // NAMED vars spill by scope (kotlinc's rule). An unnamed temp NEVER gets a slot —
+            // kotlinc holds those on the operand stack; every splice-materialization local that
+            // kotlinc names is emitted `named` at its lowering site. A krusty-only temp that
+            // genuinely crossed a suspension would fail loudly in the box corpus, not silently
+            // diverge (the arm restores wouldn't cover it).
+            if named {
                 list.push((l, ty));
             }
         }
