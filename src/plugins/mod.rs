@@ -1,22 +1,19 @@
-//! krusty plugin API (PoC) — the compiler-extension surface. See `docs/PLUGIN_API.md`.
+//! krusty plugin API. See `docs/PLUGIN_API.md`.
 //!
-//! Kotlin extensions live in two worlds with very different coupling to compiler internals, so
-//! krusty supports each through a different door:
+//! Kotlin extensions have different coupling to compiler internals, so krusty exposes separate
+//! native-plugin and codegen-host APIs:
 //!
 //!   1. NATIVE IR PLUGINS ([`IrPlugin`]) — the in-process equivalent of Kotlin's FIR
 //!      declaration/supertype generation + IR backend transforms (Compose, kotlinx.serialization).
-//!      They run as passes alongside `jvm::value_classes::lower_value_classes`. They CAN synthesize
-//!      and mutate declarations. Reference impl: [`serialization`].
+//!      They run as compiler passes and can synthesize or mutate declarations. Reference impl:
+//!      [`serialization`].
 //!
 //!   2. CODEGEN HOSTS ([`ksp`]) — the in-process host for codegen-only annotation processors
-//!      (KSP, APT: Micronaut, Dagger, Room). Those run UNMODIFIED on a JVM sidecar through a shim
-//!      that implements their interfaces; they only READ a resolved symbol view and EMIT new source
-//!      files. Modeled here in Rust to prove the front-stage fixpoint pipeline.
+//!      (KSP, APT: Micronaut, Dagger, Room). They run on a JVM sidecar through a shim that
+//!      implements their interfaces, read a resolved symbol view, and emit new source files.
 //!
-//! AST vs IR (see the doc): declaration/supertype generation is PRODUCTION-HOSTED at the signature
-//! phase (pre-typecheck) so generated symbols resolve, and so the same resolved-symbol view backs a
-//! future LSP. Only body/expression rewrite genuinely belongs at the IR level. This self-contained
-//! PoC runs all three phases over `IrFile` for testability; the phase split is documented per-hook.
+//! AST vs IR (see the doc): declaration/supertype generation belongs before type checking so
+//! generated symbols resolve. Body and expression rewriting belongs at the IR level.
 
 pub mod cli;
 pub mod deps;
@@ -27,6 +24,7 @@ pub mod serialization;
 use std::collections::HashMap;
 
 use crate::ir::{ClassId, IrFile};
+use crate::types::Ty;
 
 /// The unqualified tail of an annotation name (`kotlinx/serialization/Serializable` or
 /// `kotlinx.serialization.Serializable` → `Serializable`).
@@ -34,17 +32,41 @@ pub(crate) fn annotation_simple_name(a: &str) -> &str {
     a.rsplit(['/', '.']).next().unwrap_or(a)
 }
 
-/// Side table of applied annotations, keyed by `ClassId`. A side table because `IrClass` does not
-/// yet store applied annotations (only known-flag bools like `is_data`). The production integration
-/// adds `annotations: Vec<String>` to `IrClass`, populated in `ir_lower`; then this becomes a thin
-/// accessor over the IR. Kept separate here so the gate stays `0 FAIL` (no edits to `IrClass`
-/// struct-literal sites).
-#[derive(Default, Clone)]
+/// Side table of applied annotations, keyed by `ClassId`, plus target services required by native
+/// plugins.
 pub struct PluginContext {
     pub class_annotations: HashMap<ClassId, Vec<String>>,
+    target_type_descriptor: fn(Ty) -> Option<String>,
+}
+
+impl Default for PluginContext {
+    fn default() -> Self {
+        Self {
+            class_annotations: HashMap::new(),
+            target_type_descriptor: no_target_type_descriptor,
+        }
+    }
+}
+
+impl Clone for PluginContext {
+    fn clone(&self) -> Self {
+        Self {
+            class_annotations: self.class_annotations.clone(),
+            target_type_descriptor: self.target_type_descriptor,
+        }
+    }
 }
 
 impl PluginContext {
+    pub fn with_target_type_descriptor(mut self, f: fn(Ty) -> Option<String>) -> Self {
+        self.target_type_descriptor = f;
+        self
+    }
+
+    pub fn target_type_descriptor(&self, ty: Ty) -> Option<String> {
+        (self.target_type_descriptor)(ty)
+    }
+
     /// `ClassId`s carrying the annotation `fq` (a Kotlin FqName, e.g. `kotlinx/serialization/Serializable`).
     pub fn classes_with(&self, fq: &str) -> Vec<ClassId> {
         let mut ids: Vec<ClassId> = self
@@ -77,12 +99,8 @@ impl PluginContext {
             .is_some_and(|anns| anns.iter().any(|a| a == fq))
     }
 
-    /// Build the annotation index from the parsed source: each `IrClass` inherits the annotations the
-    /// AST captured on the matching `ClassDecl`. Matching is by **fully-qualified name** (the file's
-    /// package + the class simple name) compared to `IrClass.fq_name`, so two classes with the same
-    /// simple name in different packages don't cross-contaminate. This is how the surface is driven
-    /// from REAL `@Serializable`/`@…` in source — no manual injection. (Production would carry the
-    /// annotations on `IrClass` directly; this keeps the change localized.)
+    /// Build the annotation index from parsed source by matching class declarations to IR classes by
+    /// fully-qualified internal name.
     pub fn from_source(file: &crate::ast::File, ir: &IrFile) -> PluginContext {
         use std::collections::HashMap;
         let pkg_prefix = file
@@ -111,33 +129,34 @@ impl PluginContext {
     }
 }
 
-/// A native IR plugin — the in-process equivalent of Kotlin's FIR + IR backend extensions. Each
-/// method mirrors one real Kotlin extension point so a port maps method-for-method. All three have
-/// a no-op default, so a plugin overrides only the phases it needs.
+fn no_target_type_descriptor(_ty: Ty) -> Option<String> {
+    None
+}
+
+/// A native IR plugin with explicit hooks for supertype generation, declaration generation, and IR
+/// body transformation.
 pub trait IrPlugin {
     fn name(&self) -> &str;
 
-    /// `FirSupertypeGenerationExtension` — add interfaces/superclasses to *existing* classes
-    /// (Parcelize makes a class implement `Parcelable`). PRODUCTION: signature phase (pre-typecheck).
+    /// Add interfaces or superclasses to existing classes.
     fn generate_supertypes(&self, _ir: &mut IrFile, _ctx: &PluginContext) {}
 
-    /// `FirDeclarationGenerationExtension` — synthesize *new* classes/members (serialization's
-    /// `$serializer` + `serializer()`). PRODUCTION: signature phase, so user references resolve.
+    /// Synthesize new classes or members.
     fn generate_declarations(&self, _ir: &mut IrFile, _ctx: &PluginContext) {}
 
-    /// `IrGenerationExtension` (backend IR) — fill in / rewrite method bodies (serialize/deserialize,
-    /// Compose `$composer` threading). This is the genuine IR-level hook; runs post-`ir_lower`.
+    /// Fill in or rewrite method bodies after IR lowering.
     fn transform_bodies(&self, _ir: &mut IrFile, _ctx: &PluginContext) {}
 }
 
 /// Run the natively-supported compiler-extension plugins over a freshly-lowered `IrFile`, driven by
-/// the file's source annotations. Called from the JVM backend between `ir_lower` and the JVM IR
-/// passes. A **fast no-op** when no trigger annotation is present (the common case) — so a module
-/// with no `@Serializable` is unaffected (the box gate stays `0 FAIL`). Production note: the active
-/// set + each plugin's config (e.g. serialization ABI) should come from `registry`/`cli`
-/// (`-Xplugin`/`-classpath`); this wires the built-in serialization plugin directly for now.
-pub fn run_enabled(ir: &mut IrFile, file: &crate::ast::File) {
-    let ctx = PluginContext::from_source(file, ir);
+/// the file's source annotations.
+pub fn run_enabled(
+    ir: &mut IrFile,
+    file: &crate::ast::File,
+    target_type_descriptor: fn(Ty) -> Option<String>,
+) {
+    let ctx =
+        PluginContext::from_source(file, ir).with_target_type_descriptor(target_type_descriptor);
     if ctx.classes_with_simple("Serializable").is_empty() {
         return;
     }
@@ -146,9 +165,8 @@ pub fn run_enabled(ir: &mut IrFile, file: &crate::ast::File) {
     host.run(ir, &ctx);
 }
 
-/// Runs registered plugins over an `IrFile`, phase by phase **globally** (all plugins' supertypes,
-/// then all declarations, then all bodies) — matching kotlinc's phase ordering, so one plugin can
-/// rely on another's supertypes being in place before its declarations run.
+/// Runs registered plugins over an `IrFile` phase by phase: all supertypes, then all declarations,
+/// then all body transforms.
 #[derive(Default)]
 pub struct PluginHost {
     plugins: Vec<Box<dyn IrPlugin>>,
@@ -189,9 +207,7 @@ impl PluginHost {
     }
 }
 
-/// Fill all `IrClass` fields with empty defaults for a synthesized class — a builder helper plugins
-/// use so adding a node doesn't depend on every field. (`IrClass` deliberately has no `Default`
-/// derive in production code; this is a PoC convenience local to the plugin layer.)
+/// Fill all `IrClass` fields with empty defaults for a synthesized class.
 pub(crate) fn synthetic_class(fq_name: impl Into<String>) -> crate::ir::IrClass {
     crate::ir::IrClass {
         fq_name: fq_name.into(),
@@ -258,6 +274,25 @@ mod tests {
         assert_eq!(ctx.classes_with("c/D"), vec![0]);
         assert!(ctx.has_annotation(0, "c/D"));
         assert!(!ctx.has_annotation(1, "c/D"));
+    }
+
+    #[test]
+    fn context_carries_target_type_descriptor_service() {
+        fn descriptor(ty: Ty) -> Option<String> {
+            (ty == Ty::Int).then(|| "I".to_string())
+        }
+
+        assert_eq!(
+            PluginContext::default().target_type_descriptor(Ty::Int),
+            None
+        );
+        assert_eq!(
+            PluginContext::default()
+                .with_target_type_descriptor(descriptor)
+                .target_type_descriptor(Ty::Int)
+                .as_deref(),
+            Some("I")
+        );
     }
 
     #[test]
