@@ -1526,6 +1526,75 @@ impl IrPlugin for SerializationPlugin {
                         delegate: crate::ir::CtorDelegateTarget::Super,
                     });
             }
+
+            // `$childSerializers` cache — kotlinc emits it (a `private static final Lazy[]` + the public
+            // `access$get$childSerializers$cp()` accessor) when a property needs a NON-trivial element
+            // serializer (a collection / nullable — not a plain primitive/`String`, whose serializer is
+            // referenced directly). Each slot is `LazyKt.lazyOf(<element serializer>)`, `null` otherwise.
+            let needs_cache = |ty: &Ty| -> bool {
+                ty.kotlin_class_internal()
+                    .and_then(collection_serializer_builder)
+                    .is_some()
+                    || is_nullable(ty)
+            };
+            if plain_data_class && foo_fields.iter().any(|(_, ty)| needs_cache(ty)) {
+                let lazy_arr_ty = Ty::obj_args("kotlin/Array", &[class_ty("kotlin/Lazy")]);
+                let elems: Vec<ExprId> = foo_fields
+                    .iter()
+                    .map(|(_, ty)| {
+                        if needs_cache(ty) {
+                            if let Some(es) = element_serializer_expr(ir, ty) {
+                                return ir.add_expr(IrExpr::Call {
+                                    callee: Callee::Static {
+                                        owner: "kotlin/LazyKt".to_string(),
+                                        name: "lazyOf".to_string(),
+                                        descriptor: "(Ljava/lang/Object;)Lkotlin/Lazy;".to_string(),
+                                        inline: InlineKind::None,
+                                    },
+                                    dispatch_receiver: None,
+                                    args: vec![es],
+                                });
+                            }
+                        }
+                        ir.add_expr(IrExpr::Const(IrConst::Null))
+                    })
+                    .collect();
+                let arr = ir.add_expr(IrExpr::Vararg {
+                    array_type: lazy_arr_ty,
+                    elements: elems,
+                });
+                ir.statics.push(crate::ir::IrStatic {
+                    name: "$childSerializers".to_string(),
+                    ty: lazy_arr_ty,
+                    init: arr,
+                    is_var: false,
+                    is_const: false,
+                    owner: Some(class_fq.clone()),
+                    visibility: crate::types::Visibility::Private,
+                    custom_accessor: true,
+                });
+                // `public static final Lazy[] access$get$childSerializers$cp() { return $childSerializers; }`
+                let read = ir.add_expr(IrExpr::ExternalStaticField {
+                    owner: class_fq.clone(),
+                    name: "$childSerializers".to_string(),
+                    descriptor: "[Lkotlin/Lazy;".to_string(),
+                });
+                let ret = ir.add_expr(IrExpr::Return(Some(read)));
+                let body = ir.add_expr(IrExpr::Block {
+                    stmts: vec![ret],
+                    value: None,
+                });
+                let acc = ir.add_fun(IrFunction {
+                    name: "access$get$childSerializers$cp".to_string(),
+                    params: vec![],
+                    ret: lazy_arr_ty,
+                    body: Some(body),
+                    is_static: true,
+                    dispatch_receiver: None,
+                    param_checks: Vec::new(),
+                });
+                ir.classes[class_id as usize].methods.push(acc);
+            }
         }
     }
 
