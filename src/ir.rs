@@ -976,6 +976,14 @@ pub struct IrFile {
     /// message lambda, assumed spliced). If emission nonetheless records an `invokedynamic` for one,
     /// the two-pass driver RESCUES it — emits the method after all — so the reference never dangles.
     pub must_inline_lambdas: std::collections::HashSet<u32>,
+    /// Per suspend function: the PRE-SPLICE per-suspension lexical scope lists (suspend-call expr id →
+    /// `params ++ in-scope named locals`), captured before `splice_return_blocks` flattens block
+    /// statements (which would leak block-scoped locals into later suspensions' scopes). Consumed by
+    /// the state-machine builders. See docs/POSITIONAL_SPILLS.md.
+    pub pre_splice_scopes: std::collections::HashMap<
+        u32,
+        std::collections::HashMap<ExprId, Vec<(u32, crate::types::Ty)>>,
+    >,
     /// Methods kotlinc marks `ACC_SYNTHETIC` — currently a value class's `box-impl`/`unbox-impl` (the
     /// compiler-manufactured box adapters). The JVM backend ORs `0x1000` for a `FunId` in this set.
     pub synthetic_methods: std::collections::HashSet<u32>,
