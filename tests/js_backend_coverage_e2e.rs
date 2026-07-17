@@ -25,8 +25,8 @@ fn run(src: &str) -> Option<String> {
     let stdlib = common::stdlib_jar()?;
     let java_home = common::java_home()?;
     let jdk = PathBuf::from(format!("{java_home}/lib/modules"));
-    let ir = common::lower_to_ir(src, &[stdlib], Some(&jdk))?;
-    let js = format!("{}\nconsole.log(box());\n", krusty::js::emit_file(&ir));
+    let mut js = common::compile_js_in_process(src, "Main", &[stdlib], Some(&jdk))?;
+    js.push_str("\nconsole.log(box());\n");
     common::run_js(&js)
 }
 

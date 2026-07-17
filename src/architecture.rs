@@ -78,8 +78,29 @@ mod tests {
     }
 
     #[test]
-    fn js_target_modules_use_only_js_side_dependencies() {
-        assert_allowed_crate_modules_in_tree("src/js", &["ir", "js", "types"]);
+    fn js_facade_has_no_crate_dependencies() {
+        assert_allowed_crate_modules("src/js/mod.rs", &[]);
+    }
+
+    #[test]
+    fn js_emitter_uses_only_ir_contract_dependencies() {
+        assert_allowed_crate_modules("src/js/emit.rs", &["ir", "types"]);
+    }
+
+    #[test]
+    fn js_backend_adapter_uses_only_common_backend_dependencies() {
+        assert_allowed_crate_modules(
+            "src/js/backend.rs",
+            &[
+                "ast",
+                "backend",
+                "diag",
+                "ir_lower",
+                "js",
+                "libraries",
+                "resolve",
+            ],
+        );
     }
 
     #[test]
