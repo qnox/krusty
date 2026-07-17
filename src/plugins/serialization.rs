@@ -1126,6 +1126,28 @@ impl IrPlugin for SerializationPlugin {
                 Ty::obj_args("kotlin/Array", &[kserializer_of(class_ty("kotlin/Any"))]),
                 None,
             );
+            // `typeParametersSerializers(): KSerializer<?>[]` — the `GeneratedSerializer` member kotlinc
+            // always emits. For a non-generic serializer it returns an empty array (no type-parameter
+            // serializers); a generic serializer's is a follow-up.
+            let tps_arr = ir.add_expr(IrExpr::Vararg {
+                array_type: Ty::obj_args("kotlin/Array", &[kserializer_of(class_ty("kotlin/Any"))]),
+                elements: vec![],
+            });
+            let tps_ret = ir.add_expr(IrExpr::Return(Some(tps_arr)));
+            let tps_body = ir.add_expr(IrExpr::Block {
+                stmts: vec![tps_ret],
+                value: None,
+            });
+            let type_params_ser = Self::add_method(
+                ir,
+                &ser_fq,
+                "typeParametersSerializers",
+                vec![],
+                Ty::obj_args("kotlin/Array", &[kserializer_of(class_ty("kotlin/Any"))]),
+                Some(tps_body),
+            );
+            // kotlinc emits it non-final (a plain `GeneratedSerializer` override).
+            ir.open_methods.insert(type_params_ser);
 
             let foo_fields: Vec<(String, Ty)> = ir.classes[class_id as usize]
                 .fields
@@ -1195,7 +1217,7 @@ impl IrPlugin for SerializationPlugin {
                 };
                 n_tp
             ];
-            ser.methods = vec![descriptor, serialize, deserialize, child];
+            ser.methods = vec![descriptor, serialize, deserialize, child, type_params_ser];
             // Erased generic bridges the `KSerializer<Foo>` interface requires: the JVM sees
             // `serialize(Encoder, Object)` / `deserialize(Decoder): Object`; each adapts args/return
             // and delegates to the concrete `Foo`-typed override.
@@ -1430,6 +1452,34 @@ impl IrPlugin for SerializationPlugin {
                 param_checks: Vec::new(),
             });
             ir.classes[class_id as usize].methods.push(write_self);
+
+            // `public static void get<Prop>$annotations()` — a no-op marker kotlinc emits for each
+            // property that carries a serialization annotation (here `@SerialName`), so reflection can
+            // find the annotation on the synthetic accessor. Body is empty (`return`).
+            for (prop, _) in &serial_names {
+                let mut chars = prop.chars();
+                let cap = chars
+                    .next()
+                    .map(|c| c.to_uppercase().collect::<String>() + chars.as_str())
+                    .unwrap_or_default();
+                let ann_ret = ir.add_expr(IrExpr::Return(None));
+                let ann_body = ir.add_expr(IrExpr::Block {
+                    stmts: vec![ann_ret],
+                    value: None,
+                });
+                let marker = ir.add_fun(IrFunction {
+                    name: format!("get{cap}$annotations"),
+                    params: vec![],
+                    ret: unit(),
+                    body: Some(ann_body),
+                    is_static: true,
+                    dispatch_receiver: None,
+                    param_checks: Vec::new(),
+                });
+                // kotlinc emits the marker as `public static` (NOT final).
+                ir.open_methods.insert(marker);
+                ir.classes[class_id as usize].methods.push(marker);
+            }
         }
     }
 
@@ -2484,7 +2534,8 @@ mod tests {
                 "getDescriptor",
                 "serialize",
                 "deserialize",
-                "childSerializers"
+                "childSerializers",
+                "typeParametersSerializers"
             ]
         );
     }
