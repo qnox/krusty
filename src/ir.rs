@@ -153,23 +153,19 @@ pub enum IrExpr {
         dispatch_receiver: Option<ExprId>,
         args: Vec<ExprId>,
     },
-    /// A placeholder a compiler-extension plugin must specialize before emit — core lowering produces
-    /// it generically (no plugin-specific ABI), and the plugin rewrites this arena slot into concrete
-    /// IR in its body phase. Currently the only producer is the reified kotlinx.serialization round-trip
-    /// (`fmt.encodeToString(x)` / `fmt.decodeFromString<C>(s)`): core detects the call STRUCTURALLY (a
-    /// `StringFormat` receiver + a `@Serializable` type) and records the resolved facts here; the
-    /// serialization plugin owns the `StringFormat` member descriptors (so a new serialization runtime
-    /// doesn't require recompiling core). `exprs` are already-lowered operands, `data` carries resolved
+    /// A placeholder a compiler-extension plugin must specialize before emit. Core lowering produces
+    /// it generically, without plugin-specific ABI details, and the plugin rewrites this arena slot into
+    /// concrete IR in its body phase. `exprs` are already-lowered operands, `data` carries resolved
     /// names; the meaning of both is private to the named plugin. A node that survives to emit is
-    /// declined by `jvm_can_emit` (never miscompiled).
+    /// declined by `jvm_can_emit`.
     PluginPlaceholder {
-        /// Which plugin specializes this node (e.g. `"serialization"`).
+        /// Which plugin specializes this node.
         plugin: &'static str,
-        /// The plugin-specific operation (e.g. `"encodeToString"` / `"decodeFromString"`).
+        /// The plugin-specific operation.
         kind: &'static str,
         /// Already-lowered operand expressions, in a plugin-defined order.
         exprs: Vec<ExprId>,
-        /// Resolved names the plugin needs (e.g. the format internal name, the `@Serializable` class).
+        /// Resolved names the plugin needs.
         data: Vec<String>,
     },
     /// `IrReturn` from the enclosing function.
@@ -360,8 +356,7 @@ pub enum IrExpr {
     },
     /// Read a static field holding a singleton on a class defined OUTSIDE this compilation (a classpath
     /// class with no `IrClass`): `getstatic <owner>.<field>:L<ty>;`. Like `StaticInstance` but the owner
-    /// and field type are given by internal name directly (e.g. a kotlinx builtin serializer's
-    /// `kotlinx/serialization/internal/StringSerializer.INSTANCE`), not resolved through `ir.classes`.
+    /// and field type are given by internal name directly, not resolved through `ir.classes`.
     ExternalStaticInstance {
         owner: String,
         ty: String,
@@ -527,8 +522,8 @@ pub struct IrField {
     /// underlying (vs guessing), independent of erasure dropping the name.
     pub type_param: Option<String>,
     /// The CONSTANT default from a primary-constructor default (`val b: Int = 5` → `Some(Int(5))`,
-    /// `val t: T? = null` → `Some(Null)`), else `None` (no default, or a non-constant one). The
-    /// serialization extension marks an element with a default `isOptional`; ignored by the core backend.
+    /// `val t: T? = null` → `Some(Null)`), else `None` (no default, or a non-constant one). Later
+    /// compiler passes may use it; the core backend ignores it.
     pub default: Option<IrConst>,
     /// The backing field is immutable (`val`) — emitted `final`.
     pub is_final: bool,
@@ -590,31 +585,12 @@ pub struct IrClass {
     pub type_param_bounds: Vec<(String, Ty)>,
     /// ALL declared generic type-parameter names in order (`class C<A, B>` → `["A","B"]`), including
     /// those with only the implicit `Any` bound (unlike [`type_param_bounds`], which lists only non-`Any`
-    /// bounds). The serialization extension uses the count/order to shape a generic `$serializer`
-    /// (one `KSerializer` constructor arg per type parameter). Empty for a non-generic class.
+    /// bounds). Empty for a non-generic class.
     pub type_params: Vec<String>,
     pub supertypes: Vec<Ty>,
     /// Instance fields. The first `ctor_param_count` are the primary-constructor parameters (stored
     /// directly from args, in order); any after them are class-body properties initialized by `init_body`.
     pub fields: Vec<IrField>,
-    /// Per-property serial-name overrides from `@SerialName("x")` on a constructor property, as
-    /// `(property_name, serial_name)`. Empty for a class with no such annotation. Consumed by the
-    /// serialization extension to name descriptor elements; ignored by the core backend.
-    pub serial_names: Vec<(String, String)>,
-    /// The internal name of an explicit serializer from `@Serializable(with = X::class)`, or `None`.
-    /// The serialization extension makes `serializer()` return an instance of `X` instead of generating
-    /// a default `$serializer`. Ignored by the core backend.
-    pub custom_serializer: Option<String>,
-    /// Per-property explicit element serializers from `@Serializable(with = X::class)` on a constructor
-    /// property, as `(property_name, serializer_internal)`. Empty for a class with no such annotation.
-    /// The serialization extension routes that property's `childSerializers`/descriptor element through
-    /// an instance of `X` instead of a default builtin/nested serializer. Ignored by the core backend.
-    pub field_serializers: Vec<(String, String)>,
-    /// Property names whose element serializer is CONTEXTUAL (`@Contextual` on the property, or the file
-    /// carries `@file:UseContextualSerialization(<the property's type>::class)`). The serialization
-    /// extension emits `ContextualSerializer(<type>::class)` (descriptor kind CONTEXTUAL) for these
-    /// instead of a derived builtin/nested serializer. Empty for a class with no contextual property.
-    pub contextual_fields: Vec<String>,
     /// How many leading `fields` are property constructor parameters (`val`/`var`) — the rest are body
     /// properties. NOTE: this is the count of constructor params that BACK A FIELD, not the total
     /// constructor arity (a non-`val`/`var` parameter is an argument only, no field) — see `ctor_args`.
@@ -646,13 +622,9 @@ pub struct IrClass {
     /// `toString`/`annotationType`), so `A(args)` can construct an annotation instance. `fields` are the
     /// members in order. The backend emits the whole contract from `fields`.
     pub annotation_impl_of: Option<String>,
-    /// `true` for a `sealed class`/`sealed interface`. The serialization extension routes a sealed
-    /// `@Serializable` base's `serializer()` to a runtime `SealedClassSerializer` over its `@Serializable`
-    /// subclasses (polymorphic), instead of generating an empty `$serializer`. Ignored by the core backend.
+    /// `true` for a `sealed class`/`sealed interface`.
     pub is_sealed: bool,
-    /// `true` for an `abstract class` (not `sealed`). The serialization extension serializes a property
-    /// of an abstract `@Serializable` type via a runtime `PolymorphicSerializer(<type>::class)` (open
-    /// polymorphism), since an abstract base has no closed subclass set. Ignored by the core backend.
+    /// `true` for an `abstract class` (not `sealed`).
     pub is_abstract: bool,
     /// Semantic superclass internal name (`kotlin/Any` normally, or a user base class for
     /// `class B : A(args)`). Target-specific representation classes such as JVM enum bases are chosen by
@@ -1498,10 +1470,6 @@ mod tests {
             type_params: Vec::new(),
             supertypes: Vec::new(),
             fields: Vec::new(),
-            serial_names: Vec::new(),
-            custom_serializer: None,
-            field_serializers: Vec::new(),
-            contextual_fields: Vec::new(),
             field_annotations: Vec::new(),
             ctor_param_count: 0,
             ctor_args: Vec::new(),

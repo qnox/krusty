@@ -66,14 +66,14 @@ fn serialization_plugin_runs_on_real_lowered_ir() {
 
     let mut ctx = PluginContext::default();
     ctx.class_annotations
-        .insert(foo_id, vec![SERIALIZABLE_FQ.to_string()]);
+        .insert(foo_id, vec![SERIALIZABLE_FQ.to_string()].into());
 
     let mut host = PluginHost::new();
     host.register(Box::new(SerializationPlugin::default()));
     host.run(&mut ir, &ctx);
 
     // The $serializer object was synthesized onto krusty's own lowered IR.
-    let ser_fq = format!("{foo_fq}$serializer");
+    let ser_fq = format!("{foo_fq}$$serializer");
     let ser = ir
         .classes
         .iter()
@@ -107,13 +107,24 @@ fn serialization_plugin_runs_on_real_lowered_ir() {
         "one element serializer per real field"
     );
 
-    // serializer() accessor was attached to the real Foo class.
+    // serializer() accessor was relocated to Foo's synthesized Companion (kotlinc's placement); Foo
+    // itself carries a `companion_class` pointing at it.
+    let comp_fq = ir.classes[foo_id as usize]
+        .companion_class
+        .clone()
+        .expect("Foo has a companion_class for the serializer()");
+    let comp = ir
+        .classes
+        .iter()
+        .find(|c| c.fq_name == comp_fq)
+        .expect("Foo$Companion synthesized");
     assert!(
-        ir.classes[foo_id as usize]
-            .methods
-            .iter()
-            .any(|&f| ir.functions[f as usize].name == "serializer"),
-        "serializer() accessor added to real Foo"
+        comp.is_companion
+            && comp
+                .methods
+                .iter()
+                .any(|&f| ir.functions[f as usize].name == "serializer"),
+        "serializer() accessor added to Foo's Companion"
     );
 }
 
@@ -139,7 +150,7 @@ fn serialization_activates_from_source_annotation() {
     assert!(
         ir.classes
             .iter()
-            .any(|c| c.fq_name.ends_with("Foo$serializer")),
+            .any(|c| c.fq_name.ends_with("Foo$$serializer")),
         "$serializer synthesized purely from the source annotation"
     );
 }
