@@ -9,17 +9,20 @@ use crate::libraries::{EmptySymbolSource, SemanticPlatform};
 pub(crate) use crate::resolve::ClassSig as FrontendClassSig;
 pub use crate::resolve::SymbolTable as FrontendSymbols;
 pub use crate::resolve::TypeInfo as FrontendTypeInfo;
-pub use crate::resolve::{check_file, collect_signatures, collect_signatures_with_cp};
+pub use crate::resolve::{
+    check_file, check_file_at, collect_signatures, collect_signatures_with_cp,
+};
 pub(crate) use crate::resolve::{
     function_scope_packages, map_param_list_args, pick_overload, qualified_path, typeref_leaf,
     ClassNames, CtorDefaultValue, DelegateGetValueTarget, ExprLowering, InlineCall, InvokeKind,
-    LambdaCapture, LambdaInfo, ReceiverLambda, ResolvedCall, ResolvedLocalFunctionCall, Signature,
-    StmtLowering,
+    LambdaCapture, LambdaInfo, ReceiverLambda, ResolvedCall, ResolvedLocalFunctionCall,
+    ResolvedModuleTopLevelCall, Signature, StmtLowering,
 };
 
 /// A single parsed file together with the frontend facts needed by a backend.
 pub struct CheckedFile<'a> {
     pub file: &'a File,
+    pub file_index: u32,
     pub info: &'a FrontendTypeInfo,
     pub symbols: &'a FrontendSymbols,
 }

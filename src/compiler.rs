@@ -3,7 +3,7 @@
 use crate::ast::File;
 use crate::backend::{Artifact, Backend};
 use crate::diag::DiagSink;
-use crate::frontend::{check_file, CheckedFile, FrontendSymbols};
+use crate::frontend::{check_file_at, CheckedFile, FrontendSymbols};
 
 /// Check each parsed file and hand it to the backend.
 pub fn compile<B: Backend>(
@@ -18,13 +18,14 @@ pub fn compile<B: Backend>(
     let mut state = B::State::default();
     for (i, file) in files.iter().enumerate() {
         diags.set_file(i as u32);
-        let info = check_file(file, syms, diags);
+        let info = check_file_at(file, i as u32, syms, diags);
         if diags.has_errors() {
             continue;
         }
         outputs.extend(backend.lower_file(
             CheckedFile {
                 file,
+                file_index: i as u32,
                 info: &info,
                 symbols: syms,
             },

@@ -32,6 +32,14 @@ impl<'a> ModuleSymbols<'a> {
         self.syms.fn_facades.get(name).cloned()
     }
 
+    fn facade_of_sig(&self, name: &str, sig: &Signature) -> String {
+        sig.source_file
+            .zip(sig.source_decl)
+            .and_then(|(file, decl)| self.syms.fn_facades_by_decl.get(&(file, decl.0)).cloned())
+            .or_else(|| self.facade_of(name))
+            .unwrap_or_default()
+    }
+
     /// The user [`FrontendClassSig`] whose JVM internal name is `internal`, if any.
     fn class_by_internal(&self, internal: &str) -> Option<&'a FrontendClassSig> {
         self.syms.classes.values().find(|c| c.internal == internal)
@@ -87,21 +95,53 @@ impl<'a> ModuleSymbols<'a> {
     /// themselves.
     pub fn resolve_top_level(&self, name: &str, arg_tys: &[Ty]) -> Option<FunctionInfo> {
         let i = pick_overload(self.syms.funs.get(name)?, arg_tys)?;
-        self.module_top_level(name).into_iter().nth(i)
+        self.top_level_overloads(name).into_iter().nth(i)
+    }
+
+    pub fn resolve_top_level_in_scope(
+        &self,
+        name: &str,
+        arg_tys: &[Ty],
+        packages: &[String],
+    ) -> Option<FunctionInfo> {
+        let overloads = self.top_level_overloads_in_scope(name, packages);
+        let params = overloads
+            .iter()
+            .map(|fi| crate::frontend::Signature {
+                params: fi.callable.params.clone(),
+                ret: fi.callable.ret,
+                vararg: fi.call_sig.vararg,
+                required: fi.call_sig.required,
+                param_defaults: fi.call_sig.param_defaults.clone(),
+                param_default_values: Vec::new(),
+                param_names: fi.call_sig.param_names.clone(),
+                lambda_param_types: fi.call_sig.lambda_param_types.clone(),
+                lambda_recv: Vec::new(),
+                is_inline: fi.flags.inline.can_inline(),
+                is_final: true,
+                is_suspend: fi.flags.suspend,
+                context_count: fi.context_count,
+                source_decl: None,
+                source_file: None,
+                package: String::new(),
+            })
+            .collect::<Vec<_>>();
+        let i = pick_overload(&params, arg_tys)?;
+        overloads.into_iter().nth(i)
     }
 
     /// The module's TOP-LEVEL function overloads of `name` as [`FunctionInfo`]s — every `fun name(...)`
     /// declared at file scope, each stamped with its declaring facade [`Origin::Module`]. The building
     /// block `resolve_symbols`/`resolve_top_level` share, so the source answers a name without the old
     /// receiver-indexed `functions()` API.
-    fn module_top_level(&self, name: &str) -> Vec<FunctionInfo> {
+    pub fn top_level_overloads(&self, name: &str) -> Vec<FunctionInfo> {
         let mut overloads = Vec::new();
         if let Some(sigs) = self.syms.funs.get(name) {
-            let owner = self.facade_of(name).unwrap_or_default();
-            let origin = Origin::Module {
-                facade: owner.clone(),
-            };
             for sig in sigs {
+                let owner = self.facade_of_sig(name, sig);
+                let origin = Origin::Module {
+                    facade: owner.clone(),
+                };
                 overloads.push(fn_info(
                     FnKind::TopLevel,
                     sig,
@@ -114,6 +154,28 @@ impl<'a> ModuleSymbols<'a> {
             }
         }
         overloads
+    }
+
+    pub fn top_level_overloads_in_scope(
+        &self,
+        name: &str,
+        packages: &[String],
+    ) -> Vec<FunctionInfo> {
+        self.top_level_overloads(name)
+            .into_iter()
+            .filter(|fi| {
+                fi.source_key
+                    .and_then(|(file, decl)| {
+                        self.syms.funs.get(name).and_then(|sigs| {
+                            sigs.iter().find(|sig| {
+                                sig.source_file == Some(file)
+                                    && sig.source_decl.is_some_and(|d| d.0 == decl)
+                            })
+                        })
+                    })
+                    .is_some_and(|sig| packages.iter().any(|pkg| pkg == &sig.package))
+            })
+            .collect()
     }
 
     /// Collect members named `name` over the user hierarchy in DEPTH-FIRST pre-order (self, then each
@@ -204,6 +266,11 @@ fn fn_info(
     FunctionInfo {
         receiver_rank: rank,
         call_sig: sig.call_sig(),
+        context_count: sig.context_count,
+        source_key: sig
+            .source_file
+            .zip(sig.source_decl)
+            .map(|(file, decl)| (file, decl.0)),
         flags: FnFlags {
             inline: InlineKind::from_flags(sig.is_inline, false),
             // Same-file `suspend fun` — flows from the AST via `Signature.is_suspend` so the resolver
@@ -223,14 +290,12 @@ impl SymbolSource for ModuleSymbols<'_> {
         // package, which the resolver queries as the same-package candidate fqn).
         let classifier = self.resolve_type(fqn);
         let (pkg, name) = fqn.rsplit_once('/').unwrap_or(("", fqn));
-        let facade = self.facade_of(name).unwrap_or_default();
-        let fac_pkg = facade.rsplit_once('/').map_or("", |(p, _)| p);
-        let mut overloads =
-            if self.syms.funs.contains_key(name) && (facade.is_empty() || fac_pkg == pkg) {
-                self.module_top_level(name)
-            } else {
-                Vec::new()
-            };
+        let pkg_scope = [pkg.to_string()];
+        let mut overloads = if self.syms.funs.contains_key(name) {
+            self.top_level_overloads_in_scope(name, &pkg_scope)
+        } else {
+            Vec::new()
+        };
         // Module EXTENSIONS of `name`, receiver as an ATTRIBUTE (fqn resolution is receiver-agnostic; the
         // resolver's `receiver_extensions` filters by receiver applicability). Keyed by erased receiver in
         // `ext_funs` — the exact-receiver key is rung 0, the universal `Any` key rung 1.
@@ -354,12 +419,17 @@ mod tests {
             vararg: false,
             required: 0,
             param_defaults: vec![],
+            param_default_values: vec![],
             param_names: vec![],
             lambda_param_types: vec![],
             lambda_recv: vec![],
             is_inline: false,
             is_final: false,
             is_suspend: false,
+            context_count: 0,
+            source_decl: None,
+            source_file: None,
+            package: String::new(),
         }
     }
 
@@ -398,7 +468,7 @@ mod tests {
         st.funs
             .insert("twice".into(), vec![sig(vec![Ty::Int], Ty::Int)]);
         let m = ModuleSymbols::new(&st);
-        let fs = m.module_top_level("twice");
+        let fs = m.top_level_overloads("twice");
         assert_eq!(fs.len(), 1);
         let o = &fs[0];
         assert_eq!(o.kind, FnKind::TopLevel);
@@ -417,7 +487,7 @@ mod tests {
         s.vararg = false;
         st.funs.insert("f".into(), vec![s]);
         let m = ModuleSymbols::new(&st);
-        let cs = &m.module_top_level("f")[0].call_sig;
+        let cs = &m.top_level_overloads("f")[0].call_sig;
         assert_eq!(cs.required, 1);
         assert_eq!(cs.param_defaults, vec![false, true]);
         assert_eq!(cs.param_names, vec!["a".to_string(), "b".to_string()]);
@@ -432,7 +502,7 @@ mod tests {
             vec![sig(vec![Ty::Int], Ty::Int), sig(vec![Ty::String], Ty::Int)],
         );
         let m = ModuleSymbols::new(&st);
-        assert_eq!(m.module_top_level("f").len(), 2);
+        assert_eq!(m.top_level_overloads("f").len(), 2);
     }
 
     #[test]
@@ -441,7 +511,7 @@ mod tests {
         st.funs.insert("helper".into(), vec![sig(vec![], Ty::Unit)]);
         st.fn_facades.insert("helper".into(), "pkg/AKt".into());
         let m = ModuleSymbols::new(&st);
-        let o = &m.module_top_level("helper")[0];
+        let o = &m.top_level_overloads("helper")[0];
         assert_eq!(o.callable.owner, "pkg/AKt");
         assert_eq!(
             o.callable.origin,

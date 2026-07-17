@@ -13,7 +13,7 @@ use crate::frontend::{
     function_scope_packages, map_param_list_args, qualified_path, typeref_leaf, ClassNames,
     CtorDefaultValue, DelegateGetValueTarget, ExprLowering, FrontendSymbols, FrontendTypeInfo,
     InlineCall, InvokeKind, LambdaCapture, LambdaInfo, ReceiverLambda, ResolvedCall,
-    ResolvedLocalFunctionCall, Signature, StmtLowering,
+    ResolvedLocalFunctionCall, ResolvedModuleTopLevelCall, Signature, StmtLowering,
 };
 use crate::ir::{
     Callee, ClassId, ExprId, FnParamInfo, IrBinOp, IrCatch, IrClass, IrConst, IrCtorArg,
@@ -95,8 +95,21 @@ pub fn lower_file(
     syms: &FrontendSymbols,
     runtime: &dyn TargetRuntime,
 ) -> Option<IrFile> {
+    lower_file_at(file, 0, info, syms, runtime)
+}
+
+/// Lower a checked file with its module file index. Multi-file drivers must use this so declaration ids
+/// can be paired with their source file when selecting already-collected signatures.
+pub fn lower_file_at(
+    file: &ast::File,
+    file_index: u32,
+    info: &FrontendTypeInfo,
+    syms: &FrontendSymbols,
+    runtime: &dyn TargetRuntime,
+) -> Option<IrFile> {
     let mut lo = Lower {
         afile: file,
+        file_index,
         info,
         syms,
         runtime,
@@ -106,6 +119,7 @@ pub fn lower_file(
             ..Default::default()
         },
         fun_ids: HashMap::new(),
+        fun_ids_by_decl: HashMap::new(),
         ext_fun_ids: HashMap::new(),
         ext_fun_id_by_arity: HashMap::new(),
         ext_fun_id_by_sig: HashMap::new(),
@@ -1626,12 +1640,9 @@ pub fn lower_file(
                     lo.ir.private_methods.insert(id);
                 }
             } else {
-                let want: Vec<Ty> = f
-                    .params
-                    .iter()
-                    .map(|p| ty_of(file, &p.ty, &*syms.libraries))
-                    .collect();
-                let sig = syms.fun_by_params(&f.name, &want)?;
+                let sig = syms.funs.get(&f.name)?.iter().find(|sig| {
+                    sig.source_file == Some(lo.file_index) && sig.source_decl == Some(d)
+                })?;
                 let params: Vec<Ty> = sig
                     .params
                     .iter()
@@ -1664,6 +1675,7 @@ pub fn lower_file(
                     param_checks,
                 });
                 lo.fun_ids.insert((f.name.clone(), sig.params.clone()), id);
+                lo.fun_ids_by_decl.insert(d, id);
                 // A `private` top-level function is `private static` on the facade (kotlinc); a
                 // class-body caller goes through the `access$<name>` bridge (see `emit_pass`).
                 if f.visibility.is_private() {
@@ -1911,13 +1923,10 @@ pub fn lower_file(
                     lo.scope.push(("this".to_string(), this_v, recv_ty));
                     (fid, sig)
                 } else {
-                    let want: Vec<Ty> = f
-                        .params
-                        .iter()
-                        .map(|p| ty_of(file, &p.ty, &*syms.libraries))
-                        .collect();
-                    let sig = syms.fun_by_params(&f.name, &want)?;
-                    let fid = *lo.fun_ids.get(&(f.name.clone(), sig.params.clone()))?;
+                    let sig = syms.funs.get(&f.name)?.iter().find(|sig| {
+                        sig.source_file == Some(lo.file_index) && sig.source_decl == Some(d)
+                    })?;
+                    let fid = *lo.fun_ids_by_decl.get(&d)?;
                     (fid, sig)
                 };
                 let mut param_vals = Vec::new();
@@ -4464,6 +4473,7 @@ struct ForeachOpts<'a> {
 
 pub(crate) struct Lower<'a> {
     afile: &'a ast::File,
+    file_index: u32,
     info: &'a FrontendTypeInfo,
     syms: &'a FrontendSymbols,
     runtime: &'a dyn TargetRuntime,
@@ -4474,6 +4484,9 @@ pub(crate) struct Lower<'a> {
     /// Top-level function ids keyed by (name, parameter types) so overloads (same name,
     /// different params) each map to their own compiled method.
     fun_ids: HashMap<(String, Vec<Ty>), u32>,
+    /// Top-level function ids keyed by source declaration id. This is the preferred path for
+    /// checker-resolved module calls; the name/params map remains for older call sites during migration.
+    fun_ids_by_decl: HashMap<crate::ast::DeclId, u32>,
     /// Top-level extension functions, keyed by `(erased receiver, name)` ([`Ty::erased_recv`]) —
     /// separate from `fun_ids` since `fun Int.foo()` and `fun String.foo()` share a name but differ by
     /// receiver. Same key scheme as `FrontendSymbols::ext_funs` so the two never disagree. Holds the FIRST
@@ -6212,26 +6225,50 @@ impl<'a> Lower<'a> {
     /// this file.
     fn lower_single_spread_call(
         &mut self,
+        call: AstExprId,
         callee: AstExprId,
         args: &[AstExprId],
     ) -> Option<ExprId> {
         let spread = match args {
             [spread] if self.afile.is_spread_arg(*spread) => *spread,
-            _ => return None,
+            _ => {
+                set_bail("call spread: not single spread arg");
+                return None;
+            }
         };
         // kotlinc loads the spread twice; only a simple reusable name is safe without a temp.
         if !matches!(self.afile.expr(spread), ast::Expr::Name(_)) {
+            set_bail("call spread: non-reusable spread expression");
             return None;
         }
         let ast::Expr::Name(fname) = self.afile.expr(callee).clone() else {
+            set_bail("call spread: non-name callee");
             return None;
         };
-        let decl = self.top_fun_decl(&fname)?;
-        let param = match decl.params.as_slice() {
-            [param] if param.is_vararg => param,
-            _ => return None,
+        let target = self
+            .info
+            .resolved_module_top_level(call)
+            .filter(|target| {
+                target.name == fname && target.call_sig.vararg && target.params.len() == 1
+            })
+            .cloned();
+        let Some(target) = target else {
+            set_bail("call spread: no resolved single-vararg module target");
+            return None;
         };
-        let elem = ty_of(self.afile, &param.ty, &*self.syms.libraries);
+        let Some(fid) = target
+            .source_file
+            .filter(|file| *file == self.file_index)
+            .and(target.source_decl)
+            .and_then(|decl| self.fun_ids_by_decl.get(&decl).copied())
+        else {
+            set_bail("call spread: resolved target not in current file");
+            return None;
+        };
+        let Some(elem) = target.params[0].array_elem() else {
+            set_bail("call spread: selected vararg param is not array");
+            return None;
+        };
         // A primitive element uses the matching platform array-copy overload and needs no checkcast
         // (the result is already the exact array type). Unsigned `UInt`/`ULong` varargs are a value-class
         // array with a different copy path — leave those (skip) rather than miscompile.
@@ -6249,8 +6286,7 @@ impl<'a> Lower<'a> {
         if !elem.is_reference() && !prim {
             return None;
         }
-        let array_ty = Ty::array(elem);
-        let fid = *self.fun_ids.get(&(fname.clone(), vec![array_ty]))?;
+        let array_ty = target.params[0];
         let array_ir = ty_to_ir(array_ty);
 
         // Platform array copy. The JVM primitive overload returns the exact array type (no cast); the
@@ -6856,6 +6892,10 @@ impl<'a> Lower<'a> {
                 .info
                 .resolved_top_level(call)
                 .is_some_and(|c| c.suspend)
+                || self
+                    .info
+                    .resolved_module_top_level(call)
+                    .is_some_and(|c| c.suspend)
             {
                 return true;
             }
@@ -7910,16 +7950,6 @@ impl<'a> Lower<'a> {
         Some(self.coerce_to_static(call, logical, physical))
     }
 
-    fn top_fun_decl(&self, name: &str) -> Option<&ast::FunDecl> {
-        self.afile
-            .decls
-            .iter()
-            .find_map(|&d| match self.afile.decl(d) {
-                Decl::Fun(f) if f.name == name => Some(f),
-                _ => None,
-            })
-    }
-
     /// The internal name of an explicit serializer `X` from `@Serializable(with = X::class)` on class
     /// `c`, or `None`. The arg is a class-literal `X::class` (`CallableRef{name:"class"}`); `X`'s
     /// internal comes from the checker's type of the literal's receiver.
@@ -8360,6 +8390,128 @@ impl<'a> Lower<'a> {
         self.append_default_mask_marker(&mut a, mask);
         let dcall = self.emit_local_default_call(fid, a);
         Some(self.wrap_arg_prelude(dcall, prelude))
+    }
+
+    fn lower_cross_file_module_call(
+        &mut self,
+        call: AstExprId,
+        target: &ResolvedModuleTopLevelCall,
+        facade: String,
+        args: &[AstExprId],
+    ) -> Option<u32> {
+        if target.call_sig.vararg {
+            return None;
+        }
+        let ir_params = tys_to_ir(&target.params);
+        let n = ir_params.len();
+        let ctx_n = target.context_args.len();
+        if ctx_n > n {
+            return None;
+        }
+
+        let names = self
+            .afile
+            .call_arg_names
+            .get(&call.0)
+            .cloned()
+            .unwrap_or_default();
+        let mut slot: Vec<Option<AstExprId>> = vec![None; n];
+        let mut arg_slot: Vec<usize> = Vec::with_capacity(args.len());
+        let mut pos = ctx_n;
+        let mut seen_named = false;
+        for (i, &arg) in args.iter().enumerate() {
+            match names.get(i).and_then(|o| o.as_ref()) {
+                None => {
+                    if seen_named {
+                        if i == args.len() - 1
+                            && n > ctx_n
+                            && slot[n - 1].is_none()
+                            && self.afile.call_has_trailing_lambda.contains(&call.0)
+                        {
+                            slot[n - 1] = Some(arg);
+                            arg_slot.push(n - 1);
+                        } else {
+                            return None;
+                        }
+                    } else if i == args.len() - 1
+                        && n > ctx_n
+                        && slot[n - 1].is_none()
+                        && self.afile.call_has_trailing_lambda.contains(&call.0)
+                    {
+                        slot[n - 1] = Some(arg);
+                        arg_slot.push(n - 1);
+                    } else {
+                        while pos < n && slot[pos].is_some() {
+                            pos += 1;
+                        }
+                        if pos >= n {
+                            return None;
+                        }
+                        slot[pos] = Some(arg);
+                        arg_slot.push(pos);
+                        pos += 1;
+                    }
+                }
+                Some(nm) => {
+                    seen_named = true;
+                    let idx = target
+                        .call_sig
+                        .param_names
+                        .iter()
+                        .position(|name| name == nm)?;
+                    if idx < ctx_n || idx >= n || slot[idx].is_some() {
+                        return None;
+                    }
+                    slot[idx] = Some(arg);
+                    arg_slot.push(idx);
+                }
+            }
+        }
+
+        let mut slot_temp: Vec<Option<u32>> = vec![None; n];
+        let mut prelude = Vec::new();
+        for (i, &arg) in args.iter().enumerate() {
+            let k = arg_slot[i];
+            let v = self.lower_arg(arg, &ir_params[k])?;
+            let tmp = self.fresh_value();
+            let decl = self.emit_variable(tmp, ir_params[k], Some(v));
+            prelude.push(decl);
+            slot_temp[k] = Some(tmp);
+        }
+
+        let mut lowered_args = Vec::with_capacity(n + 2);
+        for (k, item) in slot_temp.iter().enumerate() {
+            if k < ctx_n {
+                let (v, _) = self.lookup(&target.context_args[k])?;
+                lowered_args.push(self.emit_get_value(v));
+            } else if let Some(tmp) = item {
+                lowered_args.push(self.emit_get_value(*tmp));
+            } else if target.call_sig.param_has_default(k) {
+                let default = target
+                    .param_default_values
+                    .get(k)
+                    .and_then(|v| v.as_ref())?;
+                if !default.fills_param_ty(target.params[k]) {
+                    return None;
+                }
+                lowered_args.push(ctor_default_to_ir(&mut self.ir, self.runtime, default)?);
+            } else {
+                return None;
+            }
+        }
+
+        let ret = ty_to_ir(target.ret);
+        let emitted = self.emit_cross_file_call(
+            facade,
+            target.name.clone(),
+            ir_params.clone(),
+            ret,
+            lowered_args,
+        );
+        if target.suspend {
+            self.ir.suspend_calls.insert(emitted, ret);
+        }
+        Some(self.wrap_arg_prelude(emitted, prelude))
     }
 
     /// Lower a NAMED-argument call to a same-file USER-class instance method (`z.test(b = …, a = …)`)
@@ -12831,12 +12983,17 @@ impl<'a> Lower<'a> {
                                 vararg: false,
                                 required: params.len(),
                                 param_defaults: Vec::new(),
+                                param_default_values: Vec::new(),
                                 param_names: Vec::new(),
                                 lambda_param_types: Vec::new(),
                                 lambda_recv: Vec::new(),
                                 is_inline: false,
                                 is_final: true,
                                 is_suspend: false,
+                                context_count: 0,
+                                source_decl: None,
+                                source_file: None,
+                                package: String::new(),
                             },
                             *ret,
                         )
@@ -13358,6 +13515,10 @@ impl<'a> Lower<'a> {
         let call_suspends = self.info.resolved_member(e).is_some_and(|m| m.suspend)
             || self.info.resolved_extension(e).is_some_and(|c| c.suspend)
             || self.info.resolved_top_level(e).is_some_and(|c| c.suspend)
+            || self
+                .info
+                .resolved_module_top_level(e)
+                .is_some_and(|c| c.suspend)
             || self.info.resolved_companion(e).is_some_and(|m| m.suspend);
         if call_suspends {
             return true;
@@ -14164,20 +14325,32 @@ impl<'a> Lower<'a> {
         args: &[AstExprId],
         call_id: u32,
         recv: Option<AstExprId>,
+        module_target: Option<&ResolvedModuleTopLevelCall>,
     ) -> Option<u32> {
-        // Find the matching top-level fn: an extension call wants the decl WITH a receiver, a plain call
-        // the one WITHOUT (so an extension and a same-named plain fn don't shadow each other here).
-        let f = self
-            .afile
-            .decls
-            .iter()
-            .find_map(|&d| match self.afile.decl(d) {
-                Decl::Fun(f) if f.name == fname && f.receiver.is_some() == recv.is_some() => {
-                    Some(f)
-                }
-                _ => None,
-            })?
-            .clone();
+        // Find the selected source declaration. Receiver-less module calls carry the checker's
+        // declaration key; extension inline calls still use the receiver-qualified declaration path.
+        let f = if let Some(target) = module_target {
+            if recv.is_some() || target.name != fname || target.source_file != Some(self.file_index)
+            {
+                return None;
+            }
+            let decl = target.source_decl?;
+            match self.afile.decl(decl) {
+                Decl::Fun(f) if f.name == fname && f.receiver.is_none() => f.clone(),
+                _ => return None,
+            }
+        } else {
+            self.afile
+                .decls
+                .iter()
+                .find_map(|&d| match self.afile.decl(d) {
+                    Decl::Fun(f) if f.name == fname && f.receiver.is_some() == recv.is_some() => {
+                        Some(f)
+                    }
+                    _ => None,
+                })?
+                .clone()
+        };
         // A non-extension call must hit a non-extension fn and vice versa. An extension binds its receiver
         // as `this` (below). No default/vararg params. Non-reified generic type params are SPECIALIZED
         // from the actual argument types; REIFIED type params are bound to the call's explicit type
@@ -14265,13 +14438,17 @@ impl<'a> Lower<'a> {
                 (ps, r)
             }
         } else {
-            let want: Vec<Ty> = f
-                .params
-                .iter()
-                .map(|p| ty_of(self.afile, &p.ty, &*self.syms.libraries))
-                .collect();
-            let s = self.syms.fun_by_params(fname, &want)?;
-            (s.params.clone(), s.ret)
+            if let Some(target) = module_target {
+                (target.params.clone(), target.ret)
+            } else {
+                let want: Vec<Ty> = f
+                    .params
+                    .iter()
+                    .map(|p| ty_of(self.afile, &p.ty, &*self.syms.libraries))
+                    .collect();
+                let s = self.syms.fun_by_params(fname, &want)?;
+                (s.params.clone(), s.ret)
+            }
         };
         if sig_params.len() != pnames.len() {
             return None;
@@ -17519,7 +17696,7 @@ impl<'a> Lower<'a> {
             // expr) returns `None` → the file skips, never miscompiles. The guard ensures a spread arg
             // never reaches the normal vararg-packing paths below.
             Expr::Call { callee, args } if args.iter().any(|&a| self.afile.is_spread_arg(a)) => {
-                self.lower_single_spread_call(callee, &args)?
+                self.lower_single_spread_call(e, callee, &args)?
             }
             Expr::Call { callee, args } => match self.afile.expr(callee).clone() {
                 // Local top-level function, or constructor `C(args)`.
@@ -17582,14 +17759,21 @@ impl<'a> Lower<'a> {
                     // A user-defined `inline fun foo(...)` — expand it here (kotlinc's inliner): bind its
                     // value parameters to the evaluated arguments, register its lambda arguments, and
                     // lower its body so a lambda capturing a mutable local works (no closure).
-                    if self.lookup(&fname).is_none()
-                        && self
-                            .syms
-                            .funs
-                            .get(&fname)
-                            .map_or(false, |v| v.iter().any(|s| s.is_inline))
-                    {
-                        return self.lower_inline_fn_call(&fname, &args, e.0, None);
+                    if self.lookup(&fname).is_none() {
+                        if let Some(target) = self
+                            .info
+                            .resolved_module_top_level(e)
+                            .filter(|target| target.name == fname && target.inline.can_inline())
+                            .cloned()
+                        {
+                            return self.lower_inline_fn_call(
+                                &fname,
+                                &args,
+                                e.0,
+                                None,
+                                Some(&target),
+                            );
+                        }
                     }
                     // SAM conversion `Pred { lambda }`: constructor syntax for a functional interface.
                     if let (Some((arg, params, body)), true) =
@@ -17659,24 +17843,25 @@ impl<'a> Lower<'a> {
                             }
                         }
                     }
-                    if let Some((fi, fid)) = {
-                        // Select the overload (matching the arg types) through the current module as a
-                        // `SymbolSource` (ModuleSymbols), then resolve its method id. Only a function
-                        // defined in THIS file (present in `fun_ids`) is handled here; a cross-file
-                        // function (in `funs` but not `fun_ids`) falls through to the facade branch below.
-                        let arg_tys = self.arg_tys(&args);
-                        crate::module_symbols::ModuleSymbols::new(self.syms)
-                            .resolve_top_level(&fname, &arg_tys)
-                            .and_then(|fi| {
-                                self.fun_ids
-                                    .get(&(fname.clone(), fi.callable.params.clone()))
-                                    .copied()
-                                    .map(|fid| (fi, fid))
-                            })
-                    } {
+                    if let Some((target, fid)) = self
+                        .info
+                        .resolved_module_top_level(e)
+                        .cloned()
+                        .filter(|target| target.name == fname)
+                        .and_then(|target| {
+                            (target.source_file == Some(self.file_index))
+                                .then(|| {
+                                    target
+                                        .source_decl
+                                        .and_then(|decl| self.fun_ids_by_decl.get(&decl).copied())
+                                        .map(|fid| (target, fid))
+                                })
+                                .flatten()
+                        })
+                    {
                         // A `vararg` function: pack the trailing arguments into a fresh array for the
                         // last (array) parameter. (Spread `*arr` and a branchy element are unsupported.)
-                        if fi.call_sig.vararg {
+                        if target.call_sig.vararg {
                             let params = self.ir.functions[fid as usize].params.clone();
                             let fixed = params.len() - 1;
                             if args.len() < fixed {
@@ -17684,20 +17869,12 @@ impl<'a> Lower<'a> {
                                 // parameter (a DEFAULT) is omitted along with the vararg. Route through the
                                 // `$default` stub (which fills the defaults and takes an empty vararg
                                 // array), rather than the plain vararg-packing path below.
-                                let meta: Vec<(String, Option<AstExprId>)> = self
-                                    .top_fun_decl(&fname)
-                                    .map(|f| {
-                                        f.params
-                                            .iter()
-                                            .map(|p| (p.name.clone(), p.default))
-                                            .collect()
-                                    })
-                                    .unwrap_or_default();
+                                let meta = target.param_meta.clone();
                                 return self.lower_toplevel_default_call(
                                     e, fid, &meta, &args, &params, true,
                                 );
                             }
-                            let elem_ty = fi.callable.params[fixed].array_elem()?;
+                            let elem_ty = target.params[fixed].array_elem()?;
                             let elem_ir = ty_to_ir(elem_ty);
                             let mut a = Vec::new();
                             for (i, &arg) in args.iter().take(fixed).enumerate() {
@@ -17738,35 +17915,35 @@ impl<'a> Lower<'a> {
                             return Some(self.emit_local_call(fid, a));
                         }
                         let params = self.ir.functions[fid as usize].params.clone();
+                        let meta = target.param_meta.clone();
                         // Context parameters (`context(a: A) fun f()`): the checker resolved each leading
                         // context parameter to an in-scope source; load and PREPEND them, then the
-                        // explicit arguments fill the remaining parameters. Only the plain exact-arity
-                        // case is modelled (no vararg / omitted defaults combined with context).
-                        if let Some(sources) = self.info.context_args.get(&e).cloned() {
-                            let ctx_n = sources.len();
-                            if ctx_n + args.len() == params.len() {
+                        // explicit arguments fill the remaining value parameters. Defaulted value params
+                        // reuse the normal call-site default mapper on the sliced value-parameter list.
+                        if !target.context_args.is_empty() {
+                            let ctx_n = target.context_args.len();
+                            if ctx_n <= params.len()
+                                && ctx_n <= meta.len()
+                                && args.len() <= params.len() - ctx_n
+                            {
                                 let mut a = Vec::new();
-                                for src in &sources {
+                                for src in &target.context_args {
                                     let (v, _) = self.lookup(src)?;
                                     a.push(self.emit_get_value(v));
                                 }
-                                for (i, &arg) in args.iter().enumerate() {
-                                    a.push(self.lower_arg(arg, &params[ctx_n + i])?);
-                                }
-                                return Some(self.emit_local_call(fid, a));
+                                let (mut value_args, prelude) = self.lower_args_defaulted(
+                                    e,
+                                    &meta[ctx_n..],
+                                    &args,
+                                    &params[ctx_n..],
+                                )?;
+                                a.append(&mut value_args);
+                                let call = self.emit_local_call(fid, a);
+                                return Some(self.wrap_arg_prelude(call, prelude));
                             }
                         }
                         // Omitted trailing args are filled from constant-literal defaults.
-                        let meta: Vec<(String, Option<AstExprId>)> = self
-                            .top_fun_decl(&fname)
-                            .map(|f| {
-                                f.params
-                                    .iter()
-                                    .map(|p| (p.name.clone(), p.default))
-                                    .collect()
-                            })
-                            .unwrap_or_default();
-                        if self.erased_generic_call_unmodeled(e, &fname) {
+                        if self.erased_generic_call_unmodeled(e, &target.name) {
                             return None;
                         }
                         // Fill omitted arguments from CONST-literal defaults at the call site; if that
@@ -17778,62 +17955,38 @@ impl<'a> Lower<'a> {
                             let call = self.emit_local_call(fid, a);
                             self.wrap_arg_prelude(call, prelude)
                         } else {
-                            // `fi.call_sig.vararg` is the authoritative vararg flag (a vararg callee was
-                            // already fully handled and returned in the vararg block above, so this is
-                            // reliably `false` here — but read the resolved flag, never a fallible AST
-                            // re-lookup, so a vararg slot can never be filled as a scalar).
+                            // The checker-selected call signature is the authoritative vararg flag (a
+                            // vararg callee was already fully handled and returned in the vararg block
+                            // above, so this is reliably `false` here).
                             self.lower_toplevel_default_call(
                                 e,
                                 fid,
                                 &meta,
                                 &args,
                                 &params,
-                                fi.call_sig.vararg,
+                                target.call_sig.vararg,
                             )?
                         };
                         let ret = self.ir.functions[fid as usize].ret.clone();
-                        // Whether the callee's DECLARED return is a bare type parameter (`fun <T> f(): T`)
-                        // — only then is the erased return refined by the call-site static type.
-                        let ret_is_tparam = self.top_fun_decl(&fname).is_some_and(|f| {
-                            f.ret.as_ref().is_some_and(|r| {
-                                r.targs.is_empty()
-                                    && r.fun_params.is_empty()
-                                    && f.type_params.iter().any(|tp| tp == &r.name)
+                        self.coerce_erased_call_result(e, call, &ret, target.ret_is_tparam)
+                    } else if let Some((target, facade)) =
+                        self.info
+                            .resolved_module_top_level(e)
+                            .cloned()
+                            .filter(|target| target.name == fname)
+                            .and_then(|target| {
+                                target.source_file.zip(target.source_decl).and_then(
+                                    |(file, decl)| {
+                                        self.syms
+                                            .fn_facades_by_decl
+                                            .get(&(file, decl.0))
+                                            .cloned()
+                                            .map(|facade| (target, facade))
+                                    },
+                                )
                             })
-                        });
-                        self.coerce_erased_call_result(e, call, &ret, ret_is_tparam)
-                    } else if let Some(facade) = self.syms.fn_facades.get(&fname).cloned() {
-                        // A top-level function defined in ANOTHER file of this multi-file compilation →
-                        // a cross-facade `invokestatic`. Only the simple exact-arity case (no vararg /
-                        // omitted defaults) is modeled here; anything else bails (skips the file).
-                        let arg_tys = self.arg_tys(&args);
-                        let fi = crate::module_symbols::ModuleSymbols::new(self.syms)
-                            .resolve_top_level(&fname, &arg_tys)?;
-                        let plen = fi.callable.params.len();
-                        if fi.call_sig.vararg || fi.call_sig.required != plen || args.len() != plen
-                        {
-                            return None;
-                        }
-                        let mut a = Vec::new();
-                        for (arg, pt) in args.iter().zip(&fi.callable.params) {
-                            a.push(self.lower_arg(*arg, &ty_to_ir(*pt))?);
-                        }
-                        let call = self.emit_cross_file_call(
-                            facade,
-                            fname.clone(),
-                            tys_to_ir(&fi.callable.params),
-                            ty_to_ir(fi.callable.ret),
-                            a,
-                        );
-                        // A cross-file `suspend fun` call: record it so the coroutine pass threads the
-                        // continuation (the callee, in another file, is absent from this file's
-                        // `suspend_funs`). The logical return type is the resolved callable's.
-                        if fi.flags.suspend {
-                            self.ir
-                                .suspend_calls
-                                .insert(call, ty_to_ir(fi.callable.ret));
-                        }
-                        call
+                    {
+                        self.lower_cross_file_module_call(e, &target, facade, &args)?
                     } else if let Some(r) = {
                         // Inside a receiver lambda / extension-fn body (`cur_class` cleared, `this` is the
                         // external receiver), an unqualified call resolves against the implicit `this`
@@ -18963,7 +19116,7 @@ impl<'a> Lower<'a> {
                         });
                         if is_inline_ext {
                             if let Some(r) =
-                                self.lower_inline_fn_call(&name, &args, e.0, Some(receiver))
+                                self.lower_inline_fn_call(&name, &args, e.0, Some(receiver), None)
                             {
                                 return Some(r);
                             }

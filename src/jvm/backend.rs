@@ -85,14 +85,14 @@ pub fn prepare_module_symbols(files: &[File], stems: &[String], syms: &mut Front
         return;
     }
 
-    let mut fns: Vec<(String, String)> = Vec::new();
+    let mut fns: Vec<(u32, u32, String, String)> = Vec::new();
     let mut props: Vec<(String, String)> = Vec::new();
-    for (file, stem) in files.iter().zip(stems) {
+    for (i, (file, stem)) in files.iter().zip(stems).enumerate() {
         let facade = file_class_name(stem, file.package.as_deref());
         for &d in &file.decls {
             match file.decl(d) {
                 Decl::Fun(f) if f.receiver.is_none() && !f.is_inline => {
-                    fns.push((f.name.clone(), facade.clone()))
+                    fns.push((i as u32, d.0, f.name.clone(), facade.clone()))
                 }
                 Decl::Property(p) if p.receiver.is_none() => {
                     props.push((p.name.clone(), facade.clone()))
@@ -102,7 +102,9 @@ pub fn prepare_module_symbols(files: &[File], stems: &[String], syms: &mut Front
         }
     }
 
-    for (name, facade) in fns {
+    for (file_index, decl_id, name, facade) in fns {
+        syms.fn_facades_by_decl
+            .insert((file_index, decl_id), facade.clone());
         syms.fn_facades.insert(name, facade);
     }
     for (name, facade) in props {
@@ -138,7 +140,9 @@ impl Backend for JvmBackend {
         // (The legacy direct AST emitter has been removed — IR is the sole JVM codegen path.)
         let facade_name = file_class_name(stem, file.package.as_deref());
         let runtime = crate::jvm::jvm_libraries::JvmLibraries::new(self.cp.clone());
-        let Some(mut ir) = crate::ir_lower::lower_file(file, info, syms, &runtime) else {
+        let Some(mut ir) =
+            crate::ir_lower::lower_file_at(file, checked.file_index, info, syms, &runtime)
+        else {
             crate::trace_compiler!("lower", "bail: {}", crate::ir_lower::lower_bail_reason());
             diags.error(
                 crate::diag::Span::new(0, 0),

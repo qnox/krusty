@@ -11,7 +11,9 @@ use std::collections::HashMap;
 
 use crate::ast::*;
 use crate::diag::{DiagSink, Span};
-use crate::libraries::{required_arity, CallSig, EmptySymbolSource, ParamList, SemanticPlatform};
+use crate::libraries::{
+    required_arity, CallSig, EmptySymbolSource, InlineKind, ParamList, SemanticPlatform,
+};
 use crate::symbol_source::SymbolSource;
 use crate::types::{Ty, Visibility};
 
@@ -31,6 +33,9 @@ pub struct Signature {
     /// Parameter names, parallel to `params`. Used to map named arguments (`f(x = 1)`) to positions.
     /// Empty for signatures where named-argument calls aren't supported (methods, synthesized members).
     pub param_names: Vec<String>,
+    /// File-independent default values, parallel to `params`. `Some` only for literal/object defaults the
+    /// lowerer can emit without dereferencing the declaring file's AST arena.
+    pub param_default_values: Vec<Option<CtorDefaultValue>>,
     /// For each parameter: if the parameter is a function type `(A, B) -> R`, the inner parameter
     /// types `[A, B]`; otherwise an empty Vec. Used to type-check lambda arguments with the correct
     /// `it` / parameter types. Parallel to `params`.
@@ -49,6 +54,15 @@ pub struct Signature {
     /// True for a `suspend fun`. Flows to `FnFlags.suspend` so the resolver reports suspend-ness
     /// uniformly for same-file and classpath callees; the coroutine pass keys off it.
     pub is_suspend: bool,
+    /// Number of leading context parameters in `params`. Ordinary functions leave this at 0.
+    pub context_count: usize,
+    /// Source declaration id for a top-level function in the current compilation, when this signature
+    /// came from an AST declaration. Member/local/classpath signatures leave this unset.
+    pub source_decl: Option<DeclId>,
+    /// Source file index paired with [`Self::source_decl`]. Declaration ids are arena-local to a file.
+    pub source_file: Option<u32>,
+    /// Declaring package in internal slash form (`pkg/sub`) for source top-level declarations.
+    pub package: String,
 }
 
 /// The minimum arity of an ADAPTED callable reference to a signature — the parameters a reference must
@@ -104,7 +118,7 @@ pub enum CtorDefaultValue {
 }
 
 impl CtorDefaultValue {
-    fn fills_param_ty(&self, ty: Ty) -> bool {
+    pub fn fills_param_ty(&self, ty: Ty) -> bool {
         match self {
             CtorDefaultValue::Int(_) => ty.int_arithmetic_repr() == Ty::Int,
             CtorDefaultValue::Long(_) => ty == Ty::Long,
@@ -349,6 +363,9 @@ pub struct SymbolTable {
     /// function defined in ANOTHER file as a cross-facade `invokestatic` (`Callee::CrossFile`) instead
     /// of bailing. A function defined in the file being lowered is resolved locally first.
     pub fn_facades: HashMap<String, String>,
+    /// Top-level function source declaration → declaring facade. This is the declaration-keyed
+    /// equivalent of [`Self::fn_facades`], used once the checker has selected a concrete overload.
+    pub fn_facades_by_decl: HashMap<(u32, u32), String>,
     /// Top-level property name → `(facade_internal, type, is_var)` across the WHOLE multi-file
     /// compilation. Populated only by the multi-file driver. A read of a property from ANOTHER file
     /// lowers to `invokestatic <facade>.getX()` (the field is private), a write to `setX(v)`. Empty for
@@ -370,6 +387,7 @@ impl Default for SymbolTable {
             ext_props: HashMap::new(),
             class_names: ClassNames::default(),
             fn_facades: HashMap::new(),
+            fn_facades_by_decl: HashMap::new(),
             prop_facades: HashMap::new(),
         }
     }
@@ -1375,12 +1393,29 @@ pub fn collect_signatures_with_cp(
                         vararg,
                         required,
                         param_defaults: f.params.iter().map(|p| p.default.is_some()).collect(),
+                        param_default_values: f
+                            .params
+                            .iter()
+                            .map(|p| {
+                                p.default.and_then(|dx| {
+                                    extract_ctor_default(file, dx, &class_names, &*libraries)
+                                })
+                            })
+                            .collect(),
                         param_names: f.params.iter().map(|p| p.name.clone()).collect(),
                         lambda_param_types,
                         lambda_recv: f.params.iter().map(|p| p.ty.fun_has_receiver).collect(),
                         is_inline: f.is_inline,
                         is_final: f.is_final,
                         is_suspend: f.is_suspend,
+                        context_count: f.context_count,
+                        source_decl: Some(d),
+                        source_file: Some(i as u32),
+                        package: file
+                            .package
+                            .as_deref()
+                            .map(|p| p.replace('.', "/"))
+                            .unwrap_or_default(),
                     };
                     if let Some(recv_ref) = &f.receiver {
                         // Extension function: index by (erased receiver, method_name).
@@ -1889,12 +1924,17 @@ pub fn collect_signatures_with_cp(
                                     vararg: false,
                                     required: 0,
                                     param_defaults: Vec::new(),
+                                    param_default_values: Vec::new(),
                                     param_names: Vec::new(),
                                     lambda_param_types: Vec::new(),
                                     lambda_recv: Vec::new(),
                                     is_inline: false,
                                     is_final: true,
                                     is_suspend: false,
+                                    context_count: 0,
+                                    source_decl: None,
+                                    source_file: None,
+                                    package: String::new(),
                                 },
                             );
                         }
@@ -1908,12 +1948,17 @@ pub fn collect_signatures_with_cp(
                                 vararg: false,
                                 required: 0,
                                 param_defaults: vec![true; props.len()],
+                                param_default_values: Vec::new(),
                                 param_names: props.iter().map(|(n, _, _)| n.clone()).collect(),
                                 lambda_param_types: Vec::new(),
                                 lambda_recv: Vec::new(),
                                 is_inline: false,
                                 is_final: true,
                                 is_suspend: false,
+                                context_count: 0,
+                                source_decl: None,
+                                source_file: None,
+                                package: String::new(),
                             },
                         );
                     }
@@ -2058,12 +2103,17 @@ pub fn collect_signatures_with_cp(
                                 vararg: false,
                                 required: n_tp,
                                 param_defaults: vec![],
+                                param_default_values: Vec::new(),
                                 param_names: vec![],
                                 lambda_param_types: vec![],
                                 lambda_recv: vec![],
                                 is_inline: false,
                                 is_final: true,
                                 is_suspend: false,
+                                context_count: 0,
+                                source_decl: None,
+                                source_file: None,
+                                package: String::new(),
                             },
                         );
                     }
@@ -3815,12 +3865,17 @@ fn member_signature(
         vararg: m.params.last().is_some_and(|p| p.is_vararg),
         required: m.params.iter().take_while(|p| p.default.is_none()).count(),
         param_defaults: m.params.iter().map(|p| p.default.is_some()).collect(),
+        param_default_values: Vec::new(),
         param_names: m.params.iter().map(|p| p.name.clone()).collect(),
         lambda_param_types,
         lambda_recv: m.params.iter().map(|p| p.ty.fun_has_receiver).collect(),
         is_inline: false,
         is_final: m.is_final,
         is_suspend: m.is_suspend,
+        context_count: 0,
+        source_decl: None,
+        source_file: None,
+        package: String::new(),
     }
 }
 
@@ -4034,6 +4089,10 @@ pub enum ResolvedCall {
         params: Vec<Ty>,
         ret: Ty,
     },
+    /// A same-module receiver-less top-level call selected by the checker. The lowerer maps this
+    /// semantic target to the current file's lifted IR function or sibling facade; it must not
+    /// re-resolve overloads by name/argument types.
+    ModuleTopLevel(Box<ResolvedModuleTopLevelCall>),
     /// A local function selected by the checker. The lowerer reads this target and only maps the
     /// declaration id to the lifted IR function; it must not re-resolve the call by name.
     LocalFunction(Box<ResolvedLocalFunctionCall>),
@@ -4050,6 +4109,22 @@ pub struct ResolvedLocalFunctionCall {
     pub sig: Signature,
     pub provided_arg_count: usize,
     pub context_args: Vec<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct ResolvedModuleTopLevelCall {
+    pub name: String,
+    pub params: Vec<Ty>,
+    pub ret: Ty,
+    pub call_sig: CallSig,
+    pub inline: InlineKind,
+    pub suspend: bool,
+    pub context_args: Vec<String>,
+    pub source_file: Option<u32>,
+    pub source_decl: Option<DeclId>,
+    pub param_meta: Vec<(String, Option<ExprId>)>,
+    pub param_default_values: Vec<Option<CtorDefaultValue>>,
+    pub ret_is_tparam: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -4105,6 +4180,13 @@ impl TypeInfo {
     pub fn resolved_local_function(&self, e: ExprId) -> Option<&ResolvedLocalFunctionCall> {
         match self.resolved_calls.get(&e) {
             Some(ResolvedCall::LocalFunction(c)) => Some(c),
+            _ => None,
+        }
+    }
+    /// The resolved same-module top-level function selected at call `e`, if any.
+    pub fn resolved_module_top_level(&self, e: ExprId) -> Option<&ResolvedModuleTopLevelCall> {
+        match self.resolved_calls.get(&e) {
+            Some(ResolvedCall::ModuleTopLevel(c)) => Some(c),
             _ => None,
         }
     }
@@ -4350,7 +4432,12 @@ pub(crate) fn function_scope_packages_with(file: &File, platform_defaults: &[&st
     fn_scope
 }
 
-fn make_checker<'a>(file: &'a File, syms: &'a SymbolTable, diags: &'a mut DiagSink) -> Checker<'a> {
+fn make_checker<'a>(
+    file: &'a File,
+    file_index: u32,
+    syms: &'a SymbolTable,
+    diags: &'a mut DiagSink,
+) -> Checker<'a> {
     let imports = import_map(file);
     let import_levels = import_levels(file, syms.libraries.platform_default_import_packages());
     let fn_scope = function_scope_packages(file, syms);
@@ -4358,6 +4445,7 @@ fn make_checker<'a>(file: &'a File, syms: &'a SymbolTable, diags: &'a mut DiagSi
         file,
         syms,
         module: crate::module_symbols::ModuleSymbols::new(syms),
+        file_index,
         diags,
         expr_types: vec![Ty::Error; file.expr_arena.len()],
         scopes: Vec::new(),
@@ -4397,7 +4485,12 @@ fn make_checker<'a>(file: &'a File, syms: &'a SymbolTable, diags: &'a mut DiagSi
     }
 }
 
-pub fn check_file(file: &File, syms: &mut SymbolTable, diags: &mut DiagSink) -> TypeInfo {
+pub fn check_file_at(
+    file: &File,
+    file_index: u32,
+    syms: &mut SymbolTable,
+    diags: &mut DiagSink,
+) -> TypeInfo {
     // Pre-infer EXPRESSION-body return types (top-level functions AND class methods) and patch the
     // signature table BEFORE the main check — so a call to `fun m() = f()` resolves to its real return,
     // not the collection default `Unit`. Without this, a method whose return couldn't be inferred at
@@ -4408,7 +4501,7 @@ pub fn check_file(file: &File, syms: &mut SymbolTable, diags: &mut DiagSink) -> 
     // dependency chain is shallow; an unresolvable case simply stops improving).
     for _pass in 0..8 {
         let mut scratch = DiagSink::new();
-        let mut pre = make_checker(file, &*syms, &mut scratch);
+        let mut pre = make_checker(file, file_index, &*syms, &mut scratch);
         for &d in &file.decls {
             if let Decl::Fun(f) = file.decl(d) {
                 if f.ret.is_none() && matches!(f.body, FunBody::Expr(_)) {
@@ -4416,7 +4509,7 @@ pub fn check_file(file: &File, syms: &mut SymbolTable, diags: &mut DiagSink) -> 
                     pre.tparams =
                         TParams::from_decl_with(&f.type_params, &f.type_param_bounds, &resolve);
                     pre.reified_tparams = f.reified_type_params.iter().cloned().collect();
-                    pre.check_fun(f);
+                    pre.check_fun(f, Some(d));
                     pre.tparams.clear();
                     pre.reified_tparams.clear();
                 }
@@ -4445,12 +4538,11 @@ pub fn check_file(file: &File, syms: &mut SymbolTable, diags: &mut DiagSink) -> 
         let method_rets = std::mem::take(&mut pre.inferred_method_rets);
         drop(pre);
         let mut changed = false;
-        for ((name, params), ret) in fun_rets {
-            if let Some(sig) = syms
-                .funs
-                .get_mut(&name)
-                .and_then(|sigs| sigs.iter_mut().find(|s| s.params == params))
-            {
+        for ((file, decl), ret) in fun_rets {
+            if let Some(sig) = syms.funs.values_mut().find_map(|sigs| {
+                sigs.iter_mut()
+                    .find(|s| s.source_file == Some(file) && s.source_decl == Some(DeclId(decl)))
+            }) {
                 changed |= sig.ret != ret;
                 sig.ret = ret;
             }
@@ -4480,7 +4572,7 @@ pub fn check_file(file: &File, syms: &mut SymbolTable, diags: &mut DiagSink) -> 
         }
     }
 
-    let mut c = make_checker(file, &*syms, diags);
+    let mut c = make_checker(file, file_index, &*syms, diags);
     // Top-level functions that erase to the same JVM signature collide in the facade class.
     let top_funs: Vec<&FunDecl> = file
         .decls
@@ -4507,7 +4599,7 @@ pub fn check_file(file: &File, syms: &mut SymbolTable, diags: &mut DiagSink) -> 
                 let resolve = class_internal_resolver(c.syms);
                 c.tparams = TParams::from_decl_with(&f.type_params, &f.type_param_bounds, &resolve);
                 c.reified_tparams = f.reified_type_params.iter().cloned().collect();
-                c.check_fun(f);
+                c.check_fun(f, Some(d));
                 c.tparams.clear();
                 c.reified_tparams.clear();
             }
@@ -5022,7 +5114,7 @@ pub fn check_file(file: &File, syms: &mut SymbolTable, diags: &mut DiagSink) -> 
                         }
                     }
                     for m in &cl.companion_methods {
-                        c.check_fun(m);
+                        c.check_fun(m, None);
                     }
                     c.companion_of = None;
                 }
@@ -5140,12 +5232,11 @@ pub fn check_file(file: &File, syms: &mut SymbolTable, diags: &mut DiagSink) -> 
             cs.super_ctor_params = params;
         }
     }
-    for ((name, params), ret) in inferred_fun_rets {
-        if let Some(sig) = syms
-            .funs
-            .get_mut(&name)
-            .and_then(|sigs| sigs.iter_mut().find(|s| s.params == params))
-        {
+    for ((file, decl), ret) in inferred_fun_rets {
+        if let Some(sig) = syms.funs.values_mut().find_map(|sigs| {
+            sigs.iter_mut()
+                .find(|s| s.source_file == Some(file) && s.source_decl == Some(DeclId(decl)))
+        }) {
             sig.ret = ret;
         }
     }
@@ -5182,12 +5273,17 @@ pub fn check_file(file: &File, syms: &mut SymbolTable, diags: &mut DiagSink) -> 
     }
 }
 
+pub fn check_file(file: &File, syms: &mut SymbolTable, diags: &mut DiagSink) -> TypeInfo {
+    check_file_at(file, diags.current_file(), syms, diags)
+}
+
 struct Checker<'a> {
     file: &'a File,
     syms: &'a SymbolTable,
     /// This compilation's declarations as a [`SymbolSource`], federated OVER the classpath by the resolver
     /// so a user function/type shadows a library one of the same name. Borrows the same `syms`.
     module: crate::module_symbols::ModuleSymbols<'a>,
+    file_index: u32,
     diags: &'a mut DiagSink,
     expr_types: Vec<Ty>,
     scopes: Vec<HashMap<String, Local>>,
@@ -5238,7 +5334,7 @@ struct Checker<'a> {
     local_funs: Vec<HashMap<String, (StmtId, Signature)>>,
     /// Accumulated output maps (moved into TypeInfo at the end of `check_file`).
     expr_lowers: HashMap<ExprId, ExprLowering>,
-    inferred_fun_rets: HashMap<(String, Vec<Ty>), Ty>,
+    inferred_fun_rets: HashMap<(u32, u32), Ty>,
     inferred_ext_fun_rets: HashMap<(Ty, String, Vec<Ty>), Ty>,
     inferred_method_rets: HashMap<(String, String, Vec<Ty>), Ty>,
     /// A class internal name → the base-constructor parameter types its `super(args)` resolved to
@@ -5907,23 +6003,6 @@ impl<'a> Checker<'a> {
         self.resolve_instance_member(receiver, name, arg_tys)
             .map(|m| m.ret)
     }
-    /// The number of context parameters of an UNAMBIGUOUS same-module top-level function `fname`
-    /// (`context(a: A) fun fname()` → 1). `0` when the name is absent, overloaded (ambiguous — the
-    /// resolved overload's context arity can't be read back from the `FunctionInfo`), or has none.
-    fn context_count_of(&self, fname: &str) -> usize {
-        let mut it = self
-            .file
-            .decls
-            .iter()
-            .filter_map(|&d| match self.file.decl(d) {
-                Decl::Fun(f) if f.name == fname && f.receiver.is_none() => Some(f.context_count),
-                _ => None,
-            });
-        match (it.next(), it.next()) {
-            (Some(c), None) => c,
-            _ => 0,
-        }
-    }
     /// Resolve each context-parameter type to an in-scope source that satisfies it: the enclosing
     /// implicit receiver (the sentinel `"this"`, e.g. a `with` block's receiver) if its type is a
     /// subtype, else an in-scope local / enclosing context parameter of a matching type (innermost
@@ -5967,6 +6046,85 @@ impl<'a> Checker<'a> {
         }
         Some(out)
     }
+    fn module_top_level_return(
+        &self,
+        call: ExprId,
+        selected: &crate::libraries::FunctionInfo,
+        arg_tys: &[Ty],
+    ) -> Ty {
+        let mut ret_ty = selected.callable.ret;
+        if let Some(&inferred) = selected
+            .source_key
+            .and_then(|source_key| self.inferred_fun_rets.get(&source_key))
+        {
+            ret_ty = inferred;
+        }
+        if let Some(f) = selected
+            .source_key
+            .filter(|(file, _)| *file == self.file_index)
+            .and_then(|(_, decl)| match self.file.decl(DeclId(decl)) {
+                Decl::Fun(f) => Some(f),
+                _ => None,
+            })
+        {
+            if let Some(r) = self.user_generic_return(f, arg_tys) {
+                ret_ty = r;
+            }
+            if let Some(r) = self.explicit_generic_return(call, f) {
+                ret_ty = r;
+            }
+        }
+        ret_ty
+    }
+
+    fn resolve_context_module_top_level(
+        &self,
+        name: &str,
+        arg_tys: &[Ty],
+    ) -> Option<(crate::libraries::FunctionInfo, Vec<String>)> {
+        let mut best: Option<(usize, usize, crate::libraries::FunctionInfo, Vec<String>)> = None;
+        for (idx, fi) in self
+            .module
+            .top_level_overloads_in_scope(name, &self.fn_scope)
+            .into_iter()
+            .enumerate()
+        {
+            let ctx_count = fi.context_count;
+            if ctx_count == 0 || ctx_count > fi.callable.params.len() {
+                continue;
+            }
+            let value_params = &fi.callable.params[ctx_count..];
+            if arg_tys.len() > value_params.len() {
+                continue;
+            }
+            let omitted_ok = (arg_tys.len()..value_params.len())
+                .all(|i| fi.call_sig.param_has_default(ctx_count + i));
+            if !omitted_ok {
+                continue;
+            }
+            let Some(sources) = self.resolve_context_args(&fi.callable.params[..ctx_count]) else {
+                continue;
+            };
+            let mut score = 0;
+            for (&p, &a) in value_params.iter().zip(arg_tys) {
+                if !arg_assignable_simple(p, a) {
+                    score = 0;
+                    break;
+                }
+                score += if p == a { 2 } else { 1 };
+            }
+            if score == 0 && !arg_tys.is_empty() {
+                continue;
+            }
+            if best.as_ref().is_none_or(|(best_score, best_idx, ..)| {
+                score > *best_score || (score == *best_score && idx < *best_idx)
+            }) {
+                best = Some((score, idx, fi, sources));
+            }
+        }
+        best.map(|(_, _, fi, sources)| (fi, sources))
+    }
+
     fn set(&mut self, e: ExprId, t: Ty) -> Ty {
         self.expr_types[e.0 as usize] = t;
         t
@@ -6027,6 +6185,69 @@ impl<'a> Checker<'a> {
                 sig,
                 provided_arg_count,
                 context_args,
+            })),
+        );
+    }
+    fn mark_module_top_level_call(
+        &mut self,
+        call: ExprId,
+        name: &str,
+        selected: &crate::libraries::FunctionInfo,
+        ret: Ty,
+        context_args: Vec<String>,
+    ) {
+        let source_file = selected.source_key.map(|(file, _)| file);
+        let source_decl = selected.source_key.map(|(_, decl)| DeclId(decl));
+        let source_fun = selected
+            .source_key
+            .filter(|(file, _)| *file == self.file_index)
+            .map(|(_, decl)| DeclId(decl))
+            .and_then(|decl| match self.file.decl(decl) {
+                Decl::Fun(f) => Some(f),
+                _ => None,
+            });
+        let param_meta = source_fun
+            .map(|f| {
+                f.params
+                    .iter()
+                    .map(|p| (p.name.clone(), p.default))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let param_default_values = selected
+            .source_key
+            .and_then(|(file, decl)| {
+                self.syms.funs.values().find_map(|sigs| {
+                    sigs.iter()
+                        .find(|s| {
+                            s.source_file == Some(file) && s.source_decl == Some(DeclId(decl))
+                        })
+                        .map(|s| s.param_default_values.clone())
+                })
+            })
+            .unwrap_or_default();
+        let ret_is_tparam = source_fun.is_some_and(|f| {
+            f.ret.as_ref().is_some_and(|r| {
+                r.targs.is_empty()
+                    && r.fun_params.is_empty()
+                    && f.type_params.iter().any(|tp| tp == &r.name)
+            })
+        });
+        self.resolved_calls.insert(
+            call,
+            ResolvedCall::ModuleTopLevel(Box::new(ResolvedModuleTopLevelCall {
+                name: name.to_string(),
+                params: selected.callable.params.clone(),
+                ret,
+                call_sig: selected.call_sig.clone(),
+                inline: selected.flags.inline,
+                suspend: selected.flags.suspend,
+                context_args,
+                source_file,
+                source_decl,
+                param_meta,
+                param_default_values,
+                ret_is_tparam,
             })),
         );
     }
@@ -7024,7 +7245,7 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn check_fun(&mut self, f: &FunDecl) {
+    fn check_fun(&mut self, f: &FunDecl, source_decl: Option<DeclId>) {
         // Duplicate parameter names are illegal (kotlinc reports a conflicting declaration). `_` is
         // not a valid function parameter name in Kotlin, so no placeholder exception is needed.
         {
@@ -7164,8 +7385,10 @@ impl<'a> Checker<'a> {
                             inferred,
                         );
                     } else {
-                        self.inferred_fun_rets
-                            .insert((f.name.clone(), ptys.clone()), inferred);
+                        if let Some(decl) = source_decl {
+                            self.inferred_fun_rets
+                                .insert((self.file_index, decl.0), inferred);
+                        }
                     }
                 }
             }
@@ -10218,22 +10441,10 @@ impl<'a> Checker<'a> {
     /// `Any`). Must run AFTER the lambda args are typed (unlike [`user_generic_call`], which produces
     /// the lambda parameter types and therefore runs before). `None` when no matching user inline
     /// generic function, or its return type isn't a (now-bound) type parameter.
-    fn user_generic_return(&self, fname: &str, arg_tys: &[Ty]) -> Option<Ty> {
-        let f = self
-            .file
-            .decls
-            .iter()
-            .find_map(|&d| match self.file.decl(d) {
-                Decl::Fun(f)
-                    if f.name == fname
-                        && f.receiver.is_none()
-                        && !f.type_params.is_empty()
-                        && f.params.len() == arg_tys.len() =>
-                {
-                    Some(f)
-                }
-                _ => None,
-            })?;
+    fn user_generic_return(&self, f: &FunDecl, arg_tys: &[Ty]) -> Option<Ty> {
+        if f.receiver.is_some() || f.type_params.is_empty() || f.params.len() != arg_tys.len() {
+            return None;
+        }
         let tparams: std::collections::HashSet<&str> =
             f.type_params.iter().map(String::as_str).collect();
         let mut binds: std::collections::HashMap<&str, Ty> = std::collections::HashMap::new();
@@ -10352,21 +10563,13 @@ impl<'a> Checker<'a> {
     /// whose declared return is a bare type parameter (`fun <T> asSeq(...): T`): the call's result
     /// type is the supplied argument (`String`), so members of the result resolve (`…length`). `None`
     /// when there's no explicit type argument or the return isn't one of the function's type params.
-    fn explicit_generic_return(&self, call: ExprId, fname: &str) -> Option<Ty> {
+    fn explicit_generic_return(&self, call: ExprId, f: &FunDecl) -> Option<Ty> {
         let targs = self.file.call_type_args.get(&call.0)?;
-        let idx = self
-            .file
-            .decls
-            .iter()
-            .find_map(|&d| match self.file.decl(d) {
-                Decl::Fun(f)
-                    if f.name == fname && f.receiver.is_none() && !f.type_params.is_empty() =>
-                {
-                    let ret = f.ret.as_ref()?;
-                    f.type_params.iter().position(|tp| tp == &ret.name)
-                }
-                _ => None,
-            })?;
+        if f.receiver.is_some() || f.type_params.is_empty() {
+            return None;
+        }
+        let ret = f.ret.as_ref()?;
+        let idx = f.type_params.iter().position(|tp| tp == &ret.name)?;
         // The result IS the supplied type argument (`asSeq<String>(…)` is a `String`). A generic slot
         // is physically a BOXED reference on the JVM, so a primitive argument refines to its boxed
         // wrapper (`<Int>`/`<Int?>` → `Integer`) — the actual runtime representation of the erased
@@ -13404,7 +13607,7 @@ impl<'a> Checker<'a> {
                 let user_shadows = self.module_declares(&fname);
                 let module_top: Option<crate::libraries::FunctionInfo> =
                     crate::module_symbols::ModuleSymbols::new(self.syms)
-                        .resolve_top_level(&fname, &arg_tys);
+                        .resolve_top_level_in_scope(&fname, &arg_tys, &self.fn_scope);
                 // A member of the nearest implicit receiver (a receiver-lambda body / `with` block —
                 // `"ab".run { uppercase() }`, `with(scope) { test1() }`) shadows a top-level function of
                 // the same name: the receiver is a closer scope, so kotlinc binds the member. Attempt it
@@ -13415,52 +13618,57 @@ impl<'a> Checker<'a> {
                         return ret;
                     }
                 }
+                let shadowed_by_member = self.this_ty.is_some_and(|t| {
+                    // A user-class member, OR a member on a classpath/builtin receiver type — either
+                    // takes precedence over a context-parameter function, so decline context resolution
+                    // rather than risk a wrong binding.
+                    t.obj_internal()
+                        .is_some_and(|i| self.syms.method_of(i, &fname).is_some())
+                        || self.resolve_instance_member(t, &fname, &arg_tys).is_some()
+                });
+                if module_top.is_none() && !shadowed_by_member {
+                    if let Some((fi, sources)) =
+                        self.resolve_context_module_top_level(&fname, &arg_tys)
+                    {
+                        let params = &fi.callable.params;
+                        let ctx_count = fi.context_count;
+                        let ret_ty = self.module_top_level_return(call, &fi, &arg_tys);
+                        for (i, a) in arg_tys.iter().enumerate() {
+                            self.expect_assignable(
+                                params[ctx_count + i],
+                                *a,
+                                self.span(args[i]),
+                                "argument",
+                            );
+                        }
+                        self.mark_module_top_level_call(call, &fname, &fi, ret_ty, sources);
+                        return ret_ty;
+                    }
+                }
                 if let Some(fi) = module_top {
                     let params = &fi.callable.params;
                     let cs = &fi.call_sig;
-                    let mut ret_ty = fi.callable.ret;
-                    if let Some(&inferred) =
-                        self.inferred_fun_rets.get(&(fname.clone(), params.clone()))
-                    {
-                        ret_ty = inferred;
-                    }
-                    // A user generic call whose return is a type parameter: bind from all arguments.
-                    // Not gated on a lambda argument (`user_generic`) — a plain generic call like
-                    // `id('a')` for `fun <T> id(x: T): T` must also recover its concrete return so a use
-                    // site (`id('a') > id('b')`) resolves instead of erasing to `Any`. The helper
-                    // self-checks that the callee is generic and returns a bare type parameter.
-                    if let Some(r) = self.user_generic_return(&fname, &arg_tys) {
-                        ret_ty = r;
-                    }
-                    // An EXPLICIT type argument (`asSeq<String>(x)`) on a generic call whose return is a
-                    // bare type parameter takes precedence — the result type is the supplied argument.
-                    if let Some(r) = self.explicit_generic_return(call, &fname) {
-                        ret_ty = r;
-                    }
+                    let ret_ty = self.module_top_level_return(call, &fi, &arg_tys);
                     // Context parameters (`context(a: A) fun f()`): the leading `context_count`
                     // parameters are supplied IMPLICITLY from the enclosing context, not positionally.
                     // When the explicit arguments exactly fill the remaining (value) parameters and every
                     // context parameter is satisfied by an in-scope source (an implicit receiver or an
                     // enclosing context parameter/local), resolve them and record the sources for the
                     // lowerer. Otherwise fall through (a missing context → the normal arity error → skip).
-                    let ctx_count = self.context_count_of(&fname);
+                    let ctx_count = fi.context_count;
                     // A member of the enclosing implicit receiver with the same name takes precedence
                     // over a context-parameter function (kotlinc resolution order). krusty resolves the
                     // implicit-receiver member only when there is no top-level shadow, so rather than
                     // mis-bind the context function here, decline the context resolution (the call then
                     // hits the normal arity path and the file skips — sound, never a wrong binding).
-                    let shadowed_by_member = self.this_ty.is_some_and(|t| {
-                        // A user-class member, OR a member on a classpath/builtin receiver type — either
-                        // takes precedence over a context-parameter function, so decline context
-                        // resolution (the call then skips) rather than risk a wrong binding.
-                        t.obj_internal()
-                            .is_some_and(|i| self.syms.method_of(i, &fname).is_some())
-                            || self.resolve_instance_member(t, &fname, &arg_tys).is_some()
-                    });
+                    let value_count = params.len().saturating_sub(ctx_count);
+                    let context_value_args_ok = arg_tys.len() <= value_count
+                        && (arg_tys.len()..value_count)
+                            .all(|i| cs.param_has_default(ctx_count + i));
                     if ctx_count > 0
                         && !shadowed_by_member
                         && ctx_count <= params.len()
-                        && arg_tys.len() == params.len() - ctx_count
+                        && context_value_args_ok
                     {
                         let ctx_types = &params[..ctx_count];
                         if let Some(sources) = self.resolve_context_args(ctx_types) {
@@ -13473,9 +13681,7 @@ impl<'a> Checker<'a> {
                                     "argument",
                                 );
                             }
-                            self.resolved_calls
-                                .insert(call, ResolvedCall::TopLevel(fi.callable.clone()));
-                            self.context_args.insert(call, sources);
+                            self.mark_module_top_level_call(call, &fname, &fi, ret_ty, sources);
                             return ret_ty;
                         }
                     }
@@ -13586,6 +13792,7 @@ impl<'a> Checker<'a> {
                             self.expect_assignable(params[i], *a, self.span(args[i]), "argument");
                         }
                     }
+                    self.mark_module_top_level_call(call, &fname, &fi, ret_ty, Vec::new());
                     return ret_ty;
                 }
                 // A receiver-less top-level library function (`listOf(…)`): resolve it through the
@@ -14731,12 +14938,17 @@ impl<'a> Checker<'a> {
             vararg: f.params.last().map_or(false, |p| p.is_vararg),
             required: params.len(),
             param_defaults: f.params.iter().map(|p| p.default.is_some()).collect(),
+            param_default_values: Vec::new(),
             param_names: f.params.iter().map(|p| p.name.clone()).collect(),
             lambda_param_types: Vec::new(),
             lambda_recv: Vec::new(),
             is_inline: false,
             is_final: false,
             is_suspend: f.is_suspend,
+            context_count: f.context_count,
+            source_decl: None,
+            source_file: None,
+            package: String::new(),
         };
 
         // Register in current local-funs frame and in the TypeInfo maps.
@@ -14918,6 +15130,47 @@ fun box(): String {
     fn parse_file(src: &str, d: &mut DiagSink) -> File {
         let toks = lex(src, d);
         parse(src, &toks, d)
+    }
+
+    fn assert_no_diags(d: &DiagSink) {
+        assert!(
+            d.diags.is_empty(),
+            "unexpected diagnostics: {:?}",
+            d.diags.iter().map(|x| &x.msg).collect::<Vec<_>>()
+        );
+    }
+
+    fn named_call(file: &File, name: &str) -> ExprId {
+        file.expr_arena
+            .iter()
+            .enumerate()
+            .find_map(|(idx, expr)| match expr {
+                Expr::Call { callee, .. } => match file.expr(*callee) {
+                    Expr::Name(callee_name) if callee_name == name => Some(ExprId(idx as u32)),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("source should contain {name}() call"))
+    }
+
+    fn module_top_level_target(info: &TypeInfo, call: ExprId) -> &ResolvedModuleTopLevelCall {
+        let Some(ResolvedCall::ModuleTopLevel(target)) = info.resolved_calls.get(&call) else {
+            panic!("checker must record the selected same-module top-level target for lowering");
+        };
+        target
+    }
+
+    fn top_level_fun_decl(
+        file: &File,
+        name: &str,
+        matches_decl: impl Fn(&FunDecl) -> bool,
+    ) -> DeclId {
+        file.decls
+            .iter()
+            .copied()
+            .find(|&decl| matches!(file.decl(decl), Decl::Fun(f) if f.name == name && matches_decl(f)))
+            .unwrap_or_else(|| panic!("source should contain {name} declaration"))
     }
 
     struct FakeMemberPlatform;
@@ -15524,6 +15777,185 @@ fun box(): String {
             ),
             "checker must record same-module extension get selected for index lowering"
         );
+    }
+
+    #[test]
+    fn module_top_level_calls_record_selected_overload_for_lowering() {
+        let mut d = DiagSink::new();
+        let file = parse_file(
+            "fun pick(x: Int): String = \"int\"\n\
+             fun pick(x: String): String = x\n\
+             fun box(): String = pick(\"OK\")",
+            &mut d,
+        );
+        let files = vec![file];
+        let mut syms = collect_signatures(&files, &mut d);
+        let info = check_file(&files[0], &mut syms, &mut d);
+        assert_no_diags(&d);
+
+        let call = named_call(&files[0], "pick");
+        let target = module_top_level_target(&info, call);
+        let selected_decl = top_level_fun_decl(&files[0], "pick", |f| {
+            f.params.first().is_some_and(|p| p.ty.name == "String")
+        });
+        assert_eq!(target.name, "pick");
+        assert_eq!(target.params, vec![Ty::String]);
+        assert_eq!(target.ret, Ty::String);
+        assert_eq!(target.source_file, Some(0));
+        assert_eq!(target.source_decl, Some(selected_decl));
+        assert_eq!(target.param_meta, vec![("x".to_string(), None)]);
+        assert!(!target.ret_is_tparam);
+        assert_eq!(target.context_args, Vec::<String>::new());
+    }
+
+    #[test]
+    fn module_top_level_context_calls_record_context_sources_for_lowering() {
+        let mut d = DiagSink::new();
+        let file = parse_file(
+            "class A(val x: String)\n\
+             fun leaf(x: Int): String = \"int\"\n\
+             context(a: A) fun leaf(): String = a.x\n\
+             context(a: A) fun mid(): String = leaf()",
+            &mut d,
+        );
+        let files = vec![file];
+        let mut syms = collect_signatures(&files, &mut d);
+        let info = check_file(&files[0], &mut syms, &mut d);
+        assert_no_diags(&d);
+
+        let call = named_call(&files[0], "leaf");
+        let target = module_top_level_target(&info, call);
+        assert_eq!(target.name, "leaf");
+        assert_eq!(target.params, vec![Ty::obj("A")]);
+        assert_eq!(target.ret, Ty::String);
+        assert_eq!(target.source_file, Some(0));
+        assert!(target.source_decl.is_some());
+        assert_eq!(target.param_meta, vec![("a".to_string(), None)]);
+        assert_eq!(target.context_args, vec!["a".to_string()]);
+        assert!(
+            !info.context_args.contains_key(&call),
+            "module top-level context calls must carry context sources in the resolved target"
+        );
+    }
+
+    #[test]
+    fn module_top_level_context_overload_skips_unsatisfied_candidate() {
+        let mut d = DiagSink::new();
+        let file = parse_file(
+            "class A(val x: String)\n\
+             class B(val x: String)\n\
+             context(a: A) fun leaf(): String = a.x\n\
+             context(b: B) fun leaf(): String = b.x\n\
+             context(b: B) fun mid(): String = leaf()",
+            &mut d,
+        );
+        let files = vec![file];
+        let mut syms = collect_signatures(&files, &mut d);
+        let info = check_file(&files[0], &mut syms, &mut d);
+        assert_no_diags(&d);
+
+        let call = named_call(&files[0], "leaf");
+        let target = module_top_level_target(&info, call);
+        assert_eq!(target.params, vec![Ty::obj("B")]);
+        assert_eq!(target.context_args, vec!["b".to_string()]);
+    }
+
+    #[test]
+    fn module_top_level_context_call_records_defaulted_value_param() {
+        let mut d = DiagSink::new();
+        let file = parse_file(
+            "class A(val x: String)\n\
+             context(a: A) fun leaf(s: String = \"OK\"): String = s\n\
+             context(a: A) fun mid(): String = leaf()",
+            &mut d,
+        );
+        let files = vec![file];
+        let mut syms = collect_signatures(&files, &mut d);
+        let info = check_file(&files[0], &mut syms, &mut d);
+        assert_no_diags(&d);
+
+        let call = named_call(&files[0], "leaf");
+        let target = module_top_level_target(&info, call);
+        assert_eq!(target.params, vec![Ty::obj("A"), Ty::String]);
+        assert_eq!(target.context_args, vec!["a".to_string()]);
+        assert_eq!(target.param_meta.len(), 2);
+        assert_eq!(target.param_meta[0], ("a".to_string(), None));
+        assert_eq!(target.param_meta[1].0, "s");
+        assert!(target.param_meta[1].1.is_some());
+    }
+
+    #[test]
+    fn module_top_level_cross_file_calls_record_source_key_for_lowering() {
+        let mut d = DiagSink::new();
+        let files = vec![
+            parse_file("fun helper(s: String): String = s", &mut d),
+            parse_file("fun box(): String = helper(\"OK\")", &mut d),
+        ];
+        let mut syms = collect_signatures(&files, &mut d);
+        let helper_decl = top_level_fun_decl(&files[0], "helper", |_| true);
+        syms.fn_facades_by_decl
+            .insert((0, helper_decl.0), "AKt".to_string());
+        syms.fn_facades
+            .insert("helper".to_string(), "AKt".to_string());
+        d.set_file(1);
+        let info = check_file_at(&files[1], 1, &mut syms, &mut d);
+        assert_no_diags(&d);
+
+        let call = named_call(&files[1], "helper");
+        let target = module_top_level_target(&info, call);
+        assert_eq!(target.name, "helper");
+        assert_eq!(target.source_file, Some(0));
+        assert_eq!(target.source_decl, Some(helper_decl));
+        assert!(target.param_meta.is_empty());
+    }
+
+    #[test]
+    fn module_top_level_cross_file_overload_uses_selected_source_key() {
+        let mut d = DiagSink::new();
+        let files = vec![
+            parse_file("fun helper(x: Int): String = \"int\"", &mut d),
+            parse_file("fun helper(s: String): String = s", &mut d),
+            parse_file("fun box(): String = helper(\"OK\")", &mut d),
+        ];
+        let mut syms = collect_signatures(&files, &mut d);
+        let int_decl = top_level_fun_decl(&files[0], "helper", |_| true);
+        let string_decl = top_level_fun_decl(&files[1], "helper", |_| true);
+        syms.fn_facades_by_decl
+            .insert((0, int_decl.0), "AKt".to_string());
+        syms.fn_facades_by_decl
+            .insert((1, string_decl.0), "BKt".to_string());
+        syms.fn_facades
+            .insert("helper".to_string(), "AKt".to_string());
+        d.set_file(2);
+        let info = check_file_at(&files[2], 2, &mut syms, &mut d);
+        assert_no_diags(&d);
+
+        let call = named_call(&files[2], "helper");
+        let target = module_top_level_target(&info, call);
+        assert_eq!(target.name, "helper");
+        assert_eq!(target.params, vec![Ty::String]);
+        assert_eq!(target.source_file, Some(1));
+        assert_eq!(target.source_decl, Some(string_decl));
+    }
+
+    #[test]
+    fn module_top_level_selection_respects_package_scope() {
+        let mut d = DiagSink::new();
+        let files = vec![
+            parse_file("package a\nfun helper(): String = \"a\"", &mut d),
+            parse_file("package b\nfun helper(): String = \"OK\"", &mut d),
+            parse_file("package b\nfun box(): String = helper()", &mut d),
+        ];
+        let mut syms = collect_signatures(&files, &mut d);
+        d.set_file(2);
+        let info = check_file_at(&files[2], 2, &mut syms, &mut d);
+        assert_no_diags(&d);
+
+        let call = named_call(&files[2], "helper");
+        let target = module_top_level_target(&info, call);
+        let b_decl = top_level_fun_decl(&files[1], "helper", |_| true);
+        assert_eq!(target.source_file, Some(1));
+        assert_eq!(target.source_decl, Some(b_decl));
     }
 
     #[test]

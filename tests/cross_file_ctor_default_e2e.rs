@@ -41,6 +41,8 @@ fn compile_two(a: &str, b: &str) -> Option<Vec<(String, Vec<u8>)>> {
         for &d in &file.decls {
             if let krusty::ast::Decl::Fun(f) = file.decl(d) {
                 if f.receiver.is_none() && !f.is_inline {
+                    syms.fn_facades_by_decl
+                        .insert((i as u32, d.0), facade.clone());
                     syms.fn_facades.insert(f.name.clone(), facade.clone());
                 }
             }
@@ -48,13 +50,14 @@ fn compile_two(a: &str, b: &str) -> Option<Vec<(String, Vec<u8>)>> {
     }
     let mut all = Vec::new();
     for (i, file) in files.iter().enumerate() {
+        diags.set_file(i as u32);
         let info = check_file(file, &mut syms, &mut diags);
         if diags.has_errors() {
             return None;
         }
         let facade = file_class_name(stems[i], file.package.as_deref());
         let runtime = krusty::jvm::jvm_libraries::JvmLibraries::new(cp.clone());
-        let mut ir = krusty::ir_lower::lower_file(file, &info, &syms, &runtime)?;
+        let mut ir = krusty::ir_lower::lower_file_at(file, i as u32, &info, &syms, &runtime)?;
         // Shared post-lowering pass pipeline (jvm/backend.rs); unlowerable shape → skip.
         krusty::jvm::backend::run_backend_passes(&mut ir, file, &facade, &syms).ok()?;
         all.extend(krusty::jvm::ir_emit::emit_all(&ir, &facade, &*cp, None)?);
@@ -90,4 +93,25 @@ fn cross_file_ctor_default_does_not_panic() {
 open class Base(val ctx: CoroutineContext = EmptyCoroutineContext)\n";
     let b2 = "fun box(): String { Base(); return \"OK\" }\n";
     let _ = run_two(a2, b2);
+}
+
+#[test]
+fn cross_file_top_level_default_uses_selected_decl() {
+    if common::java_home().is_none() || common::stdlib_jar().is_none() {
+        return;
+    }
+    let a = "fun choose(x: Int = 1): String = \"int:$x\"\n\
+             fun choose(s: String, suffix: String = \"K\"): String = s + suffix\n";
+    let b = "fun box(): String = choose(s = \"O\")\n";
+    assert_eq!(run_two(a, b).as_deref(), Some("OK"));
+}
+
+#[test]
+fn cross_file_top_level_default_before_trailing_lambda() {
+    if common::java_home().is_none() || common::stdlib_jar().is_none() {
+        return;
+    }
+    let a = "fun host(prefix: String = \"O\", block: () -> String): String = prefix + block()\n";
+    let b = "fun box(): String = host { \"K\" }\n";
+    assert_eq!(run_two(a, b).as_deref(), Some("OK"));
 }

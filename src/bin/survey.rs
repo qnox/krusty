@@ -143,6 +143,8 @@ fn first_error_with_coroutine_helpers(src: &str, cp: &Rc<Classpath>, stem: &str)
         for &decl in &file.decls {
             match file.decl(decl) {
                 krusty::ast::Decl::Fun(f) if f.receiver.is_none() && !f.is_inline => {
+                    syms.fn_facades_by_decl
+                        .insert((i as u32, decl.0), facade.clone());
                     syms.fn_facades.insert(f.name.clone(), facade.clone());
                 }
                 krusty::ast::Decl::Property(p) if p.receiver.is_none() => {
@@ -157,13 +159,14 @@ fn first_error_with_coroutine_helpers(src: &str, cp: &Rc<Classpath>, stem: &str)
     }
 
     for (i, file) in files.iter().enumerate() {
+        d.set_file(i as u32);
         let info = check_file(file, &mut syms, &mut d);
         if d.has_errors() {
             return Some(d.diags[0].msg.clone());
         }
         let facade = file_class_name(&blocks[i].0, file.package.as_deref());
         let runtime = JvmLibraries::new(cp.clone());
-        let mut ir = match lower_file(file, &info, &syms, &runtime) {
+        let mut ir = match krusty::ir_lower::lower_file_at(file, i as u32, &info, &syms, &runtime) {
             Some(ir) => ir,
             None => return Some(format!("lower: {}", krusty::ir_lower::lower_bail_reason())),
         };
