@@ -78,6 +78,47 @@ pub fn lower_suspend(ir: &mut IrFile, facade: &str) -> bool {
         let fn_unit_ret = orig_rets[fid as usize] == Ty::Unit;
         let forward =
             body.and_then(|b| tail_forward_call(ir, b, &suspend_set, fn_unit_ret, &orig_rets));
+        // Capture the per-suspension lexical scope lists BEFORE splice/hoist reshape the body:
+        // `splice_return_blocks` flattens block STATEMENTS into their parent, which would leak a
+        // block-scoped local (a `for`-loop iterator) into every later suspension's scope. Suspend-call
+        // expr ids are stable through the transforms; keyed per function.
+        if let (Some(b), None) = (body, forward) {
+            if !ir.pre_splice_scopes.contains_key(&fid) {
+                let is_lambda = ir.suspend_lambda_sm.iter().any(|(f2, _, _)| *f2 == fid);
+                let prefix: Vec<(u32, Ty)> = if is_lambda {
+                    Vec::new()
+                } else {
+                    let f = &ir.functions[fid as usize];
+                    let this_offset = u32::from(f.dispatch_receiver.is_some());
+                    // Capture runs BEFORE the CPS rewrite appends the `Continuation` — only strip a
+                    // trailing continuation when it is already there.
+                    let has_cont = f.params.last().is_some_and(|t| {
+                        t.obj_internal() == Some("kotlin/coroutines/Continuation")
+                    });
+                    let n_real = f.params.len().saturating_sub(usize::from(has_cont));
+                    // ALL value parameters — kotlinc spills primitive params too (`Z$0` for a
+                    // Boolean), per-kind counters decide the field family.
+                    (0..n_real)
+                        .map(|i| (this_offset + i as u32, spill_field_ty(f.params[i])))
+                        .collect()
+                };
+                {
+                    let mut w = ScopeWalk {
+                        ir,
+                        suspend_set: &suspend_set,
+                        params: &prefix,
+                        scope: Vec::new(),
+                        pending: Vec::new(),
+                        out: Default::default(),
+                    };
+                    // Walk the WHOLE body block — an expression-bodied fn (`= withLock { … }`)
+                    // carries its suspensions in the block's VALUE, not its statements.
+                    w.walk(b);
+                    let out = w.out;
+                    ir.pre_splice_scopes.insert(fid, out);
+                }
+            }
+        }
         // Normalize `return { stmts…; value }` into `stmts…; return value`. An elvis / safe-call subject
         // that suspends lowers to a value-position `Block` binding a temp (`{ val t = susp()…; when{…} }`);
         // hoisting can't see into a value block, so the suspension would hide there and the flattener bail.
@@ -123,6 +164,17 @@ pub fn lower_suspend(ir: &mut IrFile, facade: &str) -> bool {
             // placeholder; now that the trailing `Continuation` parameter exists at value-index `p_old`,
             // resolve the placeholder to read it.
             rewrite_current_continuation(ir, b, p_old);
+            // The pre-splice scope lists (captured above) hold PRE-shift local indices — shift them
+            // identically so they match the machine's value numbering.
+            if let Some(scopes) = ir.pre_splice_scopes.get_mut(&fid) {
+                for list in scopes.values_mut() {
+                    for e in list.iter_mut() {
+                        if e.0 >= p_old {
+                            e.0 += 1;
+                        }
+                    }
+                }
+            }
         }
 
         if let (Some(call), Some(b)) = (forward, body) {
@@ -1422,24 +1474,31 @@ fn build_state_machine(ir: &mut IrFile, facade: &str, fid: u32, b: ExprId, unit_
     // the map shorter than the allocations) no `fresh()` local could alias an `ev`.
     let flat_next_local = next_ev;
 
-    // kotlinc's positional-spill model (docs/POSITIONAL_SPILLS.md): one lexical walk of the final
-    // body records, per suspension, the in-scope list (params prefix + locals in declaration
-    // order); the field layout is the per-kind maxima over those lists.
-    let eligible: std::collections::HashMap<u32, Ty> = spilled.iter().copied().collect();
-    let susp_scopes: std::collections::HashMap<ExprId, Vec<(u32, Ty)>> = {
-        let mut w = ScopeWalk {
-            ir,
-            suspend_set: &suspend_set,
-            params: &param_caps,
-            eligible: &eligible,
-            catch_spills: &catch_spills,
-            scope: Vec::new(),
-            pending: Vec::new(),
-            out: Default::default(),
-        };
-        w.walk_stmts(&stmts);
-        w.out
-    };
+    // The PRE-SPLICE per-suspension scope lists (captured in `lower_suspend` before
+    // `splice_return_blocks` could leak block-scoped locals); catch variables remap to their
+    // exception-spill locals allocated above.
+    let mut susp_scopes: std::collections::HashMap<ExprId, Vec<(u32, Ty)>> =
+        ir.pre_splice_scopes.remove(&fid).unwrap_or_else(|| {
+            let mut w = ScopeWalk {
+                ir,
+                suspend_set: &suspend_set,
+                params: &param_caps,
+                scope: Vec::new(),
+                pending: Vec::new(),
+                out: Default::default(),
+            };
+            w.walk_stmts(&stmts);
+            w.out
+        });
+    for (cvar, ev) in &catch_spills {
+        for list in susp_scopes.values_mut() {
+            for e in list.iter_mut() {
+                if e.0 == *cvar {
+                    e.0 = *ev;
+                }
+            }
+        }
+    }
     let mut layout = SpillLayout::default();
     for list in susp_scopes.values() {
         layout.add_list(list);
@@ -1790,25 +1849,22 @@ fn build_lambda_state_machine(
         }
     }
 
-    // kotlinc's positional-spill model (docs/POSITIONAL_SPILLS.md): a lambda has NO value-param
-    // prefix (captures/params live in leading fields, reloaded each entry), so the lists are
-    // locals-only.
-    let eligible: std::collections::HashMap<u32, Ty> = spilled.iter().copied().collect();
-    let susp_scopes: std::collections::HashMap<ExprId, Vec<(u32, Ty)>> = {
-        let no_catch_spills = std::collections::HashMap::new();
-        let mut w = ScopeWalk {
-            ir,
-            suspend_set: &suspend_set,
-            params: &[],
-            eligible: &eligible,
-            catch_spills: &no_catch_spills,
-            scope: Vec::new(),
-            pending: Vec::new(),
-            out: Default::default(),
-        };
-        w.walk_stmts(&stmts);
-        w.out
-    };
+    // The PRE-SPLICE per-suspension scope lists (captured in `lower_suspend`); a lambda has no
+    // value-param prefix (captures/params live in leading fields, reloaded each entry). A lambda
+    // fid the prelude never visited (not in `suspend_funs`) falls back to a post-transform walk.
+    let susp_scopes: std::collections::HashMap<ExprId, Vec<(u32, Ty)>> =
+        ir.pre_splice_scopes.remove(&fid).unwrap_or_else(|| {
+            let mut w = ScopeWalk {
+                ir,
+                suspend_set: &suspend_set,
+                params: &[],
+                scope: Vec::new(),
+                pending: Vec::new(),
+                out: Default::default(),
+            };
+            w.walk_stmts(&stmts);
+            w.out
+        });
     let mut layout = SpillLayout::default();
     for list in susp_scopes.values() {
         layout.add_list(list);
@@ -3135,8 +3191,6 @@ struct ScopeWalk<'a> {
     ir: &'a IrFile,
     suspend_set: &'a HashSet<u32>,
     params: &'a [(u32, Ty)],
-    eligible: &'a std::collections::HashMap<u32, Ty>,
-    catch_spills: &'a std::collections::HashMap<u32, u32>,
     /// (local, ty, named)
     scope: Vec<(u32, Ty, bool)>,
     /// Exprs that may still execute after the current walk point (rest-of-list statements, whole
@@ -3147,11 +3201,17 @@ struct ScopeWalk<'a> {
 
 impl ScopeWalk<'_> {
     fn push_decl(&mut self, st: ExprId) {
-        if let IrExpr::Variable { index, named, .. } = self.ir.exprs[st as usize] {
-            if let Some(ty) = self.eligible.get(&index) {
-                if !self.scope.iter().any(|(l, _, _)| *l == index) {
-                    self.scope.push((index, *ty, named));
-                }
+        if let IrExpr::Variable {
+            index,
+            ty,
+            named: true,
+            ..
+        } = self.ir.exprs[st as usize]
+        {
+            if !self.scope.iter().any(|(l, _, _)| *l == index) {
+                // Every NAMED source variable participates (kotlinc's scope rule; kind decides the
+                // field family: references L$, ints I$, …).
+                self.scope.push((index, spill_field_ty(ty), true));
             }
         }
     }
@@ -3238,12 +3298,11 @@ impl ScopeWalk<'_> {
                 self.scope.truncate(base);
                 for c in catches {
                     let base = self.scope.len();
-                    // The catch variable — remapped to its exception-spill local when the body
-                    // suspends — is in scope (named) for the catch body.
-                    if let Some(&ev) = self.catch_spills.get(&c.var) {
-                        if let Some(ty) = self.eligible.get(&ev) {
-                            self.scope.push((ev, *ty, true));
-                        }
+                    // The catch variable is in scope (named) for the catch body. When the body
+                    // suspends, the machine builder remaps it to a fresh exception-spill local and
+                    // REWRITES the captured lists to that index (`catch_spills` remap below).
+                    if !self.scope.iter().any(|(l, _, _)| *l == c.var) {
+                        self.scope.push((c.var, Ty::obj(&c.exc_internal), true));
                     }
                     self.walk(c.body);
                     self.scope.truncate(base);
