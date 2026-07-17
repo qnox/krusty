@@ -1297,9 +1297,17 @@ fn build_state_machine(ir: &mut IrFile, facade: &str, fid: u32, b: ExprId, unit_
             {
                 return true;
             }
-            // The write statement suspends outside the initializer, or the read statement itself
-            // suspends — intra-statement order unknown, keep.
-            if susp_outside_init(stmts[wi], idx) || expr_calls_suspend(ir, st, &suspend_set) {
+            // The write statement suspends outside the initializer → crossing, keep.
+            if susp_outside_init(stmts[wi], idx) {
+                return true;
+            }
+            // The read statement itself suspends: a read INSIDE a suspend call's own subtree
+            // (receiver/arguments) evaluates BEFORE the suspension — kotlinc consumes it from the
+            // operand stack, no slot. Keep only when some read escapes every suspend-call subtree
+            // (it could then run AFTER the resume).
+            if expr_calls_suspend(ir, st, &suspend_set)
+                && !reads_only_in_suspension_args(ir, st, idx, &suspend_set)
+            {
                 return true;
             }
         }
@@ -1414,11 +1422,35 @@ fn build_state_machine(ir: &mut IrFile, facade: &str, fid: u32, b: ExprId, unit_
     // the map shorter than the allocations) no `fresh()` local could alias an `ev`.
     let flat_next_local = next_ev;
 
+    // kotlinc's positional-spill model (docs/POSITIONAL_SPILLS.md): one lexical walk of the final
+    // body records, per suspension, the in-scope list (params prefix + locals in declaration
+    // order); the field layout is the per-kind maxima over those lists.
+    let eligible: std::collections::HashMap<u32, Ty> = spilled.iter().copied().collect();
+    let susp_scopes: std::collections::HashMap<ExprId, Vec<(u32, Ty)>> = {
+        let mut w = ScopeWalk {
+            ir,
+            suspend_set: &suspend_set,
+            params: &param_caps,
+            eligible: &eligible,
+            catch_spills: &catch_spills,
+            scope: Vec::new(),
+            pending: Vec::new(),
+            out: Default::default(),
+        };
+        w.walk_stmts(&stmts);
+        w.out
+    };
+    let mut layout = SpillLayout::default();
+    for list in susp_scopes.values() {
+        layout.add_list(list);
+    }
+
     let cont_id = build_continuation_class(
         ir,
         &cont_internal,
         fid,
-        &spilled,
+        &layout,
+        &param_caps,
         receiver.as_deref(),
         &real_params,
     );
@@ -1433,8 +1465,11 @@ fn build_state_machine(ir: &mut IrFile, facade: &str, fid: u32, b: ExprId, unit_
         cont_id,
         field_base: 0, // dedicated continuation class: result/label/spilled at field 0..
         spilled: spilled.clone(),
+        scopes: susp_scopes,
+        layout: layout.clone(),
         states: vec![Vec::new()],
         state_handlers: vec![None],
+        state_scope: vec![None],
         cur_handler: None,
         catch_var: base + 3,
         catch_spills,
@@ -1466,15 +1501,29 @@ fn build_state_machine(ir: &mut IrFile, facade: &str, fid: u32, b: ExprId, unit_
             index: idx,
         })
     };
-    let spill_field =
-        |local: u32| 2 + spilled.iter().position(|(l, _)| *l == local).unwrap() as u32;
+    let state_scopes = std::mem::take(&mut flat.state_scope);
+    if std::env::var("KRUSTY_DBG").is_ok() {
+        eprintln!(
+            "DBG sm fid={fid} scopes_map={} state_scopes={:?}",
+            flat.scopes.len(),
+            state_scopes
+                .iter()
+                .map(|s| s
+                    .as_ref()
+                    .map(|l| l.iter().map(|(i, _)| *i).collect::<Vec<_>>()))
+                .collect::<Vec<_>>()
+        );
+    }
+    // Value parameters are the stable PREFIX of every scope list — their per-kind positions (and
+    // so their fields) are identical across states; the constructor captures them there.
+    let param_positions: Vec<(u32, Ty, char, u32)> = kind_positions(&param_caps);
 
     // For an instance method, `new C$fn$1(this, completion)` also captures the receiver (value-index 0);
     // live value parameters are stored into their `L$N` fields right after a FRESH construction.
     let receiver_this = receiver.as_ref().map(|_| 0u32);
-    let cap_pairs: Vec<(u32, u32)> = param_caps
+    let cap_pairs: Vec<(u32, u32)> = param_positions
         .iter()
-        .map(|(i, _)| (*i, spill_field(*i)))
+        .map(|&(i, _, kind, pos)| (i, 2 + layout.slot(kind, pos)))
         .collect();
     let get_or_create = build_get_or_create(
         ir,
@@ -1504,6 +1553,27 @@ fn build_state_machine(ir: &mut IrFile, facade: &str, fid: u32, b: ExprId, unit_
         },
     );
 
+    // Prologue slot declarations: every spilled LOCAL gets a zero-initialized slot ONCE per
+    // invocation (before the dispatch loop), so a resume arm's restores and same-invocation
+    // cross-state reads all target one method-scope slot. Value parameters already own theirs.
+    let is_param = |local: u32| param_caps.iter().any(|(p, _)| *p == local);
+    let mut prologue_decls: Vec<ExprId> = Vec::new();
+    for (local, ty) in spilled.iter().copied() {
+        if is_param(local) {
+            continue;
+        }
+        let z = zero_value(ir, &ty);
+        prologue_decls.push(k(
+            ir,
+            IrExpr::Variable {
+                index: local,
+                ty,
+                init: Some(z),
+                named: false,
+            },
+        ));
+    }
+
     let mut loop_stmts: Vec<ExprId> = Vec::new();
     let cont_for_r = k(ir, IrExpr::GetValue(cont_v));
     let r_init = getf(ir, cont_for_r, 0);
@@ -1516,46 +1586,35 @@ fn build_state_machine(ir: &mut IrFile, facade: &str, fid: u32, b: ExprId, unit_
             named: false,
         },
     ));
-    let is_param = |local: u32| param_caps.iter().any(|(p, _)| *p == local);
-    for (local, ty) in spilled.clone() {
-        let cont_for_f = k(ir, IrExpr::GetValue(cont_v));
-        let fld = spill_field(local);
-        let mut init = getf(ir, cont_for_f, fld);
-        // A reference spill lives in an `Object`-typed `L$N` field (kotlinc's layout) — `checkcast` it
-        // back to the local's real type on restore.
-        if ty.is_reference() && ty != object_ty() {
-            init = k(
-                ir,
-                IrExpr::TypeOp {
-                    op: IrTypeOp::Cast,
-                    arg: init,
-                    type_operand: ty,
-                },
-            );
-        }
-        // A value PARAMETER already owns its local slot (from the method signature), so assign it
-        // (`SetValue`) rather than declaring a fresh `Variable` — a re-declaration would allocate a
-        // phantom second slot and leave the param slot `top` at the loop back-edge (a frame conflict).
-        // An after-suspension LOCAL has no slot yet on the first iteration, so it must be declared.
-        let restore = if is_param(local) {
-            IrExpr::SetValue {
-                var: local,
-                value: init,
-            }
-        } else {
-            IrExpr::Variable {
-                index: local,
-                ty,
-                init: Some(init),
-                named: false,
-            }
-        };
-        loop_stmts.push(k(ir, restore));
-    }
 
     let mut branches: Branches = Vec::new();
     for (i, st) in states.iter().enumerate() {
         let mut ss = vec![throw_on_failure(ir, r_v)];
+        // A RESUME arm restores exactly ITS suspension's scope list (kotlinc: per-arm restores; a
+        // non-resume state restores nothing — locals persist within one invocation).
+        if let Some(Some(list)) = state_scopes.get(i) {
+            for (local, ty, kind, pos) in kind_positions(list) {
+                let cont_for_f = k(ir, IrExpr::GetValue(cont_v));
+                let fld = 2 + layout.slot(kind, pos);
+                let mut init = getf(ir, cont_for_f, fld);
+                // A reference spill lives in an `Object`-typed field — `checkcast` back on restore.
+                if ty.is_reference() && ty != object_ty() {
+                    init = k(
+                        ir,
+                        IrExpr::TypeOp {
+                            op: IrTypeOp::Cast,
+                            arg: init,
+                            type_operand: ty,
+                        },
+                    );
+                }
+                let restore = IrExpr::SetValue {
+                    var: local,
+                    value: init,
+                };
+                ss.push(k(ir, restore));
+            }
+        }
         ss.extend(st.iter().copied());
         let recv = k(ir, IrExpr::GetValue(cont_v));
         let lbl = getf(ir, recv, 1);
@@ -1624,10 +1683,13 @@ fn build_state_machine(ir: &mut IrFile, facade: &str, fid: u32, b: ExprId, unit_
             label: None,
         },
     );
+    let mut body_stmts = vec![var_cont, var_suspended];
+    body_stmts.extend(prologue_decls);
+    body_stmts.push(while_loop);
     let new_body = k(
         ir,
         IrExpr::Block {
-            stmts: vec![var_cont, var_suspended, while_loop],
+            stmts: body_stmts,
             value: None,
         },
     );
@@ -1728,7 +1790,31 @@ fn build_lambda_state_machine(
         }
     }
 
-    // Append `result`, `label`, then one field per spilled local — after the captures/parameters.
+    // kotlinc's positional-spill model (docs/POSITIONAL_SPILLS.md): a lambda has NO value-param
+    // prefix (captures/params live in leading fields, reloaded each entry), so the lists are
+    // locals-only.
+    let eligible: std::collections::HashMap<u32, Ty> = spilled.iter().copied().collect();
+    let susp_scopes: std::collections::HashMap<ExprId, Vec<(u32, Ty)>> = {
+        let no_catch_spills = std::collections::HashMap::new();
+        let mut w = ScopeWalk {
+            ir,
+            suspend_set: &suspend_set,
+            params: &[],
+            eligible: &eligible,
+            catch_spills: &no_catch_spills,
+            scope: Vec::new(),
+            pending: Vec::new(),
+            out: Default::default(),
+        };
+        w.walk_stmts(&stmts);
+        w.out
+    };
+    let mut layout = SpillLayout::default();
+    for list in susp_scopes.values() {
+        layout.add_list(list);
+    }
+
+    // Append `result`, `label`, then the positional spill slots — after the captures/parameters.
     {
         let cls = &mut ir.classes[class_id as usize];
         let mut push = |name: &str, ty: Ty| {
@@ -1740,9 +1826,8 @@ fn build_lambda_state_machine(
         };
         push("result", object_ty());
         push("label", int_ty());
-        let names = spill_field_names(&spilled);
-        for ((_, ty), name) in spilled.iter().zip(&names) {
-            push(name, ty.clone());
+        for (name, ty) in layout.fields() {
+            push(&name, ty);
         }
     }
 
@@ -1759,8 +1844,11 @@ fn build_lambda_state_machine(
         cont_id: class_id,
         field_base,
         spilled: spilled.clone(),
+        scopes: susp_scopes,
+        layout: layout.clone(),
         states: vec![Vec::new()],
         state_handlers: vec![None],
+        state_scope: vec![None],
         cur_handler: None,
         catch_var: base + 2,
         // A suspend LAMBDA's `invokeSuspend` doesn't yet model a suspending catch (the shape bails in
@@ -1795,6 +1883,7 @@ fn build_lambda_state_machine(
     );
     let states = std::mem::take(&mut flat.states);
     let state_handlers = std::mem::take(&mut flat.state_handlers);
+    let state_scopes = std::mem::take(&mut flat.state_scope);
     let catch_var = flat.catch_var;
 
     let k = |ir: &mut IrFile, e: IrExpr| ir.add_expr(e);
@@ -1806,8 +1895,6 @@ fn build_lambda_state_machine(
             index: field_base + idx,
         })
     };
-    let spill_field =
-        |local: u32| 2 + spilled.iter().position(|(l, _)| *l == local).unwrap() as u32;
 
     // Prologue: `this.result = result` (the invokeSuspend parameter is value-index 1).
     let this_p = k(ir, IrExpr::GetValue(0));
@@ -1844,16 +1931,17 @@ fn build_lambda_state_machine(
             named: false,
         },
     ));
-    for (local, ty) in spilled.clone() {
-        let this_f = k(ir, IrExpr::GetValue(0));
-        let fld = spill_field(local);
-        let init = getf(ir, this_f, fld);
-        loop_stmts.push(k(
+    // Prologue slot declarations (see the named-machine twin): every spilled local gets one
+    // zero-initialized method-scope slot per invocation.
+    let mut prologue_decls: Vec<ExprId> = Vec::new();
+    for (local, ty) in spilled.iter().copied() {
+        let z = zero_value(ir, &ty);
+        prologue_decls.push(k(
             ir,
             IrExpr::Variable {
                 index: local,
                 ty,
-                init: Some(init),
+                init: Some(z),
                 named: false,
             },
         ));
@@ -1861,6 +1949,31 @@ fn build_lambda_state_machine(
     let mut branches: Branches = Vec::new();
     for (i, st) in states.iter().enumerate() {
         let mut ss = vec![throw_on_failure(ir, r_v)];
+        // A RESUME arm restores exactly ITS suspension's scope list (kotlinc: per-arm restores).
+        if let Some(Some(list)) = state_scopes.get(i) {
+            for (local, ty, kind, pos) in kind_positions(list) {
+                let this_f = k(ir, IrExpr::GetValue(0));
+                let fld = 2 + layout.slot(kind, pos);
+                let mut init = getf(ir, this_f, fld);
+                if ty.is_reference() && ty != object_ty() {
+                    init = k(
+                        ir,
+                        IrExpr::TypeOp {
+                            op: IrTypeOp::Cast,
+                            arg: init,
+                            type_operand: ty,
+                        },
+                    );
+                }
+                ss.push(k(
+                    ir,
+                    IrExpr::SetValue {
+                        var: local,
+                        value: init,
+                    },
+                ));
+            }
+        }
         ss.extend(st.iter().copied());
         let recv = k(ir, IrExpr::GetValue(0));
         let lbl = getf(ir, recv, 1);
@@ -1958,7 +2071,9 @@ fn build_lambda_state_machine(
             },
         ));
     }
-    prologue.extend([store_result, var_suspended, while_loop]);
+    prologue.extend([store_result, var_suspended]);
+    prologue.extend(prologue_decls);
+    prologue.push(while_loop);
     let new_body = k(
         ir,
         IrExpr::Block {
@@ -2002,6 +2117,13 @@ struct Flat<'a> {
     /// `r_v` (`e = (E) r_v`) once on entry, and it is spilled/restored like any local so it survives the
     /// catch's own suspension (after which `r_v` holds the resume value, no longer the exception).
     catch_spills: std::collections::HashMap<u32, u32>,
+    /// Per-suspension lexical scope lists (kotlinc's positional-spill model, see
+    /// docs/POSITIONAL_SPILLS.md): suspend-call expr id → `params ++ in-scope locals`.
+    scopes: std::collections::HashMap<ExprId, Vec<(u32, Ty)>>,
+    /// The positional field layout (per-kind maxima over every scope list).
+    layout: SpillLayout,
+    /// Per RESUME state: the scope list its arm restores (`None` for a non-resume state).
+    state_scope: Vec<Option<Vec<(u32, Ty)>>>,
     /// Spilled locals definitely assigned on the current flatten path. `spill_all` skips a spilled var
     /// not in this set: on an exceptional edge (a `catch` body reached without the `try` body's writes)
     /// a body-only local is dead, and spilling its (coalesced, possibly wrong-typed) slot would emit a
@@ -2033,6 +2155,7 @@ impl Flat<'_> {
     fn new_state(&mut self) -> usize {
         self.states.push(Vec::new());
         self.state_handlers.push(self.cur_handler);
+        self.state_scope.push(None);
         self.states.len() - 1
     }
     fn is_spilled(&self, l: u32) -> bool {
@@ -2042,9 +2165,6 @@ impl Flat<'_> {
         if self.is_spilled(l) {
             self.assigned.insert(l);
         }
-    }
-    fn spill_field(&self, l: u32) -> u32 {
-        2 + self.spilled.iter().position(|(x, _)| *x == l).unwrap() as u32
     }
     fn setfield(&mut self, out: &mut Vec<ExprId>, idx: u32, val: ExprId) {
         let recv = self.gv(self.cont_v);
@@ -2060,14 +2180,16 @@ impl Flat<'_> {
         let v = self.add(IrExpr::Const(IrConst::Int(target as i32)));
         self.setfield(out, 1, v);
     }
-    fn spill_all(&mut self, out: &mut Vec<ExprId>) {
-        for (l, ty) in self.spilled.clone() {
-            // A spilled local not definitely assigned on this path is dead here (its slot may hold a
-            // coalesced value of another type); skip it — its field keeps a type-correct prior/default.
-            if !self.assigned.contains(&l) {
-                continue;
-            }
-            let f = self.spill_field(l);
+    /// The scope list for `call` — the snapshot from the pre-flatten walk. `None` (a shape the
+    /// walk didn't reach) fails the machine: the layout wouldn't cover it (skip, never miscompile).
+    fn scope_list_for(&self, call: ExprId) -> Option<Vec<(u32, Ty)>> {
+        self.scopes.get(&call).cloned()
+    }
+    /// Store `list` POSITIONALLY into the spill fields (kotlinc: each suspension stores its
+    /// in-scope vars at per-kind positions; different states reuse the same fields).
+    fn spill_scope(&mut self, out: &mut Vec<ExprId>, list: &[(u32, Ty)]) {
+        for (l, ty, kind, pos) in kind_positions(list) {
+            let f = 2 + self.layout.slot(kind, pos);
             // A `Unit`-typed local has no on-stack value (`gv` would underflow) — its live value across
             // the suspension is always the `Unit` singleton, so store that directly.
             let v = if ty == Ty::obj("kotlin/Unit") {
@@ -2079,7 +2201,12 @@ impl Flat<'_> {
         }
     }
     fn goto(&mut self, out: &mut Vec<ExprId>, target: usize) {
-        self.spill_all(out);
+        // No spilling: every transfer dispatches through `when(label)` WITHIN one invocation, and
+        // locals persist; only RESUME arms restore fields (stored by their suspension's spill).
+        debug_assert!(
+            self.state_scope.get(target).is_none_or(Option::is_none),
+            "goto into a resume arm would restore stale fields"
+        );
         self.set_label(out, target);
     }
     /// Emit the suspend-call sequence into `out`, transferring to state `resume` (the loop re-dispatches
@@ -2091,7 +2218,18 @@ impl Flat<'_> {
             "emit_call {call}:{:?}",
             &self.ir.exprs[call as usize]
         );
-        self.spill_all(out);
+        let Some(list) = self.scope_list_for(call) else {
+            crate::trace_compiler!(
+                "suspend",
+                "emit_call BAIL: no scope snapshot for suspend call {call}"
+            );
+            self.failed = true;
+            return;
+        };
+        self.spill_scope(out, &list);
+        if let Some(sc) = self.state_scope.get_mut(resume) {
+            *sc = Some(list);
+        }
         self.set_label(out, resume);
         let cont_arg = {
             let c = self.gv(self.cont_v);
@@ -2140,7 +2278,9 @@ impl Flat<'_> {
         self.setfield(out, 0, vg); // cont.result = v (so the resume reads the synchronous value)
     }
     /// Bind a suspension result from `cont.result` (loaded into `r`) at a resume state's entry.
-    fn bind_from_r(&mut self, out: &mut Vec<ExprId>, local: u32, ty: &Ty) {
+    /// A spilled local's slot is pre-declared in the machine PROLOGUE (zero-initialized), so assign
+    /// it; a non-spilled local is declared here.
+    fn bind_from_r(&mut self, out: &mut Vec<ExprId>, local: u32, ty: &Ty, _resume: usize) {
         crate::trace_compiler!(
             "suspend",
             "bind_from_r local={local} ty={ty:?} spilled={}",
@@ -2318,7 +2458,7 @@ impl Flat<'_> {
                 let br_resume = self.new_state();
                 self.emit_call(&mut bb, *value, br_resume);
                 let mut rs: Vec<ExprId> = Vec::new();
-                self.bind_from_r(&mut rs, local, ty);
+                self.bind_from_r(&mut rs, local, ty, br_resume);
                 self.goto(&mut rs, merge);
                 self.states[br_resume] = rs;
             } else {
@@ -2480,7 +2620,7 @@ impl Flat<'_> {
                 self.states[cur] = out;
                 let mut rs: Vec<ExprId> = Vec::new();
                 if let Some((local, ty)) = bind {
-                    self.bind_from_r(&mut rs, local, &ty);
+                    self.bind_from_r(&mut rs, local, &ty, resume);
                 }
                 self.states[resume] = rs;
                 self.flatten(&stmts[i + 1..], resume, after);
@@ -2917,6 +3057,32 @@ fn stmt_writes(ir: &IrFile, e: ExprId, idx: u32) -> bool {
     found
 }
 
+/// Whether EVERY read of `idx` under `stmt` sits inside a suspend-call subtree (the call's
+/// receiver/arguments — all evaluated BEFORE the suspension), so no read can observe a resume.
+fn reads_only_in_suspension_args(
+    ir: &IrFile,
+    stmt: ExprId,
+    idx: u32,
+    suspend_set: &HashSet<u32>,
+) -> bool {
+    fn walk(ir: &IrFile, e: ExprId, idx: u32, suspend_set: &HashSet<u32>, outside: &mut bool) {
+        if is_suspend_call(ir, e, suspend_set) {
+            // Everything below evaluates before the suspension — reads here are safe.
+            return;
+        }
+        if matches!(ir.exprs[e as usize], IrExpr::GetValue(i) if i == idx) {
+            *outside = true;
+            return;
+        }
+        for_each_child(&ir.exprs, e, &mut |c| {
+            walk(ir, c, idx, suspend_set, outside)
+        });
+    }
+    let mut outside = false;
+    walk(ir, stmt, idx, suspend_set, &mut outside);
+    !outside
+}
+
 /// Whether the subtree under `e` reads local `idx` (a `GetValue(idx)` node).
 fn expr_reads(ir: &IrFile, e: ExprId, idx: u32) -> bool {
     if matches!(ir.exprs[e as usize], IrExpr::GetValue(i) if i == idx) {
@@ -2954,6 +3120,148 @@ fn count_suspensions(ir: &IrFile, e: ExprId, suspend_set: &HashSet<u32>) -> usiz
         n += count_suspensions(ir, c, suspend_set);
     });
     n
+}
+
+/// Per-suspension lexical scope snapshots (kotlinc's positional-spill model, see
+/// docs/POSITIONAL_SPILLS.md): one walk of the FINAL (post-hoist) body, tracking the eligible
+/// locals in scope; every suspend-call expression id maps to `params ++ in-scope entries` in
+/// declaration order. A NAMED local is included whenever lexically in scope (kotlinc's scope
+/// rule); an unnamed TEMP only while LIVE — some read of it can still run after the suspension
+/// (the `pending` context: every not-yet-walked statement of the enclosing lists, plus the whole
+/// enclosing loops, which re-run their subtrees on the back-edge). A catch variable remapped to a
+/// spill local (`catch_spills`: cvar → ev) is in scope inside its catch body (named — it must
+/// survive its body's own suspensions).
+struct ScopeWalk<'a> {
+    ir: &'a IrFile,
+    suspend_set: &'a HashSet<u32>,
+    params: &'a [(u32, Ty)],
+    eligible: &'a std::collections::HashMap<u32, Ty>,
+    catch_spills: &'a std::collections::HashMap<u32, u32>,
+    /// (local, ty, named)
+    scope: Vec<(u32, Ty, bool)>,
+    /// Exprs that may still execute after the current walk point (rest-of-list statements, whole
+    /// enclosing loops).
+    pending: Vec<ExprId>,
+    out: std::collections::HashMap<ExprId, Vec<(u32, Ty)>>,
+}
+
+impl ScopeWalk<'_> {
+    fn push_decl(&mut self, st: ExprId) {
+        if let IrExpr::Variable { index, named, .. } = self.ir.exprs[st as usize] {
+            if let Some(ty) = self.eligible.get(&index) {
+                if !self.scope.iter().any(|(l, _, _)| *l == index) {
+                    self.scope.push((index, *ty, named));
+                }
+            }
+        }
+    }
+    fn snapshot(&mut self, call: ExprId) {
+        let mut list: Vec<(u32, Ty)> = self.params.to_vec();
+        for &(l, ty, named) in &self.scope {
+            let live = named || self.pending.iter().any(|&p| expr_reads(self.ir, p, l));
+            if live {
+                list.push((l, ty));
+            }
+        }
+        self.out.insert(call, list);
+    }
+    fn walk_stmts(&mut self, stmts: &[ExprId]) {
+        let base = self.scope.len();
+        for (i, &st) in stmts.iter().enumerate() {
+            let pbase = self.pending.len();
+            self.pending.extend_from_slice(&stmts[i + 1..]);
+            self.walk(st);
+            self.pending.truncate(pbase);
+            self.push_decl(st);
+        }
+        self.scope.truncate(base);
+    }
+    fn walk(&mut self, e: ExprId) {
+        if is_suspend_call(self.ir, e, self.suspend_set) {
+            self.snapshot(e);
+        }
+        match self.ir.exprs[e as usize].clone() {
+            IrExpr::Block { stmts, value } => {
+                let base = self.scope.len();
+                if let Some(v) = value {
+                    let pbase = self.pending.len();
+                    self.pending.push(v);
+                    self.walk_stmts(&stmts);
+                    self.pending.truncate(pbase);
+                    // The trailing value sees the block's declarations.
+                    for &st in &stmts {
+                        self.push_decl(st);
+                    }
+                    self.walk(v);
+                } else {
+                    self.walk_stmts(&stmts);
+                }
+                self.scope.truncate(base);
+            }
+            IrExpr::When { branches } => {
+                for (c, body) in branches {
+                    if let Some(c) = c {
+                        self.walk(c);
+                    }
+                    let base = self.scope.len();
+                    self.walk(body);
+                    self.scope.truncate(base);
+                }
+            }
+            IrExpr::While {
+                cond, body, update, ..
+            } => {
+                // Inside the loop, its WHOLE subtree may re-run on the back-edge.
+                let pbase = self.pending.len();
+                self.pending.push(e);
+                self.walk(cond);
+                let base = self.scope.len();
+                self.walk(body);
+                if let Some(u) = update {
+                    self.walk(u);
+                }
+                self.scope.truncate(base);
+                self.pending.truncate(pbase);
+            }
+            IrExpr::Try {
+                body,
+                catches,
+                finally,
+                ..
+            } => {
+                let base = self.scope.len();
+                self.walk(body);
+                self.scope.truncate(base);
+                for c in catches {
+                    let base = self.scope.len();
+                    // The catch variable — remapped to its exception-spill local when the body
+                    // suspends — is in scope (named) for the catch body.
+                    if let Some(&ev) = self.catch_spills.get(&c.var) {
+                        if let Some(ty) = self.eligible.get(&ev) {
+                            self.scope.push((ev, *ty, true));
+                        }
+                    }
+                    self.walk(c.body);
+                    self.scope.truncate(base);
+                }
+                if let Some(f) = finally {
+                    self.walk(f);
+                }
+            }
+            IrExpr::Variable {
+                init: Some(init), ..
+            } => {
+                self.walk(init);
+            }
+            _ => {
+                let mut children: Vec<ExprId> = Vec::new();
+                for_each_child(&self.ir.exprs, e, &mut |c| children.push(c));
+                for c in children {
+                    self.walk(c);
+                }
+            }
+        }
+    }
 }
 
 /// Every NAMED source variable (`IrExpr::Variable { named: true, .. }`) declared anywhere under `e`
@@ -3208,13 +3516,15 @@ fn build_continuation_class(
     ir: &mut IrFile,
     internal: &str,
     outer_fid: u32,
-    spilled: &[(u32, Ty)],
+    layout: &SpillLayout,
+    _param_caps: &[(u32, Ty)],
     receiver: Option<&str>,
     params: &[Ty],
 ) -> ClassId {
     let class_id = ir.classes.len() as ClassId;
-    // result(0), label(1), spilled(2..), and — for a member — the captured receiver `this$0` last.
-    let recv_field_idx = 2 + spilled.len() as u32;
+    let layout_fields = layout.fields();
+    // result(0), label(1), spill slots(2..), and — for a member — the captured receiver `this$0` last.
+    let recv_field_idx = 2 + layout_fields.len() as u32;
 
     // invokeSuspend(Object result): this.result = result; this.label |= MIN_VALUE; re-enter the outer
     // function. For a top-level fn that's `outer(this)`; for a member it's `this.this$0.m(this)`.
@@ -3373,14 +3683,10 @@ fn build_continuation_class(
             ..crate::ir::IrField::new("label".to_string(), int_ty())
         },
     ];
-    let spill_names = spill_field_names(spilled);
-    for ((_, ty), name) in spilled.iter().zip(&spill_names) {
-        // A REFERENCE spill slot is `Object`-typed (kotlinc's `L$N` layout) — the loop-top restore
-        // `checkcast`s it back to the local's real type. A primitive keeps its own type.
-        let field_ty = if ty.is_reference() { object_ty() } else { *ty };
+    for (name, field_ty) in &layout_fields {
         fields.push(crate::ir::IrField {
             is_private: false,
-            ..crate::ir::IrField::new(name.clone(), field_ty)
+            ..crate::ir::IrField::new(name.clone(), *field_ty)
         });
     }
 
@@ -3685,34 +3991,95 @@ fn ensure_tail_return(ir: &mut IrFile, body: ExprId, unit_ret: bool) {
 /// The continuation-field type for a spilled local. A `Unit`-typed local spills as the `kotlin/Unit`
 /// object reference — a JVM field cannot carry the `void` ("V") descriptor that `Ty::Unit` produces, and
 /// the live value across the suspension is the `Unit` singleton.
-/// kotlinc names spill fields PER KIND with independent counters: references share `L$0..`, ints
-/// `I$0..`, longs `J$0..`, floats `F$0..`, doubles `D$0..`, and the sub-int primitives their own
-/// letters (`Z$`/`C$`/`B$`/`S$`). One field name per `spilled` entry, in order.
-fn spill_field_names(spilled: &[(u32, Ty)]) -> Vec<String> {
+/// The per-kind spill field letter (kotlinc: references `L$`, ints `I$`, longs `J$`, …).
+fn spill_kind(ty: &Ty) -> char {
+    if ty.is_reference() {
+        'L'
+    } else {
+        match ty {
+            Ty::Long => 'J',
+            Ty::Float => 'F',
+            Ty::Double => 'D',
+            Ty::Boolean => 'Z',
+            Ty::Char => 'C',
+            Ty::Byte => 'B',
+            Ty::Short => 'S',
+            _ => 'I',
+        }
+    }
+}
+
+/// Fixed kind order for field layout (names within a kind are positional: `L$0..`, `I$0..`).
+const SPILL_KIND_ORDER: [char; 9] = ['L', 'I', 'J', 'F', 'D', 'Z', 'C', 'B', 'S'];
+
+/// Annotate each scope-list entry with its kind and position WITHIN that kind (kotlinc's
+/// per-suspension positional slot).
+fn kind_positions(list: &[(u32, Ty)]) -> Vec<(u32, Ty, char, u32)> {
     let mut counts: std::collections::HashMap<char, u32> = std::collections::HashMap::new();
-    spilled
-        .iter()
-        .map(|(_, ty)| {
-            let k = if ty.is_reference() {
-                'L'
-            } else {
-                match ty {
-                    Ty::Long => 'J',
-                    Ty::Float => 'F',
-                    Ty::Double => 'D',
-                    Ty::Boolean => 'Z',
-                    Ty::Char => 'C',
-                    Ty::Byte => 'B',
-                    Ty::Short => 'S',
-                    _ => 'I',
-                }
-            };
-            let n = counts.entry(k).or_insert(0);
-            let name = format!("{k}${n}");
-            *n += 1;
-            name
+    list.iter()
+        .map(|&(l, ty)| {
+            let k = spill_kind(&ty);
+            let c = counts.entry(k).or_insert(0);
+            let pos = *c;
+            *c += 1;
+            (l, ty, k, pos)
         })
         .collect()
+}
+
+/// The positional spill-field layout: per-kind maxima over every suspension's scope list.
+#[derive(Clone, Default)]
+struct SpillLayout {
+    max: std::collections::HashMap<char, u32>,
+}
+
+impl SpillLayout {
+    fn add_list(&mut self, list: &[(u32, Ty)]) {
+        let mut counts: std::collections::HashMap<char, u32> = std::collections::HashMap::new();
+        for (_, ty) in list {
+            *counts.entry(spill_kind(ty)).or_insert(0) += 1;
+        }
+        for (k, c) in counts {
+            let e = self.max.entry(k).or_insert(0);
+            if c > *e {
+                *e = c;
+            }
+        }
+    }
+    /// Field index of `(kind, pos)` RELATIVE to the first spill field (caller adds `result`/`label`
+    /// offset + `field_base`).
+    fn slot(&self, kind: char, pos: u32) -> u32 {
+        let mut off = 0u32;
+        for &k in &SPILL_KIND_ORDER {
+            if k == kind {
+                return off + pos;
+            }
+            off += self.max.get(&k).copied().unwrap_or(0);
+        }
+        off + pos
+    }
+    /// `(name, field type)` for every spill field, kind-ordered (`L$0.., I$0.., …`).
+    fn fields(&self) -> Vec<(String, Ty)> {
+        let mut out = Vec::new();
+        for &k in &SPILL_KIND_ORDER {
+            let n = self.max.get(&k).copied().unwrap_or(0);
+            let ty = match k {
+                'L' => object_ty(),
+                'J' => Ty::Long,
+                'F' => Ty::Float,
+                'D' => Ty::Double,
+                'Z' => Ty::Boolean,
+                'C' => Ty::Char,
+                'B' => Ty::Byte,
+                'S' => Ty::Short,
+                _ => Ty::Int,
+            };
+            for i in 0..n {
+                out.push((format!("{k}${i}"), ty));
+            }
+        }
+        out
+    }
 }
 
 fn spill_field_ty(ty: Ty) -> Ty {

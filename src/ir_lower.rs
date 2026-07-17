@@ -13229,7 +13229,9 @@ impl<'a> Lower<'a> {
         };
         let mutex_slot = self.fresh_value();
         let recv = self.expr(receiver)?;
-        let var_mutex = self.emit_variable(mutex_slot, ty_to_ir(mutex_ty), Some(recv));
+        // NAMED: kotlinc's spliced `withLock` binds the receiver as the named inline local
+        // `$this$withLock…` — in scope (and spilled) at every suspension inside the lock body.
+        let var_mutex = self.emit_named_variable(mutex_slot, ty_to_ir(mutex_ty), Some(recv));
         let m1 = self.emit_get_value(mutex_slot);
         let null1 = self.emit_const(IrConst::Null);
         let lock_call = self.emit_virtual_call(
