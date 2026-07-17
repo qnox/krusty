@@ -3931,8 +3931,7 @@ fn ty_of_ref_with(
 /// Result of typechecking a file: the type assigned to every expression node.
 pub struct TypeInfo {
     pub expr_types: Vec<Ty>,
-    /// Selected expression lowerings that cannot be recovered from the expression shape alone: classpath
-    /// object value reads and classpath extension-property getter calls.
+    /// Selected expression lowerings that cannot be recovered from the expression shape alone.
     pub expr_lowers: HashMap<ExprId, ExprLowering>,
     /// Selected statement lowerings that differ from the parser's generic statement shape.
     pub stmt_lowers: HashMap<StmtId, StmtLowering>,
@@ -4065,6 +4064,9 @@ pub enum InlineCall {
 pub enum ExprLowering {
     /// A call or function reference resolved to a local function declaration.
     LocalFunction { stmt_id: StmtId },
+    /// A classpath top-level function reference (`::foo`) resolved by the checker. Lowering reads the
+    /// callable instead of resolving the reference again.
+    ClasspathTopLevelFunctionRef(crate::libraries::LibraryCallable),
     /// An unqualified function reference `::foo` where `foo` is imported from a SAME-FILE `object`
     /// (`import Host.foo`) — a BOUND reference to that object's singleton member, lowered exactly like
     /// `Host::foo` (capture `Host.INSTANCE`, invoke the member).
@@ -9226,6 +9228,10 @@ impl<'a> Checker<'a> {
                             if o.call_sig.requires_all_args(o.callable.params.len())
                                 && o.callable.ret != Ty::Nothing
                             {
+                                self.expr_lowers.insert(
+                                    e,
+                                    ExprLowering::ClasspathTopLevelFunctionRef(o.callable.clone()),
+                                );
                                 return self
                                     .set(e, Ty::fun(o.callable.params.clone(), o.callable.ret));
                             }
@@ -14619,16 +14625,30 @@ mod tests {
 
     impl crate::symbol_source::SymbolSource for FakeMemberPlatform {
         fn resolve_symbols(&self, fqn: &str) -> crate::libraries::ResolvedSymbols {
-            if fqn != "knownTop" {
-                return crate::libraries::ResolvedSymbols::default();
-            }
+            let (owner, name, params, ret, descriptor) = match fqn {
+                "knownTop" => (
+                    "test/TopKt",
+                    "knownTop",
+                    vec![Ty::String, Ty::Int],
+                    Ty::String,
+                    "(Ljava/lang/String;I)Ljava/lang/String;",
+                ),
+                "Foo" => (
+                    "test/TopKt",
+                    "Foo",
+                    vec![Ty::String],
+                    Ty::String,
+                    "(Ljava/lang/String;)Ljava/lang/String;",
+                ),
+                _ => return crate::libraries::ResolvedSymbols::default(),
+            };
             let callable = crate::libraries::LibraryCallable::library(
-                "test/TopKt",
-                "knownTop",
-                vec![Ty::String, Ty::Int],
+                owner,
+                name,
+                params,
                 Ty::String,
-                Ty::String,
-                "(Ljava/lang/String;I)Ljava/lang/String;",
+                ret,
+                descriptor,
             );
             let mut info = crate::libraries::FunctionInfo::plain(
                 crate::libraries::FnKind::TopLevel,
@@ -14636,8 +14656,12 @@ mod tests {
                 callable,
             );
             info.call_sig = CallSig {
-                param_names: vec!["a".to_string(), "b".to_string()],
-                required: 2,
+                param_names: if name == "knownTop" {
+                    vec!["a".to_string(), "b".to_string()]
+                } else {
+                    vec!["s".to_string()]
+                },
+                required: if name == "knownTop" { 2 } else { 1 },
                 ..Default::default()
             };
             crate::libraries::ResolvedSymbols {
@@ -15006,6 +15030,79 @@ mod tests {
             })
             .collect();
         assert_eq!(values, vec![Some("x".to_string()), Some("2".to_string())]);
+    }
+
+    #[test]
+    fn classpath_top_level_function_refs_record_callable_for_lowering() {
+        let mut d = DiagSink::new();
+        let file = parse_file("val ref = ::knownTop", &mut d);
+        let files = vec![file];
+        let mut syms = collect_signatures_with_cp(&files, Box::new(FakeMemberPlatform), &mut d);
+        let info = check_file(&files[0], &mut syms, &mut d);
+        assert!(
+            d.diags.is_empty(),
+            "unexpected diagnostics: {:?}",
+            d.diags.iter().map(|x| &x.msg).collect::<Vec<_>>()
+        );
+
+        let function_ref = files[0]
+            .expr_arena
+            .iter()
+            .enumerate()
+            .find_map(|(idx, expr)| match expr {
+                Expr::CallableRef {
+                    receiver: None,
+                    name,
+                } if name == "knownTop" => Some(ExprId(idx as u32)),
+                _ => None,
+            })
+            .expect("source should contain ::knownTop");
+        let Some(ExprLowering::ClasspathTopLevelFunctionRef(callable)) =
+            info.expr_lowers.get(&function_ref)
+        else {
+            panic!("checker must record classpath top-level function refs for lowering");
+        };
+        assert_eq!(callable.owner, "test/TopKt");
+        assert_eq!(callable.name, "knownTop");
+        assert_eq!(callable.params, vec![Ty::String, Ty::Int]);
+    }
+
+    #[test]
+    fn constructor_refs_are_not_shadowed_by_same_named_classpath_functions() {
+        let mut d = DiagSink::new();
+        let file = parse_file("class Foo(val i: Int)\nval ref = ::Foo", &mut d);
+        let files = vec![file];
+        let mut syms = collect_signatures_with_cp(&files, Box::new(FakeMemberPlatform), &mut d);
+        let info = check_file(&files[0], &mut syms, &mut d);
+        assert!(
+            d.diags.is_empty(),
+            "unexpected diagnostics: {:?}",
+            d.diags.iter().map(|x| &x.msg).collect::<Vec<_>>()
+        );
+
+        let constructor_ref = files[0]
+            .expr_arena
+            .iter()
+            .enumerate()
+            .find_map(|(idx, expr)| match expr {
+                Expr::CallableRef {
+                    receiver: None,
+                    name,
+                } if name == "Foo" => Some(ExprId(idx as u32)),
+                _ => None,
+            })
+            .expect("source should contain ::Foo");
+        assert_eq!(
+            info.expr_types[constructor_ref.0 as usize],
+            Ty::fun(vec![Ty::Int], Ty::obj("Foo"))
+        );
+        assert!(
+            !matches!(
+                info.expr_lowers.get(&constructor_ref),
+                Some(ExprLowering::ClasspathTopLevelFunctionRef(_))
+            ),
+            "constructor refs must not record a classpath top-level callable"
+        );
     }
 
     #[test]
