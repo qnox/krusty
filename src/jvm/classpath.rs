@@ -1518,6 +1518,12 @@ impl Classpath {
             };
             if let Some(b) = bytes {
                 if let Ok(ci) = parse_class(&b) {
+                    // A DIRECTORY entry on a case-INSENSITIVE filesystem (macOS APFS) happily serves
+                    // `java/lang/error.class` for `Error.class` — verify the parsed class IS the
+                    // requested one (JVM names are case-sensitive; `error` must not resolve to `Error`).
+                    if ci.this_class != internal {
+                        continue;
+                    }
                     found = Some(std::sync::Arc::new(ci));
                     break;
                 }
@@ -1540,7 +1546,11 @@ impl Classpath {
         let name = format!("{internal}.class");
         for e in &self.entries {
             let bytes = match e {
-                Entry::Dir(d) => std::fs::read(d.join(&name)).ok(),
+                Entry::Dir(d) => std::fs::read(d.join(&name)).ok().filter(|b| {
+                    // Case-insensitive-filesystem guard (see `find`): the served file must BE the
+                    // requested class, not a case-collided sibling.
+                    parse_class(b).is_ok_and(|ci| ci.this_class == internal)
+                }),
                 Entry::Jar(j) => self.jar_entry(j, &name),
                 Entry::Jimage(_) => self.jimage_bytes(internal),
             };
