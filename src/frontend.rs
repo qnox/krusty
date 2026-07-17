@@ -13,7 +13,8 @@ pub use crate::resolve::{check_file, collect_signatures, collect_signatures_with
 pub(crate) use crate::resolve::{
     function_scope_packages, map_param_list_args, pick_overload, qualified_path, typeref_leaf,
     ClassNames, CtorDefaultValue, DelegateGetValueTarget, ExprLowering, InlineCall, InvokeKind,
-    LambdaCapture, LambdaInfo, ReceiverLambda, ResolvedCall, Signature, StmtLowering,
+    LambdaCapture, LambdaInfo, ReceiverLambda, ResolvedCall, ResolvedLocalFunctionCall, Signature,
+    StmtLowering,
 };
 
 /// A single parsed file together with the frontend facts needed by a backend.
