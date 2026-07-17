@@ -1,12 +1,12 @@
 //! Normalized bytecode differential: krusty vs the real kotlinc.
 //!
 //! The `box()=OK` conformance gate proves *runtime* correctness; this tool measures the project's
-//! harder goal — emitting the SAME bytecode kotlinc does. It compiles each box-corpus file with both
+//! harder goal: emitting the same bytecode kotlinc does. It compiles each box-corpus file with both
 //! compilers, then compares per-class disassembly (`javap -c -p`) after normalizing away the noise
 //! that differs without changing semantics (constant-pool indices, bytecode offsets). Two classes that
 //! normalize equal have the same method signatures and the same instruction sequences.
 //!
-//! Opt-in (slow: one kotlinc JVM launch per file) — NOT part of the <60s test gate.
+//! Opt-in and slow: one kotlinc JVM launch per file. Not part of the normal test gate.
 //!
 //! Usage:
 //!   KRUSTY_KOTLINC=<kotlinc> KRUSTY_SURVEY_STDLIB=<kotlin-stdlib.jar> \
@@ -14,6 +14,7 @@
 //!   cargo run --release --bin bytediff -- <box_dir> [limit] [--samples]
 
 use krusty::diag::DiagSink;
+use krusty::frontend::{check_file, collect_signatures_with_cp};
 use krusty::ir_lower::lower_file;
 use krusty::jvm::classpath::Classpath;
 use krusty::jvm::ir_emit::emit_all;
@@ -21,12 +22,11 @@ use krusty::jvm::jvm_libraries::JvmLibraries;
 use krusty::jvm::names::file_class_name;
 use krusty::lexer::lex;
 use krusty::parser::parse;
-use krusty::resolve::{check_file, collect_signatures_with_cp};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::rc::Rc;
 
-/// Compile one source with krusty's full pipeline → `(internal_name, class_bytes)` list, or `None` if
+/// Compile one source with krusty's full pipeline into `(internal_name, class_bytes)` entries, or `None` if
 /// krusty can't compile it (then there's nothing to diff).
 fn krusty_compile(src: &str, stem: &str, cp: &Rc<Classpath>) -> Option<Vec<(String, Vec<u8>)>> {
     let mut d = DiagSink::new();
@@ -47,7 +47,7 @@ fn krusty_compile(src: &str, stem: &str, cp: &Rc<Classpath>) -> Option<Vec<(Stri
     let facade = file_class_name(stem, files[0].package.as_deref());
     let runtime = JvmLibraries::new(cp.clone());
     let mut ir = lower_file(&files[0], &info, &syms, &runtime)?;
-    // Shared post-lowering pass pipeline (jvm/backend.rs); unlowerable shape → nothing to diff.
+    // Shared post-lowering pass pipeline (jvm/backend.rs).
     krusty::jvm::backend::run_backend_passes(&mut ir, &files[0], &facade, &syms).ok()?;
     let out = emit_all(&ir, &facade, &**cp, None)?;
     if out.is_empty() {
@@ -58,7 +58,7 @@ fn krusty_compile(src: &str, stem: &str, cp: &Rc<Classpath>) -> Option<Vec<(Stri
 }
 
 /// Normalize `javap -c -p` output so semantically-equal bytecode compares equal: drop the source-file
-/// banner, the per-instruction bytecode offset (`  12: `), and constant-pool index tokens (`#21`) —
+/// banner, the per-instruction bytecode offset (`  12: `), and constant-pool index tokens (`#21`),
 /// keeping the access flags, descriptors, instruction mnemonics, operands, and javap's resolved
 /// `// Method …`/`// String …` comments (the semantic content the pool index points at).
 fn normalize_javap(out: &str) -> String {
@@ -76,7 +76,7 @@ fn normalize_javap(out: &str) -> String {
             }
             _ => trimmed,
         };
-        // Remove `#<digits>` constant-pool index tokens (e.g. `invokevirtual #21  // …` → `invokevirtual  // …`).
+        // Remove `#<digits>` constant-pool index tokens.
         let mut cleaned = String::with_capacity(body.len());
         let bytes = body.as_bytes();
         let mut i = 0;
@@ -193,7 +193,7 @@ fn main() {
         }
         let stem = f.file_stem().and_then(|s| s.to_str()).unwrap_or("File");
         let Some(krusty_classes) = krusty_compile(&src, stem, &cp) else {
-            continue; // krusty can't compile it — not a bytecode diff, it's a coverage gap
+            continue;
         };
 
         // Compile the same source with the real kotlinc.
@@ -207,7 +207,7 @@ fn main() {
             .output();
         match kc {
             Ok(o) if o.status.success() => {}
-            _ => continue, // kotlinc rejected it (directive/feature) — nothing to compare against
+            _ => continue,
         }
 
         files_diffed += 1;

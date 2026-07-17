@@ -1,11 +1,11 @@
-//! In-process IR-lowering bail tally (untracked dev tool). One process, no classpath scan — fast.
+//! In-process IR-lowering bail tally. One process, no classpath scan.
 //! Iterates a box dir, runs the frontend, and counts which files `lower_file` bails on. For backend
 //! lowering traces, build with `--features trace` and set `KRUSTY_TRACE=lower`.
 use krusty::diag::DiagSink;
+use krusty::frontend::{check_file, collect_signatures};
 use krusty::ir_lower::lower_file;
 use krusty::lexer::lex;
 use krusty::parser::parse;
-use krusty::resolve::{check_file, collect_signatures};
 use std::path::{Path, PathBuf};
 
 fn collect(dir: &Path, out: &mut Vec<PathBuf>) {

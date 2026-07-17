@@ -1,4 +1,5 @@
 use krusty::diag::DiagSink;
+use krusty::frontend::{check_file, collect_signatures_with_cp, FrontendSymbols};
 use krusty::ir::IrFile;
 use krusty::ir_lower::lower_file;
 use krusty::jvm::classpath::Classpath;
@@ -6,7 +7,6 @@ use krusty::jvm::ir_emit::emit_all;
 use krusty::jvm::jvm_libraries::JvmLibraries;
 use krusty::jvm::names::file_class_name;
 use krusty::lexer::lex;
-use krusty::resolve::{check_file, collect_signatures_with_cp};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -54,9 +54,9 @@ class ResultContinuation : Continuation<Any?> {
 }
 "#;
 
-/// Run the FULL pipeline (lex→parse→sigs→check→lower→value-classes→emit) against the real
-/// classpath (stdlib + JDK `lib/modules`), so skip reasons match the conformance harness — not a
-/// stdlib-less front-end-only approximation. Returns the first error (with a stage prefix for the
+/// Run the full pipeline against the real classpath (stdlib + JDK `lib/modules`), so skip reasons
+/// match the conformance harness instead of a stdlib-less approximation. Returns the first error
+/// with a stage prefix for the
 /// silent lower/emit bailouts that carry no diagnostic).
 fn first_error(src: &str, cp: &Rc<Classpath>, stem: &str) -> Option<String> {
     let mut d = DiagSink::new();
@@ -90,10 +90,10 @@ fn emit_checked_ir(
     ir: &mut IrFile,
     file: &krusty::ast::File,
     facade: &str,
-    syms: &krusty::resolve::SymbolTable,
+    syms: &FrontendSymbols,
     cp: &Rc<Classpath>,
 ) -> Option<String> {
-    // Shared post-lowering pass pipeline (jvm/backend.rs) — one definition, so the survey's skip
+    // Shared post-lowering pass pipeline (jvm/backend.rs), so the survey's skip
     // reasons track exactly what the shipping backend declines.
     match krusty::jvm::backend::run_backend_passes(ir, file, facade, syms) {
         Err(krusty::jvm::backend::SkipReason::ValueClasses) => {
@@ -237,12 +237,9 @@ fn main() {
         None
     };
 
-    // Classpath: built PER FILE from its directives via the shared `krusty::toolchain` — the SAME
-    // code path (and thus the same kotlin-stdlib family + Maven fallback) the conformance gate and the
-    // e2e tests use. Reusing it means the survey can't drift from the gate by reimplementing jar
-    // location (the drift that once dropped the core `kotlin-stdlib.jar`, turning `mutableListOf`/
-    // `listOf`/`assertEquals` into false "unresolved" blockers). The JDK `lib/modules` bootclasspath is
-    // appended so `java.*` resolves. Each distinct jar-set gets one cached `Classpath` (warm indexes).
+    // Build each classpath from source directives through the shared `toolchain` path used by
+    // conformance and e2e tests. The JDK `lib/modules` bootclasspath is appended so `java.*`
+    // resolves, and each distinct jar-set gets one cached `Classpath`.
     let jdk_modules = krusty::toolchain::jdk_modules();
     let mut cp_cache: HashMap<Vec<PathBuf>, Rc<Classpath>> = HashMap::new();
 
@@ -260,8 +257,8 @@ fn main() {
         if !src.contains("fun box()") {
             continue;
         }
-        // INDY-lambda mode isn't modeled by this front-end-only survey; otherwise defer ALL backend
-        // applicability to the shared `conformance` directive logic (same as the gate — no drift).
+        // INDY-lambda mode is outside this survey; otherwise defer backend
+        // applicability to the shared `conformance` directive logic.
         if src.contains("// LAMBDAS: INDY") || !krusty::conformance::applies(&src) {
             continue;
         }
