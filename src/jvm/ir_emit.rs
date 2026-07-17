@@ -908,6 +908,9 @@ fn emit_class(
     if is_abstract {
         access |= 0x0400;
     } // ABSTRACT
+    if ir.synthetic_classes.contains(&c.fq_name) {
+        access |= 0x1000;
+    } // ACC_SYNTHETIC (a `$$serializer` object)
     cw.set_access(access);
     let raw_class_sig = ir.class_signatures.get(&c.fq_name);
     let jvm_sig = raw_class_sig.and_then(jvm_class_signature);
@@ -1377,7 +1380,8 @@ fn emit_class(
         sctor.link();
         // A SEALED class's secondary ctor is private too, with its own PUBLIC
         // `(…args, DefaultConstructorMarker)` accessor (kotlinc: EVERY sealed ctor pairs with one).
-        let sc_access = if c.is_sealed { 0x0002 } else { 0x0001 };
+        let sc_access =
+            (if c.is_sealed { 0x0002 } else { 0x0001 }) | if sc.synthetic { 0x1000 } else { 0 };
         cw.add_method(
             sc_access,
             "<init>",
@@ -3436,6 +3440,11 @@ fn emit_method_inner(
     let access = access
         | if ir.synthetic_methods.contains(&fid) {
             0x1000
+        } else {
+            0
+        }
+        | if ir.bridge_methods.contains(&fid) {
+            0x0040 // ACC_BRIDGE
         } else {
             0
         };

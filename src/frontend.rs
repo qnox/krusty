@@ -26,6 +26,9 @@ pub struct CheckedFile<'a> {
     pub file_index: u32,
     pub info: &'a FrontendTypeInfo,
     pub symbols: &'a FrontendSymbols,
+    /// The compilation's module name (kotlinc `-module-name`), for the serialization plugin's
+    /// `write$Self$<module>` helper. `"main"` by default.
+    pub module_name: &'a str,
 }
 
 /// Lex and parse one source string with an explicit feature set.

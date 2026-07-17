@@ -3307,6 +3307,7 @@ pub fn lower_file_at(
                             delegate_args: dargs,
                             body,
                             delegate,
+                            synthetic: false,
                         });
                     }
                     lo.ir.classes[class_id as usize].secondary_ctors = secs;
