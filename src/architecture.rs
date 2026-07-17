@@ -40,10 +40,7 @@ mod tests {
 
     #[test]
     fn lsp_facade_uses_only_frontend_analysis_dependencies() {
-        assert_allowed_crate_modules(
-            "src/lsp.rs",
-            &["ast", "diag", "frontend", "libraries", "resolve"],
-        );
+        assert_allowed_crate_modules("src/lsp.rs", &["ast", "diag", "frontend", "libraries"]);
     }
 
     #[test]

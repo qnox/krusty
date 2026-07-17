@@ -2,9 +2,8 @@
 
 use crate::ast::File;
 use crate::diag::{DiagSink, Diagnostic};
-use crate::frontend;
+use crate::frontend::{self, FrontendSymbols, FrontendTypeInfo};
 use crate::libraries::SemanticPlatform;
-use crate::resolve::{SymbolTable, TypeInfo};
 
 #[derive(Clone, Debug)]
 pub struct Document {
@@ -24,8 +23,8 @@ impl Document {
 pub struct Analysis {
     pub uri: String,
     pub file: File,
-    pub symbols: Option<SymbolTable>,
-    pub types: Option<TypeInfo>,
+    pub symbols: Option<FrontendSymbols>,
+    pub types: Option<FrontendTypeInfo>,
     pub diagnostics: Vec<Diagnostic>,
 }
 
