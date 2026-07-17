@@ -41,9 +41,8 @@ fn array_kotlin_fq(ty: Ty) -> Option<&'static str> {
     }
 }
 
-/// The JVM platform's contribution to Kotlin's default imports (the LANGUAGE-level `kotlin.*` set lives
-/// in [`crate::resolve::KOTLIN_DEFAULT_IMPORT_PACKAGES`]; the two are composed in `import_wildcards` and
-/// in the seed filter, so neither list is duplicated).
+/// The JVM platform's contribution to Kotlin's default imports. The language-level `kotlin.*` set is
+/// composed with this list in `import_wildcards` and in the seed filter, so neither list is duplicated.
 const PLATFORM_DEFAULT_IMPORT_PACKAGES: &[&str] = &["java.lang", "kotlin.jvm"];
 
 /// A platform backed by a JVM classpath (dirs + jars + the JDK jimage). The classpath is shared

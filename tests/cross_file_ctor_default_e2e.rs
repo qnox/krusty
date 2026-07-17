@@ -8,8 +8,8 @@
 use super::common;
 
 use krusty::diag::DiagSink;
+use krusty::frontend::{check_file, collect_signatures_with_cp};
 use krusty::jvm::names::file_class_name;
-use krusty::resolve::{check_file, collect_signatures_with_cp};
 
 /// Compile two sources as one module (mirrors the conformance harness's `compile_multifile`): parse
 /// each, collect signatures across BOTH, then check + lower + emit each file.

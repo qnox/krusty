@@ -59,7 +59,6 @@ mod tests {
             "module_symbols",
             "names",
             "plugins",
-            "resolve",
             "runtime",
             "symbol_resolver",
             "symbol_source",
@@ -215,6 +214,35 @@ mod tests {
     }
 
     #[test]
+    fn integration_tests_use_only_public_compiler_layer_dependencies() {
+        assert_allowed_external_crate_modules_in_tree(
+            "tests",
+            &[
+                "ast",
+                "compiler",
+                "conformance",
+                "dhat",
+                "diag",
+                "features",
+                "frontend",
+                "ir",
+                "ir_lower",
+                "js",
+                "jvm",
+                "lexer",
+                "libraries",
+                "metadata",
+                "parser",
+                "plugins",
+                "symbol_resolver",
+                "symbol_source",
+                "toolchain",
+                "types",
+            ],
+        );
+    }
+
+    #[test]
     fn dependency_collector_handles_rust_paths_and_ignores_test_modules() {
         let source = r#"
             use crate::{ast, jvm::names};
@@ -244,6 +272,25 @@ mod tests {
         );
     }
 
+    #[test]
+    fn external_dependency_collector_ignores_local_test_crate_paths() {
+        let source = r#"
+            use crate::common;
+            use super::fixtures;
+            use krusty::frontend;
+
+            fn f() {
+                let _ = crate::common::compile;
+                let _ = krusty::jvm::names::file_class_name;
+            }
+        "#;
+
+        assert_eq!(
+            external_crate_modules(source),
+            BTreeSet::from(["frontend".to_string(), "jvm".to_string()])
+        );
+    }
+
     fn assert_allowed_crate_modules(relative: &str, allowed: &[&str]) {
         assert_allowed_crate_modules_in_file(&source_path(relative), allowed);
     }
@@ -251,6 +298,12 @@ mod tests {
     fn assert_allowed_crate_modules_in_tree(relative: &str, allowed: &[&str]) {
         for path in rust_files_under(relative) {
             assert_allowed_crate_modules_in_file(&path, allowed);
+        }
+    }
+
+    fn assert_allowed_external_crate_modules_in_tree(relative: &str, allowed: &[&str]) {
+        for path in rust_files_under(relative) {
+            assert_allowed_external_crate_modules_in_file(&path, allowed);
         }
     }
 
@@ -272,12 +325,39 @@ mod tests {
         );
     }
 
+    fn assert_allowed_external_crate_modules_in_file(path: &Path, allowed: &[&str]) {
+        let text = fs::read_to_string(path)
+            .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()));
+        let allowed: BTreeSet<_> = allowed.iter().copied().collect();
+        let actual = external_crate_modules(&text);
+        let offenders: Vec<_> = actual
+            .iter()
+            .filter(|module| !allowed.contains(module.as_str()))
+            .map(String::as_str)
+            .collect();
+        assert!(
+            offenders.is_empty(),
+            "{} uses external crate modules outside its dependency budget: {}",
+            path.display(),
+            offenders.join(", ")
+        );
+    }
+
     fn crate_modules(text: &str) -> BTreeSet<String> {
+        modules_for_roots(text, &["crate", env!("CARGO_PKG_NAME")])
+    }
+
+    fn external_crate_modules(text: &str) -> BTreeSet<String> {
+        modules_for_roots(text, &[env!("CARGO_PKG_NAME")])
+    }
+
+    fn modules_for_roots(text: &str, roots: &[&str]) -> BTreeSet<String> {
         let file =
             syn::parse_file(text).unwrap_or_else(|err| panic!("failed to parse Rust: {err}"));
         let mut modules = BTreeSet::new();
         let mut visitor = CrateDependencyVisitor {
             modules: &mut modules,
+            roots,
         };
         syn::visit::visit_file(&mut visitor, &file);
         modules
@@ -285,6 +365,7 @@ mod tests {
 
     struct CrateDependencyVisitor<'a> {
         modules: &'a mut BTreeSet<String>,
+        roots: &'a [&'a str],
     }
 
     impl<'ast> syn::visit::Visit<'ast> for CrateDependencyVisitor<'_> {
@@ -296,18 +377,21 @@ mod tests {
         }
 
         fn visit_item_use(&mut self, item: &'ast syn::ItemUse) {
-            collect_use_tree(&item.tree, &mut Vec::new(), self.modules);
+            collect_use_tree(&item.tree, &mut Vec::new(), self.modules, self.roots);
         }
 
         fn visit_path(&mut self, path: &'ast syn::Path) {
-            collect_path_module(path, self.modules);
+            collect_path_module(path, self.modules, self.roots);
             syn::visit::visit_path(self, path);
         }
     }
 
-    fn collect_path_module(path: &syn::Path, modules: &mut BTreeSet<String>) {
+    fn collect_path_module(path: &syn::Path, modules: &mut BTreeSet<String>, roots: &[&str]) {
         let mut segments = path.segments.iter();
-        if segments.next().is_some_and(is_crate_root) {
+        if segments
+            .next()
+            .is_some_and(|segment| is_crate_root(segment, roots))
+        {
             if let Some(module) = segments.next() {
                 modules.insert(module.ident.to_string());
             }
@@ -318,42 +402,50 @@ mod tests {
         tree: &syn::UseTree,
         prefix: &mut Vec<String>,
         modules: &mut BTreeSet<String>,
+        roots: &[&str],
     ) {
         match tree {
             syn::UseTree::Path(path) => {
                 prefix.push(path.ident.to_string());
-                collect_prefixed_module(prefix, modules);
-                collect_use_tree(&path.tree, prefix, modules);
+                collect_prefixed_module(prefix, modules, roots);
+                collect_use_tree(&path.tree, prefix, modules, roots);
                 prefix.pop();
             }
-            syn::UseTree::Name(name) => collect_terminal_use(&name.ident, prefix, modules),
-            syn::UseTree::Rename(rename) => collect_terminal_use(&rename.ident, prefix, modules),
-            syn::UseTree::Glob(_) => collect_prefixed_module(prefix, modules),
+            syn::UseTree::Name(name) => collect_terminal_use(&name.ident, prefix, modules, roots),
+            syn::UseTree::Rename(rename) => {
+                collect_terminal_use(&rename.ident, prefix, modules, roots)
+            }
+            syn::UseTree::Glob(_) => collect_prefixed_module(prefix, modules, roots),
             syn::UseTree::Group(group) => {
                 for item in &group.items {
-                    collect_use_tree(item, prefix, modules);
+                    collect_use_tree(item, prefix, modules, roots);
                 }
             }
         }
     }
 
-    fn collect_terminal_use(ident: &syn::Ident, prefix: &[String], modules: &mut BTreeSet<String>) {
+    fn collect_terminal_use(
+        ident: &syn::Ident,
+        prefix: &[String],
+        modules: &mut BTreeSet<String>,
+        roots: &[&str],
+    ) {
         if prefix
             .first()
-            .is_some_and(|segment| is_crate_root_name(segment))
+            .is_some_and(|segment| is_crate_root_name(segment, roots))
         {
             if let Some(module) = prefix.get(1) {
                 modules.insert(module.clone());
-            } else if !is_crate_root_name(&ident.to_string()) {
+            } else if !is_crate_root_name(&ident.to_string(), roots) {
                 modules.insert(ident.to_string());
             }
         }
     }
 
-    fn collect_prefixed_module(prefix: &[String], modules: &mut BTreeSet<String>) {
+    fn collect_prefixed_module(prefix: &[String], modules: &mut BTreeSet<String>, roots: &[&str]) {
         if prefix
             .first()
-            .is_some_and(|segment| is_crate_root_name(segment))
+            .is_some_and(|segment| is_crate_root_name(segment, roots))
         {
             if let Some(module) = prefix.get(1) {
                 modules.insert(module.clone());
@@ -361,12 +453,12 @@ mod tests {
         }
     }
 
-    fn is_crate_root(segment: &syn::PathSegment) -> bool {
-        is_crate_root_name(&segment.ident.to_string())
+    fn is_crate_root(segment: &syn::PathSegment, roots: &[&str]) -> bool {
+        is_crate_root_name(&segment.ident.to_string(), roots)
     }
 
-    fn is_crate_root_name(segment: &str) -> bool {
-        segment == "crate" || segment == env!("CARGO_PKG_NAME")
+    fn is_crate_root_name(segment: &str, roots: &[&str]) -> bool {
+        roots.contains(&segment)
     }
 
     fn has_cfg_test(attrs: &[syn::Attribute]) -> bool {

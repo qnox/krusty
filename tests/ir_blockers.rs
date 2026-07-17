@@ -8,10 +8,10 @@ use std::path::{Path, PathBuf};
 
 use krusty::ast::{Decl, Expr, ExprId, File, FunBody, Stmt, StmtId};
 use krusty::diag::DiagSink;
+use krusty::frontend::{check_file, collect_signatures};
 use krusty::ir_lower::lower_file;
 use krusty::lexer::lex;
 use krusty::parser::parse;
-use krusty::resolve::{check_file, collect_signatures};
 
 fn collect_kt(dir: &Path, out: &mut Vec<PathBuf>) {
     let Ok(rd) = fs::read_dir(dir) else { return };

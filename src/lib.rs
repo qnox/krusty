@@ -32,7 +32,7 @@ pub mod module_symbols;
 pub mod names;
 pub mod parser;
 pub mod plugins;
-pub mod resolve;
+mod resolve;
 pub mod runtime;
 pub mod symbol_resolver;
 pub mod symbol_source;

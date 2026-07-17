@@ -3,9 +3,9 @@
 //! `TODO()` throws `kotlin.NotImplementedError`, resolved from the stdlib on the classpath.
 
 use krusty::diag::DiagSink;
+use krusty::frontend::{check_file, collect_signatures_with_cp};
 use krusty::lexer::lex;
 use krusty::parser::parse;
-use krusty::resolve::{check_file, collect_signatures_with_cp};
 
 use super::common;
 

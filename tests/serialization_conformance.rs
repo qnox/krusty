@@ -32,6 +32,7 @@ use super::common;
 #[test]
 fn serializer_object_emits_wellformed_bytecode() {
     use krusty::diag::DiagSink;
+    use krusty::frontend::{check_file, collect_signatures_with_cp};
     use krusty::ir_lower::lower_file;
     use krusty::jvm::classpath::Classpath;
     use krusty::jvm::jvm_libraries::JvmLibraries;
@@ -39,7 +40,6 @@ fn serializer_object_emits_wellformed_bytecode() {
     use krusty::lexer::lex;
     use krusty::parser::parse;
     use krusty::plugins::{serialization::SerializationPlugin, PluginContext, PluginHost};
-    use krusty::resolve::{check_file, collect_signatures_with_cp};
 
     let Some((core, json, std)) = runtime_jars() else {
         eprintln!("skipping: serialization runtime jars not in local cache");
