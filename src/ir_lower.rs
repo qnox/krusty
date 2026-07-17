@@ -137,6 +137,7 @@ pub fn lower_file(
         computed_setters: HashMap::new(),
         cur_static_field: None,
         lateinit_locals: HashMap::new(),
+        in_suspend_lambda_body: false,
         closure_captured_names: std::collections::HashSet::new(),
         local_delegated: HashMap::new(),
         cur_tailrec: None,
@@ -147,6 +148,7 @@ pub fn lower_file(
         reified_subst: Vec::new(),
         inline_return: Vec::new(),
         inline_lambda_ret: Vec::new(),
+        fn_body_tail: None,
     };
 
     // Pre-scan every `object`'s `const val`s so a read inlines the literal (like a top-level const),
@@ -393,6 +395,11 @@ pub fn lower_file(
     }
 
     // Pass 1a: register classes (id, fields) and reserve method FunIds.
+    // An INTERFACE method default that references a class declared LATER in the file
+    // (`filters: AuditFilters = AuditFilters()`) can't lower mid-pass — retried after the loop.
+    // One entry per method: `(FunId, per-param (default expr, checker type), parameter names)`.
+    type PendingIfaceDefault = (u32, Vec<(Option<crate::ast::ExprId>, Ty)>, Vec<String>);
+    let mut pending_iface_defaults: Vec<PendingIfaceDefault> = Vec::new();
     for &d in &file.decls {
         if let Decl::Class(c) = file.decl(d) {
             let internal = class_internal(file, &c.name);
@@ -926,11 +933,21 @@ pub fn lower_file(
                             }
                         }
                     }
-                    let names = m.params.iter().map(|p| p.name.clone()).collect();
+                    let names: Vec<String> = m.params.iter().map(|p| p.name.clone()).collect();
                     if c.is_interface() && !all_const {
-                        // An interface's non-constant default is never modeled (no pass-2 body) — drop the
-                        // marker so an omitted-arg call skips the file instead of miscompiling.
+                        // An interface's non-constant default may reference a class declared LATER in
+                        // the file — retry once every class is registered (below); a default that
+                        // still doesn't lower drops the marker (an omitted-arg call skips the file).
                         lo.ir.fn_params.remove(&fid);
+                        pending_iface_defaults.push((
+                            fid,
+                            m.params
+                                .iter()
+                                .zip(&sig.params)
+                                .map(|(p, t)| (p.default, *t))
+                                .collect(),
+                            names,
+                        ));
                     } else {
                         lo.ir
                             .fn_params
@@ -1131,8 +1148,11 @@ pub fn lower_file(
                 // class HAS a companion — a companion reads the outer's privates through the getter
                 // (kotlinc uses an `access$…` bridge krusty doesn't emit yet; box `classes/kt504.kt`).
                 // A value class also keeps its getter (its unboxed-support synthesis expects it).
+                // Only a companion with CODE (methods, non-const props, a base) can read the
+                // outer class's privates through the getter (kt504); a CONST-ONLY companion never
+                // does — its outer keeps kotlinc's shape (no getter for a private property).
                 let has_companion = !c.companion_methods.is_empty()
-                    || !c.companion_props.is_empty()
+                    || c.companion_props.iter().any(|p| !p.is_const)
                     || c.companion_base.is_some();
                 for (pi, (pname, is_var, is_private)) in field_props.iter().enumerate() {
                     let fidx = pi + field_offset;
@@ -1486,6 +1506,65 @@ pub fn lower_file(
             }
         }
     }
+    // Retry the interface defaults that failed mid-pass (forward class references): every class is
+    // registered now. STRUCTURALLY scope-free defaults only — a literal, or a no-/literal-arg
+    // construction of a plain (non-value) class (`filters: AuditFilters = AuditFilters()`). Anything
+    // else — an implicit-`this` member call (`x: T = defaultX()`), a value-class construction (whose
+    // stub-side boxing isn't modeled here) — keeps the marker dropped (omitted-arg calls skip the
+    // file, never miscompile).
+    for (fid, params, names) in std::mem::take(&mut pending_iface_defaults) {
+        let scope_free = |lo: &Lower, d: crate::ast::ExprId| -> bool {
+            if is_const_literal(file, d) {
+                return true;
+            }
+            match file.expr(d) {
+                Expr::Call { callee, args } => {
+                    let Expr::Name(n) = file.expr(*callee) else {
+                        return false;
+                    };
+                    let internal = class_internal(file, n);
+                    let Some(ci) = lo.classes.get(&internal) else {
+                        return false;
+                    };
+                    let is_value = lo
+                        .ir
+                        .classes
+                        .get(ci.id as usize)
+                        .is_some_and(|c| c.is_value);
+                    !is_value && args.iter().all(|&a| is_const_literal(file, a))
+                }
+                _ => false,
+            }
+        };
+        if !params
+            .iter()
+            .all(|(d, _)| d.is_none_or(|d| scope_free(&lo, d)))
+        {
+            continue;
+        }
+        lo.scope.clear();
+        lo.cur_class = None;
+        let mut defaults = Vec::new();
+        let mut ok = true;
+        for (d, t) in &params {
+            match d {
+                None => defaults.push(None),
+                Some(d) => match lo.lower_arg(*d, &ty_to_ir(*t)) {
+                    Some(e) => defaults.push(Some(e)),
+                    None => {
+                        ok = false;
+                        break;
+                    }
+                },
+            }
+        }
+        if ok {
+            lo.ir
+                .fn_params
+                .insert(fid, FnParamInfo::defaults(names, defaults));
+        }
+    }
+
     // Pass 1b: register top-level functions and extension functions. An `inline fun` is not emitted
     // as a standalone method — it is expanded at each call site (pass 2 skips it too).
     for &d in &file.decls {
@@ -4383,6 +4462,15 @@ struct TailrecCtx {
     label: String,
 }
 
+/// Options for the iterator-protocol for-each lowering: the `forEachIndexed` index-counter name,
+/// the loop label, and whether the loop is a spliced stdlib HOF (`forEach`/`forEachIndexed`) —
+/// which binds kotlinc's inline `$iv` locals (receiver, element, parameter) into the spill scope.
+struct ForeachOpts<'a> {
+    index: Option<&'a str>,
+    label: Option<String>,
+    hof_splice: bool,
+}
+
 pub(crate) struct Lower<'a> {
     afile: &'a ast::File,
     info: &'a FrontendTypeInfo,
@@ -4502,6 +4590,10 @@ pub(crate) struct Lower<'a> {
     /// bails — see `closure_captured_names`), so every entry here is a plain value slot read via
     /// `GetValue`.
     lateinit_locals: HashMap<u32, String>,
+    /// Whether we are lowering a SUSPEND LAMBDA's body (the general lambda-mode machine): its
+    /// `invokeSuspend` flattener models fewer shapes than a named fn's (no try/finally), so some
+    /// splices (`withLock` with a non-suspending body) stay on their call-based fallback there.
+    in_suspend_lambda_body: bool,
     /// Names referenced (read or written) inside a NON-inline closure (a non-inline lambda or a local
     /// function) in the body currently being lowered. A `lateinit var` local among them is not modeled
     /// (its slot / uninitialized-guard aren't threaded through the closure's captured representation), so
@@ -4546,9 +4638,17 @@ pub(crate) struct Lower<'a> {
     inline_return: Vec<(u32, String, Ty)>,
     /// Active *labeled* lambda-return targets while splicing an inline lambda whose body contains a
     /// `return@<label>` (a local return from that lambda). Each is `(label, result slot, end label,
-    /// return type)`: a `return@label x` lowers to `slot = x; break@end`, the spliced lambda body being
-    /// wrapped in a `do { … } while(false)`. The label is the inline fn name the lambda was passed to.
-    inline_lambda_ret: Vec<(String, u32, String, Ty)>,
+    /// return type, fn_tail)`: a `return@label x` lowers to `slot = x; break@end`, the spliced lambda
+    /// body being wrapped in a `do { … } while(false)`. The label is the inline fn name the lambda was
+    /// passed to. `fn_tail` marks a splice whose CALL is the enclosing function's tail expression —
+    /// there a NON-LOCAL `return v` is equivalent to `return@label v` (the splice result IS the
+    /// function result), so the return-lowering routes it through the frame instead of emitting a
+    /// real `Return` the suspend flattener can't model inside the splice's `try`/`finally`.
+    inline_lambda_ret: Vec<(String, u32, String, Ty, bool)>,
+    /// The enclosing function's TAIL expression (an expression body, a block's trailing value, or the
+    /// value of a final `return`), if any — the expression whose value is the function's result.
+    /// Consulted by tail-position splice gates (`fn_tail` above).
+    fn_body_tail: Option<AstExprId>,
 }
 
 impl<'a> Lower<'a> {
@@ -4680,6 +4780,40 @@ impl<'a> Lower<'a> {
             .and_then(Symbol::synthetic_constructor)
     }
 
+    /// Whether the LOWERED IR subtree at `e` contains a suspension point — a recorded cross-unit
+    /// suspend call, or a call to a same-file `suspend` function. Stops at a nested `Lambda` (its
+    /// body is a separate method). Used where kotlinc's evaluation order forces an already-pushed
+    /// operand (a call receiver) into a continuation spill slot.
+    fn ir_subtree_suspends(&self, e: u32) -> bool {
+        if self.ir.suspend_calls.contains_key(&e) {
+            return true;
+        }
+        match &self.ir.exprs[e as usize] {
+            IrExpr::Call {
+                callee: Callee::Local(fid),
+                ..
+            } if self.ir.suspend_funs.contains(fid) => return true,
+            IrExpr::MethodCall { class, index, .. } => {
+                if self.ir.classes[*class as usize]
+                    .methods
+                    .get(*index as usize)
+                    .is_some_and(|fid| self.ir.suspend_funs.contains(fid))
+                {
+                    return true;
+                }
+            }
+            IrExpr::Lambda { .. } => return false,
+            _ => {}
+        }
+        let mut found = false;
+        crate::ir::for_each_child(&self.ir.exprs, e, &mut |c| {
+            if !found && self.ir_subtree_suspends(c) {
+                found = true;
+            }
+        });
+        found
+    }
+
     fn emit_library_member_call(
         &mut self,
         recv: u32,
@@ -4691,6 +4825,26 @@ impl<'a> Lower<'a> {
     ) -> u32 {
         let owner = member.owner.unwrap_or(owner_fallback);
         let interface = member.is_interface || self.library_type_is_interface(&owner);
+        // kotlinc pushes the receiver BEFORE evaluating arguments; an argument that suspends forces
+        // the pushed receiver into a continuation spill slot (an unnamed temp local in its
+        // bytecode). Mirror it with a temp in the spill scope: `val tmp = recv; tmp.m(<arg>)`.
+        if self.cur_fn_suspend && args.iter().any(|&a| self.ir_subtree_suspends(a)) {
+            let rv = self.fresh_value();
+            let decl = self.emit_named_variable(rv, ty_to_ir(Ty::obj(&owner)), Some(recv));
+            let recv_g = self.emit_get_value(rv);
+            let call = self.emit_virtual_call(
+                owner,
+                member.name,
+                member.descriptor,
+                interface,
+                recv_g,
+                args,
+            );
+            if suspend {
+                self.ir.suspend_calls.insert(call, ty_to_ir(logical_ret));
+            }
+            return self.emit_block(vec![decl], Some(call));
+        }
         let call =
             self.emit_virtual_call(owner, member.name, member.descriptor, interface, recv, args);
         if suspend {
@@ -6445,7 +6599,12 @@ impl<'a> Lower<'a> {
         for n in shared_cell_vars_for_expr(self.afile, body, self.info) {
             self.shared_cell_vars.insert(n);
         }
+        // The closure METHOD is its own return scope — spliced-lambda return frames from the enclosing
+        // function must not capture a `return`/`return@label` lowered inside it (a non-local return
+        // across a non-inline boundary is illegal Kotlin anyway; don't let one silently bind).
+        let saved_lam_frames = std::mem::take(&mut self.inline_lambda_ret);
         let ve = self.expr(body);
+        self.inline_lambda_ret = saved_lam_frames;
         self.shared_cell_vars = saved_cells;
         if let Some(rt) = saved_ret_ty {
             self.cur_ret_ty = rt;
@@ -6618,6 +6777,24 @@ impl<'a> Lower<'a> {
                 })
         }
         scan(self, outer, bound, body, deep)
+    }
+
+    /// Whether the AST subtree at `e` contains a NON-LOCAL `return` (no label — it exits the enclosing
+    /// FUNCTION). Labeled returns (`return@withLock`) are local to their lambda and don't count. The
+    /// walk descends into nested lambdas: a plain `return` is only legal inside inline lambdas, where
+    /// it still exits the enclosing function. Used to gate the `withLock` splice — the suspend
+    /// flattener doesn't model a `return` inside the splice's `try`/`finally`.
+    fn ast_body_has_nonlocal_return(&self, e: AstExprId) -> bool {
+        if matches!(self.afile.expr(e), Expr::Return { label: None, .. }) {
+            return true;
+        }
+        self.afile
+            .any_child_expr(e, &mut |c| self.ast_body_has_nonlocal_return(c), &mut |s| {
+                matches!(self.afile.stmt(s), Stmt::Return(_, None))
+                    || self
+                        .afile
+                        .any_child_stmt(s, &mut |c| self.ast_body_has_nonlocal_return(c))
+            })
     }
 
     /// Does the AST expression `body` (a lambda body, function body, …) contain a SUSPENSION point — a
@@ -6903,10 +7080,17 @@ impl<'a> Lower<'a> {
             // call emits without the trailing `Continuation` and fails at runtime (`NoSuchMethodError`).
             let saved_cur_suspend = self.cur_fn_suspend;
             self.cur_fn_suspend = true;
+            let saved_in_sl = self.in_suspend_lambda_body;
+            self.in_suspend_lambda_body = true;
+            // The suspend-lambda machine is its own return scope — don't let an enclosing splice's
+            // return frame capture a `return` lowered inside it (illegal across the boundary anyway).
+            let saved_lam_frames = std::mem::take(&mut self.inline_lambda_ret);
             // Evaluate WITHOUT `?` so the `cur_fn_suspend` / `scope` state is always restored, even when the
             // body bails (an early `?` here would leak `cur_fn_suspend = true` into the enclosing method).
             let body_val = self.expr(body);
+            self.inline_lambda_ret = saved_lam_frames;
             self.cur_fn_suspend = saved_cur_suspend;
+            self.in_suspend_lambda_body = saved_in_sl;
             self.scope = saved_scope_sm;
             let body_val = body_val?;
             needs_pass_sm = true;
@@ -10145,9 +10329,13 @@ impl<'a> Lower<'a> {
         iterable: AstExprId,
         body: AstExprId,
         it_ty: Ty,
-        index: Option<&str>,
-        label: Option<String>,
+        opts: ForeachOpts<'_>,
     ) -> Option<u32> {
+        let ForeachOpts {
+            index,
+            label,
+            hof_splice,
+        } = opts;
         let internal = it_ty.obj_internal()?;
         // The iterator comes from a member `iterator()` (`List`), or — when there is none — the stdlib
         // `iterator` *extension* (`for (e in map)` uses `Map.iterator()` → `Iterator<Map.Entry<K,V>>`).
@@ -10191,6 +10379,16 @@ impl<'a> Lower<'a> {
 
         // it = iterable.iterator()  (member virtual call, or the extension's static call)
         let recv = self.expr(iterable)?;
+        // A spliced stdlib HOF (`forEach`/`forEachIndexed`): kotlinc binds the receiver to the named
+        // inline local `$this$forEach$iv` before iterating — in scope (spilled) at every suspension
+        // in the body. A plain `for` loop has no such local.
+        let (recv, var_recv) = if hof_splice {
+            let rv = self.fresh_value();
+            let vr = self.emit_named_variable(rv, ty_to_ir(it_ty), Some(recv));
+            (self.emit_get_value(rv), Some(vr))
+        } else {
+            (recv, None)
+        };
         let iter_call = match iter_dispatch {
             LibraryDispatch::Member(owner_fallback, member) => {
                 let ret = member.ret;
@@ -10202,7 +10400,7 @@ impl<'a> Lower<'a> {
             }
         };
         let it_v = self.fresh_value();
-        let var_it = self.emit_variable(it_v, ty_to_ir(iter_ty), Some(iter_call));
+        let var_it = self.emit_named_variable(it_v, ty_to_ir(iter_ty), Some(iter_call));
 
         // cond: it.hasNext()
         let it_g = self.emit_get_value(it_v);
@@ -10241,10 +10439,34 @@ impl<'a> Lower<'a> {
             next_call
         };
         let x_v = self.fresh_value();
-        self.scope.push((name.to_string(), x_v, elem));
-        let var_x = self.emit_named_variable(x_v, ty_to_ir(elem), Some(x_init));
+        // A spliced stdlib HOF binds the loop ELEMENT (`item$iv$iv`) and the lambda PARAMETER (`it`)
+        // as SEPARATE named locals, exactly as kotlinc's inline expansion does — both join the
+        // suspend spill scope. A plain `for` loop binds only the loop variable.
+        let (var_x, var_param) = if hof_splice {
+            let vi = self.emit_named_variable(x_v, ty_to_ir(elem), Some(x_init));
+            let p_v = self.fresh_value();
+            self.scope.push((name.to_string(), p_v, elem));
+            let g = self.emit_get_value(x_v);
+            let vp = self.emit_named_variable(p_v, ty_to_ir(elem), Some(g));
+            (vi, Some(vp))
+        } else {
+            self.scope.push((name.to_string(), x_v, elem));
+            // A destructuring loop (`for ((a, b) in …)`) binds a parser-synthesized `$dest$…` entry
+            // that the prepended `Stmt::Destructure` consumes immediately — kotlinc never
+            // materializes it as a named local, so it must stay an unnamed temp (out of the suspend
+            // spill scope).
+            let vx = if name.starts_with("$dest$") {
+                self.emit_variable(x_v, ty_to_ir(elem), Some(x_init))
+            } else {
+                self.emit_named_variable(x_v, ty_to_ir(elem), Some(x_init))
+            };
+            (vx, None)
+        };
 
         let mut out = vec![var_x];
+        if let Some(vp) = var_param {
+            out.push(vp);
+        }
         if self.append_body_stmts(body, &mut out).is_none() {
             self.scope.truncate(depth);
             return None;
@@ -10260,6 +10482,9 @@ impl<'a> Lower<'a> {
         let wh = self.emit_while(cond, wbody, update, false, label);
         self.scope.truncate(depth);
         let mut stmts = Vec::new();
+        if let Some(vr) = var_recv {
+            stmts.push(vr);
+        }
         if let Some(vi) = var_idx {
             stmts.push(vi);
         }
@@ -11003,6 +11228,12 @@ impl<'a> Lower<'a> {
             args.len(),
             self.afile.call_arg_names.contains_key(&call.0)
         );
+        // An INLINE callee (`Mutex.withLock` with its defaulted `owner`) must NOT route through the
+        // `$default` synthetic — kotlinc always splices it; the dedicated inline lowerings
+        // (`lower_suspend_withlock`, the splicer) handle it downstream.
+        if !matches!(member.inline, crate::libraries::InlineKind::None) {
+            return None;
+        }
         let phys = member.name.clone();
         let logical_ret = resolved.ret;
         let (desc, real, _ret, suspend) = crate::symbol_resolver::synthetic_default_member(
@@ -11011,8 +11242,28 @@ impl<'a> Lower<'a> {
             &phys,
             slots.len(),
         )?;
+        // Evaluate the PROVIDED arguments in SOURCE order (each into a temp), then feed them to the
+        // `$default` synthetic in PARAMETER order — kotlinc's evaluation-order semantics for a named
+        // call whose labels don't follow declaration order (`copy(createdAt = now(), status = P)`),
+        // where a side-effecting argument must not be reordered past a later one.
+        let mut prelude: Vec<u32> = Vec::new();
+        let mut arg_temps: std::collections::HashMap<AstExprId, u32> =
+            std::collections::HashMap::new();
+        for (i, slot) in slots.iter().enumerate() {
+            if let Some(arg) = slot {
+                let v = self.lower_arg(*arg, &ty_to_ir(real[i]))?;
+                let tmp = self.fresh_value();
+                prelude.push(self.emit_variable(tmp, ty_to_ir(real[i]), Some(v)));
+                arg_temps.insert(*arg, tmp);
+            }
+        }
         let mut a = vec![recv];
-        a.extend(self.lower_call_slot_args(args, &slots, &real)?);
+        for (i, slot) in slots.iter().enumerate() {
+            match slot {
+                Some(arg) => a.push(self.emit_get_value(arg_temps[arg])),
+                None => a.push(self.zero_placeholder(real[i])),
+            }
+        }
         let mask: i32 = slots
             .iter()
             .enumerate()
@@ -11025,7 +11276,13 @@ impl<'a> Lower<'a> {
         if suspend {
             self.ir.suspend_calls.insert(call, ty_to_ir(logical_ret));
         }
-        Some(call)
+        // No reordering happened without a prelude — return the call directly. Otherwise the temps
+        // must be declared before the call (a `Block` whose value is the call).
+        if prelude.is_empty() {
+            Some(call)
+        } else {
+            Some(self.emit_block(prelude, Some(call)))
+        }
     }
 
     /// Lower a CALL `recv.name(args)` that resolves to a top-level EXTENSION function on `rt` — the
@@ -11446,7 +11703,9 @@ impl<'a> Lower<'a> {
             self.cur_class = None;
         }
         self.scope.push((pname.to_string(), p_slot, rty));
-        let var_p = self.emit_variable(p_slot, ty_to_ir(rty), Some(recv_val));
+        // NAMED: the scope-fn binding (`it`/`this`) is a real source binding — kotlinc's spliced
+        // scope fn keeps it as a named LVT local, in scope (and spilled) at suspensions inside.
+        let var_p = self.emit_named_variable(p_slot, ty_to_ir(rty), Some(recv_val));
         let body_val = self.expr(body);
         self.scope.truncate(depth);
         self.cur_class = saved_cur;
@@ -11717,6 +11976,22 @@ impl<'a> Lower<'a> {
             closure_captured_names_for_body(self.afile, body, self.info),
         );
         self.cur_ret_ty = ret_ty.clone();
+        // The function's tail expression: an expression body, a block's trailing value, or the value
+        // of a final `return` statement. Tail-position splice gates consult this.
+        self.fn_body_tail = match body {
+            FunBody::Expr(e) => Some(*e),
+            FunBody::Block(blk) => match self.afile.expr(*blk) {
+                Expr::Block { stmts, trailing } => trailing.or_else(|| match stmts.last() {
+                    Some(&s) => match self.afile.stmt(s) {
+                        Stmt::Return(Some(v), None) => Some(*v),
+                        _ => None,
+                    },
+                    None => None,
+                }),
+                _ => None,
+            },
+            FunBody::None => None,
+        };
         // A named/local function returning `Unit` is a `void` JVM method (only a `() -> Unit` lambda's
         // closure method returns the `Unit` reference) — reset so a nested fun doesn't inherit it.
         self.cur_method_returns_unit_ref = false;
@@ -11811,6 +12086,7 @@ impl<'a> Lower<'a> {
         param_tys: Vec<Ty>,
     ) -> Option<()> {
         self.cur_ret_ty = ret_ty.clone();
+        self.fn_body_tail = None; // the tailrec loop transform owns tail positions here
         self.cur_method_returns_unit_ref = false;
         self.try_finally_stack.clear();
         self.local_delegated.clear();
@@ -12144,14 +12420,26 @@ impl<'a> Lower<'a> {
                 // lambda: break to the lambda's end label (`Unit` result — run any value for effect). A
                 // labeled return with no matching frame is a `return@enclosingFn` — fall through to the
                 // normal function-return handling below (the label names the enclosing function).
-                if let Some(lbl) = &ret_label {
-                    if let Some((_, slot, brk, rty)) = self
-                        .inline_lambda_ret
+                // A NON-LOCAL `return` where EVERY active spliced-lambda frame is in fn-TAIL position
+                // (`fun f(): T = mutex.withLock { … return v … }`) is equivalent to a labeled return
+                // through the innermost frame: each splice's result is directly the next level's (and
+                // finally the function's) result, so `v` bubbles out identically — and the splice's
+                // `try`/`finally` needs no unmodeled in-`try` `Return`.
+                let frame = if let Some(lbl) = &ret_label {
+                    self.inline_lambda_ret
                         .iter()
                         .rev()
                         .find(|(l, ..)| l == lbl)
                         .cloned()
-                    {
+                } else if !self.inline_lambda_ret.is_empty()
+                    && self.inline_lambda_ret.iter().all(|&(.., tail)| tail)
+                {
+                    self.inline_lambda_ret.last().cloned()
+                } else {
+                    None
+                };
+                {
+                    if let Some((_, slot, brk, rty, _)) = frame {
                         let mut stmts = Vec::new();
                         if let Some(e) = e {
                             // A VALUE-result labeled return (`x.let { return@let v }`) assigns `v` to the
@@ -12987,7 +13275,7 @@ impl<'a> Lower<'a> {
                 iterable,
                 body,
                 label,
-            } => self.lower_for_each(&name, iterable, body, label),
+            } => self.lower_for_each(&name, iterable, body, label, false),
             // A local-function declaration emits no code here — its body is lifted to a separate static
             // method (pass 2'); a call to it routes to that method.
             Stmt::LocalFun(_) => Some(self.emit_block(vec![], None)),
@@ -13150,7 +13438,9 @@ impl<'a> Lower<'a> {
         };
         let mutex_slot = self.fresh_value();
         let recv = self.expr(receiver)?;
-        let var_mutex = self.emit_variable(mutex_slot, ty_to_ir(mutex_ty), Some(recv));
+        // NAMED: kotlinc's spliced `withLock` binds the receiver as the named inline local
+        // `$this$withLock…` — in scope (and spilled) at every suspension inside the lock body.
+        let var_mutex = self.emit_named_variable(mutex_slot, ty_to_ir(mutex_ty), Some(recv));
         let m1 = self.emit_get_value(mutex_slot);
         let null1 = self.emit_const(IrConst::Null);
         let lock_call = self.emit_virtual_call(
@@ -13170,20 +13460,45 @@ impl<'a> Lower<'a> {
         let dflt = self.emit_zero_value(rty);
         let var_result = self.emit_variable(result_slot, ty_to_ir(rty), Some(dflt));
         let brk = format!("$withlock${}", self.fresh_value());
-        self.inline_lambda_ret
-            .push(("withLock".to_string(), result_slot, brk.clone(), rty));
+        // TAIL-position splice (`fun f(): T = mutex.withLock { … }`) whose result type IS the
+        // function's return type: a non-local `return v` inside is equivalent to `return@withLock v`
+        // and lowers through this frame (see `inline_lambda_ret`).
+        let fn_tail = self.fn_body_tail == Some(call) && rty == self.cur_ret_ty;
+        self.inline_lambda_ret.push((
+            "withLock".to_string(),
+            result_slot,
+            brk.clone(),
+            rty,
+            fn_tail,
+        ));
         let depth = self.scope.len();
         let body_val = self.expr(lbody);
         self.inline_lambda_ret.pop();
         self.scope.truncate(depth);
         let body_val = body_val?;
-        let body_stmt = if self.info.ty(lbody) == Ty::Nothing {
-            body_val
+        let mut body_stmts: Vec<u32> = Vec::new();
+        if self.info.ty(lbody) == Ty::Nothing {
+            body_stmts.push(body_val);
         } else {
-            self.emit_set_value(result_slot, body_val)
-        };
+            // Surface a value-bearing Block's statements so suspensions inside them reach the
+            // flattener at STATEMENT level — it doesn't split a suspension out of a `SetValue`
+            // whose value is a whole block (`splice_return_blocks` runs only on the fn's top-level
+            // body and never descends into this splice's loop). Only the trailing value flows into
+            // the result slot. Iterate: an elvis/safe-call value may itself be a value-block.
+            let mut v = body_val;
+            while let IrExpr::Block {
+                stmts,
+                value: Some(inner),
+            } = self.ir.exprs[v as usize].clone()
+            {
+                body_stmts.extend(stmts);
+                v = inner;
+            }
+            body_stmts.push(self.emit_set_value(result_slot, v));
+        }
         let brk_stmt = self.emit_break(Some(brk.clone()));
-        let loop_body = self.emit_block(vec![body_stmt, brk_stmt], None);
+        body_stmts.push(brk_stmt);
+        let loop_body = self.emit_block(body_stmts, None);
         let cond = self.emit_const(IrConst::Boolean(true));
         let whilew = self.emit_while(cond, loop_body, None, false, Some(brk));
         let m2 = self.emit_get_value(mutex_slot);
@@ -13231,20 +13546,29 @@ impl<'a> Lower<'a> {
             self.emit_new_external("java/util/ArrayList".to_string(), "()V".to_string(), vec![]);
         let acc_v = self.fresh_value();
         let acc_ty = Ty::obj("java/util/ArrayList");
-        let var_acc = self.emit_variable(acc_v, ty_to_ir(acc_ty), Some(acc_new));
+        let var_acc = self.emit_named_variable(acc_v, ty_to_ir(acc_ty), Some(acc_new));
 
-        // it = recv.iterator()
+        // it = recv.iterator()  — kotlinc's inline expansion is TWO frames deep
+        // (`flatMap` → `flatMapTo`, `map` → `mapTo`), each binding the receiver to a named inline
+        // local (`$this$flatMap$iv`, then `$this$flatMapTo$iv$iv`); both join the suspend spill
+        // scope like any named var.
         let recv = self.expr(receiver)?;
+        let recv_v = self.fresh_value();
+        let var_recv = self.emit_named_variable(recv_v, ty_to_ir(it_ty), Some(recv));
+        let recv_g0 = self.emit_get_value(recv_v);
+        let recv_to_v = self.fresh_value();
+        let var_recv_to = self.emit_named_variable(recv_to_v, ty_to_ir(it_ty), Some(recv_g0));
+        let recv_g = self.emit_get_value(recv_to_v);
         let iter_call = self.emit_virtual_call(
             internal.to_string(),
             "iterator".to_string(),
             iter_m.descriptor,
             it_iface,
-            recv,
+            recv_g,
             vec![],
         );
         let it_v = self.fresh_value();
-        let var_it = self.emit_variable(it_v, ty_to_ir(iter_ty), Some(iter_call));
+        let var_it = self.emit_named_variable(it_v, ty_to_ir(iter_ty), Some(iter_call));
 
         // cond: it.hasNext()
         let it_g = self.emit_get_value(it_v);
@@ -13286,9 +13610,14 @@ impl<'a> Lower<'a> {
         // loop body it already models), but NOT from a block-valued init inside a loop nor from a call
         // argument. So `val e = next; val part = <body>; acc.add*(part)`.
         let depth = self.scope.len();
+        // kotlinc binds the loop ELEMENT (`element$iv$iv`) and the lambda PARAMETER (`it`) as
+        // SEPARATE named locals — both join the suspend spill scope.
+        let elem_iv = self.fresh_value();
+        let var_e = self.emit_named_variable(elem_iv, ty_to_ir(elem), Some(elem_val));
         let elem_bv = self.fresh_value();
         self.scope.push((param.to_string(), elem_bv, elem));
-        let var_e = self.emit_variable(elem_bv, ty_to_ir(elem), Some(elem_val));
+        let elem_g = self.emit_get_value(elem_iv);
+        let var_p = self.emit_named_variable(elem_bv, ty_to_ir(elem), Some(elem_g));
         let body_val = self.expr(body);
         self.scope.truncate(depth);
         let body_val = body_val?;
@@ -13337,14 +13666,17 @@ impl<'a> Lower<'a> {
             acc_g,
             vec![add_arg],
         );
-        let mut wstmts = vec![var_e];
+        let mut wstmts = vec![var_e, var_p];
         wstmts.append(&mut loop_stmts);
         wstmts.push(var_part);
         wstmts.push(add_call);
         let wbody = self.emit_block(wstmts, None);
         let wh = self.emit_while(cond, wbody, None, false, None);
         let acc_read = self.emit_get_value(acc_v);
-        Some(self.emit_block(vec![var_acc, var_it, wh], Some(acc_read)))
+        Some(self.emit_block(
+            vec![var_recv, var_acc, var_recv_to, var_it, wh],
+            Some(acc_read),
+        ))
     }
 
     fn lower_for_each(
@@ -13353,6 +13685,7 @@ impl<'a> Lower<'a> {
         iterable: AstExprId,
         body: AstExprId,
         label: Option<String>,
+        hof_splice: bool,
     ) -> Option<u32> {
         let it_ty = self.info.ty(iterable);
         // A platform range/progression value may expose a counted-loop shape. The platform owns the
@@ -13376,7 +13709,17 @@ impl<'a> Lower<'a> {
             it_ty.array_elem()
         };
         let Some(elem) = elem else {
-            return self.lower_foreach_iterator(name, iterable, body, it_ty, None, label);
+            return self.lower_foreach_iterator(
+                name,
+                iterable,
+                body,
+                it_ty,
+                ForeachOpts {
+                    index: None,
+                    label,
+                    hof_splice,
+                },
+            );
         };
         let depth = self.scope.len();
         // Evaluate the array once. When the iterable is ALREADY a plain (non-boxed) local, iterate on
@@ -14416,8 +14759,13 @@ impl<'a> Lower<'a> {
                 let dflt = self.emit_zero_value(lam_ret);
                 let decl = self.emit_variable(result_slot, ty_to_ir(lam_ret), Some(dflt));
                 stmts.push(decl);
-                self.inline_lambda_ret
-                    .push((lam_label.clone(), result_slot, brk.clone(), lam_ret));
+                self.inline_lambda_ret.push((
+                    lam_label.clone(),
+                    result_slot,
+                    brk.clone(),
+                    lam_ret,
+                    false,
+                ));
                 let body_val = self.expr(lam_body);
                 self.inline_lambda_ret.pop();
                 self.scope.truncate(depth);
@@ -14434,7 +14782,7 @@ impl<'a> Lower<'a> {
             }
             let brk = format!("$lamret${}", self.fresh_value());
             self.inline_lambda_ret
-                .push((lam_label.clone(), 0, brk.clone(), Ty::Unit));
+                .push((lam_label.clone(), 0, brk.clone(), Ty::Unit, false));
             let body_val = self.expr(lam_body);
             self.inline_lambda_ret.pop();
             self.scope.truncate(depth);
@@ -18315,7 +18663,7 @@ impl<'a> Lower<'a> {
                             });
                         if iterable {
                             let param = ast::first_lambda_param_or_it(params);
-                            return self.lower_for_each(&param, receiver, *lbody, None);
+                            return self.lower_for_each(&param, receiver, *lbody, None, true);
                         }
                     }
                     // `iterable.map/flatMap { … }` WHERE THE LAMBDA BODY SUSPENDS: a stdlib collection HOF
@@ -18361,7 +18709,9 @@ impl<'a> Lower<'a> {
                             }
                         }
                     }
-                    // `mutex.withLock { body }` (a `suspend inline fun`) WHERE THE BODY SUSPENDS.
+                    // `mutex.withLock { body }` (a `suspend inline fun`) — kotlinc ALWAYS splices an
+                    // inline fn (a non-suspending body still surrounds suspending lock()/unlock()),
+                    // so route every shape through the dedicated lowering, never `withLock$default`.
                     if self.cur_fn_suspend
                         && name == "withLock"
                         && args.len() == 1
@@ -18371,7 +18721,18 @@ impl<'a> Lower<'a> {
                             .is_some_and(|c| c.owner.starts_with("kotlinx/coroutines/sync/"))
                     {
                         if let Expr::Lambda { body: lbody, .. } = self.afile.expr(args[0]).clone() {
-                            if self.ast_body_suspends(lbody) {
+                            // Inside a SUSPEND LAMBDA a non-suspending-body withLock keeps the
+                            // `withLock\$default` call — the lambda machine doesn't model the
+                            // splice's try/finally; a suspending body has no fallback anyway.
+                            // A NON-LOCAL `return` in the body also keeps the call — the flattener
+                            // doesn't model a `return` inside the splice's `try`/`finally`, and the
+                            // `$default` path runs the same lock/unlock semantics — UNLESS the call
+                            // is the function's tail expression: there `return v` ≡ `return@withLock v`
+                            // and lowers through the splice's return frame.
+                            if (self.ast_body_suspends(lbody) || !self.in_suspend_lambda_body)
+                                && (!self.ast_body_has_nonlocal_return(lbody)
+                                    || self.fn_body_tail == Some(e))
+                            {
                                 if let Some(v) = self.lower_suspend_withlock(e, receiver, lbody) {
                                     return Some(v);
                                 }
@@ -18397,8 +18758,11 @@ impl<'a> Lower<'a> {
                                 receiver,
                                 *lbody,
                                 rty,
-                                Some(&idx),
-                                None,
+                                ForeachOpts {
+                                    index: Some(&idx),
+                                    label: None,
+                                    hof_splice: true,
+                                },
                             );
                         }
                     }
