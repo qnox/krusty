@@ -7903,8 +7903,12 @@ impl<'a> Lower<'a> {
     }
 
     fn serializable_uses_companion_accessor(&self, c: &ast::ClassDecl) -> bool {
-        c.kind == crate::ast::ClassKind::Class
-            && !c.is_sealed()
+        // A plain data class OR a `@Serializable enum` (both relocate `serializer()` to their `Companion`);
+        // sealed/generic/custom-serializer classes keep the static accessor.
+        matches!(
+            c.kind,
+            crate::ast::ClassKind::Class | crate::ast::ClassKind::Enum
+        ) && !c.is_sealed()
             && c.type_params.is_empty()
             && self.custom_serializer_of(c).is_none()
     }

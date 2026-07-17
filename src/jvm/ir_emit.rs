@@ -3030,6 +3030,25 @@ fn emit_enum_class(
         "$ENTRIES",
         "Lkotlin/enums/EnumEntries;",
     );
+    // A `@Serializable enum`'s serializer machinery: a `public static final Companion` field + any
+    // owner-scoped statics the serialization plugin synthesized (`$cachedSerializer$delegate`), both
+    // initialized in `<clinit>` below.
+    if let Some(comp_fq) = &c.companion_class {
+        cw.add_field(0x0019, "Companion", &format!("L{comp_fq};")); // PUBLIC | STATIC | FINAL
+    }
+    let owner_statics: Vec<&crate::ir::IrStatic> = ir
+        .statics
+        .iter()
+        .filter(|s| s.owner.as_deref() == Some(fq.as_str()))
+        .collect();
+    for s in &owner_statics {
+        let acc = if s.visibility.is_private() {
+            0x001A // PRIVATE | STATIC | FINAL
+        } else {
+            0x0019 // PUBLIC | STATIC | FINAL
+        };
+        cw.add_field(acc, &s.name, &ir_type_desc(&s.ty));
+    }
 
     // Private constructor `(Ljava/lang/String;I<user params>)V` → `super(name, ordinal)` then store the
     // property params / run the body-property initializers. The user params are ALL primary-ctor params
@@ -3182,6 +3201,29 @@ fn emit_enum_class(
         clinit.invokestatic(entries_fn, 1, 1);
         let entref = e.cw.fieldref(&fq, "$ENTRIES", "Lkotlin/enums/EnumEntries;");
         clinit.putstatic(entref, 1);
+        // A `@Serializable enum`'s serializer statics (`$cachedSerializer$delegate`) then its `Companion`
+        // — same shape as a plain class's `<clinit>` companion/static init.
+        for s in &owner_statics {
+            e.emit_value(s.init, &mut clinit);
+            let jt = ir_ty_to_jvm(&s.ty);
+            let fref = e.cw.fieldref(&fq, &s.name, &type_descriptor(jt));
+            clinit.putstatic(fref, slot_words(jt) as i32);
+        }
+        if let Some(comp_fq) = &c.companion_class {
+            let comp_desc = format!("L{comp_fq};");
+            let ci = e.cw.class_ref(comp_fq);
+            clinit.new_obj(ci);
+            clinit.dup();
+            clinit.aconst_null();
+            let init = e.cw.methodref(
+                comp_fq,
+                "<init>",
+                "(Lkotlin/jvm/internal/DefaultConstructorMarker;)V",
+            );
+            clinit.invokespecial(init, 1, 0);
+            let fref = e.cw.fieldref(&fq, "Companion", &comp_desc);
+            clinit.putstatic(fref, 1);
+        }
         clinit.ret_void();
         clinit.ensure_locals(e.next_slot.max(2));
         clinit.link();

@@ -156,6 +156,61 @@ fn serialization_activates_from_source_annotation() {
 }
 
 #[test]
+fn serializable_enum_relocates_serializer_to_companion() {
+    // A `@Serializable enum` (kotlinx ≥ 1.5) gets `serializer()` on a nested `Companion` backed by a
+    // cached `Lazy` delegate — NOT a static `serializer()` on the enum itself. Matches kotlinc's member
+    // set (Companion class + `access$get$cachedSerializer$delegate$cp` accessor).
+    let Some((_file, mut ir)) = lower("enum class E { A, B }") else {
+        eprintln!("skipping: no stdlib jar / class outside IR subset");
+        return;
+    };
+
+    let e_id = ir
+        .classes
+        .iter()
+        .position(|c| c.fq_name.ends_with("E"))
+        .expect("lowered E enum present") as u32;
+
+    let mut ctx = PluginContext::default();
+    ctx.class_annotations
+        .insert(e_id, vec![SERIALIZABLE_FQ.to_string()].into());
+
+    let mut host = PluginHost::new();
+    host.register(Box::new(SerializationPlugin::default()));
+    host.run(&mut ir, &ctx);
+
+    // serializer() lives on E$Companion, not statically on E.
+    let comp_fq = ir.classes[e_id as usize]
+        .companion_class
+        .clone()
+        .expect("enum gets a companion_class for serializer()");
+    let comp = ir
+        .classes
+        .iter()
+        .find(|c| c.fq_name == comp_fq)
+        .expect("E$Companion synthesized");
+    assert!(
+        comp.methods
+            .iter()
+            .any(|&f| ir.functions[f as usize].name == "serializer"),
+        "serializer() on the Companion"
+    );
+    let enum_methods: Vec<&str> = ir.classes[e_id as usize]
+        .methods
+        .iter()
+        .map(|&f| ir.functions[f as usize].name.as_str())
+        .collect();
+    assert!(
+        !enum_methods.contains(&"serializer"),
+        "enum keeps NO static serializer()"
+    );
+    assert!(
+        enum_methods.contains(&"access$get$cachedSerializer$delegate$cp"),
+        "enum exposes the cached-serializer accessor"
+    );
+}
+
+#[test]
 fn value_class_serializer_omits_write_self() {
     // A `@JvmInline value class` serializes its sole underlying value inline — kotlinc emits NO
     // `write$Self` helper for it (unlike a plain data class). krusty must match: emitting one is a

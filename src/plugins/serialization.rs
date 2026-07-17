@@ -965,11 +965,14 @@ impl SerializationPlugin {
         ir.classes[class_id as usize].methods.push(accessor);
     }
 
-    /// Add `static serializer(): KSerializer<E>` for a `@Serializable enum`, returning a runtime
-    /// `EnumSerializer(name, E.values())` (the way kotlinc compiles a plain enum). `E.values()` is the
-    /// synthetic static the enum already emits; `E[]` passes where the ctor wants `Enum[]` (array
-    /// covariance).
-    fn add_enum_serializer_accessor(ir: &mut IrFile, class_id: u32, class_fq: &str) {
+    /// Modern (`kotlinx.serialization` ≥ 1.5) `@Serializable enum` codegen: `serializer()` lives on a
+    /// nested `Companion` and returns a runtime `EnumSerializer(name, E.values())` cached in a
+    /// `private static final Lazy $cachedSerializer$delegate` on the enum, read through a
+    /// `public static final Lazy access$get$cachedSerializer$delegate$cp()` accessor. Matches kotlinc's
+    /// member set (Companion class + `Companion` field + the accessor; no static `serializer()`).
+    fn add_enum_serializer_companion(ir: &mut IrFile, class_id: u32, class_fq: &str) {
+        let lazy_ty = class_ty("kotlin/Lazy");
+        // `$cachedSerializer$delegate = LazyKt.lazyOf(new EnumSerializer(<name>, E.values()))`.
         let name = ir.add_expr(IrExpr::Const(IrConst::String(class_fq.replace('/', "."))));
         let values = ir.add_expr(IrExpr::Call {
             callee: Callee::Static {
@@ -981,27 +984,93 @@ impl SerializationPlugin {
             dispatch_receiver: None,
             args: vec![],
         });
-        let inst = ir.add_expr(IrExpr::NewExternal {
+        let enum_ser = ir.add_expr(IrExpr::NewExternal {
             internal: "kotlinx/serialization/internal/EnumSerializer".to_string(),
             ctor_desc: "(Ljava/lang/String;[Ljava/lang/Enum;)V".to_string(),
             args: vec![name, values],
         });
-        let ret = ir.add_expr(IrExpr::Return(Some(inst)));
-        let body = ir.add_expr(IrExpr::Block {
-            stmts: vec![ret],
+        let lazy = ir.add_expr(IrExpr::Call {
+            callee: Callee::Static {
+                owner: "kotlin/LazyKt".to_string(),
+                name: "lazyOf".to_string(),
+                descriptor: "(Ljava/lang/Object;)Lkotlin/Lazy;".to_string(),
+                inline: InlineKind::None,
+            },
+            dispatch_receiver: None,
+            args: vec![enum_ser],
+        });
+        ir.statics.push(crate::ir::IrStatic {
+            name: "$cachedSerializer$delegate".to_string(),
+            ty: lazy_ty,
+            init: lazy,
+            is_var: false,
+            is_const: false,
+            owner: Some(class_fq.to_string()),
+            visibility: crate::types::Visibility::Private,
+            custom_accessor: true,
+        });
+        // `public static final Lazy access$get$cachedSerializer$delegate$cp()` — reads the private field.
+        let read = ir.add_expr(IrExpr::ExternalStaticField {
+            owner: class_fq.to_string(),
+            name: "$cachedSerializer$delegate".to_string(),
+            descriptor: "Lkotlin/Lazy;".to_string(),
+        });
+        let acc_ret = ir.add_expr(IrExpr::Return(Some(read)));
+        let acc_body = ir.add_expr(IrExpr::Block {
+            stmts: vec![acc_ret],
             value: None,
         });
-        // Enum keeps `serializer()` STATIC on the class (Companion relocation is data-class-only for now).
-        let accessor = ir.add_fun(IrFunction {
-            name: "serializer".to_string(),
+        let acc = ir.add_fun(IrFunction {
+            name: "access$get$cachedSerializer$delegate$cp".to_string(),
             params: vec![],
-            ret: kserializer_of(class_ty(class_fq)),
-            body: Some(body),
+            ret: lazy_ty,
+            body: Some(acc_body),
             is_static: true,
             dispatch_receiver: None,
             param_checks: Vec::new(),
         });
-        ir.classes[class_id as usize].methods.push(accessor);
+        ir.synthetic_methods.insert(acc);
+        ir.classes[class_id as usize].methods.push(acc);
+        // `Companion.serializer()` returns `(KSerializer) access$…$cp().getValue()` (the cached instance).
+        let acc_call = ir.add_expr(IrExpr::Call {
+            callee: Callee::Static {
+                owner: class_fq.to_string(),
+                name: "access$get$cachedSerializer$delegate$cp".to_string(),
+                descriptor: "()Lkotlin/Lazy;".to_string(),
+                inline: InlineKind::None,
+            },
+            dispatch_receiver: None,
+            args: vec![],
+        });
+        let get_value = ir.add_expr(IrExpr::Call {
+            callee: Callee::CrossFileVirtual {
+                owner: "kotlin/Lazy".to_string(),
+                name: "getValue".to_string(),
+                params: vec![],
+                ret: class_ty("kotlin/Any"),
+                interface: true,
+            },
+            dispatch_receiver: Some(acc_call),
+            args: vec![],
+        });
+        let cast = ir.add_expr(IrExpr::TypeOp {
+            op: IrTypeOp::Cast,
+            arg: get_value,
+            type_operand: Ty::obj("kotlinx/serialization/KSerializer"),
+        });
+        let sret = ir.add_expr(IrExpr::Return(Some(cast)));
+        let sbody = ir.add_expr(IrExpr::Block {
+            stmts: vec![sret],
+            value: None,
+        });
+        place_serializer_accessor(
+            ir,
+            class_id,
+            class_fq,
+            vec![],
+            kserializer_of(class_ty(class_fq)),
+            sbody,
+        );
     }
 
     /// `getOrCreateKotlinClass(<internal>.class)` — a `KClass` literal for an internal class name.
@@ -1134,10 +1203,10 @@ impl IrPlugin for SerializationPlugin {
                 Self::add_custom_serializer_accessor(ir, class_id, &class_fq, &custom);
                 continue;
             }
-            // A `@Serializable enum`: no generated `$serializer` — `serializer()` returns a runtime
-            // `EnumSerializer(name, E.values())`, the way kotlinc compiles a plain enum.
+            // A `@Serializable enum`: no generated `$serializer` — `serializer()` lives on a nested
+            // `Companion` and returns a runtime `EnumSerializer(name, E.values())` cached in a `Lazy`.
             if !ir.classes[class_id as usize].enum_entries.is_empty() {
-                Self::add_enum_serializer_accessor(ir, class_id, &class_fq);
+                Self::add_enum_serializer_companion(ir, class_id, &class_fq);
                 continue;
             }
             // A `@Serializable sealed class`/`sealed interface`: no generated `$serializer` —
