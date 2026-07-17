@@ -9,10 +9,13 @@ use super::jvm_class_map::{to_jvm_internal, to_kotlin_internal};
 use super::metadata;
 use crate::jvm::names::{method_descriptor, property_getter_name, type_descriptor};
 use crate::libraries::{
-    CountedLoopInfo, FnFlags, FnKind, FunctionInfo, FunctionSet, GenericSig, InlineKind, LibConst,
-    LibraryCallable, LibraryConst, LibraryMember, LibraryType, PlatformAccessor, PlatformCtor,
-    PlatformField, PlatformRangeCtor, PropKind, PropertyInfo, PropertySet, RangeConstruction,
-    ReturnInfo, RuntimeCtor, RuntimeOp, SemanticPlatform, Visibility,
+    FnFlags, FnKind, FunctionInfo, FunctionSet, GenericSig, InlineKind, LibConst, LibraryCallable,
+    LibraryConst, LibraryMember, LibraryType, PropKind, PropertyInfo, PropertySet, ReturnInfo,
+    SemanticPlatform, Visibility,
+};
+use crate::runtime::{
+    CountedLoopInfo, PlatformAccessor, PlatformCtor, PlatformField, PlatformRangeCtor,
+    RangeConstruction, RuntimeCtor, RuntimeOp,
 };
 use crate::symbol_resolver::{arg_fits, ty_subst, ty_subst_all};
 use crate::symbol_source::SymbolSource;
@@ -2272,7 +2275,7 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
     }
 }
 
-impl crate::libraries::TargetRuntime for JvmLibraries {
+impl crate::runtime::TargetRuntime for JvmLibraries {
     fn property_reference_impl(&self, arity: usize, mutable: bool) -> Option<PlatformCtor> {
         let internal = match (arity, mutable) {
             (0, false) => "kotlin/jvm/internal/PropertyReference0Impl",

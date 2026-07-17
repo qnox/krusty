@@ -2371,7 +2371,7 @@ mod tests {
         }
     }
 
-    impl crate::libraries::TargetRuntime for FakeSource {}
+    impl crate::runtime::TargetRuntime for FakeSource {}
 
     fn top_level_default_uint_info() -> FunctionInfo {
         let callable = LibraryCallable {

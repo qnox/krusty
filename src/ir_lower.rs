@@ -2,11 +2,9 @@
 //!
 //! Runs after the front end (parse + type-check). Produces a backend-agnostic [`IrFile`] that any
 //! backend (JVM, JS) lowers to its target — proving the FE/BE boundary is real. Covers the core
-//! subset: top-level functions, simple classes (a primary constructor of `val`/`var` properties +
-//! instance methods reading those fields), const/param/local, primitive arithmetic & comparison,
-//! calls (local + stdlib intrinsics), construction, field/method access, `if`/`when`, `while`,
-//! `return`, blocks, string templates. Anything outside the subset makes lowering return `None`, so
-//! the caller keeps using the direct JVM emitter — the IR path grows one construct at a time.
+//! subset: declarations, expressions, control flow, calls, closures, and target-independent library
+//! operations. Unsupported constructs make lowering return `None`; the selected backend reports that
+//! as an unsupported IR-lowering shape.
 
 use std::collections::HashMap;
 
@@ -15,14 +13,15 @@ use crate::ir::{
     Callee, ClassId, ExprId, FnParamInfo, IrBinOp, IrCatch, IrClass, IrConst, IrCtorArg,
     IrEnumEntry, IrExpr, IrField, IrFile, IrFunction, IrTypeOp,
 };
-use crate::libraries::{
-    CountedLoopInfo, InlineKind, LibraryCallable, LibraryMember, PlatformAccessor, PlatformCtor,
-    RuntimeCtor, RuntimeOp, SemanticPlatform, TargetRuntime,
-};
+use crate::libraries::{InlineKind, LibraryCallable, LibraryMember, SemanticPlatform};
 use crate::names::{property_getter_name, property_setter_name};
 use crate::resolve::{
     CtorDefaultValue, DelegateGetValueTarget, ExprLowering, InvokeKind, LambdaCapture,
     ResolvedCall, Signature, StmtLowering, SymbolTable, TypeInfo,
+};
+use crate::runtime::{
+    CountedLoopInfo, PlatformAccessor, PlatformCtor, PlatformField, RuntimeCtor, RuntimeOp,
+    TargetRuntime,
 };
 use crate::types::Ty;
 
@@ -5150,7 +5149,7 @@ impl<'a> Lower<'a> {
         Some(self.emit_library_static_call(c, args, false))
     }
 
-    fn platform_static_field(&mut self, field: crate::libraries::PlatformField) -> u32 {
+    fn platform_static_field(&mut self, field: PlatformField) -> u32 {
         self.emit_external_static_field(field.owner, field.name, field.descriptor)
     }
 
@@ -19500,7 +19499,7 @@ impl crate::synthetics::SyntheticIrBuilder for Lower<'_> {
     }
 }
 
-fn platform_field_expr(field: crate::libraries::PlatformField) -> IrExpr {
+fn platform_field_expr(field: PlatformField) -> IrExpr {
     IrExpr::ExternalStaticField {
         owner: field.owner,
         name: field.name,
@@ -19590,11 +19589,7 @@ fn file_expr_is_jvm_scalar(file: &ast::File, e: AstExprId) -> bool {
 
 /// The IR parameter type for a captured local lifted into a local function: a boxed capture is passed as
 /// the runtime holder reference; an ordinary captured local by its own value.
-fn captured_param_ir(
-    runtime: &dyn crate::libraries::TargetRuntime,
-    ty: Ty,
-    shared_cell: bool,
-) -> Option<Ty> {
+fn captured_param_ir(runtime: &dyn TargetRuntime, ty: Ty, shared_cell: bool) -> Option<Ty> {
     if shared_cell {
         runtime.mutable_local_ref_type(ty).map(ty_to_ir)
     } else {

@@ -65,6 +65,7 @@ mod tests {
             "names",
             "plugins",
             "resolve",
+            "runtime",
             "symbol_resolver",
             "symbol_source",
             "toolchain",
@@ -99,6 +100,7 @@ mod tests {
                 "js",
                 "libraries",
                 "resolve",
+                "runtime",
             ],
         );
     }
@@ -114,6 +116,7 @@ mod tests {
                 "module_symbols",
                 "names",
                 "resolve",
+                "runtime",
                 "symbol_resolver",
                 "synthetics",
                 "trace_compiler",
@@ -125,6 +128,16 @@ mod tests {
     #[test]
     fn synthetics_registry_uses_only_ir_contract_dependencies() {
         assert_allowed_crate_modules("src/synthetics.rs", &["ast", "ir", "types"]);
+    }
+
+    #[test]
+    fn runtime_contract_uses_only_semantic_library_and_type_dependencies() {
+        assert_allowed_crate_modules("src/runtime.rs", &["libraries", "types"]);
+    }
+
+    #[test]
+    fn semantic_library_contract_uses_only_symbol_source_and_type_dependencies() {
+        assert_allowed_crate_modules("src/libraries.rs", &["symbol_source", "types"]);
     }
 
     #[test]
