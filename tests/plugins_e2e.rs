@@ -156,6 +156,41 @@ fn serialization_activates_from_source_annotation() {
 }
 
 #[test]
+fn value_class_serializer_omits_write_self() {
+    // A `@JvmInline value class` serializes its sole underlying value inline — kotlinc emits NO
+    // `write$Self` helper for it (unlike a plain data class). krusty must match: emitting one is a
+    // spurious extra member the infragnite ABI gate flags.
+    let Some((_file, mut ir)) = lower("@JvmInline value class V(val s: String)") else {
+        eprintln!("skipping: no stdlib jar / class outside IR subset");
+        return;
+    };
+
+    let v_id = ir
+        .classes
+        .iter()
+        .position(|c| c.fq_name.ends_with("V"))
+        .expect("lowered V class present") as u32;
+    assert!(ir.classes[v_id as usize].is_value, "V is a value class");
+
+    let mut ctx = PluginContext::default();
+    ctx.class_annotations
+        .insert(v_id, vec![SERIALIZABLE_FQ.to_string()].into());
+
+    let mut host = PluginHost::new();
+    host.register(Box::new(SerializationPlugin::default()));
+    host.run(&mut ir, &ctx);
+
+    let has_write_self = ir.classes[v_id as usize]
+        .methods
+        .iter()
+        .any(|&f| ir.functions[f as usize].name.starts_with("write$Self"));
+    assert!(
+        !has_write_self,
+        "value class must not get a write$Self helper"
+    );
+}
+
+#[test]
 fn top_level_function_registers_parameter_defaults_for_plugins() {
     let Some((_file, ir)) =
         lower("fun bar(a: Int, b: String = \"hello\", c: Boolean = true) = \"\"")

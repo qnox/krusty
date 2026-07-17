@@ -605,6 +605,14 @@ pub fn lower_value_classes(
         if c.is_interface {
             continue;
         }
+        // A `@Serializable` class's synthetic `$$serializer` object is the exception to the
+        // override-drops-`ACC_FINAL` rule: kotlinc emits its `serialize`/`deserialize`/`childSerializers`/
+        // `getDescriptor` implementations as `final` (they're compiler-generated, not user-overridable).
+        // Its erased KSerializer bridges live in `class.bridges` (never `class.methods`), so skipping the
+        // whole class here leaves them untouched.
+        if c.fq_name.ends_with("$$serializer") {
+            continue;
+        }
         let Some(Some(names)) = super_member_names.get(&c.fq_name) else {
             continue;
         };
@@ -624,6 +632,9 @@ pub fn lower_value_classes(
         for c in &ir.classes {
             if c.is_interface {
                 continue;
+            }
+            if c.fq_name.ends_with("$$serializer") {
+                continue; // serializer impls stay `final` — see the override_opens loop above
             }
             if let Some(Some(_)) = super_member_names.get(&c.fq_name) {
                 continue; // whole chain same-file — handled above

@@ -1481,47 +1481,54 @@ impl IrPlugin for SerializationPlugin {
                 );
             }
 
+            // A `@Serializable` class's shape drives which synthetic members kotlinc emits: a plain data
+            // class gets `write$Self` + the deserialization ctor, whereas a value class (inline serializer,
+            // `constructor-impl` only) and an object are compiled differently and get neither.
+            let plain_data_class =
+                !ir.classes[class_id as usize].is_value && !ir.classes[class_id as usize].is_object;
+
             // `write$Self` helper — its NAME is ABI-version-dependent (mangled with the module name
             // on core >= 1.6). Emitted on the serialized class as a static member with a concrete
             // (no-op) body so the class stays concrete (an empty-body method would force it abstract).
-            let ws_ret = ir.add_expr(IrExpr::Return(None));
-            let ws_body = ir.add_expr(IrExpr::Block {
-                stmts: vec![ws_ret],
-                value: None,
-            });
-            let write_self = ir.add_fun(IrFunction {
-                name: self.write_self_name(),
-                params: vec![
-                    class_ty(&class_fq),
-                    class_ty("kotlinx/serialization/encoding/CompositeEncoder"),
-                    class_ty("kotlinx/serialization/descriptors/SerialDescriptor"),
-                ],
-                ret: unit(),
-                body: Some(ws_body),
-                is_static: true,
-                dispatch_receiver: None,
-                param_checks: Vec::new(),
-            });
-            ir.synthetic_methods.insert(write_self);
-            ir.classes[class_id as usize].methods.push(write_self);
+            // A value class serializes its sole underlying value inline (no `write$Self`), and an object
+            // uses an `ObjectSerializer`; kotlinc emits `write$Self` for a plain data class only.
+            if plain_data_class {
+                let ws_ret = ir.add_expr(IrExpr::Return(None));
+                let ws_body = ir.add_expr(IrExpr::Block {
+                    stmts: vec![ws_ret],
+                    value: None,
+                });
+                let write_self = ir.add_fun(IrFunction {
+                    name: self.write_self_name(),
+                    params: vec![
+                        class_ty(&class_fq),
+                        class_ty("kotlinx/serialization/encoding/CompositeEncoder"),
+                        class_ty("kotlinx/serialization/descriptors/SerialDescriptor"),
+                    ],
+                    ret: unit(),
+                    body: Some(ws_body),
+                    is_static: true,
+                    dispatch_receiver: None,
+                    param_checks: Vec::new(),
+                });
+                ir.synthetic_methods.insert(write_self);
+                ir.classes[class_id as usize].methods.push(write_self);
+            }
 
-            // `public static void get<Prop>$annotations()` markers for `@SerialName` properties.
+            // `<getter>$annotations()` markers for `@SerialName` properties — the marker's stem is the
+            // property's JVM getter name, so a Boolean `isFoo` yields `isFoo$annotations` (not
+            // `getIsFoo$annotations`), matching kotlinc's JavaBeans `is`-prefix rule.
             for (prop, _) in &foo_fields {
                 if serial_name_of(ctx, ir, class_id, prop).is_none() {
                     continue;
                 }
-                let mut chars = prop.chars();
-                let cap = chars
-                    .next()
-                    .map(|c| c.to_uppercase().collect::<String>() + chars.as_str())
-                    .unwrap_or_default();
                 let ann_ret = ir.add_expr(IrExpr::Return(None));
                 let ann_body = ir.add_expr(IrExpr::Block {
                     stmts: vec![ann_ret],
                     value: None,
                 });
                 let marker = ir.add_fun(IrFunction {
-                    name: format!("get{cap}$annotations"),
+                    name: format!("{}$annotations", property_getter_name(prop)),
                     params: vec![],
                     ret: unit(),
                     body: Some(ann_body),
@@ -1534,12 +1541,6 @@ impl IrPlugin for SerializationPlugin {
                 ir.deprecated_methods.insert(marker);
                 ir.classes[class_id as usize].methods.push(marker);
             }
-
-            // The deserialization ctor + `$childSerializers` cache below belong on a PLAIN data class;
-            // a value class (inline serializer, `constructor-impl` only) and an object are compiled
-            // differently.
-            let plain_data_class =
-                !ir.classes[class_id as usize].is_value && !ir.classes[class_id as usize].is_object;
 
             // ABI-only deserialization ctor `G(int seqMask, <fields…>, SerializationConstructorMarker)`
             // (krusty's `deserialize()` uses the primary ctor): a Super-delegate secondary ctor whose body
