@@ -109,9 +109,121 @@ impl Default for SerializationPlugin {
     }
 }
 
-/// The FqName of the synthesized serializer object for a `@Serializable` class (`Foo` → `Foo$serializer`).
+/// The FqName of the synthesized serializer object for a `@Serializable` class. The object is literally
+/// named `$serializer`, so its binary name is `Foo$$serializer` (the outer class + the nesting `$` +
+/// the object name `$serializer`) — matching kotlinc, which krusty previously emitted as `Foo$serializer`.
 fn serializer_fq(class_fq: &str) -> String {
-    format!("{class_fq}$serializer")
+    format!("{class_fq}$$serializer")
+}
+
+/// The FqName of a `@Serializable` class's `Companion` object (`Foo` → `Foo$Companion`), which holds
+/// the `serializer()` accessor (kotlinc puts it there, not as a static on the class itself).
+fn companion_fq(class_fq: &str) -> String {
+    format!("{class_fq}$Companion")
+}
+
+/// Place `serializer()` as an INSTANCE method on `class_fq`'s `Companion` — reusing an existing user
+/// companion, or synthesizing a `Foo$Companion` (`is_companion`: the emitter gives it a private ctor +
+/// a `(DefaultConstructorMarker)` accessor, and `companion_class` on the outer class emits the
+/// `public static final Foo$Companion Companion` field and its `<clinit>` init). Mirrors kotlinc, which
+/// resolves `Foo.serializer()` through the `Foo.Companion` static field.
+fn place_serializer_accessor(
+    ir: &mut IrFile,
+    class_id: u32,
+    class_fq: &str,
+    params: Vec<Ty>,
+    ret: Ty,
+    body: ExprId,
+) {
+    let comp_fq = companion_fq(class_fq);
+    let accessor = ir.add_fun(IrFunction {
+        name: "serializer".to_string(),
+        params,
+        ret,
+        body: Some(body),
+        is_static: false,
+        dispatch_receiver: Some(comp_fq.clone()),
+        param_checks: Vec::new(),
+    });
+    if let Some(existing) = ir.classes[class_id as usize].companion_class.clone() {
+        let cid = ir
+            .classes
+            .iter()
+            .position(|c| c.fq_name == existing)
+            .expect("companion class registered");
+        ir.classes[cid].methods.push(accessor);
+    } else {
+        let mut comp = synthetic_class(&comp_fq);
+        comp.is_companion = true;
+        comp.methods = vec![accessor];
+        ir.add_class(comp);
+        ir.classes[class_id as usize].companion_class = Some(comp_fq);
+    }
+}
+
+/// Emit a call to `class_fq.serializer(args)` routed through its `Companion` — `getstatic
+/// Foo.Companion; …args…; invokevirtual Foo$Companion.serializer(params)ret` — matching how kotlinc
+/// invokes the relocated accessor.
+fn companion_serializer_call(
+    ir: &mut IrFile,
+    class_fq: &str,
+    params: Vec<Ty>,
+    ret: Ty,
+    args: Vec<ExprId>,
+) -> ExprId {
+    let comp = companion_fq(class_fq);
+    let recv = ir.add_expr(IrExpr::ExternalStaticInstance {
+        owner: class_fq.to_string(),
+        ty: comp.clone(),
+        field: "Companion".to_string(),
+    });
+    ir.add_expr(IrExpr::Call {
+        callee: Callee::CrossFileVirtual {
+            owner: comp,
+            name: "serializer".to_string(),
+            params,
+            ret,
+            interface: false,
+        },
+        dispatch_receiver: Some(recv),
+        args,
+    })
+}
+
+/// Emit a call to `class_fq.serializer(args)`, routed through the `Companion` for a plain non-generic
+/// `@Serializable` data class (whose accessor was relocated there), or as a direct `invokestatic
+/// class_fq.serializer(…)` for an enum / sealed / custom-serializer / generic class (whose accessor
+/// stays static for now). The kind check is structural (order-independent, unlike probing
+/// `companion_class`, which is only set once the target's own declarations are generated).
+fn serializer_of(
+    ir: &mut IrFile,
+    class_fq: &str,
+    params: Vec<Ty>,
+    ret: Ty,
+    args: Vec<ExprId>,
+) -> ExprId {
+    let companion_routed = ir.classes.iter().any(|c| {
+        c.fq_name == class_fq
+            && !c.is_sealed
+            && !c.is_object
+            && c.enum_entries.is_empty()
+            && c.custom_serializer.is_none()
+            && c.type_params.is_empty()
+    });
+    if companion_routed {
+        companion_serializer_call(ir, class_fq, params, ret, args)
+    } else {
+        ir.add_expr(IrExpr::Call {
+            callee: Callee::CrossFile {
+                facade: class_fq.to_string(),
+                name: "serializer".to_string(),
+                params,
+                ret,
+            },
+            dispatch_receiver: None,
+            args,
+        })
+    }
 }
 
 fn unit() -> Ty {
@@ -383,16 +495,13 @@ fn element_serializer_expr(ir: &mut IrFile, ty: &Ty) -> Option<ExprId> {
                 .iter()
                 .any(|&m| ir.functions[m as usize].name == "serializer")
     }) {
-        return Some(ir.add_expr(IrExpr::Call {
-            callee: Callee::CrossFile {
-                facade: fq_name.to_string(),
-                name: "serializer".to_string(),
-                params: vec![],
-                ret: kserializer_of(class_ty(fq_name)),
-            },
-            dispatch_receiver: None,
-            args: vec![],
-        }));
+        return Some(serializer_of(
+            ir,
+            fq_name,
+            vec![],
+            kserializer_of(class_ty(fq_name)),
+            vec![],
+        ));
     }
     // A standard COLLECTION field (`List<T>`/`Set<T>`/`Map<K,V>`, read-only or mutable) serializes through
     // the kotlinx builtin collection serializer over its element serializer(s):
@@ -445,9 +554,12 @@ fn element_serializer_expr(ir: &mut IrFile, ty: &Ty) -> Option<ExprId> {
             && (c.is_interface
                 || (c.is_abstract
                     && !c.is_sealed
-                    && c.methods
-                        .iter()
-                        .any(|&m| ir.functions[m as usize].name == "serializer")))
+                    // `@Serializable` ⇒ a `serializer()` accessor exists — on the class itself (sealed/
+                    // enum/custom) OR relocated to its `Companion` (a plain data/abstract class).
+                    && (c.companion_class.is_some()
+                        || c.methods
+                            .iter()
+                            .any(|&m| ir.functions[m as usize].name == "serializer"))))
     }) {
         return Some(build_polymorphic_serializer(ir, fq_name));
     }
@@ -506,16 +618,13 @@ fn element_serializer_expr(ir: &mut IrFile, ty: &Ty) -> Option<ExprId> {
             return None;
         }
         let kser = kserializer_of(class_ty("kotlin/Any"));
-        return Some(ir.add_expr(IrExpr::Call {
-            callee: Callee::CrossFile {
-                facade: fq_name.to_string(),
-                name: "serializer".to_string(),
-                params: vec![kser; n_tp],
-                ret: kserializer_of(class_ty(fq_name)),
-            },
-            dispatch_receiver: None,
-            args: arg_sers,
-        }));
+        return Some(serializer_of(
+            ir,
+            fq_name,
+            vec![kser; n_tp],
+            kserializer_of(class_ty(fq_name)),
+            arg_sers,
+        ));
     }
     if let Some(ser) = builtin_element_serializer(ty) {
         return Some(ir.add_expr(IrExpr::ExternalStaticInstance {
@@ -634,9 +743,10 @@ fn can_derive_element_serializer(ir: &IrFile, ty: &Ty) -> bool {
             && (c.is_interface
                 || (c.is_abstract
                     && !c.is_sealed
-                    && c.methods
-                        .iter()
-                        .any(|&m| ir.functions[m as usize].name == "serializer")))
+                    && (c.companion_class.is_some()
+                        || c.methods
+                            .iter()
+                            .any(|&m| ir.functions[m as usize].name == "serializer"))))
     }) {
         return true;
     }
@@ -798,6 +908,9 @@ impl SerializationPlugin {
             stmts: vec![ret],
             value: None,
         });
+        // A custom-serializer / enum / sealed class keeps `serializer()` as a STATIC on the class for
+        // now (the Companion relocation is done for plain data classes, whose emitter path honors
+        // `companion_class`; the enum/interface emitters do not yet).
         let accessor = ir.add_fun(IrFunction {
             name: "serializer".to_string(),
             params: vec![],
@@ -836,6 +949,7 @@ impl SerializationPlugin {
             stmts: vec![ret],
             value: None,
         });
+        // Enum keeps `serializer()` STATIC on the class (Companion relocation is data-class-only for now).
         let accessor = ir.add_fun(IrFunction {
             name: "serializer".to_string(),
             params: vec![],
@@ -892,18 +1006,7 @@ impl SerializationPlugin {
         let sub_kclasses: Vec<ExprId> = subs.iter().map(|s| Self::kclass_literal(ir, s)).collect();
         let sub_serializers: Vec<ExprId> = subs
             .iter()
-            .map(|s| {
-                ir.add_expr(IrExpr::Call {
-                    callee: Callee::Static {
-                        owner: s.clone(),
-                        name: "serializer".to_string(),
-                        descriptor: "()Lkotlinx/serialization/KSerializer;".to_string(),
-                        inline: InlineKind::None,
-                    },
-                    dispatch_receiver: None,
-                    args: vec![],
-                })
-            })
+            .map(|s| serializer_of(ir, s, vec![], kserializer_of(class_ty(s)), vec![]))
             .collect();
         let kclass_arr = ir.add_expr(IrExpr::Vararg {
             array_type: Ty::obj_args("kotlin/Array", &[class_ty("kotlin/reflect/KClass")]),
@@ -923,6 +1026,7 @@ impl SerializationPlugin {
             stmts: vec![ret],
             value: None,
         });
+        // Sealed keeps `serializer()` STATIC on the class (Companion relocation is data-class-only for now).
         let accessor = ir.add_fun(IrFunction {
             name: "serializer".to_string(),
             params: vec![],
@@ -1277,16 +1381,32 @@ impl IrPlugin for SerializationPlugin {
                     }),
                 )
             };
-            let accessor = ir.add_fun(IrFunction {
-                name: "serializer".to_string(),
-                params: acc_params,
-                ret: kserializer_of(class_ty(&class_fq)),
-                body: Some(acc_body),
-                is_static: true,
-                dispatch_receiver: None,
-                param_checks: Vec::new(),
-            });
-            ir.classes[class_id as usize].methods.push(accessor);
+            // kotlinc puts `serializer()` on the class's `Companion` object (not a static on the class).
+            // Scoped to a PLAIN non-generic NON-object data class for now — a generic class's
+            // `serializer(KSerializer…)` on the Companion still has a dispatch gap, and an `object` is its
+            // own singleton (a synthesized Companion would duplicate its `<clinit>`), so both keep the
+            // static form (see `serializer_of`).
+            if is_generic || ir.classes[class_id as usize].is_object {
+                let accessor = ir.add_fun(IrFunction {
+                    name: "serializer".to_string(),
+                    params: acc_params,
+                    ret: kserializer_of(class_ty(&class_fq)),
+                    body: Some(acc_body),
+                    is_static: true,
+                    dispatch_receiver: None,
+                    param_checks: Vec::new(),
+                });
+                ir.classes[class_id as usize].methods.push(accessor);
+            } else {
+                place_serializer_accessor(
+                    ir,
+                    class_id,
+                    &class_fq,
+                    acc_params,
+                    kserializer_of(class_ty(&class_fq)),
+                    acc_body,
+                );
+            }
 
             // `write$Self` helper — its NAME is ABI-version-dependent (mangled with the module name
             // on core >= 1.6). Emitted on the serialized class as a static member with a concrete
@@ -2342,7 +2462,7 @@ mod tests {
         let (mut ir, ctx, _) = serializable_class("demo/Foo", &["kotlin/Int", "kotlin/String"]);
         run(&mut ir, &ctx);
 
-        let ser = find_class(&ir, "demo/Foo$serializer");
+        let ser = find_class(&ir, "demo/Foo$$serializer");
         assert!(ser.is_object, "$serializer is a singleton object");
         assert_eq!(ser.interfaces, vec![GENERATED_SERIALIZER_FQ.to_string()]);
         // supertype is KSerializer<Foo> (parameterized by the serialized type).
@@ -2374,23 +2494,23 @@ mod tests {
         let (mut ir, ctx, _) = serializable_class("demo/Foo", &["kotlin/Int"]);
         run(&mut ir, &ctx);
 
-        // The class gains a static `serializer()` returning KSerializer<Foo>.
-        let acc_fid = *find_class(&ir, "demo/Foo")
+        // The Companion gains an instance `serializer()` returning KSerializer<Foo>.
+        let acc_fid = *find_class(&ir, "demo/Foo$Companion")
             .methods
             .iter()
             .find(|&&fid| ir.functions[fid as usize].name == "serializer")
-            .expect("serializer() accessor synthesized");
+            .expect("serializer() accessor synthesized on the Companion");
         let acc = &ir.functions[acc_fid as usize];
-        assert!(acc.is_static);
+        assert!(!acc.is_static);
         match acc.ret.non_null().obj_internal() {
             Some(fq_name) => assert_eq!(fq_name, KSERIALIZER_FQ),
             None => panic!("expected KSerializer, got {:?}", acc.ret),
         }
-        // Its body returns the $serializer singleton (`return Foo$serializer.INSTANCE`).
+        // Its body returns the $$serializer singleton (`return Foo$$serializer.INSTANCE`).
         let ser_id = ir
             .classes
             .iter()
-            .position(|c| c.fq_name == "demo/Foo$serializer")
+            .position(|c| c.fq_name == "demo/Foo$$serializer")
             .unwrap() as u32;
         let Some(IrExpr::Block { stmts, .. }) = acc.body.map(|b| ir.expr(b).clone()) else {
             panic!("accessor body is not a block");
@@ -2436,7 +2556,7 @@ mod tests {
             let (mut ir, ctx, _) = serializable_class("demo/C", fields);
             run(&mut ir, &ctx);
             assert_eq!(
-                descriptor_add_element_count(&ir, "demo/C$serializer"),
+                descriptor_add_element_count(&ir, "demo/C$$serializer"),
                 fields.len(),
                 "one descriptor element per field"
             );
@@ -2477,8 +2597,8 @@ mod tests {
                 .insert(id, vec![SERIALIZABLE_FQ.to_string()]);
         }
         run(&mut ir, &ctx);
-        assert!(ir.classes.iter().any(|c| c.fq_name == "demo/A$serializer"));
-        assert!(ir.classes.iter().any(|c| c.fq_name == "demo/B$serializer"));
+        assert!(ir.classes.iter().any(|c| c.fq_name == "demo/A$$serializer"));
+        assert!(ir.classes.iter().any(|c| c.fq_name == "demo/B$$serializer"));
     }
 
     #[test]

@@ -7882,13 +7882,44 @@ impl<'a> Lower<'a> {
             .map(|ci| self.ir.classes[ci.id as usize].fq_name.clone())
     }
 
-    /// `C.serializer()` as an `invokestatic C.serializer()LKSerializer;` (the plugin fills the body
-    /// before emit) — the same form the explicit `C.serializer()` call lowers to.
+    /// `C.serializer()` — routed through `C.Companion` for a PLAIN non-generic `@Serializable` class
+    /// (the plugin relocates the accessor there), else `invokestatic C.serializer()` (enum / sealed /
+    /// generic keep the static form). The plugin fills the accessor body before emit.
     fn serializer_crossfile(&mut self, c_internal: &str) -> u32 {
         let ret = ty_to_ir(Ty::obj_args(
             "kotlinx/serialization/KSerializer",
             &[Ty::obj(c_internal)],
         ));
+        let companion_routed = self
+            .classes
+            .get(c_internal)
+            .map(|ci| &self.ir.classes[ci.id as usize])
+            .is_some_and(|c| {
+                !c.is_sealed
+                    && !c.is_object
+                    && c.enum_entries.is_empty()
+                    && c.type_params.is_empty()
+                    && c.custom_serializer.is_none()
+            });
+        if companion_routed {
+            let comp = format!("{c_internal}$Companion");
+            let recv = self.ir.add_expr(IrExpr::ExternalStaticInstance {
+                owner: c_internal.to_string(),
+                ty: comp.clone(),
+                field: "Companion".to_string(),
+            });
+            return self.ir.add_expr(IrExpr::Call {
+                callee: Callee::CrossFileVirtual {
+                    owner: comp,
+                    name: "serializer".to_string(),
+                    params: vec![],
+                    ret,
+                    interface: false,
+                },
+                dispatch_receiver: Some(recv),
+                args: vec![],
+            });
+        }
         self.emit_cross_file_call(
             c_internal.to_string(),
             "serializer".to_string(),
@@ -18499,18 +18530,28 @@ impl<'a> Lower<'a> {
                         }
                     }
                     // `C.serializer()` on a `@Serializable` class — the serialization plugin synthesizes
-                    // a `static serializer(): KSerializer<C>` on `C`, but only at the BACKEND phase
-                    // (after this lowering). Emit the call BY SIGNATURE now (`invokestatic C.serializer
-                    // ()…`, via the backend-agnostic CrossFile callee); the plugin supplies the method
-                    // body before emit. Scoped to the plugin's synthetic static so it can't shadow a
-                    // companion method (which lowers via the `C$Companion` instance, not a static).
+                    // `serializer(): KSerializer<C>` as an INSTANCE method on `C`'s `Companion`, but only
+                    // at the BACKEND phase (after this lowering). Emit the call BY SIGNATURE now, routed
+                    // through the companion (`getstatic C.Companion; invokevirtual C$Companion.serializer
+                    // (…)`); the plugin supplies the Companion class + accessor body before emit. Scoped
+                    // to the plugin's synthetic so it can't shadow a user companion method.
                     if name == "serializer" {
                         if let Expr::Name(cls) = self.afile.expr(receiver).clone() {
-                            let is_serializable = self.class_decl(&cls).is_some_and(|cd| {
+                            let cd = self.class_decl(&cls);
+                            let is_serializable = cd.is_some_and(|cd| {
                                 // Same simple-name detection as the checker + the plugin.
                                 cd.annotations
                                     .iter()
                                     .any(|a| a.rsplit(['/', '.']).next() == Some("Serializable"))
+                            });
+                            // A PLAIN non-generic `@Serializable` class routes `serializer()` through its
+                            // `Companion` (where the plugin relocates the accessor); an enum / sealed /
+                            // generic class keeps the static form (the plugin leaves those static).
+                            let companion_routed = cd.is_some_and(|cd| {
+                                cd.kind == crate::ast::ClassKind::Class
+                                    && !cd.is_sealed()
+                                    && cd.type_params.is_empty()
+                                    && self.custom_serializer_of(cd).is_none()
                             });
                             if is_serializable && self.lookup(&cls).is_none() {
                                 if let Some(internal) = self
@@ -18522,14 +18563,31 @@ impl<'a> Lower<'a> {
                                         "kotlinx/serialization/KSerializer",
                                         &[Ty::obj(&internal)],
                                     ));
-                                    // A generic `C<T…>` takes one `KSerializer` argument per type
-                                    // parameter (`C.serializer(KSerializer<T0>, …)`); a non-generic class
-                                    // takes none. Each argument lowers to an erased `KSerializer`.
                                     let kser =
                                         ty_to_ir(Ty::obj("kotlinx/serialization/KSerializer"));
                                     let mut a = Vec::new();
                                     for arg in &args {
                                         a.push(self.lower_arg(*arg, &kser)?);
+                                    }
+                                    if companion_routed {
+                                        let comp = format!("{internal}$Companion");
+                                        let recv =
+                                            self.ir.add_expr(IrExpr::ExternalStaticInstance {
+                                                owner: internal.clone(),
+                                                ty: comp.clone(),
+                                                field: "Companion".to_string(),
+                                            });
+                                        return Some(self.ir.add_expr(IrExpr::Call {
+                                            callee: Callee::CrossFileVirtual {
+                                                owner: comp,
+                                                name: "serializer".to_string(),
+                                                params: vec![kser; args.len()],
+                                                ret,
+                                                interface: false,
+                                            },
+                                            dispatch_receiver: Some(recv),
+                                            args: a,
+                                        }));
                                     }
                                     return Some(self.emit_cross_file_call(
                                         internal,
