@@ -3,14 +3,13 @@
 use crate::ast::File;
 use crate::backend::{Artifact, Backend};
 use crate::diag::DiagSink;
-use crate::frontend::{check_file, CheckedFile};
-use crate::resolve::SymbolTable;
+use crate::frontend::{check_file, CheckedFile, FrontendSymbols};
 
 /// Check each parsed file and hand it to the backend.
 pub fn compile<B: Backend>(
     files: &[File],
     stems: &[String],
-    syms: &mut SymbolTable,
+    syms: &mut FrontendSymbols,
     backend: &B,
     module_name: &str,
     diags: &mut DiagSink,
