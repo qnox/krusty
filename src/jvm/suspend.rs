@@ -989,6 +989,36 @@ fn is_suspend_call(ir: &IrFile, e: ExprId, suspend_set: &HashSet<u32>) -> bool {
     suspend_call_fid(ir, e, suspend_set).is_some() || ir.suspend_calls.contains_key(&e)
 }
 
+/// Peel a single `TypeOp::Cast`/`ImplicitCoercion` off `e` when its arg is a suspend call, returning
+/// the underlying call; otherwise return `e` unchanged. A generic suspend member call
+/// (`suspend fun findAll(): List<T>`) has its erased `Object` result cast to the declared type at the
+/// call site — the coroutine flattener binds the raw call and re-applies the cast via `bind_from_r`,
+/// so the wrapper must be seen through to recognize the suspension.
+///
+/// `ref_only` restricts the peel to a reference `Cast` (a redundant checkcast on the erased `Object`):
+/// a tail-forward returns the callee's `Object` result verbatim with NO re-coercion, so an
+/// `ImplicitCoercion` that BOXES a primitive result must be kept (dropping it would `areturn` an
+/// unboxed value where a reference is required → VerifyError). The flattener path re-applies the
+/// coercion via `bind_from_r`, so it peels both.
+fn unwrap_suspend_cast(
+    ir: &IrFile,
+    e: ExprId,
+    suspend_set: &HashSet<u32>,
+    ref_only: bool,
+) -> ExprId {
+    let ops: &[IrTypeOp] = if ref_only {
+        &[IrTypeOp::Cast]
+    } else {
+        &[IrTypeOp::Cast, IrTypeOp::ImplicitCoercion]
+    };
+    if let IrExpr::TypeOp { op, arg, .. } = ir.exprs[e as usize] {
+        if ops.contains(&op) && is_suspend_call(ir, arg, suspend_set) {
+            return arg;
+        }
+    }
+    e
+}
+
 /// Whether EXACTLY ONE suspend call is reachable from `e`. Iterative with a visited set (the expr arena
 /// can share/deeply-nest nodes — a recursive walk overflows the stack) and early-exits once a second is
 /// seen (the caller only needs the "== 1" answer).
@@ -1051,6 +1081,9 @@ fn tail_forward_call(
         },
         _ => return None,
     };
+    // A generic suspend call's erased result is cast to the declared type at the call site; a
+    // tail-forward returns the callee's Object result verbatim (no checkcast), so peel the wrapper.
+    let tail = unwrap_suspend_cast(ir, tail, set, /* ref_only */ true);
     is_suspend_call(ir, tail, set).then_some(tail)
 }
 
@@ -2468,8 +2501,15 @@ impl Flat<'_> {
                 ty,
                 init: Some(init),
                 ..
-            } => is_suspend_call(self.ir, *init, self.suspend)
-                .then(|| (Some((*index, ty.clone())), *init)),
+            } => {
+                // `val x: T = susp()` where the generic call result is wrapped in a `Cast`/coercion to
+                // `T` — the binding's `bind_from_r` already casts the resumed result to the variable's
+                // declared `ty`, so the wrapper is redundant; bind the raw suspend call underneath it.
+                let call =
+                    unwrap_suspend_cast(self.ir, *init, self.suspend, /* ref_only */ false);
+                is_suspend_call(self.ir, call, self.suspend)
+                    .then(|| (Some((*index, ty.clone())), call))
+            }
             _ => is_suspend_call(self.ir, stmt, self.suspend).then_some((None, stmt)),
         }
     }
