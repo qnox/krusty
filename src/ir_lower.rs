@@ -1144,8 +1144,11 @@ pub fn lower_file(
                 // class HAS a companion — a companion reads the outer's privates through the getter
                 // (kotlinc uses an `access$…` bridge krusty doesn't emit yet; box `classes/kt504.kt`).
                 // A value class also keeps its getter (its unboxed-support synthesis expects it).
+                // Only a companion with CODE (methods, non-const props, a base) can read the
+                // outer class's privates through the getter (kt504); a CONST-ONLY companion never
+                // does — its outer keeps kotlinc's shape (no getter for a private property).
                 let has_companion = !c.companion_methods.is_empty()
-                    || !c.companion_props.is_empty()
+                    || c.companion_props.iter().any(|p| !p.is_const)
                     || c.companion_base.is_some();
                 for (pi, (pname, is_var, is_private)) in field_props.iter().enumerate() {
                     let fidx = pi + field_offset;
