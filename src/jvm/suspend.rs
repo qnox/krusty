@@ -2947,11 +2947,16 @@ impl Flat<'_> {
                         return;
                     }
                     let catch_suspends = expr_calls_suspend(self.ir, catches[0].body, self.suspend);
-                    if expr_contains_when(self.ir, catches[0].body)
-                        // A suspending catch must have been pre-allocated an exception spill in
-                        // `build_state_machine`; if not (e.g. a shape reached only after a lambda
-                        // boundary), skip rather than emit an unbound read.
-                        || (catch_suspends && !self.catch_spills.contains_key(&catches[0].var))
+                    // A SUSPENDING catch that additionally branches (`When` from a `?.`/elvis/`if`)
+                    // spans resume states with branch temps the handler frame can't reconcile — skip.
+                    // A NON-suspending catch emits entirely inside its handler state (its temps are
+                    // ordinary state-local declarations), so branches there are fine.
+                    if catch_suspends
+                        && (expr_contains_when(self.ir, catches[0].body)
+                            // A suspending catch must have been pre-allocated an exception spill in
+                            // `build_state_machine`; if not (e.g. a shape reached only after a lambda
+                            // boundary), skip rather than emit an unbound read.
+                            || !self.catch_spills.contains_key(&catches[0].var))
                     {
                         self.failed = true;
                         self.states[cur] = out;
@@ -3255,14 +3260,16 @@ impl ScopeWalk<'_> {
     }
     fn snapshot(&mut self, call: ExprId) {
         let mut list: Vec<(u32, Ty)> = self.params.to_vec();
-        for &(l, ty, named) in &self.scope {
+        for &(l, ref ty, named) in &self.scope {
             // NAMED vars spill by scope (kotlinc's rule). An unnamed temp NEVER gets a slot —
             // kotlinc holds those on the operand stack; every splice-materialization local that
             // kotlinc names is emitted `named` at its lowering site. A krusty-only temp that
             // genuinely crossed a suspension would fail loudly in the box corpus, not silently
-            // diverge (the arm restores wouldn't cover it).
+            // diverge (the arm restores wouldn't cover it). (kotlinc's `nullOutSpilledVariable`
+            // stores are FIELD HYGIENE — clearing a previous state's spill of a now-dead var —
+            // and never allocate positions beyond some state's live list.)
             if named {
-                list.push((l, ty));
+                list.push((l, ty.clone()));
             }
         }
         self.out.insert(call, list);
@@ -3276,6 +3283,10 @@ impl ScopeWalk<'_> {
             self.pending.truncate(pbase);
             self.push_decl(st);
         }
+        self.close_scope(base);
+    }
+    /// Close the lexical scopes above `base`.
+    fn close_scope(&mut self, base: usize) {
         self.scope.truncate(base);
     }
     fn walk(&mut self, e: ExprId) {
@@ -3298,7 +3309,7 @@ impl ScopeWalk<'_> {
                 } else {
                     self.walk_stmts(&stmts);
                 }
-                self.scope.truncate(base);
+                self.close_scope(base);
             }
             IrExpr::When { branches } => {
                 for (c, body) in branches {
@@ -3307,7 +3318,7 @@ impl ScopeWalk<'_> {
                     }
                     let base = self.scope.len();
                     self.walk(body);
-                    self.scope.truncate(base);
+                    self.close_scope(base);
                 }
             }
             IrExpr::While {
@@ -3322,7 +3333,7 @@ impl ScopeWalk<'_> {
                 if let Some(u) = update {
                     self.walk(u);
                 }
-                self.scope.truncate(base);
+                self.close_scope(base);
                 self.pending.truncate(pbase);
             }
             IrExpr::Try {
@@ -3333,7 +3344,7 @@ impl ScopeWalk<'_> {
             } => {
                 let base = self.scope.len();
                 self.walk(body);
-                self.scope.truncate(base);
+                self.close_scope(base);
                 for c in catches {
                     let base = self.scope.len();
                     // The catch variable is in scope (named) for the catch body. When the body
@@ -3343,7 +3354,7 @@ impl ScopeWalk<'_> {
                         self.scope.push((c.var, Ty::obj(&c.exc_internal), true));
                     }
                     self.walk(c.body);
-                    self.scope.truncate(base);
+                    self.close_scope(base);
                 }
                 if let Some(f) = finally {
                     self.walk(f);

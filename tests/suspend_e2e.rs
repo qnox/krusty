@@ -963,17 +963,59 @@ public class M {\n\
 }
 
 #[test]
-fn suspend_try_catch_with_branch_in_catch_is_skipped_not_miscompiled() {
-    // A BRANCH (`?.`/elvis/`if`) in a suspend try's CATCH body introduces a temp whose slot the state
-    // machine's exception-handler frame cannot reconcile with the try region (a stack-map mismatch → a
-    // load-time VerifyError). krusty must SKIP the file (emit nothing runnable) rather than miscompile.
-    // Assert it produces no `box()` result — i.e. the shape is rejected, not silently mis-lowered.
-    const SRC: &str = "suspend fun risky(fail: Boolean): Int { if (fail) throw IllegalStateException(\"boom\"); return 7 }\n\
-        suspend fun compute(fail: Boolean): Int = try { risky(fail) } catch (e: IllegalStateException) { e.message?.length ?: -1 }\n\
-        fun box(): String = \"OK\"\n";
-    assert!(
-        common::compile_and_run_with_stdlib(SRC, "Main").is_none(),
-        "a branchy suspend catch body must be SKIPPED (not miscompiled to a VerifyError)"
+fn suspend_try_catch_with_branch_in_nonsuspending_catch_runs() {
+    // A BRANCH (`?.`/elvis/`if`) in a suspend try's NON-suspending CATCH body: the catch emits
+    // entirely inside its handler state, so its branch temps are ordinary state-local declarations
+    // (the shape mission-core's MissionDriftService.startDriftCheck uses). It must compile AND run —
+    // loading the class verifies the handler frames. (A branchy catch that itself SUSPENDS is still
+    // skipped — its branch temps would span resume states.)
+    let _jh = match java_home() {
+        Some(j) if std::path::Path::new(&format!("{j}/bin/javac")).exists() => j,
+        _ => return,
+    };
+    let Some(stdlib) = stdlib_jar() else {
+        return;
+    };
+    let dir = std::env::temp_dir().join(format!("krusty_susp_branchcatch_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    compile_krusty_with_stdlib(
+        "S",
+        "suspend fun risky(fail: Boolean): Int { if (fail) throw IllegalStateException(\"boom\"); return 7 }\n\
+         suspend fun compute(fail: Boolean): Int = try { risky(fail) } catch (e: IllegalStateException) { e.message?.length ?: -1 }\n",
+        &stdlib,
+        &dir,
+    );
+    let driver = "import kotlin.coroutines.*;\n\
+public class M {\n\
+  static Continuation<Object> k() {\n\
+    return new Continuation<Object>() {\n\
+      public CoroutineContext getContext() { return EmptyCoroutineContext.INSTANCE; }\n\
+      public void resumeWith(Object o) { }\n\
+    };\n\
+  }\n\
+  public static void main(String[] a) {\n\
+    Object r1 = SKt.compute(false, k());\n\
+    Object r2 = SKt.compute(true, k());\n\
+    boolean ok = r1.equals(Integer.valueOf(7)) && r2.equals(Integer.valueOf(4));\n\
+    System.out.println(ok ? \"OK\" : (\"r1=\" + r1 + \" r2=\" + r2));\n\
+  }\n\
+}\n";
+    fs::write(dir.join("M.java"), driver).unwrap();
+    let cp = format!("{}:{}", dir.to_str().unwrap(), stdlib);
+    let Some(out) = common::javac_run(
+        dir.join("M.java").to_str().unwrap(),
+        &cp,
+        dir.to_str().unwrap(),
+        "M",
+    ) else {
+        return;
+    };
+    let _ = fs::remove_dir_all(&dir);
+    assert_eq!(
+        out.trim(),
+        "OK",
+        "branchy non-suspending catch in suspend try"
     );
 }
 
