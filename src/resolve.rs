@@ -1349,7 +1349,7 @@ pub fn collect_signatures_with_cp(
                             f.params.iter().map(|p| p.name.as_str()).collect();
                         for p in &f.params {
                             if let Some(dx) = p.default {
-                                if expr_refs_param(file, dx, &pnames) {
+                                if file.expr_uses_any_name(dx, &pnames) {
                                     diags.error(f.span, "krusty: a default argument that references another parameter is not supported on an overloaded function");
                                 }
                             }
@@ -2451,44 +2451,6 @@ pub fn map_param_list_args(
     )
 }
 
-/// Does the default-argument expression `e` read any of `names` (the function's own parameters)?
-/// Statement-bearing expressions (blocks, lambdas, try, when) are conservatively treated as a
-/// reference so we never silently mis-substitute a default we can't fully analyse.
-fn expr_uses_name(file: &File, e: ExprId, name: &str) -> bool {
-    let set: std::collections::HashSet<&str> = std::iter::once(name).collect();
-    expr_refs_param(file, e, &set)
-}
-
-pub fn expr_uses_name_pub(file: &File, e: ExprId, name: &str) -> bool {
-    expr_uses_name(file, e, name)
-}
-
-fn stmt_refs_param(
-    file: &File,
-    s: StmtId,
-    names: &std::collections::HashSet<&str>,
-    into_lambdas: bool,
-) -> bool {
-    match file.stmt(s) {
-        // `name++`/`name = …` reference `name` (a write-only capture still binds it); a local function
-        // is a separate scope (stop). The assigned `value` is still visited via the fall-through below
-        // for `Assign`, so a `name = name + 1` is covered too.
-        Stmt::IncDec { name, .. } => names.contains(name.as_str()),
-        Stmt::Assign { name, value } => {
-            names.contains(name.as_str())
-                || expr_refs_param_inner(file, *value, names, into_lambdas)
-        }
-        Stmt::LocalFun(_) => false,
-        // Carry `into_lambdas` across the statement boundary: a DEEP scan must keep descending into a
-        // nested lambda that lives inside a block statement (`val r = xs.map { … outer … }`), else a
-        // transitive capture in a block-bodied lambda is missed and the nested closure fails to resolve
-        // the outer name.
-        _ => file.any_child_stmt(s, &mut |c| {
-            expr_refs_param_inner(file, c, names, into_lambdas)
-        }),
-    }
-}
-
 /// Whether `e`'s subtree contains a `try` expression (used to reject *nested* try/catch, which hits
 /// a StackMapTable frame bug in codegen).
 fn expr_has_try(file: &File, e: ExprId) -> bool {
@@ -2703,49 +2665,6 @@ fn bc_complex_s(file: &File, s: StmtId, vforbid: bool, cross: bool) -> bool {
         // A local class is hoisted + checked separately; no enclosing-loop break/continue in its body.
         Stmt::LocalClass(_) => false,
     }
-}
-
-fn expr_refs_param(file: &File, e: ExprId, names: &std::collections::HashSet<&str>) -> bool {
-    expr_refs_param_inner(file, e, names, false)
-}
-
-/// `into_lambdas`: when true, recurse into a NESTED lambda's body to detect a TRANSITIVE capture
-/// (`f { g { use(outer) } }` — `outer` is captured by both `f` and `g`). A nested lambda's own bound
-/// names (its explicit params, or `it`) shadow the outer ones, so they are removed before recursing.
-fn expr_refs_param_inner(
-    file: &File,
-    e: ExprId,
-    names: &std::collections::HashSet<&str>,
-    into_lambdas: bool,
-) -> bool {
-    match file.expr(e) {
-        Expr::Name(n) => names.contains(n.as_str()),
-        Expr::Lambda { params, body } if into_lambdas => {
-            let body = *body;
-            let mut shadowed: std::collections::HashSet<&str> =
-                params.iter().map(String::as_str).collect();
-            if params.is_empty() {
-                shadowed.insert("it");
-            }
-            let remaining: std::collections::HashSet<&str> =
-                names.difference(&shadowed).copied().collect();
-            !remaining.is_empty() && expr_refs_param_inner(file, body, &remaining, true)
-        }
-        // A lambda introduces a new `it` scope — stop (its captures are handled elsewhere).
-        Expr::Lambda { .. } => false,
-        _ => file.any_child_expr(
-            e,
-            &mut |c| expr_refs_param_inner(file, c, names, into_lambdas),
-            &mut |s| stmt_refs_param(file, s, names, into_lambdas),
-        ),
-    }
-}
-
-/// Whether `e`'s subtree uses `name`, recursing THROUGH nested lambdas — for CLOSURE-capture detection,
-/// where a name used in a nested lambda is also captured by the enclosing one.
-pub fn expr_uses_name_deep(file: &File, e: ExprId, name: &str) -> bool {
-    let set: std::collections::HashSet<&str> = std::iter::once(name).collect();
-    expr_refs_param_inner(file, e, &set, true)
 }
 
 /// Returns true if the expression subtree (or any statement within it) references a name from
@@ -7878,7 +7797,7 @@ impl<'a> Checker<'a> {
                 // parameters but a body referencing `it`, bind the implicit single parameter.
                 let bind_names: Vec<String> = if !params.is_empty() {
                     params.clone()
-                } else if expr_uses_name(self.file, body, "it") {
+                } else if self.file.expr_uses_name(body, "it") {
                     vec!["it".to_string()]
                 } else {
                     vec![]
@@ -10488,7 +10407,7 @@ impl<'a> Checker<'a> {
         if let Expr::Lambda { params, body } = self.file.expr(e).clone() {
             let bind_names: Vec<String> = if !params.is_empty() {
                 params.clone()
-            } else if !value_types.is_empty() || expr_uses_name(self.file, body, "it") {
+            } else if !value_types.is_empty() || self.file.expr_uses_name(body, "it") {
                 vec!["it".to_string()]
             } else {
                 vec![]
@@ -10532,7 +10451,7 @@ impl<'a> Checker<'a> {
         if let Expr::Lambda { params, body } = self.file.expr(e).clone() {
             let bind_names: Vec<String> = if !params.is_empty() {
                 params.clone()
-            } else if !param_types.is_empty() || expr_uses_name(self.file, body, "it") {
+            } else if !param_types.is_empty() || self.file.expr_uses_name(body, "it") {
                 vec!["it".to_string()]
             } else {
                 vec![]
@@ -12587,7 +12506,7 @@ impl<'a> Checker<'a> {
                             f.params.len() == sig.params.len()
                                 && f.params[args.len()..].iter().all(|p| {
                                     p.default
-                                        .is_some_and(|dx| !expr_refs_param(self.file, dx, &pnames))
+                                        .is_some_and(|dx| !self.file.expr_uses_any_name(dx, &pnames))
                                 })
                         });
                     if args.len() > sig.params.len()

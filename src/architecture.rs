@@ -21,6 +21,14 @@ mod tests {
     }
 
     #[test]
+    fn parser_uses_only_syntax_layer_dependencies() {
+        assert_allowed_crate_modules(
+            "src/parser.rs",
+            &["ast", "diag", "features", "token", "types"],
+        );
+    }
+
+    #[test]
     fn backend_contract_uses_only_data_contract_dependencies() {
         assert_allowed_crate_modules("src/backend.rs", &["ast", "diag", "resolve"]);
     }

@@ -1008,6 +1008,69 @@ impl File {
             Stmt::LocalClass(_) => false,
         }
     }
+
+    pub fn expr_uses_name(&self, e: ExprId, name: &str) -> bool {
+        let names: std::collections::HashSet<&str> = std::iter::once(name).collect();
+        expr_refs_name(self, e, &names)
+    }
+
+    pub fn expr_uses_any_name(&self, e: ExprId, names: &std::collections::HashSet<&str>) -> bool {
+        expr_refs_name(self, e, names)
+    }
+
+    pub fn expr_uses_name_deep(&self, e: ExprId, name: &str) -> bool {
+        let names: std::collections::HashSet<&str> = std::iter::once(name).collect();
+        expr_refs_name_inner(self, e, &names, true)
+    }
+}
+
+fn expr_refs_name(file: &File, e: ExprId, names: &std::collections::HashSet<&str>) -> bool {
+    expr_refs_name_inner(file, e, names, false)
+}
+
+fn stmt_refs_name(
+    file: &File,
+    s: StmtId,
+    names: &std::collections::HashSet<&str>,
+    into_lambdas: bool,
+) -> bool {
+    match file.stmt(s) {
+        Stmt::IncDec { name, .. } => names.contains(name.as_str()),
+        Stmt::Assign { name, value } => {
+            names.contains(name.as_str()) || expr_refs_name_inner(file, *value, names, into_lambdas)
+        }
+        Stmt::LocalFun(_) => false,
+        _ => file.any_child_stmt(s, &mut |c| {
+            expr_refs_name_inner(file, c, names, into_lambdas)
+        }),
+    }
+}
+
+fn expr_refs_name_inner(
+    file: &File,
+    e: ExprId,
+    names: &std::collections::HashSet<&str>,
+    into_lambdas: bool,
+) -> bool {
+    match file.expr(e) {
+        Expr::Name(n) => names.contains(n.as_str()),
+        Expr::Lambda { params, body } if into_lambdas => {
+            let mut shadowed: std::collections::HashSet<&str> =
+                params.iter().map(String::as_str).collect();
+            if params.is_empty() {
+                shadowed.insert("it");
+            }
+            let remaining: std::collections::HashSet<&str> =
+                names.difference(&shadowed).copied().collect();
+            !remaining.is_empty() && expr_refs_name_inner(file, *body, &remaining, true)
+        }
+        Expr::Lambda { .. } => false,
+        _ => file.any_child_expr(
+            e,
+            &mut |c| expr_refs_name_inner(file, c, names, into_lambdas),
+            &mut |s| stmt_refs_name(file, s, names, into_lambdas),
+        ),
+    }
 }
 
 // ---- S-expression debug printer (used by parser tests) ---------------------------------------
@@ -1536,5 +1599,69 @@ fn unop(op: UnOp) -> &'static str {
         UnOp::Neg => "neg",
         UnOp::Not => "not",
         UnOp::Plus => "plus",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn span() -> Span {
+        Span::new(0, 0)
+    }
+
+    #[test]
+    fn expr_uses_name_stops_at_nested_lambdas() {
+        let mut file = File::default();
+        let outer = file.add_expr(Expr::Name("outer".to_string()), span());
+        let lambda = file.add_expr(
+            Expr::Lambda {
+                params: Vec::new(),
+                body: outer,
+            },
+            span(),
+        );
+
+        assert!(!file.expr_uses_name(lambda, "outer"));
+        assert!(file.expr_uses_name_deep(lambda, "outer"));
+    }
+
+    #[test]
+    fn expr_uses_name_deep_respects_lambda_parameter_shadowing() {
+        let mut file = File::default();
+        let outer = file.add_expr(Expr::Name("outer".to_string()), span());
+        let lambda = file.add_expr(
+            Expr::Lambda {
+                params: vec!["outer".to_string()],
+                body: outer,
+            },
+            span(),
+        );
+
+        assert!(!file.expr_uses_name_deep(lambda, "outer"));
+    }
+
+    #[test]
+    fn expr_uses_name_counts_assignment_targets_and_values() {
+        let mut file = File::default();
+        let value = file.add_expr(Expr::Name("value".to_string()), span());
+        let assign = file.add_stmt(
+            Stmt::Assign {
+                name: "target".to_string(),
+                value,
+            },
+            span(),
+        );
+        let block = file.add_expr(
+            Expr::Block {
+                stmts: vec![assign],
+                trailing: None,
+            },
+            span(),
+        );
+
+        assert!(file.expr_uses_name(block, "target"));
+        assert!(file.expr_uses_name(block, "value"));
+        assert!(!file.expr_uses_name(block, "missing"));
     }
 }

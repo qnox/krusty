@@ -246,16 +246,13 @@ fn anon_body_uses(file: &File, did: DeclId, n: &str) -> bool {
         .methods
         .iter()
         .filter_map(|m| fun_body_root(&m.body))
-        .any(|root| crate::resolve::expr_uses_name_pub(file, root, n));
+        .any(|root| file.expr_uses_name(root, n));
     let in_prop = c
         .body_props
         .iter()
         .filter_map(|p| p.init)
-        .any(|init| crate::resolve::expr_uses_name_pub(file, init, n));
-    let in_super = c
-        .base_args
-        .iter()
-        .any(|&a| crate::resolve::expr_uses_name_pub(file, a, n));
+        .any(|init| file.expr_uses_name(init, n));
+    let in_super = c.base_args.iter().any(|&a| file.expr_uses_name(a, n));
     in_method || in_prop || in_super
 }
 
