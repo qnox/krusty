@@ -10281,7 +10281,7 @@ impl<'a> Lower<'a> {
             }
         };
         let it_v = self.fresh_value();
-        let var_it = self.emit_variable(it_v, ty_to_ir(iter_ty), Some(iter_call));
+        let var_it = self.emit_named_variable(it_v, ty_to_ir(iter_ty), Some(iter_call));
 
         // cond: it.hasNext()
         let it_g = self.emit_get_value(it_v);
@@ -11525,7 +11525,9 @@ impl<'a> Lower<'a> {
             self.cur_class = None;
         }
         self.scope.push((pname.to_string(), p_slot, rty));
-        let var_p = self.emit_variable(p_slot, ty_to_ir(rty), Some(recv_val));
+        // NAMED: the scope-fn binding (`it`/`this`) is a real source binding — kotlinc's spliced
+        // scope fn keeps it as a named LVT local, in scope (and spilled) at suspensions inside.
+        let var_p = self.emit_named_variable(p_slot, ty_to_ir(rty), Some(recv_val));
         let body_val = self.expr(body);
         self.scope.truncate(depth);
         self.cur_class = saved_cur;
@@ -13312,7 +13314,7 @@ impl<'a> Lower<'a> {
             self.emit_new_external("java/util/ArrayList".to_string(), "()V".to_string(), vec![]);
         let acc_v = self.fresh_value();
         let acc_ty = Ty::obj("java/util/ArrayList");
-        let var_acc = self.emit_variable(acc_v, ty_to_ir(acc_ty), Some(acc_new));
+        let var_acc = self.emit_named_variable(acc_v, ty_to_ir(acc_ty), Some(acc_new));
 
         // it = recv.iterator()
         let recv = self.expr(receiver)?;
@@ -13325,7 +13327,7 @@ impl<'a> Lower<'a> {
             vec![],
         );
         let it_v = self.fresh_value();
-        let var_it = self.emit_variable(it_v, ty_to_ir(iter_ty), Some(iter_call));
+        let var_it = self.emit_named_variable(it_v, ty_to_ir(iter_ty), Some(iter_call));
 
         // cond: it.hasNext()
         let it_g = self.emit_get_value(it_v);
