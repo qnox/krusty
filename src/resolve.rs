@@ -4542,9 +4542,7 @@ pub enum ExprLowering {
     Lambda(LambdaInfo),
     /// A classpath `object` used as a value. Lowering emits `getstatic <internal>.INSTANCE`.
     ObjectValue { internal: String },
-    /// A read of a PUBLIC STATIC FIELD `Type.name` (a `@JvmField` on an object, a Java static field, or an
-    /// enum constant) that is neither a property getter nor an instance member. Lowering emits
-    /// `getstatic <owner>.<name>:<descriptor>`.
+    /// A public static field read. Lowering emits `getstatic <owner>.<name>:<descriptor>`.
     ExternalStaticFieldRead {
         owner: String,
         name: String,
@@ -11961,9 +11959,6 @@ impl<'a> Checker<'a> {
                 return ret;
             }
         }
-        // A PUBLIC STATIC FIELD on the receiver type — a Kotlin `@JvmField` on an `object`
-        // (`Charsets.UTF_8`), a Java static field (`System.out`), or an enum constant. Neither a property
-        // getter nor an instance member covers it; lowering emits `getstatic owner.name`.
         if let Some(internal) = rt.non_null().obj_internal() {
             if let Some(sf) = self.syms.libraries.static_field(internal, name) {
                 let ty = sf.ty;
@@ -14932,12 +14927,6 @@ impl<'a> Checker<'a> {
                         }
                     }
                 }
-                // A STATIC method imported unqualified through a member import — a Java class's static
-                // (`import com.mongodb.client.model.Filters.eq; eq("_id", x)`) or a Kotlin
-                // `@JvmStatic`/companion static. Resolve it with the SAME `resolve_companion` the qualified
-                // `Filters.eq(…)` member path uses (overload-selected by argument types), and record it as
-                // a receiver-less top-level callable so lowering emits `invokestatic Filters.eq` — no
-                // singleton receiver. A same-module top-level declaration of `fname` shadows the import.
                 if !self.module_declares(&fname) {
                     if let Some((owner_path, member)) = self.imports.get(&fname).and_then(|f| {
                         f.rsplit_once('/')
@@ -14961,11 +14950,6 @@ impl<'a> Checker<'a> {
                                     );
                                     callable.suspend = m.suspend;
                                     let ret = m.ret;
-                                    // A trailing VARARGS array parameter matched element-wise (`import
-                                    // Filters.and; and(eq(...))` → `and(Bson...)`): flag the element type so
-                                    // lowering collects the trailing args into an array, and type-check each
-                                    // element against it (not the whole array). Spread (last arg IS the
-                                    // array) keeps the fixed-arity path.
                                     let vararg =
                                         m.params.last().and_then(|p| p.array_elem()).filter(|_| {
                                             m.params.len() != args.len()

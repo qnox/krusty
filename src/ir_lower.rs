@@ -16115,8 +16115,6 @@ impl<'a> Lower<'a> {
                 return None;
             }
             Expr::Member { receiver, name } => {
-                // A public STATIC FIELD read recorded by the checker (`Charsets.UTF_8`, `System.out`, an
-                // enum constant) → `getstatic <owner>.<name>:<descriptor>`.
                 if let Some(ExprLowering::ExternalStaticFieldRead {
                     owner,
                     name,
@@ -19247,10 +19245,6 @@ impl<'a> Lower<'a> {
                     } {
                         let (internal, m) = m;
                         let owner = m.owner.unwrap_or(internal);
-                        // A trailing VARARGS array parameter (`Filters.and(Bson...)`,
-                        // `Sorts.descending(String...)`, `Arrays.asList(Object...)`): the trailing element
-                        // args collect into a `new T[]{…}` (boxing each to the element type), unless the
-                        // call passes the array itself (a spread — same arity, last arg IS the array).
                         let vararg_arr = m.params.last().copied().filter(|last| {
                             last.array_elem().is_some()
                                 && !(args.len() == m.params.len()

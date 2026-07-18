@@ -2142,10 +2142,6 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
     }
 
     fn static_field(&self, internal: &str, name: &str) -> Option<crate::libraries::StaticFieldRef> {
-        // Walk the type + its superclass/interface chain for a PUBLIC STATIC field named `name` — a
-        // Kotlin `@JvmField` on an `object` (`Charsets.UTF_8`), a Java static (`System.out`), or an
-        // inherited Java `enum` constant. A field carrying a compile-time constant is handled by
-        // `companion_consts` (inlined `ldc`), so skip it here (this path emits a `getstatic`).
         let mut stack = vec![internal.to_string()];
         let mut seen = std::collections::HashSet::new();
         while let Some(cur) = stack.pop() {
@@ -2156,7 +2152,6 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
                 continue;
             };
             if let Some(f) = ci.fields.iter().find(|f| {
-                // ACC_STATIC (0x0008) | ACC_PUBLIC (0x0001); a compile-time constant goes via companion_consts.
                 f.name == name
                     && f.access & 0x0008 != 0
                     && f.access & 0x0001 != 0

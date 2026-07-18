@@ -64,8 +64,7 @@ pub struct LibraryMember {
     pub call_sig: CallSig,
 }
 
-/// A resolved public static field read (`getstatic <owner>.<name>:<descriptor>`), with the field's
-/// source [`Ty`]. See [`SemanticPlatform::static_field`].
+/// A public static field read.
 #[derive(Clone, Debug)]
 pub struct StaticFieldRef {
     pub owner: String,
@@ -88,11 +87,7 @@ pub trait SemanticPlatform: crate::symbol_source::SymbolSource {
         None
     }
 
-    /// A PUBLIC STATIC FIELD `name` on the type `internal`, for a member read `Type.name` that is neither
-    /// a property getter nor an instance member — a Kotlin `@JvmField` on an `object` (`Charsets.UTF_8`),
-    /// a Java static field (`System.out`), or a Java `enum` constant. Returned as the getstatic target
-    /// (declaring owner + JVM descriptor + the source type). Compile-time constants (`Int.MAX_VALUE`) go
-    /// through `companion_consts` instead (inlined); this is for a runtime-valued field. Default: none.
+    /// A runtime-valued public static field on `internal` or its supertypes.
     fn static_field(&self, _internal: &str, _name: &str) -> Option<StaticFieldRef> {
         None
     }
@@ -921,11 +916,6 @@ pub(crate) fn best_overload<'a>(
                 .find(|m| m.params.len() >= args.len() && m.params[..args.len()] == *args)
         })
         .or_else(|| {
-            // A trailing VARARGS array parameter (a Java `T...` / Kotlin `vararg`, e.g.
-            // `Filters.and(Bson...)`, `Sorts.descending(String...)`): N element arguments collect into the
-            // array. Match the fixed leading params exactly (or against an erased `Object`), and each
-            // trailing argument against the array's element type. A SPREAD (the sole trailing arg IS the
-            // array itself, same arity) already matched exactly above, so exclude it here.
             named.clone().find(|m| {
                 let Some((last, fixed)) = m.params.split_last() else {
                     return false;
@@ -934,7 +924,7 @@ pub(crate) fn best_overload<'a>(
                     return false;
                 };
                 if args.len() == m.params.len() && args.last() == Some(last) {
-                    return false; // a spread `f(*arr)` — not element-wise varargs
+                    return false;
                 }
                 args.len() >= fixed.len()
                     && fixed
