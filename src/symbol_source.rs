@@ -87,6 +87,10 @@ pub trait SymbolSource {
     fn class_is_extensible(&self, _internal: &str) -> bool {
         false
     }
+
+    fn class_is_extensible_name(&self, internal: TypeName) -> bool {
+        self.class_is_extensible(&internal.render())
+    }
 }
 
 /// An ordered federation of sources — itself a [`SymbolSource`], so it nests. Earlier children win:
@@ -168,6 +172,12 @@ impl SymbolSource for CompositeSource<'_> {
         self.children
             .iter()
             .any(|c| c.class_is_extensible(internal))
+    }
+
+    fn class_is_extensible_name(&self, internal: TypeName) -> bool {
+        self.children
+            .iter()
+            .any(|c| c.class_is_extensible_name(internal))
     }
 
     fn property_members(&self, recv: Ty, name: &str) -> PropertySet {

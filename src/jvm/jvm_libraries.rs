@@ -1331,6 +1331,12 @@ impl SymbolSource for JvmLibraries {
             .is_some_and(|ci| !ci.is_final() && !ci.is_abstract() && !ci.is_interface())
     }
 
+    fn class_is_extensible_name(&self, internal: TypeName) -> bool {
+        self.cp
+            .find_name(internal)
+            .is_some_and(|ci| !ci.is_final() && !ci.is_abstract() && !ci.is_interface())
+    }
+
     fn resolve_type(&self, internal: &str) -> Option<LibraryType> {
         let internal_name = type_name(internal);
         if let Some(hit) = self.cp.cached_library_type_name(internal_name) {
