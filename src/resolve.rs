@@ -1555,7 +1555,7 @@ pub fn collect_signatures_with_cp(
                                     // Kotlin nested-type scoping: the enclosing class's own nested type
                                     // SHADOWS a same-named top-level/imported type — insert unconditionally
                                     // (overwriting any top-level entry). Consistent with the checker's
-                                    // `enclosing_nested_type` and the lowerer's `field_ty_in`.
+                                    // `enclosing_nested_type` expression-path fallback.
                                     if !seg.contains('.') {
                                         let ni = class_names
                                             .get(&nc.name)
