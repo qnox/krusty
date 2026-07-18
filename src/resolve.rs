@@ -12195,10 +12195,7 @@ impl<'a> Checker<'a> {
             })
     }
 
-    /// The source qname `Outer.Inner` of a SAME-FILE nested class named by `receiver.name`, when the
-    /// receiver is a non-shadowed simple type name and the qname is a registered class. Nested classes are
-    /// hoisted to top-level decls keyed by `Outer.Inner` (parser), so the same qname also keys
-    /// [`Self::primary_ctor_param_list`] and `syms.classes` — a construction/named-arg call resolves both.
+    /// The source qname `Outer.Inner` for a same-file nested class.
     fn same_file_nested_class_qname(&self, receiver: ExprId, name: &str) -> Option<String> {
         let Expr::Name(root) = self.file.expr(receiver) else {
             return None;
@@ -12273,9 +12270,6 @@ impl<'a> Checker<'a> {
                 Expr::Member { receiver, name }
                     if self.same_file_nested_class_qname(*receiver, name).is_some() =>
                 {
-                    // A SAME-FILE nested-class CONSTRUCTOR with named args (`Outer.Inner(a = 1)`). The
-                    // nested class is hoisted to a top-level decl named `Outer.Inner`, so its primary
-                    // ctor's parameter names map the labels onto positions, exactly like a top-level ctor.
                     self.same_file_nested_class_qname(*receiver, name)
                         .and_then(|q| self.primary_ctor_param_list(&q))
                         .is_some()
@@ -12285,9 +12279,7 @@ impl<'a> Checker<'a> {
                         .qualified_nested_ctor_internal(*receiver, name)
                         .is_some() =>
                 {
-                    // A qualified nested-class CONSTRUCTOR with named args (`Op.Ext(a = 1)`). The receiver
-                    // names a TYPE, so DON'T type it as a value (that would emit "unresolved reference");
-                    // named args map via the nested class's `@Metadata` constructor parameter names.
+                    // Classpath nested-class constructor with named args.
                     self.qualified_nested_ctor_internal(*receiver, name)
                         .and_then(|i| self.resolved_type(&i))
                         .and_then(|t| t.constructor_named_params(args.len()))
@@ -12465,71 +12457,59 @@ impl<'a> Checker<'a> {
                         }
                     }
                 }
-                // Nested-class construction `Outer.Inner(args)` — the source name `Outer.Inner` is a
-                // registered class (kotlinc's `Outer$Inner`).
-                if let Expr::Name(root) = self.file.expr(receiver).clone() {
-                    if !self.value_root_shadows_classifier(&root) {
-                        let qname = format!("{root}.{name}");
-                        if let Some(cls) = self.syms.classes.get(&qname).cloned() {
-                            // Named-argument nested-class ctor (`Outer.Inner(b = 1, a = "x")`): map names →
-                            // positions via the hoisted decl's primary-ctor parameter names + defaults, the
-                            // SAME path a top-level same-file class ctor uses (the lowerer realizes the
-                            // reordering by a source-order temp spill from `call_arg_names`).
-                            if arg_names.is_some() {
-                                if let Some(param_list) = self.primary_ctor_param_list(&qname) {
-                                    match map_param_list_args(
-                                        args,
-                                        arg_names.as_deref(),
-                                        &param_list,
-                                    ) {
-                                        Ok(slots) => {
-                                            for &a in slots.iter().flatten() {
-                                                self.expr(a);
-                                            }
-                                            for (i, slot) in slots.iter().enumerate() {
-                                                if let (Some(a), Some(pt)) =
-                                                    (slot, cls.ctor_params.get(i))
-                                                {
-                                                    self.expect_assignable(
-                                                        *pt,
-                                                        self.expr_types[a.0 as usize],
-                                                        self.span(*a),
-                                                        "argument",
-                                                    );
-                                                }
+                // Nested-class construction `Outer.Inner(args)`.
+                if let Some(qname) = self.same_file_nested_class_qname(receiver, &name) {
+                    if let Some(cls) = self.syms.classes.get(&qname).cloned() {
+                        if arg_names.is_some() {
+                            if let Some(param_list) = self.primary_ctor_param_list(&qname) {
+                                match map_param_list_args(args, arg_names.as_deref(), &param_list) {
+                                    Ok(slots) => {
+                                        for &a in slots.iter().flatten() {
+                                            self.expr(a);
+                                        }
+                                        for (i, slot) in slots.iter().enumerate() {
+                                            if let (Some(a), Some(pt)) =
+                                                (slot, cls.ctor_params.get(i))
+                                            {
+                                                self.expect_assignable(
+                                                    *pt,
+                                                    self.expr_types[a.0 as usize],
+                                                    self.span(*a),
+                                                    "argument",
+                                                );
                                             }
                                         }
-                                        Err(msg) => self
-                                            .diags
-                                            .error(span, format!("constructor '{qname}': {msg}")),
                                     }
-                                    return self.ctor_result(call, &cls.internal);
+                                    Err(msg) => self
+                                        .diags
+                                        .error(span, format!("constructor '{qname}': {msg}")),
                                 }
+                                return self.ctor_result(call, &cls.internal);
                             }
-                            let arg_tys = self.arg_tys(args);
-                            let params = if cls.ctor_params.len() == arg_tys.len() {
-                                Some(cls.ctor_params.clone())
-                            } else {
-                                cls.secondary_ctors
-                                    .iter()
-                                    .find(|sp| sp.len() == arg_tys.len())
-                                    .cloned()
-                            };
-                            match params {
-                                Some(ps) => {
-                                    self.expect_call_args(&ps, false, args, &arg_tys);
-                                }
-                                None => self.diags.error(
-                                    span,
-                                    format!(
-                                        "constructor '{qname}' expects {} args, got {}",
-                                        cls.ctor_params.len(),
-                                        arg_tys.len()
-                                    ),
-                                ),
-                            }
-                            return self.ctor_result(call, &cls.internal);
                         }
+                        let arg_tys = self.arg_tys(args);
+                        let params = if cls.ctor_params.len() == arg_tys.len() {
+                            Some(cls.ctor_params.clone())
+                        } else {
+                            cls.secondary_ctors
+                                .iter()
+                                .find(|sp| sp.len() == arg_tys.len())
+                                .cloned()
+                        };
+                        match params {
+                            Some(ps) => {
+                                self.expect_call_args(&ps, false, args, &arg_tys);
+                            }
+                            None => self.diags.error(
+                                span,
+                                format!(
+                                    "constructor '{qname}' expects {} args, got {}",
+                                    cls.ctor_params.len(),
+                                    arg_tys.len()
+                                ),
+                            ),
+                        }
+                        return self.ctor_result(call, &cls.internal);
                     }
                 }
                 // `EnumName.values()` / `EnumName.valueOf(s)` — synthetic static enum methods.
