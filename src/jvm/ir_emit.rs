@@ -908,7 +908,13 @@ fn emit_class(
     if is_abstract {
         access |= 0x0400;
     } // ABSTRACT
+    if ir.synthetic_classes.contains(&c.fq_name) {
+        access |= 0x1000;
+    } // ACC_SYNTHETIC (a `$$serializer` object)
     cw.set_access(access);
+    if ir.deprecated_classes.contains(&c.fq_name) {
+        cw.set_deprecated();
+    } // Deprecated attribute (a HIDDEN-deprecated `$$serializer` object)
     let raw_class_sig = ir.class_signatures.get(&c.fq_name);
     let jvm_sig = raw_class_sig.and_then(jvm_class_signature);
     crate::trace_compiler!(
@@ -1377,7 +1383,8 @@ fn emit_class(
         sctor.link();
         // A SEALED class's secondary ctor is private too, with its own PUBLIC
         // `(…args, DefaultConstructorMarker)` accessor (kotlinc: EVERY sealed ctor pairs with one).
-        let sc_access = if c.is_sealed { 0x0002 } else { 0x0001 };
+        let sc_access =
+            (if c.is_sealed { 0x0002 } else { 0x0001 }) | if sc.synthetic { 0x1000 } else { 0 };
         cw.add_method(
             sc_access,
             "<init>",
@@ -2996,15 +3003,17 @@ fn emit_enum_class(
     // (bridges emitted after the methods below — `emit_bridges` references emitted method refs)
     let n_params = c.ctor_param_count as usize;
     let user_tys: Vec<Ty> = field_tys[..n_params].to_vec();
-    // User (primary-constructor) fields — public so the IR's direct cross-class reads work.
+    // Property backing fields are private (kotlinc), reached through the synthesized `getX()`/`setX()`
+    // accessors — for both the primary-constructor fields and body member-property fields
+    // (`enum class E { A; val x = … }`), initialized in the constructor via `init_body`.
+    let enum_field_acc = |f: &IrField| {
+        (if f.is_private { 0x0002 } else { 0x0001 }) | if f.is_final { 0x0010 } else { 0 }
+    };
     for (f, t) in c.fields[..n_params].iter().zip(&user_tys) {
-        cw.add_field(0x0001, &f.name, &type_descriptor(*t));
+        cw.add_field(enum_field_acc(f), &f.name, &type_descriptor(*t));
     }
-    // Body member-property backing fields (`enum class E { A; val x = … }`) — public, like the primary
-    // fields above, so the IR's direct cross-class reads resolve; initialized in the constructor via
-    // `init_body`.
     for (f, t) in c.fields[n_params..].iter().zip(&field_tys[n_params..]) {
-        cw.add_field(0x0001, &f.name, &type_descriptor(*t));
+        cw.add_field(enum_field_acc(f), &f.name, &type_descriptor(*t));
     }
     // One static-final constant per entry, plus the private `$VALUES` array.
     for entry in &c.enum_entries {
@@ -3023,6 +3032,25 @@ fn emit_enum_class(
         "$ENTRIES",
         "Lkotlin/enums/EnumEntries;",
     );
+    // A `@Serializable enum`'s serializer machinery: a `public static final Companion` field + any
+    // owner-scoped statics the serialization plugin synthesized (`$cachedSerializer$delegate`), both
+    // initialized in `<clinit>` below.
+    if let Some(comp_fq) = &c.companion_class {
+        cw.add_field(0x0019, "Companion", &format!("L{comp_fq};")); // PUBLIC | STATIC | FINAL
+    }
+    let owner_statics: Vec<&crate::ir::IrStatic> = ir
+        .statics
+        .iter()
+        .filter(|s| s.owner.as_deref() == Some(fq.as_str()))
+        .collect();
+    for s in &owner_statics {
+        let acc = if s.visibility.is_private() {
+            0x001A // PRIVATE | STATIC | FINAL
+        } else {
+            0x0019 // PUBLIC | STATIC | FINAL
+        };
+        cw.add_field(acc, &s.name, &ir_type_desc(&s.ty));
+    }
 
     // Private constructor `(Ljava/lang/String;I<user params>)V` → `super(name, ordinal)` then store the
     // property params / run the body-property initializers. The user params are ALL primary-ctor params
@@ -3175,6 +3203,29 @@ fn emit_enum_class(
         clinit.invokestatic(entries_fn, 1, 1);
         let entref = e.cw.fieldref(&fq, "$ENTRIES", "Lkotlin/enums/EnumEntries;");
         clinit.putstatic(entref, 1);
+        // A `@Serializable enum`'s serializer statics (`$cachedSerializer$delegate`) then its `Companion`
+        // — same shape as a plain class's `<clinit>` companion/static init.
+        for s in &owner_statics {
+            e.emit_value(s.init, &mut clinit);
+            let jt = ir_ty_to_jvm(&s.ty);
+            let fref = e.cw.fieldref(&fq, &s.name, &type_descriptor(jt));
+            clinit.putstatic(fref, slot_words(jt) as i32);
+        }
+        if let Some(comp_fq) = &c.companion_class {
+            let comp_desc = format!("L{comp_fq};");
+            let ci = e.cw.class_ref(comp_fq);
+            clinit.new_obj(ci);
+            clinit.dup();
+            clinit.aconst_null();
+            let init = e.cw.methodref(
+                comp_fq,
+                "<init>",
+                "(Lkotlin/jvm/internal/DefaultConstructorMarker;)V",
+            );
+            clinit.invokespecial(init, 1, 0);
+            let fref = e.cw.fieldref(&fq, "Companion", &comp_desc);
+            clinit.putstatic(fref, 1);
+        }
         clinit.ret_void();
         clinit.ensure_locals(e.next_slot.max(2));
         clinit.link();
@@ -3438,18 +3489,21 @@ fn emit_method_inner(
             0x1000
         } else {
             0
+        }
+        | if ir.bridge_methods.contains(&fid) {
+            0x0040 // ACC_BRIDGE
+        } else {
+            0
         };
     let signature = ir
         .signatures
         .get(&fid)
         .and_then(|g| jvm_method_signature(g, f));
-    e.cw.add_method_sig(
-        access,
-        &f.name,
-        &method_descriptor(&param_tys, ret),
-        &code,
-        signature.as_deref(),
-    );
+    let desc = method_descriptor(&param_tys, ret);
+    e.cw.add_method_sig(access, &f.name, &desc, &code, signature.as_deref());
+    if ir.deprecated_methods.contains(&fid) {
+        e.cw.mark_method_deprecated(&f.name, &desc);
+    }
 }
 
 /// Format a function's backend-agnostic [`crate::ir::IrGenericSig`] into a JVM generic `Signature`
@@ -3573,7 +3627,20 @@ fn emit_default_stub(
 ) {
     let f = &ir.functions[fid as usize];
     let method_name = f.name.clone();
+    // The REAL (base-method) param types unbox every value class. `stub_param_tys` is the `$default`
+    // signature, where a nullable-underlying value-class param stays BOXED (kotlinc): the stub takes the
+    // value class, `box-impl`s any default-filled value, and `unbox-impl`s before delegating to the base.
     let real_params = jvm_tys(&f.params);
+    let boxed: HashMap<usize, Ty> = ir
+        .default_stub_boxed_params
+        .get(&fid)
+        .map(|v| v.iter().copied().collect())
+        .unwrap_or_default();
+    let stub_param_tys: Vec<Ty> = real_params
+        .iter()
+        .enumerate()
+        .map(|(i, t)| boxed.get(&i).copied().unwrap_or(*t))
+        .collect();
     let ret = ir_ty_to_jvm(&f.ret);
     let owner_ty = Ty::obj(owner);
 
@@ -3593,7 +3660,7 @@ fn emit_default_stub(
     e.slots.insert(0, (0, owner_ty));
     let mut slot = 1u16;
     let mut param_slots: Vec<(u16, Ty)> = Vec::new();
-    for (i, t) in real_params.iter().enumerate() {
+    for (i, t) in stub_param_tys.iter().enumerate() {
         e.slots.insert((i + 1) as u32, (slot, *t));
         param_slots.push((slot, *t));
         slot += slot_words(*t);
@@ -3614,10 +3681,21 @@ fn emit_default_stub(
     e.next_slot = slot;
 
     let mut code = CodeBuilder::new(slot);
-    emit_default_param_overwrites(&mut e, &mut code, defaults, &param_slots, &mask_slots);
+    emit_default_param_overwrites(
+        &mut e,
+        &mut code,
+        defaults,
+        &param_slots,
+        &mask_slots,
+        &boxed,
+    );
     code.aload(0);
-    for &(pslot, pty) in &param_slots {
+    for (i, &(pslot, pty)) in param_slots.iter().enumerate() {
         load(pty, pslot, &mut code);
+        // A boxed value-class stub param unboxes to the underlying the base (mangled) method expects.
+        if let Some(vc) = boxed.get(&i) {
+            emit_unbox_impl(ir, e.cw, vc, &mut code);
+        }
     }
     let aw: i32 = real_params.iter().map(|t| slot_words(*t) as i32).sum();
     let desc = method_descriptor(&real_params, ret);
@@ -3641,7 +3719,7 @@ fn emit_default_stub(
     code.link();
 
     let mut stub_params = vec![owner_ty];
-    stub_params.extend(real_params.iter().copied());
+    stub_params.extend(stub_param_tys.iter().copied());
     stub_params.extend(std::iter::repeat_n(
         Ty::Int,
         default_mask_count(real_params.len()),
@@ -3676,6 +3754,7 @@ fn emit_default_param_overwrites(
     defaults: &[Option<u32>],
     param_slots: &[(u16, Ty)],
     mask_slots: &[u16],
+    boxed: &HashMap<usize, Ty>,
 ) {
     for (i, def) in defaults.iter().enumerate().take(param_slots.len()) {
         if let Some(def_expr) = def {
@@ -3686,7 +3765,12 @@ fn emit_default_param_overwrites(
             let skip = code.new_label();
             e.frame(skip, vec![], code);
             code.ifeq(skip);
+            // The default is computed in the (erased) UNDERLYING form; a slot typed by a nullable-
+            // underlying value class boxes it (`box-impl`) so the slot holds the value class.
             e.emit_value(*def_expr, code);
+            if let Some(vc) = boxed.get(&i) {
+                emit_box_impl(e.ir, e.cw, vc, code);
+            }
             store(pty, pslot, code);
             code.bind(skip);
         }
@@ -3709,6 +3793,31 @@ fn full_default_masks(param_count: usize) -> Vec<i32> {
             (start..end).fold(0i32, |mask, i| mask | default_mask_bit(i))
         })
         .collect()
+}
+
+/// A value class's (erased) underlying JVM type — its single field's type.
+fn vc_underlying_jvm(ir: &IrFile, vc: &Ty) -> Ty {
+    vc.obj_internal()
+        .and_then(|fq| ir.classes.iter().find(|c| c.fq_name == fq))
+        .and_then(|c| c.fields.first())
+        .map(|f| ir_ty_to_jvm(&f.ty))
+        .unwrap_or(Ty::obj("java/lang/Object"))
+}
+
+/// Emit `VC.box-impl(<underlying>)LVC;` (static) — boxes the underlying value on the stack into `VC`.
+fn emit_box_impl(ir: &IrFile, cw: &mut ClassWriter, vc: &Ty, code: &mut CodeBuilder) {
+    let fq = vc.obj_internal().unwrap_or("java/lang/Object");
+    let u = vc_underlying_jvm(ir, vc);
+    let m = cw.methodref(fq, "box-impl", &format!("({})L{fq};", type_descriptor(u)));
+    code.invokestatic(m, slot_words(u) as i32, 1);
+}
+
+/// Emit `VC.unbox-impl()<underlying>` (virtual) — unboxes the `VC` on the stack to its underlying.
+fn emit_unbox_impl(ir: &IrFile, cw: &mut ClassWriter, vc: &Ty, code: &mut CodeBuilder) {
+    let fq = vc.obj_internal().unwrap_or("java/lang/Object");
+    let u = vc_underlying_jvm(ir, vc);
+    let m = cw.methodref(fq, "unbox-impl", &format!("(){}", type_descriptor(u)));
+    code.invokevirtual(m, 0, slot_words(u) as i32);
 }
 
 /// Emit the `foo$default(params…, int mask, Object marker)` synthetic for a TOP-LEVEL facade function
@@ -3765,7 +3874,14 @@ fn emit_facade_default_stub(
     e.next_slot = slot;
 
     let mut code = CodeBuilder::new(slot);
-    emit_default_param_overwrites(&mut e, &mut code, defaults, &param_slots, &mask_slots);
+    emit_default_param_overwrites(
+        &mut e,
+        &mut code,
+        defaults,
+        &param_slots,
+        &mask_slots,
+        &HashMap::new(),
+    );
     for &(pslot, pty) in &param_slots {
         load(pty, pslot, &mut code);
     }
@@ -3842,8 +3958,8 @@ fn emit_ctor_default_stub(
     e.next_slot = slot;
 
     // The stackmap frame at each mask-branch target: `this` (slot 0) is UNINITIALIZED (the real `<init>`
-    // has not run yet), the params keep their types, then mask + marker. Built manually because the frame
-    // machinery types slot 0 from `e.slots` as an initialized `Object`, which the verifier rejects here.
+    // has not run yet), the params keep their types, then the mask ints + marker. Built manually because
+    // the frame machinery types slot 0 from `e.slots` as an initialized `Object`, which the verifier rejects.
     let branch_locals: Vec<VerifType> = {
         let mut raw = vec![VerifType::Top; e.next_slot as usize];
         raw[0] = VerifType::UninitializedThis;
@@ -5239,15 +5355,33 @@ impl<'a> Emitter<'a> {
                 if args.iter().any(|a| a.is_none()) {
                     // Some arguments are omitted — invoke the `<name>$default(self, params…, mask, marker)`
                     // stub: receiver, each provided arg (or a zero placeholder for an omitted one with its
-                    // mask bit set), the mask, then a null marker.
+                    // mask bit set), the mask, then a null marker. A nullable-underlying value-class param
+                    // is BOXED in the stub signature (matching `emit_default_stub`), so a provided arg is
+                    // `box-impl`d and the placeholder/descriptor use the boxed type.
+                    let boxed: HashMap<usize, Ty> = self
+                        .ir
+                        .default_stub_boxed_params
+                        .get(&fid)
+                        .map(|v| v.iter().copied().collect())
+                        .unwrap_or_default();
+                    let stub_param_tys: Vec<Ty> = param_tys
+                        .iter()
+                        .enumerate()
+                        .map(|(i, t)| boxed.get(&i).copied().unwrap_or(*t))
+                        .collect();
                     let args = args.clone();
                     self.emit_value(*receiver, code);
                     let mut masks = vec![0i32; default_mask_count(param_tys.len())];
                     for (i, arg) in args.iter().enumerate() {
                         match arg {
-                            Some(a) => self.emit_value(*a, code),
+                            Some(a) => {
+                                self.emit_value(*a, code);
+                                if let Some(vc) = boxed.get(&i) {
+                                    emit_box_impl(self.ir, self.cw, vc, code);
+                                }
+                            }
                             None => {
-                                push_zero(param_tys[i], code, self.cw);
+                                push_zero(stub_param_tys[i], code, self.cw);
                                 masks[i / 32] |= default_mask_bit(i);
                             }
                         }
@@ -5257,7 +5391,7 @@ impl<'a> Emitter<'a> {
                     }
                     code.aconst_null();
                     let mut stub_params = vec![Ty::obj(&owner)];
-                    stub_params.extend(param_tys.iter().copied());
+                    stub_params.extend(stub_param_tys.iter().copied());
                     stub_params.extend(std::iter::repeat_n(
                         Ty::Int,
                         default_mask_count(param_tys.len()),
@@ -5336,11 +5470,14 @@ impl<'a> Emitter<'a> {
                     code.invokestatic(m, aw, slot_words(ret) as i32);
                 }
                 Callee::LocalDefault(fid) => {
-                    // The `foo$default(realparams, int mask, Object marker)` synthetic on the self facade
-                    // (emitted by `emit_facade_default_stub`). Args already include the mask + marker.
+                    // The `foo$default(realparams, mask..., Object marker)` synthetic on the self facade
+                    // (emitted by `emit_facade_default_stub`). Args already include mask words + marker.
                     let f = &self.ir.functions[*fid as usize];
                     let mut param_tys = jvm_tys(&f.params);
-                    param_tys.push(Ty::Int);
+                    param_tys.extend(std::iter::repeat_n(
+                        Ty::Int,
+                        default_mask_count(f.params.len()),
+                    ));
                     param_tys.push(Ty::obj("java/lang/Object"));
                     let ret = ir_ty_to_jvm(&f.ret);
                     let name = format!("{}$default", f.name);

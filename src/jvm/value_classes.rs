@@ -605,6 +605,14 @@ pub fn lower_value_classes(
         if c.is_interface {
             continue;
         }
+        // A `@Serializable` class's synthetic `$$serializer` object is the exception to the
+        // override-drops-`ACC_FINAL` rule: kotlinc emits its `serialize`/`deserialize`/`childSerializers`/
+        // `getDescriptor` implementations as `final` (they're compiler-generated, not user-overridable).
+        // Its erased KSerializer bridges live in `class.bridges` (never `class.methods`), so skipping the
+        // whole class here leaves them untouched.
+        if c.fq_name.ends_with("$$serializer") {
+            continue;
+        }
         let Some(Some(names)) = super_member_names.get(&c.fq_name) else {
             continue;
         };
@@ -624,6 +632,9 @@ pub fn lower_value_classes(
         for c in &ir.classes {
             if c.is_interface {
                 continue;
+            }
+            if c.fq_name.ends_with("$$serializer") {
+                continue; // serializer impls stay `final` — see the override_opens loop above
             }
             if let Some(Some(_)) = super_member_names.get(&c.fq_name) {
                 continue; // whole chain same-file — handled above
@@ -678,6 +689,9 @@ pub fn lower_value_classes(
         }
         out
     };
+    // `(fid, param idx, boxed value-class Ty)` for nullable-underlying value-class params — the base
+    // method unboxes them (below), but its `$default` stub + call site keep them boxed (recorded here).
+    let mut default_boxed: Vec<(u32, usize, Ty)> = Vec::new();
     for (fid, f) in ir.functions.iter_mut().enumerate() {
         let is_box_impl = f.name == "box-impl";
         // A USER value-class member function's body runs on the BOXED object; its value-class-typed
@@ -746,8 +760,11 @@ pub fn lower_value_classes(
                 f.name = mangled;
             }
         }
-        for p in &mut f.params {
+        for (idx, p) in f.params.iter_mut().enumerate() {
             if !(vc_member && is_vc_ty(p)) {
+                if vc_underlying_nullable(p, &under) {
+                    default_boxed.push((fid as u32, idx, *p));
+                }
                 *p = erase(p, &under);
             }
         }
@@ -767,6 +784,35 @@ pub fn lower_value_classes(
                     *chk = None;
                 }
             }
+        }
+    }
+    for (fid, idx, ty) in default_boxed {
+        ir.default_stub_boxed_params
+            .entry(fid)
+            .or_default()
+            .push((idx, ty));
+    }
+
+    // 1a′. A `@Serializable` property's `get<X>$annotations()` marker follows its getter's value-class
+    //      mangle: when `getX` mangled to `getX-<hash>`, kotlinc names the marker `getX-<hash>$annotations`.
+    //      The marker is a static (no dispatch receiver), so its owner comes from the class method list.
+    if !mangle_map.is_empty() {
+        let mut renames: Vec<(u32, String)> = Vec::new();
+        for c in &ir.classes {
+            for &fid in &c.methods {
+                let Some(f) = ir.functions.get(fid as usize) else {
+                    continue;
+                };
+                let Some(base) = f.name.strip_suffix("$annotations") else {
+                    continue;
+                };
+                if let Some(mangled) = mangle_map.get(&(c.fq_name.clone(), base.to_string(), 0)) {
+                    renames.push((fid, format!("{mangled}$annotations")));
+                }
+            }
+        }
+        for (fid, name) in renames {
+            ir.functions[fid as usize].name = name;
         }
     }
 
@@ -1117,6 +1163,12 @@ pub fn lower_value_classes(
         // `constructor-impl`s by `synth_value_members`, so this only touches regular classes.
         for sc in &mut c.secondary_ctors {
             for p in &mut sc.params {
+                // A SYNTHETIC marker ctor (the serialization deser ctor, disambiguated by a trailing
+                // `DefaultConstructorMarker` rather than `-<hash>` mangling) keeps a nullable-underlying
+                // value-class param BOXED — kotlinc can't unbox it there without the mangling.
+                if sc.synthetic && vc_underlying_nullable(p, &under) {
+                    continue;
+                }
                 *p = erase(p, &under);
             }
         }

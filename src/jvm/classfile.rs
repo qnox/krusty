@@ -277,6 +277,10 @@ pub struct ClassWriter {
     /// `BootstrapMethods` entries: `(method_handle_cp_index, static_argument_cp_indices)`.
     /// The index of an entry here is its `bootstrap_method_attr_index` (referenced by InvokeDynamic).
     bootstrap_methods: Vec<(u16, Vec<u16>)>,
+    /// Whether the class itself carries a `Deprecated` attribute (from `@Deprecated`).
+    class_deprecated: bool,
+    /// `(name_index, desc_index)` of methods carrying a `Deprecated` attribute (from `@Deprecated`).
+    deprecated_methods: std::collections::HashSet<(u16, u16)>,
     pub internal_name: String,
 }
 
@@ -296,8 +300,23 @@ impl ClassWriter {
             class_attributes: Vec::new(),
             runtime_annotations: Vec::new(),
             bootstrap_methods: Vec::new(),
+            class_deprecated: false,
+            deprecated_methods: std::collections::HashSet::new(),
             internal_name: internal_name.to_string(),
         }
+    }
+
+    /// Mark the class itself as carrying a `Deprecated` attribute (kotlinc emits this for a `@Deprecated`
+    /// declaration, e.g. a `@Serializable` class's HIDDEN-deprecated `$$serializer` object).
+    pub fn set_deprecated(&mut self) {
+        self.class_deprecated = true;
+    }
+
+    /// Mark a previously-added method (by name+descriptor) as carrying a `Deprecated` attribute.
+    pub fn mark_method_deprecated(&mut self, name: &str, desc: &str) {
+        let n = self.cp.utf8(name);
+        let d = self.cp.utf8(desc);
+        self.deprecated_methods.insert((n, d));
     }
 
     /// Override the class access flags (e.g. `ACC_PUBLIC | ACC_INTERFACE | ACC_ABSTRACT`).
@@ -665,6 +684,12 @@ impl ClassWriter {
         } else {
             None
         };
+        // Intern `Deprecated` only if the class or a method carries it.
+        let deprecated_attr_name = if self.class_deprecated || !self.deprecated_methods.is_empty() {
+            Some(self.cp.utf8("Deprecated"))
+        } else {
+            None
+        };
         // Field annotation attribute names, interned only when a field actually carries them.
         let field_vis_ann_name = if self.fields.iter().any(|f| !f.visible_anns.is_empty()) {
             Some(self.cp.utf8("RuntimeVisibleAnnotations"))
@@ -744,10 +769,15 @@ impl ClassWriter {
             u2(&mut out, m.name);
             u2(&mut out, m.desc);
             let sig_attr: u16 = if m.signature.is_some() { 1 } else { 0 };
+            let dep_attr: u16 = if self.deprecated_methods.contains(&(m.name, m.desc)) {
+                1
+            } else {
+                0
+            };
             match &m.code {
-                None => u2(&mut out, sig_attr), // abstract method: only an optional Signature
+                None => u2(&mut out, sig_attr + dep_attr), // abstract: optional Signature [+ Deprecated]
                 Some(code) => {
-                    u2(&mut out, 1 + sig_attr); // Code [+ Signature]
+                    u2(&mut out, 1 + sig_attr + dep_attr); // Code [+ Signature] [+ Deprecated]
                     u2(&mut out, code_attr_name);
                     let code_len = code.len();
                     let sm_overhead = match &m.stackmap {
@@ -784,6 +814,16 @@ impl ClassWriter {
                 u4(&mut out, 2);
                 u2(&mut out, si);
             }
+            // `Deprecated` attribute: a zero-length attribute (name_index, length=0).
+            if dep_attr == 1 {
+                u2(&mut out, deprecated_attr_name.unwrap());
+                u4(&mut out, 0);
+            }
+        }
+        // Class-level `Deprecated` attribute (zero-length) — appended to the class attribute table.
+        if self.class_deprecated {
+            let name = deprecated_attr_name.unwrap();
+            self.class_attributes.push((name, Vec::new()));
         }
         u2(&mut out, self.class_attributes.len() as u16);
         for (name, bytes) in &self.class_attributes {
@@ -1615,6 +1655,32 @@ mod tests {
         let start = code.bytes.len();
         code.iinc(300, 1);
         assert_eq!(&code.bytes[start..], &[0xc4, 0x84, 0x01, 0x2c, 0x00, 0x01]);
+    }
+
+    /// A method/class marked deprecated must carry the zero-length `Deprecated` attribute — kotlinc
+    /// emits it for a `@Serializable` class's `$$serializer` object and `get<Prop>$annotations()`
+    /// markers, and ASM surfaces it as `ACC_DEPRECATED` (0x20000), which the infragnite ABI gate compares.
+    #[test]
+    fn deprecated_attribute_emitted_on_marked_method_and_class() {
+        fn contains(hay: &[u8], needle: &[u8]) -> bool {
+            hay.windows(needle.len()).any(|w| w == needle)
+        }
+
+        // No deprecation ⇒ the `Deprecated` attribute name is never interned.
+        let mut plain = ClassWriter::new("FooKt", "java/lang/Object");
+        let mut code = CodeBuilder::new(0);
+        code.ret_void();
+        plain.add_method(ACC_PUBLIC | ACC_STATIC, "m", "()V", &code);
+        assert!(!contains(&plain.finish(), b"Deprecated"));
+
+        // Marking the method and the class both intern + emit the attribute.
+        let mut cw = ClassWriter::new("FooKt", "java/lang/Object");
+        let mut code = CodeBuilder::new(0);
+        code.ret_void();
+        cw.add_method(ACC_PUBLIC | ACC_STATIC, "m", "()V", &code);
+        cw.mark_method_deprecated("m", "()V");
+        cw.set_deprecated();
+        assert!(contains(&cw.finish(), b"Deprecated"));
     }
 
     #[test]

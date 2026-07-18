@@ -820,6 +820,8 @@ pub struct IrSecondaryCtor {
     pub body: Option<ExprId>,
     /// Which `<init>` this constructor delegates to, and whether it runs the class init body.
     pub delegate: CtorDelegateTarget,
+    /// kotlinc marks this ctor `ACC_SYNTHETIC` (0x1000) — e.g. a `@Serializable` deserialization ctor.
+    pub synthetic: bool,
 }
 
 /// The delegation target of a secondary constructor.
@@ -962,6 +964,25 @@ pub struct IrFile {
     /// Methods kotlinc marks `ACC_SYNTHETIC` — currently a value class's `box-impl`/`unbox-impl` (the
     /// compiler-manufactured box adapters). The JVM backend ORs `0x1000` for a `FunId` in this set.
     pub synthetic_methods: std::collections::HashSet<u32>,
+    /// Methods kotlinc marks `ACC_BRIDGE` (0x40) — e.g. a `@Serializable` serializer's
+    /// `typeParametersSerializers`. The JVM backend ORs `0x40` for a `FunId` in this set.
+    pub bridge_methods: std::collections::HashSet<u32>,
+    /// Per-method (`FunId`) `(param index, boxed value-class type)` for params whose value class has a
+    /// NULLABLE underlying: the base (mangled) method unboxes them, but its `<name>$default` synthetic
+    /// keeps them BOXED (kotlinc — a `$default` can't disambiguate the unboxed signature without the
+    /// `-<hash>` mangling). Recorded by the value-class pass BEFORE erasure; read by `emit_default_stub`
+    /// (signature + box-on-fill + unbox-on-delegate) AND the `$default` CALL site (boxed arg + descriptor).
+    pub default_stub_boxed_params: std::collections::HashMap<u32, Vec<(usize, crate::types::Ty)>>,
+    /// Internal names of classes kotlinc marks `ACC_SYNTHETIC` (0x1000) on the class itself — e.g. a
+    /// `@Serializable` class's generated `$$serializer` object.
+    pub synthetic_classes: std::collections::HashSet<String>,
+    /// `FunId`s of methods carrying a `Deprecated` classfile attribute (from `@Deprecated`) — e.g. a
+    /// `@Serializable` class's `get<Prop>$annotations()` markers, which kotlinc deprecates HIDDEN. ASM
+    /// surfaces the attribute as `ACC_DEPRECATED` (0x20000) in the access int, so the ABI gate compares it.
+    pub deprecated_methods: std::collections::HashSet<u32>,
+    /// Internal names of classes carrying a `Deprecated` classfile attribute (from `@Deprecated`) — e.g. a
+    /// `@Serializable` class's generated `$$serializer` object, which kotlinc deprecates HIDDEN.
+    pub deprecated_classes: std::collections::HashSet<String>,
     /// Internal names of classes whose primary constructor has a value-class-typed parameter (a
     /// `data class Server(val id: ServerId, …)`). kotlinc makes such a primary `<init>` PRIVATE and adds a
     /// PUBLIC|SYNTHETIC accessor `<init>(…args, DefaultConstructorMarker)` that delegates to it — its ABI

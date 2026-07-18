@@ -1772,6 +1772,7 @@ impl<'a> Parser<'a> {
                 }
                 let pname = self.ident_or_error("parameter name");
                 self.expect(TokenKind::Colon, "':'");
+                self.skip_newlines(); // a wrapped declaration puts the type on the next line (`val x:\n  T`)
                 let ty = self.parse_type();
                 let ty = if is_vararg {
                     vararg_array_typeref(ty)
@@ -2511,6 +2512,19 @@ impl<'a> Parser<'a> {
 
     /// v0 class: `class Name(val/var p: Type, ...)` with an optional empty body `{}`.
     /// Every primary-constructor parameter must be a `val`/`var` property (no plain params yet).
+    /// Extend the names of nested types hoisted DURING a child class's parse (decls `start..`) with the
+    /// enclosing class's name, so `A { B { C } }` yields the FULL path `A.B.C` (internal `A$B$C`) instead
+    /// of the truncated `B.C` the immediate-parent prefix alone produces. Applied at each level, this
+    /// builds the complete path incrementally.
+    fn reprefix_hoisted(&mut self, outer: &str, start: usize) {
+        for k in start..self.file.decls.len() {
+            let did = self.file.decls[k];
+            if let crate::ast::Decl::Class(nc) = self.file.decl_mut(did) {
+                nc.name = format!("{outer}.{}", nc.name);
+            }
+        }
+    }
+
     fn parse_class(&mut self) -> ClassDecl {
         let annotations = self.take_pending_annotations();
         let annotation_args = self.take_pending_annotation_args();
@@ -2582,6 +2596,7 @@ impl<'a> Parser<'a> {
                 };
                 let pname = self.ident_or_error("parameter name");
                 self.expect(TokenKind::Colon, "':'");
+                self.skip_newlines(); // a wrapped declaration puts the type on the next line (`val x:\n  T`)
                 let ty = self.parse_type();
                 let ty = if is_vararg {
                     vararg_array_typeref(ty)
@@ -2708,7 +2723,9 @@ impl<'a> Parser<'a> {
                         // additionally captures the enclosing instance (`inner_of` → a synthetic `this$0`
                         // field + outer-as-first-constructor-parameter).
                         let is_inner = mods.iter().any(|m| m == "inner");
+                        let start = self.file.decls.len();
                         let mut nested = self.parse_class();
+                        self.reprefix_hoisted(&name, start);
                         nested.name = format!("{}.{}", name, nested.name);
                         if is_inner {
                             nested.inner_of = Some(name.clone());
@@ -2726,7 +2743,9 @@ impl<'a> Parser<'a> {
                                 .map_or(false, |t| t.kind == TokenKind::KwClass) =>
                     {
                         self.bump(); // 'data'
+                        let start = self.file.decls.len();
                         let mut nested = self.parse_class();
+                        self.reprefix_hoisted(&name, start);
                         nested.is_data = true;
                         nested.name = format!("{}.{}", name, nested.name);
                         let id = self.file.add_decl(Decl::Class(nested));
@@ -2746,7 +2765,9 @@ impl<'a> Parser<'a> {
                         if self.text() == "sealed" {
                             self.bump();
                         }
+                        let start = self.file.decls.len();
                         let mut nested = self.parse_interface();
+                        self.reprefix_hoisted(&name, start);
                         nested.name = format!("{}.{}", name, nested.name);
                         let id = self.file.add_decl(Decl::Class(nested));
                         self.file.decls.push(id);
@@ -2761,7 +2782,9 @@ impl<'a> Parser<'a> {
                                 .get(self.i + 1)
                                 .map_or(false, |t| t.kind == TokenKind::KwClass) =>
                     {
+                        let start = self.file.decls.len();
                         let mut nested = self.parse_enum();
+                        self.reprefix_hoisted(&name, start);
                         nested.name = format!("{}.{}", name, nested.name);
                         let id = self.file.add_decl(Decl::Class(nested));
                         self.file.decls.push(id);
@@ -2770,7 +2793,9 @@ impl<'a> Parser<'a> {
                     // (internal `Outer$Foo`), like a nested class — a sealed class's case objects
                     // (`sealed class V { object Ok : V() }`) are exactly this shape.
                     TokenKind::Ident if self.text() == "object" => {
+                        let start = self.file.decls.len();
                         let mut nested = self.parse_object();
+                        self.reprefix_hoisted(&name, start);
                         nested.name = format!("{}.{}", name, nested.name);
                         let id = self.file.add_decl(Decl::Class(nested));
                         self.file.decls.push(id);
@@ -6103,7 +6128,7 @@ impl<'a> Parser<'a> {
                 self.bump();
                 self.file.add_expr(Expr::CharLit(c), span)
             }
-            TokenKind::TemplateStart => self.parse_template(),
+            TokenKind::TemplateStart | TokenKind::RawTemplateStart => self.parse_template(),
             TokenKind::KwTrue => {
                 self.bump();
                 self.file.add_expr(Expr::BoolLit(true), span)
@@ -6245,12 +6270,20 @@ impl<'a> Parser<'a> {
     /// Parse a string template: `TemplateStart (StrChunk | Dollar Ident | Dollar { expr })* TemplateEnd`.
     fn parse_template(&mut self) -> ExprId {
         let start = self.tok().span;
-        self.bump(); // TemplateStart
+        // A raw (triple-quoted) template's chunks are verbatim — no escape processing.
+        let raw = self.kind() == TokenKind::RawTemplateStart;
+        self.bump(); // TemplateStart / RawTemplateStart
         let mut parts = Vec::new();
         loop {
             match self.kind() {
                 TokenKind::StrChunk => {
-                    parts.push(TemplatePart::Str(unescape_chunk(self.text())));
+                    let text = self.text();
+                    let piece = if raw {
+                        text.to_string()
+                    } else {
+                        unescape_chunk(text)
+                    };
+                    parts.push(TemplatePart::Str(piece));
                     self.bump();
                 }
                 TokenKind::Dollar => {
@@ -6917,6 +6950,7 @@ fn starts_expr(k: TokenKind) -> bool {
             | TokenKind::StringLit
             | TokenKind::CharLit
             | TokenKind::TemplateStart
+            | TokenKind::RawTemplateStart
             | TokenKind::KwTrue
             | TokenKind::KwFalse
             | TokenKind::KwNull

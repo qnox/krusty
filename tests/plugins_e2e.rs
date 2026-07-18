@@ -156,6 +156,142 @@ fn serialization_activates_from_source_annotation() {
 }
 
 #[test]
+fn serializable_enum_relocates_serializer_to_companion() {
+    // A `@Serializable enum` (kotlinx ≥ 1.5) gets `serializer()` on a nested `Companion` backed by a
+    // cached `Lazy` delegate — NOT a static `serializer()` on the enum itself. Matches kotlinc's member
+    // set (Companion class + `access$get$cachedSerializer$delegate$cp` accessor).
+    let Some((_file, mut ir)) = lower("enum class E { A, B }") else {
+        eprintln!("skipping: no stdlib jar / class outside IR subset");
+        return;
+    };
+
+    let e_id = ir
+        .classes
+        .iter()
+        .position(|c| c.fq_name.ends_with("E"))
+        .expect("lowered E enum present") as u32;
+
+    let mut ctx = PluginContext::default();
+    ctx.class_annotations
+        .insert(e_id, vec![SERIALIZABLE_FQ.to_string()].into());
+
+    let mut host = PluginHost::new();
+    host.register(Box::new(SerializationPlugin::default()));
+    host.run(&mut ir, &ctx);
+
+    // serializer() lives on E$Companion, not statically on E.
+    let comp_fq = ir.classes[e_id as usize]
+        .companion_class
+        .clone()
+        .expect("enum gets a companion_class for serializer()");
+    let comp = ir
+        .classes
+        .iter()
+        .find(|c| c.fq_name == comp_fq)
+        .expect("E$Companion synthesized");
+    assert!(
+        comp.methods
+            .iter()
+            .any(|&f| ir.functions[f as usize].name == "serializer"),
+        "serializer() on the Companion"
+    );
+    let enum_methods: Vec<&str> = ir.classes[e_id as usize]
+        .methods
+        .iter()
+        .map(|&f| ir.functions[f as usize].name.as_str())
+        .collect();
+    assert!(
+        !enum_methods.contains(&"serializer"),
+        "enum keeps NO static serializer()"
+    );
+    assert!(
+        enum_methods.contains(&"access$get$cachedSerializer$delegate$cp"),
+        "enum exposes the cached-serializer accessor"
+    );
+}
+
+#[test]
+fn deser_ctor_appends_marker_for_value_class_field() {
+    // A `@Serializable` data class with a value-class-typed field: kotlinc appends a trailing
+    // `DefaultConstructorMarker` to the synthetic deserialization ctor (its value-class-param ABI
+    // disambiguator), on top of the usual `SerializationConstructorMarker`.
+    let Some((_file, mut ir)) =
+        lower("@JvmInline value class V(val s: String)\nclass D(val v: V, val n: Int)")
+    else {
+        eprintln!("skipping: no stdlib jar / class outside IR subset");
+        return;
+    };
+    let d_id = ir
+        .classes
+        .iter()
+        .position(|c| c.fq_name.ends_with("D"))
+        .expect("lowered D class present") as u32;
+
+    let mut ctx = PluginContext::default();
+    ctx.class_annotations
+        .insert(d_id, vec![SERIALIZABLE_FQ.to_string()].into());
+    let mut host = PluginHost::new();
+    host.register(Box::new(SerializationPlugin::default()));
+    host.run(&mut ir, &ctx);
+
+    let deser = ir.classes[d_id as usize]
+        .secondary_ctors
+        .iter()
+        .find(|sc| sc.synthetic)
+        .expect("synthetic deserialization ctor synthesized");
+    let last_two: Vec<Option<&str>> = deser
+        .params
+        .iter()
+        .rev()
+        .take(2)
+        .map(|t| t.obj_internal())
+        .collect();
+    assert_eq!(
+        last_two,
+        vec![
+            Some("kotlin/jvm/internal/DefaultConstructorMarker"),
+            Some("kotlinx/serialization/internal/SerializationConstructorMarker"),
+        ],
+        "deser ctor ends with SerializationConstructorMarker then DefaultConstructorMarker"
+    );
+}
+
+#[test]
+fn value_class_serializer_omits_write_self() {
+    // A `@JvmInline value class` serializes its sole underlying value inline — kotlinc emits NO
+    // `write$Self` helper for it (unlike a plain data class). krusty must match: emitting one is a
+    // spurious extra member the infragnite ABI gate flags.
+    let Some((_file, mut ir)) = lower("@JvmInline value class V(val s: String)") else {
+        eprintln!("skipping: no stdlib jar / class outside IR subset");
+        return;
+    };
+
+    let v_id = ir
+        .classes
+        .iter()
+        .position(|c| c.fq_name.ends_with("V"))
+        .expect("lowered V class present") as u32;
+    assert!(ir.classes[v_id as usize].is_value, "V is a value class");
+
+    let mut ctx = PluginContext::default();
+    ctx.class_annotations
+        .insert(v_id, vec![SERIALIZABLE_FQ.to_string()].into());
+
+    let mut host = PluginHost::new();
+    host.register(Box::new(SerializationPlugin::default()));
+    host.run(&mut ir, &ctx);
+
+    let has_write_self = ir.classes[v_id as usize]
+        .methods
+        .iter()
+        .any(|&f| ir.functions[f as usize].name.starts_with("write$Self"));
+    assert!(
+        !has_write_self,
+        "value class must not get a write$Self helper"
+    );
+}
+
+#[test]
 fn top_level_function_registers_parameter_defaults_for_plugins() {
     let Some((_file, ir)) =
         lower("fun bar(a: Int, b: String = \"hello\", c: Boolean = true) = \"\"")

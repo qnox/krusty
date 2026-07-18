@@ -28,6 +28,7 @@ pub fn compile<B: Backend>(
                 file_index: i as u32,
                 info: &info,
                 symbols: syms,
+                module_name,
             },
             &stems[i],
             &mut state,
