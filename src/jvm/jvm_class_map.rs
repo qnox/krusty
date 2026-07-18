@@ -431,6 +431,17 @@ pub fn type_names_map_to_same_jvm_internal(left: TypeName, right: TypeName) -> b
             .is_some_and(|(left, right)| left == right)
 }
 
+pub fn type_name_maps_to_jvm_collection_interface(internal: TypeName) -> bool {
+    internal.starts_with("java/util/")
+        || type_name_maps_to_jvm_internal(internal, "java/util/Iterator")
+        || type_name_maps_to_jvm_internal(internal, "java/util/ListIterator")
+        || type_name_maps_to_jvm_internal(internal, "java/util/Collection")
+        || type_name_maps_to_jvm_internal(internal, "java/util/List")
+        || type_name_maps_to_jvm_internal(internal, "java/util/Set")
+        || type_name_maps_to_jvm_internal(internal, "java/util/Map")
+        || type_name_maps_to_jvm_internal(internal, "java/util/Map$Entry")
+}
+
 /// Inverse of [`to_jvm_internal`]: normalize a JVM built-in name read from the classpath/descriptors
 /// to its Kotlin identity (`java/lang/Object` → `kotlin/Any`), mirroring how the reference compiler
 /// maps Java types into Kotlin ones at the front-end boundary. Passes other names through unchanged.

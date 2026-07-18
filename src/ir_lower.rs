@@ -366,30 +366,32 @@ pub fn lower_file_at_reporting(
         // fix up. Walk module symbols first, then libraries; otherwise a source class in another file can
         // hide the relevant ancestry from this guard.
         let super_has_generic = |name: &str| -> bool {
-            let start = syms
+            let Some(start) = syms
                 .class_names
                 .get(name)
-                .map(TypeName::render)
-                .unwrap_or_else(|| name.to_string());
+                .or_else(|| existing_type_name(name))
+            else {
+                return false;
+            };
             let mut stack = vec![start];
             let mut seen = std::collections::HashSet::new();
             while let Some(i) = stack.pop() {
-                if !seen.insert(i.clone()) {
+                if !seen.insert(i) {
                     continue;
                 }
-                if let Some(c) = syms.class_by_internal(&i) {
+                if let Some(c) = syms.class_by_type_name(i) {
                     if !c.tparam_names.is_empty() {
                         return true;
                     }
-                    if let Some(s) = c.super_internal() {
+                    if let Some(s) = c.super_internal_name() {
                         stack.push(s);
                     }
-                    stack.extend(c.interfaces.iter_rendered());
-                } else if let Some(t) = syms.libraries.resolve_type(&i) {
+                    stack.extend(c.interface_names());
+                } else if let Some(t) = syms.libraries.resolve_type_name(i) {
                     if !t.type_params.is_empty() {
                         return true;
                     }
-                    stack.extend(t.supertypes.to_vec());
+                    stack.extend(t.supertypes.iter_ids());
                 }
             }
             false
@@ -2137,18 +2139,22 @@ pub fn lower_file_at_reporting(
                 // else a call through the supertype reference resolves to the missing erased getter.
                 if !c.is_interface() {
                     let cid = lo.class_info(&internal)?.id;
-                    for sup in lo.syms.supertype_internals(&internal) {
-                        let Some(sc) = lo.syms.class_by_internal(&sup) else {
+                    let internal_name = existing_type_name(&internal)?;
+                    for sup in lo.syms.supertype_internal_names_from(internal_name) {
+                        let Some(sc) = lo.syms.class_by_type_name(sup) else {
                             continue;
                         };
                         for (pname, sty, base_is_var) in sc.props.clone() {
-                            if let Some((own_ty, own_is_var)) = lo.syms.prop_of(&internal, &pname) {
+                            if let Some((own_ty, own_is_var)) =
+                                lo.syms.prop_of_name(internal_name, &pname)
+                            {
                                 let sty_desc = lo.runtime.type_descriptor(sty)?;
                                 let own_desc = lo.runtime.type_descriptor(own_ty)?;
                                 if sty_desc != own_desc {
                                     let gname = property_getter_name(&pname);
+                                    let sup_rendered = sup.render();
                                     let super_ret = lo
-                                        .class_info(&sup)
+                                        .class_info(&sup_rendered)
                                         .and_then(|ci| ci.methods.get(&gname))
                                         .map(|(_, fid, _)| lo.ir.functions[*fid as usize].ret)
                                         .unwrap_or_else(|| ty_to_ir(sty));
@@ -2210,12 +2216,13 @@ pub fn lower_file_at_reporting(
                 // forwarding to the Kotlin getter (`getSize`/`getKeys`); without it the `java.util` abstract
                 // stays unimplemented and a call through the interface throws `AbstractMethodError`. The
                 // interface members are on the classpath (empty `props`), so scan the class's OWN overrides.
+                let internal_name = existing_type_name(&internal)?;
                 if !c.is_interface()
                     && lo
                         .syms
-                        .supertype_internals(&internal)
+                        .supertype_internal_names_from(internal_name)
                         .iter()
-                        .any(|s| lo.syms.libraries.is_collection_interface(s))
+                        .any(|&s| lo.syms.libraries.is_collection_interface_name(s))
                 {
                     let cid = lo.class_info(&internal)?.id;
                     for p in &c.body_props {
@@ -2224,7 +2231,7 @@ pub fn lower_file_at_reporting(
                             continue;
                         };
                         let stub = stub.as_str();
-                        let Some((own_ty, _)) = lo.syms.prop_of(&internal, &p.name) else {
+                        let Some((own_ty, _)) = lo.syms.prop_of_name(internal_name, &p.name) else {
                             continue;
                         };
                         let already = lo.ir.classes[cid as usize]
@@ -2255,18 +2262,22 @@ pub fn lower_file_at_reporting(
                 if !c.is_interface() {
                     let cid = lo.class_info(&internal)?.id;
                     let mut ifaces = lo.ir.classes[cid as usize].interfaces.clone();
-                    for sup in lo.syms.supertype_internals(&internal) {
+                    let internal_name = existing_type_name(&internal)?;
+                    for sup in lo.syms.supertype_internal_names_from(internal_name) {
                         let is_iface = lo
                             .syms
-                            .class_by_internal(&sup)
+                            .class_by_type_name(sup)
                             .is_some_and(|c| c.is_interface)
                             || lo
                                 .syms
                                 .libraries
-                                .resolve_type(&sup)
+                                .resolve_type_name(sup)
                                 .is_some_and(|t| t.is_interface());
-                        if is_iface && !ifaces.contains(&sup) {
-                            ifaces.push(&sup);
+                        if is_iface {
+                            let sup = sup.render();
+                            if !ifaces.contains(&sup) {
+                                ifaces.push(&sup);
+                            }
                         }
                     }
                     let mut seen: std::collections::HashSet<String> = lo.ir.classes[cid as usize]
@@ -7444,19 +7455,17 @@ impl<'a> Lower<'a> {
         // implement every method Second exposes, not just the ones Second declares directly. Walk the
         // module-`ClassSig` super-interface graph breadth-first, deduping by name + parameter types.
         let mut methods: Vec<(String, Vec<Ty>, Ty)> = Vec::new();
-        let mut seen_ifaces: std::collections::HashSet<String> = std::collections::HashSet::new();
-        let mut queue = vec![iface_internal.clone()];
+        let mut seen_ifaces: std::collections::HashSet<TypeName> = std::collections::HashSet::new();
+        let mut queue = vec![existing_type_name(&iface_internal)
+            .or_else(|| self.syms.classes.get(iface_name).map(|c| c.internal_name()))?];
         while let Some(cur) = queue.pop() {
-            if !seen_ifaces.insert(cur.clone()) {
+            if !seen_ifaces.insert(cur) {
                 continue;
             }
             // A classpath (non-module) interface in the delegated hierarchy can't have its method set
             // enumerated here, so its forwarders would be missing — bail (skip the file) rather than
             // emit a class with un-forwarded abstract methods (an `AbstractMethodError` at runtime).
-            let cs = self
-                .syms
-                .class_by_internal(&cur)
-                .or_else(|| self.syms.classes.get(&cur))?;
+            let cs = self.syms.class_by_type_name(cur)?;
             for (n, s) in &cs.methods {
                 if !methods.iter().any(|(on, op, _)| on == n && *op == s.params) {
                     methods.push((n.clone(), s.params.clone(), s.ret));
@@ -7465,7 +7474,8 @@ impl<'a> Lower<'a> {
             // Super-interfaces (and any base) are stored by internal name; the module table is keyed by
             // simple name, so recurse on the last path segment (same-module interfaces resolve; a
             // classpath super-interface simply isn't found and is skipped, as before).
-            for sup in cs.interfaces.iter_rendered().chain(cs.super_internal()) {
+            queue.extend(cs.interface_names());
+            if let Some(sup) = cs.super_internal_name() {
                 queue.push(sup);
             }
         }
@@ -8682,30 +8692,35 @@ impl<'a> Lower<'a> {
             }
         }
         let mut seen = std::collections::HashSet::new();
-        let mut queue: std::collections::VecDeque<TypeName> = recv_ty
+        let mut queue: std::collections::VecDeque<TypeName> = std::collections::VecDeque::new();
+        if let Some(c) = recv_ty
             .non_null()
             .obj_internal()
-            .map(|i| self.direct_supertypes(i))
-            .unwrap_or_default()
-            .into();
+            .and_then(|i| self.syms.class_by_type_name(i))
+        {
+            for i in c.interface_names() {
+                queue.push_back(i);
+            }
+            if let Some(s) = c.super_internal_name() {
+                queue.push_back(s);
+            }
+        }
         while let Some(internal) = queue.pop_front() {
             if !seen.insert(internal) {
                 continue;
             }
-            if internal.matches("kotlin/Any") || internal.matches("java/lang/Object") {
+            let Some(c) = self.syms.class_by_type_name(internal) else {
                 continue;
-            }
-            let generic_user = self
-                .syms
-                .class_by_type_name(internal)
-                .is_some_and(|c| !c.tparam_names.is_empty());
-            if !generic_user {
-                let rty = Ty::obj_name(internal);
-                if let Some(fid) = pick(rty) {
-                    return Some((fid, rty));
+            };
+            if c.tparam_names.is_empty() {
+                if let Some(fid) = pick(Ty::obj_name(internal)) {
+                    return Some((fid, Ty::obj_name(internal)));
                 }
             }
-            for s in self.direct_supertypes(internal) {
+            for i in c.interface_names() {
+                queue.push_back(i);
+            }
+            if let Some(s) = c.super_internal_name() {
                 queue.push_back(s);
             }
         }
@@ -8724,20 +8739,6 @@ impl<'a> Lower<'a> {
             return Some(self.emit_type_op(IrTypeOp::Cast, recv, *param0));
         }
         Some(recv)
-    }
-
-    fn direct_supertypes(&self, internal: TypeName) -> Vec<TypeName> {
-        if let Some(c) = self.syms.class_by_type_name(internal) {
-            let mut v: Vec<TypeName> = c.interfaces.iter_ids().collect();
-            if let Some(s) = c.super_internal {
-                v.push(s);
-            }
-            v
-        } else if let Some(t) = self.syms.libraries.resolve_type_name(internal) {
-            t.supertypes.iter_ids().collect()
-        } else {
-            Vec::new()
-        }
     }
 
     /// An arithmetic operator member of a primitive numeric type called by its METHOD name
@@ -13469,38 +13470,35 @@ impl<'a> Lower<'a> {
 
     /// Whether `internal` is (or transitively extends) a `Collection` — so a value of it can be passed to
     /// `java.util.Collection.addAll`. Used to gate the flatMap loop desugar.
-    fn type_is_collection(&self, internal: &str) -> bool {
-        let is_coll = |n: &str| {
-            matches!(
-                n,
-                "kotlin/collections/Collection"
-                    | "kotlin/collections/MutableCollection"
-                    | "kotlin/collections/List"
-                    | "kotlin/collections/MutableList"
-                    | "kotlin/collections/Set"
-                    | "kotlin/collections/MutableSet"
-                    | "java/util/Collection"
-                    | "java/util/List"
-                    | "java/util/Set"
-                    | "java/util/ArrayList"
-            )
+    fn type_is_collection(&self, internal: TypeName) -> bool {
+        let is_coll = |n: TypeName| {
+            n.matches("kotlin/collections/Collection")
+                || n.matches("kotlin/collections/MutableCollection")
+                || n.matches("kotlin/collections/List")
+                || n.matches("kotlin/collections/MutableList")
+                || n.matches("kotlin/collections/Set")
+                || n.matches("kotlin/collections/MutableSet")
+                || n.matches("java/util/Collection")
+                || n.matches("java/util/List")
+                || n.matches("java/util/Set")
+                || n.matches("java/util/ArrayList")
         };
-        let mut stack = vec![internal.to_string()];
+        let mut stack = vec![internal];
         let mut seen = std::collections::HashSet::new();
         while let Some(i) = stack.pop() {
-            if !seen.insert(i.clone()) {
+            if !seen.insert(i) {
                 continue;
             }
-            if is_coll(&i) {
+            if is_coll(i) {
                 return true;
             }
-            if let Some(c) = self.syms.class_by_internal(&i) {
-                if let Some(s) = c.super_internal() {
+            if let Some(c) = self.syms.class_by_type_name(i) {
+                if let Some(s) = c.super_internal_name() {
                     stack.push(s);
                 }
-                stack.extend(c.interfaces.iter_rendered());
-            } else if let Some(t) = self.syms.libraries.resolve_type(&i) {
-                stack.extend(t.supertypes.to_vec());
+                stack.extend(c.interface_names());
+            } else if let Some(t) = self.syms.libraries.resolve_type_name(i) {
+                stack.extend(t.supertypes.iter_ids());
             }
         }
         false
@@ -13801,7 +13799,7 @@ impl<'a> Lower<'a> {
         if is_flat
             && !part_ty
                 .obj_internal()
-                .is_some_and(|i| self.type_is_collection(&i.render()))
+                .is_some_and(|i| self.type_is_collection(i))
         {
             self.scope.truncate(depth);
             return None;

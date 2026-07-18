@@ -2356,6 +2356,10 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
         crate::jvm::jvm_class_map::to_jvm_internal(supertype_internal).starts_with("java/util/")
     }
 
+    fn is_collection_interface_name(&self, supertype_internal: TypeName) -> bool {
+        crate::jvm::jvm_class_map::type_name_maps_to_jvm_collection_interface(supertype_internal)
+    }
+
     fn collection_property_accessor(&self, property: &str) -> Option<String> {
         crate::jvm::names::collection_property_stub_name(property).map(str::to_string)
     }

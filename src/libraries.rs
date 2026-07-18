@@ -168,6 +168,10 @@ pub trait SemanticPlatform: crate::symbol_source::SymbolSource {
         false
     }
 
+    fn is_collection_interface_name(&self, supertype_internal: TypeName) -> bool {
+        self.is_collection_interface(&supertype_internal.render())
+    }
+
     /// The accessor name a collection interface expects for a Kotlin collection PROPERTY
     /// (`size` → `size`, `keys` → `keySet`). Kept semantic here because source checking/lowering must
     /// identify the required member; descriptor construction stays in the backend ABI.

@@ -276,20 +276,20 @@ impl ClassSig {
         self.internal.matches(internal)
     }
 
-    pub fn inner_of(&self) -> Option<String> {
-        self.inner_of.map(TypeName::render)
+    pub fn inner_of_name(&self) -> Option<TypeName> {
+        self.inner_of
     }
 
     pub fn inner_of_matches(&self, internal: &str) -> bool {
         self.inner_of.is_some_and(|outer| outer.matches(internal))
     }
 
-    pub fn super_internal(&self) -> Option<String> {
-        self.super_internal.map(TypeName::render)
+    pub fn super_internal_name(&self) -> Option<TypeName> {
+        self.super_internal
     }
 
-    pub fn interfaces(&self) -> Vec<String> {
-        self.interfaces.to_vec()
+    pub fn interface_names(&self) -> impl Iterator<Item = TypeName> + '_ {
+        self.interfaces.iter_ids()
     }
 
     pub fn prop(&self, name: &str) -> Option<(Ty, bool)> {
@@ -491,6 +491,10 @@ impl SymbolTable {
             .and_then(|name| self.classes.get(name))
     }
 
+    pub fn class_simple_name(&self, internal: TypeName) -> Option<&str> {
+        self.classes_by_type_name.get(&internal).map(String::as_str)
+    }
+
     /// The extension-function overloads registered for a receiver + name (empty if none). The receiver
     /// is folded to its [`Ty::erased_recv`] key, matching how they are stored at collection.
     pub fn ext_fun_overloads(&self, recv: Ty, name: &str) -> &[Signature] {
@@ -600,21 +604,20 @@ impl SymbolTable {
         }
     }
 
-    /// All declared supertypes (base-class chain + interfaces, transitively) of `internal`.
-    pub fn supertype_internals(&self, internal: &str) -> Vec<String> {
-        self.supertype_internal_names(internal)
-            .into_iter()
-            .map(TypeName::render)
-            .collect()
-    }
-
     pub fn supertype_internal_names(&self, internal: &str) -> Vec<TypeName> {
         let mut out = Vec::new();
         if let Some(internal) = existing_type_name(internal) {
-            self.collect_super_internals(internal, &mut out);
+            out = self.supertype_internal_names_from(internal);
         }
         out
     }
+
+    pub fn supertype_internal_names_from(&self, internal: TypeName) -> Vec<TypeName> {
+        let mut out = Vec::new();
+        self.collect_super_internals(internal, &mut out);
+        out
+    }
+
     fn collect_super_internals(&self, internal: TypeName, out: &mut Vec<TypeName>) {
         let Some(c) = self.class_by_type_name(internal) else {
             return;
@@ -632,15 +635,11 @@ impl SymbolTable {
         }
     }
 
-    /// Internal names of declared classes whose direct base class is `internal`.
-    pub fn subclasses_of(&self, internal: &str) -> Vec<String> {
+    pub fn subclass_names_of(&self, internal: TypeName) -> Vec<TypeName> {
         self.classes
             .values()
-            .filter(|c| {
-                c.super_internal
-                    .is_some_and(|super_internal| super_internal.matches(internal))
-            })
-            .map(ClassSig::internal)
+            .filter(|c| c.super_internal == Some(internal))
+            .map(ClassSig::internal_name)
             .collect()
     }
 
@@ -5159,17 +5158,21 @@ pub fn check_file_at(
                 // (kotlinc); walk the `inner_of` chain and include each enclosing class's parameters.
                 let mut tparam_names = cl.type_params.clone();
                 {
-                    let mut outer = cl.inner_of.clone();
+                    let mut outer = cl.inner_of.as_deref().and_then(|o| {
+                        syms.classes
+                            .get(o)
+                            .map(ClassSig::internal_name)
+                            .or_else(|| existing_type_name(o))
+                    });
                     let mut guard = 0;
                     while let Some(o) = outer {
                         guard += 1;
                         if guard > 32 {
                             break;
                         }
-                        let key = o.rsplit(['/', '$']).next().unwrap_or(&o).to_string();
-                        if let Some(s) = syms.classes.get(&key) {
+                        if let Some(s) = syms.class_by_type_name(o) {
                             tparam_names.extend(s.tparam_names.iter().cloned());
-                            outer = s.inner_of();
+                            outer = s.inner_of_name();
                         } else {
                             break;
                         }
@@ -5185,24 +5188,37 @@ pub fn check_file_at(
                     .unwrap_or_default();
                 // An inner class's methods can read the enclosing instance's properties (via `this$0`);
                 // make the outer class's backing-field properties resolvable as implicit-`this` members.
-                if let Some(outer) = &cl.inner_of {
-                    if let Some(os) = syms.classes.get(outer) {
-                        props.extend(os.props.clone());
-                    }
+                if let Some(os) = cl.inner_of.as_deref().and_then(|outer| {
+                    syms.classes.get(outer).or_else(|| {
+                        existing_type_name(outer).and_then(|o| syms.class_by_type_name(o))
+                    })
+                }) {
+                    props.extend(os.props.clone());
                 }
-                c.this_ty = syms.classes.get(&cl.name).map(|s| Ty::obj(&s.internal()));
+                c.this_ty = syms
+                    .classes
+                    .get(&cl.name)
+                    .map(|s| Ty::obj_name(s.internal_name()));
                 // Push the enclosing-class labels for the duration of this class's member checks: the
                 // OUTER chain first (`this@Outer` for an `inner class`, resolved via `this$0`), then the
                 // class's own label (`this@C`) innermost. Walk `inner_of` outward.
                 let mut label_depth = 0usize;
                 {
                     let mut chain: Vec<(String, Ty)> = Vec::new();
-                    let mut outer = cl.inner_of.clone();
+                    let mut outer = cl.inner_of.as_deref().and_then(|o| {
+                        syms.classes
+                            .get(o)
+                            .map(ClassSig::internal_name)
+                            .or_else(|| existing_type_name(o))
+                    });
                     while let Some(o) = outer {
-                        let key = o.rsplit(['/', '$']).next().unwrap_or(&o).to_string();
-                        if let Some(s) = syms.classes.get(&key) {
-                            chain.push((key, Ty::obj(&s.internal())));
-                            outer = s.inner_of();
+                        if let Some(s) = syms.class_by_type_name(o) {
+                            let key = syms
+                                .class_simple_name(o)
+                                .unwrap_or("<anonymous>")
+                                .to_string();
+                            chain.push((key, Ty::obj_name(s.internal_name())));
+                            outer = s.inner_of_name();
                         } else {
                             break;
                         }
@@ -5399,9 +5415,10 @@ pub fn check_file_at(
                     let base_internal = c
                         .syms
                         .class_by_internal(&internal)
-                        .and_then(ClassSig::super_internal);
+                        .and_then(ClassSig::super_internal_name);
                     if let Some(base_int) = base_internal {
-                        if let Some(params) = c.resolve_super_ctor_params(&base_int, &base_arg_tys)
+                        if let Some(params) =
+                            c.resolve_super_ctor_params_name(base_int, &base_arg_tys)
                         {
                             c.super_ctor_params.insert(internal, params);
                         }
@@ -7152,11 +7169,15 @@ impl<'a> Checker<'a> {
     /// Resolve a bare type `name` through this file's imports to an internal name that actually exists on
     /// The parameter types of the base constructor that `: Base(args)` targets — the UNIQUE constructor
     /// (module or classpath, resolved through the symbol source) to which every argument is assignable.
-    /// `base_internal` is the ALREADY-RESOLVED base class internal name (from `ClassSig::super_internal`).
+    /// `base_internal` is the ALREADY-RESOLVED base class internal name.
     /// `None` if the base type is unresolved, has no matching constructor, or the match is ambiguous
     /// (then the lowerer bails rather than emitting a `super(...)` to a guessed overload).
-    fn resolve_super_ctor_params(&self, base_internal: &str, arg_tys: &[Ty]) -> Option<Vec<Ty>> {
-        let lt = self.resolved_type(base_internal)?;
+    fn resolve_super_ctor_params_name(
+        &self,
+        base_internal: TypeName,
+        arg_tys: &[Ty],
+    ) -> Option<Vec<Ty>> {
+        let lt = self.resolved_type_name(base_internal)?;
         // EXACT (nullability-insensitive) type match — a loose reference→reference assignability can't
         // tell `RuntimeException(String)` from `RuntimeException(Throwable)` for a `String` argument.
         let mut matches = lt.constructors.iter().filter(|ctor| {
@@ -7521,22 +7542,21 @@ impl<'a> Checker<'a> {
             return false;
         };
         // Subclasses of the sealed subject: a SAME-MODULE sealed class walks the user-class registry
-        // (`subclasses_of`); a CLASSPATH sealed class reads its `@Metadata` `sealedSubclassFqName`
+        // (`subclass_names_of`); a CLASSPATH sealed class reads its `@Metadata` `sealedSubclassFqName`
         // (`sealed_subclasses`), so `when (d) { is D.A -> …; is D.B -> … }` over a classpath sealed `D`
         // is proven exhaustive (an expression) the same way a same-module one is.
-        let internal = internal.render();
-        let subs = match self.syms.class_by_internal(&internal) {
-            Some(cs) if cs.is_sealed => self.syms.subclasses_of(&internal),
+        let subs: Vec<TypeName> = match self.syms.class_by_type_name(internal) {
+            Some(cs) if cs.is_sealed => self.syms.subclass_names_of(internal),
             Some(_) => return false,
             None => self
-                .resolved_type(&internal)
-                .map(|t| t.sealed_subclasses.to_vec())
+                .resolved_type_name(internal)
+                .map(|t| t.sealed_subclasses.iter_ids().collect())
                 .unwrap_or_default(),
         };
         if subs.is_empty() {
             return false;
         }
-        let mut covered: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut covered: std::collections::HashSet<TypeName> = std::collections::HashSet::new();
         for arm in arms {
             for &c in &arm.conditions {
                 match self.file.expr(c) {
@@ -7545,14 +7565,14 @@ impl<'a> Checker<'a> {
                         ty, negated: false, ..
                     } => {
                         if let Ty::Obj(n, _) = self.resolve_ty_no_diag(ty) {
-                            covered.insert(n.render());
+                            covered.insert(n);
                         }
                     }
                     // `Sub ->` — value arm naming a singleton object subclass (`object A : S`); a bare
                     // name resolving to a known class whose internal is one of the sealed subclasses.
                     Expr::Name(n) => {
                         if let Some(ci) = self.syms.classes.get(n) {
-                            let internal = ci.internal();
+                            let internal = ci.internal_name();
                             if subs.contains(&internal) {
                                 covered.insert(internal);
                             }
@@ -7576,7 +7596,7 @@ impl<'a> Checker<'a> {
             self.syms
                 .classes
                 .get(*name)
-                .map_or(false, |c| c.internal_matches(&internal.render()))
+                .map_or(false, |c| c.internal_name() == internal)
         }) else {
             return false;
         };
@@ -8241,12 +8261,6 @@ impl<'a> Checker<'a> {
             }
             _ => false,
         }
-    }
-
-    /// Resolve a method (own or inherited from the base-class chain) on a class internal name.
-    fn lookup_method(&self, internal: &str, name: &str) -> Option<Signature> {
-        let internal = existing_type_name(internal)?;
-        self.lookup_method_name(internal, name)
     }
 
     fn lookup_method_name(&self, internal: TypeName, name: &str) -> Option<Signature> {
@@ -10917,24 +10931,27 @@ impl<'a> Checker<'a> {
     fn classpath_super_member_ret(
         &mut self,
         call: ExprId,
-        sub_internal: &str,
+        sub_internal: TypeName,
         name: &str,
         arg_tys: &[Ty],
     ) -> Option<Ty> {
         // Not a user class — its own members already went through the library.
-        self.syms.class_by_internal(sub_internal)?;
-        for sup in self.syms.supertype_internals(sub_internal) {
-            if self.syms.class_by_internal(&sup).is_some() {
+        self.syms.class_by_type_name(sub_internal)?;
+        for sup in self.syms.supertype_internal_names_from(sub_internal) {
+            if self.syms.class_by_type_name(sup).is_some() {
                 continue; // a user supertype — already covered by the module-member walk
             }
             // Only inherit through a base CLASS chain, never an interface supertype: a concrete member
             // reached via an interface (e.g. `Object.clone` seen through a `Cloneable` supertype) would
             // emit an `invokevirtual` whose owner is an interface (`IncompatibleClassChangeError`).
             // Interface default methods are resolved by the ordinary member paths, not here.
-            if self.resolved_type(&sup).is_none_or(|t| t.is_interface()) {
+            if self
+                .resolved_type_name(sup)
+                .is_none_or(|t| t.is_interface())
+            {
                 continue;
             }
-            if let Some(m) = self.resolve_instance_member(Ty::obj(&sup), name, arg_tys) {
+            if let Some(m) = self.resolve_instance_member(Ty::obj_name(sup), name, arg_tys) {
                 let ret = m.ret;
                 self.resolved_calls.insert(call, ResolvedCall::Member(m));
                 return Some(ret);
@@ -11023,9 +11040,7 @@ impl<'a> Checker<'a> {
                 return Some(ret);
             }
             if let Some(internal) = rt.obj_internal() {
-                if let Some(ret) =
-                    self.classpath_super_member_ret(call, &internal.render(), name, arg_tys)
-                {
+                if let Some(ret) = self.classpath_super_member_ret(call, internal, name, arg_tys) {
                     return Some(ret);
                 }
             }
@@ -12030,27 +12045,26 @@ impl<'a> Checker<'a> {
     /// class or the companion, whose JVM internal name is `<owner>$…`); `protected` reaches those plus
     /// any subclass of `owner`. At a top-level site (no enclosing class) a non-public member is
     /// inaccessible.
-    fn member_accessible(&self, vis: Visibility, owner: &str) -> bool {
+    fn member_accessible(&self, vis: Visibility, owner: TypeName) -> bool {
         match vis {
             Visibility::Public | Visibility::Internal => true,
             Visibility::Private | Visibility::Protected => {
-                let Some(enc) = self
-                    .this_ty
-                    .and_then(|t| t.obj_internal().map(|n| n.render()))
-                else {
+                let Some(enc) = self.this_ty.and_then(Ty::obj_internal) else {
                     return false;
                 };
-                let nested_prefix = format!("{owner}$");
-                if enc == owner || enc.starts_with(&nested_prefix) {
+                if enc == owner {
+                    return true;
+                }
+                let nested_prefix = format!("{}$", owner.render());
+                if enc.starts_with(&nested_prefix) {
                     return true;
                 }
                 // `protected` additionally reaches from a subclass of the owner.
                 vis == Visibility::Protected
                     && self
                         .syms
-                        .supertype_internals(&enc)
-                        .iter()
-                        .any(|s| s == owner)
+                        .supertype_internal_names_from(enc)
+                        .contains(&owner)
             }
         }
     }
@@ -12062,13 +12076,13 @@ impl<'a> Checker<'a> {
     /// function vs property table. `None` when no class in the chain declares it (a builtin/absent member).
     fn effective_member_visibility(
         &self,
-        receiver: &str,
+        receiver: TypeName,
         name: &str,
         is_fn: bool,
-    ) -> Option<(Visibility, String)> {
-        let mut cur = Some(receiver.to_string());
+    ) -> Option<(Visibility, TypeName)> {
+        let mut cur = Some(receiver);
         while let Some(internal) = cur {
-            let cs = self.syms.class_by_internal(&internal)?;
+            let cs = self.syms.class_by_type_name(internal)?;
             let declares = if is_fn {
                 cs.methods.contains_key(name)
             } else {
@@ -12084,14 +12098,14 @@ impl<'a> Checker<'a> {
                 .unwrap_or(Visibility::Public);
                 return Some((vis, internal));
             }
-            cur = cs.super_internal();
+            cur = cs.super_internal_name();
         }
         None
     }
 
     /// Emit kotlinc's access diagnostic when a member of `owner` with visibility `vis` is NOT reachable
     /// from the current site. Shared by the property-read and member-call checks.
-    fn reject_if_inaccessible(&mut self, vis: Visibility, name: &str, owner: &str, span: Span) {
+    fn reject_if_inaccessible(&mut self, vis: Visibility, name: &str, owner: TypeName, span: Span) {
         if !self.member_accessible(vis, owner) {
             let kind = match vis {
                 Visibility::Private => "private",
@@ -12101,7 +12115,10 @@ impl<'a> Checker<'a> {
             };
             self.diags.error(
                 span,
-                format!("cannot access '{name}': it is {kind} in '{owner}'"),
+                format!(
+                    "cannot access '{name}': it is {kind} in '{}'",
+                    owner.render()
+                ),
             );
         }
     }
@@ -12117,12 +12134,14 @@ impl<'a> Checker<'a> {
         mexpr: Option<ExprId>,
     ) -> Option<Ty> {
         if let Ty::Obj(internal, args) = rt {
-            let internal = internal.render();
+            let internal_name = internal;
+            let internal = internal_name.render();
             if let Some((ty, _)) = self.lookup_prop(&internal, name) {
-                if let Some((vis, owner)) = self.effective_member_visibility(&internal, name, false)
+                if let Some((vis, owner)) =
+                    self.effective_member_visibility(internal_name, name, false)
                 {
                     if vis != Visibility::Public {
-                        self.reject_if_inaccessible(vis, name, &owner, span);
+                        self.reject_if_inaccessible(vis, name, owner, span);
                     }
                 }
                 if let Some(cs) = self.syms.class_by_internal(&internal) {
@@ -13507,14 +13526,13 @@ impl<'a> Checker<'a> {
                 }
                 // Instance method call on a class value: `p.method(args)` (own or inherited).
                 if let Ty::Obj(internal_name, _) = rt {
-                    let internal = internal_name.render();
                     // A non-public member FUNCTION may be inaccessible from this site — kotlinc rejects it;
                     // surface the same diagnostic rather than silently compiling an illegal call.
                     if let Some((vis, owner)) =
-                        self.effective_member_visibility(&internal, &name, true)
+                        self.effective_member_visibility(internal_name, &name, true)
                     {
                         if vis != Visibility::Public {
-                            self.reject_if_inaccessible(vis, &name, &owner, span);
+                            self.reject_if_inaccessible(vis, &name, owner, span);
                         }
                     }
                     // The user member resolved through the current module as a `SymbolSource`
@@ -13622,12 +13640,9 @@ impl<'a> Checker<'a> {
                     // (`sub.inheritedMethod()`). Runs after the module-member lookup, so a user override
                     // wins.
                     if let Some(internal) = rt.obj_internal() {
-                        if let Some(ret) = self.classpath_super_member_ret(
-                            call,
-                            &internal.render(),
-                            &name,
-                            &arg_tys,
-                        ) {
+                        if let Some(ret) =
+                            self.classpath_super_member_ret(call, internal, &name, &arg_tys)
+                        {
                             return ret;
                         }
                     }
@@ -14737,9 +14752,9 @@ impl<'a> Checker<'a> {
                                 .map(|m| (m.params, m.ret))
                                 .or_else(|| {
                                     self.syms
-                                        .class_by_internal(&internal_rendered)
-                                        .and_then(ClassSig::inner_of)
-                                        .and_then(|outer| self.lookup_method(&outer, &fname))
+                                        .class_by_type_name(internal)
+                                        .and_then(ClassSig::inner_of_name)
+                                        .and_then(|outer| self.lookup_method_name(outer, &fname))
                                         .map(|s| (s.params, s.ret))
                                 });
                         crate::trace_compiler!(
