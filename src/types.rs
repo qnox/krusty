@@ -478,6 +478,10 @@ impl Ty {
         Ty::Obj(type_name(internal), intern_tys(args))
     }
 
+    pub fn obj_args_name(internal: TypeName, args: &[Ty]) -> Ty {
+        Ty::Obj(internal, intern_tys(args))
+    }
+
     /// The generic type arguments of a reference type (empty for non-generic / non-`Obj`).
     pub fn type_args(self) -> &'static [Ty] {
         match self {

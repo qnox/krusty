@@ -63,31 +63,32 @@ impl crate::assignable::TypeOracle for PlatformOracle<'_> {
         else {
             return Cow::Borrowed(platform_class_identity(internal));
         };
+        if let Some(mapped) =
+            crate::jvm::jvm_class_map::type_name_to_jvm_builtin_internal(value_internal)
+        {
+            return Cow::Borrowed(mapped);
+        }
         Cow::Owned(platform_class_identity(&value_internal.render()).to_string())
     }
     fn same_class(&self, a: &str, b: &str) -> bool {
         let a_value = self.0.library_value_form(Ty::obj(a)).obj_internal();
         let b_value = self.0.library_value_form(Ty::obj(b)).obj_internal();
-        let a_rendered;
-        let b_rendered;
-        let a = match a_value {
-            Some(n) => {
-                a_rendered = n.render();
-                platform_class_identity(&a_rendered)
+        if let (Some(a), Some(b)) = (a_value, b_value) {
+            if crate::jvm::jvm_class_map::type_names_map_to_same_jvm_internal(a, b) {
+                return true;
             }
-            None => platform_class_identity(a),
-        };
-        let b = match b_value {
-            Some(n) => {
-                b_rendered = n.render();
-                platform_class_identity(&b_rendered)
-            }
-            None => platform_class_identity(b),
-        };
-        platform_class_names_match(a, b)
+        }
+        let a = platform_value_identity(a_value, a);
+        let b = platform_value_identity(b_value, b);
+        platform_class_names_match(&a, &b)
     }
     fn matches_class(&self, candidate: &str, _target: &str, target_canonical: &str) -> bool {
         let candidate_value = self.0.library_value_form(Ty::obj(candidate)).obj_internal();
+        if let Some(candidate) =
+            candidate_value.and_then(crate::jvm::jvm_class_map::type_name_to_jvm_builtin_internal)
+        {
+            return platform_class_names_match(candidate, target_canonical);
+        }
         let candidate_rendered;
         let candidate = match candidate_value {
             Some(n) => {
@@ -98,6 +99,16 @@ impl crate::assignable::TypeOracle for PlatformOracle<'_> {
         };
         platform_class_names_match(candidate, target_canonical)
     }
+}
+
+fn platform_value_identity<'a>(value: Option<TypeName>, original: &'a str) -> Cow<'a, str> {
+    let Some(value) = value else {
+        return Cow::Borrowed(platform_class_identity(original));
+    };
+    if let Some(mapped) = crate::jvm::jvm_class_map::type_name_to_jvm_builtin_internal(value) {
+        return Cow::Borrowed(mapped);
+    }
+    Cow::Owned(platform_class_identity(&value.render()).to_string())
 }
 
 pub(crate) fn platform_class_identity(internal: &str) -> &str {
@@ -221,7 +232,7 @@ pub(crate) fn ty_subst(sig: Ty, binds: &GSigBinds) -> Ty {
         Ty::Fun(fsig) => Ty::fun(ty_subst_all(&fsig.params, binds), ty_subst(fsig.ret, binds)),
         Ty::Nullable(inner) => Ty::nullable(ty_subst(*inner, binds)),
         Ty::Obj(internal, args) if !args.is_empty() => {
-            Ty::obj_args(&internal.render(), &ty_subst_all(args, binds))
+            Ty::obj_args_name(internal, &ty_subst_all(args, binds))
         }
         _ => sig,
     }
@@ -1711,9 +1722,7 @@ fn resolve_instance_ref(lib: &dyn SemanticPlatform, recv: Ty, name: &str) -> Opt
     // null-guards for a nullable/type-parameter receiver (`null::toString` yields "null"); a direct
     // `invokevirtual` on a captured null would NPE. The erased receiver (an unbounded `T`) reads as a
     // non-null `Any` here, so the receiver-type guard cannot catch it — reject on the resolved OWNER.
-    if o.callable
-        .owner_matches(&crate::types::wk::java_object().render())
-    {
+    if o.callable.owner_type() == crate::types::wk::java_object() {
         return None;
     }
     let ret = o.ret.apply(o.callable.ret);
@@ -1756,11 +1765,10 @@ fn resolve_property_ref(
         return None;
     }
     let owner = m.member.owner?;
-    let owner_name = owner.render();
     if m.member.name.contains('-')
-        || lib.is_value(&owner_name)
+        || lib.is_value_name(owner)
         || lib
-            .resolve_type(&owner_name)
+            .resolve_type_name(owner)
             .is_some_and(|t| t.is_interface())
     {
         return None;
@@ -2386,7 +2394,7 @@ fn fun_return_compatible(lib: &dyn SemanticPlatform, param: Ty, arg: Ty) -> bool
         ar.non_null().kotlin_class_internal(),
     ) {
         if pr.is_reference() && ar.is_reference() {
-            return platform_subtype(lib, Ty::obj(&a.render()), Ty::obj(&p.render()));
+            return platform_subtype(lib, Ty::obj_name(a), Ty::obj_name(p));
         }
     }
     false

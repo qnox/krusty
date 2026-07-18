@@ -442,6 +442,50 @@ pub fn type_name_maps_to_jvm_collection_interface(internal: TypeName) -> bool {
         || type_name_maps_to_jvm_internal(internal, "java/util/Map$Entry")
 }
 
+pub fn type_name_to_jvm_builtin_internal(internal: TypeName) -> Option<&'static str> {
+    Some(
+        if type_name_maps_to_jvm_internal(internal, "java/lang/Object") {
+            "java/lang/Object"
+        } else if type_name_maps_to_jvm_internal(internal, "java/lang/String") {
+            "java/lang/String"
+        } else if type_name_maps_to_jvm_internal(internal, "java/lang/CharSequence") {
+            "java/lang/CharSequence"
+        } else if type_name_maps_to_jvm_internal(internal, "java/lang/Throwable") {
+            "java/lang/Throwable"
+        } else if type_name_maps_to_jvm_internal(internal, "java/lang/Cloneable") {
+            "java/lang/Cloneable"
+        } else if type_name_maps_to_jvm_internal(internal, "java/lang/Number") {
+            "java/lang/Number"
+        } else if type_name_maps_to_jvm_internal(internal, "java/lang/Comparable") {
+            "java/lang/Comparable"
+        } else if type_name_maps_to_jvm_internal(internal, "java/lang/Enum") {
+            "java/lang/Enum"
+        } else if type_name_maps_to_jvm_internal(internal, "java/lang/annotation/Annotation") {
+            "java/lang/annotation/Annotation"
+        } else if type_name_maps_to_jvm_internal(internal, "java/lang/Void") {
+            "java/lang/Void"
+        } else if type_name_maps_to_jvm_internal(internal, "java/lang/Iterable") {
+            "java/lang/Iterable"
+        } else if type_name_maps_to_jvm_internal(internal, "java/util/Iterator") {
+            "java/util/Iterator"
+        } else if type_name_maps_to_jvm_internal(internal, "java/util/ListIterator") {
+            "java/util/ListIterator"
+        } else if type_name_maps_to_jvm_internal(internal, "java/util/Collection") {
+            "java/util/Collection"
+        } else if type_name_maps_to_jvm_internal(internal, "java/util/List") {
+            "java/util/List"
+        } else if type_name_maps_to_jvm_internal(internal, "java/util/Set") {
+            "java/util/Set"
+        } else if type_name_maps_to_jvm_internal(internal, "java/util/Map") {
+            "java/util/Map"
+        } else if type_name_maps_to_jvm_internal(internal, "java/util/Map$Entry") {
+            "java/util/Map$Entry"
+        } else {
+            return None;
+        },
+    )
+}
+
 /// Inverse of [`to_jvm_internal`]: normalize a JVM built-in name read from the classpath/descriptors
 /// to its Kotlin identity (`java/lang/Object` → `kotlin/Any`), mirroring how the reference compiler
 /// maps Java types into Kotlin ones at the front-end boundary. Passes other names through unchanged.
