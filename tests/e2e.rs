@@ -640,6 +640,8 @@ mod reference_adaptation_e2e;
 mod reference_in_range_e2e;
 #[path = "reified_inline_check_e2e.rs"]
 mod reified_inline_check_e2e;
+#[path = "require_check_smartcast_e2e.rs"]
+mod require_check_smartcast_e2e;
 #[path = "resolve_parse_deep_coverage_e2e.rs"]
 mod resolve_parse_deep_coverage_e2e;
 #[path = "resolve_parser_diag_coverage_e2e.rs"]
@@ -726,6 +728,8 @@ mod suspend_default_param_e2e;
 mod suspend_e2e;
 #[path = "suspend_inline_hof_suspending_lambda_reject_e2e.rs"]
 mod suspend_inline_hof_suspending_lambda_reject_e2e;
+#[path = "suspend_inline_statementless_block_e2e.rs"]
+mod suspend_inline_statementless_block_e2e;
 #[path = "suspend_loop_compound_assign_e2e.rs"]
 mod suspend_loop_compound_assign_e2e;
 #[path = "suspend_loop_continue_break_e2e.rs"]
