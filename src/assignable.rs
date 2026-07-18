@@ -39,6 +39,20 @@ pub trait TypeOracle {
     fn canonical_class<'a>(&self, internal: &'a str) -> Cow<'a, str> {
         Cow::Borrowed(internal)
     }
+
+    /// Whether two class names denote the same platform class identity. The default compares canonical
+    /// names; platforms that have spelling aliases should override this to avoid materializing a
+    /// normalized string on hot hierarchy walks.
+    fn same_class(&self, a: &str, b: &str) -> bool {
+        a == b || self.canonical_class(a) == self.canonical_class(b)
+    }
+
+    /// Whether `candidate` denotes the class whose original name is `target` and whose canonical name
+    /// was already computed. Hierarchy walks use this so the target identity is not recomputed for every
+    /// visited superclass.
+    fn matches_class(&self, candidate: &str, target: &str, target_canonical: &str) -> bool {
+        candidate == target || self.canonical_class(candidate).as_ref() == target_canonical
+    }
 }
 
 /// The in-scope type variables, each mapped to a `Ty` — its declared upper BOUND for a free variable
@@ -232,7 +246,7 @@ fn class_assignable(oracle: &dyn TypeOracle, sub: Ty, sup: Ty, value_class: bool
     let mut stack = vec![start_id];
     while let Some(cur) = stack.pop() {
         let cur = seen.get(cur).expect("walk index was inserted");
-        if cur == target || oracle.canonical_class(cur) == target_c {
+        if oracle.matches_class(cur, target, target_c.as_ref()) {
             return true;
         }
         let direct = oracle.direct_supertypes(cur);

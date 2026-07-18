@@ -5732,16 +5732,57 @@ impl crate::assignable::TypeOracle for Checker<'_> {
 
     fn canonical_class<'a>(&self, internal: &'a str) -> std::borrow::Cow<'a, str> {
         if internal.starts_with("kotlin/collections/") {
-            crate::symbol_resolver::platform_class_identity(
+            std::borrow::Cow::Borrowed(crate::symbol_resolver::platform_class_identity(
                 self.syms
                     .libraries
                     .library_value_form(Ty::obj(internal))
                     .obj_internal()
                     .unwrap_or(internal),
-            )
+            ))
         } else {
             std::borrow::Cow::Borrowed(internal)
         }
+    }
+
+    fn same_class(&self, a: &str, b: &str) -> bool {
+        let a = if a.starts_with("kotlin/collections/") {
+            crate::symbol_resolver::platform_class_identity(
+                self.syms
+                    .libraries
+                    .library_value_form(Ty::obj(a))
+                    .obj_internal()
+                    .unwrap_or(a),
+            )
+        } else {
+            a
+        };
+        let b = if b.starts_with("kotlin/collections/") {
+            crate::symbol_resolver::platform_class_identity(
+                self.syms
+                    .libraries
+                    .library_value_form(Ty::obj(b))
+                    .obj_internal()
+                    .unwrap_or(b),
+            )
+        } else {
+            b
+        };
+        crate::symbol_resolver::platform_class_names_match(a, b)
+    }
+
+    fn matches_class(&self, candidate: &str, _target: &str, target_canonical: &str) -> bool {
+        let candidate = if candidate.starts_with("kotlin/collections/") {
+            crate::symbol_resolver::platform_class_identity(
+                self.syms
+                    .libraries
+                    .library_value_form(Ty::obj(candidate))
+                    .obj_internal()
+                    .unwrap_or(candidate),
+            )
+        } else {
+            candidate
+        };
+        crate::symbol_resolver::platform_class_names_match(candidate, target_canonical)
     }
 }
 
@@ -7956,7 +7997,7 @@ impl<'a> Checker<'a> {
     fn obj_is_subtype(&self, sub: &str, sup: &str) -> bool {
         let sup_id = crate::assignable::TypeOracle::canonical_class(self, sup);
         let matches_sup = |name: &str| {
-            name == sup || crate::assignable::TypeOracle::canonical_class(self, name) == sup_id
+            crate::assignable::TypeOracle::matches_class(self, name, sup, sup_id.as_ref())
         };
         if matches_sup(sub) {
             return true;
