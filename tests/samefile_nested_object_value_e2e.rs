@@ -1,8 +1,3 @@
-//! Reading a NESTED singleton `object` through its enclosing SAME-FILE class name — `V.A` where
-//! `object A` is declared inside `class/sealed class V`. The checker handled a CLASSPATH nested object
-//! (`PrimitiveKind.STRING`) but had no case for a same-file one, so `V.A` fell through to checking the
-//! receiver `V` as a value → "unresolved reference 'V'". Pervasive in sealed-result hierarchies
-//! (mission-core `SlugValidation.TooShort` in a `when`).
 use super::common;
 
 #[test]

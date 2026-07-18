@@ -180,8 +180,7 @@ pub struct ClassSig {
     pub methods: HashMap<String, Signature>,
     /// True if this is an `interface` (calls dispatch via `invokeinterface`).
     pub is_interface: bool,
-    /// True if declared `object` (a singleton) — including a NESTED object, which `syms.objects` (keyed
-    /// by simple name) does not track. Lets a `Type.NestedObject` value read resolve the singleton.
+    /// True if declared `object` (a singleton).
     pub is_object: bool,
     /// True if declared `abstract` (or `sealed`, which is abstract) — cannot be instantiated directly.
     pub is_abstract: bool,
@@ -9683,13 +9682,7 @@ impl<'a> Checker<'a> {
                                 return self.set(e, Ty::obj(&outer));
                             }
                         }
-                        // `ClassName.NestedObject` on a SAME-FILE class — the nested singleton of a sealed
-                        // hierarchy or any class (`SlugValidation.TooShort` → `getstatic
-                        // SlugValidation$TooShort.INSTANCE`). A same-file class is not `imported_type_internal`,
-                        // so the classpath case above misses it. Same-file objects carry `kind: Class` in
-                        // their LibraryType (they resolve as values via the user-object path), so consult the
-                        // object registry rather than `is_object()`. Type it as the nested object's own type
-                        // (always the correct is-a; a `when` over a sealed base LUBs these to the base).
+                        // `ClassName.NestedObject` on a same-file class.
                         if let Some(cs) = self.syms.classes.get(&en) {
                             let nested = format!("{}${name}", cs.internal);
                             if self
