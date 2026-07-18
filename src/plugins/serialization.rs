@@ -224,7 +224,7 @@ fn companion_serializer_call(
     let recv = ir.external_static_instance(class_fq, &comp, "Companion");
     ir.add_expr(IrExpr::Call {
         callee: Callee::CrossFileVirtual {
-            owner: comp,
+            owner: type_name(&comp),
             name: "serializer".to_string(),
             params,
             ret,
@@ -258,7 +258,7 @@ fn serializer_of(
     } else {
         ir.add_expr(IrExpr::Call {
             callee: Callee::CrossFile {
-                facade: class_fq.to_string(),
+                facade: type_name(class_fq),
                 name: "serializer".to_string(),
                 params,
                 ret,
@@ -312,7 +312,7 @@ fn specialize_reified_placeholders(ir: &mut IrFile) {
         let (kind, fmt, class_internal) = (*kind, fmt.clone(), class_internal.clone());
         let call = |descriptor: &str| IrExpr::Call {
             callee: Callee::Virtual {
-                owner: fmt.clone(),
+                owner: type_name(&fmt),
                 name: kind.to_string(),
                 descriptor: descriptor.to_string(),
                 interface: false,
@@ -409,7 +409,7 @@ fn default_const(ty: &Ty) -> IrConst {
 /// An `invokeinterface` callee on a runtime interface (`Encoder`/`CompositeEncoder`/…).
 fn virtual_iface(owner: &str, name: &str, descriptor: &str) -> Callee {
     Callee::Virtual {
-        owner: owner.to_string(),
+        owner: type_name(owner),
         name: name.to_string(),
         descriptor: descriptor.to_string(),
         interface: true,
@@ -491,7 +491,7 @@ fn build_field_serializer_instance(ir: &mut IrFile, internal: &str) -> ExprId {
 fn wrap_nullable_serializer(ir: &mut IrFile, base: ExprId) -> ExprId {
     ir.add_expr(IrExpr::Call {
         callee: Callee::Static {
-            owner: "kotlinx/serialization/builtins/BuiltinSerializersKt".to_string(),
+            owner: type_name("kotlinx/serialization/builtins/BuiltinSerializersKt"),
             name: "getNullable".to_string(),
             descriptor: "(Lkotlinx/serialization/KSerializer;)Lkotlinx/serialization/KSerializer;"
                 .to_string(),
@@ -574,7 +574,7 @@ fn element_serializer_expr(ir: &mut IrFile, ty: &Ty) -> Option<ExprId> {
             let pdesc = "Lkotlinx/serialization/KSerializer;".repeat(n);
             return Some(ir.add_expr(IrExpr::Call {
                 callee: Callee::Static {
-                    owner: "kotlinx/serialization/builtins/BuiltinSerializersKt".to_string(),
+                    owner: type_name("kotlinx/serialization/builtins/BuiltinSerializersKt"),
                     name: builder.to_string(),
                     descriptor: format!("({pdesc})Lkotlinx/serialization/KSerializer;"),
                     inline: InlineKind::None,
@@ -708,7 +708,7 @@ fn build_contextual_serializer(ir: &mut IrFile, type_internal: &str) -> ExprId {
     let classlit = ir.class_const(Some(type_internal));
     let kclass = ir.add_expr(IrExpr::Call {
         callee: Callee::Static {
-            owner: "kotlin/jvm/internal/Reflection".to_string(),
+            owner: type_name("kotlin/jvm/internal/Reflection"),
             name: "getOrCreateKotlinClass".to_string(),
             descriptor: "(Ljava/lang/Class;)Lkotlin/reflect/KClass;".to_string(),
             inline: InlineKind::None,
@@ -730,7 +730,7 @@ fn build_polymorphic_serializer(ir: &mut IrFile, base_internal: &str) -> ExprId 
     let classlit = ir.class_const(Some(base_internal));
     let kclass = ir.add_expr(IrExpr::Call {
         callee: Callee::Static {
-            owner: "kotlin/jvm/internal/Reflection".to_string(),
+            owner: type_name("kotlin/jvm/internal/Reflection"),
             name: "getOrCreateKotlinClass".to_string(),
             descriptor: "(Ljava/lang/Class;)Lkotlin/reflect/KClass;".to_string(),
             inline: InlineKind::None,
@@ -833,27 +833,29 @@ fn can_derive_element_serializer(ir: &IrFile, ty: &Ty) -> bool {
 
 fn builtin_element_key(ty: &Ty) -> Option<&'static str> {
     let fq = ty.kotlin_class_internal()?;
-    Some(if fq.matches("java/lang/Integer") {
-        "kotlin/Int"
-    } else if fq.matches("java/lang/Long") {
-        "kotlin/Long"
-    } else if fq.matches("java/lang/Boolean") {
-        "kotlin/Boolean"
-    } else if fq.matches("java/lang/Double") {
-        "kotlin/Double"
-    } else if fq.matches("java/lang/Float") {
-        "kotlin/Float"
-    } else if fq.matches("java/lang/Character") {
-        "kotlin/Char"
-    } else if fq.matches("java/lang/Byte") {
-        "kotlin/Byte"
-    } else if fq.matches("java/lang/Short") {
-        "kotlin/Short"
-    } else if fq.matches("java/lang/String") {
-        "kotlin/String"
-    } else {
-        return None;
-    })
+    Some(
+        if fq.matches("kotlin/Int") || fq.matches("java/lang/Integer") {
+            "kotlin/Int"
+        } else if fq.matches("kotlin/Long") || fq.matches("java/lang/Long") {
+            "kotlin/Long"
+        } else if fq.matches("kotlin/Boolean") || fq.matches("java/lang/Boolean") {
+            "kotlin/Boolean"
+        } else if fq.matches("kotlin/Double") || fq.matches("java/lang/Double") {
+            "kotlin/Double"
+        } else if fq.matches("kotlin/Float") || fq.matches("java/lang/Float") {
+            "kotlin/Float"
+        } else if fq.matches("kotlin/Char") || fq.matches("java/lang/Character") {
+            "kotlin/Char"
+        } else if fq.matches("kotlin/Byte") || fq.matches("java/lang/Byte") {
+            "kotlin/Byte"
+        } else if fq.matches("kotlin/Short") || fq.matches("java/lang/Short") {
+            "kotlin/Short"
+        } else if fq.matches("java/lang/String") {
+            "kotlin/String"
+        } else {
+            return None;
+        },
+    )
 }
 
 fn builtin_element_serializer(ty: &Ty) -> Option<&'static str> {
@@ -951,7 +953,7 @@ impl SerializationPlugin {
             let classlit = ir.class_const(Some(class_fq));
             let kclass = ir.add_expr(IrExpr::Call {
                 callee: Callee::Static {
-                    owner: "kotlin/jvm/internal/Reflection".to_string(),
+                    owner: type_name("kotlin/jvm/internal/Reflection"),
                     name: "getOrCreateKotlinClass".to_string(),
                     descriptor: "(Ljava/lang/Class;)Lkotlin/reflect/KClass;".to_string(),
                     inline: InlineKind::None,
@@ -992,7 +994,7 @@ impl SerializationPlugin {
         let name = ir.add_expr(IrExpr::Const(IrConst::String(class_fq.replace('/', "."))));
         let values = ir.add_expr(IrExpr::Call {
             callee: Callee::Static {
-                owner: class_fq.to_string(),
+                owner: type_name(class_fq),
                 name: "values".to_string(),
                 descriptor: format!("()[L{class_fq};"),
                 inline: InlineKind::None,
@@ -1007,7 +1009,7 @@ impl SerializationPlugin {
         );
         let lazy = ir.add_expr(IrExpr::Call {
             callee: Callee::Static {
-                owner: "kotlin/LazyKt".to_string(),
+                owner: type_name("kotlin/LazyKt"),
                 name: "lazyOf".to_string(),
                 descriptor: "(Ljava/lang/Object;)Lkotlin/Lazy;".to_string(),
                 inline: InlineKind::None,
@@ -1047,7 +1049,7 @@ impl SerializationPlugin {
         // `Companion.serializer()` returns `(KSerializer) access$…$cp().getValue()` (the cached instance).
         let acc_call = ir.add_expr(IrExpr::Call {
             callee: Callee::Static {
-                owner: class_fq.to_string(),
+                owner: type_name(class_fq),
                 name: "access$get$cachedSerializer$delegate$cp".to_string(),
                 descriptor: "()Lkotlin/Lazy;".to_string(),
                 inline: InlineKind::None,
@@ -1057,7 +1059,7 @@ impl SerializationPlugin {
         });
         let get_value = ir.add_expr(IrExpr::Call {
             callee: Callee::CrossFileVirtual {
-                owner: "kotlin/Lazy".to_string(),
+                owner: type_name("kotlin/Lazy"),
                 name: "getValue".to_string(),
                 params: vec![],
                 ret: class_ty("kotlin/Any"),
@@ -1091,7 +1093,7 @@ impl SerializationPlugin {
         let classlit = ir.class_const(Some(internal));
         ir.add_expr(IrExpr::Call {
             callee: Callee::Static {
-                owner: "kotlin/jvm/internal/Reflection".to_string(),
+                owner: type_name("kotlin/jvm/internal/Reflection"),
                 name: "getOrCreateKotlinClass".to_string(),
                 descriptor: "(Ljava/lang/Class;)Lkotlin/reflect/KClass;".to_string(),
                 inline: InlineKind::None,
@@ -1414,7 +1416,7 @@ impl IrPlugin for SerializationPlugin {
                 };
                 let d = ir.add_expr(IrExpr::Call {
                     callee: Callee::Static {
-                        owner: "kotlinx/serialization/internal/InlineClassDescriptorKt".to_string(),
+                        owner: type_name("kotlinx/serialization/internal/InlineClassDescriptorKt"),
                         name: "InlinePrimitiveDescriptor".to_string(),
                         descriptor: "(Ljava/lang/String;Lkotlinx/serialization/KSerializer;)Lkotlinx/serialization/descriptors/SerialDescriptor;".to_string(),
                         inline: InlineKind::None,
@@ -1457,7 +1459,7 @@ impl IrPlugin for SerializationPlugin {
                     let opt = ir.add_expr(IrExpr::Const(IrConst::Boolean(is_optional)));
                     init_stmts.push(ir.add_expr(IrExpr::Call {
                         callee: Callee::Virtual {
-                            owner: pgsd_internal.to_string(),
+                            owner: type_name(pgsd_internal),
                             name: "addElement".to_string(),
                             descriptor: "(Ljava/lang/String;Z)V".to_string(),
                             interface: false,
@@ -1704,7 +1706,7 @@ impl IrPlugin for SerializationPlugin {
                             if let Some(es) = element_serializer_expr(ir, ty) {
                                 return ir.add_expr(IrExpr::Call {
                                     callee: Callee::Static {
-                                        owner: "kotlin/LazyKt".to_string(),
+                                        owner: type_name("kotlin/LazyKt"),
                                         name: "lazyOf".to_string(),
                                         descriptor: "(Ljava/lang/Object;)Lkotlin/Lazy;".to_string(),
                                         inline: InlineKind::None,
@@ -1884,7 +1886,7 @@ impl IrPlugin for SerializationPlugin {
                         };
                         let v = ir.add_expr(IrExpr::Call {
                             callee: Callee::Virtual {
-                                owner: class_internal.clone(),
+                                owner: type_name(&class_internal),
                                 name: property_getter_name(&pname),
                                 descriptor: format!("(){getter_desc}"),
                                 interface: false,
@@ -1954,7 +1956,7 @@ impl IrPlugin for SerializationPlugin {
                             };
                             let v = ir.add_expr(IrExpr::Call {
                                 callee: Callee::Virtual {
-                                    owner: class_internal.clone(),
+                                    owner: type_name(&class_internal),
                                     name: property_getter_name(pname),
                                     descriptor: format!("(){getter_desc}"),
                                     interface: false,
@@ -2113,7 +2115,7 @@ impl IrPlugin for SerializationPlugin {
                                     };
                                     let cur = ir.add_expr(IrExpr::Call {
                                         callee: Callee::Virtual {
-                                            owner: class_internal.clone(),
+                                            owner: type_name(&class_internal),
                                             name: property_getter_name(pname),
                                             descriptor: format!("(){getter_desc}"),
                                             interface: false,

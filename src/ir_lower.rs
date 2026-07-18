@@ -3849,7 +3849,7 @@ pub fn lower_file_at_reporting(
                     callee: Callee::Static { owner, name, .. },
                     ..
                 } if name.starts_with("constructor-impl") || name == "box-impl" => {
-                    referenced.insert(owner.clone());
+                    referenced.insert(owner.render());
                 }
                 _ => {}
             }
@@ -4821,7 +4821,7 @@ impl<'a> Lower<'a> {
     ) -> u32 {
         self.emit_call(
             Callee::Virtual {
-                owner,
+                owner: type_name(&owner),
                 name,
                 descriptor,
                 interface,
@@ -4861,7 +4861,7 @@ impl<'a> Lower<'a> {
     ) -> u32 {
         self.emit_call(
             Callee::Static {
-                owner,
+                owner: type_name(&owner),
                 name,
                 descriptor,
                 inline,
@@ -4913,7 +4913,7 @@ impl<'a> Lower<'a> {
     ) -> u32 {
         self.emit_call(
             Callee::CrossFile {
-                facade,
+                facade: type_name(&facade),
                 name,
                 params,
                 ret,
@@ -6310,7 +6310,7 @@ impl<'a> Lower<'a> {
                 }
                 let c = self.emit_call(
                     Callee::CrossFileVirtual {
-                        owner: owner.render(),
+                        owner,
                         name,
                         params,
                         ret: ty_to_ir(ret),
@@ -6358,9 +6358,9 @@ impl<'a> Lower<'a> {
                 interface,
             } => {
                 let getter = property_getter_name(&property);
-                let owner = owner.render();
+                let owner_rendered = owner.render();
                 if let Some((class, method, _, found_ret)) =
-                    self.link_local_method(&owner, &getter, &[])
+                    self.link_local_method(&owner_rendered, &getter, &[])
                 {
                     if found_ret != ret {
                         return None;
@@ -8005,7 +8005,7 @@ impl<'a> Lower<'a> {
                 .external_static_instance(c_internal, &comp, "Companion");
             return self.ir.add_expr(IrExpr::Call {
                 callee: Callee::CrossFileVirtual {
-                    owner: comp,
+                    owner: type_name(&comp),
                     name: "serializer".to_string(),
                     params: vec![],
                     ret,
@@ -10078,7 +10078,7 @@ impl<'a> Lower<'a> {
                 } else {
                     let call = self.emit_call(
                         Callee::CrossFileVirtual {
-                            owner,
+                            owner: type_name(&owner),
                             name: target,
                             params: tys_to_ir(&selected_params),
                             ret: ty_to_ir(selected_ret),
@@ -11167,7 +11167,7 @@ impl<'a> Lower<'a> {
                 {
                     return Some(self.emit_call(
                         Callee::CrossFileVirtual {
-                            owner,
+                            owner: type_name(&owner),
                             name: property_getter_name(name),
                             params: vec![],
                             ret: ty_to_ir(ret_ty),
@@ -14046,7 +14046,7 @@ impl<'a> Lower<'a> {
                     let v = self.lower_arg(value, &ty_to_ir(pty))?;
                     return Some(self.emit_call(
                         Callee::CrossFileVirtual {
-                            owner,
+                            owner: type_name(&owner),
                             name: property_setter_name(name),
                             params: vec![ty_to_ir(pty)],
                             ret: Ty::Unit,
@@ -17603,7 +17603,7 @@ impl<'a> Lower<'a> {
                         }
                         Some(self.emit_call(
                             Callee::Static {
-                                owner: cf.callable.owner_name(),
+                                owner: cf.callable.owner,
                                 name: cf.callable.name.clone(),
                                 descriptor: cf.callable.descriptor.clone(),
                                 inline: cf.callable.inline,
@@ -18603,7 +18603,7 @@ impl<'a> Lower<'a> {
                         }
                         return Some(self.emit_call(
                             Callee::Special {
-                                owner: target.owner.render(),
+                                owner: target.owner,
                                 name: name.clone(),
                                 descriptor,
                                 interface: target.interface,
@@ -18950,7 +18950,7 @@ impl<'a> Lower<'a> {
                                         );
                                         return Some(self.ir.add_expr(IrExpr::Call {
                                             callee: Callee::CrossFileVirtual {
-                                                owner: comp,
+                                                owner: type_name(&comp),
                                                 name: "serializer".to_string(),
                                                 params: vec![kser; args.len()],
                                                 ret,
@@ -19251,7 +19251,7 @@ impl<'a> Lower<'a> {
                             let a = self.lower_args(&args, &params)?;
                             self.emit_call(
                                 Callee::CrossFileVirtual {
-                                    owner,
+                                    owner: type_name(&owner),
                                     name: target,
                                     params: tys_to_ir(&params),
                                     ret: ty_to_ir(ret),

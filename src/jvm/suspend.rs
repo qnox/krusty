@@ -31,7 +31,7 @@ use crate::ir::{
     IrFunction, IrTypeOp,
 };
 use crate::libraries::InlineKind;
-use crate::types::Ty;
+use crate::types::{type_name, Ty};
 use std::collections::HashSet;
 
 const I32_MIN: i32 = i32::MIN;
@@ -3665,7 +3665,7 @@ fn add_static_call(
 ) -> ExprId {
     ir.add_expr(IrExpr::Call {
         callee: Callee::Static {
-            owner: owner.to_string(),
+            owner: type_name(owner),
             name: name.to_string(),
             descriptor: descriptor.to_string(),
             inline: InlineKind::None,
@@ -3818,7 +3818,7 @@ fn build_continuation_class(
             } else {
                 ir.add_expr(IrExpr::Call {
                     callee: Callee::Virtual {
-                        owner: owner.to_string(),
+                        owner: type_name(owner),
                         name,
                         descriptor,
                         interface: false,

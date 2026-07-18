@@ -43,7 +43,7 @@ pub enum Callee {
     /// (the JVM backend builds the descriptor), so `ir_lower` needn't know JVM descriptors. Distinct
     /// from `Local` (same IrFile, by index) and `Static` (a resolved classpath/library method).
     CrossFile {
-        facade: String,
+        facade: TypeName,
         name: String,
         params: Vec<Ty>,
         ret: Ty,
@@ -53,7 +53,7 @@ pub enum Callee {
     /// Like `Virtual` but carries `Ty`s (the JVM backend builds the descriptor), so `ir_lower` needs
     /// no JVM descriptor for a sibling-file user class (resolved from its `ClassSig`).
     CrossFileVirtual {
-        owner: String,
+        owner: TypeName,
         name: String,
         params: Vec<Ty>,
         ret: Ty,
@@ -69,7 +69,7 @@ pub enum Callee {
     /// backend MUST splice the body (a body it can't splice — e.g. branchy on a non-empty operand stack —
     /// skips the whole file, never miscompiled).
     Static {
-        owner: String,
+        owner: TypeName,
         name: String,
         descriptor: String,
         inline: InlineKind,
@@ -77,7 +77,7 @@ pub enum Callee {
     /// A resolved classpath *instance* method — `invokevirtual`/`invokeinterface owner.name:descriptor`
     /// on the `dispatch_receiver`. `owner` is the receiver's static type; `interface` ⇒ `invokeinterface`.
     Virtual {
-        owner: String,
+        owner: TypeName,
         name: String,
         descriptor: String,
         interface: bool,
@@ -86,7 +86,7 @@ pub enum Callee {
     /// Used for `super.method(…)`, which dispatches to the named base-class method directly (skipping the
     /// receiver's override). `owner` is the base class declaring the method.
     Special {
-        owner: String,
+        owner: TypeName,
         name: String,
         descriptor: String,
         /// `owner` is an INTERFACE (a diamond `super.f()` dispatched to a superinterface's DEFAULT method):

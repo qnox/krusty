@@ -602,13 +602,13 @@ pub(crate) fn jvm_can_emit(ir: &IrFile) -> bool {
                 descriptor,
                 ..
             } => {
-                !mentions_unsupported_stdlib_value_class(owner)
+                !mentions_unsupported_stdlib_value_class(&owner.render())
                     && !mentions_unsupported_stdlib_value_class(descriptor)
             }
             Callee::CrossFileVirtual {
                 owner, params, ret, ..
             } => {
-                !mentions_unsupported_stdlib_value_class(owner)
+                !mentions_unsupported_stdlib_value_class(&owner.render())
                     && params.iter().all(ty_ok)
                     && ty_ok(ret)
             }
@@ -5608,7 +5608,7 @@ impl<'a> Emitter<'a> {
                     // A top-level function from another file → `invokestatic <facade>.<name>(desc)`.
                     let param_tys = jvm_tys(params);
                     let ret = ir_ty_to_jvm(ret);
-                    let (facade, name) = (facade.clone(), name.clone());
+                    let (facade, name) = (facade.render(), name.clone());
                     let args = args.clone();
                     self.emit_operands(&args, code);
                     let aw: i32 = param_tys.iter().map(|t| slot_words(*t) as i32).sum();
@@ -5635,7 +5635,7 @@ impl<'a> Emitter<'a> {
                     inline,
                 } => {
                     let (owner, name, descriptor, inline) =
-                        (owner.clone(), name.clone(), descriptor.clone(), *inline);
+                        (owner.render(), name.clone(), descriptor.clone(), *inline);
                     let args = args.clone();
                     crate::trace_compiler!(
                         "resolve",
@@ -5712,7 +5712,7 @@ impl<'a> Emitter<'a> {
                     interface,
                 } => {
                     let (owner, name, descriptor, interface) =
-                        (owner.clone(), name.clone(), descriptor.clone(), *interface);
+                        (owner.render(), name.clone(), descriptor.clone(), *interface);
                     let recv = dispatch_receiver.expect("virtual call needs a receiver");
                     let args = args.clone();
                     if self.emit_primitive_inc_dec_virtual(
@@ -5788,7 +5788,7 @@ impl<'a> Emitter<'a> {
                     ret,
                     interface,
                 } => {
-                    let owner = owner.clone();
+                    let owner = owner.render();
                     let name = name.clone();
                     let interface = *interface;
                     let param_tys = jvm_tys(params);
@@ -5815,7 +5815,7 @@ impl<'a> Emitter<'a> {
                     interface,
                 } => {
                     let (owner, name, descriptor, interface) =
-                        (owner.clone(), name.clone(), descriptor.clone(), *interface);
+                        (owner.render(), name.clone(), descriptor.clone(), *interface);
                     let recv = dispatch_receiver.expect("special call needs a receiver");
                     let args = args.clone();
                     let mut ops = vec![recv];
@@ -6728,7 +6728,7 @@ impl<'a> Emitter<'a> {
                                 IrExpr::Lambda { inline_body: Some(b), .. } if self.records_frame(*b))
                         }) || self
                             .bodies
-                            .body(owner, name, descriptor)
+                            .body(&owner.render(), name, descriptor)
                             .and_then(|b| crate::jvm::inline::disassemble(&b.code))
                             .is_some_and(|ins| {
                                 ins.iter()

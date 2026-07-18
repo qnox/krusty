@@ -39,11 +39,11 @@ fn is_ieee_fp(fq: TypeName) -> bool {
     fq.matches("kotlin/Float") || fq.matches("kotlin/Double")
 }
 
-fn value_class_name(internal: &str, under: &Under) -> Option<TypeName> {
-    existing_type_name(internal).filter(|name| under.contains_key(name))
+fn value_class_name(internal: TypeName, under: &Under) -> Option<TypeName> {
+    under.contains_key(&internal).then_some(internal)
 }
 
-fn is_value_class_internal(internal: &str, under: &Under) -> bool {
+fn is_value_class_internal(internal: TypeName, under: &Under) -> bool {
     value_class_name(internal, under).is_some()
 }
 
@@ -419,7 +419,6 @@ pub fn lower_value_classes(
     // Per-class id metadata (parallel to ir.classes).
     let is_vc: Vec<bool> = ir.classes.iter().map(|c| c.is_value).collect();
     let fq: Vec<TypeName> = ir.classes.iter().map(|c| type_name(&c.fq_name())).collect();
-    let fq_rendered: Vec<String> = fq.iter().map(|name| name.render()).collect();
     // Getter method name for each value class's sole field (`getV`), to recognize property access.
     let getter: Vec<Option<String>> = ir
         .classes
@@ -435,21 +434,21 @@ pub fn lower_value_classes(
 
     // Each value class's getter name keyed by its internal name (`A2` → `getValue`) — to recognize a
     // sole-property access emitted as a resolved `invokevirtual X.getV()`.
-    let mut vc_getters: HashMap<String, String> = ir
+    let mut vc_getters: HashMap<TypeName, String> = ir
         .classes
         .iter()
         .filter(|c| c.is_value)
         .filter_map(|c| {
             c.fields
                 .first()
-                .map(|f| (c.fq_name(), property_getter_name(&f.name)))
+                .map(|f| (type_name(&c.fq_name()), property_getter_name(&f.name)))
         })
         .collect();
     // A classpath value class's sole-property getter (`ids/RoleId` → `getV`), so `r.v` (an
     // `invokevirtual X.getV()`) on an unboxed external value is rewritten to identity like a user one.
     vc_getters.extend(
         ir.external_value_class_getters()
-            .map(|(k, v)| (k, v.to_string())),
+            .map(|(k, v)| (type_name(&k), v.to_string())),
     );
 
     // Interfaces that value classes implement — a function returning one of these (or `Any`) boxes a
@@ -635,7 +634,7 @@ pub fn lower_value_classes(
     };
     // `(owner-internal, plain name, arity)` → mangled name, for rewriting resolved-by-name calls
     // (`super.f(vc)`, an interface method) to the value-class-mangled method.
-    let mut mangle_map: HashMap<(String, String, usize), String> = HashMap::new();
+    let mut mangle_map: HashMap<(TypeName, String, usize), String> = HashMap::new();
     let mut target_param_map: HashMap<(String, String, usize), Vec<Ty>> = HashMap::new();
     let mut target_nullable_map: HashMap<(String, String, usize), Vec<bool>> = HashMap::new();
     for (fid, f) in ir.functions.iter().enumerate() {
@@ -739,7 +738,7 @@ pub fn lower_value_classes(
             if mangled != f.name {
                 if let Some(owner) = &f.dispatch_receiver {
                     mangle_map.insert(
-                        (owner.clone(), f.name.clone(), orig_params[fid].len()),
+                        (type_name(owner), f.name.clone(), orig_params[fid].len()),
                         mangled.clone(),
                     );
                 }
@@ -792,7 +791,9 @@ pub fn lower_value_classes(
                 let Some(base) = f.name.strip_suffix("$annotations") else {
                     continue;
                 };
-                if let Some(mangled) = mangle_map.get(&(c.fq_name(), base.to_string(), 0)) {
+                if let Some(mangled) =
+                    mangle_map.get(&(type_name(&c.fq_name()), base.to_string(), 0))
+                {
                     renames.push((fid, format!("{mangled}$annotations")));
                 }
             }
@@ -830,7 +831,7 @@ pub fn lower_value_classes(
                 ..
             } = e
             {
-                if let Some(mangled) = mangle_map.get(&(owner.clone(), name.clone(), args.len())) {
+                if let Some(mangled) = mangle_map.get(&(*owner, name.clone(), args.len())) {
                     *name = mangled.clone();
                     *descriptor = erase_descriptor(descriptor, &under);
                 }
@@ -956,7 +957,7 @@ pub fn lower_value_classes(
             for b in &mut c.bridges {
                 let target = b.target_name.clone().unwrap_or_else(|| b.name.clone());
                 if let Some(m) =
-                    mangle_map.get(&(owner_fq.clone(), target, b.concrete_params.len()))
+                    mangle_map.get(&(type_name(&owner_fq), target, b.concrete_params.len()))
                 {
                     b.target_name = Some(m.clone());
                 }
@@ -1384,7 +1385,7 @@ pub fn lower_value_classes(
                 };
                 Some(Rw::Ctor(IrExpr::Call {
                     callee: Callee::Static {
-                        owner: fq_rendered[cls].clone(),
+                        owner: fq[cls],
                         name: "constructor-impl".to_string(),
                         descriptor: format!("({params}){ret}"),
                         inline: InlineKind::None,
@@ -1411,12 +1412,12 @@ pub fn lower_value_classes(
                     .get(&fq_name)
                     .map(|t| erase(t, &under))
                     .unwrap_or(Ty::Error);
-                let owner = fq_name.render();
+                let owner_rendered = fq_name.render();
                 Some(Rw::Ctor(IrExpr::Call {
                     callee: Callee::Static {
-                        owner: owner.clone(),
+                        owner: fq_name,
                         name: "box-impl".to_string(),
-                        descriptor: format!("({})L{owner};", desc(&u)),
+                        descriptor: format!("({})L{owner_rendered};", desc(&u)),
                         inline: InlineKind::None,
                     },
                     dispatch_receiver: None,
@@ -1434,7 +1435,7 @@ pub fn lower_value_classes(
                 dispatch_receiver: Some(receiver),
                 ..
             } if vc_getters.get(owner).is_some_and(|g| g == name) => {
-                value_class_name(owner, &under).map(|owner| Rw::Prop(*receiver, owner))
+                value_class_name(*owner, &under).map(|owner| Rw::Prop(*receiver, owner))
             }
             // `x.getV()` getter: identity on an unboxed value, `unbox-impl()` on a boxed one.
             IrExpr::MethodCall {
@@ -1662,9 +1663,7 @@ pub fn lower_value_classes(
                 args,
             } = &ir.exprs[id as usize]
             {
-                if is_vc[*class as usize]
-                    || !is_value_class_internal(&ir.classes[*class as usize].fq_name(), &under)
-                {
+                if is_vc[*class as usize] || !is_value_class_internal(fq[*class as usize], &under) {
                     if let Repr::Unboxed(x) = repr_ctx.repr(*receiver) {
                         ops.push((*receiver, BoxOp::Box(x)));
                     }
@@ -1776,7 +1775,7 @@ pub fn lower_value_classes(
                 ..
             } = &ir.exprs[id as usize]
             {
-                if !is_value_class_internal(owner, &under) {
+                if !is_value_class_internal(*owner, &under) {
                     if let Repr::Unboxed(x) = repr_ctx.repr(*recv) {
                         ops.push((*recv, repr_ctx.box_op(*recv, x)));
                     }
@@ -1792,7 +1791,7 @@ pub fn lower_value_classes(
                 ..
             } = &ir.exprs[id as usize]
             {
-                if is_value_class_internal(owner, &under)
+                if is_value_class_internal(*owner, &under)
                     && name.contains("-impl")
                     && name != "unbox-impl"
                     && name != "box-impl"
@@ -1869,7 +1868,7 @@ pub fn lower_value_classes(
                 // BOXED value class (`ZN.constructor-impl(LZ1;)`, where `ZN`'s underlying `Z1?` boxes):
                 // there the unboxed `Z1` arg must box to `LZ1;`. So for a VC-owned call, box an arg only
                 // when its param descriptor is exactly `Lx;` for the arg's value class `x`.
-                let vc_owned = is_value_class_internal(owner, &under);
+                let vc_owned = is_value_class_internal(*owner, &under);
                 let refs = descriptor_param_refs(descriptor);
                 let ptypes = descriptor_param_types(descriptor);
                 #[cfg(feature = "trace")]
@@ -2336,7 +2335,7 @@ fn unboxed_vc_class(
         IrExpr::Call {
             callee: Callee::Static { owner, name, .. },
             ..
-        } if name == "constructor-impl" || name == "unbox-impl" => value_class_name(owner, under),
+        } if name == "constructor-impl" || name == "unbox-impl" => value_class_name(*owner, under),
         // A local call returning an unboxed value class — only considered when `calls` is set (the
         // `Any`-return case); the lambda case must NOT box these (they already satisfy `Object`).
         IrExpr::Call {
@@ -2550,17 +2549,17 @@ fn repr(
             callee: Callee::Static { owner, name, .. },
             ..
         } if name == "constructor-impl" || name == "unbox-impl" => {
-            value_class_name(owner, under).map_or(Repr::NotVc, Repr::Unboxed)
+            value_class_name(*owner, under).map_or(Repr::NotVc, Repr::Unboxed)
         }
         IrExpr::Call {
             callee: Callee::Static { owner, name, .. } | Callee::Virtual { owner, name, .. },
             ..
-        } if name == "box-impl" => value_class_name(owner, under).map_or(Repr::NotVc, Repr::Boxed),
+        } if name == "box-impl" => value_class_name(*owner, under).map_or(Repr::NotVc, Repr::Boxed),
         IrExpr::Call {
             callee: Callee::Virtual { owner, name, .. },
             ..
         } if name == "unbox-impl" => {
-            value_class_name(owner, under).map_or(Repr::NotVc, Repr::Unboxed)
+            value_class_name(*owner, under).map_or(Repr::NotVc, Repr::Unboxed)
         }
         IrExpr::Call {
             callee: Callee::Local(fid),
@@ -2712,10 +2711,9 @@ fn unbox_wrap(ir: &mut IrFile, id: ExprId, x: TypeName, under: &Under) {
     });
     let u = under.get(&x).map(|t| erase(t, under)).unwrap_or(Ty::Error);
     let d = desc(&u);
-    let owner = x.render();
     ir.exprs[id as usize] = IrExpr::Call {
         callee: Callee::Virtual {
-            owner,
+            owner: x,
             name: "unbox-impl".to_string(),
             descriptor: format!("(){d}"),
             interface: false,
@@ -2760,10 +2758,9 @@ fn prop_access(
             x,
         ) {
         let d = desc(&u);
-        let owner = x.render();
         ir.add_expr(IrExpr::Call {
             callee: Callee::Virtual {
-                owner,
+                owner: x,
                 name: "unbox-impl".to_string(),
                 descriptor: format!("(){d}"),
                 interface: false,
@@ -2811,7 +2808,7 @@ fn is_boxed_vc(
         IrExpr::Call {
             callee: Callee::Static { owner, name, .. },
             ..
-        } if x.matches(owner) && name == "box-impl" => true,
+        } if *owner == x && name == "box-impl" => true,
         IrExpr::Call {
             callee: Callee::Local(fid),
             ..
@@ -2934,7 +2931,7 @@ fn is_unboxed_vc(exprs: &[IrExpr], id: ExprId, x: TypeName) -> bool {
         IrExpr::Call {
             callee: Callee::Static { owner, name, .. },
             ..
-        } if x.matches(owner) && (name == "constructor-impl" || name == "unbox-impl") => true,
+        } if *owner == x && (name == "constructor-impl" || name == "unbox-impl") => true,
         IrExpr::Block { value: Some(v), .. } => is_unboxed_vc(exprs, *v, x),
         _ => false,
     }
@@ -3193,12 +3190,12 @@ fn box_wrap(ir: &mut IrFile, id: ExprId, x: TypeName, under: &Under) {
     ir.exprs.push(orig);
     let u = under.get(&x).map(|t| erase(t, under)).unwrap_or(Ty::Error);
     let d = desc(&u);
-    let owner = x.render();
+    let owner_rendered = x.render();
     ir.exprs[id as usize] = IrExpr::Call {
         callee: Callee::Static {
-            owner: owner.clone(),
+            owner: x,
             name: "box-impl".to_string(),
-            descriptor: format!("({d})L{owner};"),
+            descriptor: format!("({d})L{owner_rendered};"),
             inline: InlineKind::None,
         },
         dispatch_receiver: None,
@@ -3235,13 +3232,13 @@ fn box_wrap_nullable(ir: &mut IrFile, id: ExprId, x: TypeName, under: &Under, sl
     let get_for_box = ir.exprs.len() as ExprId;
     ir.exprs.push(IrExpr::GetValue(slot));
     let d = desc(&u);
-    let owner = x.render();
+    let owner_rendered = x.render();
     let boxed = ir.exprs.len() as ExprId;
     ir.exprs.push(IrExpr::Call {
         callee: Callee::Static {
-            owner: owner.clone(),
+            owner: x,
             name: "box-impl".to_string(),
-            descriptor: format!("({d})L{owner};"),
+            descriptor: format!("({d})L{owner_rendered};"),
             inline: InlineKind::None,
         },
         dispatch_receiver: None,
@@ -3544,7 +3541,7 @@ fn synth_value_members(ir: &mut IrFile, class_id: u32, under: &Under, has_init: 
         let cmp = if is_ref_under {
             ir.add_expr(IrExpr::Call {
                 callee: Callee::Static {
-                    owner: "kotlin/jvm/internal/Intrinsics".into(),
+                    owner: type_name("kotlin/jvm/internal/Intrinsics"),
                     name: "areEqual".into(),
                     descriptor: "(Ljava/lang/Object;Ljava/lang/Object;)Z".into(),
                     inline: InlineKind::None,
@@ -3563,7 +3560,7 @@ fn synth_value_members(ir: &mut IrFile, class_id: u32, under: &Under, has_init: 
             };
             let call = ir.add_expr(IrExpr::Call {
                 callee: Callee::Static {
-                    owner: owner.into(),
+                    owner: type_name(owner),
                     name: "compare".into(),
                     descriptor: desc.into(),
                     inline: InlineKind::None,
@@ -3608,7 +3605,7 @@ fn synth_value_members(ir: &mut IrFile, class_id: u32, under: &Under, has_init: 
         let fv = this_field(ir);
         let call = ir.add_expr(IrExpr::Call {
             callee: Callee::Static {
-                owner: internal.clone(),
+                owner: internal_name,
                 name: "toString-impl".to_string(),
                 descriptor: format!("({udesc})Ljava/lang/String;"),
                 inline: InlineKind::None,
@@ -3631,7 +3628,7 @@ fn synth_value_members(ir: &mut IrFile, class_id: u32, under: &Under, has_init: 
         let fv = this_field(ir);
         let call = ir.add_expr(IrExpr::Call {
             callee: Callee::Static {
-                owner: internal.clone(),
+                owner: internal_name,
                 name: "hashCode-impl".to_string(),
                 descriptor: format!("({udesc})I"),
                 inline: InlineKind::None,
@@ -3664,7 +3661,7 @@ fn synth_value_members(ir: &mut IrFile, class_id: u32, under: &Under, has_init: 
         });
         let ounbox = ir.add_expr(IrExpr::Call {
             callee: Callee::Virtual {
-                owner: internal.clone(),
+                owner: internal_name,
                 name: "unbox-impl".to_string(),
                 descriptor: format!("(){udesc}"),
                 interface: false,
@@ -3675,7 +3672,7 @@ fn synth_value_members(ir: &mut IrFile, class_id: u32, under: &Under, has_init: 
         let v = ir.add_expr(IrExpr::GetValue(0));
         let eq0 = ir.add_expr(IrExpr::Call {
             callee: Callee::Static {
-                owner: internal.clone(),
+                owner: internal_name,
                 name: "equals-impl0".to_string(),
                 descriptor: format!("({udesc}{udesc})Z"),
                 inline: InlineKind::None,
@@ -3692,7 +3689,7 @@ fn synth_value_members(ir: &mut IrFile, class_id: u32, under: &Under, has_init: 
         let other_i = ir.add_expr(IrExpr::GetValue(1));
         let call = ir.add_expr(IrExpr::Call {
             callee: Callee::Static {
-                owner: internal.clone(),
+                owner: internal_name,
                 name: "equals-impl".to_string(),
                 descriptor: format!("({udesc}Ljava/lang/Object;)Z"),
                 inline: InlineKind::None,
@@ -3735,7 +3732,7 @@ fn synth_value_members(ir: &mut IrFile, class_id: u32, under: &Under, has_init: 
             }
             let call = ir.add_expr(IrExpr::Call {
                 callee: Callee::Static {
-                    owner: internal.clone(),
+                    owner: internal_name,
                     name: "constructor-impl".to_string(),
                     descriptor: format!("({udesc}){udesc}"),
                     inline: InlineKind::None,
