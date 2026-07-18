@@ -16123,6 +16123,13 @@ impl<'a> Lower<'a> {
                 {
                     return Some(self.emit_external_static_field(&owner, &name, &descriptor));
                 }
+                // `X::class.java`.
+                if matches!(
+                    self.info.expr_lowers.get(&e),
+                    Some(ExprLowering::ClassLiteralJava)
+                ) {
+                    return self.expr(receiver);
+                }
                 // A classpath nested singleton object recorded by the checker (`PrimitiveKind.STRING`) →
                 // `getstatic <Outer$Nested>.INSTANCE`.
                 if let Some(ExprLowering::ObjectValue { internal }) = self.info.expr_lowers.get(&e)

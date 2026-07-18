@@ -4552,6 +4552,8 @@ pub enum ExprLowering {
         name: String,
         descriptor: String,
     },
+    /// The `.java` member of a class literal.
+    ClassLiteralJava,
     /// A bare-name call `m(args)` resolved to a MEMBER function of a classpath `object` that was imported
     /// unqualified (`import Obj.m; m()`). Kotlin dispatches this on the singleton, so lowering reads
     /// `getstatic <internal>.INSTANCE` as the receiver and invokes the member — the same shape a qualified
@@ -7025,17 +7027,20 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// If a bare type name `n` denotes a reference type usable as an UNBOUND class literal `n::class`,
-    /// its `Ty`. Resolves the same way [`Self::resolve_ty_no_diag`] does (built-in `from_name` types + user
-    /// classes) — deliberately NOT via the global simple-name index, which falsely collides names like
-    /// `IntArray` with unrelated JDK classes. A primitive (`Int::class` needs `Integer.TYPE`-style
-    /// lowering) or unknown name returns `None` so the literal is skipped rather than miscompiled.
+    /// If a bare type name `n` denotes a reference type usable as an unbound class literal `n::class`,
+    /// its `Ty`. Checks built-ins, user classes, enclosing nested types, and imports, but not the global
+    /// simple-name index because it collides with built-in names. Primitive or unknown names return `None`.
     fn class_literal_unbound_ty(&self, n: &str) -> Option<Ty> {
         if self.tparams.contains(n) {
             return None;
         }
+        if self.lookup(n).is_some() {
+            return None;
+        }
         let ty = Ty::from_name(n)
-            .or_else(|| self.syms.classes.get(n).map(|cs| Ty::obj(&cs.internal)))?;
+            .or_else(|| self.syms.classes.get(n).map(|cs| Ty::obj(&cs.internal)))
+            .or_else(|| self.enclosing_nested_type(n).map(|i| Ty::obj(&i)))
+            .or_else(|| self.imported_type_internal(n).map(|i| Ty::obj(&i)))?;
         if ty == Ty::Error {
             return None;
         }
@@ -11979,6 +11984,12 @@ impl<'a> Checker<'a> {
                 }
                 return ret;
             }
+        }
+        if name == "java" && rt.non_null().obj_internal() == Some("java/lang/Class") {
+            if let Some(me) = mexpr {
+                self.expr_lowers.insert(me, ExprLowering::ClassLiteralJava);
+            }
+            return rt;
         }
         if let Some(internal) = rt.non_null().obj_internal() {
             if let Some(sf) = self.syms.libraries.static_field(internal, name) {

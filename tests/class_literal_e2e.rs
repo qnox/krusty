@@ -38,6 +38,35 @@ fn primitive_class_literals_bound_and_unbound_agree() {
 }
 
 #[test]
+fn class_literal_java_is_identity_on_the_class() {
+    const SRC: &str = "class Foo\n\
+fun box(): String {\n\
+    if (Foo::class.java != Foo::class.java) return \"Fail 1\"\n\
+    if (String::class.java.getName() != \"java.lang.String\") return \"Fail 2\"\n\
+    val x: Any = Foo()\n\
+    if (x::class.java != Foo::class.java) return \"Fail 3\"\n\
+    if (String::class.java == Foo::class.java) return \"Fail 4\"\n\
+    return \"OK\"\n\
+}\n";
+    assert_eq!(run(SRC).expect("class literal .java"), "OK");
+}
+
+#[test]
+fn class_literal_java_on_explicitly_imported_type() {
+    const SRC: &str = "import java.util.ArrayList\n\
+fun box(): String {\n\
+    val c = ArrayList::class.java\n\
+    if (c.getName() != \"java.util.ArrayList\") return \"Fail 1\"\n\
+    if (c != ArrayList::class.java) return \"Fail 2\"\n\
+    return \"OK\"\n\
+}\n";
+    assert_eq!(
+        run(SRC).expect("class literal .java on imported type"),
+        "OK"
+    );
+}
+
+#[test]
 fn bound_class_literal_smartcast_in_equals() {
     // KT-16291: `other::class == this::class` inside an overridden `equals` (bound literals on values).
     const SRC: &str = "class Foo(val s: String) {\n\
