@@ -672,6 +672,8 @@ mod sam_classpath_e2e;
 mod sam_conversion_e2e;
 #[path = "same_package_classpath_e2e.rs"]
 mod same_package_classpath_e2e;
+#[path = "samefile_nested_object_value_e2e.rs"]
+mod samefile_nested_object_value_e2e;
 #[path = "scope_function_value_arg_e2e.rs"]
 mod scope_function_value_arg_e2e;
 #[path = "sealed_interface_nested_e2e.rs"]
