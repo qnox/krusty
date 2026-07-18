@@ -9765,11 +9765,14 @@ impl<'a> Checker<'a> {
                         // condition is FALSE (`contract { returns() implies (x is T) }`), so the condition
                         // holds for the rest of the block. Narrow a stable binding in the FIRST argument
                         // (the condition), exactly as the `if (…) return` guard above does. Gated on the
-                        // stdlib name not being shadowed by a module-declared function.
+                        // stdlib name not being shadowed by a lexical local or module-declared function.
                         else if let Expr::Call { callee, args } = self.file.expr(ie).clone() {
                             if let Expr::Name(fname) = self.file.expr(callee).clone() {
                                 if (fname == "require" || fname == "check")
                                     && !args.is_empty()
+                                    && !self.lexical_value_declares(&fname)
+                                    && !self.syms.props.contains_key(&fname)
+                                    && !self.syms.prop_facades.contains_key(&fname)
                                     && !self.module_declares(&fname)
                                 {
                                     if let Some((n, t)) = self.smartcast_binding(args[0], false) {

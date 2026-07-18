@@ -728,6 +728,8 @@ mod suspend_default_param_e2e;
 mod suspend_e2e;
 #[path = "suspend_inline_hof_suspending_lambda_reject_e2e.rs"]
 mod suspend_inline_hof_suspending_lambda_reject_e2e;
+#[path = "suspend_inline_statementless_block_e2e.rs"]
+mod suspend_inline_statementless_block_e2e;
 #[path = "suspend_loop_compound_assign_e2e.rs"]
 mod suspend_loop_compound_assign_e2e;
 #[path = "suspend_loop_continue_break_e2e.rs"]
