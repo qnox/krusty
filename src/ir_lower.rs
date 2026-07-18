@@ -4774,20 +4774,20 @@ impl<'a> Lower<'a> {
     fn emit_library_member_call(
         &mut self,
         recv: u32,
-        owner_fallback: String,
+        owner_fallback: TypeName,
         member: crate::libraries::LibraryMember,
         logical_ret: Ty,
         suspend: bool,
         args: Vec<u32>,
     ) -> u32 {
-        let owner = member.owner_name_or(&owner_fallback);
-        let interface = member.is_interface || self.library_type_is_interface(&owner);
+        let owner = member.owner_type_or(owner_fallback);
+        let interface = member.is_interface || self.library_type_is_interface(owner);
         // kotlinc pushes the receiver BEFORE evaluating arguments; an argument that suspends forces
         // the pushed receiver into a continuation spill slot (an unnamed temp local in its
         // bytecode). Mirror it with a temp in the spill scope: `val tmp = recv; tmp.m(<arg>)`.
         if self.cur_fn_suspend && args.iter().any(|&a| self.ir_subtree_suspends(a)) {
             let rv = self.fresh_value();
-            let decl = self.emit_named_variable(rv, ty_to_ir(Ty::obj(&owner)), Some(recv));
+            let decl = self.emit_named_variable(rv, ty_to_ir(Ty::obj_name(owner)), Some(recv));
             let recv_g = self.emit_get_value(rv);
             let call = self.emit_virtual_call(
                 owner,
@@ -4839,7 +4839,7 @@ impl<'a> Lower<'a> {
     ) -> u32 {
         let logical_ret = callable.ret;
         let call = self.emit_static_call(
-            callable.owner_name(),
+            callable.owner_type(),
             callable.name,
             callable.descriptor,
             callable.inline,
@@ -4905,7 +4905,7 @@ impl<'a> Lower<'a> {
 
     fn emit_cross_file_call(
         &mut self,
-        facade: String,
+        facade: TypeName,
         name: String,
         params: Vec<Ty>,
         ret: Ty,
@@ -4913,7 +4913,7 @@ impl<'a> Lower<'a> {
     ) -> u32 {
         self.emit_call(
             Callee::CrossFile {
-                facade: type_name(&facade),
+                facade,
                 name,
                 params,
                 ret,
@@ -5279,12 +5279,12 @@ impl<'a> Lower<'a> {
         args: &[AstExprId],
         call_expr: AstExprId,
     ) -> Option<u32> {
-        let internal = internal.render();
+        let internal_name = internal.render();
         // A SAME-FILE object or companion: read the singleton (`Obj.INSTANCE` or `C.Companion`) and
         // invoke the recorded member on it. The classpath path below needs a library type.
-        if let Some(ci) = self.class_info(&internal) {
+        if let Some(ci) = self.class_info(&internal_name) {
             let cid = ci.id;
-            let (class_id, index, fid, ret) = self.resolve_method(&internal, name)?;
+            let (class_id, index, fid, ret) = self.resolve_method(&internal_name, name)?;
             let params = self.ir.functions[fid as usize].params.clone();
             if params.len() != args.len() {
                 return None;
@@ -5292,10 +5292,10 @@ impl<'a> Lower<'a> {
             let recv = if self.ir.classes[cid as usize].is_object {
                 self.emit_static_instance(cid, cid, "INSTANCE")
             } else if self.ir.classes[cid as usize].is_companion {
-                let outer = internal.strip_suffix("$Companion")?;
-                let field = self
-                    .runtime
-                    .companion_instance_field(outer, &internal, "Companion")?;
+                let outer = internal_name.strip_suffix("$Companion")?;
+                let field =
+                    self.runtime
+                        .companion_instance_field(outer, &internal_name, "Companion")?;
                 self.platform_static_field(field)
             } else {
                 return None;
@@ -5312,7 +5312,7 @@ impl<'a> Lower<'a> {
         if m.name != name || m.params.len() != args.len() {
             return None;
         }
-        let field = self.runtime.object_instance_field(&internal)?;
+        let field = self.runtime.object_instance_field(&internal_name)?;
         let recv = self.platform_static_field(field);
         let mut a = Vec::new();
         for (i, &arg) in args.iter().enumerate() {
@@ -5354,11 +5354,11 @@ impl<'a> Lower<'a> {
         self.runtime.property_reference_signature(getter_name, ret)
     }
 
-    fn library_type_is_interface(&self, internal: &str) -> bool {
+    fn library_type_is_interface(&self, internal: TypeName) -> bool {
         self.syms
             .libraries
-            .resolve_type(internal)
-            .map_or(false, |t| t.is_interface())
+            .resolve_type_name(internal)
+            .is_some_and(|t| t.is_interface())
     }
 
     fn insert_class_info(&mut self, internal: &str, mut info: ClassInfo) -> Option<ClassInfo> {
@@ -6279,7 +6279,7 @@ impl<'a> Lower<'a> {
         idx: usize,
         target: DestructureComponentTarget,
     ) -> Option<(u32, Ty)> {
-        let internal = recv_ty.kotlin_class_internal()?.to_string();
+        let internal = recv_ty.kotlin_class_internal()?;
         match target {
             DestructureComponentTarget::ModuleMember {
                 owner,
@@ -7507,10 +7507,10 @@ impl<'a> Lower<'a> {
         let c = self
             .runtime
             .runtime_callable(RuntimeOp::UnsignedUnbox, ty)?;
-        let owner_ty = Ty::obj(&c.owner_name());
-        let owner = owner_ty.obj_internal()?;
+        let owner = c.owner_type();
+        let owner_ty = Ty::obj_name(owner);
         let cast = self.emit_type_op(IrTypeOp::Cast, val, ty_to_ir(owner_ty));
-        Some(self.emit_virtual_call(owner.to_string(), c.name, c.descriptor, false, cast, vec![]))
+        Some(self.emit_virtual_call(owner, c.name, c.descriptor, false, cast, vec![]))
     }
 
     fn unsigned_to_string(&mut self, val: u32, ty: Ty) -> Option<u32> {
@@ -8016,7 +8016,7 @@ impl<'a> Lower<'a> {
             });
         }
         self.emit_cross_file_call(
-            c_internal.to_string(),
+            type_name(c_internal),
             "serializer".to_string(),
             vec![],
             ret,
@@ -8348,7 +8348,7 @@ impl<'a> Lower<'a> {
         &mut self,
         call: AstExprId,
         target: &ResolvedModuleTopLevelCall,
-        facade: String,
+        facade: TypeName,
         args: &[AstExprId],
     ) -> Option<u32> {
         if target.call_sig.vararg {
@@ -9462,11 +9462,11 @@ impl<'a> Lower<'a> {
                 e.0,
                 false,
                 params.len() as u8,
-                String::new(),
+                None,
                 name.to_string(),
                 1,
                 crate::ir::FrDispatch::Static,
-                String::new(),
+                None,
                 name.to_string(),
                 false,
                 param_tys,
@@ -9504,11 +9504,11 @@ impl<'a> Lower<'a> {
                 e.0,
                 bound,
                 params.len() as u8,
-                "java/lang/Object".to_string(),
+                Some(crate::types::wk::java_object()),
                 name.to_string(),
                 0,
                 dispatch,
-                "java/lang/Object".to_string(),
+                Some(crate::types::wk::java_object()),
                 name.to_string(),
                 false,
                 param_tys,
@@ -9545,11 +9545,11 @@ impl<'a> Lower<'a> {
             e.0,
             bound,
             params.len() as u8,
-            internal.clone(),
+            Some(type_name(&internal)),
             name.to_string(),
             0, // member
             dispatch,
-            internal,
+            Some(type_name(&internal)),
             call_name,
             call_interface,
             param_tys,
@@ -9587,11 +9587,11 @@ impl<'a> Lower<'a> {
             e.0,
             true,
             params.len() as u8,
-            internal.to_string(),
+            Some(type_name(&internal)),
             name.to_string(),
             0,
             crate::ir::FrDispatch::VirtualBound,
-            internal.to_string(),
+            Some(type_name(&internal)),
             call_name,
             false,
             param_tys,
@@ -9631,11 +9631,11 @@ impl<'a> Lower<'a> {
             e.0,
             true,
             sig.params.len() as u8,
-            internal.clone(),
+            Some(type_name(&internal)),
             name.to_string(),
             0,
             crate::ir::FrDispatch::VirtualBound,
-            internal,
+            Some(type_name(&internal)),
             call_name,
             call_interface,
             param_tys,
@@ -9687,11 +9687,11 @@ impl<'a> Lower<'a> {
                     e.0,
                     true,
                     params.len() as u8,
-                    String::new(),
+                    None,
                     name.to_string(),
                     1,
                     crate::ir::FrDispatch::StaticBound,
-                    String::new(),
+                    None,
                     name.to_string(),
                     false,
                     param_tys,
@@ -9747,19 +9747,19 @@ impl<'a> Lower<'a> {
             if m.suspend {
                 return None;
             }
-            let owner = m.owner_name()?;
-            let call_interface = self.library_type_is_interface(&owner);
+            let owner = m.owner?;
+            let call_interface = self.library_type_is_interface(owner);
             let cap = self.expr(recv)?;
             let param_tys = tys_to_ir(params);
             return self.make_func_ref(
                 e.0,
                 true,
                 params.len() as u8,
-                owner.clone(),
+                Some(owner),
                 m.name.clone(),
                 0,
                 crate::ir::FrDispatch::VirtualBound,
-                owner,
+                Some(owner),
                 m.physical_name.clone().unwrap_or(m.name),
                 call_interface,
                 param_tys,
@@ -9892,11 +9892,11 @@ impl<'a> Lower<'a> {
         uniq: u32,
         bound: bool,
         arity: u8,
-        owner_class: String,
+        owner_class: Option<TypeName>,
         fn_name: String,
         flags: i32,
         dispatch: crate::ir::FrDispatch,
-        call_owner: String,
+        call_owner: Option<TypeName>,
         call_name: String,
         call_interface: bool,
         param_tys: Vec<Ty>,
@@ -9910,8 +9910,7 @@ impl<'a> Lower<'a> {
         let superclass = self
             .runtime
             .function_reference_impl_type()?
-            .obj_internal()?
-            .to_string();
+            .obj_internal()?;
         let synth_id = self.ir.add_class(IrClass {
             fq_name: type_name(&synth_fq),
             is_value: false,
@@ -9931,7 +9930,7 @@ impl<'a> Lower<'a> {
             is_sealed: false,
             is_abstract: false,
             is_open: false,
-            superclass: type_name(&superclass),
+            superclass,
             super_args: vec![],
             enum_entries: vec![],
             enum_entry_of: None,
@@ -9939,11 +9938,11 @@ impl<'a> Lower<'a> {
             func_ref: Some(crate::ir::FuncRef {
                 bound,
                 arity,
-                owner_class: (!owner_class.is_empty()).then(|| type_name(&owner_class)),
+                owner_class,
                 fn_name,
                 flags,
                 dispatch,
-                call_owner: (!call_owner.is_empty()).then(|| type_name(&call_owner)),
+                call_owner,
                 call_name,
                 call_interface,
                 target_param_tys: target_override.unwrap_or_else(|| param_tys.clone()),
@@ -10033,7 +10032,7 @@ impl<'a> Lower<'a> {
         args: &[AstExprId],
         selected: ResolvedCall,
     ) -> Option<(u32, Ty)> {
-        let internal = recv_ty.kotlin_class_internal()?.to_string();
+        let internal = recv_ty.kotlin_class_internal()?;
         match selected {
             ResolvedCall::Member(resolved) => {
                 let member = resolved.member;
@@ -10425,7 +10424,7 @@ impl<'a> Lower<'a> {
         let protocol = self.info.iterator_protocol(iterable).cloned()?;
         let iter_dispatch = protocol.iterator;
         let iter_ty = protocol.iter_ty;
-        let iter_internal = iter_ty.obj_internal()?.to_string();
+        let iter_internal = iter_ty.obj_internal()?;
         let hasnext_m = protocol.has_next;
         let next_m = protocol.next;
         let elem = protocol.elem_ty;
@@ -10463,14 +10462,7 @@ impl<'a> Lower<'a> {
             } => {
                 let ret = member.ret;
                 let suspend = member.suspend;
-                self.emit_library_member_call(
-                    recv,
-                    owner_fallback.render(),
-                    *member,
-                    ret,
-                    suspend,
-                    vec![],
-                )
+                self.emit_library_member_call(recv, owner_fallback, *member, ret, suspend, vec![])
             }
             IteratorDispatchTarget::Extension(callable) => {
                 self.emit_library_static_call(*callable, vec![recv], false)
@@ -10485,7 +10477,7 @@ impl<'a> Lower<'a> {
         let hasnext_suspend = hasnext_m.suspend;
         let cond = self.emit_library_member_call(
             it_g,
-            iter_internal.clone(),
+            iter_internal,
             hasnext_m,
             hasnext_ret,
             hasnext_suspend,
@@ -10498,7 +10490,7 @@ impl<'a> Lower<'a> {
         let next_suspend = next_m.suspend;
         let next_call = self.emit_library_member_call(
             it_g2,
-            iter_internal.clone(),
+            iter_internal,
             next_m,
             next_ret,
             next_suspend,
@@ -11182,8 +11174,8 @@ impl<'a> Lower<'a> {
         // A Kotlin property is a zero-arg member. Resolve the semantic property name through the
         // library source first; mapped builtins supply their physical owner/name/descriptor there.
         let internal = match rt {
-            Ty::String => "kotlin/String".to_string(),
-            Ty::Obj(i, _) => i.to_string(),
+            Ty::String => type_name("kotlin/String"),
+            Ty::Obj(i, _) => i,
             _ => return None,
         };
         let resolved = self.info.resolved_member(e).cloned().map(|r| {
@@ -11771,12 +11763,10 @@ impl<'a> Lower<'a> {
                 }
                 lowered
             };
-            let owner = member.owner.map(|owner| owner.render()).unwrap_or_else(|| {
-                this_ty
-                    .obj_internal()
-                    .map(|n| n.render())
-                    .unwrap_or_else(|| "kotlin/Any".to_string())
-            });
+            let owner = member
+                .owner
+                .or_else(|| this_ty.obj_internal())
+                .unwrap_or_else(crate::types::wk::any);
             let physical_ret = member.physical_ret;
             let call = self.emit_library_member_call(recv, owner, member, ret, false, a);
             return Some(self.coerce_generic_read(call, e, physical_ret));
@@ -13079,7 +13069,7 @@ impl<'a> Lower<'a> {
                     }
                     let val = self.lower_arg(value, &ty_to_ir(ty))?;
                     Some(self.emit_cross_file_call(
-                        facade.render(),
+                        facade,
                         property_setter_name(&name),
                         vec![ty_to_ir(ty)],
                         Ty::Unit,
@@ -13701,7 +13691,7 @@ impl<'a> Lower<'a> {
         let protocol = self.info.iterator_protocol(receiver).cloned()?;
         let iter_dispatch = protocol.iterator;
         let iter_ty = protocol.iter_ty;
-        let iter_internal = iter_ty.obj_internal()?.to_string();
+        let iter_internal = iter_ty.obj_internal()?;
         let hasnext_m = protocol.has_next;
         let next_m = protocol.next;
         let elem = protocol.elem_ty;
@@ -13730,14 +13720,7 @@ impl<'a> Lower<'a> {
             } => {
                 let ret = member.ret;
                 let suspend = member.suspend;
-                self.emit_library_member_call(
-                    recv_g,
-                    owner_fallback.render(),
-                    *member,
-                    ret,
-                    suspend,
-                    vec![],
-                )
+                self.emit_library_member_call(recv_g, owner_fallback, *member, ret, suspend, vec![])
             }
             IteratorDispatchTarget::Extension(callable) => {
                 self.emit_library_static_call(*callable, vec![recv_g], false)
@@ -13752,7 +13735,7 @@ impl<'a> Lower<'a> {
         let hasnext_suspend = hasnext_m.suspend;
         let cond = self.emit_library_member_call(
             it_g,
-            iter_internal.clone(),
+            iter_internal,
             hasnext_m,
             hasnext_ret,
             hasnext_suspend,
@@ -14070,8 +14053,8 @@ impl<'a> Lower<'a> {
                         .first()
                         .map(|t| ty_to_ir(*t))
                         .unwrap_or_else(|| ty_to_ir(self.info.ty(value)));
-                    let setter_owner = setter.owner_name();
-                    let is_iface = self.library_type_is_interface(&setter_owner);
+                    let setter_owner = setter.owner_type();
+                    let is_iface = self.library_type_is_interface(setter_owner);
                     let r = self.expr(receiver)?;
                     let v = self.lower_arg(value, &pty)?;
                     return Some(self.emit_virtual_call(
@@ -15286,18 +15269,19 @@ impl<'a> Lower<'a> {
                 // to `Int`). A nullable-primitive receiver has no class internal — the scope-fn path
                 // (tried first) unboxes it itself, so a placeholder owner suffices for the null-check.
                 let nn = rty.non_null();
-                let internal = if nn == Ty::String {
-                    "kotlin/String".to_string()
+                let internal_id = if nn == Ty::String {
+                    type_name("kotlin/String")
                 } else if let Some(i) = nn.obj_internal() {
-                    i.to_string()
+                    i
                 } else if self.has_scalar_value_repr(nn) {
                     // A nullable-PRIMITIVE receiver (`Int?` in a chained `?.let`) has no class internal —
                     // the scope-fn path (tried first) unboxes it; a placeholder owner suffices.
-                    "kotlin/Any".to_string()
+                    crate::types::wk::any()
                 } else {
                     // A non-object, non-primitive receiver (e.g. a literal `null?.…`): unsupported — bail.
                     return None;
                 };
+                let internal = internal_id.render();
                 let rv = self.expr(receiver)?;
                 let v = self.fresh_value();
                 // The `?.` receiver is NULLABLE by construction — carry that into the temp's IrType (`Ty`
@@ -15369,7 +15353,7 @@ impl<'a> Lower<'a> {
                                     let physical_ret = m.physical_ret;
                                     let call = self.emit_library_member_call(
                                         recv2,
-                                        internal.clone(),
+                                        internal_id,
                                         m,
                                         ret,
                                         resolved.suspend,
@@ -15818,11 +15802,11 @@ impl<'a> Lower<'a> {
                         e.0,
                         false,
                         arity as u8,
-                        String::new(),
+                        None,
                         name.clone(),
                         1,
                         crate::ir::FrDispatch::Static,
-                        String::new(),
+                        None,
                         name.clone(),
                         false,
                         fn_params,
@@ -15837,18 +15821,18 @@ impl<'a> Lower<'a> {
                     return None;
                 }
                 let param_tys = tys_to_ir(&c.params);
-                let owner = c.owner_name();
+                let owner = c.owner_type();
                 let target_name = c.name.clone();
                 let ret = ty_to_ir(c.ret);
                 return self.make_func_ref(
                     e.0,
                     false,
                     arity as u8,
-                    owner.clone(),
+                    Some(owner),
                     name.clone(),
                     1,
                     crate::ir::FrDispatch::Static,
-                    owner,
+                    Some(owner),
                     target_name,
                     false,
                     param_tys,
@@ -16044,7 +16028,7 @@ impl<'a> Lower<'a> {
                         // A top-level property from ANOTHER file → call its facade's `getX()` (the field is
                         // private), reusing the backend-agnostic cross-file callee.
                         self.emit_cross_file_call(
-                            facade.render(),
+                            facade,
                             property_getter_name(&n),
                             vec![],
                             ty_to_ir(ty),
@@ -16587,8 +16571,7 @@ impl<'a> Lower<'a> {
                                 let r = self.lower_arg(rhs, &ty_to_ir(param))?;
                                 let owner_fallback = lt
                                     .kotlin_class_internal()
-                                    .map(|n| n.render())
-                                    .unwrap_or_else(|| "kotlin/Any".to_string());
+                                    .unwrap_or_else(crate::types::wk::any);
                                 let cmp = self.emit_library_member_call(
                                     l,
                                     owner_fallback,
@@ -17909,7 +17892,7 @@ impl<'a> Lower<'a> {
                                             .fn_facades_by_decl
                                             .get(&(file, decl.0))
                                             .cloned()
-                                            .map(|facade| (target, facade.render()))
+                                            .map(|facade| (target, facade))
                                     },
                                 )
                             })
@@ -18961,7 +18944,7 @@ impl<'a> Lower<'a> {
                                         }));
                                     }
                                     return Some(self.emit_cross_file_call(
-                                        internal,
+                                        type_name(&internal),
                                         "serializer".to_string(),
                                         vec![kser; args.len()],
                                         ret,
@@ -19352,7 +19335,7 @@ impl<'a> Lower<'a> {
                         };
                         let call = self.emit_library_member_call(
                             recv,
-                            owner.render(),
+                            owner,
                             member,
                             ret,
                             resolved.suspend,
@@ -19361,18 +19344,13 @@ impl<'a> Lower<'a> {
                         // A generic member whose erased return is `Object` but whose substituted type is
                         // more specific (`List<Int>.get` → `Int`) gets the unbox/checkcast kotlinc emits.
                         self.coerce_to_static(call, ret, physical_ret)
-                    } else if let Some(m) = {
+                    } else if let Some((internal, m)) = {
                         // A `@JvmStatic` member of a classpath `object` (`Base58Uuid.of(x)`) → a static
                         // method on the object class (`invokestatic`), found in the type's static list.
-                        rt.obj_internal().and_then(|internal| {
-                            self.info
-                                .resolved_companion(e)
-                                .cloned()
-                                .map(|m| (internal.to_string(), m))
-                        })
+                        rt.obj_internal()
+                            .zip(self.info.resolved_companion(e).cloned())
                     } {
-                        let (internal, m) = m;
-                        let owner = m.owner_name_or(&internal);
+                        let owner = m.owner_type_or(internal);
                         let vararg_arr = m.params.last().copied().filter(|last| {
                             last.array_elem().is_some()
                                 && !(args.len() == m.params.len()
@@ -19502,8 +19480,8 @@ impl<'a> Lower<'a> {
                         // NOT an argument. The checker recorded it; the lowerer has no other path for it
                         // (emitting it static would leave the receiver on the operand stack → `VerifyError`).
                         let phys = c.physical_ret;
-                        let owner = c.owner_name();
-                        let interface = self.library_type_is_interface(&owner);
+                        let owner = c.owner_type();
+                        let interface = self.library_type_is_interface(owner);
                         let recv = self.expr(receiver)?;
                         let mut a = Vec::new();
                         for (i, &arg) in args.iter().enumerate() {

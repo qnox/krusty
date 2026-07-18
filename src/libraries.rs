@@ -215,6 +215,10 @@ impl LibraryMember {
     pub fn owner_name_or(&self, fallback: &str) -> String {
         self.owner_name().unwrap_or_else(|| fallback.to_string())
     }
+
+    pub fn owner_type_or(&self, fallback: TypeName) -> TypeName {
+        self.owner.unwrap_or(fallback)
+    }
 }
 
 /// Which source a resolved callable came from — set by the source that resolves it, read by the
@@ -226,7 +230,7 @@ pub enum Origin {
     #[default]
     Library,
     Module {
-        facade: String,
+        facade: TypeName,
     },
 }
 
@@ -258,6 +262,10 @@ impl LibraryCallable {
 
     pub fn owner_name(&self) -> String {
         self.owner.render()
+    }
+
+    pub fn owner_type(&self) -> TypeName {
+        self.owner
     }
 
     pub fn owner_matches(&self, internal: &str) -> bool {
@@ -793,6 +801,14 @@ impl PropertyInfo {
             fallback.to_string()
         } else {
             rendered
+        }
+    }
+
+    pub fn owner_type_or(&self, fallback: TypeName) -> TypeName {
+        if self.owner.matches("") {
+            fallback
+        } else {
+            self.owner
         }
     }
 }

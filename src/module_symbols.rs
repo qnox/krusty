@@ -13,7 +13,7 @@ use crate::libraries::{
     LibraryType, Origin,
 };
 use crate::symbol_source::SymbolSource;
-use crate::types::{Ty, TypeName};
+use crate::types::{type_name, Ty, TypeName};
 use std::collections::HashMap;
 
 /// The current module's declarations as a [`SymbolSource`]. Borrows the frontend symbols; cheap.
@@ -28,21 +28,16 @@ impl<'a> ModuleSymbols<'a> {
 
     /// The declaring facade of a top-level `name`, if the multi-file driver recorded one. `None` means
     /// "the file being compiled" — the lowerer then resolves it as a same-file local.
-    fn facade_of(&self, name: &str) -> Option<String> {
-        self.syms.fn_facades.get(name).map(|facade| facade.render())
+    fn facade_of(&self, name: &str) -> Option<TypeName> {
+        self.syms.fn_facades.get(name).copied()
     }
 
-    fn facade_of_sig(&self, name: &str, sig: &Signature) -> String {
+    fn facade_of_sig(&self, name: &str, sig: &Signature) -> TypeName {
         sig.source_file
             .zip(sig.source_decl)
-            .and_then(|(file, decl)| {
-                self.syms
-                    .fn_facades_by_decl
-                    .get(&(file, decl.0))
-                    .map(|facade| facade.render())
-            })
+            .and_then(|(file, decl)| self.syms.fn_facades_by_decl.get(&(file, decl.0)).copied())
             .or_else(|| self.facade_of(name))
-            .unwrap_or_default()
+            .unwrap_or_else(|| type_name(""))
     }
 
     /// The user [`FrontendClassSig`] whose JVM internal name is `internal`, if any.
@@ -212,14 +207,12 @@ impl<'a> ModuleSymbols<'a> {
         if let Some(sigs) = self.syms.funs.get(name) {
             for sig in sigs {
                 let owner = self.facade_of_sig(name, sig);
-                let origin = Origin::Module {
-                    facade: owner.clone(),
-                };
+                let origin = Origin::Module { facade: owner };
                 overloads.push(fn_info(
                     FnKind::TopLevel,
                     sig,
                     None,
-                    crate::types::type_name(&owner),
+                    owner,
                     name,
                     0,
                     origin.clone(),
@@ -279,7 +272,7 @@ impl<'a> ModuleSymbols<'a> {
                 name,
                 here,
                 Origin::Module {
-                    facade: c.internal(),
+                    facade: c.internal_name(),
                 },
             ));
         }
@@ -389,7 +382,7 @@ impl SymbolSource for ModuleSymbols<'_> {
                         name,
                         rank,
                         Origin::Module {
-                            facade: String::new(),
+                            facade: type_name(""),
                         },
                     ));
                 }
@@ -500,7 +493,12 @@ mod tests {
         assert_eq!(o.kind, FnKind::TopLevel);
         assert_eq!(o.callable.params, vec![Ty::Int]);
         assert_eq!(o.callable.ret, Ty::Int);
-        assert_eq!(o.callable.origin, Origin::Module { facade: "".into() });
+        assert_eq!(
+            o.callable.origin,
+            Origin::Module {
+                facade: type_name("")
+            }
+        );
     }
 
     #[test]
@@ -543,7 +541,7 @@ mod tests {
         assert_eq!(
             o.callable.origin,
             Origin::Module {
-                facade: "pkg/AKt".into()
+                facade: type_name("pkg/AKt")
             }
         );
     }
