@@ -73,3 +73,16 @@ fun box(): String {\n\
 }\n";
     assert_rejected(SRC);
 }
+
+#[test]
+fn implicit_receiver_member_require_does_not_apply_stdlib_contract() {
+    const SRC: &str = "class Scope {\n\
+    fun require(ok: Boolean) {}\n\
+    fun f(x: Any): Int {\n\
+        require(x is String)\n\
+        return x.length\n\
+    }\n\
+}\n\
+fun box(): String = \"OK\"\n";
+    assert_rejected(SRC);
+}
