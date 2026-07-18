@@ -75,13 +75,12 @@ impl JvmLibraries {
         // Top-level (receiver-less) functions of this name — `listOf`, `run`, `println`, … — each with
         // its inline/`@InlineOnly` flags in one place.
         for c in self.cp.find_top_level(name) {
-            let owner_rendered = c.owner.render();
             let is_default = c.name.ends_with("$default");
             let meta_name = c.name.strip_suffix("$default").unwrap_or(&c.name);
             // Suspend-ness lives on the SOURCE function's `@Metadata`; a `$default` synthetic is not in
             // metadata, so detect it via the stripped `meta_name` — otherwise a suspend function's
             // `withLock$default` keeps its `Continuation` param and no normal call shape resolves.
-            let suspend = self.cp.is_suspend_method(&owner_rendered, meta_name);
+            let suspend = self.cp.is_suspend_method_name(c.owner, meta_name);
             // A `suspend fun`'s physical method appends a `Continuation` parameter and erases the
             // return to `Object`; present the LOGICAL signature (drop the continuation) so a normal
             // call resolves. The coroutine pass re-derives the CPS form for the emitted call.
@@ -114,6 +113,7 @@ impl JvmLibraries {
             // leading params (their exact types — an extension receiver, a vararg array) and
             // truncate the trailing synthetics. A normal function's metadata count equals the
             // descriptor's param count, so this is a no-op for it (no regression).
+            let owner_rendered = c.owner.render();
             let meta = self.cp.metadata_call_facts(
                 &owner_rendered,
                 meta_name,
@@ -647,8 +647,7 @@ impl JvmLibraries {
                 // Only a value-class-typed property (mangled getter); an ordinary property keeps its
                 // normal getter path. Test value-class-ness via the `@JvmInline` `@Metadata` flag DIRECTLY
                 // (not `value_underlying`, which would call `resolve_type` and recurse mid-build).
-                let logical_rendered = logical.render();
-                let lci = self.cp.find(&logical_rendered)?;
+                let lci = self.cp.find_name(logical)?;
                 metadata::class_inline(&lci)?;
                 let mut chars = p.name.chars();
                 let cap = chars.next()?.to_uppercase().collect::<String>();
@@ -1761,7 +1760,7 @@ impl SymbolSource for JvmLibraries {
         // JVM specifics (element-variant `sumOfInt`, value-class mangling) are the emitter's job.
         for facade in self.cp.package_facades(pkg) {
             let facade_rendered = facade.render();
-            for mf in self.cp.meta_functions(&facade_rendered).iter() {
+            for mf in self.cp.meta_functions_name(facade).iter() {
                 if mf.kotlin_name != name || !mf.is_extension {
                     continue;
                 }
@@ -1908,7 +1907,7 @@ impl SymbolSource for JvmLibraries {
             // name is authoritative, never a `getX` guess. A multifile FACADE holds no property metadata of
             // its own — its `d1` names the PART classes that do; merge them (mirrors the `meta_functions`
             // part merge). A single-file facade carries its properties directly.
-            let Some(fci) = self.cp.find(&facade_rendered) else {
+            let Some(fci) = self.cp.find_name(facade) else {
                 continue;
             };
             let mut mprops = metadata::package_properties(&fci);
@@ -2204,8 +2203,7 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
             if !seen.insert(cur) {
                 continue;
             }
-            let cur_rendered = cur.render();
-            let Some(ci) = self.cp.find(&cur_rendered) else {
+            let Some(ci) = self.cp.find_name(cur) else {
                 continue;
             };
             if let Some(f) = ci.fields.iter().find(|f| {
@@ -2221,10 +2219,10 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
                     ty: field_desc_to_ty(&f.descriptor),
                 });
             }
-            if let Some(s) = ci.super_class() {
-                stack.push(type_name(&s));
+            if let Some(s) = ci.super_class {
+                stack.push(s);
             }
-            stack.extend(ci.interfaces.iter_rendered().map(|i| type_name(&i)));
+            stack.extend(ci.interfaces.iter_ids());
         }
         None
     }

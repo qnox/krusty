@@ -1105,13 +1105,16 @@ impl Classpath {
     /// The decoded `@Metadata` function lookups for `internal` (facade parts merged), decoded once and
     /// cached. The single `d1` decode that `meta_functions`/`metadata_call_facts` all project over.
     fn class_meta(&self, internal: &str) -> std::rc::Rc<ClassMeta> {
-        let internal_id = type_name(internal);
+        self.class_meta_name(type_name(internal))
+    }
+
+    fn class_meta_name(&self, internal_id: TypeName) -> std::rc::Rc<ClassMeta> {
         if let Some(m) = self.meta_fns.borrow_mut().get(&internal_id) {
             cache_stat!(meta_fns, true);
             return m.clone();
         }
         cache_stat!(meta_fns, false);
-        let ci = self.find(internal);
+        let ci = self.find_name(internal_id);
         let mut fns = ci
             .as_ref()
             .map(|c| super::metadata::package_functions(c))
@@ -1171,6 +1174,13 @@ impl Classpath {
     /// re-calling `package_functions` + re-merging the facade parts at each call site.
     pub fn meta_functions(&self, internal: &str) -> std::rc::Rc<[super::metadata::MetaFn]> {
         self.class_meta(internal).fns.clone()
+    }
+
+    pub fn meta_functions_name(
+        &self,
+        internal: TypeName,
+    ) -> std::rc::Rc<[super::metadata::MetaFn]> {
+        self.class_meta_name(internal).fns.clone()
     }
 
     /// The metadata-primary [`GenericSig`] for the `internal.jvm_name` overload corresponding to the JVM
@@ -1713,12 +1723,15 @@ impl Classpath {
     }
 
     pub fn find(&self, internal: &str) -> Option<std::sync::Arc<ClassInfo>> {
+        self.find_name(type_name(internal))
+    }
+
+    pub fn find_name(&self, internal: TypeName) -> Option<std::sync::Arc<ClassInfo>> {
         // The front end names built-in types in Kotlin terms (`kotlin/Any`); a classpath artifact is
         // a real JVM class, so map to the JVM name (`java/lang/Object`) before looking it up. The parsed
         // class is shared behind an `Arc`: L1↔L2 and every caller clone is a refcount bump, never a deep
         // copy of the (large) `ClassInfo`.
-        let internal = super::jvm_class_map::to_jvm_internal(internal);
-        let internal_id = type_name(internal);
+        let internal_id = super::jvm_class_map::to_jvm_type_name(internal);
         // L1: per-thread, no lock.
         if let Some(hit) = self.local_cache.borrow_mut().get(&internal_id) {
             cache_stat!(l1_class, true);
@@ -1741,6 +1754,7 @@ impl Classpath {
             return hit;
         }
         cache_stat!(l2_class, false);
+        let internal = internal_id.render();
         let name = format!("{internal}.class");
         let mut found = None;
         // Search only the entries the package tree says declare this class's package, in classpath order
@@ -1764,14 +1778,14 @@ impl Classpath {
                 Entry::Jar(j) => self.jar_entry(j, &name),
                 // The JDK jimage stores classes uncompressed — seek-read the class via a one-time
                 // name→(offset,size) index so JDK type members (String, collections, …) resolve.
-                Entry::Jimage(_) => self.jimage_bytes(internal),
+                Entry::Jimage(_) => self.jimage_bytes(&internal),
             };
             if let Some(b) = bytes {
                 if let Ok(ci) = parse_class(&b) {
                     // A DIRECTORY entry on a case-INSENSITIVE filesystem (macOS APFS) happily serves
                     // `java/lang/error.class` for `Error.class` — verify the parsed class IS the
                     // requested one (JVM names are case-sensitive; `error` must not resolve to `Error`).
-                    if !ci.this_class_matches(internal) {
+                    if !ci.this_class_matches(&internal) {
                         continue;
                     }
                     found = Some(std::sync::Arc::new(ci));
@@ -1881,16 +1895,20 @@ impl Classpath {
     /// `IS_SUSPEND` flag. A call to it is a coroutine suspension point. Includes the superclass walk
     /// needed for facade part classes.
     pub fn is_suspend_method(&self, internal: &str, name: &str) -> bool {
-        let mut cur = Some(internal.to_string());
+        self.is_suspend_method_name(type_name(internal), name)
+    }
+
+    pub fn is_suspend_method_name(&self, internal: TypeName, name: &str) -> bool {
+        let mut cur = Some(internal);
         while let Some(s) = cur.take() {
-            if s == "java/lang/Object" {
+            if s.matches("java/lang/Object") {
                 break;
             }
-            if self.class_meta(&s).suspend_names.contains(name) {
+            if self.class_meta_name(s).suspend_names.contains(name) {
                 return true;
             }
-            match self.find(&s) {
-                Some(ci) => cur = ci.super_class(),
+            match self.find_name(s) {
+                Some(ci) => cur = ci.super_class,
                 None => break,
             }
         }

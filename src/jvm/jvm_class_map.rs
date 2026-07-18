@@ -486,6 +486,10 @@ pub fn type_name_to_jvm_builtin_internal(internal: TypeName) -> Option<&'static 
     )
 }
 
+pub fn to_jvm_type_name(internal: TypeName) -> TypeName {
+    type_name_to_jvm_builtin_internal(internal).map_or(internal, crate::types::type_name)
+}
+
 /// Inverse of [`to_jvm_internal`]: normalize a JVM built-in name read from the classpath/descriptors
 /// to its Kotlin identity (`java/lang/Object` → `kotlin/Any`), mirroring how the reference compiler
 /// maps Java types into Kotlin ones at the front-end boundary. Passes other names through unchanged.
