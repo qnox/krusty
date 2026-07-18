@@ -59,25 +59,59 @@ impl crate::assignable::TypeOracle for PlatformOracle<'_> {
         self.0.value_underlying(ty)
     }
     fn canonical_class<'a>(&self, internal: &'a str) -> Cow<'a, str> {
-        platform_class_identity(
+        Cow::Borrowed(platform_class_identity(
             self.0
                 .library_value_form(Ty::obj(internal))
                 .obj_internal()
                 .unwrap_or(internal),
-        )
+        ))
+    }
+    fn same_class(&self, a: &str, b: &str) -> bool {
+        let a = platform_class_identity(
+            self.0
+                .library_value_form(Ty::obj(a))
+                .obj_internal()
+                .unwrap_or(a),
+        );
+        let b = platform_class_identity(
+            self.0
+                .library_value_form(Ty::obj(b))
+                .obj_internal()
+                .unwrap_or(b),
+        );
+        platform_class_names_match(a, b)
+    }
+    fn matches_class(&self, candidate: &str, _target: &str, target_canonical: &str) -> bool {
+        let candidate = platform_class_identity(
+            self.0
+                .library_value_form(Ty::obj(candidate))
+                .obj_internal()
+                .unwrap_or(candidate),
+        );
+        platform_class_names_match(candidate, target_canonical)
     }
 }
 
-pub(crate) fn platform_class_identity(internal: &str) -> Cow<'_, str> {
-    match internal.rfind('/') {
-        Some(i) if internal[i + 1..].contains('.') => Cow::Owned(format!(
-            "{}{}",
-            &internal[..=i],
-            internal[i + 1..].replace('.', "$")
-        )),
-        None if internal.contains('.') => Cow::Owned(internal.replace('.', "$")),
-        _ => Cow::Borrowed(internal),
+pub(crate) fn platform_class_identity(internal: &str) -> &str {
+    crate::jvm::jvm_class_map::kotlin_builtin_to_jvm(internal).unwrap_or(internal)
+}
+
+pub(crate) fn platform_class_names_match(a: &str, b: &str) -> bool {
+    a == b || nested_separator_names_match(a, b)
+}
+
+fn nested_separator_names_match(a: &str, b: &str) -> bool {
+    if a.len() != b.len() {
+        return false;
     }
+    let a_nested_start = a.rfind('/').map_or(0, |i| i + 1);
+    let b_nested_start = b.rfind('/').map_or(0, |i| i + 1);
+    if a_nested_start != b_nested_start || a[..a_nested_start] != b[..b_nested_start] {
+        return false;
+    }
+    a.bytes().zip(b.bytes()).enumerate().all(|(i, (a, b))| {
+        a == b || (i >= a_nested_start && matches!((a, b), (b'.', b'$') | (b'$', b'.')))
+    })
 }
 
 /// The type arguments of a constructed generic type INFERRED from a construction's argument types
@@ -2474,15 +2508,37 @@ mod tests {
     }
 
     #[test]
-    fn platform_class_identity_borrows_unchanged_names() {
-        assert!(matches!(
-            platform_class_identity("kotlin/collections/Map$Entry"),
-            std::borrow::Cow::Borrowed("kotlin/collections/Map$Entry")
-        ));
+    fn platform_class_identity_uses_borrowed_table_entries() {
         assert_eq!(
-            platform_class_identity("kotlin/collections/Map.Entry").as_ref(),
-            "kotlin/collections/Map$Entry"
+            platform_class_identity("kotlin/collections/Map$Entry"),
+            "java/util/Map$Entry"
         );
+        assert_eq!(
+            platform_class_identity("kotlin/collections/Map.Entry"),
+            "java/util/Map$Entry"
+        );
+        let unmapped = "demo/Outer.Inner";
+        assert!(std::ptr::eq(
+            platform_class_identity(unmapped).as_ptr(),
+            unmapped.as_ptr()
+        ));
+    }
+
+    #[test]
+    fn platform_class_names_match_nested_spellings_without_normalizing() {
+        assert!(platform_class_names_match("lib/Flex.FMap", "lib/Flex$FMap"));
+        assert!(platform_class_names_match(
+            "lib/Flex.Inner.Deep",
+            "lib/Flex$Inner$Deep"
+        ));
+        assert!(!platform_class_names_match(
+            "lib/Flex.FMap",
+            "other/Flex$FMap"
+        ));
+        assert!(!platform_class_names_match(
+            "lib/Flex.FMap",
+            "lib/Flex$Other"
+        ));
     }
 
     #[test]
@@ -2498,10 +2554,27 @@ mod tests {
                 .as_ref(),
             "java/util/Map$Entry"
         );
+        assert!(matches!(
+            crate::assignable::TypeOracle::canonical_class(&oracle, "kotlin/collections/Map.Entry"),
+            std::borrow::Cow::Borrowed("java/util/Map$Entry")
+        ));
         assert_eq!(
             crate::assignable::TypeOracle::canonical_class(&oracle, "kotlin/collections/Map$Entry"),
             crate::assignable::TypeOracle::canonical_class(&oracle, "kotlin/collections/Map.Entry")
         );
+        assert!(crate::assignable::TypeOracle::same_class(
+            &oracle,
+            "lib/Flex.FMap",
+            "lib/Flex$FMap"
+        ));
+        let nested_target =
+            crate::assignable::TypeOracle::canonical_class(&oracle, "lib/Flex$FMap");
+        assert!(crate::assignable::TypeOracle::matches_class(
+            &oracle,
+            "lib/Flex.FMap",
+            "lib/Flex$FMap",
+            nested_target.as_ref()
+        ));
     }
 
     fn member_nullable_string_info() -> FunctionInfo {
