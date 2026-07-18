@@ -2141,6 +2141,37 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
         Some(Ty::obj(&format!("kotlin/jvm/functions/Function{arity}")))
     }
 
+    fn static_field(&self, internal: &str, name: &str) -> Option<crate::libraries::StaticFieldRef> {
+        let mut stack = vec![internal.to_string()];
+        let mut seen = std::collections::HashSet::new();
+        while let Some(cur) = stack.pop() {
+            if !seen.insert(cur.clone()) {
+                continue;
+            }
+            let Some(ci) = self.cp.find(&cur) else {
+                continue;
+            };
+            if let Some(f) = ci.fields.iter().find(|f| {
+                f.name == name
+                    && f.access & 0x0008 != 0
+                    && f.access & 0x0001 != 0
+                    && f.const_value.is_none()
+            }) {
+                return Some(crate::libraries::StaticFieldRef {
+                    owner: cur.clone(),
+                    name: name.to_string(),
+                    descriptor: f.descriptor.clone(),
+                    ty: field_desc_to_ty(&f.descriptor),
+                });
+            }
+            if let Some(s) = &ci.super_class {
+                stack.push(s.clone());
+            }
+            stack.extend(ci.interfaces.iter().cloned());
+        }
+        None
+    }
+
     fn extension_receiver_rank(&self, recv: Ty, decl_recv: Ty) -> Option<u32> {
         // VALUE-CLASS receivers match by IDENTITY, never by erasing to the underlying: a `UInt` receiver
         // binds only a `UInt` extension (`UInt.downTo` → `UIntProgression`), never `Int`'s — they share the

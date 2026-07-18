@@ -4542,6 +4542,12 @@ pub enum ExprLowering {
     Lambda(LambdaInfo),
     /// A classpath `object` used as a value. Lowering emits `getstatic <internal>.INSTANCE`.
     ObjectValue { internal: String },
+    /// A public static field read. Lowering emits `getstatic <owner>.<name>:<descriptor>`.
+    ExternalStaticFieldRead {
+        owner: String,
+        name: String,
+        descriptor: String,
+    },
     /// A bare-name call `m(args)` resolved to a MEMBER function of a classpath `object` that was imported
     /// unqualified (`import Obj.m; m()`). Kotlin dispatches this on the singleton, so lowering reads
     /// `getstatic <internal>.INSTANCE` as the receiver and invokes the member — the same shape a qualified
@@ -11953,6 +11959,22 @@ impl<'a> Checker<'a> {
                 return ret;
             }
         }
+        if let Some(internal) = rt.non_null().obj_internal() {
+            if let Some(sf) = self.syms.libraries.static_field(internal, name) {
+                let ty = sf.ty;
+                if let Some(me) = mexpr {
+                    self.expr_lowers.insert(
+                        me,
+                        ExprLowering::ExternalStaticFieldRead {
+                            owner: sf.owner,
+                            name: sf.name,
+                            descriptor: sf.descriptor,
+                        },
+                    );
+                }
+                return ty;
+            }
+        }
         self.diags.error(
             span,
             format!("unresolved member '{name}' on '{}'", rt.name()),
@@ -14901,6 +14923,57 @@ impl<'a> Checker<'a> {
                                 self.record_invoke(call, callee, ct, args, &arg_tys, span)
                             {
                                 return t;
+                            }
+                        }
+                    }
+                }
+                if !self.module_declares(&fname) {
+                    if let Some((owner_path, member)) = self.imports.get(&fname).and_then(|f| {
+                        f.rsplit_once('/')
+                            .map(|(o, m)| (o.to_string(), m.to_string()))
+                    }) {
+                        if member == fname {
+                            if let Some(owner_internal) = self.nested_internal(&owner_path) {
+                                if let Some(m) =
+                                    self.resolve_companion(&owner_internal, &fname, &arg_tys)
+                                {
+                                    let owner = m.owner.clone().unwrap_or(owner_internal);
+                                    let phys =
+                                        m.physical_name.clone().unwrap_or_else(|| m.name.clone());
+                                    let mut callable = crate::libraries::LibraryCallable::library(
+                                        owner,
+                                        phys,
+                                        m.params.clone(),
+                                        m.ret,
+                                        m.physical_ret,
+                                        m.descriptor.clone(),
+                                    );
+                                    callable.suspend = m.suspend;
+                                    let ret = m.ret;
+                                    let vararg =
+                                        m.params.last().and_then(|p| p.array_elem()).filter(|_| {
+                                            m.params.len() != args.len()
+                                                || arg_tys.last() != m.params.last()
+                                        });
+                                    if let Some(elem) = vararg {
+                                        callable.vararg_elem = Some(elem);
+                                        let fixed = m.params.len() - 1;
+                                        for (i, &a) in args.iter().enumerate() {
+                                            let pt = if i < fixed { m.params[i] } else { elem };
+                                            self.expect_assignable(
+                                                pt,
+                                                arg_tys[i],
+                                                self.span(a),
+                                                "argument",
+                                            );
+                                        }
+                                    } else {
+                                        self.expect_call_args(&m.params, false, args, &arg_tys);
+                                    }
+                                    self.resolved_calls
+                                        .insert(call, ResolvedCall::TopLevel(callable));
+                                    return ret;
+                                }
                             }
                         }
                     }
