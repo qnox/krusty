@@ -366,8 +366,6 @@ fn const_string_value_d(
     }
     match file.expr(e) {
         crate::ast::Expr::StringLit(s) => Some(s.clone()),
-        // A char literal folds to its one-character string — e.g. the `${'$'}` interpolation the code
-        // generator uses to embed a literal `$` in a `@SerialName` (`"${'$'}ref"` → `$ref`).
         crate::ast::Expr::CharLit(c) => Some(c.to_string()),
         crate::ast::Expr::Name(n) => top_level_const_string_d(file, n, depth + 1),
         crate::ast::Expr::Template(parts) => {

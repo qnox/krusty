@@ -1637,11 +1637,7 @@ impl IrPlugin for SerializationPlugin {
                         _ => *ty,
                     })
                     .collect();
-                // kotlinc's seen-mask count in the deserialization ctor is `n / 32 + 1` (floor division
-                // plus one), NOT `ceil(n / 32)` — so a class whose field count is an exact multiple of 32
-                // (32, 64, …) carries an EXTRA leading seq-mask int (32 fields → 2 masks). The two formulas
-                // agree everywhere else, so this only matters at the multiples of 32 (e.g. GhCodespace, 32
-                // fields, was the sole RED_ABI on the github httpclient models).
+                // kotlinc always emits one seen-mask slot past the last full 32-field group.
                 let n_masks = foo_fields.len() / 32 + 1;
                 let mut deser_params = vec![Ty::Int; n_masks];
                 deser_params.extend(deser_field_tys.iter().cloned());
@@ -2838,9 +2834,6 @@ mod tests {
 
     #[test]
     fn deser_ctor_seq_mask_count_is_floor_div_32_plus_1() {
-        // kotlinc's synthetic deserialization ctor carries `n / 32 + 1` leading seq-mask `int`s (floor
-        // division plus one), NOT `ceil(n / 32)` — so a field count that is an exact multiple of 32
-        // gets an EXTRA mask (32 fields → 2). String fields keep the leading `Int` masks distinguishable.
         for (n, expect) in [(1usize, 1usize), (31, 1), (32, 2), (33, 2), (64, 3)] {
             let tys: Vec<&str> = std::iter::repeat_n("kotlin/String", n).collect();
             let (mut ir, ctx, _) = serializable_class("demo/M", &tys);
@@ -2855,7 +2848,6 @@ mod tests {
                 masks, expect,
                 "n={n} fields: expected {expect} seq-mask ints"
             );
-            // Sanity: params = masks + n fields + the trailing SerializationConstructorMarker.
             assert_eq!(ctor.params.len(), expect + n + 1, "n={n} total ctor params");
         }
     }

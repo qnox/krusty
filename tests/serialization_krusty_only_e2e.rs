@@ -154,11 +154,6 @@ fun box(): String {
 
 #[test]
 fn serial_name_with_dollar_char_template_round_trips_in_krusty() {
-    // `@SerialName("${'$'}ref")` — the code generator embeds a literal `$` in a serial name via the
-    // `${'$'}` char-literal interpolation (JSON-schema keys `$ref`/`$schema`). The annotation value
-    // must const-fold to `$ref` so the descriptor element / JSON key is `$ref` (and the ABI marker
-    // `getRef$annotations()` is emitted) — krusty previously failed to fold a char literal in the
-    // template, silently keeping the raw property name. Mirrors k8s `K8sJSONSchemaProps`.
     let src = r#"import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json

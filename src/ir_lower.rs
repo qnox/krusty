@@ -19608,8 +19608,6 @@ fn const_string_value_d(file: &ast::File, e: AstExprId, depth: u32) -> Option<St
     }
     match file.expr(e) {
         Expr::StringLit(s) => Some(s.clone()),
-        // A char literal folds to its one-character string — e.g. `${'$'}` embedding a literal `$` in a
-        // `@SerialName("${'$'}ref")` (→ `$ref`), which the code generator emits for JSON-schema keys.
         Expr::CharLit(c) => Some(c.to_string()),
         Expr::Name(n) => top_level_const_string_d(file, n, depth + 1),
         Expr::Template(parts) => {
