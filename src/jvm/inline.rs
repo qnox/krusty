@@ -253,8 +253,20 @@ pub fn disassemble(code: &[u8]) -> Option<Vec<Insn>> {
         insns.push(insn);
         pc += len;
     }
-    // Pass 2: resolve byte-offset targets to instruction indices.
-    let idx_of = |byte: usize| offsets.binary_search(&byte).ok();
+    // Pass 2: resolve byte-offset targets to instruction indices. A target equal to `code.len()` is a
+    // branch to one-past-the-last-instruction — the "fall off the end" target a `goto L_end` carries
+    // when `L_end` sits at the very end of the body (e.g. the join of an `x?.let{…}` safecall whose
+    // else-arm `aconst_null` is the final instruction). It resolves to the sentinel index `insns.len()`,
+    // which `insn_offsets_at`/`assemble_at` already map to the body's total byte length.
+    let n_insns = insns.len();
+    let end_off = code.len();
+    let idx_of = |byte: usize| {
+        if byte == end_off {
+            Some(n_insns)
+        } else {
+            offsets.binary_search(&byte).ok()
+        }
+    };
     for insn in &mut insns {
         match insn {
             Insn::Branch { target, .. } | Insn::BranchW { target, .. } => {
