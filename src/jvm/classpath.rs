@@ -319,6 +319,146 @@ impl<T> EntryCache<T> {
     }
 }
 
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+struct NameId(u32);
+
+#[derive(Debug)]
+struct NameNode {
+    parent: Option<NameId>,
+    first_child: Option<NameId>,
+    next_sibling: Option<NameId>,
+    sep: u8,
+    segment: String,
+}
+
+/// A compact per-index internal-name tree. Names are inserted as path segments and retained lists store `NameId`
+/// (`u32`) handles instead of cloning the full owner string in every receiver/name bucket.
+#[derive(Debug)]
+struct NameTree {
+    nodes: Vec<NameNode>,
+}
+
+impl Default for NameTree {
+    fn default() -> Self {
+        NameTree {
+            nodes: vec![NameNode {
+                parent: None,
+                first_child: None,
+                next_sibling: None,
+                sep: 0,
+                segment: String::new(),
+            }],
+        }
+    }
+}
+
+impl NameTree {
+    const ROOT: NameId = NameId(0);
+
+    fn insert(&mut self, internal: &str) -> NameId {
+        if internal.is_empty() {
+            return Self::ROOT;
+        }
+        let mut parent = Self::ROOT;
+        let mut sep = 0;
+        for segment in internal.split('/') {
+            parent = self.child_or_insert(parent, sep, segment);
+            sep = b'/';
+        }
+        parent
+    }
+
+    fn insert_from(&mut self, other: &NameTree, id: NameId) -> NameId {
+        let mut parts = Vec::new();
+        let mut cur = id;
+        while cur != Self::ROOT {
+            let node = other.node(cur);
+            parts.push((node.sep, node.segment.as_str()));
+            cur = node.parent.expect("non-root name node has a parent");
+        }
+        let mut parent = Self::ROOT;
+        for (sep, segment) in parts.into_iter().rev() {
+            parent = self.child_or_insert(parent, sep, segment);
+        }
+        parent
+    }
+
+    fn render(&self, id: NameId) -> String {
+        if id == Self::ROOT {
+            return String::new();
+        }
+        let mut parts = Vec::new();
+        let mut len = 0usize;
+        let mut cur = id;
+        while cur != Self::ROOT {
+            let node = self.node(cur);
+            len += node.segment.len() + usize::from(node.sep != 0);
+            parts.push((node.sep, node.segment.as_str()));
+            cur = node.parent.expect("non-root name node has a parent");
+        }
+        let mut out = String::with_capacity(len);
+        for (sep, segment) in parts.into_iter().rev() {
+            if sep != 0 {
+                out.push(sep as char);
+            }
+            out.push_str(segment);
+        }
+        out
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.nodes.len()
+    }
+
+    fn node(&self, id: NameId) -> &NameNode {
+        &self.nodes[id.0 as usize]
+    }
+
+    fn child_or_insert(&mut self, parent: NameId, sep: u8, segment: &str) -> NameId {
+        let mut cur = self.node(parent).first_child;
+        while let Some(id) = cur {
+            let node = self.node(id);
+            if node.sep == sep && node.segment == segment {
+                return id;
+            }
+            cur = node.next_sibling;
+        }
+
+        let id = NameId(
+            u32::try_from(self.nodes.len()).expect("name tree node count exceeded u32 capacity"),
+        );
+        let next_sibling = self.nodes[parent.0 as usize].first_child;
+        self.nodes.push(NameNode {
+            parent: Some(parent),
+            first_child: None,
+            next_sibling,
+            sep,
+            segment: segment.to_string(),
+        });
+        self.nodes[parent.0 as usize].first_child = Some(id);
+        id
+    }
+}
+
+fn push_id_dedup(m: &mut HashMap<String, Vec<NameId>>, key: &str, id: NameId) {
+    let v = m.entry(key.to_string()).or_default();
+    if v.last().copied() != Some(id) && !v.contains(&id) {
+        v.push(id);
+    }
+}
+
+fn push_name_from_dedup(
+    names: &mut NameTree,
+    m: &mut HashMap<String, Vec<NameId>>,
+    key: &str,
+    source_names: &NameTree,
+    source_id: NameId,
+) {
+    let id = names.insert_from(source_names, source_id);
+    push_id_dedup(m, key, id);
+}
+
 /// Per-ENTRY extension-index contributions (one per jar/dir), composed per classpath by
 /// [`Classpath::ensure_ext_index`]. See [`EntryCache`].
 fn global_entry_ext() -> &'static EntryCache<EntryExt> {
@@ -351,6 +491,7 @@ fn global_entry_types() -> &'static EntryCache<TypeIndex> {
 /// declaring-facade query. `Arc` so a package touched by many worker threads is parsed once.
 #[derive(Default)]
 struct PkgMembers {
+    owner_names: NameTree,
     /// Static callables keyed by their `@Metadata` SOURCE name (`sum`), for the source-name resolution.
     by_source: HashMap<String, Vec<ExtCandidate>>,
     /// The same callables keyed by their JVM method name (`sumOfInt`), for the literal-name extension
@@ -358,7 +499,7 @@ struct PkgMembers {
     by_jvm: HashMap<String, Vec<ExtCandidate>>,
     /// Receiver (first-parameter) descriptor → the facades declaring a static with that receiver — the
     /// scoped analogue of [`Classpath::find_extension_owners`]. Deduped, declaration order.
-    owners_by_recv: HashMap<String, Vec<String>>,
+    owners_by_recv: HashMap<String, Vec<NameId>>,
 }
 type JarPkgMembers = std::sync::Arc<PkgMembers>;
 fn global_jar_pkg_members() -> &'static std::sync::Mutex<HashMap<(PathBuf, String), JarPkgMembers>>
@@ -450,10 +591,11 @@ pub struct ExtCandidate {
 /// was the single largest retained allocation — ~195 MB — per heap profiling).
 #[derive(Default)]
 struct ExtIndex {
+    owner_names: NameTree,
     /// method name → facade/part ROOT class names whose super-walk declares a static of that name.
-    by_name: HashMap<String, Vec<String>>,
+    by_name: HashMap<String, Vec<NameId>>,
     /// receiver descriptor → the owner facades that declare an extension on it (for `find_extension_owners`).
-    by_recv_owners: HashMap<String, Vec<String>>,
+    by_recv_owners: HashMap<String, Vec<NameId>>,
     /// Names `@Metadata` marks as GENUINE top-level (a receiver-less function, never an extension) — these
     /// are never keyed by their first parameter, so `find_extensions` must not return them for any receiver.
     toplevel_only: std::collections::HashSet<String>,
@@ -464,10 +606,11 @@ struct ExtIndex {
 /// `toplevel_only` decision is global across the whole cp, so it can only be applied when composing.
 #[derive(Default)]
 struct EntryExt {
+    owner_names: NameTree,
     /// method name → owner ROOT classes in THIS entry (super-walk within the entry).
-    by_name: HashMap<String, Vec<String>>,
+    by_name: HashMap<String, Vec<NameId>>,
     /// receiver descriptor → `(method name, owner)` for each receiver-taking static in this entry.
-    by_recv_raw: HashMap<String, Vec<(String, String)>>,
+    by_recv_raw: HashMap<String, Vec<(String, NameId)>>,
     /// JVM names this entry marks as genuine top-level, and as extensions (unioned across the cp at
     /// compose to decide `toplevel_only = union(top) - union(ext)`).
     toplevel_names: std::collections::HashSet<String>,
@@ -1058,11 +1201,16 @@ impl Classpath {
     /// `receiver_desc` — the facades to consult for a Kotlin-name resolution (`sumOf`).
     pub fn find_extension_owners(&self, receiver_desc: &str) -> Vec<String> {
         self.ensure_ext_index();
-        self.ext
-            .borrow()
-            .as_ref()
-            .and_then(|idx| idx.by_recv_owners.get(receiver_desc).cloned())
-            .unwrap_or_default()
+        let ext = self.ext.borrow().as_ref().cloned();
+        ext.and_then(|idx| {
+            idx.by_recv_owners.get(receiver_desc).map(|owners| {
+                owners
+                    .iter()
+                    .map(|&id| idx.owner_names.render(id))
+                    .collect()
+            })
+        })
+        .unwrap_or_default()
     }
 
     /// Rebuild the [`ExtCandidate`]s a facade/part `root` contributes for `name` — the lazy counterpart of
@@ -1811,6 +1959,7 @@ impl Classpath {
                 if !seen_facade.insert(facade.to_string()) {
                     continue;
                 }
+                let facade_id = m.owner_names.insert(facade);
                 let metas = self.meta_functions(facade);
                 for cand in self.facade_statics(facade) {
                     // Key each static by its @Metadata SOURCE name (`kotlin_name`), NOT its JVM name — a
@@ -1826,10 +1975,9 @@ impl Classpath {
                     // — the scoped `find_extension_owners`. Recorded before `cand` is moved into the maps.
                     if let Some(recv) = descriptor_parts(&cand.descriptor).and_then(|(fp, _)| fp) {
                         let owners = m.owners_by_recv.entry(recv).or_default();
-                        if owners.last().map(String::as_str) != Some(facade)
-                            && !owners.iter().any(|o| o == facade)
+                        if owners.last().copied() != Some(facade_id) && !owners.contains(&facade_id)
                         {
-                            owners.push(facade.to_string());
+                            owners.push(facade_id);
                         }
                     }
                     m.by_jvm
@@ -1932,14 +2080,12 @@ impl Classpath {
                 let Some(entry) = self.entries.get(jar_id) else {
                     continue;
                 };
-                if let Some(owners) = self
-                    .jar_pkg_members(entry, pkg)
-                    .owners_by_recv
-                    .get(recv_desc)
-                {
-                    for o in owners {
-                        if !out.contains(o) {
-                            out.push(o.clone());
+                let members = self.jar_pkg_members(entry, pkg);
+                if let Some(owners) = members.owners_by_recv.get(recv_desc) {
+                    for &id in owners {
+                        let o = members.owner_names.render(id);
+                        if !out.contains(&o) {
+                            out.push(o);
                         }
                     }
                 }
@@ -2057,19 +2203,21 @@ impl Classpath {
         self.ensure_ext_index();
         // Clone the small owner list, releasing the `ext` borrow before `rebuild` (which borrows the class
         // caches). Candidates are rebuilt from each owner's cached `ClassInfo`, then grouped by receiver.
-        let roots = self
-            .ext
-            .borrow()
+        let ext = self.ext.borrow().as_ref().cloned();
+        let roots = ext
             .as_ref()
             .and_then(|idx| idx.by_name.get(method_name).cloned())
             .unwrap_or_default();
         let mut grouped = ExtByName::default();
-        for root in &roots {
-            for cand in self.rebuild_ext_candidates(root, method_name) {
-                if let Some(recv) = descriptor_parts(&cand.descriptor).and_then(|(fp, _)| fp) {
-                    grouped.by_recv.entry(recv).or_default().push(cand.clone());
+        if let Some(idx) = ext {
+            for root_id in roots {
+                let root = idx.owner_names.render(root_id);
+                for cand in self.rebuild_ext_candidates(&root, method_name) {
+                    if let Some(recv) = descriptor_parts(&cand.descriptor).and_then(|(fp, _)| fp) {
+                        grouped.by_recv.entry(recv).or_default().push(cand.clone());
+                    }
+                    grouped.all.push(cand);
                 }
-                grouped.all.push(cand);
             }
         }
         let rc = std::sync::Arc::new(grouped);
@@ -2122,22 +2270,28 @@ impl Classpath {
             toplevel_only,
             ..ExtIndex::default()
         };
-        let push_dedup = |m: &mut HashMap<String, Vec<String>>, k: &str, owner: &str| {
-            let v = m.entry(k.to_string()).or_default();
-            if v.last().map(String::as_str) != Some(owner) && !v.iter().any(|o| o == owner) {
-                v.push(owner.to_string());
-            }
-        };
         for p in &parts {
             for (name, owners) in &p.by_name {
-                for o in owners {
-                    push_dedup(&mut idx.by_name, name, o);
+                for &owner in owners {
+                    push_name_from_dedup(
+                        &mut idx.owner_names,
+                        &mut idx.by_name,
+                        name,
+                        &p.owner_names,
+                        owner,
+                    );
                 }
             }
             for (recv, statics) in &p.by_recv_raw {
                 for (name, owner) in statics {
                     if !idx.toplevel_only.contains(name) {
-                        push_dedup(&mut idx.by_recv_owners, recv, owner);
+                        push_name_from_dedup(
+                            &mut idx.owner_names,
+                            &mut idx.by_recv_owners,
+                            recv,
+                            &p.owner_names,
+                            *owner,
+                        );
                     }
                 }
             }
@@ -2167,13 +2321,8 @@ fn build_entry_ext(entry: &Entry) -> EntryExt {
             .extend(lite.toplevel_names.iter().cloned());
         ext.ext_names.extend(lite.ext_names.iter().cloned());
     }
-    let push_dedup = |m: &mut HashMap<String, Vec<String>>, k: &str, owner: &str| {
-        let v = m.entry(k.to_string()).or_default();
-        if v.last().map(String::as_str) != Some(owner) && !v.iter().any(|o| o == owner) {
-            v.push(owner.to_string());
-        }
-    };
     for (root, lite) in &all {
+        let mut root_id = None;
         let mut cur = Some(root.clone());
         let mut visited = std::collections::HashSet::new();
         while let Some(cn) = cur {
@@ -2188,12 +2337,20 @@ fn build_entry_ext(entry: &Entry) -> EntryExt {
                 let Some((first_param, _ret_desc)) = descriptor_parts(mdesc) else {
                     continue;
                 };
-                push_dedup(&mut ext.by_name, mname, root);
+                let owner = match root_id {
+                    Some(id) => id,
+                    None => {
+                        let id = ext.owner_names.insert(root);
+                        root_id = Some(id);
+                        id
+                    }
+                };
+                push_id_dedup(&mut ext.by_name, mname, owner);
                 if let Some(recv) = first_param {
                     ext.by_recv_raw
                         .entry(recv)
                         .or_default()
-                        .push((mname.clone(), root.clone()));
+                        .push((mname.clone(), owner));
                 }
             }
             cur = c.super_class.clone();
@@ -2729,6 +2886,53 @@ fn build_jimage_index(path: &Path) -> Option<JimageIndex> {
 #[cfg(test)]
 mod fq_tests {
     use super::*;
+
+    #[test]
+    fn name_tree_shares_segments_and_renders_internal_names() {
+        let mut tree = NameTree::default();
+        let collections = tree.insert("kotlin/collections/CollectionsKt");
+        let maps = tree.insert("kotlin/collections/MapsKt");
+        let duplicate = tree.insert("kotlin/collections/CollectionsKt");
+
+        assert_eq!(collections, duplicate);
+        assert_eq!(tree.render(collections), "kotlin/collections/CollectionsKt");
+        assert_eq!(tree.render(maps), "kotlin/collections/MapsKt");
+        assert_eq!(tree.len(), 5);
+    }
+
+    #[test]
+    fn name_tree_copies_between_indexes_without_render_dedup() {
+        let mut entry_names = NameTree::default();
+        let collections = entry_names.insert("kotlin/collections/CollectionsKt");
+        let maps = entry_names.insert("kotlin/collections/MapsKt");
+
+        let mut index_names = NameTree::default();
+        let mut owners = HashMap::new();
+        push_name_from_dedup(
+            &mut index_names,
+            &mut owners,
+            "map",
+            &entry_names,
+            collections,
+        );
+        push_name_from_dedup(
+            &mut index_names,
+            &mut owners,
+            "map",
+            &entry_names,
+            collections,
+        );
+        push_name_from_dedup(&mut index_names, &mut owners, "map", &entry_names, maps);
+
+        let copied = owners.get("map").expect("owner ids copied");
+        assert_eq!(copied.len(), 2);
+        assert_eq!(
+            index_names.render(copied[0]),
+            "kotlin/collections/CollectionsKt"
+        );
+        assert_eq!(index_names.render(copied[1]), "kotlin/collections/MapsKt");
+        assert_eq!(index_names.len(), 5);
+    }
 
     #[test]
     fn metadata_param_matching_keeps_unsigned_descriptor_erasure() {
