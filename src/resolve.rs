@@ -4552,6 +4552,8 @@ pub enum ExprLowering {
         name: String,
         descriptor: String,
     },
+    /// The `.java` member of a class literal.
+    ClassLiteralJava,
     /// A bare-name call `m(args)` resolved to a MEMBER function of a classpath `object` that was imported
     /// unqualified (`import Obj.m; m()`). Kotlin dispatches this on the singleton, so lowering reads
     /// `getstatic <internal>.INSTANCE` as the receiver and invokes the member — the same shape a qualified
@@ -7034,8 +7036,20 @@ impl<'a> Checker<'a> {
         if self.tparams.contains(n) {
             return None;
         }
+        // A value binding with this name shadows any same-named type: `n::class` is then a BOUND
+        // literal on the value (handled by the caller's bound path) — don't read it as unbound.
+        if self.lookup(n).is_some() {
+            return None;
+        }
+        // Built-in `from_name` types + user classes, then the NESTED type of an enclosing class and
+        // finally an EXPLICIT/wildcard import (`import org.bson.Document` → `Document::class`). Both
+        // extra sources name a definite reference type the file brought into scope — unlike the global
+        // simple-name index, which is deliberately skipped (it collides names like `IntArray` with
+        // unrelated JDK classes).
         let ty = Ty::from_name(n)
-            .or_else(|| self.syms.classes.get(n).map(|cs| Ty::obj(&cs.internal)))?;
+            .or_else(|| self.syms.classes.get(n).map(|cs| Ty::obj(&cs.internal)))
+            .or_else(|| self.enclosing_nested_type(n).map(|i| Ty::obj(&i)))
+            .or_else(|| self.imported_type_internal(n).map(|i| Ty::obj(&i)))?;
         if ty == Ty::Error {
             return None;
         }
@@ -11979,6 +11993,12 @@ impl<'a> Checker<'a> {
                 }
                 return ret;
             }
+        }
+        if name == "java" && rt.non_null().obj_internal() == Some("java/lang/Class") {
+            if let Some(me) = mexpr {
+                self.expr_lowers.insert(me, ExprLowering::ClassLiteralJava);
+            }
+            return rt;
         }
         if let Some(internal) = rt.non_null().obj_internal() {
             if let Some(sf) = self.syms.libraries.static_field(internal, name) {
