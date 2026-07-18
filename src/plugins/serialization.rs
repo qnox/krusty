@@ -1591,11 +1591,14 @@ impl IrPlugin for SerializationPlugin {
                 ir.classes[class_id as usize].methods.push(write_self);
             }
 
-            // `<getter>$annotations()` markers for `@SerialName` properties — the marker's stem is the
-            // property's JVM getter name, so a Boolean `isFoo` yields `isFoo$annotations` (not
-            // `getIsFoo$annotations`), matching kotlinc's JavaBeans `is`-prefix rule.
+            // `<getter>$annotations()` markers for properties kotlinc preserves the serialization
+            // annotation on: `@SerialName`, OR a property-level `@Serializable(with = X::class)` custom
+            // serializer. The marker's stem is the property's JVM getter name, so a Boolean `isFoo` yields
+            // `isFoo$annotations` (JavaBeans `is`-prefix rule).
             for (prop, _) in &foo_fields {
-                if serial_name_of(ctx, ir, class_id, prop).is_none() {
+                if serial_name_of(ctx, ir, class_id, prop).is_none()
+                    && field_serializer_of(ctx, ir, class_id, prop).is_none()
+                {
                     continue;
                 }
                 let ann_ret = ir.add_expr(IrExpr::Return(None));
