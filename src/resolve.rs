@@ -4542,6 +4542,14 @@ pub enum ExprLowering {
     Lambda(LambdaInfo),
     /// A classpath `object` used as a value. Lowering emits `getstatic <internal>.INSTANCE`.
     ObjectValue { internal: String },
+    /// A read of a PUBLIC STATIC FIELD `Type.name` (a `@JvmField` on an object, a Java static field, or an
+    /// enum constant) that is neither a property getter nor an instance member. Lowering emits
+    /// `getstatic <owner>.<name>:<descriptor>`.
+    ExternalStaticFieldRead {
+        owner: String,
+        name: String,
+        descriptor: String,
+    },
     /// A bare-name call `m(args)` resolved to a MEMBER function of a classpath `object` that was imported
     /// unqualified (`import Obj.m; m()`). Kotlin dispatches this on the singleton, so lowering reads
     /// `getstatic <internal>.INSTANCE` as the receiver and invokes the member — the same shape a qualified
@@ -11951,6 +11959,25 @@ impl<'a> Checker<'a> {
                     self.resolved_calls.insert(me, ResolvedCall::Member(m));
                 }
                 return ret;
+            }
+        }
+        // A PUBLIC STATIC FIELD on the receiver type — a Kotlin `@JvmField` on an `object`
+        // (`Charsets.UTF_8`), a Java static field (`System.out`), or an enum constant. Neither a property
+        // getter nor an instance member covers it; lowering emits `getstatic owner.name`.
+        if let Some(internal) = rt.non_null().obj_internal() {
+            if let Some(sf) = self.syms.libraries.static_field(internal, name) {
+                let ty = sf.ty;
+                if let Some(me) = mexpr {
+                    self.expr_lowers.insert(
+                        me,
+                        ExprLowering::ExternalStaticFieldRead {
+                            owner: sf.owner,
+                            name: sf.name,
+                            descriptor: sf.descriptor,
+                        },
+                    );
+                }
+                return ty;
             }
         }
         self.diags.error(

@@ -16115,6 +16115,16 @@ impl<'a> Lower<'a> {
                 return None;
             }
             Expr::Member { receiver, name } => {
+                // A public STATIC FIELD read recorded by the checker (`Charsets.UTF_8`, `System.out`, an
+                // enum constant) → `getstatic <owner>.<name>:<descriptor>`.
+                if let Some(ExprLowering::ExternalStaticFieldRead {
+                    owner,
+                    name,
+                    descriptor,
+                }) = self.info.expr_lowers.get(&e).cloned()
+                {
+                    return Some(self.emit_external_static_field(&owner, &name, &descriptor));
+                }
                 // A classpath nested singleton object recorded by the checker (`PrimitiveKind.STRING`) →
                 // `getstatic <Outer$Nested>.INSTANCE`.
                 if let Some(ExprLowering::ObjectValue { internal }) = self.info.expr_lowers.get(&e)

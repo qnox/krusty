@@ -64,6 +64,16 @@ pub struct LibraryMember {
     pub call_sig: CallSig,
 }
 
+/// A resolved public static field read (`getstatic <owner>.<name>:<descriptor>`), with the field's
+/// source [`Ty`]. See [`SemanticPlatform::static_field`].
+#[derive(Clone, Debug)]
+pub struct StaticFieldRef {
+    pub owner: String,
+    pub name: String,
+    pub descriptor: String,
+    pub ty: Ty,
+}
+
 /// Source-level services exposed by compiled libraries.
 pub trait SemanticPlatform: crate::symbol_source::SymbolSource {
     /// Semantic interface/class used by the platform libraries to model a function value of `arity`.
@@ -75,6 +85,15 @@ pub trait SemanticPlatform: crate::symbol_source::SymbolSource {
     /// no value classes; a library provider recovers the underlying from its type metadata plus
     /// any builtins whose source type is not represented as `Ty::Obj` (`UInt` → `Int`).
     fn value_underlying(&self, _ty: Ty) -> Option<Ty> {
+        None
+    }
+
+    /// A PUBLIC STATIC FIELD `name` on the type `internal`, for a member read `Type.name` that is neither
+    /// a property getter nor an instance member — a Kotlin `@JvmField` on an `object` (`Charsets.UTF_8`),
+    /// a Java static field (`System.out`), or a Java `enum` constant. Returned as the getstatic target
+    /// (declaring owner + JVM descriptor + the source type). Compile-time constants (`Int.MAX_VALUE`) go
+    /// through `companion_consts` instead (inlined); this is for a runtime-valued field. Default: none.
+    fn static_field(&self, _internal: &str, _name: &str) -> Option<StaticFieldRef> {
         None
     }
 

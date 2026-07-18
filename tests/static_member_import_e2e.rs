@@ -39,3 +39,19 @@ fn classpath_varargs_static_qualified_and_via_import() {
         "OK"
     );
 }
+
+#[test]
+fn classpath_object_jvmfield_and_java_static_field_read() {
+    // A PUBLIC STATIC FIELD read `Type.name` that is neither a property getter nor an instance member —
+    // a Kotlin `@JvmField` on an `object` (`Charsets.UTF_8`) or a Java static field — resolves to a
+    // `getstatic <owner>.<name>`. krusty previously reported "unresolved member 'UTF_8' on
+    // 'kotlin/text/Charsets'". Pervasive in the mission-infrastructure token/crypto code.
+    const SRC: &str = "fun box(): String {\n\
+        \x20 val cs = Charsets.UTF_8\n\
+        \x20 return if (cs.name() == \"UTF-8\") \"OK\" else \"FAIL:${cs.name()}\"\n\
+        }\n";
+    assert_eq!(
+        common::compile_and_run_with_stdlib(SRC, "Main").expect("static field read"),
+        "OK"
+    );
+}
