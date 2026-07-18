@@ -700,6 +700,8 @@ mod smartcast_and_e2e;
 mod spread_in_annotation_e2e;
 #[path = "spread_operator_e2e.rs"]
 mod spread_operator_e2e;
+#[path = "static_member_import_e2e.rs"]
+mod static_member_import_e2e;
 #[path = "stdlib_call_resolution_e2e.rs"]
 mod stdlib_call_resolution_e2e;
 #[path = "string_concat_append_overload_e2e.rs"]

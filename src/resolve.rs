@@ -14905,6 +14905,44 @@ impl<'a> Checker<'a> {
                         }
                     }
                 }
+                // A STATIC method imported unqualified through a member import — a Java class's static
+                // (`import com.mongodb.client.model.Filters.eq; eq("_id", x)`) or a Kotlin
+                // `@JvmStatic`/companion static. Resolve it with the SAME `resolve_companion` the qualified
+                // `Filters.eq(…)` member path uses (overload-selected by argument types), and record it as
+                // a receiver-less top-level callable so lowering emits `invokestatic Filters.eq` — no
+                // singleton receiver. A same-module top-level declaration of `fname` shadows the import.
+                if !self.module_declares(&fname) {
+                    if let Some((owner_path, member)) = self.imports.get(&fname).and_then(|f| {
+                        f.rsplit_once('/')
+                            .map(|(o, m)| (o.to_string(), m.to_string()))
+                    }) {
+                        if member == fname {
+                            if let Some(owner_internal) = self.nested_internal(&owner_path) {
+                                if let Some(m) =
+                                    self.resolve_companion(&owner_internal, &fname, &arg_tys)
+                                {
+                                    let owner = m.owner.clone().unwrap_or(owner_internal);
+                                    let phys =
+                                        m.physical_name.clone().unwrap_or_else(|| m.name.clone());
+                                    let mut callable = crate::libraries::LibraryCallable::library(
+                                        owner,
+                                        phys,
+                                        m.params.clone(),
+                                        m.ret,
+                                        m.physical_ret,
+                                        m.descriptor.clone(),
+                                    );
+                                    callable.suspend = m.suspend;
+                                    let ret = m.ret;
+                                    self.expect_call_args(&m.params, false, args, &arg_tys);
+                                    self.resolved_calls
+                                        .insert(call, ResolvedCall::TopLevel(callable));
+                                    return ret;
+                                }
+                            }
+                        }
+                    }
+                }
                 self.diags
                     .error(span, format!("unresolved function '{fname}'"));
                 Ty::Error
