@@ -95,7 +95,7 @@ fn emit_checked_ir(
 ) -> Option<String> {
     // Shared post-lowering pass pipeline (jvm/backend.rs), so the survey's skip
     // reasons track exactly what the shipping backend declines.
-    match krusty::jvm::backend::run_backend_passes(ir, file, facade, syms) {
+    match krusty::jvm::backend::run_backend_passes(ir, file, facade, "main", syms) {
         Err(krusty::jvm::backend::SkipReason::ValueClasses) => {
             return Some("lower: value-class shape not lowered".into())
         }

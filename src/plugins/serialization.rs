@@ -133,11 +133,21 @@ impl SerializationPlugin {
         }
     }
 
-    /// The per-class write-helper name for the target ABI.
+    /// The per-class write-helper name for the target ABI. On core >= 1.6 the module name is mangled
+    /// into the suffix with every non-`[A-Za-z0-9]` character replaced by `_` (kotlinc sanitizes the
+    /// module name so it is a legal JVM method-name segment — `com.infragnite_x-httpclient` →
+    /// `com_infragnite_x_httpclient`).
     fn write_self_name(&self) -> String {
         match self.abi {
             SerializationAbi::V1_0 => "write$Self".to_string(),
-            SerializationAbi::V1_6Plus => format!("write$Self${}", self.module),
+            SerializationAbi::V1_6Plus => {
+                let mangled: String = self
+                    .module
+                    .chars()
+                    .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+                    .collect();
+                format!("write$Self${mangled}")
+            }
         }
     }
 }
@@ -858,13 +868,20 @@ fn value_class_underlying(ir: &IrFile, ty: &Ty) -> Option<Ty> {
             return None;
         }
         let fq = ty.kotlin_class_internal()?;
-        let c = ir.classes.iter().find(|c| c.fq_name == fq)?;
-        if !c.is_value {
-            return None;
+        // A same-file value class: recurse through its declared single field.
+        if let Some(c) = ir.classes.iter().find(|c| c.fq_name == fq) {
+            if !c.is_value {
+                return None;
+            }
+            let u = c.fields.first()?.ty;
+            return Some(rec(ir, &u, depth + 1).unwrap_or(u));
         }
-        let u = c.fields.first()?.ty;
-        // Unwrap a further value-class layer; else this layer's underlying IS the terminal type.
-        Some(rec(ir, &u, depth + 1).unwrap_or(u))
+        // A CROSS-FILE `@JvmInline value class` (its `@Metadata`-decoded underlying, carrying nullability)
+        // — so a serialized data class with an imported value-class field still recognizes it.
+        if let Some(u) = ir.external_value_classes.get(fq) {
+            return Some(rec(ir, u, depth + 1).unwrap_or(*u));
+        }
+        None
     }
     rec(ir, ty, 0)
 }
@@ -955,11 +972,14 @@ impl SerializationPlugin {
         ir.classes[class_id as usize].methods.push(accessor);
     }
 
-    /// Add `static serializer(): KSerializer<E>` for a `@Serializable enum`, returning a runtime
-    /// `EnumSerializer(name, E.values())` (the way kotlinc compiles a plain enum). `E.values()` is the
-    /// synthetic static the enum already emits; `E[]` passes where the ctor wants `Enum[]` (array
-    /// covariance).
-    fn add_enum_serializer_accessor(ir: &mut IrFile, class_id: u32, class_fq: &str) {
+    /// Modern (`kotlinx.serialization` ≥ 1.5) `@Serializable enum` codegen: `serializer()` lives on a
+    /// nested `Companion` and returns a runtime `EnumSerializer(name, E.values())` cached in a
+    /// `private static final Lazy $cachedSerializer$delegate` on the enum, read through a
+    /// `public static final Lazy access$get$cachedSerializer$delegate$cp()` accessor. Matches kotlinc's
+    /// member set (Companion class + `Companion` field + the accessor; no static `serializer()`).
+    fn add_enum_serializer_companion(ir: &mut IrFile, class_id: u32, class_fq: &str) {
+        let lazy_ty = class_ty("kotlin/Lazy");
+        // `$cachedSerializer$delegate = LazyKt.lazyOf(new EnumSerializer(<name>, E.values()))`.
         let name = ir.add_expr(IrExpr::Const(IrConst::String(class_fq.replace('/', "."))));
         let values = ir.add_expr(IrExpr::Call {
             callee: Callee::Static {
@@ -971,27 +991,93 @@ impl SerializationPlugin {
             dispatch_receiver: None,
             args: vec![],
         });
-        let inst = ir.add_expr(IrExpr::NewExternal {
+        let enum_ser = ir.add_expr(IrExpr::NewExternal {
             internal: "kotlinx/serialization/internal/EnumSerializer".to_string(),
             ctor_desc: "(Ljava/lang/String;[Ljava/lang/Enum;)V".to_string(),
             args: vec![name, values],
         });
-        let ret = ir.add_expr(IrExpr::Return(Some(inst)));
-        let body = ir.add_expr(IrExpr::Block {
-            stmts: vec![ret],
+        let lazy = ir.add_expr(IrExpr::Call {
+            callee: Callee::Static {
+                owner: "kotlin/LazyKt".to_string(),
+                name: "lazyOf".to_string(),
+                descriptor: "(Ljava/lang/Object;)Lkotlin/Lazy;".to_string(),
+                inline: InlineKind::None,
+            },
+            dispatch_receiver: None,
+            args: vec![enum_ser],
+        });
+        ir.statics.push(crate::ir::IrStatic {
+            name: "$cachedSerializer$delegate".to_string(),
+            ty: lazy_ty,
+            init: lazy,
+            is_var: false,
+            is_const: false,
+            owner: Some(class_fq.to_string()),
+            visibility: crate::types::Visibility::Private,
+            custom_accessor: true,
+        });
+        // `public static final Lazy access$get$cachedSerializer$delegate$cp()` — reads the private field.
+        let read = ir.add_expr(IrExpr::ExternalStaticField {
+            owner: class_fq.to_string(),
+            name: "$cachedSerializer$delegate".to_string(),
+            descriptor: "Lkotlin/Lazy;".to_string(),
+        });
+        let acc_ret = ir.add_expr(IrExpr::Return(Some(read)));
+        let acc_body = ir.add_expr(IrExpr::Block {
+            stmts: vec![acc_ret],
             value: None,
         });
-        // Enum keeps `serializer()` STATIC on the class (Companion relocation is data-class-only for now).
-        let accessor = ir.add_fun(IrFunction {
-            name: "serializer".to_string(),
+        let acc = ir.add_fun(IrFunction {
+            name: "access$get$cachedSerializer$delegate$cp".to_string(),
             params: vec![],
-            ret: kserializer_of(class_ty(class_fq)),
-            body: Some(body),
+            ret: lazy_ty,
+            body: Some(acc_body),
             is_static: true,
             dispatch_receiver: None,
             param_checks: Vec::new(),
         });
-        ir.classes[class_id as usize].methods.push(accessor);
+        ir.synthetic_methods.insert(acc);
+        ir.classes[class_id as usize].methods.push(acc);
+        // `Companion.serializer()` returns `(KSerializer) access$…$cp().getValue()` (the cached instance).
+        let acc_call = ir.add_expr(IrExpr::Call {
+            callee: Callee::Static {
+                owner: class_fq.to_string(),
+                name: "access$get$cachedSerializer$delegate$cp".to_string(),
+                descriptor: "()Lkotlin/Lazy;".to_string(),
+                inline: InlineKind::None,
+            },
+            dispatch_receiver: None,
+            args: vec![],
+        });
+        let get_value = ir.add_expr(IrExpr::Call {
+            callee: Callee::CrossFileVirtual {
+                owner: "kotlin/Lazy".to_string(),
+                name: "getValue".to_string(),
+                params: vec![],
+                ret: class_ty("kotlin/Any"),
+                interface: true,
+            },
+            dispatch_receiver: Some(acc_call),
+            args: vec![],
+        });
+        let cast = ir.add_expr(IrExpr::TypeOp {
+            op: IrTypeOp::Cast,
+            arg: get_value,
+            type_operand: Ty::obj("kotlinx/serialization/KSerializer"),
+        });
+        let sret = ir.add_expr(IrExpr::Return(Some(cast)));
+        let sbody = ir.add_expr(IrExpr::Block {
+            stmts: vec![sret],
+            value: None,
+        });
+        place_serializer_accessor(
+            ir,
+            class_id,
+            class_fq,
+            vec![],
+            kserializer_of(class_ty(class_fq)),
+            sbody,
+        );
     }
 
     /// `getOrCreateKotlinClass(<internal>.class)` — a `KClass` literal for an internal class name.
@@ -1124,10 +1210,10 @@ impl IrPlugin for SerializationPlugin {
                 Self::add_custom_serializer_accessor(ir, class_id, &class_fq, &custom);
                 continue;
             }
-            // A `@Serializable enum`: no generated `$serializer` — `serializer()` returns a runtime
-            // `EnumSerializer(name, E.values())`, the way kotlinc compiles a plain enum.
+            // A `@Serializable enum`: no generated `$serializer` — `serializer()` lives on a nested
+            // `Companion` and returns a runtime `EnumSerializer(name, E.values())` cached in a `Lazy`.
             if !ir.classes[class_id as usize].enum_entries.is_empty() {
-                Self::add_enum_serializer_accessor(ir, class_id, &class_fq);
+                Self::add_enum_serializer_companion(ir, class_id, &class_fq);
                 continue;
             }
             // A `@Serializable sealed class`/`sealed interface`: no generated `$serializer` —
@@ -1195,6 +1281,7 @@ impl IrPlugin for SerializationPlugin {
             );
             // kotlinc emits it non-final (a plain `GeneratedSerializer` override).
             ir.open_methods.insert(type_params_ser);
+            ir.bridge_methods.insert(type_params_ser);
 
             let foo_fields: Vec<(String, Ty)> = ir.classes[class_id as usize]
                 .fields
@@ -1285,6 +1372,8 @@ impl IrPlugin for SerializationPlugin {
                     unbox_params: Vec::new(),
                 },
             ];
+            ir.synthetic_classes.insert(ser_fq.clone());
+            ir.deprecated_classes.insert(ser_fq.clone());
             let ser_id = ir.add_class(ser);
 
             // Build the `descriptor` field in <init>: `descriptor = PluginGeneratedSerialDescriptor(
@@ -1468,46 +1557,57 @@ impl IrPlugin for SerializationPlugin {
                 );
             }
 
+            // A `@Serializable` class's shape drives which synthetic members kotlinc emits: a plain data
+            // class gets `write$Self` + the deserialization ctor, whereas a value class (inline serializer,
+            // `constructor-impl` only) and an object are compiled differently and get neither.
+            let plain_data_class =
+                !ir.classes[class_id as usize].is_value && !ir.classes[class_id as usize].is_object;
+
             // `write$Self` helper — its NAME is ABI-version-dependent (mangled with the module name
             // on core >= 1.6). Emitted on the serialized class as a static member with a concrete
             // (no-op) body so the class stays concrete (an empty-body method would force it abstract).
-            let ws_ret = ir.add_expr(IrExpr::Return(None));
-            let ws_body = ir.add_expr(IrExpr::Block {
-                stmts: vec![ws_ret],
-                value: None,
-            });
-            let write_self = ir.add_fun(IrFunction {
-                name: self.write_self_name(),
-                params: vec![
-                    class_ty(&class_fq),
-                    class_ty("kotlinx/serialization/encoding/CompositeEncoder"),
-                    class_ty("kotlinx/serialization/descriptors/SerialDescriptor"),
-                ],
-                ret: unit(),
-                body: Some(ws_body),
-                is_static: true,
-                dispatch_receiver: None,
-                param_checks: Vec::new(),
-            });
-            ir.classes[class_id as usize].methods.push(write_self);
+            // A value class serializes its sole underlying value inline (no `write$Self`), and an object
+            // uses an `ObjectSerializer`; kotlinc emits `write$Self` for a plain data class only.
+            if plain_data_class {
+                let ws_ret = ir.add_expr(IrExpr::Return(None));
+                let ws_body = ir.add_expr(IrExpr::Block {
+                    stmts: vec![ws_ret],
+                    value: None,
+                });
+                let write_self = ir.add_fun(IrFunction {
+                    name: self.write_self_name(),
+                    params: vec![
+                        class_ty(&class_fq),
+                        class_ty("kotlinx/serialization/encoding/CompositeEncoder"),
+                        class_ty("kotlinx/serialization/descriptors/SerialDescriptor"),
+                    ],
+                    ret: unit(),
+                    body: Some(ws_body),
+                    is_static: true,
+                    dispatch_receiver: None,
+                    param_checks: Vec::new(),
+                });
+                ir.synthetic_methods.insert(write_self);
+                ir.classes[class_id as usize].methods.push(write_self);
+            }
 
-            // `public static void get<Prop>$annotations()` markers for `@SerialName` properties.
+            // `<getter>$annotations()` markers for properties kotlinc preserves the serialization
+            // annotation on: `@SerialName`, OR a property-level `@Serializable(with = X::class)` custom
+            // serializer. The marker's stem is the property's JVM getter name, so a Boolean `isFoo` yields
+            // `isFoo$annotations` (JavaBeans `is`-prefix rule).
             for (prop, _) in &foo_fields {
-                if serial_name_of(ctx, ir, class_id, prop).is_none() {
+                if serial_name_of(ctx, ir, class_id, prop).is_none()
+                    && field_serializer_of(ctx, ir, class_id, prop).is_none()
+                {
                     continue;
                 }
-                let mut chars = prop.chars();
-                let cap = chars
-                    .next()
-                    .map(|c| c.to_uppercase().collect::<String>() + chars.as_str())
-                    .unwrap_or_default();
                 let ann_ret = ir.add_expr(IrExpr::Return(None));
                 let ann_body = ir.add_expr(IrExpr::Block {
                     stmts: vec![ann_ret],
                     value: None,
                 });
                 let marker = ir.add_fun(IrFunction {
-                    name: format!("get{cap}$annotations"),
+                    name: format!("{}$annotations", property_getter_name(prop)),
                     params: vec![],
                     ret: unit(),
                     body: Some(ann_body),
@@ -1515,9 +1615,145 @@ impl IrPlugin for SerializationPlugin {
                     dispatch_receiver: None,
                     param_checks: Vec::new(),
                 });
-                // kotlinc emits the marker as `public static` (NOT final).
                 ir.open_methods.insert(marker);
+                ir.synthetic_methods.insert(marker);
+                ir.deprecated_methods.insert(marker);
                 ir.classes[class_id as usize].methods.push(marker);
+            }
+
+            // ABI-only deserialization ctor `G(int seqMask, <fields…>, SerializationConstructorMarker)`
+            // (krusty's `deserialize()` uses the primary ctor): a Super-delegate secondary ctor whose body
+            // sets each field from its arg (fields start at param 2, after the seq-mask). kotlinc marks it
+            // `ACC_SYNTHETIC`. A value-class field is stored UNBOXED, so its param + `putfield` use the
+            // underlying type.
+            if plain_data_class {
+                // A value-class field unboxes to its underlying in the deser ctor ONLY when that underlying
+                // is NON-nullable; a nullable-underlying value class (`VC(val s: String?)`) stays BOXED
+                // (its marker-style synthetic ctor can't unbox — kotlinc keeps the `VC` type).
+                let deser_field_tys: Vec<Ty> = foo_fields
+                    .iter()
+                    .map(|(_, ty)| match value_class_underlying(ir, ty) {
+                        Some(u) if !u.is_nullable() => u,
+                        _ => *ty,
+                    })
+                    .collect();
+                // kotlinc's bit-mask is one `int` per 32 properties (`(n+31)/32`, min 1) — a class with
+                // >32 serialized fields carries multiple leading seq-mask ints.
+                let n_masks = foo_fields.len().max(1).div_ceil(32);
+                let mut deser_params = vec![Ty::Int; n_masks];
+                deser_params.extend(deser_field_tys.iter().cloned());
+                deser_params.push(class_ty(
+                    "kotlinx/serialization/internal/SerializationConstructorMarker",
+                ));
+                // A value-class field is stored unboxed, so kotlinc treats the deser ctor as a
+                // value-class-param ctor and appends a trailing `DefaultConstructorMarker` (its ABI
+                // disambiguator — mirrors the primary ctor's `value_param_ctors` marker accessor).
+                let has_value_field = foo_fields
+                    .iter()
+                    .any(|(_, ty)| value_class_underlying(ir, ty).is_some());
+                if has_value_field {
+                    deser_params.push(class_ty("kotlin/jvm/internal/DefaultConstructorMarker"));
+                }
+                let this = ir.add_expr(IrExpr::GetValue(0));
+                let mut deser_stmts = Vec::with_capacity(foo_fields.len());
+                for i in 0..foo_fields.len() {
+                    // `this` at 0, the `n_masks` seq-mask ints at 1..=n_masks, then the field params.
+                    let arg = ir.add_expr(IrExpr::GetValue(i as u32 + 1 + n_masks as u32));
+                    deser_stmts.push(ir.add_expr(IrExpr::SetField {
+                        receiver: this,
+                        class: class_id,
+                        index: i as u32,
+                        value: arg,
+                    }));
+                }
+                let deser_body = ir.add_expr(IrExpr::Block {
+                    stmts: deser_stmts,
+                    value: None,
+                });
+                ir.classes[class_id as usize]
+                    .secondary_ctors
+                    .push(crate::ir::IrSecondaryCtor {
+                        params: deser_params,
+                        delegate_args: vec![],
+                        body: Some(deser_body),
+                        delegate: crate::ir::CtorDelegateTarget::Super,
+                        synthetic: true,
+                    });
+            }
+
+            // `$childSerializers` cache — a `private static final Lazy[]` + the public synthetic
+            // `access$get$childSerializers$cp()` accessor kotlinc emits when a prop's serializer is
+            // ALLOCATED rather than a singleton: a collection (`ArrayListSerializer(…)`) or an ENUM
+            // (`EnumSerializer(…)`). A primitive/`String` (singleton `INSTANCE`) or a nested `@Serializable`
+            // CLASS (singleton `$$serializer.INSTANCE`) is NOT cached. Each slot is `LazyKt.lazyOf(…)`, else null.
+            let enum_internals: std::collections::HashSet<String> = ir
+                .classes
+                .iter()
+                .filter(|c| !c.enum_entries.is_empty())
+                .map(|c| c.fq_name.clone())
+                .collect();
+            let needs_cache = |ty: &Ty| -> bool {
+                let internal = ty.kotlin_class_internal();
+                internal.and_then(collection_serializer_builder).is_some()
+                    || internal.is_some_and(|i| enum_internals.contains(i))
+            };
+            if plain_data_class && foo_fields.iter().any(|(_, ty)| needs_cache(ty)) {
+                let lazy_arr_ty = Ty::obj_args("kotlin/Array", &[class_ty("kotlin/Lazy")]);
+                let elems: Vec<ExprId> = foo_fields
+                    .iter()
+                    .map(|(_, ty)| {
+                        if needs_cache(ty) {
+                            if let Some(es) = element_serializer_expr(ir, ty) {
+                                return ir.add_expr(IrExpr::Call {
+                                    callee: Callee::Static {
+                                        owner: "kotlin/LazyKt".to_string(),
+                                        name: "lazyOf".to_string(),
+                                        descriptor: "(Ljava/lang/Object;)Lkotlin/Lazy;".to_string(),
+                                        inline: InlineKind::None,
+                                    },
+                                    dispatch_receiver: None,
+                                    args: vec![es],
+                                });
+                            }
+                        }
+                        ir.add_expr(IrExpr::Const(IrConst::Null))
+                    })
+                    .collect();
+                let arr = ir.add_expr(IrExpr::Vararg {
+                    array_type: lazy_arr_ty,
+                    elements: elems,
+                });
+                ir.statics.push(crate::ir::IrStatic {
+                    name: "$childSerializers".to_string(),
+                    ty: lazy_arr_ty,
+                    init: arr,
+                    is_var: false,
+                    is_const: false,
+                    owner: Some(class_fq.clone()),
+                    visibility: crate::types::Visibility::Private,
+                    custom_accessor: true,
+                });
+                let read = ir.add_expr(IrExpr::ExternalStaticField {
+                    owner: class_fq.clone(),
+                    name: "$childSerializers".to_string(),
+                    descriptor: "[Lkotlin/Lazy;".to_string(),
+                });
+                let ret = ir.add_expr(IrExpr::Return(Some(read)));
+                let body = ir.add_expr(IrExpr::Block {
+                    stmts: vec![ret],
+                    value: None,
+                });
+                let acc = ir.add_fun(IrFunction {
+                    name: "access$get$childSerializers$cp".to_string(),
+                    params: vec![],
+                    ret: lazy_arr_ty,
+                    body: Some(body),
+                    is_static: true,
+                    dispatch_receiver: None,
+                    param_checks: Vec::new(),
+                });
+                ir.synthetic_methods.insert(acc);
+                ir.classes[class_id as usize].methods.push(acc);
             }
         }
     }

@@ -222,6 +222,8 @@ mod data_copy_e2e;
 mod dataclass_hash_and_sam_e2e;
 #[path = "decl_body_on_next_line_e2e.rs"]
 mod decl_body_on_next_line_e2e;
+#[path = "deep_nested_type_e2e.rs"]
+mod deep_nested_type_e2e;
 #[path = "default_args_member_e2e.rs"]
 mod default_args_member_e2e;
 #[path = "default_args_synthetic_e2e.rs"]
@@ -408,6 +410,8 @@ mod inheritance_e2e;
 mod inline_deep_coverage_e2e;
 #[path = "inline_e2e.rs"]
 mod inline_e2e;
+#[path = "inline_end_branch_e2e.rs"]
+mod inline_end_branch_e2e;
 #[path = "inline_lambda_value_return_e2e.rs"]
 mod inline_lambda_value_return_e2e;
 #[path = "inline_splice_e2e.rs"]
@@ -544,6 +548,8 @@ mod nested_string_template_e2e;
 mod nested_try_finally_e2e;
 #[path = "nested_type_scope_e2e.rs"]
 mod nested_type_scope_e2e;
+#[path = "nested_type_shadowing_e2e.rs"]
+mod nested_type_shadowing_e2e;
 #[path = "newline_method_chain_e2e.rs"]
 mod newline_method_chain_e2e;
 #[path = "not_null_assert_e2e.rs"]
@@ -562,6 +568,8 @@ mod nullable_primitive_box_e2e;
 mod nullable_ref_arg_to_erased_param_e2e;
 #[path = "nullable_unit_e2e.rs"]
 mod nullable_unit_e2e;
+#[path = "nullable_vc_default_stub_e2e.rs"]
+mod nullable_vc_default_stub_e2e;
 #[path = "number_and_ctor_coverage_e2e.rs"]
 mod number_and_ctor_coverage_e2e;
 #[path = "number_assignability_e2e.rs"]
@@ -622,6 +630,8 @@ mod qq1_safecall_diverging_scope_block_e2e;
 mod range_property_e2e;
 #[path = "range_step_e2e.rs"]
 mod range_step_e2e;
+#[path = "raw_string_interpolation_e2e.rs"]
+mod raw_string_interpolation_e2e;
 #[path = "receiver_lambda_e2e.rs"]
 mod receiver_lambda_e2e;
 #[path = "reference_adaptation_e2e.rs"]
@@ -752,6 +762,8 @@ mod top_level_generic_property_inference_e2e;
 mod top_level_property_e2e;
 #[path = "toplevel_array_inference_e2e.rs"]
 mod toplevel_array_inference_e2e;
+#[path = "toplevel_default_multimask_e2e.rs"]
+mod toplevel_default_multimask_e2e;
 #[path = "toplevel_prop_with_companion_const_e2e.rs"]
 mod toplevel_prop_with_companion_const_e2e;
 #[path = "toplevel_property_inference_e2e.rs"]
@@ -820,3 +832,5 @@ mod when_multiple_else_check_e2e;
 mod when_nothing_arm_e2e;
 #[path = "when_throwing_branch_e2e.rs"]
 mod when_throwing_branch_e2e;
+#[path = "wrapped_param_type_e2e.rs"]
+mod wrapped_param_type_e2e;

@@ -45,6 +45,14 @@ pub fn lower_bail_reason() -> String {
     BAIL_REASON.with(|r| r.borrow().clone())
 }
 
+fn default_mask_count(param_count: usize) -> usize {
+    param_count.div_ceil(32).max(1)
+}
+
+fn default_mask_bit(param_index: usize) -> i32 {
+    (1u32 << (param_index % 32)) as i32
+}
+
 fn is_conversion_call_name(name: &str) -> bool {
     matches!(
         name,
@@ -423,16 +431,22 @@ pub fn lower_file_at(
             // An `inner class` captures the enclosing instance: a synthetic `this$0` field of the outer
             // type, prepended as the first constructor-parameter field.
             let inner_outer: Option<String> = c.inner_of.as_ref().map(|o| class_internal(file, o));
+            let class_sig = syms.classes.get(&c.name)?;
+            let resolved_prop_ty = |name: &str| {
+                class_sig
+                    .props
+                    .iter()
+                    .find_map(|(n, t, _)| (n == name).then_some(stored_value_ty(*t)))
+                    .unwrap_or(Ty::Error)
+            };
             // Constructor-parameter fields, then class-body-property fields (initialized in `init_body`).
-            // A field's type is resolved with `ty_of` (file-local classes + built-ins); when that erases a
-            // CLASSPATH reference type to `Any` (`ty_of` doesn't consult imports), recover the concrete type
-            // from the lowerer's classpath-aware `ty_ref` so the field decl, constructor parameter and getter
-            // all agree on the real type (e.g. `kotlin.uuid.Uuid`, `java.net.URL`).
+            // Field types come from the resolver's ClassSig so nested/imported/user classifier decisions
+            // are made in the front end and lowering only consumes resolved semantic types.
             let mut ctor_fields: Vec<(String, Ty)> = c
                 .props
                 .iter()
                 .filter(|p| p.is_property)
-                .map(|p| (p.name.clone(), lo.field_ty(file, &p.ty)))
+                .map(|p| (p.name.clone(), resolved_prop_ty(&p.name)))
                 .collect();
             if let Some(outer) = &inner_outer {
                 ctor_fields.insert(0, ("this$0".to_string(), Ty::obj(outer)));
@@ -445,13 +459,9 @@ pub fn lower_file_at(
                 .iter()
                 .filter(|p| is_backing_field_prop(p))
                 .map(|p| {
-                    // Use the classpath-aware `field_ty` (not `ty_of`, which erases a CLASSPATH reference
-                    // type to `Any` since it doesn't consult imports) so a body property declared with a
-                    // classpath type (`override val context: CoroutineContext`) keeps its concrete field +
-                    // getter return type — matching an overridden interface member's descriptor.
                     let ty =
                         p.ty.as_ref()
-                            .map(|r| lo.field_ty(file, r))
+                            .map(|_| resolved_prop_ty(&p.name))
                             .unwrap_or_else(|| info.ty(p.init.unwrap()));
                     (p.name.clone(), ty)
                 })
@@ -790,9 +800,10 @@ pub fn lower_file_at(
                         is_field: true,
                         check: None,
                     })
-                    .chain(c.props.iter().map(|p| {
-                        // Use `field_ty` so a classpath-typed param matches the field/getter (not erased `Any`).
-                        let t = ty_to_ir(lo.field_ty(file, &p.ty));
+                    .chain(c.props.iter().enumerate().map(|(i, p)| {
+                        let t = ty_to_ir(stored_value_ty(
+                            class_sig.ctor_params.get(i).copied().unwrap_or(Ty::Error),
+                        ));
                         let t = if p.ty.nullable { mark_nullable(t) } else { t };
                         // A non-null reference param gets an `Intrinsics.checkNotNullParameter` guard at
                         // `<init>` entry (kotlinc does); primitives, nullable, and class type-params skip it.
@@ -1134,8 +1145,9 @@ pub fn lower_file_at(
             }
             // Synthesize `getX()`/`setX()` accessors for each backing-field property (kotlinc emits
             // them; the fields are private). Getter returns the field; setter (var only) writes it.
-            // Enums keep their existing shape (separate emit path); interfaces have no backing fields.
-            if !c.is_interface() && !c.is_enum() {
+            // Interfaces have no backing fields. An enum's ctor properties get getters here too (kotlinc
+            // emits `private` fields + `getX()`); `emit_enum_class` emits those fields private to match.
+            if !c.is_interface() {
                 let field_props: Vec<(String, bool, bool)> = c
                     .props
                     .iter()
@@ -1937,16 +1949,10 @@ pub fn lower_file_at(
                     param_vals.push(v);
                     lo.scope.push((p.name.clone(), v, *t));
                 }
-                // Register parameter defaults for a plain top-level function (no extension receiver, no
-                // vararg, ≤31 params) so a transform/plugin can read the lowered default exprs. Lowered
-                // with the STATIC value layout — params at values `0..n` (no `this`), the layout these
-                // bodies already use. This does NOT emit a `name$default` stub: stub emission runs only on
-                // the class path (`emit_default_stub`), never the facade, so a top-level function's codegen
-                // is unchanged (top-level calls keep filling omitted args at the call site).
                 // Register parameter defaults for a top-level function OR EXTENSION (the latter's IR
                 // function prepends the receiver as parameter 0, so the defaults/names get a leading
-                // receiver slot). The omitted args are filled at the CALL SITE (no `$default` stub), like a
-                // plain top-level call.
+                // receiver slot). Plain top-level functions may also emit a facade `$default` stub; the
+                // JVM backend uses one mask word per 32 parameters, so there is no 31-param cap here.
                 // An EXTENSION fills its omitted defaults at the CALL SITE by REUSING these lowered default
                 // exprs, so restrict it to CONSTANT defaults (a literal carries no function-local value
                 // dependency); a non-constant extension default isn't modeled — skip registration so an
@@ -1963,11 +1969,7 @@ pub fn lower_file_at(
                 // receiver-offset vararg is left out (a later slice).
                 let vararg_ok = !f.params.iter().any(|p| p.is_vararg)
                     || (f.receiver.is_none() && f.params.last().is_some_and(|p| p.is_vararg));
-                if const_ok
-                    && f.params.iter().any(|p| p.default.is_some())
-                    && vararg_ok
-                    && f.params.len() <= 31
-                {
+                if const_ok && f.params.iter().any(|p| p.default.is_some()) && vararg_ok {
                     let ir_params = lo.ir.functions[fid as usize].params.clone();
                     let recv_off = usize::from(f.receiver.is_some());
                     let mut defaults: Vec<Option<u32>> = vec![None; recv_off];
@@ -2810,13 +2812,11 @@ pub fn lower_file_at(
                 // A REGULAR (non-value, non-inner) class with a DEFAULT on any primary-ctor parameter needs
                 // kotlinc's synthetic `<init>(params…, int mask, DefaultConstructorMarker)` overload. Lower
                 // each default in the INSTANCE `<init>` frame (`this` = value 0, params = 1..=n) and stash
-                // them by class internal; the backend emits the overload. Gated like the member-default
-                // path: not an interface, ≤31 params, and only when at least one default exists.
+                // them by class internal; the backend emits the overload (one int mask per 32 params).
                 if !c.is_value
                     && c.inner_of.is_none()
                     && !c.is_interface()
                     && c.has_primary_ctor
-                    && c.props.len() <= 31
                     && c.props.iter().any(|p| p.default.is_some())
                 {
                     lo.scope.clear();
@@ -3307,6 +3307,7 @@ pub fn lower_file_at(
                             delegate_args: dargs,
                             body,
                             delegate,
+                            synthetic: false,
                         });
                     }
                     lo.ir.classes[class_id as usize].secondary_ctors = secs;
@@ -3509,16 +3510,11 @@ pub fn lower_file_at(
                                 super_internal: Some(internal.clone()),
                             },
                         );
-                        // A body that reads a prop resolves it as a subclass field → `cur_class` must be
-                        // the subclass; a property-less entry keeps the enum scope (unchanged behavior).
-                        // (When the subclass scope is used, a bare read of an INHERITED enum constructor
-                        // property routes through its `getX()` getter; a shape that resolution can't
-                        // reach cleanly skips the file — never a miscompile.)
-                        let body_cur = if prop_fields.is_empty() {
-                            internal.clone()
-                        } else {
-                            sub_fq.clone()
-                        };
+                        // An override body reads through the SUBCLASS scope: an own property resolves to a
+                        // subclass field, and a bare read of an INHERITED enum constructor property routes
+                        // through its `getX()` getter (the enum's backing fields are now private, so a
+                        // subclass `getfield` on them would be an `IllegalAccessError` — box `enum/kt2350`).
+                        let body_cur = sub_fq.clone();
                         // Subclass ctor init: `this.<prop> = <init>` for each property (run after super()).
                         if !prop_fields.is_empty() {
                             lo.scope.clear();
@@ -7607,8 +7603,9 @@ impl<'a> Lower<'a> {
                     .collect();
                 checks.resize(fields.len(), None);
                 self.ir.functions[copy_fid as usize].param_checks = checks;
-                // Each `copy` parameter defaults to the corresponding receiver property.
-                if fields.len() <= 31 {
+                // Each `copy` parameter defaults to the corresponding receiver property. The `$default`
+                // stub's bit-mask is one `int` per 32 params (multi-mask), so any parameter count works.
+                {
                     let defaults: Vec<Option<u32>> = (0..fields.len())
                         .map(|i| {
                             let this = self.emit_get_value(0);
@@ -7902,8 +7899,12 @@ impl<'a> Lower<'a> {
     }
 
     fn serializable_uses_companion_accessor(&self, c: &ast::ClassDecl) -> bool {
-        c.kind == crate::ast::ClassKind::Class
-            && !c.is_sealed()
+        // A plain data class OR a `@Serializable enum` (both relocate `serializer()` to their `Companion`);
+        // sealed/generic/custom-serializer classes keep the static accessor.
+        matches!(
+            c.kind,
+            crate::ast::ClassKind::Class | crate::ast::ClassKind::Enum
+        ) && !c.is_sealed()
             && c.type_params.is_empty()
             && self.custom_serializer_of(c).is_none()
     }
@@ -8265,9 +8266,9 @@ impl<'a> Lower<'a> {
             "lower_toplevel_default_call fid={fid} ir_params={ir_params:?} slot_temp={slot_temp:?}"
         );
         // Build the `$default` argument list in slot order: provided temp, or a zero placeholder for an
-        // omitted slot (with its mask bit set). Then the int mask and the null marker.
-        let mut a: Vec<u32> = Vec::with_capacity(n + 2);
-        let mut mask: i32 = 0;
+        // omitted slot (with its mask bit set). Then the mask words and the null marker.
+        let mut a: Vec<u32> = Vec::with_capacity(n + default_mask_count(n) + 1);
+        let mut omitted = Vec::new();
         for (k, item) in slot_temp.iter().enumerate() {
             match item {
                 Some(tmp) => a.push(self.emit_get_value(*tmp)),
@@ -8275,12 +8276,12 @@ impl<'a> Lower<'a> {
                 // passed through by `$default`, not filled from the mask).
                 None if vararg && k == n - 1 => a.push(self.empty_array(ir_params[k])),
                 None => {
-                    mask |= 1i32 << k;
+                    omitted.push(k);
                     a.push(self.zero_placeholder(ir_params[k]));
                 }
             }
         }
-        self.append_default_mask_marker(&mut a, mask);
+        self.append_default_masks_marker(&mut a, n, omitted);
         let dcall = self.emit_local_default_call(fid, a);
         Some(self.wrap_arg_prelude(dcall, prelude))
     }
@@ -9183,18 +9184,18 @@ impl<'a> Lower<'a> {
             if !crate::ir::toplevel_default_stub_safe(&self.ir, fid) {
                 return None;
             }
-            let mut mask: i32 = 0;
+            let mut omitted = Vec::new();
             for (k, &pt) in target_params.iter().enumerate().skip(n) {
                 if k == m - 1 && target_vararg {
                     // The dropped trailing vararg gets an EMPTY array and NO mask bit (passed through by
                     // `$default`, not filled from the mask).
                     a.push(self.empty_array(ty_to_ir(pt)));
                 } else {
-                    mask |= 1i32 << k;
+                    omitted.push(k);
                     a.push(self.zero_placeholder(pt));
                 }
             }
-            self.append_default_mask_marker(&mut a, mask);
+            self.append_default_masks_marker(&mut a, m, omitted);
             self.emit_local_default_call(fid, a)
         };
         // A `Unit`-returning invoke (a coercion, or the target itself returns `Unit`) yields the `Unit`
@@ -10704,6 +10705,22 @@ impl<'a> Lower<'a> {
         out.push(self.emit_const(IrConst::Null));
     }
 
+    fn append_default_masks_marker(
+        &mut self,
+        out: &mut Vec<u32>,
+        param_count: usize,
+        omitted: impl IntoIterator<Item = usize>,
+    ) {
+        let mut masks = vec![0i32; default_mask_count(param_count)];
+        for i in omitted {
+            masks[i / 32] |= default_mask_bit(i);
+        }
+        for mask in masks {
+            out.push(self.emit_const(IrConst::Int(mask)));
+        }
+        out.push(self.emit_const(IrConst::Null));
+    }
+
     fn empty_array(&mut self, array_type: Ty) -> u32 {
         let size = self.emit_const(IrConst::Int(0));
         self.emit_new_array(array_type, size)
@@ -11806,8 +11823,6 @@ impl<'a> Lower<'a> {
         self.lower_scope_inline_on(recv_val, rty, &pname, body, returns_receiver)
     }
 
-    /// Resolve an `is`/`as` target `TypeRef` to a known **reference** `Ty` (`String` or a class in
-    /// this IR); returns `None` to bail for primitives, nullables, or unknown types.
     /// A field's declared type: `ty_of` (file-local classes + built-ins), falling back to the
     /// classpath-aware [`ty_ref`] when `ty_of` erases a CLASSPATH reference type to `Any` (it doesn't
     /// consult imports). Keeps the field decl, constructor parameter and getter agreeing on the real type.

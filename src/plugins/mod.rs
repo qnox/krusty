@@ -312,13 +312,10 @@ fn source_class_by_internal<'a>(
     file: &'a crate::ast::File,
     internal: &str,
 ) -> Option<&'a crate::ast::ClassDecl> {
-    let pkg_prefix = file
-        .package
-        .as_deref()
-        .map(|p| format!("{}/", p.replace('.', "/")))
-        .unwrap_or_default();
+    // A NESTED class is hoisted with a DOTTED name (`Outer.Inner`) while its IrClass.fq_name uses `$`
+    // (`pkg/Outer$Inner`), so mangle `.`→`$` (via `source_internal`) before comparing.
     file.decl_arena.iter().find_map(|d| match d {
-        crate::ast::Decl::Class(c) if format!("{pkg_prefix}{}", c.name) == internal => Some(c),
+        crate::ast::Decl::Class(c) if source_internal(file, &c.name) == internal => Some(c),
         _ => None,
     })
 }
@@ -422,6 +419,7 @@ pub trait IrPlugin {
 pub fn run_enabled(
     ir: &mut IrFile,
     file: &crate::ast::File,
+    module_name: &str,
     class_name_resolver: &ClassNameResolver<'_>,
     target_type_descriptor: fn(Ty) -> Option<String>,
 ) {
@@ -430,8 +428,13 @@ pub fn run_enabled(
     if ctx.classes_with_simple("Serializable").is_empty() {
         return;
     }
+    // The `write$Self$<module>` helper is mangled with the compilation's module name (kotlinc's >=1.6
+    // ABI); thread it so it matches the real Gradle module, not the "main" default.
     let mut host = PluginHost::new();
-    host.register(Box::new(serialization::SerializationPlugin::default()));
+    host.register(Box::new(serialization::SerializationPlugin::new(
+        serialization::SerializationAbi::default(),
+        module_name,
+    )));
     host.run(ir, &ctx);
 }
 

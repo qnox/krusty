@@ -16,6 +16,9 @@ pub enum TokenKind {
     CharLit,   // 'x'
     // string templates: TemplateStart StrChunk (Dollar Ident | Dollar LBrace expr RBrace | StrChunk)* TemplateEnd
     TemplateStart,
+    // like TemplateStart but for a raw (triple-quoted) template: its StrChunk pieces are verbatim
+    // (no escape processing), so the parser must not run `unescape_chunk` on them.
+    RawTemplateStart,
     TemplateEnd,
     StrChunk, // a literal text piece of a template (text() is the raw chunk)
     Dollar,   // `$` before an interpolation

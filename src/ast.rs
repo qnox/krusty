@@ -880,6 +880,10 @@ impl File {
         &self.decl_arena[id.0 as usize]
     }
 
+    pub fn decl_mut(&mut self, id: DeclId) -> &mut Decl {
+        &mut self.decl_arena[id.0 as usize]
+    }
+
     pub fn add_expr(&mut self, e: Expr, span: Span) -> ExprId {
         let id = ExprId(self.expr_arena.len() as u32);
         self.expr_arena.push(e);

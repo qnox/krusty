@@ -43,10 +43,17 @@ pub fn run_backend_passes(
     ir: &mut crate::ir::IrFile,
     file: &File,
     facade: &str,
+    module_name: &str,
     syms: &FrontendSymbols,
 ) -> Result<(), SkipReason> {
     let resolve_class_name = |name: &str| syms.class_names.get(name).cloned();
-    crate::plugins::run_enabled(ir, file, &resolve_class_name, jvm_plugin_type_descriptor);
+    crate::plugins::run_enabled(
+        ir,
+        file,
+        module_name,
+        &resolve_class_name,
+        jvm_plugin_type_descriptor,
+    );
     let vc_module = crate::module_symbols::ModuleSymbols::new(syms);
     let vc_resolver = crate::symbol_resolver::SymbolResolver::new_scoped_with_module(
         &*syms.libraries,
@@ -135,6 +142,7 @@ impl Backend for JvmBackend {
         let file = checked.file;
         let info = checked.info;
         let syms = checked.symbols;
+        let module_name = checked.module_name;
 
         // Lower the checked file to the backend-agnostic IR, then emit JVM bytecode from it.
         // (The legacy direct AST emitter has been removed — IR is the sole JVM codegen path.)
@@ -152,7 +160,7 @@ impl Backend for JvmBackend {
         };
         // The shared post-lowering pass pipeline (see `run_backend_passes`); an unlowerable shape →
         // diagnose and skip the file rather than miscompile.
-        if let Err(reason) = run_backend_passes(&mut ir, file, &facade_name, syms) {
+        if let Err(reason) = run_backend_passes(&mut ir, file, &facade_name, module_name, syms) {
             let what = match reason {
                 SkipReason::ValueClasses => "value-class",
                 SkipReason::Suspend => "suspend-function",

@@ -375,17 +375,19 @@ impl<'a> Lexer<'a> {
     }
 
     /// Lex a raw string `"""..."""`. Content is verbatim (no escapes); the closing delimiter is a run
-    /// of three quotes (a run of >3 leaves the surplus quotes in the content). The emitted `StringLit`
-    /// token spans the whole literal; the parser strips the three leading/trailing quotes.
+    /// of three quotes (a run of >3 leaves the surplus quotes in the content). A raw string with
+    /// `$x`/`${…}` interpolation is lexed as a template (like a regular string, but verbatim chunks and
+    /// the triple-quote delimiter). The emitted `StringLit` token spans the whole literal; the parser
+    /// strips the three leading/trailing quotes.
     fn raw_string(&mut self, lo: u32) -> Token {
+        if self.raw_string_has_interpolation() {
+            return self.raw_string_template(lo);
+        }
         self.i += 3; // opening `"""`
-        let content_lo = self.i;
-        let close_start;
         loop {
             if self.i >= self.b.len() {
                 self.diags
                     .error(Span::new(lo, self.i as u32), "unterminated string literal");
-                close_start = self.i;
                 break;
             }
             if self.b[self.i] == b'"' {
@@ -394,7 +396,6 @@ impl<'a> Lexer<'a> {
                     q += 1;
                 }
                 if q >= 3 {
-                    close_start = self.i;
                     self.i += q; // consume the whole quote run; the final three are the delimiter
                     break;
                 }
@@ -403,25 +404,129 @@ impl<'a> Lexer<'a> {
                 self.i += 1;
             }
         }
-        // Interpolation inside a raw string isn't supported yet — reject so it isn't taken literally.
-        let mut j = content_lo;
-        while j < close_start {
-            if self.b[j] == b'$' {
-                let next = self.b.get(j + 1).copied().unwrap_or(0);
-                if next == b'{' || is_ident_start(next) {
-                    self.diags.error(
-                        Span::new(lo, self.i as u32),
-                        "raw string interpolation is not supported",
-                    );
-                    break;
-                }
-            }
-            j += 1;
-        }
         Token {
             kind: TokenKind::StringLit,
             span: Span::new(lo, self.i as u32),
         }
+    }
+
+    /// Does the raw string starting at `self.i` (`"""`) contain a `$ident` / `${` interpolation?
+    fn raw_string_has_interpolation(&self) -> bool {
+        let mut j = self.i + 3;
+        while j < self.b.len() {
+            if self.b[j] == b'"'
+                && self.b.get(j + 1) == Some(&b'"')
+                && self.b.get(j + 2) == Some(&b'"')
+            {
+                return false; // reached the closing delimiter with no interpolation
+            }
+            if self.b[j] == b'$' {
+                let next = self.b.get(j + 1).copied().unwrap_or(0);
+                if next == b'{' || is_ident_start(next) {
+                    return true;
+                }
+            }
+            j += 1;
+        }
+        false
+    }
+
+    /// Lex an interpolated raw string into the same token sequence as `string_template`, but with
+    /// verbatim chunks (no escape processing) and a triple-quote delimiter. Emits `RawTemplateStart`
+    /// so the parser keeps the chunks verbatim.
+    fn raw_string_template(&mut self, lo: u32) -> Token {
+        let mut toks: Vec<Token> = vec![Token {
+            kind: TokenKind::RawTemplateStart,
+            span: Span::new(lo, lo + 3),
+        }];
+        self.i += 3; // opening `"""`
+        let mut chunk_lo = self.i;
+        loop {
+            if self.i >= self.b.len() {
+                self.diags
+                    .error(Span::new(lo, self.i as u32), "unterminated string literal");
+                break;
+            }
+            let c = self.b[self.i];
+            // Closing delimiter: a run of >=3 quotes ends the literal (the final three are the delimiter).
+            if c == b'"' {
+                let mut q = 0;
+                while self.b.get(self.i + q) == Some(&b'"') {
+                    q += 1;
+                }
+                if q >= 3 {
+                    if self.i > chunk_lo {
+                        toks.push(Token {
+                            kind: TokenKind::StrChunk,
+                            span: Span::new(chunk_lo as u32, self.i as u32),
+                        });
+                    }
+                    self.i += q;
+                    break;
+                }
+                self.i += q; // one or two quotes are ordinary content
+                continue;
+            }
+            let next = self.b.get(self.i + 1).copied().unwrap_or(0);
+            if c == b'$' && (next == b'{' || is_ident_start(next)) {
+                if self.i > chunk_lo {
+                    toks.push(Token {
+                        kind: TokenKind::StrChunk,
+                        span: Span::new(chunk_lo as u32, self.i as u32),
+                    });
+                }
+                let dollar_lo = self.i;
+                self.i += 1; // consume `$`
+                toks.push(Token {
+                    kind: TokenKind::Dollar,
+                    span: Span::new(dollar_lo as u32, self.i as u32),
+                });
+                if self.b[self.i] == b'{' {
+                    let lb = self.i;
+                    self.i += 1;
+                    toks.push(Token {
+                        kind: TokenKind::LBrace,
+                        span: Span::new(lb as u32, self.i as u32),
+                    });
+                    let mut depth = 1;
+                    loop {
+                        let t = self.next_token();
+                        if t.kind == TokenKind::Eof {
+                            break;
+                        }
+                        if t.kind == TokenKind::LBrace {
+                            depth += 1;
+                        } else if t.kind == TokenKind::RBrace {
+                            depth -= 1;
+                            if depth == 0 {
+                                toks.push(t);
+                                break;
+                            }
+                        }
+                        toks.push(t);
+                    }
+                } else {
+                    let id_lo = self.i;
+                    while self.i < self.b.len() && is_ident_continue(self.b[self.i]) {
+                        self.i += 1;
+                    }
+                    toks.push(Token {
+                        kind: TokenKind::Ident,
+                        span: Span::new(id_lo as u32, self.i as u32),
+                    });
+                }
+                chunk_lo = self.i;
+            } else {
+                self.i += 1;
+            }
+        }
+        toks.push(Token {
+            kind: TokenKind::TemplateEnd,
+            span: Span::new(self.i as u32, self.i as u32),
+        });
+        let first = toks.remove(0);
+        self.pending.extend(toks);
+        first
     }
 
     /// Does the string starting at `self.i` (`"`) contain a `$ident` / `${` interpolation?
