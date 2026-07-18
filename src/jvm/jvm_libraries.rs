@@ -1760,7 +1760,8 @@ impl SymbolSource for JvmLibraries {
         // target — so a package-private multifile PART never leaks a `false` visibility. Receiver-coupled
         // JVM specifics (element-variant `sumOfInt`, value-class mangling) are the emitter's job.
         for facade in self.cp.package_facades(pkg) {
-            for mf in self.cp.meta_functions(&facade).iter() {
+            let facade_rendered = facade.render();
+            for mf in self.cp.meta_functions(&facade_rendered).iter() {
                 if mf.kotlin_name != name || !mf.is_extension {
                     continue;
                 }
@@ -1828,7 +1829,7 @@ impl SymbolSource for JvmLibraries {
                 });
                 let by_name = |n: &str| {
                     self.cp.facade_method(
-                        &facade,
+                        &facade_rendered,
                         n,
                         Some(&recv_desc),
                         ret_desc.as_deref(),
@@ -1882,14 +1883,7 @@ impl SymbolSource for JvmLibraries {
                     // type arguments. Without it the reified body cannot be specialized and the call falls
                     // back to a (throwing) direct invoke of the inline-only method.
                     signature: cand.as_ref().and_then(|c| c.signature.clone()),
-                    ..LibraryCallable::library(
-                        type_name(&facade),
-                        jvm_name,
-                        params,
-                        ret,
-                        pret,
-                        descriptor,
-                    )
+                    ..LibraryCallable::library(facade, jvm_name, params, ret, pret, descriptor)
                 };
                 overloads.push(FunctionInfo {
                     ret: ReturnInfo::new(mf.ret_nullable, ret_class),
@@ -1914,7 +1908,7 @@ impl SymbolSource for JvmLibraries {
             // name is authoritative, never a `getX` guess. A multifile FACADE holds no property metadata of
             // its own — its `d1` names the PART classes that do; merge them (mirrors the `meta_functions`
             // part merge). A single-file facade carries its properties directly.
-            let Some(fci) = self.cp.find(&facade) else {
+            let Some(fci) = self.cp.find(&facade_rendered) else {
                 continue;
             };
             let mut mprops = metadata::package_properties(&fci);
@@ -1938,7 +1932,7 @@ impl SymbolSource for JvmLibraries {
                 }
                 let ret_ty = mp.ret_class.map_or(gret, kotlin_type_name_to_ty);
                 let getter = LibraryCallable::library(
-                    type_name(&facade),
+                    facade,
                     getter_sig.name,
                     gparams,
                     ret_ty,
@@ -1948,7 +1942,7 @@ impl SymbolSource for JvmLibraries {
                 let setter = mp.setter.map(|setter_sig| {
                     let (sparams, sret) = parse_method_desc(&setter_sig.desc);
                     LibraryCallable::library(
-                        type_name(&facade),
+                        facade,
                         setter_sig.name,
                         sparams,
                         sret,
@@ -1968,7 +1962,7 @@ impl SymbolSource for JvmLibraries {
                     setter,
                     is_const: mp.is_const,
                     visibility: mp.visibility,
-                    owner: type_name(&facade),
+                    owner: facade,
                     receiver_rank: 0,
                 });
             }

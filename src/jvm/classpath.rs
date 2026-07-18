@@ -2104,7 +2104,7 @@ impl Classpath {
     /// `…Kt__X` collapsed to their public facade `…Kt`), across every jar that declares the package. The
     /// `@Metadata`-driven extension/top-level discovery reads each facade's merged metadata — the source
     /// of truth — instead of scanning JVM statics. Declaration order, deduped.
-    pub fn package_facades(&self, pkg: &str) -> Vec<String> {
+    pub fn package_facades(&self, pkg: &str) -> Vec<TypeName> {
         let tree = self.package_tree();
         let mut out = Vec::new();
         let Some(node) = tree.node_for(pkg) else {
@@ -2118,9 +2118,11 @@ impl Classpath {
             if let Some(pe) = jp.entry(pkg) {
                 for &part_id in &pe.facades {
                     let part = jp.names.render(part_id);
-                    let facade = part.split_once("__").map_or(part.as_str(), |(f, _)| f);
-                    if !out.iter().any(|f| f == facade) {
-                        out.push(facade.to_string());
+                    let facade = part
+                        .split_once("__")
+                        .map_or_else(|| type_name_from(&jp.names, part_id), |(f, _)| type_name(f));
+                    if !out.contains(&facade) {
+                        out.push(facade);
                     }
                 }
             }
@@ -3463,14 +3465,12 @@ mod fq_tests {
         // The public facade is listed (the `__`-part is collapsed to it) and deduped.
         assert!(facades
             .iter()
-            .any(|f| f == "kotlin/collections/CollectionsKt"));
+            .any(|f| f.matches("kotlin/collections/CollectionsKt")));
         assert!(
             !facades.iter().any(|f| f.contains("__")),
             "parts collapse to the public facade"
         );
-        let mut deduped = facades.clone();
-        deduped.sort();
-        deduped.dedup();
+        let deduped: HashSet<_> = facades.iter().copied().collect();
         assert_eq!(deduped.len(), facades.len(), "no duplicate facades");
         // A package no jar declares yields nothing.
         assert!(cp.package_facades("no/such/pkg").is_empty());
