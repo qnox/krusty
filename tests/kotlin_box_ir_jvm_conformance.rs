@@ -436,14 +436,16 @@ fn compile_blocks(
         }
     }
     for (file_index, decl_id, name, facade) in fns {
+        let facade_name = krusty::types::type_name(&facade);
         syms.fn_facades_by_decl
-            .insert((file_index, decl_id), facade.clone());
-        syms.fn_facades.insert(name, facade);
+            .insert((file_index, decl_id), facade_name);
+        syms.fn_facades.insert(name, facade_name);
     }
     for (name, facade) in props {
         if let Some(&(ty, is_var, is_const)) = syms.props.get(&name) {
+            let facade_name = krusty::types::type_name(&facade);
             syms.prop_facades
-                .insert(name, (facade, ty, is_var, is_const));
+                .insert(name, (facade_name, ty, is_var, is_const));
         }
     }
 

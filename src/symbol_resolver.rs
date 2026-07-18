@@ -14,7 +14,7 @@ use crate::libraries::{
     LibraryMember, Origin, PropKind, SemanticPlatform,
 };
 use crate::symbol_source::SymbolSource;
-use crate::types::Ty;
+use crate::types::{Ty, TypeName};
 use std::borrow::Cow;
 
 #[derive(Clone, Debug, Default)]
@@ -32,15 +32,15 @@ type GSigBinds = std::collections::HashMap<String, Ty>;
 pub(crate) struct SourceOracle<'a>(pub &'a dyn SymbolSource);
 
 impl crate::assignable::TypeOracle for SourceOracle<'_> {
-    fn direct_supertypes(&self, internal: &str) -> Vec<String> {
+    fn direct_supertypes(&self, internal: TypeName) -> Vec<TypeName> {
         self.0
-            .resolve_type(internal)
-            .map(|t| t.supertypes)
+            .resolve_type_name(internal)
+            .map(|t| t.supertypes.iter_ids().collect())
             .unwrap_or_default()
     }
     fn value_underlying(&self, ty: Ty) -> Option<Ty> {
         self.0
-            .resolve_type(ty.kotlin_class_internal()?)
+            .resolve_type_name(ty.kotlin_class_internal()?)
             .and_then(|t| t.value_underlying)
     }
 }
@@ -49,45 +49,53 @@ impl crate::assignable::TypeOracle for SourceOracle<'_> {
 pub(crate) struct PlatformOracle<'a>(pub &'a dyn SemanticPlatform);
 
 impl crate::assignable::TypeOracle for PlatformOracle<'_> {
-    fn direct_supertypes(&self, internal: &str) -> Vec<String> {
+    fn direct_supertypes(&self, internal: TypeName) -> Vec<TypeName> {
         self.0
-            .resolve_type(internal)
-            .map(|t| t.supertypes)
+            .resolve_type_name(internal)
+            .map(|t| t.supertypes.iter_ids().collect())
             .unwrap_or_default()
     }
     fn value_underlying(&self, ty: Ty) -> Option<Ty> {
         self.0.value_underlying(ty)
     }
     fn canonical_class<'a>(&self, internal: &'a str) -> Cow<'a, str> {
-        Cow::Borrowed(platform_class_identity(
-            self.0
-                .library_value_form(Ty::obj(internal))
-                .obj_internal()
-                .unwrap_or(internal),
-        ))
+        let Some(value_internal) = self.0.library_value_form(Ty::obj(internal)).obj_internal()
+        else {
+            return Cow::Borrowed(platform_class_identity(internal));
+        };
+        Cow::Owned(platform_class_identity(&value_internal.render()).to_string())
     }
     fn same_class(&self, a: &str, b: &str) -> bool {
-        let a = platform_class_identity(
-            self.0
-                .library_value_form(Ty::obj(a))
-                .obj_internal()
-                .unwrap_or(a),
-        );
-        let b = platform_class_identity(
-            self.0
-                .library_value_form(Ty::obj(b))
-                .obj_internal()
-                .unwrap_or(b),
-        );
+        let a_value = self.0.library_value_form(Ty::obj(a)).obj_internal();
+        let b_value = self.0.library_value_form(Ty::obj(b)).obj_internal();
+        let a_rendered;
+        let b_rendered;
+        let a = match a_value {
+            Some(n) => {
+                a_rendered = n.render();
+                platform_class_identity(&a_rendered)
+            }
+            None => platform_class_identity(a),
+        };
+        let b = match b_value {
+            Some(n) => {
+                b_rendered = n.render();
+                platform_class_identity(&b_rendered)
+            }
+            None => platform_class_identity(b),
+        };
         platform_class_names_match(a, b)
     }
     fn matches_class(&self, candidate: &str, _target: &str, target_canonical: &str) -> bool {
-        let candidate = platform_class_identity(
-            self.0
-                .library_value_form(Ty::obj(candidate))
-                .obj_internal()
-                .unwrap_or(candidate),
-        );
+        let candidate_value = self.0.library_value_form(Ty::obj(candidate)).obj_internal();
+        let candidate_rendered;
+        let candidate = match candidate_value {
+            Some(n) => {
+                candidate_rendered = n.render();
+                platform_class_identity(&candidate_rendered)
+            }
+            None => platform_class_identity(candidate),
+        };
         platform_class_names_match(candidate, target_canonical)
     }
 }
@@ -176,7 +184,7 @@ pub(crate) fn unify_ty(sig: Ty, actual: Ty, binds: &mut GSigBinds) {
                 // `afsig.ret` instead, and skip the `Continuation` param so it isn't double-unified.
                 let value_params: &[Ty] = match fsig.params.last() {
                     Some(Ty::Obj(n, cargs))
-                        if crate::types::same(n, crate::types::wk::continuation())
+                        if crate::types::same(*n, crate::types::wk::continuation())
                             && !cargs.is_empty() =>
                     {
                         unify_ty(cargs[0], afsig.ret, binds);
@@ -213,7 +221,7 @@ pub(crate) fn ty_subst(sig: Ty, binds: &GSigBinds) -> Ty {
         Ty::Fun(fsig) => Ty::fun(ty_subst_all(&fsig.params, binds), ty_subst(fsig.ret, binds)),
         Ty::Nullable(inner) => Ty::nullable(ty_subst(*inner, binds)),
         Ty::Obj(internal, args) if !args.is_empty() => {
-            Ty::obj_args(internal, &ty_subst_all(args, binds))
+            Ty::obj_args(&internal.render(), &ty_subst_all(args, binds))
         }
         _ => sig,
     }
@@ -326,8 +334,8 @@ pub(crate) fn arg_fits(p: &Ty, a: &Ty) -> bool {
     // whether spelled `kotlin/Any` or its JVM form `java/lang/Object` (a generic vararg element erases to
     // it) — accepts any reference argument.
     p == a
-        || matches!(p, Ty::Obj(n, _) if crate::types::same(n, crate::types::wk::any())
-            || crate::types::same(n, crate::types::wk::java_object()))
+        || matches!(p, Ty::Obj(n, _) if crate::types::same(*n, crate::types::wk::any())
+            || crate::types::same(*n, crate::types::wk::java_object()))
         || matches!((p.fun_arity(), a.fun_arity()), (Some(pn), Some(an)) if pn == an)
         || matches!((p, a), (Ty::Obj(pi, _), Ty::Obj(ai, _)) if pi == ai)
 }
@@ -395,7 +403,7 @@ pub(crate) fn trailing_default_arg_indices(
 fn is_default_ctor_marker(ty: Ty) -> bool {
     matches!(
         ty,
-        Ty::Obj("kotlin/jvm/internal/DefaultConstructorMarker", _)
+        Ty::Obj(n, _) if n.matches("kotlin/jvm/internal/DefaultConstructorMarker")
     )
 }
 
@@ -624,6 +632,10 @@ impl<'a> SymbolResolver<'a> {
         self.src.is_value(internal)
     }
 
+    pub fn is_value_name(&self, internal: TypeName) -> bool {
+        self.src.is_value_name(internal)
+    }
+
     /// The single-field UNDERLYING type of the value class named `internal` (`Result` → `Object`), resolved
     /// through the federated source. `None` if not a value class this resolver knows.
     pub fn value_underlying(&self, internal: &str) -> Option<Ty> {
@@ -632,17 +644,23 @@ impl<'a> SymbolResolver<'a> {
             .and_then(|t| t.value_underlying)
     }
 
+    pub fn value_underlying_name(&self, internal: TypeName) -> Option<Ty> {
+        self.src
+            .resolve_type_name(internal)
+            .and_then(|t| t.value_underlying)
+    }
+
     /// Whether the type named `internal` — or anything in its (classpath) supertype chain — declares a
     /// member named `name` (Kotlin/source or physical JVM name). Drives the OVERRIDE test for a class
     /// whose supertype is not in the same file: an override is emitted without `ACC_FINAL` (kotlinc).
     pub fn declares_member(&self, internal: &str, name: &str) -> bool {
-        let mut work = vec![internal.to_string()];
+        let mut work = vec![crate::types::type_name(internal)];
         let mut seen = std::collections::HashSet::new();
         while let Some(cur) = work.pop() {
-            if cur == "java/lang/Object" || cur == "kotlin/Any" || !seen.insert(cur.clone()) {
+            if cur.matches("java/lang/Object") || cur.matches("kotlin/Any") || !seen.insert(cur) {
                 continue;
             }
-            let Some(t) = self.src.resolve_type(&cur) else {
+            let Some(t) = self.src.resolve_type_name(cur) else {
                 continue;
             };
             if t.members
@@ -651,7 +669,7 @@ impl<'a> SymbolResolver<'a> {
             {
                 return true;
             }
-            work.extend(t.supertypes.iter().cloned());
+            work.extend(t.supertypes.iter_ids());
         }
         false
     }
@@ -670,6 +688,11 @@ impl<'a> SymbolResolver<'a> {
     /// interface shape), or `None` for an unknown name. The type-side counterpart of [`resolve_symbol`].
     pub fn resolve_type(&self, internal: &str) -> Option<crate::libraries::LibraryType> {
         self.src.resolve_type(internal)
+    }
+
+    /// Id-backed type query for callers that already carry a [`TypeName`].
+    pub fn resolve_type_name(&self, internal: TypeName) -> Option<crate::libraries::LibraryType> {
+        self.src.resolve_type_name(internal)
     }
 
     /// Resolve a name on a receiver to the thing it DENOTES — a member, a property, a companion/instance
@@ -863,7 +886,7 @@ impl<'a> SymbolResolver<'a> {
                 crate::trace_compiler!(
                     "resolve",
                     "top-level {name} args={args:?} -> {}.{}{} default inline={:?}",
-                    c.owner,
+                    c.owner.render(),
                     c.name,
                     c.descriptor,
                     c.inline
@@ -876,7 +899,7 @@ impl<'a> SymbolResolver<'a> {
             crate::trace_compiler!(
                 "resolve",
                 "top-level {name} args={args:?} -> {}.{}{} inline-only",
-                c.owner,
+                c.owner.render(),
                 c.name,
                 c.descriptor
             );
@@ -885,7 +908,10 @@ impl<'a> SymbolResolver<'a> {
 
         let (o, params, ret) = pick?;
         let c = &o.callable;
-        if ret.obj_internal() == Some("kotlin/reflect/KType") {
+        if ret
+            .obj_internal()
+            .is_some_and(|n| n.matches("kotlin/reflect/KType"))
+        {
             return None;
         }
 
@@ -929,7 +955,7 @@ impl<'a> SymbolResolver<'a> {
         crate::trace_compiler!(
             "resolve",
             "top-level {name} args={args:?} -> {}.{}{} inline={:?}",
-            c.owner,
+            c.owner.render(),
             c.name,
             c.descriptor,
             c.inline
@@ -973,7 +999,7 @@ impl<'a> SymbolResolver<'a> {
             crate::trace_compiler!(
                 "resolve",
                 "bind_extension_callable {}.{} gsig={} type_args={type_args:?} ret_ty={ret_ty:?} -> {ret_ty2:?}",
-                c.owner,
+                c.owner.render(),
                 c.name,
                 o.generic_sig.is_some()
             );
@@ -997,7 +1023,7 @@ impl<'a> SymbolResolver<'a> {
             crate::trace_compiler!(
                 "resolve",
                 "extension defaulted ($default) {name} recv={receiver:?} args={args:?} -> {}.{}{} ret={ret_ty:?}",
-                c.owner,
+                c.owner.render(),
                 c.name,
                 c.descriptor
             );
@@ -1009,7 +1035,7 @@ impl<'a> SymbolResolver<'a> {
             crate::trace_compiler!(
                 "resolve",
                 "extension defaulted (inline) {name} recv={receiver:?} args={args:?} -> {}.{}{} ret={ret_ty:?}",
-                callable.owner,
+                callable.owner.render(),
                 callable.name,
                 callable.descriptor
             );
@@ -1049,7 +1075,7 @@ impl<'a> SymbolResolver<'a> {
             crate::trace_compiler!(
                 "resolve",
                 "extension defaulted slots ($default) {name} recv={receiver:?} slots={slots:?} -> {}.{}{} ret={ret_ty:?}",
-                c.owner,
+                c.owner.render(),
                 c.name,
                 c.descriptor
             );
@@ -1537,10 +1563,9 @@ pub(crate) fn synthetic_default_member(
     // continuation in place; the coroutine pass threads the value there (see `append_continuation`).
     let m = t.companion.iter().find(|m| {
         m.name == dname
-            && m.params
-                .get(arity + 1)
-                .copied()
-                .is_some_and(|p| matches!(p, Ty::Obj("kotlin/coroutines/Continuation", _)))
+            && m.params.get(arity + 1).copied().is_some_and(
+                |p| matches!(p, Ty::Obj(n, _) if n.matches("kotlin/coroutines/Continuation")),
+            )
             && has_default_tail(&m.params, arity + 2, Ty::is_reference)
     })?;
     Some((
@@ -1686,7 +1711,9 @@ fn resolve_instance_ref(lib: &dyn SemanticPlatform, recv: Ty, name: &str) -> Opt
     // null-guards for a nullable/type-parameter receiver (`null::toString` yields "null"); a direct
     // `invokevirtual` on a captured null would NPE. The erased receiver (an unbounded `T`) reads as a
     // non-null `Any` here, so the receiver-type guard cannot catch it — reject on the resolved OWNER.
-    if o.callable.owner.as_str() == crate::types::wk::java_object() {
+    if o.callable
+        .owner_matches(&crate::types::wk::java_object().render())
+    {
         return None;
     }
     let ret = o.ret.apply(o.callable.ret);
@@ -1699,7 +1726,7 @@ fn resolve_instance_ref(lib: &dyn SemanticPlatform, recv: Ty, name: &str) -> Opt
 /// value-class-ness, interface-ness, or property-vs-function from the platform themselves.
 #[derive(Clone, Debug)]
 pub struct BoundPropertyRef {
-    pub owner: String,
+    pub owner: TypeName,
     pub getter_name: String,
     pub prop_ty: Ty,
 }
@@ -1729,9 +1756,12 @@ fn resolve_property_ref(
         return None;
     }
     let owner = m.member.owner?;
+    let owner_name = owner.render();
     if m.member.name.contains('-')
-        || lib.is_value(&owner)
-        || lib.resolve_type(&owner).is_some_and(|t| t.is_interface())
+        || lib.is_value(&owner_name)
+        || lib
+            .resolve_type(&owner_name)
+            .is_some_and(|t| t.is_interface())
     {
         return None;
     }
@@ -1834,7 +1864,7 @@ fn resolve_property_member(
             // the plain lookups above miss it. Recover the mangled getter + logical value-class type.
             let internal = recv.kotlin_class_internal()?;
             let member = lib
-                .resolve_type(internal)?
+                .resolve_type_name(internal)?
                 .value_class_property(property)
                 .cloned()?;
             let ret = member.ret;
@@ -1961,27 +1991,22 @@ pub(crate) fn source_receiver_rank(src: &dyn SymbolSource, recv: Ty, decl_recv: 
     }
     let want = decl_recv.erased_recv().kotlin_class_internal();
     if let (Some(want), Some(start)) = (want, recv.erased_recv().kotlin_class_internal()) {
-        let mut seen = crate::types::NameWalkSet::new();
-        let (start_id, _) = seen.insert(start.to_string());
-        let mut frontier = vec![start_id];
+        let mut seen = std::collections::HashSet::new();
+        let mut frontier = vec![start];
         let mut rung = 0u32;
         while !frontier.is_empty() {
-            if frontier
-                .iter()
-                .any(|&t| seen.get(t).is_some_and(|t| t == want))
-            {
+            if frontier.contains(&want) {
                 return Some(rung);
             }
             let mut next = Vec::new();
-            for &t in &frontier {
-                let supertypes = seen
-                    .get(t)
-                    .and_then(|t| src.resolve_type(t).map(|lt| lt.supertypes));
-                if let Some(supertypes) = supertypes {
-                    for supertype in supertypes {
-                        let (id, inserted) = seen.insert(supertype);
-                        if inserted {
-                            next.push(id);
+            for &ty in &frontier {
+                if !seen.insert(ty) {
+                    continue;
+                }
+                if let Some(shape) = src.resolve_type_name(ty) {
+                    for supertype in shape.supertypes.iter_ids() {
+                        if !seen.contains(&supertype) {
+                            next.push(supertype);
                         }
                     }
                 }
@@ -1992,7 +2017,7 @@ pub(crate) fn source_receiver_rank(src: &dyn SymbolSource, recv: Ty, decl_recv: 
     }
     // A universal `Any`-receiver extension (`<T> T.let`) applies to every receiver — arrays included — at
     // lowest precedence.
-    (want == Some("kotlin/Any")).then_some(u32::MAX - 1)
+    (want.is_some_and(|n| n.matches("kotlin/Any"))).then_some(u32::MAX - 1)
 }
 
 pub(crate) fn resolve_symbols_in_scope(
@@ -2040,10 +2065,7 @@ fn fn_in_scope(o: &FunctionInfo, fn_scope: Option<&[String]>) -> bool {
     }
     match fn_scope {
         None => true,
-        Some(scope) => {
-            let pkg = o.callable.owner.rsplit_once('/').map_or("", |(p, _)| p);
-            scope.iter().any(|p| p == pkg)
-        }
+        Some(scope) => scope.iter().any(|p| o.callable.owner_package_matches(p)),
     }
 }
 
@@ -2076,7 +2098,7 @@ fn select_overload(
     // type variables, nullable types) that may have no `resolve_type` entry, so gate only members.
     if kind == FnKind::Member {
         let internal = recv.kotlin_class_internal()?;
-        if !lib.resolve_type(internal)?.is_public {
+        if !lib.resolve_type_name(internal)?.is_public {
             return None;
         }
     }
@@ -2118,7 +2140,7 @@ fn select_overload(
             o.public(),
             o.receiver_rank,
             o.callable.origin,
-            o.callable.owner,
+            o.callable.owner.render(),
         );
     }
     // Candidates as `(overload, logical value params)`, grouped by receiver rank. An extension admits only
@@ -2158,7 +2180,7 @@ fn select_overload(
         crate::trace_compiler!(
             "resolve",
             "  cand {name} rank={rank} logical_params={lp:?} owner={}",
-            o.callable.owner
+            o.callable.owner.render()
         );
         by_rank.entry(rank).or_default().push((o, lp));
     }
@@ -2342,7 +2364,10 @@ fn fun_return_compatible(lib: &dyn SemanticPlatform, param: Ty, arg: Ty) -> bool
         return true;
     };
     if matches!(pr, Ty::TyParam(..) | Ty::Error)
-        || pr.non_null().obj_internal() == Some("kotlin/Any")
+        || pr
+            .non_null()
+            .obj_internal()
+            .is_some_and(|n| n.matches("kotlin/Any"))
     {
         return true;
     }
@@ -2361,7 +2386,7 @@ fn fun_return_compatible(lib: &dyn SemanticPlatform, param: Ty, arg: Ty) -> bool
         ar.non_null().kotlin_class_internal(),
     ) {
         if pr.is_reference() && ar.is_reference() {
-            return platform_subtype(lib, Ty::obj(a), Ty::obj(p));
+            return platform_subtype(lib, Ty::obj(&a.render()), Ty::obj(&p.render()));
         }
     }
     false
@@ -2415,7 +2440,7 @@ mod tests {
             Some(crate::libraries::LibraryType {
                 is_public: true,
                 kind: TypeKind::Class,
-                supertypes,
+                supertypes: supertypes.into(),
                 constructors: vec![],
                 members: vec![],
                 companion: vec![],
@@ -2426,7 +2451,7 @@ mod tests {
                 value_underlying: (internal == "kotlin/UInt").then_some(Ty::Int),
                 alias_target: None,
                 type_params: Vec::new(),
-                sealed_subclasses: Vec::new(),
+                sealed_subclasses: crate::types::TypeNameList::new(),
                 enum_entries: Vec::new(),
                 value_ctor_has_default: false,
                 ctor_named_params: Vec::new(),
@@ -2438,13 +2463,13 @@ mod tests {
 
     impl crate::libraries::SemanticPlatform for FakeSource {
         fn value_underlying(&self, ty: Ty) -> Option<Ty> {
-            self.resolve_type(ty.obj_internal()?)
+            self.resolve_type_name(ty.obj_internal()?)
                 .and_then(|t| t.value_underlying)
         }
 
         fn library_value_form(&self, ty: Ty) -> Ty {
             ty.obj_internal()
-                .and_then(crate::jvm::jvm_class_map::kotlin_builtin_to_jvm)
+                .and_then(|n| crate::jvm::jvm_class_map::kotlin_builtin_to_jvm(&n.render()))
                 .map(Ty::obj)
                 .unwrap_or(ty)
         }
@@ -2454,7 +2479,7 @@ mod tests {
 
     fn top_level_default_uint_info() -> FunctionInfo {
         let callable = LibraryCallable {
-            owner: "kotlin/UIntKt".to_string(),
+            owner: "kotlin/UIntKt".into(),
             name: "make$default".to_string(),
             params: vec![Ty::Int],
             ret: Ty::Int,

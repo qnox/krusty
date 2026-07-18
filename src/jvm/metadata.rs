@@ -9,7 +9,7 @@
 
 use super::classreader::ClassInfo;
 use crate::libraries::{CallSig, GenericSig, ParamList};
-use crate::types::{intern, Ty};
+use crate::types::{intern, type_name, Ty, TypeName};
 use std::collections::HashMap;
 
 /// Decode a Kotlin `@Metadata` `Type` message into a signature [`Ty`] — the metadata-primary,
@@ -891,12 +891,12 @@ fn build_generic_sig(
 
 #[derive(Clone, Debug)]
 pub struct MetaValueParam {
-    pub ty: Option<String>,
+    pub ty: Option<TypeName>,
     pub name: String,
     pub has_default: bool,
     pub materialized: bool,
     pub recv_fun: bool,
-    pub recv_fun_receiver: Option<String>,
+    pub recv_fun_receiver: Option<TypeName>,
 }
 
 /// A function decoded from a `Class`/`Package` `@Metadata` message — the *metadata-truth* signature
@@ -916,13 +916,13 @@ pub struct MetaFn {
     pub is_suspend: bool,
     /// Extension-receiver Kotlin class name (`kotlin/Result` for `Result.getOrThrow`), if any. `None` for a
     /// top-level fn AND for an extension on a type PARAMETER — use [`MetaFn::is_extension`] to disambiguate.
-    pub receiver_class: Option<&'static str>,
+    pub receiver_class: Option<TypeName>,
     /// Whether this is an EXTENSION (has a receiver of any kind — class or type parameter) vs a true
     /// top-level function. Lets the classpath ext index avoid mis-indexing a top-level generic as an
     /// extension on its first parameter's type.
     pub is_extension: bool,
     /// The Kotlin return-type class name (`kotlin/UInt` for `UInt.coerceAtMost`), if it is a class type.
-    pub ret_class: Option<&'static str>,
+    pub ret_class: Option<TypeName>,
     /// Whether the Kotlin return type is nullable (`T?`) — `Type.nullable`. The JVM descriptor/`Signature`
     /// erase this; only `@Metadata` carries it. Drives the elvis null-check for a nullable-returning scope
     /// fn (`takeIf`/`takeUnless` return `T?`).
@@ -970,7 +970,7 @@ pub struct MetaProp {
     pub name: String,
     /// The Kotlin return-type class name (`kotlin/String`), if it is a class type; `None` for a bare
     /// type parameter.
-    pub ret_class: Option<String>,
+    pub ret_class: Option<TypeName>,
     /// The JVM getter method name (`getLength`, or a `@JvmName`/value-class-mangled spelling) + its
     /// descriptor, from the `JvmPropertySignature`. `None` if the metadata omits an explicit getter.
     pub getter: Option<MetaJvmMethodSig>,
@@ -982,7 +982,7 @@ pub struct MetaProp {
     pub is_var: bool,
     /// The EXTENSION receiver's class name (`val String.foo` → `kotlin/String`) — `None` for an
     /// ordinary member/top-level property.
-    pub receiver_class: Option<String>,
+    pub receiver_class: Option<TypeName>,
 }
 
 /// Decode every `Function` (proto field `fn_field`: 9 in a `Class`, 3 in a `Package`) of this class's
@@ -1053,16 +1053,18 @@ fn decode_functions(ci: &ClassInfo, fn_field: u64) -> Vec<MetaFn> {
                         .value_params
                         .iter()
                         .map(|p| {
-                            let recv_fun = p
+                            let recv_fun_ty = p
                                 .recv_fun
                                 .0
                                 .and_then(|id| resolve_class_name(&records, d2, id as usize))
-                                .as_deref()
-                                == Some("kotlin/ExtensionFunctionType");
+                                .map(|name| type_name(&name));
+                            let recv_fun = recv_fun_ty
+                                .is_some_and(|name| name.matches("kotlin/ExtensionFunctionType"));
                             MetaValueParam {
                                 ty: p
                                     .class_id
-                                    .and_then(|id| resolve_class_name(&records, d2, id as usize)),
+                                    .and_then(|id| resolve_class_name(&records, d2, id as usize))
+                                    .map(|name| type_name(&name)),
                                 // Param names are plain string-table entries (like the JVM name/desc), not class names.
                                 name: resolve_string(&records, d2, p.name_id as usize)
                                     .unwrap_or_default(),
@@ -1070,9 +1072,12 @@ fn decode_functions(ci: &ClassInfo, fn_field: u64) -> Vec<MetaFn> {
                                 materialized: p.materialized,
                                 recv_fun,
                                 recv_fun_receiver: if recv_fun {
-                                    p.recv_fun.1.and_then(|id| {
-                                        resolve_class_name(&records, d2, id as usize)
-                                    })
+                                    p.recv_fun
+                                        .1
+                                        .and_then(|id| {
+                                            resolve_class_name(&records, d2, id as usize)
+                                        })
+                                        .map(|name| type_name(&name))
                                 } else {
                                     None
                                 },
@@ -1091,9 +1096,9 @@ fn decode_functions(ci: &ClassInfo, fn_field: u64) -> Vec<MetaFn> {
                         is_public: pf.is_public,
                         is_inline: pf.is_inline,
                         is_suspend: pf.is_suspend,
-                        receiver_class: receiver_class.map(|s| intern(&s)),
+                        receiver_class: receiver_class.map(|s| type_name(&s)),
                         is_extension: pf.has_receiver,
-                        ret_class: ret_class.map(|s| intern(&s)),
+                        ret_class: ret_class.map(|s| type_name(&s)),
                         ret_nullable: pf.ret_nullable,
                         value_params,
                         generic_sig,
@@ -1150,7 +1155,8 @@ pub fn package_type_aliases(ci: &ClassInfo) -> Vec<(String, String)> {
                     // Key the alias by its FULL internal name — its declaring package (the facade's) plus
                     // the alias's simple name — so `kotlin/collections/ArrayList` is distinct from any other
                     // package's `ArrayList`. `resolve_type` looks it up by that full name.
-                    let pkg = ci.this_class.rsplit_once('/').map_or("", |(p, _)| p);
+                    let this_class = ci.this_class();
+                    let pkg = this_class.rsplit_once('/').map_or("", |(p, _)| p);
                     let full = if pkg.is_empty() {
                         name
                     } else {
@@ -1456,10 +1462,10 @@ fn decode_properties(ci: &ClassInfo, prop_field: u64) -> Vec<MetaProp> {
             }
         }
     }
-    let type_of_id = |tid: u64| -> Option<String> {
+    let type_of_id = |tid: u64| -> Option<TypeName> {
         let tb = types.get(tid as usize)?;
         let cn = parse_type_class_name(tb)?;
-        resolve_class_name(&records, d2, cn as usize)
+        resolve_class_name(&records, d2, cn as usize).map(|name| type_name(&name))
     };
     // `Property.flags`: HAS_ANNOTATIONS(0) · VISIBILITY(1..3) · MODALITY(4..5) · IS_VAR(6) ·
     // HAS_GETTER(7) · HAS_SETTER(8) · IS_CONST(9) · …
@@ -1481,7 +1487,8 @@ fn decode_properties(ci: &ClassInfo, prop_field: u64) -> Vec<MetaProp> {
                     let Some(n) = p.varint() else { break };
                     let Some(tb) = p.bytes(n as usize) else { break };
                     ret = parse_type_class_name(tb)
-                        .and_then(|cn| resolve_class_name(&records, d2, cn as usize));
+                        .and_then(|cn| resolve_class_name(&records, d2, cn as usize))
+                        .map(|name| type_name(&name));
                 }
                 (9, 0) => ret = p.varint().and_then(type_of_id),
                 // `Property.receiver_type` (field 5, inline `Type`) / `receiver_type_id` (field 10) —
@@ -1490,7 +1497,8 @@ fn decode_properties(ci: &ClassInfo, prop_field: u64) -> Vec<MetaProp> {
                     let Some(n) = p.varint() else { break };
                     let Some(tb) = p.bytes(n as usize) else { break };
                     receiver_class = parse_type_class_name(tb)
-                        .and_then(|cn| resolve_class_name(&records, d2, cn as usize));
+                        .and_then(|cn| resolve_class_name(&records, d2, cn as usize))
+                        .map(|name| type_name(&name));
                 }
                 (10, 0) => receiver_class = p.varint().and_then(type_of_id),
                 (100, 2) => {

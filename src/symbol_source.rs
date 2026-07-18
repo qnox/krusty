@@ -12,7 +12,7 @@
 //! the composite federates at the resolve boundary, never by flattening one global overload set.
 
 use crate::libraries::{FunctionSet, LibraryType, PropertySet, ResolvedSymbols};
-use crate::types::Ty;
+use crate::types::{Ty, TypeName};
 
 /// A provider of declarations — a module's AST or a compiled library. The arg-independent metadata
 /// surface that federates across sources; arg-dependent selection/binding lives above (the resolver).
@@ -35,11 +35,22 @@ pub trait SymbolSource {
         None
     }
 
+    /// Id-backed type lookup. Providers that already index by ids should override this; the default keeps
+    /// legacy string-backed sources working while callers stop rendering names at each use site.
+    fn resolve_type_name(&self, internal: TypeName) -> Option<LibraryType> {
+        self.resolve_type(&internal.render())
+    }
+
     /// Whether `internal` names a `@JvmInline value`/inline class — the value-class-ness attribute of the
     /// class SYMBOL, queried by name. THE authority the value-class pass and resolver consult, rather than
     /// a side "value-class set". Derived from the symbol's `value_underlying` shape.
     fn is_value(&self, internal: &str) -> bool {
         self.resolve_type(internal)
+            .is_some_and(|t| t.value_underlying.is_some())
+    }
+
+    fn is_value_name(&self, internal: TypeName) -> bool {
+        self.resolve_type_name(internal)
             .is_some_and(|t| t.value_underlying.is_some())
     }
 
@@ -114,6 +125,12 @@ impl SymbolSource for CompositeSource<'_> {
 
     fn resolve_type(&self, internal: &str) -> Option<LibraryType> {
         self.children.iter().find_map(|c| c.resolve_type(internal))
+    }
+
+    fn resolve_type_name(&self, internal: TypeName) -> Option<LibraryType> {
+        self.children
+            .iter()
+            .find_map(|c| c.resolve_type_name(internal))
     }
 
     fn resolve_symbols(&self, fqn: &str) -> ResolvedSymbols {
@@ -221,7 +238,7 @@ mod tests {
                         setter: None,
                         is_const: false,
                         visibility: Visibility::Public,
-                        owner: self.owner.clone(),
+                        owner: self.owner.as_str().into(),
                         receiver_rank: 0,
                     }],
                 }
@@ -234,7 +251,7 @@ mod tests {
                 Some(LibraryType {
                     is_public: true,
                     kind: crate::libraries::TypeKind::Class,
-                    supertypes: vec![self.owner.clone()],
+                    supertypes: vec![self.owner.clone()].into(),
                     constructors: vec![],
                     members: vec![],
                     companion: vec![],
@@ -245,7 +262,7 @@ mod tests {
                     value_underlying: None,
                     alias_target: None,
                     type_params: Vec::new(),
-                    sealed_subclasses: Vec::new(),
+                    sealed_subclasses: crate::types::TypeNameList::new(),
                     enum_entries: Vec::new(),
                     value_ctor_has_default: false,
                     ctor_named_params: Vec::new(),
@@ -282,8 +299,8 @@ mod tests {
         let fs = c.member_overloads(Ty::obj("R"), "greet");
         // Both contribute; the module's (first) overload comes first.
         assert_eq!(fs.overloads.len(), 2);
-        assert_eq!(fs.overloads[0].callable.owner, "module");
-        assert_eq!(fs.overloads[1].callable.owner, "library");
+        assert!(fs.overloads[0].callable.owner.matches("module"));
+        assert!(fs.overloads[1].callable.owner.matches("library"));
     }
 
     #[test]
@@ -306,8 +323,8 @@ mod tests {
         let c = CompositeSource::new(vec![&m as &dyn SymbolSource, &l]);
         let ps = c.property_members(Ty::obj("R"), "greet");
         assert_eq!(ps.overloads.len(), 2);
-        assert_eq!(ps.overloads[0].owner, "module");
-        assert_eq!(ps.overloads[1].owner, "library");
+        assert!(ps.overloads[0].owner.matches("module"));
+        assert!(ps.overloads[1].owner.matches("library"));
     }
 
     #[test]
@@ -333,7 +350,7 @@ mod tests {
         let c = CompositeSource::new(vec![&m as &dyn SymbolSource, &l]);
         // Both define `shared`; the module (first) wins.
         let t = c.resolve_type("shared").expect("a shape");
-        assert_eq!(t.supertypes, vec!["module".to_string()]);
+        assert_eq!(t.supertypes.to_vec(), vec!["module".to_string()]);
     }
 
     #[test]
@@ -359,7 +376,7 @@ mod tests {
         // Nesting works: the inner composite's module overload is found, library appends after.
         let fs = outer.member_overloads(Ty::obj("R"), "greet");
         assert_eq!(fs.overloads.len(), 2);
-        assert_eq!(fs.overloads[0].callable.owner, "module");
+        assert!(fs.overloads[0].callable.owner.matches("module"));
     }
 
     #[test]
@@ -371,7 +388,7 @@ mod tests {
         let fs = c.member_overloads(Ty::obj("R"), "greet");
         assert_eq!(fs.overloads.len(), 2);
         // The pushed library is consulted last.
-        assert_eq!(fs.overloads[1].callable.owner, "library");
+        assert!(fs.overloads[1].callable.owner.matches("library"));
     }
 
     #[test]

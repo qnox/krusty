@@ -11,7 +11,7 @@ use krusty::jvm::metadata::{
     class_companion_name, class_functions, class_inline, package_functions,
 };
 use krusty::symbol_resolver::{SymRecv, Symbol, SymbolResolver};
-use krusty::types::Ty;
+use krusty::types::{type_name, Ty};
 use std::rc::Rc;
 
 fn cp() -> Option<Classpath> {
@@ -71,7 +71,7 @@ fn resultkt_get_or_throw_is_public_inline_extension_in_metadata() {
     assert!(g.is_inline, "getOrThrow must be inline");
     assert_eq!(
         g.receiver_class,
-        Some("kotlin/Result"),
+        Some(type_name("kotlin/Result")),
         "getOrThrow is an extension on Result"
     );
 }
@@ -126,7 +126,7 @@ fn result_get_or_throw_resolves_as_inline_extension() {
         )
         .and_then(Symbol::extension_call)
         .expect("getOrThrow resolves on a Result receiver via @Metadata");
-    assert_eq!(c.owner, "kotlin/ResultKt");
+    assert!(c.owner.matches("kotlin/ResultKt"));
     assert_eq!(c.name, "getOrThrow");
     assert!(c.inline.can_inline(), "getOrThrow is inline");
 
@@ -163,7 +163,7 @@ fn result_get_or_null_resolves_as_nullable_metadata_member() {
         )
         .and_then(Symbol::call)
         .expect("getOrNull resolves on Result via value-class @Metadata");
-    assert_eq!(m.member.owner.as_deref(), Some("kotlin/Result"));
+    assert_eq!(m.member.owner_name().as_deref(), Some("kotlin/Result"));
     assert_eq!(m.member.name, "getOrNull-impl");
     assert_eq!(
         m.member.descriptor,

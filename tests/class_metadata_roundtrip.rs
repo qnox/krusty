@@ -8,7 +8,7 @@
 use krusty::jvm::classreader::ClassInfo;
 use krusty::jvm::metadata::{class_functions, package_functions};
 use krusty::metadata::class_builder::{build_class, FnMeta};
-use krusty::types::Ty;
+use krusty::types::{type_name, Ty};
 
 /// Wrap built `(d1_bytes, d2)` into a `ClassInfo` the reader consumes. `d1` is the protobuf payload with
 /// one byte per `char` (the constant pool writes it as modified-UTF-8, the reader decodes it back).
@@ -16,9 +16,9 @@ fn class_info(internal: &str, d1: Vec<u8>, d2: Vec<String>) -> ClassInfo {
     ClassInfo {
         major: 52,
         access: 0,
-        this_class: internal.to_string(),
-        super_class: Some("java/lang/Object".to_string()),
-        interfaces: Vec::new(),
+        this_class: internal.into(),
+        super_class: Some("java/lang/Object".into()),
+        interfaces: Vec::<String>::new().into(),
         fields: Vec::new(),
         methods: Vec::new(),
         kotlin_d1: vec![d1.iter().map(|&b| b as char).collect()],
@@ -59,14 +59,10 @@ fn class_member_value_params_round_trip() {
     // The SOURCE value-parameter types must round-trip — this is what cross-module resolution reads to
     // recover a call's matchable arity (drop any synthetic trailing params the descriptor appends).
     assert_eq!(
-        greet
-            .value_params
-            .iter()
-            .map(|p| p.ty.clone())
-            .collect::<Vec<_>>(),
+        greet.value_params.iter().map(|p| p.ty).collect::<Vec<_>>(),
         vec![
-            Some("kotlin/String".to_string()),
-            Some("kotlin/Int".to_string())
+            Some(type_name("kotlin/String")),
+            Some(type_name("kotlin/Int"))
         ],
         "build_class → class_functions must preserve each member param's source type"
     );
@@ -137,7 +133,7 @@ fn package_extension_receiver_round_trips() {
     );
     assert_eq!(
         f.receiver_class,
-        Some("androidx/navigation/NavGraphBuilder"),
+        Some(type_name("androidx/navigation/NavGraphBuilder")),
         "the extension receiver class must round-trip"
     );
     assert_eq!(
@@ -174,9 +170,9 @@ fn package_receiver_function_type_param_round_trips() {
     assert_eq!(
         f.value_params
             .iter()
-            .map(|p| p.recv_fun_receiver.clone())
+            .map(|p| p.recv_fun_receiver)
             .collect::<Vec<_>>(),
-        vec![Some("androidx/navigation/NavGraphBuilder".to_string())],
+        vec![Some(type_name("androidx/navigation/NavGraphBuilder"))],
         "the receiver-function-type param's @ExtensionFunctionType + receiver class must round-trip"
     );
 }

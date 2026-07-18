@@ -6,6 +6,8 @@
 //! Also reads the `@kotlin.Metadata` annotation (RuntimeVisibleAnnotations) to extract the `d2`
 //! string table, which contains type-alias targets used by `classpath.rs` for type resolution.
 
+use crate::types::{TypeName, TypeNameList};
+
 pub const ACC_PUBLIC: u16 = 0x0001;
 pub const ACC_PROTECTED: u16 = 0x0004;
 pub const ACC_STATIC: u16 = 0x0008;
@@ -63,10 +65,10 @@ pub struct ClassInfo {
     /// class access flags (`ACC_PUBLIC`, …)
     pub access: u16,
     /// internal name, e.g. `java/lang/String`
-    pub this_class: String,
-    pub super_class: Option<String>,
+    pub this_class: TypeName,
+    pub super_class: Option<TypeName>,
     /// Directly-implemented interface internal names (e.g. `String` → `[java/lang/CharSequence, …]`).
-    pub interfaces: Vec<String>,
+    pub interfaces: TypeNameList,
     pub fields: Vec<FieldSig>,
     pub methods: Vec<MethodSig>,
     /// Strings from the `@kotlin.Metadata` `d1` annotation element — the BitEncoded protobuf carrying
@@ -86,6 +88,22 @@ pub struct ClassInfo {
 }
 
 impl ClassInfo {
+    pub fn this_class(&self) -> String {
+        self.this_class.render()
+    }
+
+    pub fn this_class_matches(&self, internal: &str) -> bool {
+        self.this_class.matches(internal)
+    }
+
+    pub fn super_class(&self) -> Option<String> {
+        self.super_class.map(TypeName::render)
+    }
+
+    pub fn interfaces(&self) -> Vec<String> {
+        self.interfaces.to_vec()
+    }
+
     pub fn is_public(&self) -> bool {
         self.access & ACC_PUBLIC != 0
     }
@@ -393,9 +411,9 @@ pub fn parse_class(bytes: &[u8]) -> Result<ClassInfo, ReadError> {
     Ok(ClassInfo {
         major,
         access,
-        this_class,
-        super_class,
-        interfaces,
+        this_class: this_class.into(),
+        super_class: super_class.map(Into::into),
+        interfaces: interfaces.into(),
         fields,
         methods,
         kotlin_d1: attrs.d1.unwrap_or_default(),
@@ -664,7 +682,7 @@ mod tests {
         cw.add_method(0x0001 | 0x0008 | 0x0010, "add", "(II)I", &code);
         let bytes = cw.finish();
         let ci = parse_class(&bytes).unwrap();
-        assert_eq!(ci.this_class, "demo/RKt");
+        assert!(ci.this_class_matches("demo/RKt"));
         assert_eq!(ci.methods.len(), 1);
         assert_eq!(ci.methods[0].name, "add");
         assert_eq!(ci.methods[0].descriptor, "(II)I");

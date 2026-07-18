@@ -13,6 +13,8 @@
 //! `*TypeAliasesKt` `@Metadata` and are read from the classpath by `classpath::scan_types`). They
 //! are intrinsic to the compiler, so they are seeded unconditionally.
 
+use crate::types::TypeName;
+
 /// Every simple name handled by [`kotlin_builtin_to_jvm`], used to seed the resolver's class map.
 pub const BUILTIN_MAPPED_NAMES: &[&str] = &[
     "Any",
@@ -276,6 +278,159 @@ pub fn to_jvm_internal(internal: &str) -> &str {
         .unwrap_or(internal)
 }
 
+/// Compare a semantic Kotlin/internal class name with a JVM-erased internal name without rendering the
+/// semantic name first.
+pub fn type_name_maps_to_jvm_internal(internal: TypeName, jvm_internal: &str) -> bool {
+    match jvm_internal {
+        "java/lang/Object" => internal.matches("kotlin/Any") || internal.matches(jvm_internal),
+        "java/lang/String" => internal.matches("kotlin/String") || internal.matches(jvm_internal),
+        "java/lang/CharSequence" => {
+            internal.matches("kotlin/CharSequence") || internal.matches(jvm_internal)
+        }
+        "java/lang/Throwable" => {
+            internal.matches("kotlin/Throwable") || internal.matches(jvm_internal)
+        }
+        "java/lang/Cloneable" => {
+            internal.matches("kotlin/Cloneable") || internal.matches(jvm_internal)
+        }
+        "java/lang/Number" => internal.matches("kotlin/Number") || internal.matches(jvm_internal),
+        "java/lang/Comparable" => {
+            internal.matches("kotlin/Comparable") || internal.matches(jvm_internal)
+        }
+        "java/lang/Enum" => internal.matches("kotlin/Enum") || internal.matches(jvm_internal),
+        "java/lang/annotation/Annotation" => {
+            internal.matches("kotlin/Annotation") || internal.matches(jvm_internal)
+        }
+        "java/lang/Void" => internal.matches("kotlin/Nothing") || internal.matches(jvm_internal),
+        "java/lang/Iterable" => {
+            internal.matches("kotlin/collections/Iterable")
+                || internal.matches("kotlin/collections/MutableIterable")
+                || internal.matches(jvm_internal)
+        }
+        "java/util/Iterator" => {
+            internal.matches("kotlin/collections/Iterator")
+                || internal.matches("kotlin/collections/MutableIterator")
+                || internal.matches(jvm_internal)
+        }
+        "java/util/ListIterator" => {
+            internal.matches("kotlin/collections/ListIterator")
+                || internal.matches("kotlin/collections/MutableListIterator")
+                || internal.matches(jvm_internal)
+        }
+        "java/util/Collection" => {
+            internal.matches("kotlin/collections/Collection")
+                || internal.matches("kotlin/collections/MutableCollection")
+                || internal.matches(jvm_internal)
+        }
+        "java/util/List" => {
+            internal.matches("kotlin/collections/List")
+                || internal.matches("kotlin/collections/MutableList")
+                || internal.matches(jvm_internal)
+        }
+        "java/util/Set" => {
+            internal.matches("kotlin/collections/Set")
+                || internal.matches("kotlin/collections/MutableSet")
+                || internal.matches(jvm_internal)
+        }
+        "java/util/Map" => {
+            internal.matches("kotlin/collections/Map")
+                || internal.matches("kotlin/collections/MutableMap")
+                || internal.matches(jvm_internal)
+        }
+        "java/util/Map$Entry" => {
+            internal.matches("kotlin/collections/Map.Entry")
+                || internal.matches("kotlin/collections/Map$Entry")
+                || internal.matches("kotlin/collections/MutableMap.MutableEntry")
+                || internal.matches("kotlin/collections/MutableMap$MutableEntry")
+                || internal.matches(jvm_internal)
+        }
+        _ => internal.matches(jvm_internal),
+    }
+}
+
+fn jvm_erasure_group(internal: TypeName) -> Option<u8> {
+    Some(
+        if internal.matches("kotlin/Any") || internal.matches("java/lang/Object") {
+            0
+        } else if internal.matches("kotlin/String") || internal.matches("java/lang/String") {
+            1
+        } else if internal.matches("kotlin/CharSequence")
+            || internal.matches("java/lang/CharSequence")
+        {
+            2
+        } else if internal.matches("kotlin/Throwable") || internal.matches("java/lang/Throwable") {
+            3
+        } else if internal.matches("kotlin/Cloneable") || internal.matches("java/lang/Cloneable") {
+            4
+        } else if internal.matches("kotlin/Number") || internal.matches("java/lang/Number") {
+            5
+        } else if internal.matches("kotlin/Comparable") || internal.matches("java/lang/Comparable")
+        {
+            6
+        } else if internal.matches("kotlin/Enum") || internal.matches("java/lang/Enum") {
+            7
+        } else if internal.matches("kotlin/Annotation")
+            || internal.matches("java/lang/annotation/Annotation")
+        {
+            8
+        } else if internal.matches("kotlin/Nothing") || internal.matches("java/lang/Void") {
+            9
+        } else if internal.matches("kotlin/collections/Iterable")
+            || internal.matches("kotlin/collections/MutableIterable")
+            || internal.matches("java/lang/Iterable")
+        {
+            10
+        } else if internal.matches("kotlin/collections/Iterator")
+            || internal.matches("kotlin/collections/MutableIterator")
+            || internal.matches("java/util/Iterator")
+        {
+            11
+        } else if internal.matches("kotlin/collections/ListIterator")
+            || internal.matches("kotlin/collections/MutableListIterator")
+            || internal.matches("java/util/ListIterator")
+        {
+            12
+        } else if internal.matches("kotlin/collections/Collection")
+            || internal.matches("kotlin/collections/MutableCollection")
+            || internal.matches("java/util/Collection")
+        {
+            13
+        } else if internal.matches("kotlin/collections/List")
+            || internal.matches("kotlin/collections/MutableList")
+            || internal.matches("java/util/List")
+        {
+            14
+        } else if internal.matches("kotlin/collections/Set")
+            || internal.matches("kotlin/collections/MutableSet")
+            || internal.matches("java/util/Set")
+        {
+            15
+        } else if internal.matches("kotlin/collections/Map")
+            || internal.matches("kotlin/collections/MutableMap")
+            || internal.matches("java/util/Map")
+        {
+            16
+        } else if internal.matches("kotlin/collections/Map.Entry")
+            || internal.matches("kotlin/collections/Map$Entry")
+            || internal.matches("kotlin/collections/MutableMap.MutableEntry")
+            || internal.matches("kotlin/collections/MutableMap$MutableEntry")
+            || internal.matches("java/util/Map$Entry")
+        {
+            17
+        } else {
+            return None;
+        },
+    )
+}
+
+/// Compare two id-backed class names by their JVM erasure identity without materializing either name.
+pub fn type_names_map_to_same_jvm_internal(left: TypeName, right: TypeName) -> bool {
+    left == right
+        || jvm_erasure_group(left)
+            .zip(jvm_erasure_group(right))
+            .is_some_and(|(left, right)| left == right)
+}
+
 /// Inverse of [`to_jvm_internal`]: normalize a JVM built-in name read from the classpath/descriptors
 /// to its Kotlin identity (`java/lang/Object` → `kotlin/Any`), mirroring how the reference compiler
 /// maps Java types into Kotlin ones at the front-end boundary. Passes other names through unchanged.
@@ -293,7 +448,8 @@ pub fn wrapper_internal(t: Ty) -> Option<&'static str> {
     // Route through the single primitive→wrapper table: `boxed_ref` carries a primitive as its Kotlin
     // internal name (`Ty::Int` → `Obj("kotlin/Int")`, `Ty::UInt` → `Obj("kotlin/UInt")`), which
     // `kotlin_prim_to_wrapper` boxes (`kotlin/Int` → `java/lang/Integer`, `kotlin/UInt` → `kotlin/UInt`).
-    kotlin_prim_to_wrapper(t.boxed_ref()?.obj_internal()?)
+    let boxed = t.boxed_ref()?.obj_internal()?;
+    kotlin_prim_to_wrapper(&boxed.render())
 }
 
 #[cfg(test)]

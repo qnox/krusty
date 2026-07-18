@@ -1,7 +1,7 @@
 //! Library metadata shared by symbol sources.
 
-use crate::types::Ty;
 pub use crate::types::Visibility;
+use crate::types::{Ty, TypeName, TypeNameList};
 use std::collections::HashMap;
 
 /// A parsed generic signature in Kotlin's logical shape: formal type-parameter names, an OPTIONAL
@@ -32,7 +32,7 @@ pub struct LibraryMember {
     /// The Kotlin/source name used for resolution (`CharSequence.get`, `Number.toInt`).
     pub name: String,
     /// Concrete platform owner when it differs from the receiver's resolved type.
-    pub owner: Option<String>,
+    pub owner: Option<TypeName>,
     /// Physical method name when it differs from the Kotlin/source member name.
     pub physical_name: Option<String>,
     pub params: Vec<Ty>,
@@ -67,7 +67,7 @@ pub struct LibraryMember {
 /// A public static field read.
 #[derive(Clone, Debug)]
 pub struct StaticFieldRef {
-    pub owner: String,
+    pub owner: TypeName,
     pub name: String,
     pub descriptor: String,
     pub ty: Ty,
@@ -87,8 +87,17 @@ pub trait SemanticPlatform: crate::symbol_source::SymbolSource {
         None
     }
 
+    fn value_underlying_name(&self, internal: TypeName) -> Option<Ty> {
+        self.resolve_type_name(internal)
+            .and_then(|t| t.value_underlying)
+    }
+
     /// A runtime-valued public static field on `internal` or its supertypes.
     fn static_field(&self, _internal: &str, _name: &str) -> Option<StaticFieldRef> {
+        None
+    }
+
+    fn static_field_name(&self, _internal: TypeName, _name: &str) -> Option<StaticFieldRef> {
         None
     }
 
@@ -198,6 +207,14 @@ impl LibraryMember {
             call_sig: CallSig::default(),
         }
     }
+
+    pub fn owner_name(&self) -> Option<String> {
+        self.owner.map(TypeName::render)
+    }
+
+    pub fn owner_name_or(&self, fallback: &str) -> String {
+        self.owner_name().unwrap_or_else(|| fallback.to_string())
+    }
 }
 
 /// Which source a resolved callable came from — set by the source that resolves it, read by the
@@ -215,7 +232,7 @@ pub enum Origin {
 
 impl LibraryCallable {
     pub fn library(
-        owner: impl Into<String>,
+        owner: impl Into<TypeName>,
         name: impl Into<String>,
         params: Vec<Ty>,
         ret: Ty,
@@ -238,6 +255,30 @@ impl LibraryCallable {
             source_receiver: None,
         }
     }
+
+    pub fn owner_name(&self) -> String {
+        self.owner.render()
+    }
+
+    pub fn owner_matches(&self, internal: &str) -> bool {
+        self.owner.matches(internal)
+    }
+
+    pub fn owner_starts_with(&self, prefix: &str) -> bool {
+        self.owner.starts_with(prefix)
+    }
+
+    pub fn owner_contains(&self, needle: &str) -> bool {
+        self.owner.contains(needle)
+    }
+
+    pub fn owner_package_matches(&self, package: &str) -> bool {
+        self.owner.package_matches(package)
+    }
+
+    pub fn owner_package(&self) -> String {
+        self.owner.package()
+    }
 }
 
 /// A resolved companion-object function on a classpath value class (`Result.success`). The call lowers
@@ -246,9 +287,9 @@ impl LibraryCallable {
 #[derive(Clone, Debug)]
 pub struct CompanionFn {
     /// The value-class declaring the companion (`kotlin/Result`).
-    pub class_internal: String,
+    pub class_internal: TypeName,
     /// The companion object's internal name (`kotlin/Result$Companion`).
-    pub companion_internal: String,
+    pub companion_internal: TypeName,
     /// The static field on `class_internal` holding the singleton (`Companion`).
     pub companion_field: String,
     /// Selected companion method. Its `owner` is `companion_internal`; its name/descriptor are backend
@@ -260,7 +301,7 @@ pub struct CompanionFn {
 /// first parameter). `owner` is the internal name of the facade/declaring container for emit.
 #[derive(Clone, Debug)]
 pub struct LibraryCallable {
-    pub owner: String,
+    pub owner: TypeName,
     /// Kotlin/source name used for selection.
     pub name: String,
     pub params: Vec<Ty>,
@@ -499,7 +540,8 @@ impl ReturnInfo {
     pub fn apply_with_class(self, class: Option<Ty>, fallback: Ty) -> Ty {
         let ret = match class {
             Some(meta) if meta.type_args().is_empty() && !fallback.type_args().is_empty() => {
-                Ty::obj_args(meta.name(), fallback.type_args())
+                let name = meta.name();
+                Ty::obj_args(&name, fallback.type_args())
             }
             Some(meta) => meta,
             None => fallback,
@@ -595,7 +637,7 @@ impl FunctionInfo {
             ret,
             self.callable.descriptor.clone(),
         );
-        member.owner = Some(self.callable.owner.clone());
+        member.owner = Some(self.callable.owner);
         member.physical_ret = self.callable.physical_ret;
         member.signature = self.callable.signature.clone();
         member.inline = self.flags.inline;
@@ -727,7 +769,7 @@ pub struct PropertyInfo {
     /// The property's Kotlin visibility.
     pub visibility: Visibility,
     /// The declaring type's internal name — for the resolver's access check (`protected`/`private`).
-    pub owner: String,
+    pub owner: TypeName,
     /// For an [`PropKind::Extension`], the receiver-MRO rung it was found at (0 = the receiver's own
     /// type); `0` for member/top-level. Mirrors [`FunctionInfo::receiver_rank`].
     pub receiver_rank: u32,
@@ -738,6 +780,21 @@ pub struct PropertyInfo {
 #[derive(Clone, Default)]
 pub struct PropertySet {
     pub overloads: Vec<PropertyInfo>,
+}
+
+impl PropertyInfo {
+    pub fn owner_name(&self) -> String {
+        self.owner.render()
+    }
+
+    pub fn owner_name_or(&self, fallback: &str) -> String {
+        let rendered = self.owner.render();
+        if rendered.is_empty() {
+            fallback.to_string()
+        } else {
+            rendered
+        }
+    }
 }
 
 /// The callable half of a [`ResolvedSymbols`]: a name is functions XOR a property, never both (a `fun`
@@ -780,7 +837,7 @@ pub struct LibraryType {
     /// is also an interface.
     pub kind: TypeKind,
     /// Internal names of the superclass + implemented interfaces (for the inherited-member walk).
-    pub supertypes: Vec<String>,
+    pub supertypes: TypeNameList,
     pub constructors: Vec<LibraryMember>,
     /// Instance members (member functions and property accessors).
     pub members: Vec<LibraryMember>,
@@ -798,7 +855,7 @@ pub struct LibraryType {
     /// field on `C` (default name `Companion`, e.g. `Json.Default: Json$Default`). A bare reference to
     /// `C` in value position is that companion instance — `getstatic C.field:LcompanionType;`. Lets the
     /// resolver resolve `Json.encodeToString(…)` (an instance method on the companion's type).
-    pub companion_object: Option<(String, String)>,
+    pub companion_object: Option<(String, TypeName)>,
     /// Public inline companion functions on a classpath value class whose bytecode method is private but
     /// callable per metadata (`Result.success`). Lowering loads the companion object and splices the
     /// method body; ordinary companion members stay in `companion`.
@@ -810,7 +867,7 @@ pub struct LibraryType {
     /// When this name is a `typealias`, the target internal it expands to (`kotlin/collections/ArrayList`
     /// → `java/util/ArrayList`); `None` for a real type. Name resolution records the target, so an alias
     /// resolves to the underlying type with no separate alias query.
-    pub alias_target: Option<String>,
+    pub alias_target: Option<TypeName>,
     /// The type's own formal type parameters, in declaration order (`Pair` → `["A", "B"]`); empty for a
     /// non-generic type. With the constructors' [`LibraryMember::generic_sig`], lets a caller infer a
     /// construction's type arguments by unifying the ctor's generic parameter signatures against the
@@ -818,7 +875,7 @@ pub struct LibraryType {
     pub type_params: Vec<String>,
     /// The direct subclasses (JVM internal names) of a `sealed` type, from its `@Metadata`; empty for a
     /// non-sealed type. Lets an exhaustive `when` over a classpath sealed subject be proven exhaustive.
-    pub sealed_subclasses: Vec<String>,
+    pub sealed_subclasses: TypeNameList,
     /// The enum entry names this type declares (`Kind` → `["PENDING", "DONE"]`); empty for a non-enum.
     /// Lets `EnumName.ENTRY` resolve for a classpath enum as it does for a source enum.
     pub enum_entries: Vec<String>,
@@ -1111,7 +1168,7 @@ mod tests {
         let mut t = super::LibraryType {
             is_public: true,
             kind: super::TypeKind::Class,
-            supertypes: vec![],
+            supertypes: crate::types::TypeNameList::new(),
             constructors: vec![],
             members: vec![],
             companion: vec![],
@@ -1122,7 +1179,7 @@ mod tests {
             value_underlying: None,
             alias_target: None,
             type_params: vec![],
-            sealed_subclasses: vec![],
+            sealed_subclasses: crate::types::TypeNameList::new(),
             enum_entries: vec![],
             value_ctor_has_default: false,
             ctor_named_params: vec![],

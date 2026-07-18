@@ -15,7 +15,7 @@ use crate::libraries::{
     required_arity, CallSig, EmptySymbolSource, InlineKind, Origin, ParamList, SemanticPlatform,
 };
 use crate::symbol_source::SymbolSource;
-use crate::types::{Ty, Visibility};
+use crate::types::{existing_type_name, type_name, Ty, TypeName, Visibility};
 
 pub type ResolvedMember = crate::symbol_resolver::ResolvedMember;
 
@@ -157,10 +157,10 @@ fn extract_ctor_default(
         Expr::Name(n) => {
             let internal = class_names.get(n)?;
             if libraries
-                .resolve_type(internal)
+                .resolve_type_name(internal)
                 .is_some_and(|t| t.is_object())
             {
-                CtorDefaultValue::Object(internal.clone())
+                CtorDefaultValue::Object(internal.render())
             } else {
                 return None;
             }
@@ -173,7 +173,7 @@ fn extract_ctor_default(
 /// primary-constructor properties (in order), and its member-function signatures.
 #[derive(Clone, Debug)]
 pub struct ClassSig {
-    pub internal: String,
+    pub internal: TypeName,
     pub props: Vec<(String, Ty, bool)>, // backing-field properties (name, type, is_var)
     /// Full primary-constructor parameter types in order (includes non-property params).
     pub ctor_params: Vec<Ty>,
@@ -192,7 +192,7 @@ pub struct ClassSig {
     pub is_sealed: bool,
     /// `Some(outer_internal)` for an `inner class` — it captures the enclosing instance (a `this$0`
     /// field of the outer type); constructed as `outerInstance.Inner(...)`.
-    pub inner_of: Option<String>,
+    pub inner_of: Option<TypeName>,
     /// `companion object` functions, emitted as `static` methods and called as `ClassName.fn(...)`.
     pub static_methods: HashMap<String, Signature>,
     /// `companion object` properties, emitted as `static final` fields read as `ClassName.PROP`.
@@ -200,9 +200,9 @@ pub struct ClassSig {
     /// Names of `lateinit` properties (instance and companion) — reads emit a null-check that throws.
     pub lateinit_props: std::collections::HashSet<String>,
     /// Internal names of interfaces this type implements (for subtyping).
-    pub interfaces: Vec<String>,
+    pub interfaces: crate::types::TypeNameList,
     /// Internal name of the base class (`: Base(..)`), if any.
-    pub super_internal: Option<String>,
+    pub super_internal: Option<TypeName>,
     /// The parameter types of the base constructor that this class's `super(args)` targets, as the
     /// CHECKER resolved it (uniformly for a same-file, module, or classpath base, via the symbol
     /// source). Empty when the class has no base arguments. The lowerer emits `super(args)` against
@@ -264,6 +264,34 @@ pub struct GenericMethod {
 type GenericMemberPlan = (GenericMethod, HashMap<String, Ty>, Vec<Vec<Ty>>);
 
 impl ClassSig {
+    pub fn internal_name(&self) -> TypeName {
+        self.internal
+    }
+
+    pub fn internal(&self) -> String {
+        self.internal.render()
+    }
+
+    pub fn internal_matches(&self, internal: &str) -> bool {
+        self.internal.matches(internal)
+    }
+
+    pub fn inner_of(&self) -> Option<String> {
+        self.inner_of.map(TypeName::render)
+    }
+
+    pub fn inner_of_matches(&self, internal: &str) -> bool {
+        self.inner_of.is_some_and(|outer| outer.matches(internal))
+    }
+
+    pub fn super_internal(&self) -> Option<String> {
+        self.super_internal.map(TypeName::render)
+    }
+
+    pub fn interfaces(&self) -> Vec<String> {
+        self.interfaces.to_vec()
+    }
+
     pub fn prop(&self, name: &str) -> Option<(Ty, bool)> {
         self.props
             .iter()
@@ -283,19 +311,22 @@ impl ClassSig {
 /// sharing it via `Rc`.
 #[derive(Clone, Default)]
 pub struct ClassNames {
-    base: std::rc::Rc<HashMap<String, String>>,
-    user: HashMap<String, String>,
+    base: std::rc::Rc<HashMap<String, TypeName>>,
+    user: HashMap<String, TypeName>,
 }
 
 impl ClassNames {
-    pub fn new(base: std::rc::Rc<HashMap<String, String>>) -> ClassNames {
+    pub fn new(base: std::rc::Rc<HashMap<String, TypeName>>) -> ClassNames {
         ClassNames {
             base,
             user: HashMap::new(),
         }
     }
-    pub fn get(&self, k: &str) -> Option<&String> {
-        self.user.get(k).or_else(|| self.base.get(k))
+    pub fn get(&self, k: &str) -> Option<TypeName> {
+        self.user
+            .get(k)
+            .copied()
+            .or_else(|| self.base.get(k).copied())
     }
     pub fn contains_key(&self, k: &str) -> bool {
         self.user.contains_key(k) || self.base.contains_key(k)
@@ -303,7 +334,9 @@ impl ClassNames {
     /// Does some registered simple name resolve to this JVM internal name? Used to confirm a
     /// qualified nested supertype (`Foo/Bar` → `Foo$Bar`) names a REAL declared class.
     pub fn has_internal(&self, internal: &str) -> bool {
-        self.user.values().any(|v| v == internal) || self.base.values().any(|v| v == internal)
+        existing_type_name(internal).is_some_and(|internal| {
+            self.user.values().any(|&v| v == internal) || self.base.values().any(|&v| v == internal)
+        })
     }
     pub fn library_companion_const(
         &self,
@@ -311,18 +344,16 @@ impl ClassNames {
         type_name: &str,
         const_name: &str,
     ) -> Option<crate::libraries::LibraryConst> {
-        let fallback;
-        let internal = match self.get(type_name) {
-            Some(internal) => internal.as_str(),
-            None => {
-                fallback = format!("kotlin/{type_name}");
-                &fallback
-            }
-        };
-        src.resolve_type(internal)
+        let fallback = self
+            .get(type_name)
+            .unwrap_or_else(|| crate::types::type_name(&format!("kotlin/{type_name}")));
+        src.resolve_type_name(fallback)
             .and_then(|t| t.companion_consts.get(const_name).copied())
     }
-    pub fn insert(&mut self, k: String, v: String) -> Option<String> {
+    pub fn insert(&mut self, k: String, v: impl AsRef<str>) -> Option<TypeName> {
+        self.user.insert(k, crate::types::type_name(v.as_ref()))
+    }
+    pub fn insert_name(&mut self, k: String, v: TypeName) -> Option<TypeName> {
         self.user.insert(k, v)
     }
 }
@@ -335,6 +366,7 @@ pub struct SymbolTable {
     pub funs: HashMap<String, Vec<Signature>>,
     /// Declared classes by simple name (e.g. `Point`).
     pub classes: HashMap<String, ClassSig>,
+    classes_by_type_name: HashMap<TypeName, String>,
     /// Top-level properties (name → type, is_var, is_const), backed by static fields on the file facade.
     /// `is_const` distinguishes a `const val` (public field, no accessor, cross-file `getstatic`) from a
     /// plain `val`/`var` (private field, read/written through `getX`/`setX`).
@@ -366,15 +398,15 @@ pub struct SymbolTable {
     /// stem/facade); empty for single-file/in-process callers. Lets `lower_file` emit a call to a
     /// function defined in ANOTHER file as a cross-facade `invokestatic` (`Callee::CrossFile`) instead
     /// of bailing. A function defined in the file being lowered is resolved locally first.
-    pub fn_facades: HashMap<String, String>,
+    pub fn_facades: HashMap<String, TypeName>,
     /// Top-level function source declaration → declaring facade. This is the declaration-keyed
     /// equivalent of [`Self::fn_facades`], used once the checker has selected a concrete overload.
-    pub fn_facades_by_decl: HashMap<(u32, u32), String>,
+    pub fn_facades_by_decl: HashMap<(u32, u32), TypeName>,
     /// Top-level property name → `(facade_internal, type, is_var)` across the WHOLE multi-file
     /// compilation. Populated only by the multi-file driver. A read of a property from ANOTHER file
     /// lowers to `invokestatic <facade>.getX()` (the field is private), a write to `setX(v)`. Empty for
     /// single-file callers; a property in the file being lowered is resolved locally (its static) first.
-    pub prop_facades: HashMap<String, (String, Ty, bool, bool)>,
+    pub prop_facades: HashMap<String, (TypeName, Ty, bool, bool)>,
 }
 
 impl Default for SymbolTable {
@@ -382,6 +414,7 @@ impl Default for SymbolTable {
         SymbolTable {
             funs: HashMap::new(),
             classes: HashMap::new(),
+            classes_by_type_name: HashMap::new(),
             props: HashMap::new(),
             computed_props: std::collections::HashSet::new(),
             objects: std::collections::HashSet::new(),
@@ -398,6 +431,21 @@ impl Default for SymbolTable {
 }
 
 impl SymbolTable {
+    pub fn insert_class(&mut self, name: String, sig: ClassSig) -> Option<ClassSig> {
+        let internal = sig.internal.render();
+        self.insert_class_with_internal(name, &internal, sig)
+    }
+
+    pub fn insert_class_with_internal(
+        &mut self,
+        name: String,
+        _internal: &str,
+        sig: ClassSig,
+    ) -> Option<ClassSig> {
+        self.classes_by_type_name.insert(sig.internal, name.clone());
+        self.classes.insert(name, sig)
+    }
+
     /// Resolve an extension-property read/write `recv.name` to its `(type, is_var)`.
     ///
     /// A property whose receiver is a free type parameter — `val <T> T.p` or `val <T> Array<T>.p` —
@@ -434,7 +482,13 @@ impl SymbolTable {
 
     /// Resolve a class reference type `Ty::Obj` back to its declaration (by internal name).
     pub fn class_by_internal(&self, internal: &str) -> Option<&ClassSig> {
-        self.classes.values().find(|c| c.internal == internal)
+        existing_type_name(internal).and_then(|internal| self.class_by_type_name(internal))
+    }
+
+    pub fn class_by_type_name(&self, internal: TypeName) -> Option<&ClassSig> {
+        self.classes_by_type_name
+            .get(&internal)
+            .and_then(|name| self.classes.get(name))
     }
 
     /// The extension-function overloads registered for a receiver + name (empty if none). The receiver
@@ -454,7 +508,16 @@ impl SymbolTable {
     }
 
     pub fn class_by_internal_mut(&mut self, internal: &str) -> Option<&mut ClassSig> {
-        self.classes.values_mut().find(|c| c.internal == internal)
+        let name = self
+            .classes_by_type_name
+            .get(&existing_type_name(internal)?)
+            .cloned()?;
+        self.classes.get_mut(&name)
+    }
+
+    pub fn class_by_type_name_mut(&mut self, internal: TypeName) -> Option<&mut ClassSig> {
+        let name = self.classes_by_type_name.get(&internal)?.clone();
+        self.classes.get_mut(&name)
     }
 
     /// A method (own or inherited up the base-class chain) on a class internal name.
@@ -463,31 +526,49 @@ impl SymbolTable {
             .map(|(_, sig)| sig)
     }
 
+    pub fn method_of_name(&self, internal: TypeName, name: &str) -> Option<Signature> {
+        self.method_of_with_owner_name(internal, name)
+            .map(|(_, sig)| sig)
+    }
+
     /// A method (own or inherited up the base-class chain) with the internal name of the class that
     /// declares it. Call resolution records this owner so lowering can dispatch to a cross-file base method
     /// instead of pretending the receiver class declares it.
     pub fn method_of_with_owner(&self, internal: &str, name: &str) -> Option<(String, Signature)> {
-        let c = self.class_by_internal(internal)?;
+        let internal = existing_type_name(internal)?;
+        self.method_of_with_owner_name(internal, name)
+            .map(|(owner, sig)| (owner.render(), sig))
+    }
+
+    pub fn method_of_with_owner_name(
+        &self,
+        internal: TypeName,
+        name: &str,
+    ) -> Option<(TypeName, Signature)> {
+        let c = self.class_by_type_name(internal)?;
         if let Some(sig) = c.methods.get(name) {
-            return Some((c.internal.clone(), sig.clone()));
+            return Some((c.internal_name(), sig.clone()));
         }
-        let s = c.super_internal.clone()?;
-        self.method_of_with_owner(&s, name)
+        self.method_of_with_owner_name(c.super_internal?, name)
     }
 
     /// Whether `internal`'s method `name` (or one inherited up the base chain) is `vararg` — a
     /// clone-free probe for the hot call paths, which only need the flag (`method_of` clones the whole
     /// `Signature`, an allocation per call when used merely to read one bool).
     pub fn method_is_vararg(&self, internal: &str, name: &str) -> bool {
-        let Some(c) = self.class_by_internal(internal) else {
+        existing_type_name(internal)
+            .is_some_and(|internal| self.method_is_vararg_name(internal, name))
+    }
+
+    pub fn method_is_vararg_name(&self, internal: TypeName, name: &str) -> bool {
+        let Some(c) = self.class_by_type_name(internal) else {
             return false;
         };
         if let Some(sig) = c.methods.get(name) {
             return sig.vararg;
         }
         c.super_internal
-            .as_deref()
-            .is_some_and(|s| self.method_is_vararg(s, name))
+            .is_some_and(|s| self.method_is_vararg_name(s, name))
     }
 
     /// All method signatures inherited from declared supertypes (base-class chain + interfaces,
@@ -495,47 +576,58 @@ impl SymbolTable {
     /// method (covariant/generic return), which krusty does not synthesize.
     pub fn supertype_methods(&self, internal: &str) -> Vec<(String, Signature)> {
         let mut out = Vec::new();
-        self.collect_super_methods(internal, &mut out);
+        if let Some(internal) = existing_type_name(internal) {
+            self.collect_super_methods(internal, &mut out);
+        }
         out
     }
-    fn collect_super_methods(&self, internal: &str, out: &mut Vec<(String, Signature)>) {
-        let Some(c) = self.class_by_internal(internal) else {
+    fn collect_super_methods(&self, internal: TypeName, out: &mut Vec<(String, Signature)>) {
+        let Some(c) = self.class_by_type_name(internal) else {
             return;
         };
-        let mut parents: Vec<String> = Vec::new();
-        if let Some(s) = &c.super_internal {
-            parents.push(s.clone());
+        let mut parents: Vec<TypeName> = Vec::new();
+        if let Some(s) = c.super_internal {
+            parents.push(s);
         }
-        parents.extend(c.interfaces.iter().cloned());
+        parents.extend(c.interfaces.iter_ids());
         for p in parents {
-            if let Some(pc) = self.class_by_internal(&p) {
+            if let Some(pc) = self.class_by_type_name(p) {
                 for (n, sig) in &pc.methods {
                     out.push((n.clone(), sig.clone()));
                 }
             }
-            self.collect_super_methods(&p, out);
+            self.collect_super_methods(p, out);
         }
     }
 
     /// All declared supertypes (base-class chain + interfaces, transitively) of `internal`.
     pub fn supertype_internals(&self, internal: &str) -> Vec<String> {
+        self.supertype_internal_names(internal)
+            .into_iter()
+            .map(TypeName::render)
+            .collect()
+    }
+
+    pub fn supertype_internal_names(&self, internal: &str) -> Vec<TypeName> {
         let mut out = Vec::new();
-        self.collect_super_internals(internal, &mut out);
+        if let Some(internal) = existing_type_name(internal) {
+            self.collect_super_internals(internal, &mut out);
+        }
         out
     }
-    fn collect_super_internals(&self, internal: &str, out: &mut Vec<String>) {
-        let Some(c) = self.class_by_internal(internal) else {
+    fn collect_super_internals(&self, internal: TypeName, out: &mut Vec<TypeName>) {
+        let Some(c) = self.class_by_type_name(internal) else {
             return;
         };
-        let mut parents: Vec<String> = Vec::new();
-        if let Some(s) = &c.super_internal {
-            parents.push(s.clone());
+        let mut parents: Vec<TypeName> = Vec::new();
+        if let Some(s) = c.super_internal {
+            parents.push(s);
         }
-        parents.extend(c.interfaces.iter().cloned());
+        parents.extend(c.interfaces.iter_ids());
         for p in parents {
             if !out.contains(&p) {
-                out.push(p.clone());
-                self.collect_super_internals(&p, out);
+                out.push(p);
+                self.collect_super_internals(p, out);
             }
         }
     }
@@ -544,19 +636,26 @@ impl SymbolTable {
     pub fn subclasses_of(&self, internal: &str) -> Vec<String> {
         self.classes
             .values()
-            .filter(|c| c.super_internal.as_deref() == Some(internal))
-            .map(|c| c.internal.clone())
+            .filter(|c| {
+                c.super_internal
+                    .is_some_and(|super_internal| super_internal.matches(internal))
+            })
+            .map(ClassSig::internal)
             .collect()
     }
 
     /// A property (own or inherited) on a class internal name. Returns `(type, is_var)`.
     pub fn prop_of(&self, internal: &str, name: &str) -> Option<(Ty, bool)> {
-        let c = self.class_by_internal(internal)?;
+        let internal = existing_type_name(internal)?;
+        self.prop_of_name(internal, name)
+    }
+
+    pub fn prop_of_name(&self, internal: TypeName, name: &str) -> Option<(Ty, bool)> {
+        let c = self.class_by_type_name(internal)?;
         if let Some(p) = c.prop(name) {
             return Some(p);
         }
-        let s = c.super_internal.clone()?;
-        self.prop_of(&s, name)
+        self.prop_of_name(c.super_internal?, name)
     }
 }
 
@@ -590,7 +689,7 @@ fn erased_type_key(t: Ty) -> ErasedTypeKey {
     let key = match t {
         u if u.is_unsigned() => u.scalar_value_repr().unwrap(),
         Ty::String => Ty::obj("kotlin/String"),
-        Ty::Obj("kotlin/Array", args) => {
+        Ty::Obj(n, args) if n.matches("kotlin/Array") => {
             let e = args
                 .first()
                 .copied()
@@ -962,7 +1061,7 @@ fn resolve_name_against_imports(
         let mut hits: Vec<String> = Vec::new();
         for (fqn, r) in crate::symbol_resolver::resolve_symbols_in_scope(source, name, level) {
             if let Some(t) = r.classifier {
-                let internal = t.alias_target.unwrap_or(fqn);
+                let internal = t.alias_target.map(|target| target.render()).unwrap_or(fqn);
                 if !hits.contains(&internal) {
                     hits.push(internal);
                 }
@@ -1018,7 +1117,11 @@ fn resolve_nested_internal(internal: &str, source: &dyn SymbolSource) -> Option<
     // A `typealias` resolves to its target internal, not to the (classless) alias name.
     let resolved = |name: &str| -> Option<String> {
         let t = source.resolve_type(name)?;
-        Some(t.alias_target.unwrap_or_else(|| name.to_string()))
+        Some(
+            t.alias_target
+                .map(|target| target.render())
+                .unwrap_or_else(|| name.to_string()),
+        )
     };
     if let Some(r) = resolved(internal) {
         return Some(r);
@@ -1051,7 +1154,7 @@ fn resolve_dotted_classpath_type(
         let base = class_names
             .get(&outer)
             .filter(|i| !i.starts_with("__ty/"))
-            .cloned()
+            .map(TypeName::render)
             .or_else(|| {
                 imap.get(&outer)
                     .filter(|f| libraries.resolve_type(f).is_some())
@@ -1223,8 +1326,8 @@ pub fn collect_signatures_with_cp(
             if class_names.contains_key(alias.as_str()) {
                 continue;
             }
-            if let Some(internal) = class_names.get(target.as_str()).cloned() {
-                class_names.insert(alias.clone(), internal);
+            if let Some(internal) = class_names.get(target.as_str()) {
+                class_names.insert_name(alias.clone(), internal);
                 changed = true;
             } else if Ty::from_name(target).is_some() {
                 class_names.insert(alias.clone(), format!("__ty/{target}"));
@@ -1264,7 +1367,7 @@ pub fn collect_signatures_with_cp(
                     if let Some(r) = &f.ret {
                         let tp =
                             TParams::from_decl_with(&f.type_params, &f.type_param_bounds, &|n| {
-                                class_names.get(n).cloned()
+                                class_names.get(n)
                             });
                         fun_rets.insert(f.name.clone(), ty_of_ref(r, &class_names, &tp, diags));
                     }
@@ -1286,7 +1389,7 @@ pub fn collect_signatures_with_cp(
             match file.decl(d) {
                 Decl::Fun(f) => {
                     let tp = TParams::from_decl_with(&f.type_params, &f.type_param_bounds, &|n| {
-                        class_names.get(n).cloned()
+                        class_names.get(n)
                     });
                     // A `vararg` parameter's runtime type is `Array<elem>`.
                     let params: Vec<Ty> = f
@@ -1512,7 +1615,7 @@ pub fn collect_signatures_with_cp(
                 Decl::Class(c) => {
                     let internal = class_names
                         .get(&c.name)
-                        .cloned()
+                        .map(TypeName::render)
                         .unwrap_or_else(|| class_internal(file, &c.name));
                     // An `inner class` captures the enclosing instance, so the outer class's type
                     // parameters are in scope for its own member/ctor/field types (`inner class N :
@@ -1559,11 +1662,10 @@ pub fn collect_signatures_with_cp(
                                     // (overwriting any top-level entry). Consistent with the checker's
                                     // `enclosing_nested_type` expression-path fallback.
                                     if !seg.contains('.') {
-                                        let ni = class_names
-                                            .get(&nc.name)
-                                            .cloned()
-                                            .unwrap_or_else(|| class_internal(file, &nc.name));
-                                        ext.insert(seg.to_string(), ni);
+                                        let ni = class_names.get(&nc.name).unwrap_or_else(|| {
+                                            type_name(&class_internal(file, &nc.name))
+                                        });
+                                        ext.insert_name(seg.to_string(), ni);
                                     }
                                 }
                             }
@@ -1819,7 +1921,7 @@ pub fn collect_signatures_with_cp(
                                 let mtp = bctp.extended_with(
                                     &m.type_params,
                                     &m.type_param_bounds,
-                                    &|n| class_names.get(n).cloned(),
+                                    &|n| class_names.get(n),
                                 );
                                 local_rets.insert(
                                     m.name.clone(),
@@ -1833,7 +1935,7 @@ pub fn collect_signatures_with_cp(
                         if let Some(r) = &m.ret {
                             let mtp =
                                 ctp.extended_with(&m.type_params, &m.type_param_bounds, &|n| {
-                                    class_names.get(n).cloned()
+                                    class_names.get(n)
                                 });
                             local_rets
                                 .insert(m.name.clone(), ty_of_ref(r, &class_names, &mtp, diags));
@@ -1845,7 +1947,7 @@ pub fn collect_signatures_with_cp(
                         .map(|m| {
                             let mtp =
                                 ctp.extended_with(&m.type_params, &m.type_param_bounds, &|n| {
-                                    class_names.get(n).cloned()
+                                    class_names.get(n)
                                 });
                             // A `vararg` parameter's runtime type is `Array<elem>` (mirrors the
                             // top-level-function path) — without this a member `vararg s: String`
@@ -2000,7 +2102,7 @@ pub fn collect_signatures_with_cp(
                     let mut resolve_super = |s: &str| -> String {
                         let resolved = class_names
                             .get(s)
-                            .cloned()
+                            .map(TypeName::render)
                             // An erased type parameter used as a supertype (degenerate) stays as-is.
                             .or_else(|| ctp.contains(s).then(|| s.to_string()))
                             // A QUALIFIED nested supertype (`Foo.Bar` → `Foo/Bar` here) whose outer isn't a
@@ -2019,7 +2121,7 @@ pub fn collect_signatures_with_cp(
                                 let mut prefix = c.name.as_str();
                                 while let Some((p, _)) = prefix.rsplit_once('.') {
                                     if let Some(internal) = class_names.get(&format!("{p}.{s}")) {
-                                        return Some(internal.clone());
+                                        return Some(internal.render());
                                     }
                                     prefix = p;
                                 }
@@ -2067,7 +2169,7 @@ pub fn collect_signatures_with_cp(
                         .map(|m| {
                             let mtp =
                                 ctp.extended_with(&m.type_params, &m.type_param_bounds, &|n| {
-                                    class_names.get(n).cloned()
+                                    class_names.get(n)
                                 });
                             // A `vararg` parameter's runtime type is `Array<elem>` (mirrors the
                             // top-level-function path) — without this a member `vararg s: String`
@@ -2231,10 +2333,19 @@ pub fn collect_signatures_with_cp(
                         .map(|m| (m.name.clone(), m.visibility))
                         .collect();
                     let comp_internal = format!("{internal}$Companion");
-                    table.classes.insert(
+                    let has_companion_supertypes =
+                        !companion_interfaces.is_empty() || companion_super_internal.is_some();
+                    let internal_ref = type_name(&internal);
+                    let inner_of_ref = inner_of.as_ref().map(|inner| type_name(inner));
+                    let interfaces_ref: crate::types::TypeNameList = interfaces.into();
+                    let super_internal_ref = super_internal
+                        .as_ref()
+                        .map(|super_internal| type_name(super_internal));
+                    table.insert_class_with_internal(
                         c.name.clone(),
+                        &internal,
                         ClassSig {
-                            internal,
+                            internal: internal_ref,
                             props,
                             ctor_params,
                             methods,
@@ -2243,12 +2354,12 @@ pub fn collect_signatures_with_cp(
                             is_abstract: c.is_abstract(),
                             is_fun_interface: c.is_fun_interface,
                             is_sealed: c.is_sealed(),
-                            inner_of,
+                            inner_of: inner_of_ref,
                             static_methods,
                             static_props,
                             lateinit_props,
-                            interfaces,
-                            super_internal,
+                            interfaces: interfaces_ref,
+                            super_internal: super_internal_ref,
                             super_ctor_params: Vec::new(),
                             is_annotation: c.is_annotation(),
                             ctor_defaults,
@@ -2268,11 +2379,18 @@ pub fn collect_signatures_with_cp(
                     // declared INTERFACE supertype and/or a base CLASS (`ir_lower` extends the companion to
                     // the base when it's a file class with no-arg / all-default ctor). A companion with no
                     // supertype isn't a first-class value yet (its use as a value skips).
-                    if !companion_interfaces.is_empty() || companion_super_internal.is_some() {
-                        table.classes.insert(
+                    if has_companion_supertypes {
+                        let comp_internal_ref = type_name(&comp_internal);
+                        let companion_interfaces_ref: crate::types::TypeNameList =
+                            companion_interfaces.into();
+                        let companion_super_internal_ref = companion_super_internal
+                            .as_ref()
+                            .map(|super_internal| type_name(super_internal));
+                        table.insert_class_with_internal(
                             comp_internal.clone(),
+                            &comp_internal,
                             ClassSig {
-                                internal: comp_internal,
+                                internal: comp_internal_ref,
                                 props: Vec::new(),
                                 ctor_params: Vec::new(),
                                 methods: companion_methods_sigs,
@@ -2285,8 +2403,8 @@ pub fn collect_signatures_with_cp(
                                 static_methods: HashMap::new(),
                                 static_props: HashMap::new(),
                                 lateinit_props: Default::default(),
-                                interfaces: companion_interfaces,
-                                super_internal: companion_super_internal,
+                                interfaces: companion_interfaces_ref,
+                                super_internal: companion_super_internal_ref,
                                 super_ctor_params: Vec::new(),
                                 is_annotation: false,
                                 ctor_defaults: Vec::new(),
@@ -2308,7 +2426,7 @@ pub fn collect_signatures_with_cp(
                         // An extension property's own type params (`val <T> Array<T>.length`) scope over
                         // the receiver and declared type — bind them (erased) so the receiver isn't a raw
                         // `Array` and `T` isn't mistaken for an unresolved class.
-                        let resolve = |n: &str| class_names.get(n).cloned();
+                        let resolve = |n: &str| class_names.get(n);
                         let ptp =
                             TParams::from_decl_with(&p.type_params, &p.type_param_bounds, &resolve);
                         let recv_ty = ty_of_ref(recv_ref, &class_names, &ptp, diags);
@@ -2416,7 +2534,7 @@ pub fn collect_signatures_with_cp(
     for (alias, target) in &alias_map {
         if !table.classes.contains_key(alias.as_str()) {
             if let Some(cs) = table.classes.get(target.as_str()).cloned() {
-                table.classes.insert(alias.clone(), cs);
+                table.insert_class(alias.clone(), cs);
             }
         }
     }
@@ -3203,7 +3321,8 @@ fn delegated_getvalue_ret_for_signature(
     if internal.starts_with("kotlin/reflect/") {
         return None;
     }
-    if let Some(sig) = table.method_of(internal, "getValue") {
+    let internal = internal.render();
+    if let Some(sig) = table.method_of(&internal, "getValue") {
         return Some(sig.ret);
     }
     let module = crate::module_symbols::ModuleSymbols::new(table);
@@ -3365,8 +3484,11 @@ fn infer_lit_ty_p(
             .or_else(|| {
                 class_names
                     .get(n.as_str())
-                    .filter(|internal| src.resolve_type(internal).is_some_and(|t| t.is_object()))
-                    .map(|internal| Ty::obj(internal))
+                    .filter(|internal| {
+                        src.resolve_type_name(*internal)
+                            .is_some_and(|t| t.is_object())
+                    })
+                    .map(Ty::obj_name)
             })
             .unwrap_or(Ty::Error),
         Expr::Member { receiver, name } => {
@@ -3392,7 +3514,7 @@ fn infer_lit_ty_p(
             }
             // A property of a module class being collected, invisible to the library source.
             if let Some(internal) = rt.obj_internal() {
-                if let Some(t) = (env.up)(internal, name) {
+                if let Some(t) = (env.up)(&internal.render(), name) {
                     return t;
                 }
             }
@@ -3441,7 +3563,6 @@ fn infer_lit_ty_p(
                     }
                     // A JDK/classpath type resolvable by simple name (`val sb = StringBuilder()`).
                     if let Some(internal) = class_names.get(n.as_str()) {
-                        let internal = internal.clone();
                         // Preserve EXPLICIT type arguments on a generic constructor call
                         // (`ConcurrentHashMap<String, V>()`) so an inferred PROPERTY keeps them — else a
                         // later indexing / generic-member access on the field erases its element to `Any`.
@@ -3454,9 +3575,9 @@ fn infer_lit_ty_p(
                                 .iter()
                                 .map(|r| ty_of_ref(r, class_names, &empty_tp, &mut sink))
                                 .collect();
-                            return Ty::obj_args(&internal, &args);
+                            return Ty::Obj(internal, Box::leak(args.into_boxed_slice()));
                         }
-                        return Ty::obj(&internal);
+                        return Ty::obj_name(internal);
                     }
                     // A top-level library/stdlib function — federated resolution (no hardcoded names).
                     if let Some(t) = resolved_ret(&resolver, n, None) {
@@ -3729,7 +3850,7 @@ impl TParams {
     pub fn from_decl_with(
         names: &[String],
         bounds: &[(String, TypeRef)],
-        resolve: &dyn Fn(&str) -> Option<String>,
+        resolve: &dyn Fn(&str) -> Option<TypeName>,
     ) -> Self {
         let erasure = names
             .iter()
@@ -3764,7 +3885,7 @@ impl TParams {
         &self,
         names: &[String],
         bounds: &[(String, TypeRef)],
-        resolve: &dyn Fn(&str) -> Option<String>,
+        resolve: &dyn Fn(&str) -> Option<TypeName>,
     ) -> Self {
         let mut out = self.clone();
         out.erasure
@@ -3776,7 +3897,7 @@ impl TParams {
         &mut self,
         names: &[String],
         bounds: &[(String, TypeRef)],
-        resolve: &dyn Fn(&str) -> Option<String>,
+        resolve: &dyn Fn(&str) -> Option<TypeName>,
     ) -> Vec<String> {
         let scoped = TParams::from_decl_with(names, bounds, resolve);
         let mut added = Vec::new();
@@ -3834,12 +3955,12 @@ fn unify_ref(r: &TypeRef, actual: Ty, tparams: &[String], binds: &mut HashMap<St
 /// the merged class-name map (which already carries the Kotlin built-in → JVM mapping, `CharSequence`
 /// → `java/lang/CharSequence`). Borrows only the (copied) `&SymbolTable`, so a caller can hold it while
 /// mutating `self.tparams`.
-fn class_internal_resolver(syms: &SymbolTable) -> impl Fn(&str) -> Option<String> + '_ {
+fn class_internal_resolver(syms: &SymbolTable) -> impl Fn(&str) -> Option<TypeName> + '_ {
     move |n: &str| {
         syms.classes
             .get(n)
-            .map(|c| c.internal.clone())
-            .or_else(|| syms.class_names.get(n).cloned())
+            .map(|c| type_name(&c.internal()))
+            .or_else(|| syms.class_names.get(n))
     }
 }
 
@@ -3849,7 +3970,7 @@ fn class_internal_resolver(syms: &SymbolTable) -> impl Fn(&str) -> Option<String
 /// value of type `T` accesses the bound's members and the descriptor uses the bound, not `Object`.
 /// `Any` when there's no bound, a nullable bound, an unresolved bound, or a non-specializable primitive
 /// (`Double`/unsigned/value — those bounds stay rejected on use).
-fn tparam_bound_erasure(b: Option<&TypeRef>, resolve: &dyn Fn(&str) -> Option<String>) -> Ty {
+fn tparam_bound_erasure(b: Option<&TypeRef>, resolve: &dyn Fn(&str) -> Option<TypeName>) -> Ty {
     let any = Ty::obj("kotlin/Any");
     let Some(b) = b else { return any };
     // A nullable / generic-instantiated bound name still resolves by its head: `<T: Comparable<T>>`
@@ -3867,7 +3988,7 @@ fn tparam_bound_erasure(b: Option<&TypeRef>, resolve: &dyn Fn(&str) -> Option<St
         };
     }
     match resolve(&b.name) {
-        Some(internal) => Ty::obj(&internal),
+        Some(internal) => Ty::obj_name(internal),
         None => any,
     }
 }
@@ -4034,9 +4155,9 @@ fn ty_of_ref_with(
     } else if let Some(internal) = classes.get(&r.name) {
         // `"__ty/<PrimName>"` encodes a type-alias → primitive/builtin mapping.
         if let Some(prim) = internal.strip_prefix("__ty/") {
-            Ty::from_name(prim).unwrap_or(Ty::Error)
+            Ty::from_name(&prim).unwrap_or(Ty::Error)
         } else if r.targs.is_empty() {
-            Ty::obj(internal)
+            Ty::obj_name(internal)
         } else {
             // Generic instantiation `C<A, …>` — carry the resolved arguments (erased in descriptors).
             let args: Vec<Ty> = r
@@ -4044,7 +4165,7 @@ fn ty_of_ref_with(
                 .iter()
                 .map(|a| ty_of_ref_with(a, classes, tparams, ctx, diags))
                 .collect();
-            Ty::obj_args(internal, &args)
+            Ty::Obj(internal, Box::leak(args.into_boxed_slice()))
         }
     } else {
         diags.error(r.span, format!("unresolved reference '{}'.", r.name));
@@ -4137,7 +4258,7 @@ pub struct TypeInfo {
     pub resolved_library_companion_consts: HashMap<ExprId, crate::libraries::LibraryConst>,
     /// Classpath/library enum entries selected while checking (`Kind.PENDING`), keyed by the member-read
     /// expression. Lowering emits the recorded owner field instead of resolving imports again.
-    pub resolved_library_enum_entries: HashMap<ExprId, String>,
+    pub resolved_library_enum_entries: HashMap<ExprId, TypeName>,
     /// For a resolved classpath member, extension, or top-level call, maps callee parameter slots to
     /// source arguments. `None` means the target default-call ABI fills that slot.
     pub resolved_call_arg_slots: HashMap<ExprId, Vec<Option<ExprId>>>,
@@ -4175,7 +4296,7 @@ pub enum ResolvedCall {
     /// A same-module member operator selected by the checker for a source expression. Lowering links
     /// this exact owner/signature to the current file's IR method id; it must not re-select by name.
     ModuleMember {
-        owner: String,
+        owner: TypeName,
         name: String,
         params: Vec<Ty>,
         ret: Ty,
@@ -4230,7 +4351,7 @@ pub enum ResolvedConstructor {
 
 #[derive(Clone, Debug)]
 pub struct ResolvedSuperCall {
-    pub owner: String,
+    pub owner: TypeName,
     pub interface: bool,
     pub params: Vec<Ty>,
     pub ret: Ty,
@@ -4248,13 +4369,13 @@ pub struct ResolvedDefaultMemberCall {
 #[derive(Clone, Debug)]
 pub enum DestructureComponentTarget {
     ModuleMember {
-        owner: String,
+        owner: TypeName,
         name: String,
         params: Vec<Ty>,
         ret: Ty,
     },
     CrossFileModuleMember {
-        owner: String,
+        owner: TypeName,
         name: String,
         params: Vec<Ty>,
         ret: Ty,
@@ -4269,7 +4390,7 @@ pub enum DestructureComponentTarget {
         ret: Ty,
     },
     ModulePropertyGetter {
-        owner: String,
+        owner: TypeName,
         property: String,
         ret: Ty,
         interface: bool,
@@ -4280,7 +4401,7 @@ pub enum DestructureComponentTarget {
 #[derive(Clone, Debug)]
 pub enum IteratorDispatchTarget {
     Member {
-        owner_fallback: String,
+        owner_fallback: TypeName,
         member: Box<crate::libraries::LibraryMember>,
     },
     Extension(Box<crate::libraries::LibraryCallable>),
@@ -4364,7 +4485,7 @@ pub struct ResolvedModuleTopLevelCall {
 #[derive(Clone, Debug)]
 pub enum DelegateGetValueTarget {
     Member {
-        owner: String,
+        owner: TypeName,
         params: Vec<Ty>,
         ret: Ty,
     },
@@ -4492,10 +4613,8 @@ impl TypeInfo {
         self.resolved_library_companion_consts.get(&e).copied()
     }
     /// The classpath/library enum-entry owner selected for member-read expression `e`, if any.
-    pub fn resolved_library_enum_entry_owner(&self, e: ExprId) -> Option<&str> {
-        self.resolved_library_enum_entries
-            .get(&e)
-            .map(String::as_str)
+    pub fn resolved_library_enum_entry_owner(&self, e: ExprId) -> Option<TypeName> {
+        self.resolved_library_enum_entries.get(&e).copied()
     }
     /// The extension callable the checker resolved for a SYNTHESIZED operator (`componentN`/`iterator`/
     /// `plusAssign`) on the receiver expression `recv`, if any.
@@ -4543,7 +4662,7 @@ pub enum ExprLowering {
     /// An unqualified function reference `::foo` where `foo` is imported from a SAME-FILE `object`
     /// (`import Host.foo`) — a BOUND reference to that object's singleton member, lowered exactly like
     /// `Host::foo` (capture `Host.INSTANCE`, invoke the member).
-    ImportedObjectMemberRef { internal: String },
+    ImportedObjectMemberRef { internal: TypeName },
     /// A function reference `::of` whose target has a trailing `vararg` (and no fixed defaults), adapted
     /// to a function type of LARGER arity: the expected function type's extra parameters (beyond the
     /// `fixed` leading fixed parameters) are COLLECTED into the vararg array. `target_params` is `of`'s
@@ -4557,7 +4676,7 @@ pub enum ExprLowering {
         fixed: usize,
         /// `Some(internal)` when the target is a member of a same-file `object` (`import Host.foo`) — the
         /// adapter invokes it on `Host.INSTANCE` instead of as a top-level static.
-        object_internal: Option<String>,
+        object_internal: Option<TypeName>,
     },
     /// An ADAPTED same-file top-level function reference (`::foo` passed where a shorter function type is
     /// expected, `foo` having trailing DEFAULT parameters). Lowering synthesizes an adapter of the
@@ -4587,10 +4706,10 @@ pub enum ExprLowering {
     /// collection must stay shallow because the lambda is spliced by an inline call.
     Lambda(LambdaInfo),
     /// A classpath `object` used as a value. Lowering emits `getstatic <internal>.INSTANCE`.
-    ObjectValue { internal: String },
+    ObjectValue { internal: TypeName },
     /// A public static field read. Lowering emits `getstatic <owner>.<name>:<descriptor>`.
     ExternalStaticFieldRead {
-        owner: String,
+        owner: TypeName,
         name: String,
         descriptor: String,
     },
@@ -4600,7 +4719,7 @@ pub enum ExprLowering {
     /// unqualified (`import Obj.m; m()`). Kotlin dispatches this on the singleton, so lowering reads
     /// `getstatic <internal>.INSTANCE` as the receiver and invokes the member — the same shape a qualified
     /// `Obj.m(args)` produces (a receiver whose [`ObjectValue`] lowering names `internal`).
-    ObjectMemberCall { internal: String },
+    ObjectMemberCall { internal: TypeName },
     /// A `this@Label` that denotes the INNERMOST receiver (the current `this`), so it lowers as a bare
     /// `this`. Only recorded for the innermost match; an outer-receiver label is left unresolved/skipped.
     LabeledThisInner,
@@ -4843,8 +4962,7 @@ pub fn check_file_at(
                     pre.reified_tparams.clear();
                 }
             } else if let Decl::Class(cl) = file.decl(d) {
-                let Some(internal) = pre.syms.classes.get(&cl.name).map(|s| s.internal.clone())
-                else {
+                let Some(internal) = pre.syms.classes.get(&cl.name).map(ClassSig::internal) else {
                     continue;
                 };
                 pre.this_ty = Some(Ty::obj(&internal));
@@ -5051,7 +5169,7 @@ pub fn check_file_at(
                         let key = o.rsplit(['/', '$']).next().unwrap_or(&o).to_string();
                         if let Some(s) = syms.classes.get(&key) {
                             tparam_names.extend(s.tparam_names.iter().cloned());
-                            outer = s.inner_of.clone();
+                            outer = s.inner_of();
                         } else {
                             break;
                         }
@@ -5072,7 +5190,7 @@ pub fn check_file_at(
                         props.extend(os.props.clone());
                     }
                 }
-                c.this_ty = syms.classes.get(&cl.name).map(|s| Ty::obj(&s.internal));
+                c.this_ty = syms.classes.get(&cl.name).map(|s| Ty::obj(&s.internal()));
                 // Push the enclosing-class labels for the duration of this class's member checks: the
                 // OUTER chain first (`this@Outer` for an `inner class`, resolved via `this$0`), then the
                 // class's own label (`this@C`) innermost. Walk `inner_of` outward.
@@ -5083,8 +5201,8 @@ pub fn check_file_at(
                     while let Some(o) = outer {
                         let key = o.rsplit(['/', '$']).next().unwrap_or(&o).to_string();
                         if let Some(s) = syms.classes.get(&key) {
-                            chain.push((key, Ty::obj(&s.internal)));
-                            outer = s.inner_of.clone();
+                            chain.push((key, Ty::obj(&s.internal())));
+                            outer = s.inner_of();
                         } else {
                             break;
                         }
@@ -5100,7 +5218,7 @@ pub fn check_file_at(
                 }
                 let methods: Vec<&FunDecl> = cl.methods.iter().collect();
                 c.check_no_erased_clash(&methods, false);
-                if let Some(internal) = syms.classes.get(&cl.name).map(|s| s.internal.clone()) {
+                if let Some(internal) = syms.classes.get(&cl.name).map(ClassSig::internal) {
                     c.check_no_bridge_needed(&internal, cl.span);
                     // A `data class` implementing an interface that declares `copy`/`componentN` would
                     // need bridges for its *synthesized* members (which return the class itself, not
@@ -5281,7 +5399,7 @@ pub fn check_file_at(
                     let base_internal = c
                         .syms
                         .class_by_internal(&internal)
-                        .and_then(|cs| cs.super_internal.clone());
+                        .and_then(ClassSig::super_internal);
                     if let Some(base_int) = base_internal {
                         if let Some(params) = c.resolve_super_ctor_params(&base_int, &base_arg_tys)
                         {
@@ -5719,7 +5837,7 @@ struct Checker<'a> {
     resolved_super_calls: HashMap<ExprId, ResolvedSuperCall>,
     resolved_default_member_calls: HashMap<ExprId, ResolvedDefaultMemberCall>,
     resolved_library_companion_consts: HashMap<ExprId, crate::libraries::LibraryConst>,
-    resolved_library_enum_entries: HashMap<ExprId, String>,
+    resolved_library_enum_entries: HashMap<ExprId, TypeName>,
     resolved_call_arg_slots: HashMap<ExprId, Vec<Option<ExprId>>>,
     synthetic_ext_calls: HashMap<(ExprId, String), crate::libraries::LibraryCallable>,
     delegate_getvalue_targets: HashMap<ExprId, DelegateGetValueTarget>,
@@ -5777,47 +5895,64 @@ fn bind_or_conflict<'k>(
 }
 
 impl crate::assignable::TypeOracle for Checker<'_> {
-    fn direct_supertypes(&self, internal: &str) -> Vec<String> {
+    fn direct_supertypes(&self, internal: TypeName) -> Vec<TypeName> {
         self.resolver()
-            .resolve_type(internal)
-            .map(|t| t.supertypes)
+            .resolve_type_name(internal)
+            .map(|t| t.supertypes.iter_ids().collect())
             .unwrap_or_default()
     }
 
     fn canonical_class<'a>(&self, internal: &'a str) -> std::borrow::Cow<'a, str> {
         if internal.starts_with("kotlin/collections/") {
-            std::borrow::Cow::Borrowed(crate::symbol_resolver::platform_class_identity(
-                self.syms
-                    .libraries
-                    .library_value_form(Ty::obj(internal))
-                    .obj_internal()
-                    .unwrap_or(internal),
-            ))
+            let Some(value_internal) = self
+                .syms
+                .libraries
+                .library_value_form(Ty::obj(internal))
+                .obj_internal()
+            else {
+                return std::borrow::Cow::Borrowed(
+                    crate::symbol_resolver::platform_class_identity(internal),
+                );
+            };
+            std::borrow::Cow::Owned(
+                crate::symbol_resolver::platform_class_identity(&value_internal.render())
+                    .to_string(),
+            )
         } else {
             std::borrow::Cow::Borrowed(internal)
         }
     }
 
     fn same_class(&self, a: &str, b: &str) -> bool {
+        let a_value;
         let a = if a.starts_with("kotlin/collections/") {
-            crate::symbol_resolver::platform_class_identity(
-                self.syms
-                    .libraries
-                    .library_value_form(Ty::obj(a))
-                    .obj_internal()
-                    .unwrap_or(a),
-            )
+            if let Some(value) = self
+                .syms
+                .libraries
+                .library_value_form(Ty::obj(a))
+                .obj_internal()
+            {
+                a_value = value.render();
+                crate::symbol_resolver::platform_class_identity(&a_value)
+            } else {
+                crate::symbol_resolver::platform_class_identity(a)
+            }
         } else {
             a
         };
+        let b_value;
         let b = if b.starts_with("kotlin/collections/") {
-            crate::symbol_resolver::platform_class_identity(
-                self.syms
-                    .libraries
-                    .library_value_form(Ty::obj(b))
-                    .obj_internal()
-                    .unwrap_or(b),
-            )
+            if let Some(value) = self
+                .syms
+                .libraries
+                .library_value_form(Ty::obj(b))
+                .obj_internal()
+            {
+                b_value = value.render();
+                crate::symbol_resolver::platform_class_identity(&b_value)
+            } else {
+                crate::symbol_resolver::platform_class_identity(b)
+            }
         } else {
             b
         };
@@ -5825,14 +5960,19 @@ impl crate::assignable::TypeOracle for Checker<'_> {
     }
 
     fn matches_class(&self, candidate: &str, _target: &str, target_canonical: &str) -> bool {
+        let candidate_value;
         let candidate = if candidate.starts_with("kotlin/collections/") {
-            crate::symbol_resolver::platform_class_identity(
-                self.syms
-                    .libraries
-                    .library_value_form(Ty::obj(candidate))
-                    .obj_internal()
-                    .unwrap_or(candidate),
-            )
+            if let Some(value) = self
+                .syms
+                .libraries
+                .library_value_form(Ty::obj(candidate))
+                .obj_internal()
+            {
+                candidate_value = value.render();
+                crate::symbol_resolver::platform_class_identity(&candidate_value)
+            } else {
+                crate::symbol_resolver::platform_class_identity(candidate)
+            }
         } else {
             candidate
         };
@@ -5843,6 +5983,10 @@ impl crate::assignable::TypeOracle for Checker<'_> {
 impl<'a> Checker<'a> {
     fn resolved_type(&self, internal: &str) -> Option<crate::libraries::LibraryType> {
         self.resolver().resolve_type(internal)
+    }
+
+    fn resolved_type_name(&self, internal: TypeName) -> Option<crate::libraries::LibraryType> {
+        self.resolver().resolve_type_name(internal)
     }
 
     fn with_ret<R>(&mut self, ret_ty: Ty, f: impl FnOnce(&mut Self) -> R) -> R {
@@ -5971,7 +6115,7 @@ impl<'a> Checker<'a> {
                 crate::trace_compiler!(
                     "resolve",
                     "lambda-return {name} recv={receiver:?} lambda_ret={lambda_ret:?} -> {}.{}{} kind={:?}",
-                    o.callable.owner,
+                    o.callable.owner.render(),
                     o.callable.name,
                     o.callable.descriptor,
                     o.kind
@@ -6404,12 +6548,12 @@ impl<'a> Checker<'a> {
         arg_exprs: &[ExprId],
     ) -> Option<(Ty, ResolvedCall)> {
         if let Some(internal) = receiver.obj_internal() {
-            if let Some((owner, sig)) = self.syms.method_of_with_owner(internal, name) {
+            if let Some((owner, sig)) = self.syms.method_of_with_owner_name(internal, name) {
                 if sig.params.len() == arg_tys.len() {
                     self.expect_call_args(&sig.params, false, arg_exprs, arg_tys);
                     let interface = self
                         .syms
-                        .class_by_internal(&owner)
+                        .class_by_type_name(owner)
                         .is_some_and(|c| c.is_interface);
                     return Some((
                         sig.ret,
@@ -6456,7 +6600,7 @@ impl<'a> Checker<'a> {
                 return true;
             }
             match (have.obj_internal(), want.obj_internal()) {
-                (Some(h), Some(w)) => self.obj_is_subtype(h, w),
+                (Some(h), Some(w)) => self.obj_name_is_subtype(h, w),
                 _ => false,
             }
         };
@@ -6720,9 +6864,11 @@ impl<'a> Checker<'a> {
             // it goes through `Function{N}.invoke` — an `invokeinterface`, not the `operator fun invoke`
             // member path (which would emit an `invokevirtual` on the interface method → ICCE). Args and
             // result are the erased `Object` the reflection `invoke` uses.
-            Ty::Obj(internal, _) if callable_reference_invoke_arity(internal).is_some() => {
-                let arity = callable_reference_invoke_arity(internal).unwrap();
-                let obj = Ty::obj(crate::types::wk::any());
+            Ty::Obj(internal, _)
+                if callable_reference_invoke_arity(&internal.render()).is_some() =>
+            {
+                let arity = callable_reference_invoke_arity(&internal.render()).unwrap();
+                let obj = Ty::obj_name(crate::types::wk::any());
                 (
                     vec![obj; arity],
                     obj,
@@ -6735,10 +6881,9 @@ impl<'a> Checker<'a> {
             _ => {
                 // A member `operator fun invoke`: source/user classes are emitted by IR method id later,
                 // while classpath/cross-file members carry the checker-selected callable into lowering.
-                if let Some(sig) = receiver_ty
-                    .obj_internal()
-                    .and_then(|internal| self.syms.method_of(internal, CALLABLE_INVOKE_OPERATOR))
-                {
+                if let Some(sig) = receiver_ty.obj_internal().and_then(|internal| {
+                    self.syms.method_of_name(internal, CALLABLE_INVOKE_OPERATOR)
+                }) {
                     (
                         sig.params,
                         sig.ret,
@@ -6971,14 +7116,14 @@ impl<'a> Checker<'a> {
                 .syms
                 .classes
                 .get(outer)
-                .map(|c| c.internal.clone())
+                .map(ClassSig::internal)
                 .or_else(|| self.imported_type_internal(outer))
                 .or_else(|| {
                     self.syms
                         .class_names
                         .get(outer)
                         .filter(|i| !i.starts_with("__ty/"))
-                        .cloned()
+                        .map(TypeName::render)
                 });
             if let Some(base) = base {
                 let candidate = format!("{base}${}", rest.replace('.', "$"));
@@ -6995,10 +7140,10 @@ impl<'a> Checker<'a> {
         self.nested_internal(&fq)
     }
 
-    fn classpath_object_value(&self, name: &str) -> Option<String> {
+    fn classpath_object_value(&self, name: &str) -> Option<TypeName> {
         let internal = self.imported_type_internal(name)?;
         if self.resolved_type(&internal)?.is_object() {
-            Some(internal)
+            Some(type_name(&internal))
         } else {
             None
         }
@@ -7038,6 +7183,10 @@ impl<'a> Checker<'a> {
         resolve_name_against_imports(name, &self.imports, &self.import_levels, &source)
     }
 
+    fn imported_type_name(&self, name: &str) -> Option<TypeName> {
+        self.imported_type_internal(name).as_deref().map(type_name)
+    }
+
     /// Resolve a dotted import flattened to slashes (`import lib.Scope.Ws` → `lib/Scope/Ws`) to the
     /// internal name that actually EXISTS on the classpath, treating trailing path segments as NESTED
     /// classes (`lib/Scope$Ws`). A nested-type import can't be told apart from a package path
@@ -7056,10 +7205,16 @@ impl<'a> Checker<'a> {
         let Some(Ty::Obj(outer, _)) = self.this_ty else {
             return None;
         };
-        let mut prefix: &str = outer;
+        let outer = outer.render();
+        let mut prefix: &str = &outer;
         loop {
             let cand = format!("{prefix}${name}");
-            if self.syms.classes.values().any(|s| s.internal == cand) {
+            if self
+                .syms
+                .classes
+                .values()
+                .any(|s| s.internal_matches(&cand))
+            {
                 return Some(cand);
             }
             match prefix.rsplit_once('$') {
@@ -7080,7 +7235,12 @@ impl<'a> Checker<'a> {
             return None;
         }
         let ty = Ty::from_name(n)
-            .or_else(|| self.syms.classes.get(n).map(|cs| Ty::obj(&cs.internal)))
+            .or_else(|| {
+                self.syms
+                    .classes
+                    .get(n)
+                    .map(|cs| Ty::obj_name(type_name(&cs.internal())))
+            })
             .or_else(|| self.enclosing_nested_type(n).map(|i| Ty::obj(&i)))
             .or_else(|| self.imported_type_internal(n).map(|i| Ty::obj(&i)))?;
         if ty == Ty::Error {
@@ -7142,16 +7302,16 @@ impl<'a> Checker<'a> {
             // `info.ty`, the construction-expression lowering, keeping them consistent.
             self.obj_with_targs(&internal, r)
         } else if let Some(cs) = self.syms.classes.get(&r.name) {
-            let internal = cs.internal.clone();
+            let internal = cs.internal();
             self.obj_with_targs(&internal, r)
-        } else if let Some(internal) = self.syms.class_names.get(&r.name).cloned() {
+        } else if let Some(internal) = self.syms.class_names.get(&r.name) {
             // Built-in mapped types (`Number`, `Comparable`, `List`, …), classpath classes, and
             // type aliases — the *same* map emit resolves against, so the checker and codegen agree
             // (otherwise a leniently-`Error` type here becomes a real `Obj` in emit → VerifyError).
             // `"__ty/<Prim>"` encodes an alias to a primitive/builtin.
             match internal.strip_prefix("__ty/") {
-                Some(prim) => Ty::from_name(prim).unwrap_or(Ty::Error),
-                None => self.obj_with_targs(&internal, r),
+                Some(prim) => Ty::from_name(&prim).unwrap_or(Ty::Error),
+                None => self.obj_with_targs(&internal.render(), r),
             }
         } else if let Some(internal) = self.imported_type_internal(&r.name) {
             // An explicit/wildcard import resolves a name whose simple form is ABSENT from the global
@@ -7171,8 +7331,8 @@ impl<'a> Checker<'a> {
                 self.syms
                     .classes
                     .values()
-                    .find(|s| s.internal == nested)
-                    .map(|s| s.internal.clone())
+                    .find(|s| s.internal_matches(&nested))
+                    .map(ClassSig::internal)
             } else {
                 None
             }
@@ -7199,7 +7359,7 @@ impl<'a> Checker<'a> {
         // the `unbox-impl` a `getOrThrow()`/member access needs.
         if r.nullable && !base.is_nullable() {
             if let Ty::Obj(internal, _) = base {
-                if self.resolver().is_value(internal) {
+                if self.resolver().is_value_name(internal) {
                     return Ty::nullable(base);
                 }
             }
@@ -7219,7 +7379,7 @@ impl<'a> Checker<'a> {
             } else if self.tparams.contains(name) || extra.contains(name) {
                 erased_type_key(Ty::obj("kotlin/Any"))
             } else if let Some(cs) = self.syms.classes.get(name) {
-                erased_type_key(Ty::obj(&cs.internal))
+                erased_type_key(Ty::obj(&cs.internal()))
             } else {
                 ErasedTypeKey::Unresolved(name.to_string())
             }
@@ -7249,7 +7409,7 @@ impl<'a> Checker<'a> {
 
     /// True if `t` is a `@JvmInline value class` reference type (carries a `value_field`).
     fn ty_is_value_class(&self, t: Ty) -> bool {
-        matches!(t, Ty::Obj(n, _) if self.syms.class_by_internal(n).is_some_and(|c| c.value_field.is_some()))
+        matches!(t, Ty::Obj(n, _) if self.syms.class_by_type_name(n).is_some_and(|c| c.value_field.is_some()))
     }
 
     /// Whether the file-declared class `internal` declares method `name` as abstract (`fun f()` /
@@ -7364,12 +7524,13 @@ impl<'a> Checker<'a> {
         // (`subclasses_of`); a CLASSPATH sealed class reads its `@Metadata` `sealedSubclassFqName`
         // (`sealed_subclasses`), so `when (d) { is D.A -> …; is D.B -> … }` over a classpath sealed `D`
         // is proven exhaustive (an expression) the same way a same-module one is.
-        let subs = match self.syms.class_by_internal(internal) {
-            Some(cs) if cs.is_sealed => self.syms.subclasses_of(internal),
+        let internal = internal.render();
+        let subs = match self.syms.class_by_internal(&internal) {
+            Some(cs) if cs.is_sealed => self.syms.subclasses_of(&internal),
             Some(_) => return false,
             None => self
-                .resolved_type(internal)
-                .map(|t| t.sealed_subclasses)
+                .resolved_type(&internal)
+                .map(|t| t.sealed_subclasses.to_vec())
                 .unwrap_or_default(),
         };
         if subs.is_empty() {
@@ -7384,15 +7545,16 @@ impl<'a> Checker<'a> {
                         ty, negated: false, ..
                     } => {
                         if let Ty::Obj(n, _) = self.resolve_ty_no_diag(ty) {
-                            covered.insert(n.to_string());
+                            covered.insert(n.render());
                         }
                     }
                     // `Sub ->` — value arm naming a singleton object subclass (`object A : S`); a bare
                     // name resolving to a known class whose internal is one of the sealed subclasses.
                     Expr::Name(n) => {
                         if let Some(ci) = self.syms.classes.get(n) {
-                            if subs.contains(&ci.internal) {
-                                covered.insert(ci.internal.clone());
+                            let internal = ci.internal();
+                            if subs.contains(&internal) {
+                                covered.insert(internal);
                             }
                         }
                     }
@@ -7414,7 +7576,7 @@ impl<'a> Checker<'a> {
             self.syms
                 .classes
                 .get(*name)
-                .map_or(false, |c| c.internal == internal)
+                .map_or(false, |c| c.internal_matches(&internal.render()))
         }) else {
             return false;
         };
@@ -7435,7 +7597,7 @@ impl<'a> Checker<'a> {
                             .syms
                             .classes
                             .get(en)
-                            .map_or(false, |c| c.internal == internal)
+                            .map_or(false, |c| c.internal_matches(&internal.render()))
                         {
                             covered.insert(entry);
                         }
@@ -7549,11 +7711,11 @@ impl<'a> Checker<'a> {
         self.imports
             .get(name)
             .cloned()
-            .or_else(|| self.syms.classes.get(name).map(|c| c.internal.clone()))
+            .or_else(|| self.syms.classes.get(name).map(ClassSig::internal))
             // Exception types resolve from the classpath: stdlib `TypeAliasesKt` aliases
             // (`Exception`, `RuntimeException`, …) and the ported `JavaToKotlinClassMap`
             // built-ins (`Throwable`) are both folded into `class_names`.
-            .or_else(|| self.syms.class_names.get(name).cloned())
+            .or_else(|| self.syms.class_names.get(name).map(TypeName::render))
     }
 
     /// Resolve a type without emitting diagnostics (used for speculative smart-cast narrowing).
@@ -7580,7 +7742,7 @@ impl<'a> Checker<'a> {
         } else if self.tparams.contains(&r.name) {
             self.tparams.erase(&r.name)
         } else if let Some(cs) = self.syms.classes.get(&r.name) {
-            Ty::obj(&cs.internal)
+            Ty::obj(&cs.internal())
         } else if let Some(internal) = self.syms.class_names.get(&r.name) {
             // The block-resolved name→internal map (built-in mapped types, classpath classes, and
             // typealiases resolved to their TARGET) — the same map `resolve_ty` narrows against, so a
@@ -7588,7 +7750,7 @@ impl<'a> Checker<'a> {
             // the classless alias name). `"__ty/<prim>"` is an alias to a primitive, not modeled here.
             match internal.strip_prefix("__ty/") {
                 Some(_) => Ty::Error,
-                None => Ty::obj(internal),
+                None => Ty::obj_name(internal),
             }
         } else if let Some(internal) = self
             .imported_type_internal(&r.name)
@@ -7608,8 +7770,8 @@ impl<'a> Checker<'a> {
             self.syms
                 .classes
                 .values()
-                .find(|s| s.internal == nested)
-                .map(|s| Ty::obj(&s.internal))
+                .find(|s| s.internal_matches(&nested))
+                .map(|s| Ty::obj(&s.internal()))
                 .unwrap_or(Ty::Error)
         } else {
             Ty::Error
@@ -7936,16 +8098,17 @@ impl<'a> Checker<'a> {
                 // for an `override` of an inherited member (a base class OR an implemented interface, e.g.
                 // an enum entry overriding an interface method) — that member's declared return type.
                 if let Some(Ty::Obj(internal, _)) = self.this_ty {
+                    let internal = internal.render();
                     if let Some(sig) = self
                         .syms
-                        .class_by_internal(internal)
+                        .class_by_internal(&internal)
                         .and_then(|c| c.methods.get(&f.name))
                     {
                         return sig.ret;
                     }
                     if let Some((_, sig)) = self
                         .syms
-                        .supertype_methods(internal)
+                        .supertype_methods(&internal)
                         .into_iter()
                         .find(|(n, _)| n == &f.name)
                     {
@@ -8058,30 +8221,12 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// Is `sub` a subtype of `sup`? Reflexive, through implemented interfaces, and up the base-class
-    /// chain.
-    fn obj_is_subtype(&self, sub: &str, sup: &str) -> bool {
-        let sup_id = crate::assignable::TypeOracle::canonical_class(self, sup);
-        let matches_sup = |name: &str| {
-            crate::assignable::TypeOracle::matches_class(self, name, sup, sup_id.as_ref())
-        };
-        if matches_sup(sub) {
-            return true;
-        }
-        if let Some(c) = self.syms.class_by_internal(sub) {
-            if c.interfaces.iter().any(|i| matches_sup(i)) {
-                return true;
-            }
-            if let Some(s) = &c.super_internal {
-                return self.obj_is_subtype(s, sup);
-            }
-            return false;
-        }
+    fn obj_name_is_subtype(&self, sub: TypeName, sup: TypeName) -> bool {
         crate::assignable::is_subtype(
             &crate::assignable::TyCtx::new(),
             self,
-            Ty::obj(sub),
-            Ty::obj(sup),
+            Ty::obj_name(sub),
+            Ty::obj_name(sup),
         )
     }
 
@@ -8092,7 +8237,7 @@ impl<'a> Checker<'a> {
     fn when_objs_comparable(&self, st: Ty, ct: Ty) -> bool {
         match (st, ct) {
             (Ty::Obj(a, _), Ty::Obj(b, _)) => {
-                self.obj_is_subtype(a, b) || self.obj_is_subtype(b, a)
+                self.obj_name_is_subtype(a, b) || self.obj_name_is_subtype(b, a)
             }
             _ => false,
         }
@@ -8100,29 +8245,37 @@ impl<'a> Checker<'a> {
 
     /// Resolve a method (own or inherited from the base-class chain) on a class internal name.
     fn lookup_method(&self, internal: &str, name: &str) -> Option<Signature> {
-        let c = self.syms.class_by_internal(internal)?;
+        let internal = existing_type_name(internal)?;
+        self.lookup_method_name(internal, name)
+    }
+
+    fn lookup_method_name(&self, internal: TypeName, name: &str) -> Option<Signature> {
+        let c = self.syms.class_by_type_name(internal)?;
         if let Some(sig) = c.methods.get(name) {
             return Some(sig.clone());
         }
         // A class provides its implemented interfaces' methods — directly overridden, inherited, or (for
         // `: I by d`) delegated. Resolving them here lets a delegating class's calls type-check.
-        for i in c.interfaces.clone() {
-            if let Some(sig) = self.lookup_method(&i, name) {
+        for i in c.interfaces.iter_ids() {
+            if let Some(sig) = self.lookup_method_name(i, name) {
                 return Some(sig);
             }
         }
-        let s = c.super_internal.clone()?;
-        self.lookup_method(&s, name)
+        self.lookup_method_name(c.super_internal?, name)
     }
 
     /// Resolve a property (own or inherited) on a class internal name.
     fn lookup_prop(&self, internal: &str, name: &str) -> Option<(Ty, bool)> {
-        let c = self.syms.class_by_internal(internal)?;
+        let internal = existing_type_name(internal)?;
+        self.lookup_prop_name(internal, name)
+    }
+
+    fn lookup_prop_name(&self, internal: TypeName, name: &str) -> Option<(Ty, bool)> {
+        let c = self.syms.class_by_type_name(internal)?;
         if let Some(p) = c.prop(name) {
             return Some(p);
         }
-        let s = c.super_internal.clone()?;
-        self.lookup_prop(&s, name)
+        self.lookup_prop_name(c.super_internal?, name)
     }
 
     fn property_ref_ty(&self, arity: usize, mutable: bool) -> Option<Ty> {
@@ -8148,10 +8301,10 @@ impl<'a> Checker<'a> {
         if internal.starts_with("__ty/") {
             return None;
         }
-        let internal = internal.to_string();
+        let internal = internal.render();
         let lt = self.resolved_type(&internal)?;
         let (_, companion_ty) = lt.companion_object?;
-        Some(Ty::obj(&companion_ty))
+        Some(Ty::obj_name(companion_ty))
     }
 
     /// Silent (non-erroring) assignability of each argument to a constructor's parameters — used to pick
@@ -8166,7 +8319,7 @@ impl<'a> Checker<'a> {
                     || (a == Ty::Null && p.is_reference())
                     || p.is_erased_top()
                     || a.is_erased_top()
-                    || matches!((p, a), (Ty::Obj(e, _), Ty::Obj(x, _)) if self.obj_is_subtype(x, e))
+                    || matches!((p, a), (Ty::Obj(e, _), Ty::Obj(x, _)) if self.obj_name_is_subtype(x, e))
                     || p.accepts_numeric(a)
             })
     }
@@ -8325,7 +8478,7 @@ impl<'a> Checker<'a> {
         // A primitive flowing into a reference supertype is checked through its boxed source type; the
         // provider's type hierarchy decides whether that box implements `Number`, `Comparable`, etc.
         if let (Some(Ty::Obj(b, _)), Ty::Obj(e, _)) = (actual.boxed_ref(), expected) {
-            if self.obj_is_subtype(b, e) {
+            if self.obj_name_is_subtype(b, e) {
                 return;
             }
         }
@@ -8341,14 +8494,14 @@ impl<'a> Checker<'a> {
         // keeping a local list of platform interfaces.
         if actual == Ty::String || actual == Ty::obj("kotlin/String") {
             if let Ty::Obj(e, _) = expected {
-                if self.obj_is_subtype("kotlin/String", e) {
+                if self.obj_name_is_subtype(type_name("kotlin/String"), e) {
                     return;
                 }
             }
         }
         // A class value is assignable to an interface (supertype) it implements.
         if let (Ty::Obj(e, _), Ty::Obj(a, _)) = (expected, actual) {
-            if self.obj_is_subtype(a, e) {
+            if self.obj_name_is_subtype(a, e) {
                 return;
             }
         }
@@ -8371,7 +8524,7 @@ impl<'a> Checker<'a> {
                 actual.obj_internal(),
                 expected.function_interface_internal(),
             ) {
-                if self.obj_is_subtype(actual_internal, fn_internal) {
+                if self.obj_name_is_subtype(actual_internal, type_name(fn_internal)) {
                     return;
                 }
             }
@@ -8380,7 +8533,7 @@ impl<'a> Checker<'a> {
         // lowering builds an instance whose single abstract method runs the lambda.
         if matches!(actual, Ty::Fun(_)) {
             if let Some(internal) = expected.obj_internal() {
-                if self.simple_fun_interface(internal) {
+                if self.simple_fun_interface(&internal.render()) {
                     return;
                 }
             }
@@ -8486,7 +8639,7 @@ impl<'a> Checker<'a> {
             (sig, None)
         } else if !self.module_declares(name) {
             let internal = self.object_member_import(name)?;
-            let sig = self.syms.method_of(&internal, name)?;
+            let sig = self.syms.method_of_name(internal, name)?;
             (sig, Some(internal))
         } else {
             return None;
@@ -8706,14 +8859,15 @@ impl<'a> Checker<'a> {
                 }
                 // A user-class member `operator fun get(i, j, …)`.
                 if let Some(internal) = at.obj_internal() {
-                    if let Some((owner, sig)) = self.syms.method_of_with_owner(internal, "get") {
+                    if let Some((owner, sig)) = self.syms.method_of_with_owner_name(internal, "get")
+                    {
                         if sig.params.len() == its.len() {
                             for (i, &pt) in sig.params.iter().enumerate() {
                                 self.expect_assignable(pt, its[i], self.span(indices[i]), "index");
                             }
                             let interface = self
                                 .syms
-                                .class_by_internal(&owner)
+                                .class_by_type_name(owner)
                                 .is_some_and(|c| c.is_interface);
                             self.resolved_calls.insert(
                                 e,
@@ -8842,7 +8996,7 @@ impl<'a> Checker<'a> {
                         result
                     } else if let (Ty::Obj(ai, _), Ty::Obj(bi, _)) = (result, ht) {
                         if ai == bi {
-                            Ty::obj(ai)
+                            Ty::obj_name(ai)
                         } else {
                             Ty::Unit
                         }
@@ -8924,7 +9078,9 @@ impl<'a> Checker<'a> {
                         // (`kotlin/Int` <: `Number` <: `Any`); the wrapper realization is the backend's.
                         || ot.boxed_ref().and_then(|b| b.obj_internal()).is_some_and(|bw| {
                             tt.is_erased_top()
-                                || tt.obj_internal().is_some_and(|t| self.obj_is_subtype(bw, t))
+                                || tt
+                                    .obj_internal()
+                                    .is_some_and(|t| self.obj_name_is_subtype(bw, t))
                         }));
                 // A SAFE cast of a PRIMITIVE operand (`1 as? Byte`, `1.0 as? Int`): box the operand to its
                 // wrapper, then `instanceof` the target wrapper/class — `null` on a mismatch (an `Int` box
@@ -9214,21 +9370,22 @@ impl<'a> Checker<'a> {
                                     .next()
                                     .map(|m| m.ret)
                                     .or_else(|| {
-                                        self.resolve_instance(internal, &name, &arg_tys).map(|m| {
-                                            let ret = m.ret;
-                                            let suspend = m.suspend;
-                                            self.resolved_calls.insert(
-                                                e,
-                                                ResolvedCall::Member(
-                                                    crate::symbol_resolver::ResolvedMember {
-                                                        member: m,
-                                                        ret,
-                                                        suspend,
-                                                    },
-                                                ),
-                                            );
-                                            ret
-                                        })
+                                        self.resolve_instance(&internal.render(), &name, &arg_tys)
+                                            .map(|m| {
+                                                let ret = m.ret;
+                                                let suspend = m.suspend;
+                                                self.resolved_calls.insert(
+                                                    e,
+                                                    ResolvedCall::Member(
+                                                        crate::symbol_resolver::ResolvedMember {
+                                                            member: m,
+                                                            ret,
+                                                            suspend,
+                                                        },
+                                                    ),
+                                                );
+                                                ret
+                                            })
                                     })
                                     // A stdlib/classpath EXTENSION reached by `?.` (`c?.takeIf { … }`):
                                     // resolve AND RECORD the callable keyed by the safe-call `ExprId`, so the
@@ -9376,8 +9533,8 @@ impl<'a> Checker<'a> {
                     }
                     if let Some(bt) = self.this_narrow {
                         if let Some(bi) = bt.obj_internal() {
-                            if let Some((ty, _)) = self.lookup_prop(bi, &n) {
-                                self.narrowed_this_member.insert(e, bi.to_string());
+                            if let Some((ty, _)) = self.lookup_prop_name(bi, &n) {
+                                self.narrowed_this_member.insert(e, bi.render());
                                 return self.set(e, ty);
                             }
                             if let Some(ty) = self.try_member_read(bt, &n, self.span(e), Some(e)) {
@@ -9389,7 +9546,7 @@ impl<'a> Checker<'a> {
                     // Unqualified property of the implicit/extension receiver: `fun Box.f() = v`
                     // means `this.v` (sibling method calls already resolve via `this_ty`).
                     if let Some(Ty::Obj(internal, _)) = self.this_ty {
-                        if let Some((ty, _)) = self.lookup_prop(internal, &n) {
+                        if let Some((ty, _)) = self.lookup_prop_name(internal, &n) {
                             return self.set(e, ty);
                         }
                     }
@@ -9402,7 +9559,7 @@ impl<'a> Checker<'a> {
                     if let Some(Ty::Obj(internal, _)) = self.this_ty {
                         if let Some(&ty) = self
                             .syms
-                            .class_by_internal(internal)
+                            .class_by_type_name(internal)
                             .and_then(|c| c.static_props.get(&n))
                         {
                             return self.set(e, ty);
@@ -9416,12 +9573,25 @@ impl<'a> Checker<'a> {
                             return self.set(e, ty);
                         }
                     }
+                    // The bare name is not a member of the DECLARED receiver — try the flow-narrowed
+                    // receiver from an enclosing `if (this is B)`. A member found only on `B` records
+                    // the narrowing so the lowerer inserts a `checkcast` on `this` before the read.
+                    if let Some(bt) = self.this_narrow {
+                        if let Some((ty, _)) =
+                            bt.obj_internal().and_then(|i| self.lookup_prop_name(i, &n))
+                        {
+                            if let Some(bi) = bt.obj_internal() {
+                                self.narrowed_this_member.insert(e, bi.render());
+                            }
+                            return self.set(e, ty);
+                        }
+                    }
                     if self.syms.objects.contains(&n) {
                         // A bare `object` name used as a value (`val x = Foo`, or a self-reference
                         // `object Foo { … Foo … }`) — its type is the singleton, read as `Foo.INSTANCE`
                         // by lowering. Resolved here so an object can refer to itself in its own body.
                         if let Some(cls) = self.syms.classes.get(&n) {
-                            return self.set(e, Ty::obj(&cls.internal));
+                            return self.set(e, Ty::obj(&cls.internal()));
                         }
                     }
                     // A class NAME with a typed `companion object` used as a VALUE (`val c: I = C`): its
@@ -9431,7 +9601,7 @@ impl<'a> Checker<'a> {
                     // supertype get a `C$Companion` ClassSig; a plain companion isn't a first-class value.)
                     if !self.syms.objects.contains(&n) {
                         if let Some(cls) = self.syms.classes.get(&n) {
-                            let comp_internal = format!("{}$Companion", cls.internal);
+                            let comp_internal = format!("{}$Companion", cls.internal());
                             if self.syms.class_by_internal(&comp_internal).is_some() {
                                 return self.set(e, Ty::obj(&comp_internal));
                             }
@@ -9459,13 +9629,9 @@ impl<'a> Checker<'a> {
                     } else if let Some(internal) = self.classpath_object_value(&n) {
                         // A CLASSPATH `object` referenced as a value (`EmptyCoroutineContext`): its type is
                         // the object type; lowering reads `getstatic <internal>.INSTANCE`.
-                        self.expr_lowers.insert(
-                            e,
-                            ExprLowering::ObjectValue {
-                                internal: internal.clone(),
-                            },
-                        );
-                        Ty::obj(&internal)
+                        self.expr_lowers
+                            .insert(e, ExprLowering::ObjectValue { internal });
+                        Ty::obj_name(internal)
                     } else {
                         self.diags
                             .error(self.span(e), format!("unresolved reference '{n}'."));
@@ -9502,7 +9668,7 @@ impl<'a> Checker<'a> {
                         // unboxed-equals path the `&&`-narrowing lowering doesn't model — miscompile.
                         let is_value = t
                             .obj_internal()
-                            .and_then(|i| self.syms.class_by_internal(i))
+                            .and_then(|i| self.syms.class_by_type_name(i))
                             .is_some_and(|c| c.value_field.is_some());
                         if !is_value {
                             self.declare(n, *t, false);
@@ -9548,7 +9714,9 @@ impl<'a> Checker<'a> {
                                     || (p.is_reference()
                                         && rt.is_reference()
                                         && match ((*p).obj_internal(), rt.obj_internal()) {
-                                            (Some(ps), Some(rs)) => self.obj_is_subtype(rs, ps),
+                                            (Some(ps), Some(rs)) => {
+                                                self.obj_name_is_subtype(rs, ps)
+                                            }
                                             _ => true,
                                         });
                                 if arg_ok {
@@ -9562,7 +9730,7 @@ impl<'a> Checker<'a> {
                 if let Ty::Obj(internal, _) = &lt {
                     let op_name = op.arith_operator_name();
                     if let Some(fname) = op_name {
-                        if let Some(sig) = self.syms.method_of(internal, fname) {
+                        if let Some(sig) = self.syms.method_of_name(*internal, fname) {
                             if let Some(param) = sig.single_param().filter(|_| rt != Ty::Error) {
                                 self.expect_assignable(
                                     param,
@@ -9578,7 +9746,7 @@ impl<'a> Checker<'a> {
                     if matches!(op, BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge)
                         && rt != Ty::Error
                     {
-                        if let Some(sig) = self.syms.method_of(internal, "compareTo") {
+                        if let Some(sig) = self.syms.method_of_name(*internal, "compareTo") {
                             if let Some(param) = sig.single_param().filter(|_| sig.ret == Ty::Int) {
                                 self.expect_assignable(
                                     param,
@@ -9658,7 +9826,7 @@ impl<'a> Checker<'a> {
                                         .syms
                                         .classes
                                         .get(&path)
-                                        .map(|c| c.internal.clone())
+                                        .map(ClassSig::internal)
                                         .unwrap_or_else(|| path.replace('.', "$"));
                                     return self.set(e, Ty::obj(&internal));
                                 }
@@ -9675,7 +9843,7 @@ impl<'a> Checker<'a> {
                                     .syms
                                     .classes
                                     .get(&en)
-                                    .map(|c| c.internal.clone())
+                                    .map(ClassSig::internal)
                                     .unwrap_or(en.clone());
                                 return self.set(e, Ty::obj(&internal));
                             }
@@ -9683,20 +9851,20 @@ impl<'a> Checker<'a> {
                         // `Kind.PENDING` on a CLASSPATH enum — a static enum-constant field of the enum's
                         // own type. Lowering emits `getstatic <internal>.ENTRY:L<internal>;`.
                         if let Some(internal) = self
-                            .imported_type_internal(&en)
-                            .or_else(|| self.syms.class_names.get(&en).cloned())
+                            .imported_type_name(&en)
+                            .or_else(|| self.syms.class_names.get(&en))
                         {
                             if self
-                                .resolved_type(&internal)
+                                .resolved_type_name(internal)
                                 .is_some_and(|t| t.is_enum_entry(&name))
                             {
+                                let rendered = internal.render();
                                 crate::trace_compiler!(
                                     "resolve",
-                                    "classpath enum entry {en}.{name} -> {internal}"
+                                    "classpath enum entry {en}.{name} -> {rendered}"
                                 );
-                                self.resolved_library_enum_entries
-                                    .insert(e, internal.clone());
-                                return self.set(e, Ty::obj(&internal));
+                                self.resolved_library_enum_entries.insert(e, internal);
+                                return self.set(e, Ty::obj_name(internal));
                             }
                         }
                         // `ClassName.PROP` — a companion (static) property read.
@@ -9723,8 +9891,12 @@ impl<'a> Checker<'a> {
                                 // TYPE it as the OUTER class — the runtime object is-a Outer, and erased
                                 // argument matching wants `Outer` (`PrimitiveSerialDescriptor(_, PrimitiveKind)`
                                 // accepts `PrimitiveKind.STRING`), not the narrower nested type.
-                                self.expr_lowers
-                                    .insert(e, ExprLowering::ObjectValue { internal: nested });
+                                self.expr_lowers.insert(
+                                    e,
+                                    ExprLowering::ObjectValue {
+                                        internal: type_name(&nested),
+                                    },
+                                );
                                 return self.set(e, Ty::obj(&outer));
                             }
                         }
@@ -9739,7 +9911,7 @@ impl<'a> Checker<'a> {
                                 self.expr_lowers.insert(
                                     e,
                                     ExprLowering::ObjectValue {
-                                        internal: nested.clone(),
+                                        internal: type_name(&nested),
                                     },
                                 );
                                 return self.set(e, Ty::obj(&nested));
@@ -9778,7 +9950,7 @@ impl<'a> Checker<'a> {
                     // take an unmodeled unboxed path; mirrors the `&&`-narrowing guard).
                     let is_value = t
                         .obj_internal()
-                        .and_then(|i| self.syms.class_by_internal(i))
+                        .and_then(|i| self.syms.class_by_type_name(i))
                         .is_some_and(|c| c.value_field.is_some());
                     // A `Boolean` narrowed inside an `&&` chain then used as a `compareTo` receiver
                     // mis-lowers (a primitive `Boolean` has no instance `compareTo`); leave it un-narrowed
@@ -10071,7 +10243,7 @@ impl<'a> Checker<'a> {
                     // member-property implicit ref isn't lowered, so it's NOT resolved here either, to keep
                     // the checker and lowerer in agreement).
                     if let Some(Ty::Obj(internal, _)) = self.this_ty.clone() {
-                        if let Some(sig) = self.syms.method_of(&internal, &name) {
+                        if let Some(sig) = self.syms.method_of_name(internal, &name) {
                             if sig.requires_all_args() && sig.ret != Ty::Nothing {
                                 return self.set(e, Ty::fun(sig.params.clone(), sig.ret));
                             }
@@ -10094,7 +10266,7 @@ impl<'a> Checker<'a> {
                     // module does not declare `foo` itself (a local declaration shadows the import).
                     if !self.module_declares(&name) {
                         if let Some(internal) = self.object_member_import(&name) {
-                            if let Some(sig) = self.syms.method_of(&internal, &name) {
+                            if let Some(sig) = self.syms.method_of_name(internal, &name) {
                                 if sig.requires_all_args() {
                                     self.expr_lowers.insert(
                                         e,
@@ -10139,7 +10311,7 @@ impl<'a> Checker<'a> {
                             if !cls.is_annotation {
                                 return self.set(
                                     e,
-                                    Ty::fun(cls.ctor_params.clone(), Ty::obj(&cls.internal)),
+                                    Ty::fun(cls.ctor_params.clone(), Ty::obj(&cls.internal())),
                                 );
                             }
                         }
@@ -10154,12 +10326,13 @@ impl<'a> Checker<'a> {
                         // captures `this` = value 0 in `lower_method_ref`/`lower_prop_ref`).
                         if rn == "this" {
                             if let Some(Ty::Obj(internal, _)) = self.this_ty {
-                                if let Some(sig) = self.syms.method_of(internal, &name) {
+                                let internal = internal.render();
+                                if let Some(sig) = self.syms.method_of(&internal, &name) {
                                     if sig.requires_all_args() {
                                         return self.set(e, Ty::fun(sig.params.clone(), sig.ret));
                                     }
                                 }
-                                if let Some((_, is_var)) = self.lookup_prop(internal, &name) {
+                                if let Some((_, is_var)) = self.lookup_prop(&internal, &name) {
                                     if let Some(ty) = self.property_ref_ty(0, is_var) {
                                         return self.set(e, ty);
                                     }
@@ -10169,7 +10342,7 @@ impl<'a> Checker<'a> {
                         // bound: `obj::m` where `obj` is an in-scope value
                         if let Some(loc) = self.lookup(&rn) {
                             if let Some(internal) = loc.ty.obj_internal() {
-                                if let Some(sig) = self.syms.method_of(internal, &name) {
+                                if let Some(sig) = self.syms.method_of_name(internal, &name) {
                                     if sig.requires_all_args() {
                                         self.expr(r); // capture the receiver
                                         return self.set(e, Ty::fun(sig.params.clone(), sig.ret));
@@ -10210,7 +10383,8 @@ impl<'a> Checker<'a> {
                             if let Some(cls) = self.syms.classes.get(&rn).cloned() {
                                 if let Some(sig) = cls.methods.get(&name).cloned() {
                                     if sig.requires_all_args() {
-                                        let mut params = vec![Ty::obj(&cls.internal)];
+                                        let cls_internal = cls.internal();
+                                        let mut params = vec![Ty::obj(&cls_internal)];
                                         params.extend(sig.params.iter().copied());
                                         return self.set(e, Ty::fun(params, sig.ret));
                                     }
@@ -10219,7 +10393,7 @@ impl<'a> Checker<'a> {
                                 // `fun A.foo()` is top-level): the function type prepends the receiver to
                                 // the extension's own args — `(A, ext-args…) -> ext-ret`. (A member of
                                 // the same name, checked above, takes precedence.)
-                                let recv_ty = Ty::obj(&cls.internal);
+                                let recv_ty = Ty::obj(&cls.internal());
                                 if let Some(sig) = self.syms.ext_fun(recv_ty, &name).cloned() {
                                     if sig.requires_all_args() && sig.ret != Ty::Nothing {
                                         let mut params = vec![recv_ty];
@@ -10273,7 +10447,7 @@ impl<'a> Checker<'a> {
                 if let Some(r) = receiver {
                     let rty = self.expr(r);
                     if let Some(internal) = rty.obj_internal() {
-                        if let Some(sig) = self.syms.method_of(internal, &name) {
+                        if let Some(sig) = self.syms.method_of_name(internal, &name) {
                             if sig.requires_all_args() {
                                 return self.set(e, Ty::fun(sig.params.clone(), sig.ret));
                             }
@@ -10294,7 +10468,7 @@ impl<'a> Checker<'a> {
                         // reference; a `var` (mutable reference) isn't lowered, so don't type it. (The
                         // `obj::p` Name form is handled above; a bound METHOD ref on such a receiver is
                         // handled by the member-method path in the lowerer.)
-                        let immutable_prop = self.syms.class_by_internal(internal).and_then(|c| {
+                        let immutable_prop = self.syms.class_by_type_name(internal).and_then(|c| {
                             c.props
                                 .iter()
                                 .find_map(|(n, _, v)| (*n == name).then_some(*v))
@@ -10677,7 +10851,7 @@ impl<'a> Checker<'a> {
         // and library receivers (`String`, `StringBuilder`, …) a bare member resolves through the
         // implicit-`this` member probe in the `Expr::Name`/call arms instead.
         if let Ty::Obj(internal, _) = recv {
-            if let Some(cs) = self.syms.class_by_internal(internal) {
+            if let Some(cs) = self.syms.class_by_type_name(internal) {
                 for (n, t, is_var) in cs.props.clone() {
                     self.declare(&n, t, is_var);
                 }
@@ -10804,8 +10978,9 @@ impl<'a> Checker<'a> {
             // A `vararg` member (`fun f(vararg s: T)`) accepts any number of trailing `T` arguments,
             // packed into the array parameter — element-type them rather than matching the single array
             // parameter positionally (which would reject `f(x)` as "T but Array<T> expected").
-            if self.syms.method_is_vararg(internal, name) {
-                if let Some(sig) = self.syms.method_of(internal, name) {
+            let internal = internal.render();
+            if self.syms.method_is_vararg(&internal, name) {
+                if let Some(sig) = self.syms.method_of(&internal, name) {
                     let n_fixed = sig.params.len().saturating_sub(1);
                     if arg_tys.len() >= n_fixed {
                         self.expect_call_args(&sig.params, true, args, arg_tys);
@@ -10848,7 +11023,9 @@ impl<'a> Checker<'a> {
                 return Some(ret);
             }
             if let Some(internal) = rt.obj_internal() {
-                if let Some(ret) = self.classpath_super_member_ret(call, internal, name, arg_tys) {
+                if let Some(ret) =
+                    self.classpath_super_member_ret(call, &internal.render(), name, arg_tys)
+                {
                     return Some(ret);
                 }
             }
@@ -11142,7 +11319,7 @@ impl<'a> Checker<'a> {
             "resolve",
             "record_library_extension_call {name} -> ret={:?} owner={} jvm={} desc={}",
             c.ret,
-            c.owner,
+            c.owner.render(),
             c.name,
             c.descriptor
         );
@@ -11170,7 +11347,7 @@ impl<'a> Checker<'a> {
         {
             return;
         }
-        let Some(receiver_internal) = receiver.obj_internal().map(str::to_string) else {
+        let Some(receiver_internal) = receiver.obj_internal().map(|n| n.render()) else {
             return;
         };
         let owner = Ty::obj("kotlin/Any");
@@ -11186,9 +11363,9 @@ impl<'a> Checker<'a> {
         args: &[Ty],
     ) {
         if let Some(mut member) = self.resolve_instance(receiver_internal, name, args) {
-            let owner = member.owner.as_deref().unwrap_or(receiver_internal);
+            let owner = member.owner_name_or(receiver_internal);
             member.is_interface = self
-                .resolved_type(owner)
+                .resolved_type(&owner)
                 .is_some_and(|ty| ty.is_interface());
             self.synthetic_member_calls
                 .insert((anchor, name.to_string()), member);
@@ -11279,26 +11456,27 @@ impl<'a> Checker<'a> {
 
     fn iterator_protocol_target(&self, iterable_ty: Ty) -> Option<IteratorProtocolTarget> {
         let internal = iterable_ty.obj_internal()?;
-        let iterator = if let Some(member) = self.resolve_instance(internal, "iterator", &[]) {
-            IteratorDispatchTarget::Member {
-                owner_fallback: internal.to_string(),
-                member: Box::new(member),
-            }
-        } else {
-            IteratorDispatchTarget::Extension(Box::new(self.library_extension_callable(
-                "iterator",
-                iterable_ty,
-                &[],
-                &[],
-            )?))
-        };
+        let iterator =
+            if let Some(member) = self.resolve_instance(&internal.render(), "iterator", &[]) {
+                IteratorDispatchTarget::Member {
+                    owner_fallback: internal,
+                    member: Box::new(member),
+                }
+            } else {
+                IteratorDispatchTarget::Extension(Box::new(self.library_extension_callable(
+                    "iterator",
+                    iterable_ty,
+                    &[],
+                    &[],
+                )?))
+            };
         let iter_ty = iterator.ret();
-        let iter_internal = iter_ty.obj_internal()?;
-        let has_next = self.resolve_instance(iter_internal, "hasNext", &[])?;
-        let next = self.resolve_instance(iter_internal, "next", &[])?;
+        let iter_internal = iter_ty.obj_internal()?.render();
+        let has_next = self.resolve_instance(&iter_internal, "hasNext", &[])?;
+        let next = self.resolve_instance(&iter_internal, "next", &[])?;
         let elem_ty = iterable_ty
             .obj_internal()
-            .and_then(|i| self.syms.libraries.iterable_element_type(i))
+            .and_then(|i| self.syms.libraries.iterable_element_type(&i.render()))
             .or_else(|| iter_ty.type_args().first().copied())
             .or_else(|| iterable_ty.type_args().first().copied())
             .unwrap_or_else(|| Ty::obj("kotlin/Any"));
@@ -11330,11 +11508,11 @@ impl<'a> Checker<'a> {
         name: &str,
         params: &[Ty],
     ) -> Option<DestructureComponentTarget> {
-        let owner = recv.obj_internal()?.to_string();
-        if !self.current_file_declares_class(&owner) {
+        let owner = recv.obj_internal()?;
+        if !self.current_file_declares_class_name(owner) {
             return None;
         }
-        let sig = self.syms.class_by_internal(&owner)?.methods.get(name)?;
+        let sig = self.syms.class_by_type_name(owner)?.methods.get(name)?;
         if sig.params.as_slice() != params {
             return None;
         }
@@ -11352,8 +11530,8 @@ impl<'a> Checker<'a> {
         name: &str,
         params: &[Ty],
     ) -> Option<DestructureComponentTarget> {
-        let owner = recv.obj_internal()?.to_string();
-        let sig = self.syms.class_by_internal(&owner)?;
+        let owner = recv.obj_internal()?;
+        let sig = self.syms.class_by_type_name(owner)?;
         let method = sig.methods.get(name)?;
         if method.params.as_slice() != params {
             return None;
@@ -11415,13 +11593,16 @@ impl<'a> Checker<'a> {
         recv: Ty,
         property: &str,
     ) -> Option<DestructureComponentTarget> {
-        fn find(syms: &SymbolTable, internal: &str, property: &str) -> Option<(String, Ty, bool)> {
-            let c = syms.class_by_internal(internal)?;
+        fn find(
+            syms: &SymbolTable,
+            internal: TypeName,
+            property: &str,
+        ) -> Option<(TypeName, Ty, bool)> {
+            let c = syms.class_by_type_name(internal)?;
             if let Some((ty, _)) = c.prop(property) {
-                return Some((internal.to_string(), ty, c.is_interface));
+                return Some((internal, ty, c.is_interface));
             }
-            let sup = c.super_internal.as_deref()?;
-            find(syms, sup, property)
+            find(syms, c.super_internal?, property)
         }
 
         let owner = recv.obj_internal()?;
@@ -11434,11 +11615,11 @@ impl<'a> Checker<'a> {
         })
     }
 
-    fn current_file_declares_class(&self, internal: &str) -> bool {
+    fn current_file_declares_class_name(&self, internal: TypeName) -> bool {
         self.file.decls.iter().any(|&d| {
             matches!(
                 self.file.decl(d),
-                Decl::Class(c) if class_internal(self.file, &c.name) == internal
+                Decl::Class(c) if internal.matches(&class_internal(self.file, &c.name))
             )
         })
     }
@@ -11448,11 +11629,11 @@ impl<'a> Checker<'a> {
             if internal.starts_with("kotlin/reflect/") {
                 return None;
             }
-            if let Some(sig) = self.syms.method_of(internal, "getValue") {
+            if let Some(sig) = self.syms.method_of_name(internal, "getValue") {
                 self.delegate_getvalue_targets.insert(
                     delegate,
                     DelegateGetValueTarget::Member {
-                        owner: internal.to_string(),
+                        owner: internal,
                         params: sig.params.clone(),
                         ret: sig.ret,
                     },
@@ -11542,7 +11723,7 @@ impl<'a> Checker<'a> {
             let pushed = label.map(|l| self.this_labels.push((l.to_string(), recv, false)));
             self.push_scope();
             if let Ty::Obj(internal, _) = recv {
-                if let Some(cs) = self.syms.class_by_internal(internal) {
+                if let Some(cs) = self.syms.class_by_type_name(internal) {
                     for (n, t, is_var) in cs.props.clone() {
                         self.declare(&n, t, is_var);
                     }
@@ -11606,7 +11787,7 @@ impl<'a> Checker<'a> {
         let Ty::Obj(internal, targs) = rt else {
             return None;
         };
-        let cs = self.syms.class_by_internal(internal)?;
+        let cs = self.syms.class_by_type_name(internal)?;
         let gm = cs.generic_methods.get(name)?.clone();
         // Class type parameters → the receiver's type arguments; a parameter the receiver doesn't
         // supply (a raw type) keeps the erased `Object`, preserving the previous lenient behavior.
@@ -11778,8 +11959,8 @@ impl<'a> Checker<'a> {
     ) {
         let Some(owner) = member
             .owner
-            .clone()
-            .or_else(|| rt.non_null().obj_internal().map(str::to_string))
+            .map(|owner| owner.render())
+            .or_else(|| rt.non_null().obj_internal().map(|n| n.render()))
         else {
             return;
         };
@@ -11855,7 +12036,7 @@ impl<'a> Checker<'a> {
             Visibility::Private | Visibility::Protected => {
                 let Some(enc) = self
                     .this_ty
-                    .and_then(|t| t.obj_internal().map(str::to_string))
+                    .and_then(|t| t.obj_internal().map(|n| n.render()))
                 else {
                     return false;
                 };
@@ -11903,7 +12084,7 @@ impl<'a> Checker<'a> {
                 .unwrap_or(Visibility::Public);
                 return Some((vis, internal));
             }
-            cur = cs.super_internal.clone();
+            cur = cs.super_internal();
         }
         None
     }
@@ -11936,14 +12117,15 @@ impl<'a> Checker<'a> {
         mexpr: Option<ExprId>,
     ) -> Option<Ty> {
         if let Ty::Obj(internal, args) = rt {
-            if let Some((ty, _)) = self.lookup_prop(internal, name) {
-                if let Some((vis, owner)) = self.effective_member_visibility(internal, name, false)
+            let internal = internal.render();
+            if let Some((ty, _)) = self.lookup_prop(&internal, name) {
+                if let Some((vis, owner)) = self.effective_member_visibility(&internal, name, false)
                 {
                     if vis != Visibility::Public {
                         self.reject_if_inaccessible(vis, name, &owner, span);
                     }
                 }
-                if let Some(cs) = self.syms.class_by_internal(internal) {
+                if let Some(cs) = self.syms.class_by_internal(&internal) {
                     if let Some(&i) = cs.generic_props.get(name) {
                         if let Some(&arg) = args.get(i) {
                             return Some(arg);
@@ -11956,7 +12138,7 @@ impl<'a> Checker<'a> {
                 self.syms
                     .classes
                     .get(en)
-                    .map_or(false, |c| c.internal == internal)
+                    .map_or(false, |c| c.internal_matches(&internal))
             });
             if is_enum_val {
                 match name {
@@ -12026,14 +12208,19 @@ impl<'a> Checker<'a> {
                 return ret;
             }
         }
-        if name == "java" && rt.non_null().obj_internal() == Some("java/lang/Class") {
+        if name == "java"
+            && rt
+                .non_null()
+                .obj_internal()
+                .is_some_and(|internal| internal.matches("java/lang/Class"))
+        {
             if let Some(me) = mexpr {
                 self.expr_lowers.insert(me, ExprLowering::ClassLiteralJava);
             }
             return rt;
         }
         if let Some(internal) = rt.non_null().obj_internal() {
-            if let Some(sf) = self.syms.libraries.static_field(internal, name) {
+            if let Some(sf) = self.syms.libraries.static_field_name(internal, name) {
                 let ty = sf.ty;
                 if let Some(me) = mexpr {
                     self.expr_lowers.insert(
@@ -12136,12 +12323,12 @@ impl<'a> Checker<'a> {
         if matches!(fi.callable.origin, Origin::Module { .. }) {
             let interface = self
                 .syms
-                .class_by_internal(&fi.callable.owner)
+                .class_by_type_name(fi.callable.owner)
                 .is_some_and(|c| c.is_interface);
             self.resolved_calls.insert(
                 call,
                 ResolvedCall::ModuleMember {
-                    owner: fi.callable.owner.clone(),
+                    owner: fi.callable.owner,
                     name: fi.callable.name.clone(),
                     params: params.clone(),
                     ret,
@@ -12193,14 +12380,14 @@ impl<'a> Checker<'a> {
         // parameter names the same way the positional form already resolves the class.
         self.imported_type_internal(name)
             .or_else(|| self.imports.get(name).cloned())
-            .or_else(|| self.syms.class_names.get(name).cloned())
+            .or_else(|| self.syms.class_names.get(name).map(TypeName::render))
     }
 
     /// If `name` is imported from a classpath `object` (`import a.b.Obj.member` → `imports[member] =
     /// a/b/Obj/member`), the object's internal name — so an unqualified call `member(args)` can dispatch
     /// on the singleton. `None` unless the import's owner path resolves to an object carrying a member of
     /// this name (the owner-value lowering, `getstatic Obj.INSTANCE`, requires a plain object INSTANCE).
-    fn object_member_import(&self, name: &str) -> Option<String> {
+    fn object_member_import(&self, name: &str) -> Option<TypeName> {
         let full = self.imports.get(name)?;
         let (owner_path, member) = full.rsplit_once('/')?;
         if member != name {
@@ -12211,14 +12398,14 @@ impl<'a> Checker<'a> {
         if self.syms.objects.contains(owner_path) {
             if let Some(cls) = self.syms.classes.get(owner_path) {
                 if cls.methods.contains_key(name) {
-                    return Some(cls.internal.clone());
+                    return Some(cls.internal_name());
                 }
             }
         }
         let owner = self.nested_internal(owner_path)?;
         self.resolved_type(&owner)
             .filter(|t| t.is_object())
-            .map(|_| owner)
+            .map(|_| type_name(&owner))
     }
 
     /// Primary-constructor parameter names/defaults of a same-file class, in declaration order — for
@@ -12400,11 +12587,11 @@ impl<'a> Checker<'a> {
                                 )
                                 .and_then(crate::symbol_resolver::Symbol::top_level_call)
                             {
-                                if c.owner.rsplit_once('/').map(|(p, _)| p) == Some(pkg.as_str()) {
+                                if c.owner_package_matches(pkg.as_str()) {
                                     crate::trace_compiler!(
                                         "resolve",
                                         "fully-qualified top-level call {pkg}.{name} -> {}",
-                                        c.owner
+                                        c.owner.render()
                                     );
                                     for (i, a) in args.iter().enumerate() {
                                         if let Some(p) = c.params.get(i) {
@@ -12477,13 +12664,11 @@ impl<'a> Checker<'a> {
                                         )
                                         .and_then(crate::symbol_resolver::Symbol::top_level_call)
                                     {
-                                        if c.owner.rsplit_once('/').map(|(p, _)| p)
-                                            == Some(pkg.as_str())
-                                        {
+                                        if c.owner_package_matches(pkg.as_str()) {
                                             crate::trace_compiler!(
                                                 "resolve",
                                                 "fully-qualified trailing-lambda call {pkg}.{name} -> {}",
-                                                c.owner
+                                                c.owner.render()
                                             );
                                             // Record the resolved callable so the lowerer emits it (the
                                             // non-trailing-lambda FQ path above records the same way).
@@ -12525,7 +12710,7 @@ impl<'a> Checker<'a> {
                                         .diags
                                         .error(span, format!("constructor '{qname}': {msg}")),
                                 }
-                                return self.ctor_result(call, &cls.internal);
+                                return self.ctor_result(call, &cls.internal());
                             }
                         }
                         let arg_tys = self.arg_tys(args);
@@ -12550,7 +12735,7 @@ impl<'a> Checker<'a> {
                                 ),
                             ),
                         }
-                        return self.ctor_result(call, &cls.internal);
+                        return self.ctor_result(call, &cls.internal());
                     }
                 }
                 // `EnumName.values()` / `EnumName.valueOf(s)` — synthetic static enum methods.
@@ -12561,7 +12746,7 @@ impl<'a> Checker<'a> {
                             .syms
                             .classes
                             .get(&en)
-                            .map(|c| c.internal.clone())
+                            .map(ClassSig::internal)
                             .unwrap_or(en.clone());
                         if name == "values" && args.is_empty() {
                             return Ty::array(Ty::obj(&internal));
@@ -12591,7 +12776,7 @@ impl<'a> Checker<'a> {
                             } else {
                                 self.expect_call_args(&cls.ctor_params, false, args, &arg_tys);
                             }
-                            return Ty::obj(&cls.internal);
+                            return Ty::obj(&cls.internal());
                         }
                     }
                 }
@@ -12704,28 +12889,29 @@ impl<'a> Checker<'a> {
                     }
                     let arg_tys = self.arg_tys(args);
                     // A `super<T>` qualifier matches a supertype by its simple name.
-                    let matches_qual = |internal: &str| {
+                    let matches_qual = |internal: TypeName| {
                         super_ty
                             .as_deref()
-                            .is_none_or(|t| internal.rsplit('/').next() == Some(t) || internal == t)
+                            .is_none_or(|t| internal.qualifier_matches(t))
                     };
                     if let Some(Ty::Obj(internal, _)) = self.this_ty {
                         let sup = self
                             .syms
-                            .class_by_internal(internal)
-                            .and_then(|c| c.super_internal.clone());
-                        if let Some(sup) = sup.filter(|s| matches_qual(s)) {
+                            .class_by_type_name(internal)
+                            .and_then(|c| c.super_internal);
+                        if let Some(sup) = sup.filter(|s| matches_qual(*s)) {
                             // A user base-class method.
+                            let sup_rendered = sup.render();
                             if let Some(sig) = self
                                 .syms
-                                .method_of(&sup, &name)
-                                .filter(|_| !self.class_method_is_abstract(&sup, &name))
+                                .method_of_name(sup, &name)
+                                .filter(|_| !self.class_method_is_abstract(&sup_rendered, &name))
                             {
                                 self.expect_call_args(&sig.params, false, args, &arg_tys);
                                 self.resolved_super_calls.insert(
                                     call,
                                     ResolvedSuperCall {
-                                        owner: sup.clone(),
+                                        owner: sup,
                                         interface: false,
                                         params: sig.params.clone(),
                                         ret: sig.ret,
@@ -12735,7 +12921,7 @@ impl<'a> Checker<'a> {
                                 return sig.ret;
                             }
                             // A classpath base-class method (`class C : ArrayList<…>() { … super.add(x) }`).
-                            if let Some(m) = self.resolve_instance(&sup, &name, &arg_tys) {
+                            if let Some(m) = self.resolve_instance(&sup_rendered, &name, &arg_tys) {
                                 self.resolved_super_calls.insert(
                                     call,
                                     ResolvedSuperCall {
@@ -12753,18 +12939,16 @@ impl<'a> Checker<'a> {
                         // `I`'s default. Resolve across the superinterfaces matching the `super<T>`
                         // qualifier — with none, EXACTLY ONE must provide the method (matching the
                         // lowerer); more than one needs the explicit `super<T>.foo()` krusty now honors.
-                        let ifaces: Vec<String> = self
+                        let matches: Vec<(TypeName, Signature)> = self
                             .syms
-                            .class_by_internal(internal)
-                            .map(|c| c.interfaces.clone())
-                            .unwrap_or_default();
-                        let matches: Vec<(String, Signature)> = ifaces
-                            .iter()
-                            .filter(|iface| matches_qual(iface))
+                            .class_by_type_name(internal)
+                            .into_iter()
+                            .flat_map(|c| c.interfaces.iter_ids())
+                            .filter(|iface| matches_qual(*iface))
                             .filter_map(|iface| {
                                 self.syms
-                                    .method_of(iface, &name)
-                                    .map(|sig| (iface.clone(), sig.clone()))
+                                    .method_of_name(iface, &name)
+                                    .map(|sig| (iface, sig.clone()))
                             })
                             .collect();
                         if let [(iface, sig)] = matches.as_slice() {
@@ -12772,7 +12956,7 @@ impl<'a> Checker<'a> {
                             self.resolved_super_calls.insert(
                                 call,
                                 ResolvedSuperCall {
-                                    owner: iface.clone(),
+                                    owner: *iface,
                                     interface: true,
                                     params: sig.params.clone(),
                                     ret: sig.ret,
@@ -12851,7 +13035,7 @@ impl<'a> Checker<'a> {
                                 self.expr_lowers.insert(
                                     call,
                                     ExprLowering::ObjectMemberCall {
-                                        internal: comp_internal,
+                                        internal: type_name(&comp_internal),
                                     },
                                 );
                             }
@@ -12864,8 +13048,8 @@ impl<'a> Checker<'a> {
                                 .syms
                                 .classes
                                 .get(&cls)
-                                .map(|c| c.internal.clone())
-                                .unwrap_or_else(|| class_internal(self.file, &cls));
+                                .map(ClassSig::internal_name)
+                                .unwrap_or_else(|| type_name(&class_internal(self.file, &cls)));
                             return match self
                                 .syms
                                 .classes
@@ -12887,12 +13071,8 @@ impl<'a> Checker<'a> {
                                         );
                                     }
                                     self.expect_call_args(&sig.params, false, args, &arg_tys);
-                                    self.expr_lowers.insert(
-                                        call,
-                                        ExprLowering::ObjectMemberCall {
-                                            internal: internal.clone(),
-                                        },
-                                    );
+                                    self.expr_lowers
+                                        .insert(call, ExprLowering::ObjectMemberCall { internal });
                                     sig.ret
                                 }
                                 None => {
@@ -12924,7 +13104,7 @@ impl<'a> Checker<'a> {
                                         .and_then(|lt| lt.companion_object)
                                         .and_then(|(_, cty)| {
                                             self.resolve_instance_member(
-                                                Ty::obj(&cty),
+                                                Ty::obj_name(cty),
                                                 &name,
                                                 &arg_tys,
                                             )
@@ -12935,7 +13115,7 @@ impl<'a> Checker<'a> {
                                             // Record the receiver's type as the companion's type so the
                                             // LOWERING resolves this as an instance call on the
                                             // getstatic'd companion value (`Random` → `Random$Default`).
-                                            self.set(receiver, Ty::obj(&cty));
+                                            self.set(receiver, Ty::obj(&cty.render()));
                                             // A generic member whose return ERASED to `Any`
                                             // (`Json.decodeFromString(KSerializer<Foo>, String): T`)
                                             // recovers its substituted return (`Foo`) from the arguments.
@@ -12977,7 +13157,7 @@ impl<'a> Checker<'a> {
                                                     self.expr_lowers.insert(
                                                         receiver,
                                                         ExprLowering::ObjectValue {
-                                                            internal: internal.clone(),
+                                                            internal: type_name(&internal),
                                                         },
                                                     );
                                                     let ret = m.ret;
@@ -13326,11 +13506,12 @@ impl<'a> Checker<'a> {
                     }
                 }
                 // Instance method call on a class value: `p.method(args)` (own or inherited).
-                if let Ty::Obj(internal, _) = rt {
+                if let Ty::Obj(internal_name, _) = rt {
+                    let internal = internal_name.render();
                     // A non-public member FUNCTION may be inaccessible from this site — kotlinc rejects it;
                     // surface the same diagnostic rather than silently compiling an illegal call.
                     if let Some((vis, owner)) =
-                        self.effective_member_visibility(internal, &name, true)
+                        self.effective_member_visibility(&internal, &name, true)
                     {
                         if vis != Visibility::Public {
                             self.reject_if_inaccessible(vis, &name, &owner, span);
@@ -13419,7 +13600,7 @@ impl<'a> Checker<'a> {
                         self.resolved_calls.insert(
                             call,
                             ResolvedCall::ModuleMember {
-                                owner: fi.owner.clone().unwrap_or_else(|| internal.to_string()),
+                                owner: fi.owner.unwrap_or(internal_name),
                                 name: name.clone(),
                                 params: params.clone(),
                                 ret,
@@ -13441,9 +13622,12 @@ impl<'a> Checker<'a> {
                     // (`sub.inheritedMethod()`). Runs after the module-member lookup, so a user override
                     // wins.
                     if let Some(internal) = rt.obj_internal() {
-                        if let Some(ret) =
-                            self.classpath_super_member_ret(call, internal, &name, &arg_tys)
-                        {
+                        if let Some(ret) = self.classpath_super_member_ret(
+                            call,
+                            &internal.render(),
+                            &name,
+                            &arg_tys,
+                        ) {
                             return ret;
                         }
                     }
@@ -13778,8 +13962,8 @@ impl<'a> Checker<'a> {
                         .classes
                         .values()
                         .find(|cs| {
-                            cs.internal == inner_internal
-                                && cs.inner_of.as_deref() == Some(outer_internal)
+                            cs.internal_matches(&inner_internal)
+                                && cs.inner_of_matches(&outer_internal.render())
                         })
                         .cloned()
                     {
@@ -13803,7 +13987,7 @@ impl<'a> Checker<'a> {
                 // not an instance member. Resolve it there as a static call on the receiver's type.
                 if let Some(internal) = rt.obj_internal() {
                     if let Some(m) = self
-                        .resolve_companion(internal, &name, &arg_tys)
+                        .resolve_companion(&internal.render(), &name, &arg_tys)
                         // A `@JvmStatic suspend fun` keeps its physical `Continuation` param here (the
                         // companion path doesn't strip/CPS it), so leave it unresolved rather than
                         // miscompile the calling convention.
@@ -14001,15 +14185,16 @@ impl<'a> Checker<'a> {
                         if let Some(sig) = cls.single_method().filter(|_| cls.is_interface) {
                             let pts = sig.params.clone();
                             self.check_lambda_with_types(lambda, &pts);
-                            return self.set(call, Ty::obj(&cls.internal));
+                            return self.set(call, Ty::obj(&cls.internal()));
                         }
                     }
                     // A classpath functional interface (`Runnable`, `Comparator`, …).
-                    if let Some(internal) = self.syms.class_names.get(&fname).cloned() {
-                        if let Some(sam) = self.resolved_type(&internal).and_then(|t| t.sam_method)
+                    if let Some(internal) = self.syms.class_names.get(&fname) {
+                        if let Some(sam) =
+                            self.resolved_type_name(internal).and_then(|t| t.sam_method)
                         {
                             self.check_lambda_with_types(lambda, &sam.params);
-                            return self.set(call, Ty::obj(&internal));
+                            return self.set(call, Ty::obj_name(internal));
                         }
                     }
                 }
@@ -14295,8 +14480,9 @@ impl<'a> Checker<'a> {
                                 && matches!(self.file.expr(a), Expr::Lambda { .. })
                             {
                                 if let Some(internal) = sig.params[i].obj_internal() {
-                                    if self.simple_fun_interface(internal) {
-                                        if let Some(sp) = self.fun_interface_sam_params(internal) {
+                                    let internal = internal.render();
+                                    if self.simple_fun_interface(&internal) {
+                                        if let Some(sp) = self.fun_interface_sam_params(&internal) {
                                             return self.check_lambda_with_types(a, &sp);
                                         }
                                     }
@@ -14384,7 +14570,7 @@ impl<'a> Checker<'a> {
                             self.syms
                                 .classes
                                 .values()
-                                .find(|s| s.internal == nested)
+                                .find(|s| s.internal_matches(&nested))
                                 .cloned()
                         })
                         .or_else(|| self.syms.classes.get(&fname).cloned());
@@ -14415,7 +14601,7 @@ impl<'a> Checker<'a> {
                                             .error(span, format!("constructor '{fname}': {msg}"));
                                     }
                                 }
-                                return self.ctor_result(call, &cls.internal);
+                                return self.ctor_result(call, &cls.internal());
                             }
                         }
                         // Omitted trailing arguments are allowed when those parameters have a default
@@ -14443,7 +14629,7 @@ impl<'a> Checker<'a> {
                                 .or_else(|| cls.secondary_ctors.iter().find(|sp| sp.len() == got));
                             if let Some(sparams) = chosen {
                                 self.expect_call_args(sparams, false, args, &arg_tys);
-                                return self.ctor_result(call, &cls.internal);
+                                return self.ctor_result(call, &cls.internal());
                             }
                             self.diags.error(
                                 span,
@@ -14466,12 +14652,12 @@ impl<'a> Checker<'a> {
                                     .find(|sp| self.ctor_args_match(sp, &arg_tys))
                                 {
                                     self.expect_call_args(sparams, false, args, &arg_tys);
-                                    return self.ctor_result(call, &cls.internal);
+                                    return self.ctor_result(call, &cls.internal());
                                 }
                             }
                             self.expect_call_args(&ctor_params, false, args, &arg_tys);
                         }
-                        return self.ctor_result(call, &cls.internal);
+                        return self.ctor_result(call, &cls.internal());
                     }
                     // Named classpath constructors use metadata names/defaults; lowering selects
                     // either the plain constructor or the default-argument synthetic.
@@ -14522,7 +14708,8 @@ impl<'a> Checker<'a> {
                     // type with no explicit import): ask the library to resolve the constructor. The
                     // library owns any target-specific knowledge (e.g. the throwable-ctor shapes the
                     // JVM jimage can't surface) — the resolver no longer special-cases throwables.
-                    if let Some(internal) = self.syms.class_names.get(&fname).cloned() {
+                    if let Some(internal) = self.syms.class_names.get(&fname).map(TypeName::render)
+                    {
                         if self
                             .record_library_constructor(call, &internal, args.to_vec(), &arg_tys)
                             .is_some()
@@ -14539,18 +14726,19 @@ impl<'a> Checker<'a> {
                 // inner class, an unqualified call may target an enclosing method (`this.this$0.foo()`).
                 if !self.module_declares(&fname) {
                     if let Some(Ty::Obj(internal, _)) = self.this_ty {
+                        let internal = internal.render();
                         // The sibling member through the module source; the enclosing-class fallback walks
                         // `inner_of` (a LEXICAL scope, not the type hierarchy) so it stays on `lookup_method`.
                         let resolved: Option<(Vec<Ty>, Ty)> =
                             crate::module_symbols::ModuleSymbols::new(self.syms)
-                                .instance_members(Ty::obj(internal), &fname)
+                                .instance_members(Ty::obj(&internal), &fname)
                                 .into_iter()
                                 .next()
                                 .map(|m| (m.params, m.ret))
                                 .or_else(|| {
                                     self.syms
-                                        .class_by_internal(internal)
-                                        .and_then(|c| c.inner_of.clone())
+                                        .class_by_internal(&internal)
+                                        .and_then(ClassSig::inner_of)
                                         .and_then(|outer| self.lookup_method(&outer, &fname))
                                         .map(|s| (s.params, s.ret))
                                 });
@@ -14564,7 +14752,7 @@ impl<'a> Checker<'a> {
                             // positionally.
                             let vararg = self
                                 .syms
-                                .method_of(internal, &fname)
+                                .method_of(&internal, &fname)
                                 .is_some_and(|s| s.vararg);
                             self.expect_call_args(&params, vararg, args, &arg_tys);
                             // An EXPRESSION-body sibling method whose declared return was the collection
@@ -14572,7 +14760,7 @@ impl<'a> Checker<'a> {
                             // its body was checked (an anonymous object / local class whose `fun m() = f()`
                             // return couldn't be inferred at collection). Matches the qualified-member path.
                             return self
-                                .inferred_member_ret(Ty::obj(internal), &fname, &params)
+                                .inferred_member_ret(Ty::obj(&internal), &fname, &params)
                                 .unwrap_or(ret);
                         }
                     } else {
@@ -14590,14 +14778,15 @@ impl<'a> Checker<'a> {
                     // `this_narrow` is only ever a known reference subtype of the receiver.
                     if let Some(bt) = self.this_narrow {
                         if let Some(bi) = bt.obj_internal() {
+                            let bi = bi.render();
                             if let Some(m) = crate::module_symbols::ModuleSymbols::new(self.syms)
                                 .instance_members(bt, &fname)
                                 .into_iter()
                                 .next()
                             {
-                                self.narrowed_this_member.insert(call, bi.to_string());
+                                self.narrowed_this_member.insert(call, bi.clone());
                                 let vararg =
-                                    self.syms.method_of(bi, &fname).is_some_and(|s| s.vararg);
+                                    self.syms.method_of(&bi, &fname).is_some_and(|s| s.vararg);
                                 self.expect_call_args(&m.params, vararg, args, &arg_tys);
                                 return self
                                     .inferred_member_ret(bt, &fname, &m.params)
@@ -14630,7 +14819,7 @@ impl<'a> Checker<'a> {
                     // takes precedence over a context-parameter function, so decline context resolution
                     // rather than risk a wrong binding.
                     t.obj_internal()
-                        .is_some_and(|i| self.syms.method_of(i, &fname).is_some())
+                        .is_some_and(|i| self.syms.method_of_name(i, &fname).is_some())
                         || self.resolve_instance_member(t, &fname, &arg_tys).is_some()
                 });
                 if module_top.is_none() && !shadowed_by_member {
@@ -14949,7 +15138,7 @@ impl<'a> Checker<'a> {
                         .syms
                         .classes
                         .values()
-                        .find(|s| s.internal == nested)
+                        .find(|s| s.internal_matches(&nested))
                         .cloned()
                     {
                         // A sibling nested class — plain or `inner`. An `inner class` also needs the
@@ -14958,11 +15147,14 @@ impl<'a> Checker<'a> {
                         // check is the same. It is valid ONLY inside the enclosing instance where `this`
                         // is available — this branch requires `this_ty == outer`, and an inner class must
                         // declare exactly that outer (`inner_of == outer`) so `this` is the right instance.
-                        let inner_ok = cls.inner_of.as_deref().map_or(true, |o| o == outer);
+                        let inner_ok = cls
+                            .inner_of
+                            .as_ref()
+                            .map_or(true, |o| o.matches(&outer.render()));
                         if inner_ok && cls.ctor_params.len() == arg_tys.len() && arg_names.is_none()
                         {
                             self.expect_call_args(&cls.ctor_params, false, args, &arg_tys);
-                            return self.ctor_result(call, &cls.internal);
+                            return self.ctor_result(call, &cls.internal());
                         }
                     }
                 }
@@ -14978,7 +15170,7 @@ impl<'a> Checker<'a> {
                     // declaration of the same name SHADOWS the import (Kotlin), so only bind the import
                     // when the module does not declare `fname` itself.
                     if !self.module_declares(&fname) {
-                        if let Some(sig) = self.syms.method_of(&internal, &fname) {
+                        if let Some(sig) = self.syms.method_of_name(internal, &fname) {
                             if sig.requires_all_args() && args.len() == sig.params.len() {
                                 for (i, &a) in args.iter().enumerate() {
                                     self.expect_assignable(
@@ -14994,12 +15186,13 @@ impl<'a> Checker<'a> {
                             }
                         }
                     }
+                    let internal_rendered = internal.render();
                     if let Some(m) =
-                        self.resolve_instance_member(Ty::obj(&internal), &fname, &arg_tys)
+                        self.resolve_instance_member(Ty::obj_name(internal), &fname, &arg_tys)
                     {
                         crate::trace_compiler!(
                             "resolve",
-                            "unqualified object-member import {fname}() -> {internal}.{fname}"
+                            "unqualified object-member import {fname}() -> {internal_rendered}.{fname}"
                         );
                         let ret = m.ret;
                         self.expr_lowers
@@ -15065,7 +15258,7 @@ impl<'a> Checker<'a> {
                                 if let Some(m) =
                                     self.resolve_companion(&owner_internal, &fname, &arg_tys)
                                 {
-                                    let owner = m.owner.clone().unwrap_or(owner_internal);
+                                    let owner = m.owner_name_or(&owner_internal);
                                     let phys =
                                         m.physical_name.clone().unwrap_or_else(|| m.name.clone());
                                     let mut callable = crate::libraries::LibraryCallable::library(
@@ -15181,7 +15374,7 @@ impl<'a> Checker<'a> {
         // missed, collapsing it to `Any`.
         if let (Some(ai), Some(bi)) = (a.non_null().obj_internal(), b.non_null().obj_internal()) {
             if ai == bi {
-                let base = Ty::obj(ai);
+                let base = Ty::obj_name(ai);
                 return if a.is_nullable() || b.is_nullable() {
                     Ty::nullable(base)
                 } else {
@@ -15455,7 +15648,7 @@ impl<'a> Checker<'a> {
                 let span = self.file.stmt_spans[s.0 as usize];
                 let inherited = || {
                     if let Some(Ty::Obj(internal, _)) = self.this_ty {
-                        self.lookup_prop(internal, &name)
+                        self.lookup_prop_name(internal, &name)
                     } else {
                         None
                     }
@@ -15543,7 +15736,7 @@ impl<'a> Checker<'a> {
                             // superclass): the own properties are in the implicit-`this` scope (found by
                             // `lookup` above), but inherited ones are resolved through `this`'s class chain.
                             let inherited = if let Some(Ty::Obj(internal, _)) = self.this_ty {
-                                self.lookup_prop(internal, &name)
+                                self.lookup_prop_name(internal, &name)
                             } else {
                                 None
                             };
@@ -15589,7 +15782,9 @@ impl<'a> Checker<'a> {
                     match rt {
                         Ty::Error => {}
                         Ty::Obj(internal, _) => {
-                            if let Some((lty, is_var)) = self.syms.prop_of(internal, &name) {
+                            if let Some((lty, is_var)) =
+                                self.syms.prop_of(&internal.render(), &name)
+                            {
                                 if !is_var {
                                     self.diags
                                         .error(span, "'val' cannot be reassigned.".to_string());
@@ -16360,7 +16555,7 @@ fun box(): String {
             .then(|| crate::libraries::LibraryType {
                 is_public: true,
                 kind: crate::libraries::TypeKind::Class,
-                supertypes: vec![],
+                supertypes: crate::types::TypeNameList::new(),
                 constructors: vec![],
                 members: vec![],
                 companion: vec![],
@@ -16371,7 +16566,7 @@ fun box(): String {
                 value_underlying: None,
                 alias_target: None,
                 type_params: vec![],
-                sealed_subclasses: vec![],
+                sealed_subclasses: crate::types::TypeNameList::new(),
                 enum_entries: vec![],
                 value_ctor_has_default: false,
                 ctor_named_params: vec![],
@@ -16469,7 +16664,11 @@ fun box(): String {
                     )],
                 };
             }
-            if recv.obj_internal() == Some("BoxedIterator") && name == "hasNext" {
+            if recv
+                .obj_internal()
+                .is_some_and(|n| n.matches("BoxedIterator"))
+                && name == "hasNext"
+            {
                 let callable = crate::libraries::LibraryCallable::library(
                     "BoxedIterator",
                     "hasNext",
@@ -16486,7 +16685,11 @@ fun box(): String {
                     )],
                 };
             }
-            if recv.obj_internal() == Some("BoxedIterator") && name == "next" {
+            if recv
+                .obj_internal()
+                .is_some_and(|n| n.matches("BoxedIterator"))
+                && name == "next"
+            {
                 let callable = crate::libraries::LibraryCallable::library(
                     "BoxedIterator",
                     "next",
@@ -16972,7 +17175,10 @@ fun box(): String {
             matches!(
                 info.resolved_calls.get(&index),
                 Some(ResolvedCall::ModuleMember { owner, name, params, ret, .. })
-                    if owner == "Box" && name == "get" && params == &vec![Ty::Int] && *ret == Ty::String
+                    if owner.matches("Box")
+                        && name == "get"
+                        && params == &vec![Ty::Int]
+                        && *ret == Ty::String
             ),
             "checker must record same-module member get selected for index lowering"
         );
@@ -17013,7 +17219,7 @@ fun box(): String {
             matches!(
                 info.resolved_calls.get(&call),
                 Some(ResolvedCall::ModuleMember { owner, name, params, ret, interface })
-                    if owner == "Base"
+                    if owner.matches("Base")
                         && name == "ok"
                         && params.is_empty()
                         && *ret == Ty::String
@@ -17101,7 +17307,7 @@ fun box(): String {
             matches!(
                 info.resolved_operator_call(in_range, "rangeTo"),
                 Some(ResolvedCall::ModuleMember { owner, name, params, ret, .. })
-                    if owner == "V"
+                    if owner.matches("V")
                         && name == "rangeTo"
                         && params.as_slice() == [Ty::obj("V")]
                         && *ret == Ty::obj("VR")
@@ -17112,7 +17318,7 @@ fun box(): String {
             matches!(
                 info.resolved_operator_call(in_range, "contains"),
                 Some(ResolvedCall::ModuleMember { owner, name, params, ret, .. })
-                    if owner == "VR"
+                    if owner.matches("VR")
                         && name == "contains"
                         && params.as_slice() == [Ty::obj("V")]
                         && *ret == Ty::Boolean
@@ -17192,7 +17398,7 @@ fun box(): String {
             matches!(
                 info.resolved_stmt_operator_call(assign, "set"),
                 Some(ResolvedCall::ModuleMember { owner, name, params, ret, .. })
-                    if owner == "Box"
+                    if owner.matches("Box")
                         && name == "set"
                         && params.as_slice() == [Ty::Int, Ty::String]
                         && *ret == Ty::Unit
@@ -17299,7 +17505,7 @@ fun box(): String {
             matches!(
                 &protocol.iterator,
                 IteratorDispatchTarget::Member { owner_fallback, member }
-                    if owner_fallback == "BoxedIterable" && member.name == "iterator"
+                    if owner_fallback.matches("BoxedIterable") && member.name == "iterator"
             ),
             "checker must record the member iterator dispatch selected for foreach lowering"
         );
@@ -17332,7 +17538,7 @@ fun box(): String {
             matches!(
                 info.resolved_destructure_component(stmt, 0),
                 Some(DestructureComponentTarget::ModuleMember { owner, name, params, ret })
-                    if owner == "Box"
+                    if owner.matches("Box")
                         && name == "component1"
                         && params.is_empty()
                         && *ret == Ty::String
@@ -17410,7 +17616,7 @@ fun box(): String {
                     property,
                     ret,
                     interface
-                }) if owner == "P"
+                }) if owner.matches("P")
                     && property == "second"
                     && *ret == Ty::String
                     && !*interface
@@ -17534,9 +17740,9 @@ fun box(): String {
         let mut syms = collect_signatures(&files, &mut d);
         let helper_decl = top_level_fun_decl(&files[0], "helper", |_| true);
         syms.fn_facades_by_decl
-            .insert((0, helper_decl.0), "AKt".to_string());
+            .insert((0, helper_decl.0), crate::types::type_name("AKt"));
         syms.fn_facades
-            .insert("helper".to_string(), "AKt".to_string());
+            .insert("helper".to_string(), crate::types::type_name("AKt"));
         d.set_file(1);
         let info = check_file_at(&files[1], 1, &mut syms, &mut d);
         assert_no_diags(&d);
@@ -17561,11 +17767,11 @@ fun box(): String {
         let int_decl = top_level_fun_decl(&files[0], "helper", |_| true);
         let string_decl = top_level_fun_decl(&files[1], "helper", |_| true);
         syms.fn_facades_by_decl
-            .insert((0, int_decl.0), "AKt".to_string());
+            .insert((0, int_decl.0), crate::types::type_name("AKt"));
         syms.fn_facades_by_decl
-            .insert((1, string_decl.0), "BKt".to_string());
+            .insert((1, string_decl.0), crate::types::type_name("BKt"));
         syms.fn_facades
-            .insert("helper".to_string(), "AKt".to_string());
+            .insert("helper".to_string(), crate::types::type_name("AKt"));
         d.set_file(2);
         let info = check_file_at(&files[2], 2, &mut syms, &mut d);
         assert_no_diags(&d);
@@ -17677,7 +17883,7 @@ fun box(): String {
         else {
             panic!("checker must record classpath top-level function refs for lowering");
         };
-        assert_eq!(callable.owner, "test/TopKt");
+        assert!(callable.owner.matches("test/TopKt"));
         assert_eq!(callable.name, "knownTop");
         assert_eq!(callable.params, vec![Ty::String, Ty::Int]);
     }
@@ -17750,7 +17956,7 @@ fun box(): String {
         let DelegateGetValueTarget::Extension(callable) = target else {
             panic!("expected classpath extension getValue target, got {target:?}");
         };
-        assert_eq!(callable.owner, "test/DelegateKt");
+        assert!(callable.owner.matches("test/DelegateKt"));
         assert_eq!(callable.name, "getValue");
         assert_eq!(callable.ret, Ty::String);
         assert!(

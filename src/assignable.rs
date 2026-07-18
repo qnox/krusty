@@ -14,7 +14,7 @@
 //! `source_receiver_rank`), each of which re-implemented one slice — usually erased (dropping type
 //! arguments and nullability) and without a type-variable context.
 
-use crate::types::Ty;
+use crate::types::{Ty, TypeName};
 use std::borrow::Cow;
 use std::collections::HashMap;
 
@@ -23,7 +23,7 @@ use std::collections::HashMap;
 pub trait TypeOracle {
     /// The DIRECT supertypes (superclass + superinterfaces) of `internal`, as Kotlin internal names.
     /// Empty when the class is unknown or has none (`kotlin/Any`).
-    fn direct_supertypes(&self, internal: &str) -> Vec<String>;
+    fn direct_supertypes(&self, internal: TypeName) -> Vec<TypeName>;
 
     /// The underlying representation type of a value/inline class (`Aid(val v: String)` → `kotlin/String`),
     /// or `None` for a non-value class. Lets the relation accept a value-class argument where its erased
@@ -52,6 +52,21 @@ pub trait TypeOracle {
     /// visited superclass.
     fn matches_class(&self, candidate: &str, target: &str, target_canonical: &str) -> bool {
         candidate == target || self.canonical_class(candidate).as_ref() == target_canonical
+    }
+
+    /// Id-backed variant used by hot hierarchy walks. The default renders only when the id did not match
+    /// directly and platform canonicalization must be consulted.
+    fn matches_class_name(
+        &self,
+        candidate: TypeName,
+        target: TypeName,
+        target_canonical: &str,
+    ) -> bool {
+        if candidate == target {
+            return true;
+        }
+        let candidate = candidate.render();
+        self.canonical_class(&candidate).as_ref() == target_canonical
     }
 }
 
@@ -240,27 +255,24 @@ fn class_assignable(oracle: &dyn TypeOracle, sub: Ty, sup: Ty, value_class: bool
     else {
         return false;
     };
-    let target_c = oracle.canonical_class(target);
-    let mut seen = crate::types::NameWalkSet::new();
-    let (start_id, _) = seen.insert(start.to_string());
-    let mut stack = vec![start_id];
+    let target_rendered = target.render();
+    let target_c = oracle.canonical_class(&target_rendered);
+    let mut seen = std::collections::HashSet::new();
+    seen.insert(start);
+    let mut stack = vec![start];
     while let Some(cur) = stack.pop() {
-        let cur = seen.get(cur).expect("walk index was inserted");
-        if oracle.matches_class(cur, target, target_c.as_ref()) {
+        if oracle.matches_class_name(cur, target, target_c.as_ref()) {
             return true;
         }
         let direct = oracle.direct_supertypes(cur);
-        stack.extend(direct.into_iter().filter_map(|s| {
-            let (id, inserted) = seen.insert(s);
-            inserted.then_some(id)
-        }));
+        stack.extend(direct.into_iter().filter(|s| seen.insert(*s)));
     }
     // A value/inline class is assignable where its underlying representation is expected (the JVM-ABI
     // boundary) — only under `is_assignable`, not the pure `is_subtype` relation.
     value_class
         && oracle
             .value_underlying(sub)
-            .is_some_and(|u| u.kotlin_class_internal() == Some(target) || u == sup)
+            .is_some_and(|u| u.kotlin_class_internal().is_some_and(|n| n == target) || u == sup)
 }
 
 #[cfg(test)]
@@ -271,25 +283,25 @@ mod tests {
     /// A tiny hand-wired hierarchy oracle for the relation's unit tests.
     struct Fake;
     impl TypeOracle for Fake {
-        fn direct_supertypes(&self, internal: &str) -> Vec<String> {
+        fn direct_supertypes(&self, internal: TypeName) -> Vec<TypeName> {
             let s: &[&str] = match internal {
-                "kotlin/String" => &["kotlin/CharSequence", "kotlin/Comparable"],
-                "kotlin/CharSequence" => &["kotlin/Any"],
-                "kotlin/Comparable" => &["kotlin/Any"],
-                "kotlin/collections/List" => &["kotlin/collections/Iterable"],
-                "kotlin/collections/MutableList" => &["kotlin/collections/List"],
-                "kotlin/collections/Iterable" => &["kotlin/Any"],
-                "kotlin/Int" | "kotlin/Double" => &["kotlin/Number"],
-                "kotlin/Number" => &["kotlin/Any"],
-                "app/Dog" => &["app/Animal"],
-                "app/Animal" => &["kotlin/Any"],
+                n if n.matches("kotlin/String") => &["kotlin/CharSequence", "kotlin/Comparable"],
+                n if n.matches("kotlin/CharSequence") => &["kotlin/Any"],
+                n if n.matches("kotlin/Comparable") => &["kotlin/Any"],
+                n if n.matches("kotlin/collections/List") => &["kotlin/collections/Iterable"],
+                n if n.matches("kotlin/collections/MutableList") => &["kotlin/collections/List"],
+                n if n.matches("kotlin/collections/Iterable") => &["kotlin/Any"],
+                n if n.matches("kotlin/Int") || n.matches("kotlin/Double") => &["kotlin/Number"],
+                n if n.matches("kotlin/Number") => &["kotlin/Any"],
+                n if n.matches("app/Dog") => &["app/Animal"],
+                n if n.matches("app/Animal") => &["kotlin/Any"],
                 _ => &[],
             };
-            s.iter().map(|x| x.to_string()).collect()
+            s.iter().map(|x| crate::types::type_name(x)).collect()
         }
         fn value_underlying(&self, ty: Ty) -> Option<Ty> {
             match ty {
-                Ty::Obj("app/Aid", _) => Some(Ty::String),
+                Ty::Obj(n, _) if n.matches("app/Aid") => Some(Ty::String),
                 _ => None,
             }
         }

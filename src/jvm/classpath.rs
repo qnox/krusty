@@ -19,7 +19,8 @@ use std::path::{Path, PathBuf};
 use crate::jvm::classreader::{parse_class, read_method_code, ClassInfo, MethodCode};
 use crate::jvm::names::type_descriptor;
 use crate::libraries::{CallSig, FunctionSet, ReturnInfo};
-use crate::types::Ty;
+use crate::name_tree::{NameId, NameTree};
+use crate::types::{type_name, Ty, TypeName};
 
 /// Map a Kotlin internal type name (`kotlin/Int`, `kotlin/Char`, …) from builtins metadata to a `Ty`.
 pub(super) fn kotlin_name_to_ty(name: &str) -> Ty {
@@ -41,106 +42,171 @@ pub(super) fn kotlin_name_to_ty(name: &str) -> Ty {
     }
 }
 
-fn meta_function_arity(name: &str) -> Option<usize> {
+/// Id-backed form of [`kotlin_name_to_ty`].
+pub(super) fn kotlin_type_name_to_ty(name: TypeName) -> Ty {
+    if name.matches("kotlin/Int") {
+        Ty::Int
+    } else if name.matches("kotlin/Char") {
+        Ty::Char
+    } else if name.matches("kotlin/Boolean") {
+        Ty::Boolean
+    } else if name.matches("kotlin/Long") {
+        Ty::Long
+    } else if name.matches("kotlin/Double") {
+        Ty::Double
+    } else if name.matches("kotlin/Float") {
+        Ty::Float
+    } else if name.matches("kotlin/Byte") {
+        Ty::Byte
+    } else if name.matches("kotlin/Short") {
+        Ty::Short
+    } else if name.matches("kotlin/UInt") {
+        Ty::UInt
+    } else if name.matches("kotlin/ULong") {
+        Ty::ULong
+    } else if name.matches("kotlin/String") {
+        Ty::String
+    } else if name.matches("kotlin/Unit") {
+        Ty::Unit
+    } else if name.matches("kotlin/Nothing") {
+        Ty::Nothing
+    } else {
+        Ty::obj_name(name)
+    }
+}
+
+fn meta_function_arity_name(name: TypeName) -> Option<usize> {
     name.strip_prefix("kotlin/Function")
         .filter(|arity| !arity.is_empty() && arity.bytes().all(|b| b.is_ascii_digit()))
         .and_then(|arity| arity.parse::<usize>().ok())
 }
 
-fn primitive_array_descriptor(internal: &str) -> Option<&'static str> {
-    Some(match internal {
-        "kotlin/IntArray" => "[I",
-        "kotlin/LongArray" | "kotlin/ULongArray" => "[J",
-        "kotlin/ShortArray" => "[S",
-        "kotlin/ByteArray" => "[B",
-        "kotlin/BooleanArray" => "[Z",
-        "kotlin/CharArray" => "[C",
-        "kotlin/FloatArray" => "[F",
-        "kotlin/DoubleArray" => "[D",
-        "kotlin/UIntArray" => "[I",
-        _ => return None,
+fn primitive_array_descriptor_name(internal: TypeName) -> Option<&'static str> {
+    Some(if internal.matches("kotlin/BooleanArray") {
+        "[Z"
+    } else if internal.matches("kotlin/ByteArray") {
+        "[B"
+    } else if internal.matches("kotlin/ShortArray") {
+        "[S"
+    } else if internal.matches("kotlin/IntArray") {
+        "[I"
+    } else if internal.matches("kotlin/LongArray") || internal.matches("kotlin/ULongArray") {
+        "[J"
+    } else if internal.matches("kotlin/CharArray") {
+        "[C"
+    } else if internal.matches("kotlin/FloatArray") {
+        "[F"
+    } else if internal.matches("kotlin/DoubleArray") {
+        "[D"
+    } else if internal.matches("kotlin/UIntArray") {
+        "[I"
+    } else {
+        return None;
     })
 }
 
-fn ty_descriptor_matches_obj(desc: Ty, internal: &str) -> bool {
-    match desc {
-        Ty::String => crate::jvm::jvm_class_map::to_jvm_internal(internal) == "java/lang/String",
-        Ty::Obj(desc_internal, _) => {
-            crate::jvm::jvm_class_map::to_jvm_internal(internal)
-                == crate::jvm::jvm_class_map::to_jvm_internal(desc_internal)
-        }
-        Ty::Nullable(inner) => ty_descriptor_matches_obj(*inner, internal),
-        Ty::TyParam(_, bound) => ty_descriptor_matches_obj(*bound, internal),
-        _ => false,
-    }
-}
-
 fn ty_erases_to_object(desc: Ty) -> bool {
-    matches!(desc, Ty::Obj(n, _) if n == "kotlin/Any" || n == "java/lang/Object")
+    matches!(desc, Ty::Obj(n, _) if n.matches("kotlin/Any") || n.matches("java/lang/Object"))
 }
 
 /// Whether a `@Metadata` source value-parameter class name aligns with a JVM-descriptor parameter `Ty`.
 /// This keeps the hot overload-alignment path in borrowed names: mapped builtins compare through
 /// `to_jvm_internal`, arrays/functions use structural `Ty` facts, and no descriptor `String` is built just
 /// to decide whether two class names denote the same erased JVM parameter.
-fn meta_param_compat(name: Option<&str>, desc: &Ty) -> bool {
+fn meta_param_compat(name: Option<TypeName>, desc: &Ty) -> bool {
     let Some(name) = name else {
         return desc.is_reference();
     };
-    if let Some(arity) = meta_function_arity(name) {
+    if let Some(arity) = meta_function_arity_name(name) {
         return matches!(desc, Ty::Fun(sig) if sig.params.len() == arity);
     }
-    if name == "kotlin/Array" || primitive_array_descriptor(name).is_some() {
+    if name.matches("kotlin/Array") || primitive_array_descriptor_name(name).is_some() {
         return desc.is_array();
     }
-    match name {
-        "kotlin/Int" => *desc == Ty::Int,
-        "kotlin/Char" => *desc == Ty::Char,
-        "kotlin/Boolean" => *desc == Ty::Boolean,
-        "kotlin/Long" => *desc == Ty::Long,
-        "kotlin/Double" => *desc == Ty::Double,
-        "kotlin/Float" => *desc == Ty::Float,
-        "kotlin/Byte" => *desc == Ty::Byte,
-        "kotlin/Short" => *desc == Ty::Short,
-        "kotlin/UInt" => matches!(*desc, Ty::UInt | Ty::Int),
-        "kotlin/ULong" => matches!(*desc, Ty::ULong | Ty::Long),
-        "kotlin/Unit" => *desc == Ty::Unit,
-        "kotlin/Nothing" => *desc == Ty::Nothing,
-        "kotlin/Any" if desc.is_reference() => true,
-        _ if ty_descriptor_matches_obj(*desc, name) => true,
-        _ if ty_erases_to_object(*desc) && !desc.is_array() => true,
-        _ => false,
+    if name.matches("kotlin/Int") {
+        *desc == Ty::Int
+    } else if name.matches("kotlin/Char") {
+        *desc == Ty::Char
+    } else if name.matches("kotlin/Boolean") {
+        *desc == Ty::Boolean
+    } else if name.matches("kotlin/Long") {
+        *desc == Ty::Long
+    } else if name.matches("kotlin/Double") {
+        *desc == Ty::Double
+    } else if name.matches("kotlin/Float") {
+        *desc == Ty::Float
+    } else if name.matches("kotlin/Byte") {
+        *desc == Ty::Byte
+    } else if name.matches("kotlin/Short") {
+        *desc == Ty::Short
+    } else if name.matches("kotlin/UInt") {
+        matches!(*desc, Ty::UInt | Ty::Int)
+    } else if name.matches("kotlin/ULong") {
+        matches!(*desc, Ty::ULong | Ty::Long)
+    } else if name.matches("kotlin/Unit") {
+        *desc == Ty::Unit
+    } else if name.matches("kotlin/Nothing") {
+        *desc == Ty::Nothing
+    } else if name.matches("kotlin/Any") && desc.is_reference() {
+        true
+    } else if matches!(*desc, Ty::String) {
+        name.matches("kotlin/String") || name.matches("java/lang/String")
+    } else if desc.obj_internal().is_some_and(|desc_internal| {
+        crate::jvm::jvm_class_map::type_names_map_to_same_jvm_internal(desc_internal, name)
+    }) {
+        true
+    } else {
+        ty_erases_to_object(*desc) && !desc.is_array()
     }
 }
 
-fn meta_param_exact(name: Option<&str>, desc: &Ty) -> bool {
+fn meta_param_exact(name: Option<TypeName>, desc: &Ty) -> bool {
     let Some(name) = name else {
         return ty_erases_to_object(*desc);
     };
-    if let Some(arity) = meta_function_arity(name) {
+    if let Some(arity) = meta_function_arity_name(name) {
         return matches!(desc, Ty::Fun(sig) if sig.params.len() == arity);
     }
-    if name == "kotlin/Array" {
-        return matches!(desc, Ty::Obj("kotlin/Array", args)
-            if args.first().copied().is_some_and(ty_erases_to_object));
+    if name.matches("kotlin/Array") {
+        return matches!(desc, Ty::Obj(n, args)
+            if n.matches("kotlin/Array") && args.first().copied().is_some_and(ty_erases_to_object));
     }
-    if let Some(meta_desc) = primitive_array_descriptor(name) {
-        return desc.obj_internal().and_then(primitive_array_descriptor) == Some(meta_desc);
+    if let Some(meta_desc) = primitive_array_descriptor_name(name) {
+        return desc
+            .obj_internal()
+            .and_then(primitive_array_descriptor_name)
+            == Some(meta_desc);
     }
-    match name {
-        "kotlin/Int" => *desc == Ty::Int,
-        "kotlin/Char" => *desc == Ty::Char,
-        "kotlin/Boolean" => *desc == Ty::Boolean,
-        "kotlin/Long" => *desc == Ty::Long,
-        "kotlin/Double" => *desc == Ty::Double,
-        "kotlin/Float" => *desc == Ty::Float,
-        "kotlin/Byte" => *desc == Ty::Byte,
-        "kotlin/Short" => *desc == Ty::Short,
-        "kotlin/UInt" => matches!(*desc, Ty::UInt | Ty::Int),
-        "kotlin/ULong" => matches!(*desc, Ty::ULong | Ty::Long),
-        "kotlin/Unit" => *desc == Ty::Unit,
-        "kotlin/Nothing" => *desc == Ty::Nothing,
-        _ => ty_descriptor_matches_obj(*desc, name),
+    if name.matches("kotlin/Int") {
+        *desc == Ty::Int
+    } else if name.matches("kotlin/Char") {
+        *desc == Ty::Char
+    } else if name.matches("kotlin/Boolean") {
+        *desc == Ty::Boolean
+    } else if name.matches("kotlin/Long") {
+        *desc == Ty::Long
+    } else if name.matches("kotlin/Double") {
+        *desc == Ty::Double
+    } else if name.matches("kotlin/Float") {
+        *desc == Ty::Float
+    } else if name.matches("kotlin/Byte") {
+        *desc == Ty::Byte
+    } else if name.matches("kotlin/Short") {
+        *desc == Ty::Short
+    } else if name.matches("kotlin/UInt") {
+        matches!(*desc, Ty::UInt | Ty::Int)
+    } else if name.matches("kotlin/ULong") {
+        matches!(*desc, Ty::ULong | Ty::Long)
+    } else if name.matches("kotlin/Unit") {
+        *desc == Ty::Unit
+    } else if name.matches("kotlin/Nothing") {
+        *desc == Ty::Nothing
+    } else if matches!(*desc, Ty::String) {
+        name.matches("kotlin/String") || name.matches("java/lang/String")
+    } else {
+        desc.obj_internal().is_some_and(|desc_internal| {
+            crate::jvm::jvm_class_map::type_names_map_to_same_jvm_internal(desc_internal, name)
+        })
     }
 }
 
@@ -265,9 +331,14 @@ pub fn trace_cache_stats() {
 /// flag is set ONLY for the "zip" decompressor (authoritatively, from the strings table) so the reader
 /// never inflates a resource compressed by some other scheme.
 type JimageEntry = (u64, usize, bool);
-type JimageIndex = HashMap<String, JimageEntry>;
 
-/// Process-global jimage index (name → file offset/size), keyed by the jimage path. The jimage is
+#[derive(Default, Debug)]
+struct JimageIndex {
+    names: NameTree,
+    by_name: HashMap<NameId, JimageEntry>,
+}
+
+/// Process-global jimage index (name id → file offset/size), keyed by the jimage path. The jimage is
 /// identical for every compiled file, so parsing its 146 MB happens once per process, not per thread.
 fn global_jimage_cache() -> &'static std::sync::Mutex<HashMap<PathBuf, std::sync::Arc<JimageIndex>>>
 {
@@ -319,128 +390,6 @@ impl<T> EntryCache<T> {
     }
 }
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-struct NameId(u32);
-
-#[derive(Debug)]
-struct NameNode {
-    parent: Option<NameId>,
-    first_child: Option<NameId>,
-    next_sibling: Option<NameId>,
-    sep: u8,
-    segment: String,
-}
-
-/// A compact per-index internal-name tree. Names are inserted as path segments and retained lists store `NameId`
-/// (`u32`) handles instead of cloning the full owner string in every receiver/name bucket.
-#[derive(Debug)]
-struct NameTree {
-    nodes: Vec<NameNode>,
-}
-
-impl Default for NameTree {
-    fn default() -> Self {
-        NameTree {
-            nodes: vec![NameNode {
-                parent: None,
-                first_child: None,
-                next_sibling: None,
-                sep: 0,
-                segment: String::new(),
-            }],
-        }
-    }
-}
-
-impl NameTree {
-    const ROOT: NameId = NameId(0);
-
-    fn insert(&mut self, internal: &str) -> NameId {
-        if internal.is_empty() {
-            return Self::ROOT;
-        }
-        let mut parent = Self::ROOT;
-        let mut sep = 0;
-        for segment in internal.split('/') {
-            parent = self.child_or_insert(parent, sep, segment);
-            sep = b'/';
-        }
-        parent
-    }
-
-    fn insert_from(&mut self, other: &NameTree, id: NameId) -> NameId {
-        let mut parts = Vec::new();
-        let mut cur = id;
-        while cur != Self::ROOT {
-            let node = other.node(cur);
-            parts.push((node.sep, node.segment.as_str()));
-            cur = node.parent.expect("non-root name node has a parent");
-        }
-        let mut parent = Self::ROOT;
-        for (sep, segment) in parts.into_iter().rev() {
-            parent = self.child_or_insert(parent, sep, segment);
-        }
-        parent
-    }
-
-    fn render(&self, id: NameId) -> String {
-        if id == Self::ROOT {
-            return String::new();
-        }
-        let mut parts = Vec::new();
-        let mut len = 0usize;
-        let mut cur = id;
-        while cur != Self::ROOT {
-            let node = self.node(cur);
-            len += node.segment.len() + usize::from(node.sep != 0);
-            parts.push((node.sep, node.segment.as_str()));
-            cur = node.parent.expect("non-root name node has a parent");
-        }
-        let mut out = String::with_capacity(len);
-        for (sep, segment) in parts.into_iter().rev() {
-            if sep != 0 {
-                out.push(sep as char);
-            }
-            out.push_str(segment);
-        }
-        out
-    }
-
-    #[cfg(test)]
-    fn len(&self) -> usize {
-        self.nodes.len()
-    }
-
-    fn node(&self, id: NameId) -> &NameNode {
-        &self.nodes[id.0 as usize]
-    }
-
-    fn child_or_insert(&mut self, parent: NameId, sep: u8, segment: &str) -> NameId {
-        let mut cur = self.node(parent).first_child;
-        while let Some(id) = cur {
-            let node = self.node(id);
-            if node.sep == sep && node.segment == segment {
-                return id;
-            }
-            cur = node.next_sibling;
-        }
-
-        let id = NameId(
-            u32::try_from(self.nodes.len()).expect("name tree node count exceeded u32 capacity"),
-        );
-        let next_sibling = self.nodes[parent.0 as usize].first_child;
-        self.nodes.push(NameNode {
-            parent: Some(parent),
-            first_child: None,
-            next_sibling,
-            sep,
-            segment: segment.to_string(),
-        });
-        self.nodes[parent.0 as usize].first_child = Some(id);
-        id
-    }
-}
-
 fn push_id_dedup(m: &mut HashMap<String, Vec<NameId>>, key: &str, id: NameId) {
     let v = m.entry(key.to_string()).or_default();
     if v.last().copied() != Some(id) && !v.contains(&id) {
@@ -467,7 +416,7 @@ fn global_entry_ext() -> &'static EntryCache<EntryExt> {
 }
 
 /// Per-ENTRY package catalogs (one [`JarPackages`] per jar/dir), composed into the per-classpath
-/// [`PackageNode`] tree by [`Classpath::package_tree`]. See [`EntryCache`].
+/// [`PackageTree`] by [`Classpath::package_tree`]. See [`EntryCache`].
 fn global_jar_packages() -> &'static EntryCache<JarPackages> {
     static CACHE: std::sync::OnceLock<EntryCache<JarPackages>> = std::sync::OnceLock::new();
     CACHE.get_or_init(EntryCache::new)
@@ -492,15 +441,27 @@ fn global_entry_types() -> &'static EntryCache<TypeIndex> {
 #[derive(Default)]
 struct PkgMembers {
     owner_names: NameTree,
+    candidates: Vec<ExtCandidateRecord>,
     /// Static callables keyed by their `@Metadata` SOURCE name (`sum`), for the source-name resolution.
-    by_source: HashMap<String, Vec<ExtCandidate>>,
+    by_source: HashMap<String, Vec<usize>>,
     /// The same callables keyed by their JVM method name (`sumOfInt`), for the literal-name extension
     /// lookup that mirrors [`Classpath::find_extensions`] (which keys by the bytecode name).
-    by_jvm: HashMap<String, Vec<ExtCandidate>>,
+    by_jvm: HashMap<String, Vec<usize>>,
     /// Receiver (first-parameter) descriptor → the facades declaring a static with that receiver — the
     /// scoped analogue of [`Classpath::find_extension_owners`]. Deduped, declaration order.
     owners_by_recv: HashMap<String, Vec<NameId>>,
 }
+
+impl PkgMembers {
+    fn render_indices(&self, indices: &[usize]) -> Vec<ExtCandidate> {
+        indices
+            .iter()
+            .filter_map(|&i| self.candidates.get(i))
+            .map(|c| c.render(&self.owner_names))
+            .collect()
+    }
+}
+
 type JarPkgMembers = std::sync::Arc<PkgMembers>;
 fn global_jar_pkg_members() -> &'static std::sync::Mutex<HashMap<(PathBuf, String), JarPkgMembers>>
 {
@@ -509,12 +470,12 @@ fn global_jar_pkg_members() -> &'static std::sync::Mutex<HashMap<(PathBuf, Strin
     CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
 }
 
-/// Process-global composed package tree, keyed by the classpath entry set — like [`global_type_cache`],
+/// Process-global composed package table, keyed by the classpath entry set — like [`global_type_cache`],
 /// the stdlib/JDK entries are identical across every compiled file, so the compose runs once per process.
 fn global_pkg_tree_cache(
-) -> &'static std::sync::Mutex<HashMap<Vec<PathBuf>, std::sync::Arc<PackageNode>>> {
+) -> &'static std::sync::Mutex<HashMap<Vec<PathBuf>, std::sync::Arc<PackageTree>>> {
     static CACHE: std::sync::OnceLock<
-        std::sync::Mutex<HashMap<Vec<PathBuf>, std::sync::Arc<PackageNode>>>,
+        std::sync::Mutex<HashMap<Vec<PathBuf>, std::sync::Arc<PackageTree>>>,
     > = std::sync::OnceLock::new();
     CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
 }
@@ -523,10 +484,68 @@ fn global_pkg_tree_cache(
 /// doesn't re-scan + re-parse the whole list on every call site (the cost the eager `by_recv` map avoided).
 #[derive(Default)]
 struct ExtByName {
-    /// first-parameter descriptor (the extension receiver) → candidates.
-    by_recv: HashMap<String, Vec<ExtCandidate>>,
+    owner_names: NameTree,
+    /// first-parameter descriptor (the extension receiver) → indices into [`Self::all`].
+    by_recv: HashMap<String, Vec<usize>>,
     /// every candidate of this name (top-level + extensions), for the receiver-less `find_top_level`.
-    all: Vec<ExtCandidate>,
+    all: Vec<ExtCandidateRecord>,
+}
+
+impl ExtByName {
+    fn render_by_recv(&self, receiver_desc: &str) -> Vec<ExtCandidate> {
+        self.by_recv
+            .get(receiver_desc)
+            .map(|indices| {
+                indices
+                    .iter()
+                    .filter_map(|&i| self.all.get(i))
+                    .map(|c| c.render(&self.owner_names))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn render_all(&self) -> Vec<ExtCandidate> {
+        self.render_candidates(&self.all)
+    }
+
+    fn render_candidates(&self, cands: &[ExtCandidateRecord]) -> Vec<ExtCandidate> {
+        cands.iter().map(|c| c.render(&self.owner_names)).collect()
+    }
+}
+
+#[derive(Clone, Debug)]
+struct ExtCandidateRecord {
+    owner: NameId,
+    name: String,
+    descriptor: String,
+    ret_desc: String,
+    signature: Option<String>,
+    public: bool,
+}
+
+impl ExtCandidateRecord {
+    fn from_candidate(owner: NameId, cand: &ExtCandidate) -> Self {
+        ExtCandidateRecord {
+            owner,
+            name: cand.name.clone(),
+            descriptor: cand.descriptor.clone(),
+            ret_desc: cand.ret_desc.clone(),
+            signature: cand.signature.clone(),
+            public: cand.public,
+        }
+    }
+
+    fn render(&self, owner_names: &NameTree) -> ExtCandidate {
+        ExtCandidate {
+            owner: owner_names.render(self.owner),
+            name: self.name.clone(),
+            descriptor: self.descriptor.clone(),
+            ret_desc: self.ret_desc.clone(),
+            signature: self.signature.clone(),
+            public: self.public,
+        }
+    }
 }
 
 /// Process-global memoization of the lazy ext index's REBUILT candidates (method name → grouped
@@ -547,20 +566,37 @@ fn global_ext_candidates(key: &[PathBuf]) -> ExtCandCache {
         .clone()
 }
 
-/// Process-global cache of parsed `ClassInfo` (internal name → parsed class, `None` if absent), keyed
+/// Process-global cache of parsed `ClassInfo` (internal-name id → parsed class, `None` if absent), keyed
 /// by the classpath. The conformance harness compiles on several rayon worker threads, EACH with its
 /// own `Classpath`; without sharing, every common class (`kotlin/collections/List`, …) was parsed once
 /// per thread. Sharing this — like the type/ext/jimage indexes — parses each class once per process.
 /// `RwLock` because reads (cache hits) dominate; a parse on a miss takes the write lock briefly.
-type ClassCache =
-    std::sync::Arc<std::sync::RwLock<HashMap<String, Option<std::sync::Arc<ClassInfo>>>>>;
+struct ClassCacheData {
+    classes: std::sync::RwLock<HashMap<TypeName, Option<std::sync::Arc<ClassInfo>>>>,
+}
+
+impl Default for ClassCacheData {
+    fn default() -> Self {
+        ClassCacheData {
+            classes: std::sync::RwLock::new(HashMap::new()),
+        }
+    }
+}
+
+impl ClassCacheData {
+    fn len(&self) -> usize {
+        self.classes.read().unwrap().len()
+    }
+}
+
+type ClassCache = std::sync::Arc<ClassCacheData>;
 fn global_class_cache(key: &[PathBuf]) -> ClassCache {
     static CACHE: std::sync::OnceLock<std::sync::Mutex<HashMap<Vec<PathBuf>, ClassCache>>> =
         std::sync::OnceLock::new();
     let m = CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
     let mut g = m.lock().unwrap();
     g.entry(key.to_vec())
-        .or_insert_with(|| std::sync::Arc::new(std::sync::RwLock::new(HashMap::new())))
+        .or_insert_with(|| std::sync::Arc::new(ClassCacheData::default()))
         .clone()
 }
 
@@ -586,8 +622,8 @@ pub struct ExtCandidate {
 /// A LAZY index of the classpath's static (top-level + extension) functions. Only the small "where" map
 /// is retained — `name → the facade/part ROOT classes that declare a static of that name`; the full
 /// candidate records (descriptors, signatures) are REBUILT on query from each root's `ClassInfo` (which
-/// the L1/L2 caches already hold), via [`Classpath::rebuild_ext_candidates`]. This keeps ~a few MB of
-/// name/owner strings resident instead of materializing every stdlib static twice (the old eager index
+/// the L1/L2 caches already hold), via [`Classpath::rebuild_ext_candidate_records`]. This keeps ~a few MB
+/// of name/owner strings resident instead of materializing every stdlib static twice (the old eager index
 /// was the single largest retained allocation — ~195 MB — per heap profiling).
 #[derive(Default)]
 struct ExtIndex {
@@ -617,23 +653,31 @@ struct EntryExt {
     ext_names: std::collections::HashSet<String>,
 }
 
-/// Classpath Kotlin type aliases (`typealias X = Y` in a library), simple alias name → JVM internal name.
+/// Classpath Kotlin type aliases (`typealias X = Y` in a library), simple alias name → target-name ID.
 /// A simple/FQ name → internal CLASS map used to live here too, but name resolution is import-driven (via
 /// `resolve_type` probes and the ext index's `resolve_top_level_callable`), not table-driven — verified by
 /// building it empty with no test regression. Building it eagerly for every class on the classpath (the
 /// whole ~30k-class JDK jimage included) was ~85 MB of retained dead weight + a full-image name scan.
 #[derive(Default, Clone, Debug)]
 pub struct TypeIndex {
-    /// Kotlin type alias simple name → JVM internal name
+    alias_names: NameTree,
+    target_names: NameTree,
+    /// Kotlin type alias name ID → target JVM internal name ID
     /// (e.g. `"StringBuilder"` → `"java/lang/StringBuilder"`).
-    pub type_aliases: HashMap<String, String>,
+    type_aliases: HashMap<NameId, NameId>,
+}
+
+impl TypeIndex {
+    pub fn is_empty(&self) -> bool {
+        self.type_aliases.is_empty()
+    }
 }
 
 /// Per-class `@Metadata` cache: class internal name → every function decoded from its `Package` metadata
 /// (with the multifile-facade part classes merged in). This is the SINGLE decode of a class's `d1` for the
 /// function lookups below — `meta_functions`, `metadata_call_facts`, and parameter metadata all project
 /// over it instead of each re-decoding and re-merging.
-type MetaFnsCache = RefCell<crate::lru::LruCache<String, std::rc::Rc<ClassMeta>>>;
+type MetaFnsCache = RefCell<crate::lru::LruCache<TypeName, std::rc::Rc<ClassMeta>>>;
 
 #[derive(Clone)]
 pub struct MetadataCallFacts {
@@ -664,6 +708,50 @@ struct ClassMeta {
     fns: std::rc::Rc<[super::metadata::MetaFn]>,
 }
 
+#[derive(Default)]
+struct BuiltinsFile {
+    names: NameTree,
+    classes: HashMap<NameId, super::metadata::BuiltinClass>,
+}
+
+impl BuiltinsFile {
+    fn from_classes(classes: HashMap<String, super::metadata::BuiltinClass>) -> Self {
+        let mut file = BuiltinsFile::default();
+        for (internal, class) in classes {
+            let id = file.names.insert(&internal);
+            file.classes.insert(id, class);
+        }
+        file
+    }
+
+    fn get(&self, internal: &str) -> Option<&super::metadata::BuiltinClass> {
+        let id = self.names.get(internal)?;
+        self.classes.get(&id)
+    }
+
+    fn contains_key(&self, internal: &str) -> bool {
+        self.get(internal).is_some()
+    }
+
+    fn is_subtype(&self, sub: &str, sup: &str) -> bool {
+        let Some(sup) = self.names.get(sup) else {
+            return false;
+        };
+        self.is_subtype_id(sub, sup)
+    }
+
+    fn is_subtype_id(&self, sub: &str, sup: NameId) -> bool {
+        let Some(sub_id) = self.names.get(sub) else {
+            return false;
+        };
+        sub_id == sup
+            || self
+                .classes
+                .get(&sub_id)
+                .is_some_and(|c| c.supertypes.iter().any(|s| self.is_subtype_id(s, sup)))
+    }
+}
+
 /// Whether metadata callable `c` corresponds to a JVM method with these descriptor parameter types. An
 /// EXTENSION's receiver — a separate attribute, emitted as the leading JVM parameter — must match, then
 /// the value parameters align in order. Returns `(kept-param end, exact-match count)` — `end` is the count
@@ -687,7 +775,7 @@ fn meta_callable_aligns(f: &super::metadata::MetaFn, desc_params: &[Ty]) -> Opti
             .value_params
             .iter()
             .zip(&desc_params[off..end])
-            .all(|(m, d)| meta_param_compat(m.ty.as_deref(), d))
+            .all(|(m, d)| meta_param_compat(m.ty, d))
     {
         return None;
     }
@@ -695,7 +783,7 @@ fn meta_callable_aligns(f: &super::metadata::MetaFn, desc_params: &[Ty]) -> Opti
         .value_params
         .iter()
         .zip(&desc_params[off..end])
-        .filter(|(m, d)| meta_param_exact(m.ty.as_deref(), d))
+        .filter(|(m, d)| meta_param_exact(m.ty, d))
         .count();
     Some((end, exact))
 }
@@ -739,15 +827,16 @@ fn aligned_meta_callable<'a>(
     aligned_meta_index(meta, fn_name, desc_params, desc_ret).map(|(end, i)| (end, &meta.fns[i]))
 }
 
-pub(super) fn metadata_return_info(class: Option<&str>, nullable: bool) -> ReturnInfo {
-    ReturnInfo::new(nullable, class.map(kotlin_name_to_ty))
+pub(super) fn metadata_return_info(class: Option<TypeName>, nullable: bool) -> ReturnInfo {
+    ReturnInfo::new(nullable, class.map(kotlin_type_name_to_ty))
 }
 
 /// Per-class `@Metadata` cache: class internal name → Kotlin function names that participate in
 /// `@OverloadResolutionByLambdaReturnType` (`sumOf`, …). The resolver derives and verifies the concrete
 /// JVM method (`sumOfInt`/`sumOfLong`/…) from the lambda return type, so the cache only needs membership.
 type LambdaReturnOverloads = std::collections::HashSet<String>;
-type MetaOverloadCache = RefCell<crate::lru::LruCache<String, std::rc::Rc<LambdaReturnOverloads>>>;
+type MetaOverloadCache =
+    RefCell<crate::lru::LruCache<TypeName, std::rc::Rc<LambdaReturnOverloads>>>;
 
 #[derive(Default)]
 pub struct Classpath {
@@ -755,7 +844,7 @@ pub struct Classpath {
     // Two-level parsed-class cache: `local` is a per-thread L1 (cheap `RefCell`, no lock — serves the
     // hot repeated lookups), backed by `shared` — a process-global L2 (`RwLock`) so a class is PARSED
     // once across all rayon worker threads, not once per thread. L1 miss → L2 → parse.
-    local_cache: RefCell<crate::lru::LruCache<String, Option<std::sync::Arc<ClassInfo>>>>,
+    local_cache: RefCell<crate::lru::LruCache<TypeName, Option<std::sync::Arc<ClassInfo>>>>,
     cache: ClassCache,
     /// Open `ZipArchive` per jar path, so reading an entry is a central-directory hash lookup + inflate
     /// — NOT a re-parse of the whole central directory (which `zip::ZipArchive::new` does, thousands of
@@ -765,18 +854,18 @@ pub struct Classpath {
     archives: RefCell<HashMap<PathBuf, zip::ZipArchive<File>>>,
     ext: RefCell<Option<std::sync::Arc<ExtIndex>>>,
     types: RefCell<Option<std::sync::Arc<TypeIndex>>>,
-    /// The composed package tree (`segment → PackageNode`, each node listing the jars that declare that
-    /// package) — the merged classpath view name resolution walks. Composed once from the per-jar
+    /// The composed package table (`package NameId → PackageNode`, each node listing the jars that declare
+    /// that package) — the merged classpath view name resolution walks. Composed once from the per-jar
     /// [`JarPackages`] (each cached per jar via [`EntryCache`]) and shared via `Arc` from a process-global
     /// cache keyed by the entry set, so a cp that adds one library reuses every other jar's catalog.
-    pkg_tree: RefCell<Option<std::sync::Arc<PackageNode>>>,
-    /// Lazily-built index of the JDK jimage: internal class name → [`JimageEntry`], so JDK class bytes
+    pkg_tree: RefCell<Option<std::sync::Arc<PackageTree>>>,
+    /// Lazily-built index of the JDK jimage: internal class-name id → [`JimageEntry`], so JDK class bytes
     /// can be seek-read (and inflated, for a compressed image) on demand. Shared via `Arc` from a
     /// process-global cache so the 146 MB parse happens once.
     jimage: RefCell<Option<(PathBuf, std::sync::Arc<JimageIndex>)>>,
-    /// Cache of lazily-read method bodies (`(internal, name, descriptor) → MethodCode`), so the inline
+    /// Cache of lazily-read method bodies (`(internal-name, name, descriptor) → MethodCode`), so the inline
     /// expander reads each inline function's body once even when it's called many times.
-    bodies: RefCell<crate::lru::LruCache<(String, String, String), Option<MethodCode>>>,
+    bodies: RefCell<crate::lru::LruCache<(TypeName, String, String), Option<MethodCode>>>,
     /// Cache of each class's decoded `@Metadata` functions (facade parts merged) — the single decode the
     /// return-type / receiver / nullability / kept-param lookups all project over (see [`MetaFnsCache`]).
     meta_fns: MetaFnsCache,
@@ -786,22 +875,22 @@ pub struct Classpath {
     /// rebuilt for every snippet, but the `Classpath` is reused on the worker thread, so keeping this here
     /// avoids re-walking metadata/extension indexes for common stdlib calls across thousands of snippets.
     functions: RefCell<crate::lru::LruCache<(String, Option<Ty>), FunctionSet>>,
-    /// Cache of resolved `LibraryType`s by internal name. Like `functions`, kept on the reused-per-thread
+    /// Cache of resolved `LibraryType`s by global internal-name id. Like `functions`, kept on the reused-per-thread
     /// `Classpath` (NOT the per-compile `JvmLibraries`) so the import-driven `resolve_type` probing — which
     /// asks for the same stdlib types across thousands of snippets — warms across compiles instead of
     /// rebuilding each `LibraryType` (descriptor parses + `@Metadata` decodes) from cold every file.
     resolved_types:
-        RefCell<crate::lru::LruCache<String, Option<std::rc::Rc<crate::libraries::LibraryType>>>>,
+        RefCell<crate::lru::LruCache<TypeName, Option<std::rc::Rc<crate::libraries::LibraryType>>>>,
     /// Parsed `.kotlin_builtins` fragments, keyed by resource path (e.g. `kotlin/kotlin.kotlin_builtins`,
     /// `kotlin/collections/collections.kotlin_builtins`), each mapping class internal name → its
     /// supertypes + members. Built once per file on first use — the single source for BOTH the collection
     /// read-only/mutable hierarchy AND every builtin type's API. Empty if no stdlib is on the classpath.
-    builtins: RefCell<HashMap<String, std::rc::Rc<HashMap<String, super::metadata::BuiltinClass>>>>,
+    builtins: RefCell<HashMap<String, std::rc::Rc<BuiltinsFile>>>,
     /// Resolved builtin member vectors, keyed by Kotlin internal class name. The raw builtins fragment is
     /// already cached, but mapping it to `LibraryMember`s also resolves JVM owners/interface flags and
     /// allocates descriptors. `resolve_type` asks for these repeatedly during member/subtype lookup.
     builtin_members:
-        RefCell<crate::lru::LruCache<String, std::rc::Rc<Vec<crate::libraries::LibraryMember>>>>,
+        RefCell<crate::lru::LruCache<TypeName, std::rc::Rc<Vec<crate::libraries::LibraryMember>>>>,
     /// Rebuilt ext/top-level candidates per method name (the lazy [`ExtIndex`]'s `by_name` gives WHERE;
     /// this memoizes the actual rebuilt records so a hot stdlib name isn't re-walked on every query). Two
     /// levels, like the parsed-class cache: `ext_l1` is a per-thread `RefCell` — a CHEAP borrow on the hot
@@ -814,7 +903,7 @@ pub struct Classpath {
     /// per name and reused across the compile (the per-(jar,package) parses are the intermediate caches).
     /// An LRU bounded to the queried working set.
     symbols_memo:
-        RefCell<crate::lru::LruCache<String, std::rc::Rc<crate::libraries::ResolvedSymbols>>>,
+        RefCell<crate::lru::LruCache<TypeName, std::rc::Rc<crate::libraries::ResolvedSymbols>>>,
     /// Process-unique identity for this `Classpath`, assigned at construction. Caches keyed by a
     /// `Classpath` (e.g. the per-classpath library seed) MUST key on this — NOT on the `Rc<Classpath>`
     /// pointer address, which a freed-then-reallocated `Classpath` can reuse, yielding a false cache hit
@@ -902,7 +991,11 @@ impl Classpath {
     /// plateau at their caps; the shared `L2_class` map and the `jimage`/`type`/`ext` INDEXES are the
     /// library-sized structures (the jimage names every JDK class) — the ones to watch if RSS is high.
     pub fn cache_report(&self) -> String {
-        let jimage = self.jimage.borrow().as_ref().map_or(0, |(_, i)| i.len());
+        let jimage = self
+            .jimage
+            .borrow()
+            .as_ref()
+            .map_or(0, |(_, i)| i.by_name.len());
         let types = self
             .types
             .borrow()
@@ -923,7 +1016,7 @@ impl Classpath {
              jimage={} type={} ext={} pkgtree={}",
             self.id,
             self.local_cache.borrow().len(),
-            self.cache.read().unwrap().len(),
+            self.cache.len(),
             self.functions.borrow().len(),
             self.meta_fns.borrow().len(),
             self.meta_overloads.borrow().len(),
@@ -936,11 +1029,11 @@ impl Classpath {
         )
     }
 
-    /// The composed classpath package tree (`segment → node`, each node listing the jars that declare
-    /// that package), built once from the per-jar [`JarPackages`] and shared via `Arc`. The merged view
-    /// name resolution walks: `tree.node_for("kotlin/collections")` gives the jars to consult. Cached
-    /// per-instance and process-globally by the entry set.
-    pub fn package_tree(&self) -> std::sync::Arc<PackageNode> {
+    /// The composed classpath package table (`package NameId → node`, each node listing the jars that
+    /// declare that package), built once from the per-jar [`JarPackages`] and shared via `Arc`. The merged
+    /// view resolves `tree.node_for("kotlin/collections")` to the jars to consult. Cached per-instance and
+    /// process-globally by the entry set.
+    pub fn package_tree(&self) -> std::sync::Arc<PackageTree> {
         if let Some(t) = self.pkg_tree.borrow().as_ref() {
             return t.clone();
         }
@@ -983,7 +1076,14 @@ impl Classpath {
         &self,
         internal: &str,
     ) -> Option<Option<std::rc::Rc<crate::libraries::LibraryType>>> {
-        self.resolved_types.borrow_mut().get(internal).cloned()
+        self.cached_library_type_name(type_name(internal))
+    }
+
+    pub fn cached_library_type_name(
+        &self,
+        internal: TypeName,
+    ) -> Option<Option<std::rc::Rc<crate::libraries::LibraryType>>> {
+        self.resolved_types.borrow_mut().get(&internal).cloned()
     }
 
     pub fn cache_library_type(
@@ -991,15 +1091,22 @@ impl Classpath {
         internal: &str,
         ty: Option<std::rc::Rc<crate::libraries::LibraryType>>,
     ) {
-        self.resolved_types
-            .borrow_mut()
-            .insert(internal.to_string(), ty);
+        self.cache_library_type_name(type_name(internal), ty);
+    }
+
+    pub fn cache_library_type_name(
+        &self,
+        internal: TypeName,
+        ty: Option<std::rc::Rc<crate::libraries::LibraryType>>,
+    ) {
+        self.resolved_types.borrow_mut().insert(internal, ty);
     }
 
     /// The decoded `@Metadata` function lookups for `internal` (facade parts merged), decoded once and
     /// cached. The single `d1` decode that `meta_functions`/`metadata_call_facts` all project over.
     fn class_meta(&self, internal: &str) -> std::rc::Rc<ClassMeta> {
-        if let Some(m) = self.meta_fns.borrow_mut().get(internal) {
+        let internal_id = type_name(internal);
+        if let Some(m) = self.meta_fns.borrow_mut().get(&internal_id) {
             cache_stat!(meta_fns, true);
             return m.clone();
         }
@@ -1055,9 +1162,7 @@ impl Classpath {
             suspend_names,
             fns: fns.into(),
         });
-        self.meta_fns
-            .borrow_mut()
-            .insert(internal.to_string(), meta.clone());
+        self.meta_fns.borrow_mut().insert(internal_id, meta.clone());
         meta
     }
 
@@ -1130,7 +1235,7 @@ impl Classpath {
                     defaults,
                     c.value_params
                         .iter()
-                        .map(|p| p.recv_fun_receiver.as_deref().map(Ty::obj))
+                        .map(|p| p.recv_fun_receiver.map(Ty::obj_name))
                         .collect(),
                     c.value_params.iter().map(|p| p.recv_fun).collect(),
                     c.value_params.iter().map(|p| p.materialized).collect(),
@@ -1168,7 +1273,8 @@ impl Classpath {
 
     /// A facade class's lambda-return-overload Kotlin names, cached (part-merged for a multifile facade).
     pub fn lambda_return_overloads(&self, internal: &str) -> std::rc::Rc<LambdaReturnOverloads> {
-        if let Some(m) = self.meta_overloads.borrow_mut().get(internal) {
+        let internal_id = type_name(internal);
+        if let Some(m) = self.meta_overloads.borrow_mut().get(&internal_id) {
             return m.clone();
         }
         // Overloads of one Kotlin name are split across the multifile facade's PART classes (the
@@ -1188,12 +1294,12 @@ impl Classpath {
                     names.insert(f.kotlin_name.clone());
                 }
             }
-            cur = ci.super_class.clone();
+            cur = ci.super_class();
         }
         let rc = std::rc::Rc::new(names);
         self.meta_overloads
             .borrow_mut()
-            .insert(internal.to_string(), rc.clone());
+            .insert(internal_id, rc.clone());
         rc
     }
 
@@ -1217,7 +1323,12 @@ impl Classpath {
     /// the old eager index. Walks `root`'s super-class chain (each `ClassInfo` served from the L1/L2 cache),
     /// collecting matching statics; `public` mirrors the eager filter (a non-public root's public statics
     /// are the `@InlineOnly` splice-only candidates the inliner may select but resolution never emits).
-    fn rebuild_ext_candidates(&self, root: &str, name: &str) -> Vec<ExtCandidate> {
+    fn rebuild_ext_candidate_records(
+        &self,
+        owner: NameId,
+        root: &str,
+        name: &str,
+    ) -> Vec<ExtCandidateRecord> {
         let mut out = Vec::new();
         let Some(root_ci) = self.find(root) else {
             return out;
@@ -1242,8 +1353,8 @@ impl Classpath {
                 let Some((_, ret_desc)) = descriptor_parts(&m.descriptor) else {
                     continue;
                 };
-                out.push(ExtCandidate {
-                    owner: root.to_string(),
+                out.push(ExtCandidateRecord {
+                    owner,
                     name: m.name.clone(),
                     descriptor: m.descriptor.clone(),
                     ret_desc,
@@ -1251,18 +1362,15 @@ impl Classpath {
                     public: root_public && m.is_public(),
                 });
             }
-            cur = ci.super_class.clone();
+            cur = ci.super_class();
         }
         out
     }
 
-    /// A parsed `.kotlin_builtins` fragment by resource path (class internal name → supertypes+members),
+    /// A parsed `.kotlin_builtins` fragment by resource path (class internal-name id → supertypes+members),
     /// read once and cached. The single builtins entry point — both the collection hierarchy and a
     /// type's member API derive from it.
-    fn builtins_file(
-        &self,
-        path: &str,
-    ) -> std::rc::Rc<HashMap<String, super::metadata::BuiltinClass>> {
+    fn builtins_file(&self, path: &str) -> std::rc::Rc<BuiltinsFile> {
         if let Some(m) = self.builtins.borrow().get(path) {
             return m.clone();
         }
@@ -1275,7 +1383,7 @@ impl Classpath {
                 }
             }
         }
-        let rc = std::rc::Rc::new(map);
+        let rc = std::rc::Rc::new(BuiltinsFile::from_classes(map));
         self.builtins
             .borrow_mut()
             .insert(path.to_string(), rc.clone());
@@ -1292,7 +1400,7 @@ impl Classpath {
     }
 
     /// The parsed `collections.kotlin_builtins` fragment (the Kotlin collection hierarchy lives here).
-    fn collection_builtins(&self) -> std::rc::Rc<HashMap<String, super::metadata::BuiltinClass>> {
+    fn collection_builtins(&self) -> std::rc::Rc<BuiltinsFile> {
         self.builtins_file("kotlin/collections/collections.kotlin_builtins")
     }
 
@@ -1300,7 +1408,8 @@ impl Classpath {
     /// `LibraryMember` facts. The source name stays in `name`; JVM realization details stay in the JVM
     /// backend/provider and descriptor data.
     pub fn builtin_members(&self, internal: &str) -> Vec<crate::libraries::LibraryMember> {
-        if let Some(members) = self.builtin_members.borrow_mut().get(internal) {
+        let internal_id = type_name(internal);
+        if let Some(members) = self.builtin_members.borrow_mut().get(&internal_id) {
             cache_stat!(builtin_members, true);
             return members.as_ref().clone();
         }
@@ -1371,7 +1480,7 @@ impl Classpath {
                     };
                     crate::libraries::LibraryMember {
                         name: member_name,
-                        owner: Some(owner),
+                        owner: Some(type_name(&owner)),
                         physical_name: None,
                         params: m.params.iter().map(|p| kotlin_name_to_ty(p)).collect(),
                         ret,
@@ -1397,7 +1506,7 @@ impl Classpath {
             .collect();
         self.builtin_members
             .borrow_mut()
-            .insert(internal.to_string(), std::rc::Rc::new(members.clone()));
+            .insert(internal_id, std::rc::Rc::new(members.clone()));
         members
     }
 
@@ -1438,7 +1547,11 @@ impl Classpath {
     /// The target internal name of the classpath `typealias` named `internal` (full name, e.g.
     /// `kotlin/collections/ArrayList` → `java/util/ArrayList`), or `None` if `internal` is not an alias.
     pub fn type_alias_target(&self, internal: &str) -> Option<String> {
-        self.scan_types().type_aliases.get(internal).cloned()
+        let idx = self.scan_types();
+        let alias = idx.alias_names.get(internal)?;
+        idx.type_aliases
+            .get(&alias)
+            .map(|&target| idx.target_names.render(target))
     }
 
     /// Whether `internal` is a Kotlin BUILTIN declared in a `.kotlin_builtins` fragment (`kotlin/Number`,
@@ -1465,18 +1578,7 @@ impl Classpath {
     /// generic subtype query behind extension applicability — `MutableCollection.plusAssign` applies to a
     /// `MutableList` receiver but not a read-only `List`, exactly as kotlinc's overload resolution.
     pub fn kotlin_subtype(&self, sub: &str, sup: &str) -> bool {
-        let f = self.collection_builtins();
-        fn walk(
-            map: &HashMap<String, super::metadata::BuiltinClass>,
-            sub: &str,
-            sup: &str,
-        ) -> bool {
-            sub == sup
-                || map
-                    .get(sub)
-                    .is_some_and(|c| c.supertypes.iter().any(|s| walk(map, s, sup)))
-        }
-        walk(&f, sub, sup)
+        self.collection_builtins().is_subtype(sub, sup)
     }
 
     pub fn empty() -> Classpath {
@@ -1511,14 +1613,14 @@ impl Classpath {
         let mut idx = TypeIndex::default();
         for e in &self.entries {
             let part = global_entry_types().get_or_build(e.path(), || build_entry_types(e));
-            for (alias, target) in &part.type_aliases {
+            for (&alias, &target) in &part.type_aliases {
                 // First entry on the classpath wins — kotlinc/java class-resolution order (and this doc's
                 // "first hit" invariant). The old inline scan `insert`ed in entry order, so a LATER jar
                 // overwrote an earlier one (last-wins); that was a latent divergence, masked only because
                 // no two corpus jars declare the same alias (box conformance stays FAIL:0 either way).
-                idx.type_aliases
-                    .entry(alias.clone())
-                    .or_insert_with(|| target.clone());
+                let alias = idx.alias_names.insert_from(&part.alias_names, alias);
+                let target = idx.target_names.insert_from(&part.target_names, target);
+                idx.type_aliases.entry(alias).or_insert(target);
             }
         }
         let idx = std::sync::Arc::new(idx);
@@ -1538,7 +1640,8 @@ impl Classpath {
         self.ensure_jimage_index();
         let guard = self.jimage.borrow();
         let (path, index) = guard.as_ref()?;
-        let &(offset, size, compressed) = index.get(internal)?;
+        let id = index.names.get(internal)?;
+        let &(offset, size, compressed) = index.by_name.get(&id)?;
         use std::io::{Read, Seek, SeekFrom};
         let mut f = File::open(path).ok()?;
         f.seek(SeekFrom::Start(offset)).ok()?;
@@ -1585,7 +1688,7 @@ impl Classpath {
                 };
                 (p, idx)
             }
-            None => (PathBuf::new(), std::sync::Arc::new(HashMap::new())),
+            None => (PathBuf::new(), std::sync::Arc::new(JimageIndex::default())),
         };
         *self.jimage.borrow_mut() = Some(entry);
     }
@@ -1615,18 +1718,26 @@ impl Classpath {
         // class is shared behind an `Arc`: L1↔L2 and every caller clone is a refcount bump, never a deep
         // copy of the (large) `ClassInfo`.
         let internal = super::jvm_class_map::to_jvm_internal(internal);
+        let internal_id = type_name(internal);
         // L1: per-thread, no lock.
-        if let Some(hit) = self.local_cache.borrow_mut().get(internal) {
+        if let Some(hit) = self.local_cache.borrow_mut().get(&internal_id) {
             cache_stat!(l1_class, true);
             return hit.clone();
         }
         cache_stat!(l1_class, false);
         // L2: process-global, shared across threads — a class parsed by ANY thread is reused here.
-        if let Some(hit) = self.cache.read().unwrap().get(internal).cloned() {
+        if let Some(hit) = self
+            .cache
+            .classes
+            .read()
+            .unwrap()
+            .get(&internal_id)
+            .cloned()
+        {
             cache_stat!(l2_class, true);
             self.local_cache
                 .borrow_mut()
-                .insert(internal.to_string(), hit.clone());
+                .insert(internal_id, hit.clone());
             return hit;
         }
         cache_stat!(l2_class, false);
@@ -1660,7 +1771,7 @@ impl Classpath {
                     // A DIRECTORY entry on a case-INSENSITIVE filesystem (macOS APFS) happily serves
                     // `java/lang/error.class` for `Error.class` — verify the parsed class IS the
                     // requested one (JVM names are case-sensitive; `error` must not resolve to `Error`).
-                    if ci.this_class != internal {
+                    if !ci.this_class_matches(internal) {
                         continue;
                     }
                     found = Some(std::sync::Arc::new(ci));
@@ -1669,12 +1780,13 @@ impl Classpath {
             }
         }
         self.cache
+            .classes
             .write()
             .unwrap()
-            .insert(internal.to_string(), found.clone());
+            .insert(internal_id, found.clone());
         self.local_cache
             .borrow_mut()
-            .insert(internal.to_string(), found.clone());
+            .insert(internal_id, found.clone());
         found
     }
 
@@ -1688,7 +1800,7 @@ impl Classpath {
                 Entry::Dir(d) => std::fs::read(d.join(&name)).ok().filter(|b| {
                     // Case-insensitive-filesystem guard (see `find`): the served file must BE the
                     // requested class, not a case-collided sibling.
-                    parse_class(b).is_ok_and(|ci| ci.this_class == internal)
+                    parse_class(b).is_ok_and(|ci| ci.this_class_matches(internal))
                 }),
                 Entry::Jar(j) => self.jar_entry(j, &name),
                 Entry::Jimage(_) => self.jimage_bytes(internal),
@@ -1703,11 +1815,8 @@ impl Classpath {
     /// Lazily read (and cache) one method's bytecode body — the inline expander's entry point. Each
     /// `(class, method, descriptor)` body is read and parsed at most once, even across many call sites.
     pub fn method_code(&self, internal: &str, name: &str, descriptor: &str) -> Option<MethodCode> {
-        let key = (
-            internal.to_string(),
-            name.to_string(),
-            descriptor.to_string(),
-        );
+        let internal_id = type_name(internal);
+        let key = (internal_id, name.to_string(), descriptor.to_string());
         if let Some(hit) = self.bodies.borrow_mut().get(&key) {
             cache_stat!(bodies, true);
             return hit.clone();
@@ -1719,7 +1828,7 @@ impl Classpath {
         if code.is_none() {
             // A multifile facade (`StandardKt`) has no method bodies — they live in its part classes,
             // which the facade *extends* (a superclass chain: `StandardKt` → `StandardKt__StandardKt`).
-            let mut cur = self.find(internal).and_then(|ci| ci.super_class.clone());
+            let mut cur = self.find(internal).and_then(|ci| ci.super_class());
             while let Some(s) = cur {
                 if s == "java/lang/Object" {
                     break;
@@ -1731,7 +1840,7 @@ impl Classpath {
                     code = Some(mc);
                     break;
                 }
-                cur = self.find(&s).and_then(|ci| ci.super_class.clone());
+                cur = self.find(&s).and_then(|ci| ci.super_class());
             }
         }
         self.bodies.borrow_mut().insert(key, code.clone());
@@ -1764,7 +1873,7 @@ impl Classpath {
                 && f.value_params
                     .iter()
                     .zip(&desc_params[off..end])
-                    .all(|(m, d)| meta_param_compat(m.ty.as_deref(), d))
+                    .all(|(m, d)| meta_param_compat(m.ty, d))
         })
     }
 
@@ -1781,7 +1890,7 @@ impl Classpath {
                 return true;
             }
             match self.find(&s) {
-                Some(ci) => cur = ci.super_class.clone(),
+                Some(ci) => cur = ci.super_class(),
                 None => break,
             }
         }
@@ -1803,18 +1912,14 @@ impl Classpath {
             return Vec::new();
         }
         // O(1): the rebuilt candidates are pre-grouped by receiver (first-parameter) descriptor.
-        self.ext_by_name(method_name)
-            .by_recv
-            .get(receiver_desc)
-            .cloned()
-            .unwrap_or_default()
+        self.ext_by_name(method_name).render_by_recv(receiver_desc)
     }
 
     /// Every static method named `method_name` across the classpath (top-level functions and
     /// extensions), for resolving a receiver-less call. Includes non-public (`@InlineOnly`) candidates,
     /// each tagged via `ExtCandidate.public`; the caller filters — normal resolution is public-only.
     pub fn find_top_level(&self, method_name: &str) -> Vec<ExtCandidate> {
-        self.ext_by_name(method_name).all.clone()
+        self.ext_by_name(method_name).render_all()
     }
 
     /// The JVM descriptor of the static method named `jvm_name` on facade `root` (walking the multifile
@@ -1897,7 +2002,7 @@ impl Classpath {
     }
 
     /// Every static callable a facade `root` declares (all names), following the multifile-facade super
-    /// chain — the name-agnostic form of [`Self::rebuild_ext_candidates`], used to build a package's
+    /// chain — the name-agnostic form of [`Self::rebuild_ext_candidate_records`], used to build a package's
     /// [`Self::pkg_members`] in one pass. Each `ClassInfo` is served from the L1/L2 cache.
     fn facade_statics(&self, root: &str) -> Vec<ExtCandidate> {
         let mut out = Vec::new();
@@ -1931,7 +2036,7 @@ impl Classpath {
                     public: root_public && m.is_public(),
                 });
             }
-            cur = ci.super_class.clone();
+            cur = ci.super_class();
         }
         out
     }
@@ -1950,9 +2055,10 @@ impl Classpath {
         }
         let jp = global_jar_packages().get_or_build(entry.path(), || build_jar_packages(entry));
         let mut m = PkgMembers::default();
-        if let Some(pe) = jp.packages.get(pkg) {
+        if let Some(pe) = jp.entry(pkg) {
             let mut seen_facade = std::collections::HashSet::new();
-            for part in &pe.facades {
+            for &part_id in &pe.facades {
+                let part = jp.names.render(part_id);
                 // The public multifile facade is the `__`-prefix of a part (`…/CollectionsKt__X` →
                 // `…/CollectionsKt`); a single-file facade has no `__` and roots at itself.
                 let facade = part.split_once("__").map_or(part.as_str(), |(f, _)| f);
@@ -1980,11 +2086,12 @@ impl Classpath {
                             owners.push(facade_id);
                         }
                     }
-                    m.by_jvm
-                        .entry(cand.name.clone())
-                        .or_default()
-                        .push(cand.clone());
-                    m.by_source.entry(source).or_default().push(cand);
+                    let jvm_name = cand.name.clone();
+                    let idx = m.candidates.len();
+                    m.candidates
+                        .push(ExtCandidateRecord::from_candidate(facade_id, &cand));
+                    m.by_jvm.entry(jvm_name).or_default().push(idx);
+                    m.by_source.entry(source).or_default().push(idx);
                 }
             }
         }
@@ -2008,8 +2115,9 @@ impl Classpath {
                 continue;
             };
             let jp = global_jar_packages().get_or_build(entry.path(), || build_jar_packages(entry));
-            if let Some(pe) = jp.packages.get(pkg) {
-                for part in &pe.facades {
+            if let Some(pe) = jp.entry(pkg) {
+                for &part_id in &pe.facades {
+                    let part = jp.names.render(part_id);
                     let facade = part.split_once("__").map_or(part.as_str(), |(f, _)| f);
                     if !out.iter().any(|f| f == facade) {
                         out.push(facade.to_string());
@@ -2046,14 +2154,18 @@ impl Classpath {
                 let Some(entry) = self.entries.get(jar_id) else {
                     continue;
                 };
-                if let Some(cands) = self.jar_pkg_members(entry, pkg).by_jvm.get(jvm_name) {
-                    for c in cands {
+                let members = self.jar_pkg_members(entry, pkg);
+                if let Some(indices) = members.by_jvm.get(jvm_name) {
+                    for &idx in indices {
+                        let Some(c) = members.candidates.get(idx) else {
+                            continue;
+                        };
                         if descriptor_parts(&c.descriptor)
                             .and_then(|(fp, _)| fp)
                             .as_deref()
                             == Some(recv_desc)
                         {
-                            out.push(c.clone());
+                            out.push(c.render(&members.owner_names));
                         }
                     }
                 }
@@ -2141,8 +2253,9 @@ impl Classpath {
                 let Some(entry) = self.entries.get(jar_id) else {
                     continue;
                 };
-                if let Some(cands) = self.jar_pkg_members(entry, pkg).by_source.get(name) {
-                    out.extend(cands.iter().cloned());
+                let members = self.jar_pkg_members(entry, pkg);
+                if let Some(indices) = members.by_source.get(name) {
+                    out.extend(members.render_indices(indices));
                 }
             }
         }
@@ -2157,7 +2270,8 @@ impl Classpath {
         &self,
         fqn: &str,
     ) -> Option<std::rc::Rc<crate::libraries::ResolvedSymbols>> {
-        self.symbols_memo.borrow_mut().get(fqn).cloned()
+        let fqn_id = type_name(fqn);
+        self.symbols_memo.borrow_mut().get(&fqn_id).cloned()
     }
 
     /// Store the composed namespace record for `fqn` in the top-level memo, returning the shared `Rc` the
@@ -2167,10 +2281,9 @@ impl Classpath {
         fqn: &str,
         symbols: crate::libraries::ResolvedSymbols,
     ) -> std::rc::Rc<crate::libraries::ResolvedSymbols> {
+        let fqn_id = type_name(fqn);
         let rc = std::rc::Rc::new(symbols);
-        self.symbols_memo
-            .borrow_mut()
-            .insert(fqn.to_string(), rc.clone());
+        self.symbols_memo.borrow_mut().insert(fqn_id, rc.clone());
         rc
     }
 
@@ -2212,9 +2325,11 @@ impl Classpath {
         if let Some(idx) = ext {
             for root_id in roots {
                 let root = idx.owner_names.render(root_id);
-                for cand in self.rebuild_ext_candidates(&root, method_name) {
+                let owner = grouped.owner_names.insert_from(&idx.owner_names, root_id);
+                for cand in self.rebuild_ext_candidate_records(owner, &root, method_name) {
+                    let cand_idx = grouped.all.len();
                     if let Some(recv) = descriptor_parts(&cand.descriptor).and_then(|(fp, _)| fp) {
-                        grouped.by_recv.entry(recv).or_default().push(cand.clone());
+                        grouped.by_recv.entry(recv).or_default().push(cand_idx);
                     }
                     grouped.all.push(cand);
                 }
@@ -2308,10 +2423,11 @@ impl Classpath {
 /// The `toplevel_only` filter is a whole-classpath decision, so it is deferred to the per-cp compose in
 /// [`Classpath::ensure_ext_index`] — here every receiver-taking static is recorded raw in `by_recv_raw`.
 fn build_entry_ext(entry: &Entry) -> EntryExt {
-    let mut all: HashMap<String, ClassLite> = HashMap::new();
+    let mut names = NameTree::default();
+    let mut all: HashMap<NameId, ClassLite> = HashMap::new();
     match entry {
-        Entry::Dir(d) => collect_dir(d, &mut all),
-        Entry::Jar(j) => collect_jar(j, &mut all),
+        Entry::Dir(d) => collect_dir(d, &mut names, &mut all),
+        Entry::Jar(j) => collect_jar(j, &mut names, &mut all),
         // No Kotlin extensions live in the JDK.
         Entry::Jimage(_) => {}
     }
@@ -2321,12 +2437,12 @@ fn build_entry_ext(entry: &Entry) -> EntryExt {
             .extend(lite.toplevel_names.iter().cloned());
         ext.ext_names.extend(lite.ext_names.iter().cloned());
     }
-    for (root, lite) in &all {
+    for (&root, lite) in &all {
         let mut root_id = None;
-        let mut cur = Some(root.clone());
+        let mut cur = Some(root);
         let mut visited = std::collections::HashSet::new();
         while let Some(cn) = cur {
-            if !visited.insert(cn.clone()) {
+            if !visited.insert(cn) {
                 break;
             }
             let Some(c) = all.get(&cn) else { break };
@@ -2340,7 +2456,7 @@ fn build_entry_ext(entry: &Entry) -> EntryExt {
                 let owner = match root_id {
                     Some(id) => id,
                     None => {
-                        let id = ext.owner_names.insert(root);
+                        let id = ext.owner_names.insert_from(&names, root);
                         root_id = Some(id);
                         id
                     }
@@ -2353,7 +2469,7 @@ fn build_entry_ext(entry: &Entry) -> EntryExt {
                         .push((mname.clone(), owner));
                 }
             }
-            cur = c.super_class.clone();
+            cur = c.super_class;
         }
     }
     ext
@@ -2372,7 +2488,7 @@ type JarId = usize;
 struct PkgEntry {
     /// File-facade internal names declared for this package by `kotlin_module` (`kotlin/collections/
     /// CollectionsKt`). The roots whose `@Metadata` statics are the package's top-level/extension functions.
-    facades: Vec<String>,
+    facades: Vec<NameId>,
     /// The package directory holds `<pkg>/*.class` entries (regular classes / facades live here).
     has_classes: bool,
     /// The package has a `.kotlin_builtins` fragment (a builtin type with no `.class`: List, Int, Map…).
@@ -2384,41 +2500,46 @@ struct PkgEntry {
 /// central-directory package-name pass (entry names only — no decompression, no class parse).
 #[derive(Default)]
 struct JarPackages {
-    /// slashed package name (`kotlin/collections`, `""` for the default package) → its facts.
-    packages: HashMap<String, PkgEntry>,
+    names: NameTree,
+    /// slashed package name ID (`kotlin/collections`, `""` for the default package) → its facts.
+    packages: HashMap<NameId, PkgEntry>,
 }
 
-/// A node in the composed classpath package tree: sub-packages by segment, and every jar that declares
-/// THIS package (union across the classpath, in declaration order). One jar sits in many nodes.
+impl JarPackages {
+    fn entry(&self, pkg: &str) -> Option<&PkgEntry> {
+        self.names.get(pkg).and_then(|id| self.packages.get(&id))
+    }
+
+    fn entry_mut(&mut self, pkg: &str) -> &mut PkgEntry {
+        let id = self.names.insert(pkg);
+        self.packages.entry(id).or_default()
+    }
+}
+
+/// A node in the composed classpath package table: every jar that declares THIS package (union across the
+/// classpath, in declaration order). One jar sits in many package nodes.
 #[derive(Default)]
 pub struct PackageNode {
-    children: HashMap<String, PackageNode>,
     jars: Vec<JarId>,
 }
 
-impl PackageNode {
+#[derive(Default)]
+pub struct PackageTree {
+    names: NameTree,
+    packages: HashMap<NameId, PackageNode>,
+}
+
+impl PackageTree {
     /// The node for a slashed package path (`""` = this root), or `None` if no jar declares it. The
     /// resolution seam (wired in a later rollout step); exercised now by the compose unit tests.
     #[allow(dead_code)]
     fn node_for(&self, pkg: &str) -> Option<&PackageNode> {
-        let mut node = self;
-        if !pkg.is_empty() {
-            for seg in pkg.split('/') {
-                node = node.children.get(seg)?;
-            }
-        }
-        Some(node)
+        self.names.get(pkg).and_then(|id| self.packages.get(&id))
     }
 
-    /// Total package count in the subtree (a package = a node that some jar declares). For memory
-    /// reporting.
+    /// Total package count in the table. For memory reporting.
     fn package_count(&self) -> usize {
-        (!self.jars.is_empty()) as usize
-            + self
-                .children
-                .values()
-                .map(PackageNode::package_count)
-                .sum::<usize>()
+        self.packages.len()
     }
 }
 
@@ -2430,16 +2551,25 @@ fn record_pkg_entry_name(name: &str, jp: &mut JarPackages) {
             .map_or(String::new(), |(p, _)| p.to_string())
     };
     if name.ends_with(".class") {
-        jp.packages.entry(pkg_of(name)).or_default().has_classes = true;
+        jp.entry_mut(&pkg_of(name)).has_classes = true;
     } else if name.ends_with(".kotlin_builtins") {
-        jp.packages.entry(pkg_of(name)).or_default().has_builtins = true;
+        jp.entry_mut(&pkg_of(name)).has_builtins = true;
     }
 }
 
 /// Merge a jar's `kotlin_module` bytes into its catalog: each package's facade internal names.
 fn record_kotlin_module(bytes: &[u8], jp: &mut JarPackages) {
     for (pkg, facades) in super::metadata::read_kotlin_module(bytes) {
-        jp.packages.entry(pkg).or_default().facades.extend(facades);
+        let pkg_id = jp.names.insert(&pkg);
+        let facades = facades
+            .iter()
+            .map(|facade| jp.names.insert(facade))
+            .collect::<Vec<_>>();
+        jp.packages
+            .entry(pkg_id)
+            .or_default()
+            .facades
+            .extend(facades);
     }
 }
 
@@ -2454,10 +2584,15 @@ fn build_jar_packages(entry: &Entry) -> JarPackages {
         Entry::Dir(d) => build_jar_packages_dir(d, d, &mut jp),
         Entry::Jimage(p) => {
             if let Some(idx) = build_jimage_index(p) {
-                for internal in idx.keys() {
-                    if let Some((pkg, _)) = internal.rsplit_once('/') {
-                        jp.packages.entry(pkg.to_string()).or_default().has_classes = true;
+                for &internal in idx.by_name.keys() {
+                    let Some(pkg) = idx.names.parent(internal) else {
+                        continue;
+                    };
+                    if pkg == NameTree::ROOT {
+                        continue;
                     }
+                    let pkg = jp.names.insert_from(&idx.names, pkg);
+                    jp.packages.entry(pkg).or_default().has_classes = true;
                 }
             }
         }
@@ -2516,24 +2651,20 @@ fn build_jar_packages_dir(root: &Path, dir: &Path, jp: &mut JarPackages) {
     }
 }
 
-/// Compose per-jar [`JarPackages`] into the merged [`PackageNode`] tree — a cheap union: every package a
-/// jar declares adds that jar to the package's node (in classpath declaration order).
-fn compose_package_tree(parts: &[std::sync::Arc<JarPackages>]) -> PackageNode {
-    let mut root = PackageNode::default();
+/// Compose per-jar [`JarPackages`] into the merged [`PackageTree`] — a cheap union: every package a jar
+/// declares adds that jar to the package's node (in classpath declaration order).
+fn compose_package_tree(parts: &[std::sync::Arc<JarPackages>]) -> PackageTree {
+    let mut tree = PackageTree::default();
     for (jar_id, jp) in parts.iter().enumerate() {
-        for pkg in jp.packages.keys() {
-            let mut node = &mut root;
-            if !pkg.is_empty() {
-                for seg in pkg.split('/') {
-                    node = node.children.entry(seg.to_string()).or_default();
-                }
-            }
+        for &pkg_id in jp.packages.keys() {
+            let pkg = tree.names.insert_from(&jp.names, pkg_id);
+            let node = tree.packages.entry(pkg).or_default();
             if !node.jars.contains(&jar_id) {
                 node.jars.push(jar_id);
             }
         }
     }
-    root
+    tree
 }
 
 /// The classpath is the JVM realization of the inliner's narrow [`MethodBodies`] capability — the
@@ -2554,7 +2685,7 @@ impl super::inline::MethodBodies for Classpath {
 /// superclass chains and index static methods (no fields, no instance methods).
 struct ClassLite {
     is_public: bool,
-    super_class: Option<String>,
+    super_class: Option<NameId>,
     /// `(name, descriptor, generic-signature, is_public)` of each static method (excl `<init>`/`<clinit>`).
     /// Non-public ones (`@InlineOnly`) are kept for the inliner; the flag gates normal resolution.
     statics: Vec<(String, String, Option<String>, bool)>,
@@ -2569,8 +2700,10 @@ struct ClassLite {
     ext_names: std::collections::HashSet<String>,
 }
 
-fn collect_class_bytes(bytes: &[u8], all: &mut HashMap<String, ClassLite>) {
+fn collect_class_bytes(bytes: &[u8], names: &mut NameTree, all: &mut HashMap<NameId, ClassLite>) {
     let Ok(ci) = parse_class(bytes) else { return };
+    let this_class = names.insert(&ci.this_class());
+    let super_class = ci.super_class().map(|s| names.insert(&s));
     let statics = ci
         .methods
         .iter()
@@ -2600,10 +2733,10 @@ fn collect_class_bytes(bytes: &[u8], all: &mut HashMap<String, ClassLite>) {
         }
     }
     all.insert(
-        ci.this_class.clone(),
+        this_class,
         ClassLite {
             is_public: ci.is_public(),
-            super_class: ci.super_class,
+            super_class,
             statics,
             toplevel_names,
             ext_names,
@@ -2611,23 +2744,23 @@ fn collect_class_bytes(bytes: &[u8], all: &mut HashMap<String, ClassLite>) {
     );
 }
 
-fn collect_dir(dir: &Path, all: &mut HashMap<String, ClassLite>) {
+fn collect_dir(dir: &Path, names: &mut NameTree, all: &mut HashMap<NameId, ClassLite>) {
     let Ok(rd) = std::fs::read_dir(dir) else {
         return;
     };
     for e in rd.flatten() {
         let p = e.path();
         if p.is_dir() {
-            collect_dir(&p, all);
+            collect_dir(&p, names, all);
         } else if p.extension().map_or(false, |x| x == "class") {
             if let Ok(b) = std::fs::read(&p) {
-                collect_class_bytes(&b, all);
+                collect_class_bytes(&b, names, all);
             }
         }
     }
 }
 
-fn collect_jar(jar: &Path, all: &mut HashMap<String, ClassLite>) {
+fn collect_jar(jar: &Path, names: &mut NameTree, all: &mut HashMap<NameId, ClassLite>) {
     let Ok(f) = File::open(jar) else { return };
     let Ok(mut archive) = zip::ZipArchive::new(f) else {
         return;
@@ -2651,7 +2784,7 @@ fn collect_jar(jar: &Path, all: &mut HashMap<String, ClassLite>) {
         }
         let mut buf = Vec::new();
         if entry.read_to_end(&mut buf).is_ok() {
-            collect_class_bytes(&buf, all);
+            collect_class_bytes(&buf, names, all);
         }
     }
 }
@@ -2704,7 +2837,9 @@ fn class_internal_from_entry(name: &str) -> Option<&str> {
 fn parse_aliases_from_bytes(bytes: &[u8], idx: &mut TypeIndex) {
     let Ok(ci) = parse_class(bytes) else { return };
     for (alias, internal) in super::metadata::package_type_aliases(&ci) {
-        idx.type_aliases.insert(alias, internal);
+        let alias = idx.alias_names.insert(&alias);
+        let target = idx.target_names.insert(&internal);
+        idx.type_aliases.insert(alias, target);
     }
 }
 
@@ -2786,7 +2921,7 @@ fn scan_types_jar(jar: &Path, idx: &mut TypeIndex) {
     }
 }
 
-/// Build the jimage class index: internal name → [`JimageEntry`] (content offset + on-disk size +
+/// Build the jimage class index: internal name id → [`JimageEntry`] (content offset + on-disk size +
 /// compressed flag) for each `.class` resource, read from the jimage location table directly — the
 /// bootclasspath equivalent of a jar's central directory — so JDK class bytes can be seek-read on demand.
 /// Format reference (little-endian header): jdk.internal.jimage.BasicImageReader / ImageHeader /
@@ -2854,7 +2989,7 @@ fn build_jimage_index(path: &Path) -> Option<JimageIndex> {
         }
         a
     };
-    let mut idx = HashMap::new();
+    let mut idx = JimageIndex::default();
     for i in 0..table_length {
         let lo = u32le(offsets + i * 4) as usize;
         if lo == 0 {
@@ -2877,7 +3012,9 @@ fn build_jimage_index(path: &Path) -> Option<JimageIndex> {
         // "zip" scheme is deferred to `jimage_bytes` (which reads the content anyway), so the index build
         // needs only the tables, not the content.
         let stored = if comp != 0 { comp } else { unc };
-        idx.entry(internal)
+        let internal = idx.names.insert(&internal);
+        idx.by_name
+            .entry(internal)
             .or_insert((abs as u64, stored, comp != 0));
     }
     Some(idx)
@@ -2935,16 +3072,135 @@ mod fq_tests {
     }
 
     #[test]
-    fn metadata_param_matching_keeps_unsigned_descriptor_erasure() {
-        assert!(meta_param_compat(Some("kotlin/UInt"), &Ty::Int));
-        assert!(meta_param_compat(Some("kotlin/ULong"), &Ty::Long));
-        assert!(meta_param_exact(Some("kotlin/UInt"), &Ty::Int));
-        assert!(meta_param_exact(Some("kotlin/ULong"), &Ty::Long));
+    fn jimage_index_uses_name_ids_for_class_lookup_and_package_parent() {
+        let mut idx = JimageIndex::default();
+        let string = idx.names.insert("java/lang/String");
+        idx.by_name.insert(string, (1, 2, false));
 
-        assert!(!meta_param_compat(Some("kotlin/UInt"), &Ty::Long));
-        assert!(!meta_param_compat(Some("kotlin/ULong"), &Ty::Int));
-        assert!(!meta_param_exact(Some("kotlin/UInt"), &Ty::Long));
-        assert!(!meta_param_exact(Some("kotlin/ULong"), &Ty::Int));
+        let lookup = idx.names.get("java/lang/String").expect("indexed class");
+        assert_eq!(idx.by_name.get(&lookup), Some(&(1, 2, false)));
+
+        let package = idx.names.parent(string).expect("class has package parent");
+        let mut packages = JarPackages::default();
+        let package = packages.names.insert_from(&idx.names, package);
+        packages.packages.entry(package).or_default().has_classes = true;
+
+        assert_eq!(packages.names.render(package), "java/lang");
+        assert!(packages.packages[&package].has_classes);
+    }
+
+    #[test]
+    fn class_cache_uses_type_names_for_l1_l2_keys() {
+        let cache = ClassCacheData::default();
+        let first = type_name("kotlin/collections/List");
+        let second = type_name("kotlin/collections/List");
+        let map = type_name("kotlin/collections/Map");
+
+        assert_eq!(first, second);
+        assert_ne!(first, map);
+        cache.classes.write().unwrap().insert(first, None);
+        assert!(cache.classes.read().unwrap().contains_key(&second));
+        assert_eq!(cache.len(), 1);
+    }
+
+    #[test]
+    fn ext_by_name_cache_records_owner_ids_until_render() {
+        let mut cached = ExtByName::default();
+        let owner = cached
+            .owner_names
+            .insert("kotlin/collections/CollectionsKt");
+        let record = ExtCandidateRecord {
+            owner,
+            name: "map".to_string(),
+            descriptor: "(Ljava/lang/Iterable;)Ljava/util/List;".to_string(),
+            ret_desc: "Ljava/util/List;".to_string(),
+            signature: None,
+            public: true,
+        };
+
+        cached.all.push(record);
+        cached
+            .by_recv
+            .entry("Ljava/lang/Iterable;".to_string())
+            .or_default()
+            .push(0);
+
+        assert_eq!(cached.owner_names.len(), 4);
+        let all = cached.render_all();
+        assert_eq!(all[0].owner, "kotlin/collections/CollectionsKt");
+        let by_recv = cached.render_by_recv("Ljava/lang/Iterable;");
+        assert_eq!(by_recv[0].owner, "kotlin/collections/CollectionsKt");
+    }
+
+    #[test]
+    fn package_member_cache_indexes_id_backed_candidates() {
+        let mut members = PkgMembers::default();
+        let owner = members
+            .owner_names
+            .insert("kotlin/collections/CollectionsKt");
+        members.candidates.push(ExtCandidateRecord {
+            owner,
+            name: "sumOfInt".to_string(),
+            descriptor: "(Ljava/lang/Iterable;)I".to_string(),
+            ret_desc: "I".to_string(),
+            signature: None,
+            public: true,
+        });
+        members
+            .by_source
+            .entry("sumOf".to_string())
+            .or_default()
+            .push(0);
+        members
+            .by_jvm
+            .entry("sumOfInt".to_string())
+            .or_default()
+            .push(0);
+
+        assert_eq!(members.owner_names.len(), 4);
+        assert_eq!(members.by_source["sumOf"], vec![0]);
+        assert_eq!(members.by_jvm["sumOfInt"], vec![0]);
+        let rendered = members.render_indices(&members.by_source["sumOf"]);
+        assert_eq!(rendered[0].owner, "kotlin/collections/CollectionsKt");
+        assert_eq!(rendered[0].name, "sumOfInt");
+    }
+
+    #[test]
+    fn type_index_composes_alias_targets_as_name_ids() {
+        let mut part = TypeIndex::default();
+        let array_list_alias = part.alias_names.insert("kotlin/collections/ArrayList");
+        let array_list = part.target_names.insert("java/util/ArrayList");
+        part.type_aliases.insert(array_list_alias, array_list);
+
+        let mut idx = TypeIndex::default();
+        for (&alias, &target) in &part.type_aliases {
+            let alias = idx.alias_names.insert_from(&part.alias_names, alias);
+            let target = idx.target_names.insert_from(&part.target_names, target);
+            idx.type_aliases.entry(alias).or_insert(target);
+        }
+
+        let alias = idx
+            .alias_names
+            .get("kotlin/collections/ArrayList")
+            .expect("alias id");
+        let target = idx.type_aliases[&alias];
+        assert_eq!(idx.target_names.render(target), "java/util/ArrayList");
+        assert!(!idx.is_empty());
+    }
+
+    #[test]
+    fn metadata_param_matching_keeps_unsigned_descriptor_erasure() {
+        let uint = type_name("kotlin/UInt");
+        let ulong = type_name("kotlin/ULong");
+        assert!(meta_param_compat(Some(uint), &Ty::Int));
+        assert!(meta_param_compat(Some(ulong), &Ty::Long));
+        assert!(meta_param_exact(Some(uint), &Ty::Int));
+        assert!(meta_param_exact(Some(ulong), &Ty::Long));
+
+        assert!(!meta_param_compat(Some(uint), &Ty::Long));
+        assert!(!meta_param_compat(Some(ulong), &Ty::Int));
+        assert!(!meta_param_exact(Some(uint), &Ty::Long));
+        assert!(!meta_param_exact(Some(ulong), &Ty::Int));
     }
 
     /// The provisioned kotlin-stdlib jar via the project's single CI-safe resolver
@@ -2975,14 +3231,9 @@ mod fq_tests {
     fn jar_packages(pkgs: &[(&str, PkgEntry)]) -> std::sync::Arc<JarPackages> {
         let mut jp = JarPackages::default();
         for (p, e) in pkgs {
-            jp.packages.insert(
-                p.to_string(),
-                PkgEntry {
-                    facades: e.facades.clone(),
-                    has_classes: e.has_classes,
-                    has_builtins: e.has_builtins,
-                },
-            );
+            let entry = jp.entry_mut(p);
+            entry.has_classes = e.has_classes;
+            entry.has_builtins = e.has_builtins;
         }
         std::sync::Arc::new(jp)
     }
@@ -3014,6 +3265,7 @@ mod fq_tests {
             },
         )]);
         let tree = compose_package_tree(&[jar0, jar1]);
+        assert!(tree.names.get("kotlin/collections").is_some());
         assert_eq!(tree.node_for("kotlin").unwrap().jars, vec![0]);
         assert_eq!(
             tree.node_for("kotlin/collections").unwrap().jars,
@@ -3030,9 +3282,25 @@ mod fq_tests {
         record_pkg_entry_name("kotlin/collections/CollectionsKt.class", &mut jp);
         record_pkg_entry_name("kotlin/collections/collections.kotlin_builtins", &mut jp);
         record_pkg_entry_name("Top.class", &mut jp); // default package
-        let c = &jp.packages["kotlin/collections"];
+        let c = jp.entry("kotlin/collections").unwrap();
         assert!(c.has_classes && c.has_builtins);
-        assert!(jp.packages[""].has_classes);
+        assert!(jp.entry("").unwrap().has_classes);
+    }
+
+    #[test]
+    fn jar_package_catalog_stores_package_and_facade_ids() {
+        let mut jp = JarPackages::default();
+        let pkg = jp.names.insert("kotlin/collections");
+        let facade = jp.names.insert("kotlin/collections/CollectionsKt");
+        jp.packages.entry(pkg).or_default().facades.push(facade);
+
+        let entry = jp.entry("kotlin/collections").unwrap();
+        assert_eq!(entry.facades, vec![facade]);
+        assert_eq!(
+            jp.names.render(entry.facades[0]),
+            "kotlin/collections/CollectionsKt"
+        );
+        assert!(jp.entry("kotlin/text").is_none());
     }
 
     #[test]
@@ -3042,7 +3310,7 @@ mod fq_tests {
         };
         let jp = build_jar_packages(&Entry::Jar(jar));
         // Central-directory pass sees the class-bearing + builtins packages.
-        let coll = &jp.packages["kotlin/collections"];
+        let coll = jp.entry("kotlin/collections").unwrap();
         assert!(coll.has_classes, "kotlin/collections has .class entries");
         assert!(
             coll.has_builtins,
@@ -3051,11 +3319,15 @@ mod fq_tests {
         // `kotlin_module` names the multifile-facade PART classes (`CollectionsKt__CollectionsKt`),
         // which carry the package's top-level statics — exactly the roots lazy facade parsing needs.
         assert!(
-            coll.facades
-                .iter()
-                .any(|f| f.starts_with("kotlin/collections/CollectionsKt")),
+            coll.facades.iter().any(|&f| jp
+                .names
+                .render(f)
+                .starts_with("kotlin/collections/CollectionsKt")),
             "kotlin_module names the CollectionsKt parts, got {:?}",
             coll.facades
+                .iter()
+                .map(|&f| jp.names.render(f))
+                .collect::<Vec<_>>()
         );
         // Compose into a tree; the nested package resolves and the root does not falsely appear.
         let tree = compose_package_tree(&[std::sync::Arc::new(jp)]);
@@ -3278,7 +3550,8 @@ mod fq_tests {
         let cp = Classpath::new(vec![PathBuf::from("/nonexistent/stdlib.jar")]);
         assert!(cp.builtin_members.borrow().is_empty());
         assert!(cp.builtin_members("kotlin/String").is_empty());
-        assert!(cp.builtin_members.borrow().contains_key("kotlin/String"));
+        let string = type_name("kotlin/String");
+        assert!(cp.builtin_members.borrow().contains_key(&string));
         assert!(cp.builtin_members("kotlin/String").is_empty());
     }
 }

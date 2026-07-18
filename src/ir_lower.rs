@@ -26,7 +26,7 @@ use crate::runtime::{
     CountedLoopInfo, PlatformAccessor, PlatformCtor, PlatformField, RuntimeCtor, RuntimeOp,
     TargetRuntime,
 };
-use crate::types::Ty;
+use crate::types::{existing_type_name, type_name, Ty, TypeName};
 
 // --- Lower-bail diagnostics ----------------------------------------------------------------------
 // `lower_file` returns `None` (silently skips a file) for any construct outside the IR subset. That is
@@ -66,12 +66,18 @@ fn bail_variant(dbg: &str) -> &str {
 
 struct ClassInfo {
     id: ClassId,
-    internal: String,
+    internal: TypeName,
     fields: Vec<(String, Ty)>,
     /// method name → (index into the class's `methods`, FunId, return Ty).
     methods: HashMap<String, (u32, u32, Ty)>,
     /// Base class internal name (`class B : A(…)`), for inherited field/method resolution.
-    super_internal: Option<String>,
+    super_internal: Option<TypeName>,
+}
+
+impl ClassInfo {
+    fn internal(&self) -> String {
+        self.internal.render()
+    }
 }
 
 /// Lower a checked file to IR, or `None` if it uses anything outside the core subset.
@@ -125,10 +131,7 @@ pub fn lower_file_at_reporting(
         syms,
         runtime,
         bail,
-        ir: IrFile {
-            package: file.package.clone(),
-            ..Default::default()
-        },
+        ir: IrFile::with_package(file.package.clone()),
         fun_ids: HashMap::new(),
         fun_ids_by_decl: HashMap::new(),
         ext_fun_ids: HashMap::new(),
@@ -189,7 +192,7 @@ pub fn lower_file_at_reporting(
                         ast_literal_const(file, i, body_prop_ty(file, info, p, &*syms.libraries))
                     }) {
                         lo.object_const_lits
-                            .insert((internal.clone(), p.name.clone()), lit);
+                            .insert((type_name(&internal), p.name.clone()), lit);
                     }
                 }
             }
@@ -204,7 +207,7 @@ pub fn lower_file_at_reporting(
                     ast_literal_const(file, i, body_prop_ty(file, info, p, &*syms.libraries))
                 }) {
                     lo.object_const_lits
-                        .insert((internal.clone(), p.name.clone()), lit);
+                        .insert((type_name(&internal), p.name.clone()), lit);
                 }
             }
         }
@@ -366,7 +369,7 @@ pub fn lower_file_at_reporting(
             let start = syms
                 .class_names
                 .get(name)
-                .cloned()
+                .map(TypeName::render)
                 .unwrap_or_else(|| name.to_string());
             let mut stack = vec![start];
             let mut seen = std::collections::HashSet::new();
@@ -378,15 +381,15 @@ pub fn lower_file_at_reporting(
                     if !c.tparam_names.is_empty() {
                         return true;
                     }
-                    if let Some(s) = &c.super_internal {
-                        stack.push(s.clone());
+                    if let Some(s) = c.super_internal() {
+                        stack.push(s);
                     }
-                    stack.extend(c.interfaces.iter().cloned());
+                    stack.extend(c.interfaces.iter_rendered());
                 } else if let Some(t) = syms.libraries.resolve_type(&i) {
                     if !t.type_params.is_empty() {
                         return true;
                     }
-                    stack.extend(t.supertypes.iter().cloned());
+                    stack.extend(t.supertypes.to_vec());
                 }
             }
             false
@@ -437,13 +440,13 @@ pub fn lower_file_at_reporting(
             let internal = class_internal(file, &c.name);
             // A generic class gets a JVM class `Signature` (kotlinc does), matching its bytecode.
             if let Some(s) = class_generic_sig(file, c, &*lo.syms.libraries, &lo.syms.class_names) {
-                lo.ir.class_signatures.insert(internal.clone(), s);
+                lo.ir.insert_class_signature(&internal, s);
             }
             // A field whose declared type is a bare type parameter (`val a: A`) gets a field `Signature`
             // (`TA;`); record the (field, type-param) pairs for the JVM backend to format.
             let field_sigs = class_field_tparams(c);
             if !field_sigs.is_empty() {
-                lo.ir.field_signatures.insert(internal.clone(), field_sigs);
+                lo.ir.insert_field_signatures(&internal, field_sigs);
             }
             // An `inner class` captures the enclosing instance: a synthetic `this$0` field of the outer
             // type, prepended as the first constructor-parameter field.
@@ -487,10 +490,10 @@ pub fn lower_file_at_reporting(
             // in-class access by name routes through the accessor, not a direct field read/write.
             for p in c.body_props.iter().filter(|p| is_field_accessor_prop(p)) {
                 lo.field_accessor_props
-                    .insert((internal.clone(), p.name.clone()));
+                    .insert((type_name(&internal), p.name.clone()));
                 if p.is_var {
                     lo.field_accessor_var_props
-                        .insert((internal.clone(), p.name.clone()));
+                        .insert((type_name(&internal), p.name.clone()));
                 }
             }
             // Guard each delegated member property: only the simple shape is modeled — a concrete
@@ -504,10 +507,11 @@ pub fn lower_file_at_reporting(
                     syms.class_by_internal(internal)
                         .is_some_and(|cs| cs.value_field.is_some())
                 };
-                if is_value_cls(di) || syms.method_of(di, "provideDelegate").is_some() {
+                let di = di.render();
+                if is_value_cls(&di) || syms.method_of(&di, "provideDelegate").is_some() {
                     return None;
                 }
-                let (_, _, gv_ret, _, _) = lo.delegate_getvalue_info(p.delegate.unwrap(), di)?;
+                let (_, _, gv_ret, _, _) = lo.delegate_getvalue_info(p.delegate.unwrap(), &di)?;
                 let prop_ty = syms
                     .classes
                     .get(&c.name)
@@ -524,7 +528,10 @@ pub fn lower_file_at_reporting(
                 if gv_ret != prop_ty && !gv_ret.is_reference() {
                     return None;
                 }
-                if prop_ty.obj_internal().is_some_and(is_value_cls) {
+                if prop_ty
+                    .obj_internal()
+                    .is_some_and(|n| is_value_cls(&n.render()))
+                {
                     return None;
                 }
             }
@@ -652,7 +659,7 @@ pub fn lower_file_at_reporting(
                             .syms
                             .class_names
                             .get(base)
-                            .cloned()
+                            .map(TypeName::render)
                             .unwrap_or_else(|| base.clone());
                         if let Some(module_base) = lo.syms.class_by_internal(&resolved) {
                             if module_base.is_interface || module_base.is_abstract {
@@ -703,7 +710,7 @@ pub fn lower_file_at_reporting(
                     .syms
                     .class_names
                     .get(st)
-                    .cloned()
+                    .map(TypeName::render)
                     .unwrap_or_else(|| st.clone());
                 if lo
                     .syms
@@ -763,7 +770,7 @@ pub fn lower_file_at_reporting(
                                     .iter()
                                     .map(|a| field_ty_with_args(file, a, &*syms.libraries))
                                     .collect();
-                            let base = Ty::obj_args(fq_name, &targs);
+                            let base = Ty::obj_args(&fq_name.render(), &targs);
                             if ir.is_nullable() {
                                 Ty::nullable(base)
                             } else {
@@ -793,7 +800,7 @@ pub fn lower_file_at_reporting(
                 })
                 .collect();
             let id = lo.ir.add_class(IrClass {
-                fq_name: internal.clone(),
+                fq_name: type_name(&internal),
                 is_value: c.is_value,
                 type_param_bounds: c
                     .type_param_bounds
@@ -849,7 +856,7 @@ pub fn lower_file_at_reporting(
                 is_sealed: c.is_sealed(),
                 is_abstract: c.is_abstract(),
                 is_open: c.is_open(),
-                superclass,
+                superclass: type_name(&superclass),
                 super_args: Vec::new(),
                 // Entry names + subclass markers now; constructor-arg value-ids are lowered in pass 2.
                 enum_entries: c
@@ -865,14 +872,14 @@ pub fn lower_file_at_reporting(
                 prop_ref: None,
                 func_ref: None,
                 bridges: Vec::new(),
-                interfaces: iface_internals,
+                interfaces: iface_internals.clone().into(),
                 is_object: c.is_object(),
                 is_companion: false,
                 companion_class: None,
                 secondary_ctors: vec![],
                 has_primary_ctor: c.has_primary_ctor,
-                applied_annotations: class_applied_annotations(file, c),
-                field_annotations: class_field_annotations(file, c, syms),
+                applied_annotations: class_applied_annotations(file, c, &lo.ir),
+                field_annotations: class_field_annotations(file, c, syms, &lo.ir),
                 // A Kotlin `annotation class` is RUNTIME-retained unless it opts out — emit the
                 // `@Retention(RUNTIME)` meta-annotation so its uses stay visible to reflection.
                 runtime_retained: c.kind == ast::ClassKind::Annotation
@@ -884,11 +891,11 @@ pub fn lower_file_at_reporting(
             // generates the whole impl from `fields` (see `emit_annotation_impl_class`).
             if c.is_annotation() {
                 let mut impl_class = lo.ir.classes[id as usize].clone();
-                impl_class.fq_name = format!("{internal}$annotationImpl");
+                impl_class.fq_name = type_name(&format!("{internal}$annotationImpl"));
                 impl_class.is_annotation = false;
-                impl_class.annotation_impl_of = Some(internal.clone());
-                impl_class.interfaces = vec![internal.clone()];
-                impl_class.superclass = "kotlin/Any".to_string();
+                impl_class.annotation_impl_of = Some(type_name(&internal));
+                impl_class.interfaces = vec![type_name(&internal)].into();
+                impl_class.superclass = type_name("kotlin/Any");
                 impl_class.supertypes = vec![];
                 impl_class.methods = vec![];
                 lo.ir.add_class(impl_class);
@@ -1279,14 +1286,14 @@ pub fn lower_file_at_reporting(
             }
             lo.ir.classes[id as usize].methods = method_fids;
             let _ = class_ty;
-            lo.classes.insert(
-                internal.clone(),
+            lo.insert_class_info(
+                &internal,
                 ClassInfo {
                     id,
-                    internal: internal.clone(),
+                    internal: type_name(&internal),
                     fields,
                     methods,
-                    super_internal,
+                    super_internal: super_internal.as_deref().map(type_name),
                 },
             );
             // A `companion object`'s `val`s become static fields on the OUTER class (kotlinc's layout),
@@ -1316,11 +1323,11 @@ pub fn lower_file_at_reporting(
                     init,
                     is_var: false,
                     is_const: cp.is_const,
-                    owner: Some(internal.clone()),
+                    owner: Some(type_name(&internal)),
                     custom_accessor: false,
                 });
                 lo.companion_consts
-                    .insert((internal.clone(), cp.name.clone()), cty);
+                    .insert((type_name(&internal), cp.name.clone()), cty);
             }
             // An `object`'s own `const val`s become `public static final` + `ConstantValue` fields on the
             // object class (kotlinc's layout) — reads inline the literal (`object_const_lits`), exactly as
@@ -1341,7 +1348,7 @@ pub fn lower_file_at_reporting(
                                 init,
                                 is_var: false,
                                 is_const: true,
-                                owner: Some(internal.clone()),
+                                owner: Some(type_name(&internal)),
                                 custom_accessor: false,
                             });
                         }
@@ -1451,7 +1458,7 @@ pub fn lower_file_at_reporting(
                         ("kotlin/Any".to_string(), Vec::new())
                     };
                 let comp_id = lo.ir.add_class(IrClass {
-                    fq_name: comp_fq.clone(),
+                    fq_name: type_name(&comp_fq),
                     is_value: false,
                     type_param_bounds: vec![],
                     type_params: Vec::new(),
@@ -1469,14 +1476,14 @@ pub fn lower_file_at_reporting(
                     is_sealed: false,
                     is_abstract: false,
                     is_open: false,
-                    superclass: comp_super,
+                    superclass: type_name(&comp_super),
                     super_args: comp_super_args,
                     enum_entries: vec![],
                     enum_entry_of: None,
                     prop_ref: None,
                     func_ref: None,
                     bridges: vec![],
-                    interfaces: comp_ifaces,
+                    interfaces: comp_ifaces.clone().into(),
                     is_object: false,
                     is_companion: true,
                     companion_class: None,
@@ -1509,18 +1516,19 @@ pub fn lower_file_at_reporting(
                     cmethod_fids.push(fid);
                 }
                 lo.ir.classes[comp_id as usize].methods = cmethod_fids;
-                lo.ir.classes[id as usize].companion_class = Some(comp_fq.clone());
-                lo.classes.insert(
-                    comp_fq.clone(),
+                lo.ir.classes[id as usize].companion_class = Some(type_name(&comp_fq));
+                lo.insert_class_info(
+                    &comp_fq,
                     ClassInfo {
                         id: comp_id,
-                        internal: comp_fq.clone(),
+                        internal: type_name(&comp_fq),
                         fields: vec![],
                         methods: cmethods,
                         super_internal: None,
                     },
                 );
-                lo.companions.insert(internal.clone(), comp_fq);
+                lo.companions
+                    .insert(type_name(&internal), type_name(&comp_fq));
             }
             // A `data class`'s equals/hashCode/toString/componentN are Kotlin language semantics —
             // synthesize them here as ordinary IR methods (backend-agnostic), registered so calls
@@ -1561,7 +1569,7 @@ pub fn lower_file_at_reporting(
                         return false;
                     };
                     let internal = class_internal(file, n);
-                    let Some(ci) = lo.classes.get(&internal) else {
+                    let Some(ci) = lo.class_info(&internal) else {
                         return false;
                     };
                     let is_value = lo
@@ -1779,7 +1787,8 @@ pub fn lower_file_at_reporting(
                 } else {
                     let delegate_ty = info.ty(p.delegate?);
                     let internal = delegate_ty.obj_internal()?;
-                    lo.delegate_getvalue_info(p.delegate?, internal)?.2
+                    lo.delegate_getvalue_info(p.delegate?, &internal.render())?
+                        .2
                 };
                 let fid = lo.ir.add_fun(IrFunction {
                     name: property_getter_name(&p.name),
@@ -2031,9 +2040,12 @@ pub fn lower_file_at_reporting(
                 // A method that overrides a base method with a *different erased signature* (a
                 // generic/covariant override) needs a synthetic JVM bridge that krusty doesn't emit
                 // yet — bail rather than miscompile (the erased call wouldn't reach the override).
-                if let Some(super_int) = lo.classes[&internal].super_internal.clone() {
+                if let Some(super_int) = lo.class_info(&internal)?.super_internal {
+                    let super_internal = super_int.render();
                     for m in &c.methods {
-                        if let Some((_, _, base_fid, _)) = lo.resolve_method(&super_int, &m.name) {
+                        if let Some((_, _, base_fid, _)) =
+                            lo.resolve_method(&super_internal, &m.name)
+                        {
                             // A param/return typed by a class type-param that carries a *class* upper
                             // bound (`class D<T : Foo> : Base<T>() { override fun bar(x: T) }`): kotlinc
                             // erases the override to the bound (`bar(Foo)`) and synthesizes a `bar(Object)`
@@ -2050,7 +2062,7 @@ pub fn lower_file_at_reporting(
                             {
                                 return None;
                             }
-                            let own_fid = lo.classes[&internal].methods[&m.name].1;
+                            let own_fid = lo.class_info(&internal)?.methods[&m.name].1;
                             let bp = lo.ir.functions[base_fid as usize].params.clone();
                             let br = lo.ir.functions[base_fid as usize].ret.clone();
                             let op = lo.ir.functions[own_fid as usize].params.clone();
@@ -2064,7 +2076,7 @@ pub fn lower_file_at_reporting(
                                 }
                                 // Generic/covariant override → synthesize an `ACC_BRIDGE` method with
                                 // the supertype's erased descriptor that delegates to the concrete one.
-                                let cid = lo.classes[&internal].id;
+                                let cid = lo.class_info(&internal)?.id;
                                 lo.ir.classes[cid as usize].bridges.push(crate::ir::Bridge {
                                     name: m.name.clone(),
                                     erased_params: bp,
@@ -2097,7 +2109,7 @@ pub fn lower_file_at_reporting(
                         })
                     });
                     for fname in own_fields {
-                        if lo.resolve_field(&super_int, fname).is_some() {
+                        if lo.resolve_field(&super_internal, fname).is_some() {
                             // A base with its own base, or a base member reading `fname`, risks the
                             // internal-read bypass — bail conservatively; else the override is safe.
                             let unsafe_base = base_decl.map_or(true, |bd| {
@@ -2124,7 +2136,7 @@ pub fn lower_file_at_reporting(
                 // `getX()` returning the supertype's (erased) type that delegates to the concrete getter —
                 // else a call through the supertype reference resolves to the missing erased getter.
                 if !c.is_interface() {
-                    let cid = lo.classes[&internal].id;
+                    let cid = lo.class_info(&internal)?.id;
                     for sup in lo.syms.supertype_internals(&internal) {
                         let Some(sc) = lo.syms.class_by_internal(&sup) else {
                             continue;
@@ -2136,14 +2148,12 @@ pub fn lower_file_at_reporting(
                                 if sty_desc != own_desc {
                                     let gname = property_getter_name(&pname);
                                     let super_ret = lo
-                                        .classes
-                                        .get(&sup)
+                                        .class_info(&sup)
                                         .and_then(|ci| ci.methods.get(&gname))
                                         .map(|(_, fid, _)| lo.ir.functions[*fid as usize].ret)
                                         .unwrap_or_else(|| ty_to_ir(sty));
                                     let own_ret = lo
-                                        .classes
-                                        .get(&internal)
+                                        .class_info(&internal)
                                         .and_then(|ci| ci.methods.get(&gname))
                                         .map(|(_, fid, _)| lo.ir.functions[*fid as usize].ret)
                                         .unwrap_or_else(|| ty_to_ir(own_ty));
@@ -2207,7 +2217,7 @@ pub fn lower_file_at_reporting(
                         .iter()
                         .any(|s| lo.syms.libraries.is_collection_interface(s))
                 {
-                    let cid = lo.classes[&internal].id;
+                    let cid = lo.class_info(&internal)?.id;
                     for p in &c.body_props {
                         let Some(stub) = lo.syms.libraries.collection_property_accessor(&p.name)
                         else {
@@ -2243,7 +2253,7 @@ pub fn lower_file_at_reporting(
                 // implementation (declared or inherited) has a different erased signature than the
                 // interface's, add a bridge with the interface's descriptor delegating to the impl.
                 if !c.is_interface() {
-                    let cid = lo.classes[&internal].id;
+                    let cid = lo.class_info(&internal)?.id;
                     let mut ifaces = lo.ir.classes[cid as usize].interfaces.clone();
                     for sup in lo.syms.supertype_internals(&internal) {
                         let is_iface = lo
@@ -2256,7 +2266,7 @@ pub fn lower_file_at_reporting(
                                 .resolve_type(&sup)
                                 .is_some_and(|t| t.is_interface());
                         if is_iface && !ifaces.contains(&sup) {
-                            ifaces.push(sup);
+                            ifaces.push(&sup);
                         }
                     }
                     let mut seen: std::collections::HashSet<String> = lo.ir.classes[cid as usize]
@@ -2264,8 +2274,8 @@ pub fn lower_file_at_reporting(
                         .iter()
                         .map(|b| format!("{}{:?}{:?}", b.name, b.erased_params, b.erased_ret))
                         .collect();
-                    for itf in &ifaces {
-                        for (mname, ifid) in lo.collect_iface_methods(itf) {
+                    for itf in ifaces.iter_rendered() {
+                        for (mname, ifid) in lo.collect_iface_methods(&itf) {
                             if let Some((_, _, impl_fid, _)) = lo.resolve_method(&internal, &mname)
                             {
                                 let ip = lo.ir.functions[ifid as usize].params.clone();
@@ -2306,11 +2316,11 @@ pub fn lower_file_at_reporting(
                         // interface's erased `compareTo(Object)`), emit the `ACC_BRIDGE` the JVM needs to
                         // dispatch an interface-typed call — without it `(x as Comparable).compareTo(y)`
                         // hits `AbstractMethodError` instead of running the override (or throwing CCE).
-                        if !lo.classes.contains_key(itf) {
+                        if !lo.contains_class(&itf) {
                             if let Some(m) = lo
                                 .syms
                                 .libraries
-                                .resolve_type(itf)
+                                .resolve_type(&itf)
                                 .and_then(|t| t.sam_method)
                             {
                                 if let Some((_, _, impl_fid, _)) =
@@ -2368,7 +2378,7 @@ pub fn lower_file_at_reporting(
                     if m.is_tailrec && !matches!(m.body, FunBody::None) {
                         return None;
                     }
-                    let (_, fid, _) = lo.classes[&internal].methods[&m.name];
+                    let (_, fid, _) = lo.class_info(&internal)?.methods[&m.name];
                     lo.scope.clear();
                     lo.boxed_elem.clear();
                     lo.next_value = 0;
@@ -2441,7 +2451,7 @@ pub fn lower_file_at_reporting(
                 // Computed body-property getter bodies → `getX()` methods on the class.
                 for p in c.body_props.iter().filter(|p| is_computed_prop(p)) {
                     let gname = property_getter_name(&p.name);
-                    let (_, fid, _) = lo.classes[&internal].methods[&gname];
+                    let (_, fid, _) = lo.class_info(&internal)?.methods[&gname];
                     lo.scope.clear();
                     lo.boxed_elem.clear();
                     lo.next_value = 0;
@@ -2460,7 +2470,7 @@ pub fn lower_file_at_reporting(
                 // `getX`/`setX` body (built in pass 1) with the lowered custom accessor, binding the
                 // `field` keyword to the property's backing field via `cur_field`.
                 for p in c.body_props.iter().filter(|p| is_field_accessor_prop(p)) {
-                    let class_id = lo.classes[&internal].id;
+                    let class_id = lo.class_info(&internal)?.id;
                     let fidx = lo.ir.classes[class_id as usize]
                         .fields
                         .iter()
@@ -2470,7 +2480,7 @@ pub fn lower_file_at_reporting(
                         .clone();
                     if let Some(getter) = p.getter.clone() {
                         let gname = property_getter_name(&p.name);
-                        let (_, fid, _) = lo.classes[&internal].methods[&gname];
+                        let (_, fid, _) = lo.class_info(&internal)?.methods[&gname];
                         lo.scope.clear();
                         lo.boxed_elem.clear();
                         lo.next_value = 0;
@@ -2491,7 +2501,7 @@ pub fn lower_file_at_reporting(
                             p.setter.as_ref().filter(|s| s.body.is_some()).cloned()
                         {
                             let sname = property_setter_name(&p.name);
-                            let (_, fid, _) = lo.classes[&internal].methods[&sname];
+                            let (_, fid, _) = lo.class_info(&internal)?.methods[&sname];
                             let pty = body_prop_ty(file, info, p, &*syms.libraries);
                             lo.scope.clear();
                             lo.boxed_elem.clear();
@@ -2519,7 +2529,7 @@ pub fn lower_file_at_reporting(
                 // Delegated body-property accessors → `getX()`/`setX()` calling the delegate's
                 // getValue/setValue, with the `KProperty` passed inline as a `PropertyReference1Impl`.
                 for p in c.body_props.iter().filter(|p| p.delegate.is_some()) {
-                    let class_id = lo.classes[&internal].id;
+                    let class_id = lo.class_info(&internal)?.id;
                     let delegate_ty = lo.info.ty(p.delegate.unwrap());
                     let delegate_internal = delegate_ty.obj_internal()?.to_string();
                     let fname = format!("{}$delegate", p.name);
@@ -2530,7 +2540,7 @@ pub fn lower_file_at_reporting(
                         .expect("delegate field") as u32;
                     // Build a fresh `PropertyReference1Impl(A::class, "x", "getX()<ret>", 0)`.
                     let gname = property_getter_name(&p.name);
-                    let (_, get_fid, prop_ty) = lo.classes[&internal].methods[&gname];
+                    let (_, get_fid, prop_ty) = lo.class_info(&internal)?.methods[&gname];
                     let prop_sig = lo.property_reference_signature(&gname, prop_ty)?;
                     let propref_impl = lo.property_reference_impl(1, false)?;
                     let make_propref = |lo: &mut Lower| {
@@ -2578,7 +2588,7 @@ pub fn lower_file_at_reporting(
                     // setX(value): this.x$delegate.setValue(this, propref, value)
                     if p.is_var {
                         let sname = property_setter_name(&p.name);
-                        let (_, set_fid, _) = lo.classes[&internal].methods[&sname];
+                        let (_, set_fid, _) = lo.class_info(&internal)?.methods[&sname];
                         let sv = lo.syms.method_of(&delegate_internal, "setValue")?;
                         let sv_desc = lo.runtime.method_descriptor(&sv.params, sv.ret)?;
                         let this_e = lo.emit_get_value(0);
@@ -2615,7 +2625,8 @@ pub fn lower_file_at_reporting(
                     }
                 }
                 // Companion method bodies — lowered on the synthesized `C$Companion` class.
-                if let Some(comp_fq) = lo.companions.get(&internal).cloned() {
+                if let Some(comp_name) = lo.companions.get(&type_name(&internal)).copied() {
+                    let comp_fq = comp_name.render();
                     for m in &c.companion_methods {
                         if matches!(m.body, FunBody::None) {
                             continue;
@@ -2626,7 +2637,7 @@ pub fn lower_file_at_reporting(
                         if m.is_tailrec {
                             return None;
                         }
-                        let (_, fid, _) = lo.classes[&comp_fq].methods[&m.name];
+                        let (_, fid, _) = lo.class_info(&comp_fq)?.methods[&m.name];
                         lo.scope.clear();
                         lo.boxed_elem.clear();
                         lo.next_value = 0;
@@ -2651,7 +2662,7 @@ pub fn lower_file_at_reporting(
                 // (the common `: A()` shape) — handled by `super_default_fill` below. Any other arity
                 // mismatch (some explicit + some defaulted, or a required param missing) still bails.
                 let mut super_default_fill = false;
-                if let Some(s) = lo.classes[&internal].super_internal.clone() {
+                if let Some(s) = lo.class_info(&internal)?.super_internal {
                     let sup_params = lo
                         .classes
                         .get(&s)
@@ -2664,7 +2675,7 @@ pub fn lower_file_at_reporting(
                         // `: A()` (no explicit args) where every base param has a default (read from the
                         // base's resolve `ClassSig`) → fill them.
                         let defaults_ok = c.base_args.is_empty()
-                            && lo.syms.class_by_internal(&s).is_some_and(|cs| {
+                            && lo.syms.class_by_type_name(s).is_some_and(|cs| {
                                 cs.ctor_defaults.len() >= sup_params
                                     && cs.ctor_defaults[..sup_params].iter().all(|d| d.is_some())
                             });
@@ -2708,9 +2719,9 @@ pub fn lower_file_at_reporting(
                 // scope (no explicit args reference the subclass params); a default referencing a base param
                 // would fail to resolve and bail via `lower_arg`'s `?`.
                 if super_default_fill {
-                    let class_id = lo.classes[&internal].id;
-                    let sup_internal = lo.classes[&internal].super_internal.clone()?;
-                    let sup_id = lo.classes.get(&sup_internal).map(|s| s.id)?;
+                    let class_id = lo.class_info(&internal)?.id;
+                    let sup_internal = lo.class_info(&internal)?.super_internal?;
+                    let sup_id = lo.class_info_name(sup_internal).map(|s| s.id)?;
                     let super_field_tys: Vec<Ty> = {
                         let sup = &lo.ir.classes[sup_id as usize];
                         let n = sup.ctor_param_count as usize;
@@ -2723,7 +2734,7 @@ pub fn lower_file_at_reporting(
                     // Defaults are file-independent (`CtorDefaultValue`) — built directly into the
                     // `super(…)` args, so a base defined in ANOTHER file fills with no cross-file deref.
                     let defaults: Vec<CtorDefaultValue> =
-                        lo.syms.class_by_internal(&sup_internal)?.ctor_defaults
+                        lo.syms.class_by_type_name(sup_internal)?.ctor_defaults
                             [..super_field_tys.len()]
                             .iter()
                             .map(|d| d.clone().expect("super_default_fill checked all Some"))
@@ -2740,7 +2751,7 @@ pub fn lower_file_at_reporting(
                 // constructor's parameter order; positional args are unchanged. `None` bails the file.
                 let base_args = reordered_base_args(file, c)?;
                 if !base_args.is_empty() {
-                    let class_id = lo.classes[&internal].id;
+                    let class_id = lo.class_info(&internal)?.id;
                     lo.scope.clear();
                     lo.boxed_elem.clear();
                     lo.next_value = 0;
@@ -2821,7 +2832,7 @@ pub fn lower_file_at_reporting(
                             let v = lo.fresh_value(); // value-index 0 = the underlying param
                             lo.scope.push((p.name.clone(), v, pty));
                             if let Some(lowered) = lo.lower_arg(d, &ty_to_ir(pty)) {
-                                lo.ir.value_ctor_defaults.insert(internal.clone(), lowered);
+                                lo.ir.insert_value_ctor_default(&internal, lowered);
                             }
                         }
                     }
@@ -2868,7 +2879,7 @@ pub fn lower_file_at_reporting(
                     // Only register when EVERY default lowered — a partial set would emit a stub that fills
                     // some slots with a zero placeholder (a miscompile); bail to the no-stub status quo.
                     if all_ok {
-                        lo.ir.class_ctor_defaults.insert(internal.clone(), defaults);
+                        lo.ir.insert_class_ctor_defaults(&internal, defaults);
                     }
                 }
                 // Constructor body: run body-property initializers and `init { … }` blocks in source
@@ -2893,7 +2904,7 @@ pub fn lower_file_at_reporting(
                     || c.props.iter().any(|p| p.is_property))
                     && c.has_primary_ctor
                 {
-                    let class_id = lo.classes[&internal].id;
+                    let class_id = lo.class_info(&internal)?.id;
                     let ctor_count = lo.ir.classes[class_id as usize].ctor_param_count;
                     let _ = ctor_count;
                     lo.scope.clear();
@@ -3102,7 +3113,7 @@ pub fn lower_file_at_reporting(
                 // `constructor-impl` overloads.
                 if !c.secondary_ctors.is_empty() {
                     use crate::ir::CtorDelegateTarget;
-                    let class_id = lo.classes[&internal].id;
+                    let class_id = lo.class_info(&internal)?.id;
                     let primary_param_tys: Vec<Ty> = {
                         let n = lo.ir.classes[class_id as usize].ctor_param_count as usize;
                         lo.ir.classes[class_id as usize].fields[..n]
@@ -3380,7 +3391,7 @@ pub fn lower_file_at_reporting(
                             }
                         }
                     }
-                    let class_id = lo.classes[&internal].id;
+                    let class_id = lo.class_info(&internal)?.id;
                     // ALL primary-constructor parameters (property AND plain) define the enum
                     // constructor's user parameters, in declaration order — a plain param is a ctor
                     // argument (in scope for a body-property initializer), not a field. Each entry
@@ -3473,7 +3484,7 @@ pub fn lower_file_at_reporting(
                             prop_fields.push((p.name.clone(), ty));
                         }
                         let sub_id = lo.ir.add_class(IrClass {
-                            fq_name: sub_fq.clone(),
+                            fq_name: type_name(&sub_fq),
                             is_value: false,
                             type_param_bounds: vec![],
                             type_params: Vec::new(),
@@ -3498,14 +3509,14 @@ pub fn lower_file_at_reporting(
                             is_sealed: false,
                             is_abstract: false,
                             is_open: false,
-                            superclass: internal.clone(),
+                            superclass: type_name(&internal),
                             super_args: vec![],
                             enum_entries: vec![],
                             enum_entry_of: Some(param_tys.clone()),
                             prop_ref: None,
                             func_ref: None,
                             bridges: vec![],
-                            interfaces: vec![],
+                            interfaces: Default::default(),
                             is_object: false,
                             is_companion: false,
                             companion_class: None,
@@ -3517,14 +3528,14 @@ pub fn lower_file_at_reporting(
                         });
                         // Register the subclass so an override body resolves a prop as `this.<field>` and
                         // getter synthesis can attach. Methods are filled in below.
-                        lo.classes.insert(
-                            sub_fq.clone(),
+                        lo.insert_class_info(
+                            &sub_fq,
                             ClassInfo {
                                 id: sub_id,
-                                internal: sub_fq.clone(),
+                                internal: type_name(&sub_fq),
                                 fields: prop_fields.clone(),
                                 methods: HashMap::new(),
-                                super_internal: Some(internal.clone()),
+                                super_internal: Some(type_name(&internal)),
                             },
                         );
                         // An override body reads through the SUBCLASS scope: an own property resolves to a
@@ -3852,7 +3863,7 @@ pub fn lower_file_at_reporting(
                 lo.runtime
                     .unsigned_integer_box_type(u)
                     .and_then(|b| b.obj_internal())
-                    == Some(fq.as_str())
+                    .is_some_and(|n| n.matches(fq.as_str()))
             });
             if native_unsigned {
                 continue;
@@ -3876,7 +3887,7 @@ pub fn lower_file_at_reporting(
                     Some(scalar) => ty_to_ir(scalar),
                     None => Ty::nullable(ty_to_ir(under)),
                 };
-                lo.ir.external_value_classes.insert(fq.clone(), ir_under);
+                lo.ir.insert_external_value_class(&fq, ir_under);
                 // The sole-property getter (`getV`) — the no-arg member returning the underlying — so
                 // the value-class pass can rewrite `x.v` (emitted as `invokevirtual X.getV()`) to
                 // identity on the unboxed value.
@@ -3886,8 +3897,7 @@ pub fn lower_file_at_reporting(
                     .find(|m| m.params.is_empty() && m.ret == under && m.name.starts_with("get"))
                 {
                     lo.ir
-                        .external_value_class_getters
-                        .insert(fq, getter.name.clone());
+                        .insert_external_value_class_getter(&fq, getter.name.clone());
                 }
             }
         }
@@ -4540,7 +4550,7 @@ pub(crate) struct Lower<'a> {
     ext_prop_get_ids: HashMap<(Ty, String), u32>,
     /// `(outer class internal, companion `const val` name)` → its type. Such a const lives as a
     /// `public static final` field on the OUTER class; a `C.X` read lowers to `getstatic C.X`.
-    companion_consts: HashMap<(String, String), Ty>,
+    companion_consts: HashMap<(TypeName, String), Ty>,
     /// Top-level `const val` name → its compile-time literal value. A same-file read inlines this as a
     /// constant (kotlinc's `ldc`), exactly like the reference compiler — byte-identical, no `getstatic`.
     const_lits: HashMap<String, crate::ir::IrConst>,
@@ -4548,9 +4558,9 @@ pub(crate) struct Lower<'a> {
     /// `object` is inlined at every read (unqualified inside the object's own methods, or qualified
     /// `Obj.NAME`), exactly as kotlinc inlines it — so no `getstatic` is needed and a read during the
     /// object's own initialization can't observe an uninitialized field.
-    object_const_lits: HashMap<(String, String), crate::ir::IrConst>,
+    object_const_lits: HashMap<(TypeName, String), crate::ir::IrConst>,
     ext_prop_set_ids: HashMap<(Ty, String), u32>,
-    classes: HashMap<String, ClassInfo>,
+    classes: HashMap<TypeName, ClassInfo>,
     /// Top-level property name → (index into `ir.statics`, type).
     statics: HashMap<String, (u32, Ty)>,
     scope: Vec<(String, u32, Ty)>,
@@ -4570,11 +4580,11 @@ pub(crate) struct Lower<'a> {
     /// field. Such a property is read/written ONLY through `getX`/`setX` (even in-class) — never as a
     /// direct field — so `resolve_field` declines it (the `field` keyword reaches the field via
     /// `cur_field` instead).
-    field_accessor_props: std::collections::HashSet<(String, String)>,
+    field_accessor_props: std::collections::HashSet<(TypeName, String)>,
     /// The subset of [`Self::field_accessor_props`] that are `var`s — their WRITE routes through the
     /// custom `setX`. A `val` custom-accessor property (no setter) is NOT here: it is assigned once
     /// in a constructor by writing its backing field directly.
-    field_accessor_var_props: std::collections::HashSet<(String, String)>,
+    field_accessor_var_props: std::collections::HashSet<(TypeName, String)>,
     /// Name of the enclosing function/method being lowered — used to name synthesized lambda impl
     /// methods `<enclosing>$lambda$<n>` (matching kotlinc).
     cur_fn_name: String,
@@ -4613,7 +4623,7 @@ pub(crate) struct Lower<'a> {
     /// with a `finally` is lowered.
     try_finally_stack: Vec<AstExprId>,
     /// Outer-class internal name → its `C$Companion` internal name, for routing `C.foo()` calls.
-    companions: HashMap<String, String>,
+    companions: HashMap<TypeName, TypeName>,
     /// Top-level computed property name → (its synthesized `getX()` `FunId`, property type). A read of
     /// the property compiles to a call to the getter. For a *computed* property there is no backing
     /// field; for a top-level backing-field property with a custom getter (`val x = init get() = field`)
@@ -4770,7 +4780,7 @@ impl<'a> Lower<'a> {
         suspend: bool,
         args: Vec<u32>,
     ) -> u32 {
-        let owner = member.owner.unwrap_or(owner_fallback);
+        let owner = member.owner_name_or(&owner_fallback);
         let interface = member.is_interface || self.library_type_is_interface(&owner);
         // kotlinc pushes the receiver BEFORE evaluating arguments; an argument that suspends forces
         // the pushed receiver into a continuation spill slot (an unnamed temp local in its
@@ -4829,7 +4839,7 @@ impl<'a> Lower<'a> {
     ) -> u32 {
         let logical_ret = callable.ret;
         let call = self.emit_static_call(
-            callable.owner,
+            callable.owner_name(),
             callable.name,
             callable.descriptor,
             callable.inline,
@@ -4929,12 +4939,13 @@ impl<'a> Lower<'a> {
         })
     }
 
-    fn emit_new_external(&mut self, internal: String, ctor_desc: String, args: Vec<u32>) -> u32 {
-        self.ir.add_expr(IrExpr::NewExternal {
-            internal,
-            ctor_desc,
-            args,
-        })
+    fn emit_new_external(
+        &mut self,
+        internal: impl AsRef<str>,
+        ctor_desc: impl Into<String>,
+        args: Vec<u32>,
+    ) -> u32 {
+        self.ir.new_external(internal.as_ref(), ctor_desc, args)
     }
 
     fn emit_const(&mut self, value: IrConst) -> u32 {
@@ -4950,7 +4961,11 @@ impl<'a> Lower<'a> {
     }
 
     fn emit_class_const(&mut self, internal: String) -> u32 {
-        self.ir.add_expr(IrExpr::ClassConst { internal })
+        if internal.is_empty() {
+            self.ir.class_const(None)
+        } else {
+            self.ir.class_const(Some(&internal))
+        }
     }
 
     fn emit_new_array(&mut self, array_type: Ty, size: u32) -> u32 {
@@ -5097,11 +5112,8 @@ impl<'a> Lower<'a> {
         name: impl Into<String>,
         descriptor: impl Into<String>,
     ) -> u32 {
-        self.ir.add_expr(IrExpr::ExternalStaticField {
-            owner: owner.into(),
-            name: name.into(),
-            descriptor: descriptor.into(),
-        })
+        let owner = owner.into();
+        self.ir.external_static_field(&owner, name, descriptor)
     }
 
     /// Returns the already-checked `getValue` target for a delegated property.
@@ -5117,10 +5129,10 @@ impl<'a> Lower<'a> {
         match self.info.delegate_getvalue(delegate_expr)? {
             DelegateGetValueTarget::Member { owner, params, ret } => {
                 let desc = self.runtime.method_descriptor(params, *ret)?;
-                Some((owner.clone(), desc, *ret, InlineKind::None, false))
+                Some((owner.render(), desc, *ret, InlineKind::None, false))
             }
             DelegateGetValueTarget::Extension(c) => {
-                Some((c.owner.clone(), c.descriptor.clone(), c.ret, c.inline, true))
+                Some((c.owner_name(), c.descriptor.clone(), c.ret, c.inline, true))
             }
         }
     }
@@ -5262,14 +5274,15 @@ impl<'a> Lower<'a> {
     /// qualified `Obj.m(args)` lowers to. `call_expr` is the AST call, for generic-return coercion.
     fn lower_object_member_call(
         &mut self,
-        internal: String,
+        internal: TypeName,
         name: &str,
         args: &[AstExprId],
         call_expr: AstExprId,
     ) -> Option<u32> {
+        let internal = internal.render();
         // A SAME-FILE object or companion: read the singleton (`Obj.INSTANCE` or `C.Companion`) and
         // invoke the recorded member on it. The classpath path below needs a library type.
-        if let Some(ci) = self.classes.get(&internal) {
+        if let Some(ci) = self.class_info(&internal) {
             let cid = ci.id;
             let (class_id, index, fid, ret) = self.resolve_method(&internal, name)?;
             let params = self.ir.functions[fid as usize].params.clone();
@@ -5348,6 +5361,32 @@ impl<'a> Lower<'a> {
             .map_or(false, |t| t.is_interface())
     }
 
+    fn insert_class_info(&mut self, internal: &str, mut info: ClassInfo) -> Option<ClassInfo> {
+        let name = type_name(internal);
+        info.internal = name;
+        self.classes.insert(name, info)
+    }
+
+    fn class_info(&self, internal: &str) -> Option<&ClassInfo> {
+        existing_type_name(internal).and_then(|name| self.classes.get(&name))
+    }
+
+    fn class_info_mut(&mut self, internal: &str) -> Option<&mut ClassInfo> {
+        existing_type_name(internal).and_then(|name| self.classes.get_mut(&name))
+    }
+
+    fn class_info_name(&self, internal: TypeName) -> Option<&ClassInfo> {
+        self.classes.get(&internal)
+    }
+
+    fn contains_class(&self, internal: &str) -> bool {
+        existing_type_name(internal).is_some_and(|name| self.classes.contains_key(&name))
+    }
+
+    fn contains_class_name(&self, internal: TypeName) -> bool {
+        self.classes.contains_key(&internal)
+    }
+
     /// Whether the current module declares a top-level function `name` (shadow-precedence test) — asked
     /// through the module source rather than touching `syms.funs` directly.
     fn module_declares(&self, name: &str) -> bool {
@@ -5401,10 +5440,9 @@ impl<'a> Lower<'a> {
     }
 
     fn super_class(&self, internal: &str) -> Option<&ClassInfo> {
-        self.classes[internal]
+        self.class_info(internal)?
             .super_internal
-            .as_deref()
-            .and_then(|s| self.classes.get(s))
+            .and_then(|s| self.class_info_name(s))
     }
 
     /// Lower a class's body-property initializers + `init {}` blocks (source order) into IR effect
@@ -5727,8 +5765,8 @@ impl<'a> Lower<'a> {
         self.syms
             .class_names
             .get(name)
-            .cloned()
-            .or_else(|| self.syms.classes.get(name).map(|c| c.internal.clone()))
+            .map(TypeName::render)
+            .or_else(|| self.syms.classes.get(name).map(|c| c.internal()))
     }
 
     /// Lower construction of a classpath (non-IR) class — `RuntimeException("x")`, `StringBuilder()`.
@@ -5792,7 +5830,7 @@ impl<'a> Lower<'a> {
         // The CHECKER resolved this FQ top-level call and recorded the callable (keyed by the call
         // `ExprId`); the lowerer reads it.
         let c = self.info.resolved_top_level(e).cloned()?;
-        if c.owner.rsplit_once('/').map(|(p, _)| p) != Some(pkg.as_str()) {
+        if !c.owner_package_matches(pkg.as_str()) {
             return None;
         }
         // A vararg FQ call is a later slice (sound skip).
@@ -5851,11 +5889,7 @@ impl<'a> Lower<'a> {
                 for (arg, pty) in args.iter().zip(&params) {
                     a.push(self.lower_arg(*arg, pty)?);
                 }
-                return Some(self.ir.add_expr(IrExpr::NewCrossFile {
-                    internal: internal.to_string(),
-                    params,
-                    args: a,
-                }));
+                return Some(self.ir.new_cross_file(internal, params, a));
             }
             return None; // sibling-file user class but arity/defaults/secondary not modeled cross-file
         }
@@ -5897,12 +5931,12 @@ impl<'a> Lower<'a> {
                 for (arg, pty) in args.iter().zip(&member.params) {
                     lowered.push(self.lower_arg(*arg, &ty_to_ir(*pty))?);
                 }
-                Some(self.emit_new_external(internal.to_string(), member.descriptor, lowered))
+                Some(self.emit_new_external(internal, member.descriptor, lowered))
             }
             ResolvedConstructor::PlainSlots { member, slots } => {
                 let (lowered, prelude) =
                     self.lower_call_slot_args_source_order(args, &slots, &member.params, false)?;
-                let new = self.emit_new_external(internal.to_string(), member.descriptor, lowered);
+                let new = self.emit_new_external(internal, member.descriptor, lowered);
                 Some(self.wrap_arg_prelude(new, prelude))
             }
             ResolvedConstructor::Synthetic { ctor, args } => {
@@ -5918,7 +5952,7 @@ impl<'a> Lower<'a> {
                     lowered.push(self.emit_const(IrConst::Int(mask)));
                 }
                 lowered.push(self.emit_const(IrConst::Null)); // DefaultConstructorMarker
-                Some(self.emit_new_external(internal.to_string(), ctor.descriptor, lowered))
+                Some(self.emit_new_external(internal, ctor.descriptor, lowered))
             }
             ResolvedConstructor::NamedDefault {
                 descriptor,
@@ -5929,7 +5963,7 @@ impl<'a> Lower<'a> {
                 let (mut lowered, prelude) =
                     self.lower_call_slot_args_source_order(args, &slots, &real_params, true)?;
                 self.append_default_mask_marker(&mut lowered, mask);
-                let new = self.emit_new_external(internal.to_string(), descriptor, lowered);
+                let new = self.emit_new_external(internal, descriptor, lowered);
                 Some(self.wrap_arg_prelude(new, prelude))
             }
         }
@@ -6072,7 +6106,7 @@ impl<'a> Lower<'a> {
         let internal = t.obj_internal()?;
         self.syms
             .classes
-            .get(internal)
+            .get(&internal.render())
             .and_then(|c| c.value_field.as_ref())
             .map(|(_, u)| *u)
     }
@@ -6256,6 +6290,7 @@ impl<'a> Lower<'a> {
                 if !params.is_empty() {
                     return None;
                 }
+                let owner = owner.render();
                 let (class, method, _, found_ret) =
                     self.link_local_method(&owner, &name, &params)?;
                 if found_ret != ret {
@@ -6275,7 +6310,7 @@ impl<'a> Lower<'a> {
                 }
                 let c = self.emit_call(
                     Callee::CrossFileVirtual {
-                        owner,
+                        owner: owner.render(),
                         name,
                         params,
                         ret: ty_to_ir(ret),
@@ -6323,6 +6358,7 @@ impl<'a> Lower<'a> {
                 interface,
             } => {
                 let getter = property_getter_name(&property);
+                let owner = owner.render();
                 if let Some((class, method, _, found_ret)) =
                     self.link_local_method(&owner, &getter, &[])
                 {
@@ -6649,7 +6685,7 @@ impl<'a> Lower<'a> {
         // method.)
         if !self.ir.inline_only_fns.contains(&fid) {
             if let Some(internal) = self.cur_class.clone() {
-                if let Some(cid) = self.classes.get(&internal).map(|ci| ci.id) {
+                if let Some(cid) = self.class_info(&internal).map(|ci| ci.id) {
                     self.ir.classes[cid as usize].methods.push(fid);
                 }
             }
@@ -6721,6 +6757,7 @@ impl<'a> Lower<'a> {
         let Some(outer) = outer_ty.obj_internal() else {
             return false;
         };
+        let outer = outer.render();
         fn scan(lo: &Lower, outer: &str, bound: &[String], e: AstExprId, deep: bool) -> bool {
             if let Expr::Name(n) = lo.afile.expr(e) {
                 if !bound.contains(n)
@@ -6739,7 +6776,7 @@ impl<'a> Lower<'a> {
                         .any_child_stmt(s, &mut |c| scan(lo, outer, bound, c, deep))
                 })
         }
-        scan(self, outer, bound, body, deep)
+        scan(self, &outer, bound, body, deep)
     }
 
     /// Whether the AST subtree at `e` contains a NON-LOCAL `return` (no label — it exits the enclosing
@@ -6808,7 +6845,7 @@ impl<'a> Lower<'a> {
                         member: None,
                     } if receiver_ty
                         .obj_internal()
-                        .is_some_and(|i| method_suspends(i, "invoke")) =>
+                        .is_some_and(|i| method_suspends(&i.render(), "invoke")) =>
                     {
                         return true
                     }
@@ -6840,7 +6877,7 @@ impl<'a> Lower<'a> {
                     let recv_ty = self.info.ty(*receiver);
                     if recv_ty
                         .obj_internal()
-                        .is_some_and(|i| method_suspends(i, name))
+                        .is_some_and(|i| method_suspends(&i.render(), name))
                     {
                         return true;
                     }
@@ -6966,7 +7003,7 @@ impl<'a> Lower<'a> {
             })
             .collect();
         let class = IrClass {
-            fq_name: internal.clone(),
+            fq_name: type_name(&internal),
             is_value: false,
             type_param_bounds: vec![],
             type_params: Vec::new(),
@@ -6984,14 +7021,14 @@ impl<'a> Lower<'a> {
             is_sealed: false,
             is_abstract: false,
             is_open: false,
-            superclass: "kotlin/coroutines/jvm/internal/SuspendLambda".to_string(),
+            superclass: type_name("kotlin/coroutines/jvm/internal/SuspendLambda"),
             super_args: vec![arity_const, completion_get],
             enum_entries: vec![],
             enum_entry_of: None,
             prop_ref: None,
             func_ref: None,
             bridges: vec![],
-            interfaces: vec![function_iface],
+            interfaces: vec![type_name(&function_iface)].into(),
             is_object: false,
             is_companion: false,
             companion_class: None,
@@ -7238,8 +7275,7 @@ impl<'a> Lower<'a> {
         force_override: bool,
     ) -> Option<u32> {
         if self
-            .classes
-            .get(internal)
+            .class_info(internal)
             .map_or(false, |ci| ci.methods.contains_key(name))
         {
             return None; // a user-defined override exists — don't synthesize over it
@@ -7248,17 +7284,14 @@ impl<'a> Lower<'a> {
         // (`force_override`), only a *final* base member blocks generation — an `open` override IS
         // overridden by the synthesized member (KT-6206); a final one is inherited (can't override).
         // Other synthesis (an interface-delegation forwarder) inherits any base member.
-        if let Some(s) = self
-            .classes
-            .get(internal)
-            .and_then(|ci| ci.super_internal.clone())
-        {
+        if let Some(s) = self.class_info(internal).and_then(|ci| ci.super_internal) {
+            let super_internal = s.render();
             let blocks = if force_override {
                 self.syms
-                    .method_of(&s, name)
+                    .method_of(&super_internal, name)
                     .map_or(false, |sig| sig.is_final)
             } else {
-                self.resolve_method(&s, name).is_some()
+                self.resolve_method(&super_internal, name).is_some()
             };
             if blocks {
                 return None;
@@ -7275,7 +7308,7 @@ impl<'a> Lower<'a> {
         });
         let idx = self.ir.classes[class_id as usize].methods.len() as u32;
         self.ir.classes[class_id as usize].methods.push(fid);
-        if let Some(ci) = self.classes.get_mut(internal) {
+        if let Some(ci) = self.class_info_mut(internal) {
             ci.methods.insert(name.to_string(), (idx, fid, ret));
         }
         Some(fid)
@@ -7349,8 +7382,7 @@ impl<'a> Lower<'a> {
             }
             let synth_name = format!("$$delegate_{di}");
             let delegate_idx =
-                self.classes
-                    .get(internal)?
+                self.class_info(internal)?
                     .fields
                     .iter()
                     .position(|(n, _)| n == delegate || n == &synth_name)? as u32;
@@ -7367,8 +7399,7 @@ impl<'a> Lower<'a> {
         for (j, (iface_name, _e)) in c.delegation_exprs.iter().enumerate() {
             let synth_name = format!("$$delegate_e{j}");
             let delegate_idx = self
-                .classes
-                .get(internal)?
+                .class_info(internal)?
                 .fields
                 .iter()
                 .position(|(n, _)| n == &synth_name)? as u32;
@@ -7399,7 +7430,7 @@ impl<'a> Lower<'a> {
             .syms
             .class_names
             .get(iface_name)
-            .cloned()
+            .map(TypeName::render)
             .unwrap_or_else(|| class_internal(file, iface_name));
         let iface_sig = self
             .syms
@@ -7434,8 +7465,8 @@ impl<'a> Lower<'a> {
             // Super-interfaces (and any base) are stored by internal name; the module table is keyed by
             // simple name, so recurse on the last path segment (same-module interfaces resolve; a
             // classpath super-interface simply isn't found and is skipped, as before).
-            for sup in cs.interfaces.iter().chain(cs.super_internal.iter()) {
-                queue.push(sup.clone());
+            for sup in cs.interfaces.iter_rendered().chain(cs.super_internal()) {
+                queue.push(sup);
             }
         }
         for (mname, params, ret) in methods {
@@ -7476,7 +7507,7 @@ impl<'a> Lower<'a> {
         let c = self
             .runtime
             .runtime_callable(RuntimeOp::UnsignedUnbox, ty)?;
-        let owner_ty = Ty::obj(&c.owner);
+        let owner_ty = Ty::obj(&c.owner_name());
         let owner = owner_ty.obj_internal()?;
         let cast = self.emit_type_op(IrTypeOp::Cast, val, ty_to_ir(owner_ty));
         Some(self.emit_virtual_call(owner.to_string(), c.name, c.descriptor, false, cast, vec![]))
@@ -7513,7 +7544,11 @@ impl<'a> Lower<'a> {
             // A NON-null `String` hashes via its own `String.hashCode()` (kotlinc's `invokevirtual`),
             // matching the bytecode. A nullable one stays on `Objects.hashCode` (which null-guards,
             // returning 0 for `null`) — the null-guarded-ternary form is a future parity item.
-            t if !nullable && t.non_null().kotlin_class_internal() == Some("kotlin/String") => {
+            t if !nullable
+                && t.non_null()
+                    .kotlin_class_internal()
+                    .is_some_and(|n| n.matches("kotlin/String")) =>
+            {
                 Some(self.emit_external_call("kotlin/String.hashCode", Some(v), vec![]))
             }
             Ty::Long | Ty::Double | Ty::Float => self.runtime_call(RuntimeOp::HashCode, t, vec![v]),
@@ -7557,7 +7592,7 @@ impl<'a> Lower<'a> {
         n: usize,
         is_object: bool,
     ) -> Option<()> {
-        let fields: Vec<(String, Ty)> = self.classes[internal].fields[..n].to_vec();
+        let fields: Vec<(String, Ty)> = self.class_info(internal)?.fields[..n].to_vec();
 
         // componentN(): `return this.fieldN`.
         for (i, (fname, t)) in fields.iter().enumerate() {
@@ -7803,7 +7838,7 @@ impl<'a> Lower<'a> {
     }
 
     fn class_of(&self, ty: Ty) -> Option<&ClassInfo> {
-        ty.obj_internal().and_then(|i| self.classes.get(i))
+        ty.obj_internal().and_then(|i| self.class_info_name(i))
     }
 
     fn single_lambda_arg(&self, args: &[AstExprId]) -> Option<(AstExprId, Vec<String>, AstExprId)> {
@@ -7897,7 +7932,7 @@ impl<'a> Lower<'a> {
         {
             if name == "class" {
                 if let Expr::Name(x) = self.afile.expr(*r) {
-                    return self.syms.class_names.get(x).cloned();
+                    return self.syms.class_names.get(x).map(TypeName::render);
                 }
             }
         }
@@ -7938,8 +7973,8 @@ impl<'a> Lower<'a> {
     /// The IR fq name of a `@Serializable` USER class for `ty` (the value/type-arg of a reified
     /// serialization call), or `None`. Detection mirrors the plugin/checker (annotation simple name).
     fn serializable_internal(&self, ty: Ty) -> Option<String> {
-        let internal = ty.obj_internal()?;
-        let simple = internal.rsplit('/').next().unwrap_or(internal);
+        let internal = ty.obj_internal()?.render();
+        let simple = internal.rsplit('/').next().unwrap_or(&internal);
         let cd = self.class_decl(simple)?;
         let is_ser = cd
             .annotations
@@ -7948,9 +7983,8 @@ impl<'a> Lower<'a> {
         if !is_ser {
             return None;
         }
-        self.classes
-            .get(&class_internal(self.afile, simple))
-            .map(|ci| self.ir.classes[ci.id as usize].fq_name.clone())
+        self.class_info(&class_internal(self.afile, simple))
+            .map(|ci| self.ir.classes[ci.id as usize].fq_name())
     }
 
     /// `C.serializer()` — routed through `C.Companion` for a PLAIN non-generic `@Serializable` class
@@ -7966,11 +8000,9 @@ impl<'a> Lower<'a> {
             .is_some_and(|c| self.serializable_uses_companion_accessor(c));
         if companion_routed {
             let comp = format!("{c_internal}$Companion");
-            let recv = self.ir.add_expr(IrExpr::ExternalStaticInstance {
-                owner: c_internal.to_string(),
-                ty: comp.clone(),
-                field: "Companion".to_string(),
-            });
+            let recv = self
+                .ir
+                .external_static_instance(c_internal, &comp, "Companion");
             return self.ir.add_expr(IrExpr::Call {
                 callee: Callee::CrossFileVirtual {
                     owner: comp,
@@ -8620,8 +8652,7 @@ impl<'a> Lower<'a> {
         if let Expr::Name(rn) = self.afile.expr(receiver) {
             let internal = class_internal(self.afile, rn);
             if self
-                .classes
-                .get(&internal)
+                .class_info(&internal)
                 .map_or(false, |ci| self.ir.classes[ci.id as usize].is_object)
             {
                 return Ty::obj(&internal);
@@ -8646,35 +8677,35 @@ impl<'a> Lower<'a> {
             return Some((fid, recv_ty));
         }
         if let Some(i) = recv_ty.non_null().obj_internal() {
-            if self.resolve_method(i, name).is_some() {
+            if self.resolve_method_name(i, name).is_some() {
                 return None;
             }
         }
         let mut seen = std::collections::HashSet::new();
-        let mut queue: std::collections::VecDeque<String> = recv_ty
+        let mut queue: std::collections::VecDeque<TypeName> = recv_ty
             .non_null()
             .obj_internal()
             .map(|i| self.direct_supertypes(i))
             .unwrap_or_default()
             .into();
         while let Some(internal) = queue.pop_front() {
-            if !seen.insert(internal.clone()) {
+            if !seen.insert(internal) {
                 continue;
             }
-            if internal == "kotlin/Any" || internal == "java/lang/Object" {
+            if internal.matches("kotlin/Any") || internal.matches("java/lang/Object") {
                 continue;
             }
             let generic_user = self
                 .syms
-                .class_by_internal(&internal)
+                .class_by_type_name(internal)
                 .is_some_and(|c| !c.tparam_names.is_empty());
             if !generic_user {
-                let rty = Ty::obj(&internal);
+                let rty = Ty::obj_name(internal);
                 if let Some(fid) = pick(rty) {
                     return Some((fid, rty));
                 }
             }
-            for s in self.direct_supertypes(&internal) {
+            for s in self.direct_supertypes(internal) {
                 queue.push_back(s);
             }
         }
@@ -8695,15 +8726,15 @@ impl<'a> Lower<'a> {
         Some(recv)
     }
 
-    fn direct_supertypes(&self, internal: &str) -> Vec<String> {
-        if let Some(c) = self.syms.class_by_internal(internal) {
-            let mut v = c.interfaces.clone();
-            if let Some(s) = &c.super_internal {
-                v.push(s.clone());
+    fn direct_supertypes(&self, internal: TypeName) -> Vec<TypeName> {
+        if let Some(c) = self.syms.class_by_type_name(internal) {
+            let mut v: Vec<TypeName> = c.interfaces.iter_ids().collect();
+            if let Some(s) = c.super_internal {
+                v.push(s);
             }
             v
-        } else if let Some(t) = self.syms.libraries.resolve_type(internal) {
-            t.supertypes.clone()
+        } else if let Some(t) = self.syms.libraries.resolve_type_name(internal) {
+            t.supertypes.iter_ids().collect()
         } else {
             Vec::new()
         }
@@ -8829,22 +8860,22 @@ impl<'a> Lower<'a> {
     /// Resolve a field by name, walking the superclass chain. Returns the *owning* class id, the
     /// field index within that class, and its type.
     fn resolve_field(&self, internal: &str, name: &str) -> Option<(ClassId, u32, Ty)> {
-        let mut cur = Some(internal.to_string());
+        let mut cur = existing_type_name(internal);
         while let Some(ci_name) = cur {
-            let ci = self.classes.get(&ci_name)?;
+            let ci = self.class_info_name(ci_name)?;
             if let Some(idx) = ci.fields.iter().position(|(fn_, _)| fn_ == name) {
                 // A custom-accessor property is never a direct field read: decline it so the caller
                 // routes the access through `getX`/`setX` (the accessor's own `field` reaches the
                 // field via `cur_field`, not this resolver).
                 if self
                     .field_accessor_props
-                    .contains(&(ci_name.clone(), name.to_string()))
+                    .contains(&(ci_name, name.to_string()))
                 {
                     return None;
                 }
                 return Some((ci.id, idx as u32, ci.fields[idx].1));
             }
-            cur = ci.super_internal.clone();
+            cur = ci.super_internal;
         }
         None
     }
@@ -8852,18 +8883,18 @@ impl<'a> Lower<'a> {
     /// All `(method_name, FunId)` declared by an interface and its super-interfaces (transitively).
     fn collect_iface_methods(&self, itf: &str) -> Vec<(String, u32)> {
         let mut out = Vec::new();
-        let mut stack = vec![itf.to_string()];
+        let mut stack = vec![type_name(itf)];
         let mut seen = std::collections::HashSet::new();
         while let Some(i) = stack.pop() {
-            if !seen.insert(i.clone()) {
+            if !seen.insert(i) {
                 continue;
             }
-            if let Some(ci) = self.classes.get(&i) {
+            if let Some(ci) = self.class_info_name(i) {
                 for (name, &(_, fid, _)) in &ci.methods {
                     out.push((name.clone(), fid));
                 }
-                for sup in self.ir.classes[ci.id as usize].interfaces.clone() {
-                    stack.push(sup);
+                for sup in self.ir.classes[ci.id as usize].interfaces.iter_rendered() {
+                    stack.push(type_name(&sup));
                 }
             }
         }
@@ -8885,8 +8916,7 @@ impl<'a> Lower<'a> {
                     // An OBJECT singleton receiver (`O::p`) is BOUND to `O.INSTANCE`; a plain class name
                     // (`Type::p`) stays an UNBOUND reference (`get(receiver)`).
                     match self
-                        .classes
-                        .get(&owner)
+                        .class_info(&owner)
                         .map(|ci| ci.id)
                         .filter(|&cid| self.ir.classes[cid as usize].is_object)
                     {
@@ -8903,13 +8933,13 @@ impl<'a> Lower<'a> {
                 // `lower_bound_library_prop_ref` (checked BEFORE capturing, so the receiver expression
                 // isn't evaluated twice).
                 let owner = self.info.ty(recv).obj_internal()?.to_string();
-                if !self.classes.contains_key(&owner) {
+                if !self.contains_class(&owner) {
                     return None;
                 }
                 (owner, Some(self.expr(recv)?))
             }
         };
-        let owner_id = self.classes.get(&owner)?.id;
+        let owner_id = self.class_info(&owner)?.id;
         // A member field property dispatches through the instance `getName()`/`setName()`; an EXTENSION
         // property (`val A.ext`, not a field) dispatches through the static `getName(A)`/`setName(A, v)`
         // on the facade — `ext_facade = Some(())` selects that emit shape.
@@ -8925,8 +8955,12 @@ impl<'a> Lower<'a> {
                     field = Some((cls.fields[idx].ty, !cls.fields[idx].is_final));
                     break;
                 }
-                cur = (!cls.superclass.is_empty() && cls.superclass != "kotlin/Any")
-                    .then(|| self.classes.get(&cls.superclass).map(|c| c.id))
+                cur = cls
+                    .has_non_top_superclass()
+                    .then(|| {
+                        let superclass = cls.superclass();
+                        self.class_info(&superclass).map(|c| c.id)
+                    })
                     .flatten();
             }
             if let Some((pty, is_var)) = field {
@@ -8967,7 +9001,7 @@ impl<'a> Lower<'a> {
             .property_reference_impl(if bound { 0 } else { 1 }, is_var)?
             .internal;
         let synth_id = self.ir.add_class(IrClass {
-            fq_name: synth_fq,
+            fq_name: type_name(&synth_fq),
             is_value: false,
             type_param_bounds: vec![],
             type_params: Vec::new(),
@@ -8985,23 +9019,24 @@ impl<'a> Lower<'a> {
             is_sealed: false,
             is_abstract: false,
             is_open: false,
-            superclass,
+            superclass: type_name(&superclass),
             super_args: vec![],
             enum_entries: vec![],
             enum_entry_of: None,
             prop_ref: Some(crate::ir::PropRef {
-                owner_internal: owner,
+                owner_internal: Some(type_name(&owner)),
                 prop_name: name.to_string(),
                 getter_name: property_getter_name(name),
                 prop_ty,
                 bound,
                 static_dispatch: false,
                 mutable: is_var,
-                ext_facade,
+                ext_facade: ext_facade
+                    .map(|facade| (!facade.is_empty()).then(|| type_name(&facade))),
             }),
             func_ref: None,
             bridges: vec![],
-            interfaces: vec![],
+            interfaces: Default::default(),
             is_object: false,
             is_companion: false,
             companion_class: None,
@@ -9039,12 +9074,12 @@ impl<'a> Lower<'a> {
         // A user-class receiver is handled by `lower_prop_ref`; only a library receiver falls here.
         if rty
             .obj_internal()
-            .is_some_and(|i| self.classes.contains_key(i))
+            .is_some_and(|i| self.contains_class_name(i))
         {
             return None;
         }
         let p = self.info.bound_property_ref(e)?.clone();
-        let owner = p.owner;
+        let owner = p.owner.render();
         let prop_ty = ty_to_ir(p.prop_ty);
         let cap = self.expr(recv)?;
         let synth_fq = class_internal(
@@ -9054,7 +9089,7 @@ impl<'a> Lower<'a> {
         self.lambda_seq += 1;
         let superclass = self.property_reference_impl(0, false)?.internal;
         let synth_id = self.ir.add_class(IrClass {
-            fq_name: synth_fq,
+            fq_name: type_name(&synth_fq),
             is_value: false,
             type_param_bounds: vec![],
             type_params: Vec::new(),
@@ -9071,12 +9106,12 @@ impl<'a> Lower<'a> {
             is_sealed: false,
             is_abstract: false,
             is_open: false,
-            superclass,
+            superclass: type_name(&superclass),
             super_args: vec![],
             enum_entries: vec![],
             enum_entry_of: None,
             prop_ref: Some(crate::ir::PropRef {
-                owner_internal: owner,
+                owner_internal: Some(type_name(&owner)),
                 prop_name: name.to_string(),
                 getter_name: p.getter_name,
                 prop_ty,
@@ -9087,7 +9122,7 @@ impl<'a> Lower<'a> {
             }),
             func_ref: None,
             bridges: vec![],
-            interfaces: vec![],
+            interfaces: Default::default(),
             is_object: false,
             is_companion: false,
             companion_class: None,
@@ -9122,7 +9157,7 @@ impl<'a> Lower<'a> {
         adapted_params: &[Ty],
         ret: Ty,
         fixed: usize,
-        object_internal: Option<&str>,
+        object_internal: Option<TypeName>,
     ) -> Option<u32> {
         let n = adapted_params.len();
         // The vararg's ARRAY type is the target's last parameter; each collected argument is coerced to
@@ -9136,9 +9171,10 @@ impl<'a> Lower<'a> {
         }
         let arr = self.emit_vararg(ty_to_ir(arr_ty), collected);
         let call = if let Some(internal) = object_internal {
+            let internal = internal.render();
             // A member of a same-file `object`: dispatch on its `INSTANCE` singleton.
-            let cid = self.classes.get(internal)?.id;
-            let (class_id, index, _fid, _) = self.resolve_method(internal, name)?;
+            let cid = self.class_info(&internal)?.id;
+            let (class_id, index, _fid, _) = self.resolve_method(&internal, name)?;
             let recv = self.emit_static_instance(cid, cid, "INSTANCE");
             let mut a: Vec<Option<u32>> = (0..fixed as u32)
                 .map(|k| Some(self.emit_get_value(k)))
@@ -9289,7 +9325,7 @@ impl<'a> Lower<'a> {
                 if is_const {
                     return None;
                 }
-                (facade, ty, is_var)
+                (facade.render(), ty, is_var)
             } else {
                 return None;
             };
@@ -9301,7 +9337,7 @@ impl<'a> Lower<'a> {
         );
         self.lambda_seq += 1;
         let synth_id = self.ir.add_class(IrClass {
-            fq_name: synth_fq,
+            fq_name: type_name(&synth_fq),
             is_value: false,
             type_param_bounds: vec![],
             type_params: Vec::new(),
@@ -9318,12 +9354,12 @@ impl<'a> Lower<'a> {
             is_sealed: false,
             is_abstract: false,
             is_open: false,
-            superclass,
+            superclass: type_name(&superclass),
             super_args: vec![],
             enum_entries: vec![],
             enum_entry_of: None,
             prop_ref: Some(crate::ir::PropRef {
-                owner_internal: owner,
+                owner_internal: (!owner.is_empty()).then(|| type_name(&owner)),
                 prop_name: name.to_string(),
                 getter_name: property_getter_name(name),
                 prop_ty,
@@ -9334,7 +9370,7 @@ impl<'a> Lower<'a> {
             }),
             func_ref: None,
             bridges: vec![],
-            interfaces: vec![],
+            interfaces: Default::default(),
             is_object: false,
             is_companion: false,
             companion_class: None,
@@ -9400,7 +9436,7 @@ impl<'a> Lower<'a> {
             Some((v, ty)) => (Some(self.emit_get_value(v)), ty),
             None => {
                 let internal = class_internal(self.afile, &rn);
-                let cid = self.classes.get(&internal)?.id;
+                let cid = self.class_info(&internal)?.id;
                 if self.ir.classes[cid as usize].is_object {
                     let inst = self.emit_static_instance(cid, cid, "INSTANCE");
                     (Some(inst), Ty::obj(&internal))
@@ -9496,8 +9532,7 @@ impl<'a> Lower<'a> {
         };
         // Dispatch on the receiver's STATIC type: an interface receiver needs `invokeinterface`.
         let call_interface = self
-            .classes
-            .get(&internal)
+            .class_info(&internal)
             .is_some_and(|ci| self.ir.classes[ci.id as usize].is_interface);
         let bound = capture.is_some();
         let dispatch = if bound {
@@ -9530,7 +9565,7 @@ impl<'a> Lower<'a> {
     fn lower_imported_object_ref(
         &mut self,
         e: AstExprId,
-        internal: &str,
+        internal: TypeName,
         name: &str,
         params: &[Ty],
         ret: Ty,
@@ -9538,11 +9573,12 @@ impl<'a> Lower<'a> {
         if ret == Ty::Nothing {
             return None;
         }
-        let cid = self.classes.get(internal)?.id;
+        let internal = internal.render();
+        let cid = self.class_info(&internal)?.id;
         let inst = self.emit_static_instance(cid, cid, "INSTANCE");
-        let (_, _, target_fid, _) = self.resolve_method(internal, name)?;
+        let (_, _, target_fid, _) = self.resolve_method(&internal, name)?;
         let call_name = if self.ir.private_methods.contains(&target_fid) {
-            self.ensure_private_accessor(internal, name)?
+            self.ensure_private_accessor(&internal, name)?
         } else {
             name.to_string()
         };
@@ -9587,8 +9623,7 @@ impl<'a> Lower<'a> {
             name.to_string()
         };
         let call_interface = self
-            .classes
-            .get(&internal)
+            .class_info(&internal)
             .is_some_and(|ci| self.ir.classes[ci.id as usize].is_interface);
         let this_e = self.emit_get_value(0);
         let param_tys = tys_to_ir(&sig.params);
@@ -9690,8 +9725,8 @@ impl<'a> Lower<'a> {
         // method of this name) — those go through the synthesized-impl path below.
         let user_method = rty
             .obj_internal()
-            .filter(|internal| self.resolve_method(internal, name).is_some())
-            .map(|s| s.to_string());
+            .map(|internal| internal.render())
+            .filter(|internal| self.resolve_method(internal, name).is_some());
         if user_method.is_none() {
             // A null-risky receiver (type parameter / nullable / bare erased `Any`) may be `null`;
             // kotlinc null-guards `toString`/`equals`/`hashCode` on those (`null::toString` → "null"),
@@ -9712,7 +9747,7 @@ impl<'a> Lower<'a> {
             if m.suspend {
                 return None;
             }
-            let owner = m.owner.clone()?;
+            let owner = m.owner_name()?;
             let call_interface = self.library_type_is_interface(&owner);
             let cap = self.expr(recv)?;
             let param_tys = tys_to_ir(params);
@@ -9808,8 +9843,7 @@ impl<'a> Lower<'a> {
     fn ensure_private_accessor(&mut self, internal: &str, method_name: &str) -> Option<String> {
         let accessor = format!("access${method_name}");
         if self
-            .classes
-            .get(internal)
+            .class_info(internal)
             .is_some_and(|ci| ci.methods.contains_key(&accessor))
         {
             return Some(accessor);
@@ -9840,10 +9874,10 @@ impl<'a> Lower<'a> {
             dispatch_receiver: Some(internal.to_string()),
             param_checks: Vec::new(),
         });
-        let cid = self.classes.get(internal)?.id;
+        let cid = self.class_info(internal)?.id;
         let idx = self.ir.classes[cid as usize].methods.len() as u32;
         self.ir.classes[cid as usize].methods.push(acc_fid);
-        if let Some(ci) = self.classes.get_mut(internal) {
+        if let Some(ci) = self.class_info_mut(internal) {
             ci.methods.insert(accessor.clone(), (idx, acc_fid, ret));
         }
         Some(accessor)
@@ -9879,7 +9913,7 @@ impl<'a> Lower<'a> {
             .obj_internal()?
             .to_string();
         let synth_id = self.ir.add_class(IrClass {
-            fq_name: synth_fq,
+            fq_name: type_name(&synth_fq),
             is_value: false,
             type_param_bounds: vec![],
             type_params: Vec::new(),
@@ -9897,7 +9931,7 @@ impl<'a> Lower<'a> {
             is_sealed: false,
             is_abstract: false,
             is_open: false,
-            superclass,
+            superclass: type_name(&superclass),
             super_args: vec![],
             enum_entries: vec![],
             enum_entry_of: None,
@@ -9905,11 +9939,11 @@ impl<'a> Lower<'a> {
             func_ref: Some(crate::ir::FuncRef {
                 bound,
                 arity,
-                owner_class,
+                owner_class: (!owner_class.is_empty()).then(|| type_name(&owner_class)),
                 fn_name,
                 flags,
                 dispatch,
-                call_owner,
+                call_owner: (!call_owner.is_empty()).then(|| type_name(&call_owner)),
                 call_name,
                 call_interface,
                 target_param_tys: target_override.unwrap_or_else(|| param_tys.clone()),
@@ -9924,7 +9958,7 @@ impl<'a> Lower<'a> {
                 staticbound_recv_unbox: None,
             }),
             bridges: vec![],
-            interfaces: vec![],
+            interfaces: Default::default(),
             is_object: false,
             is_companion: false,
             companion_class: None,
@@ -9948,7 +9982,7 @@ impl<'a> Lower<'a> {
     /// through `this$0`). Returns `(method_class, method_index, method_fid, inner_class_id)`.
     fn inner_outer_method(&self, name: &str) -> Option<(ClassId, u32, u32, ClassId)> {
         let cur = self.cur_class.as_ref()?;
-        let cur_id = self.classes.get(cur)?.id;
+        let cur_id = self.class_info(cur)?.id;
         let outer = match self.ir.classes[cur_id as usize].fields.first() {
             Some(IrField { name: n0, ty, .. })
                 if n0 == "this$0" && ty.non_null().obj_internal().is_some() =>
@@ -10030,6 +10064,7 @@ impl<'a> Lower<'a> {
                 for (k, &arg) in args.iter().enumerate() {
                     a.push(self.lower_arg(arg, &ty_to_ir(selected_params[k]))?);
                 }
+                let owner = owner.render();
                 if let Some((class, midx, _fid, _ret)) =
                     self.link_local_method(&owner, name, &selected_params)
                 {
@@ -10088,17 +10123,25 @@ impl<'a> Lower<'a> {
         }
     }
     fn resolve_method(&self, internal: &str, name: &str) -> Option<(ClassId, u32, u32, Ty)> {
-        let mut cur = Some(internal.to_string());
+        self.resolve_method_name(existing_type_name(internal)?, name)
+    }
+
+    fn resolve_method_name(
+        &self,
+        internal: TypeName,
+        name: &str,
+    ) -> Option<(ClassId, u32, u32, Ty)> {
+        let mut cur = Some(internal);
         while let Some(ci_name) = cur {
             // Stop at a non-IR (classpath) super rather than aborting the whole lookup — the interface
             // default-method fallback below still applies.
-            let Some(ci) = self.classes.get(&ci_name) else {
+            let Some(ci) = self.class_info_name(ci_name) else {
                 break;
             };
             if let Some(&(idx, fid, ret)) = ci.methods.get(name) {
                 return Some((ci.id, idx, fid, ret));
             }
-            cur = ci.super_internal.clone();
+            cur = ci.super_internal;
         }
         // Inherited interface DEFAULT method (`class C : I` calling `I`'s `fun f() = …` it doesn't
         // override): search the class's (and supers') interfaces transitively for a method WITH a body.
@@ -10107,37 +10150,37 @@ impl<'a> Lower<'a> {
         // default — not modeled here, so skip the fallback (the caller bails → file skipped, not wrong).
         if self
             .syms
-            .class_by_internal(internal)
+            .class_by_type_name(internal)
             .is_some_and(|c| c.value_field.is_some())
         {
             return None;
         }
-        let mut stack = vec![internal.to_string()];
+        let mut stack = vec![internal];
         let mut seen = std::collections::HashSet::new();
         while let Some(cn) = stack.pop() {
-            if !seen.insert(cn.clone()) {
+            if !seen.insert(cn) {
                 continue;
             }
-            let Some(ci) = self.classes.get(&cn) else {
+            let Some(ci) = self.class_info_name(cn) else {
                 continue;
             };
-            if let Some(sup) = &ci.super_internal {
-                stack.push(sup.clone());
+            if let Some(sup) = ci.super_internal {
+                stack.push(sup);
             }
-            for itf in &self.ir.classes[ci.id as usize].interfaces {
-                if let Some(ici) = self.classes.get(itf) {
+            for itf in self.ir.classes[ci.id as usize].interfaces.iter_rendered() {
+                if let Some(ici) = self.class_info(&itf) {
                     // Only a genuine DEFAULT method (a body in the source) is a valid inherited target.
                     // An ABSTRACT interface method reached here (e.g. via class delegation `by`, where
                     // the class neither defines nor IR-registers it) would emit an `invokeinterface` to an
                     // unimplemented method (`AbstractMethodError`). Check the AST (order-independent; the
                     // IR body is set later in pass 2).
-                    if self.iface_method_is_default(itf, name) {
+                    if self.iface_method_is_default(&itf, name) {
                         if let Some(&(idx, fid, ret)) = ici.methods.get(name) {
                             return Some((ici.id, idx, fid, ret));
                         }
                     }
                 }
-                stack.push(itf.clone());
+                stack.push(type_name(&itf));
             }
         }
         None
@@ -10149,7 +10192,7 @@ impl<'a> Lower<'a> {
         name: &str,
         params: &[Ty],
     ) -> Option<(ClassId, u32, u32, Ty)> {
-        let ci = self.classes.get(owner)?;
+        let ci = self.class_info(owner)?;
         let &(idx, fid, ret) = ci.methods.get(name)?;
         let found_params = &self.ir.functions[fid as usize].params;
         (found_params.as_slice() == params).then_some((ci.id, idx, fid, ret))
@@ -10420,7 +10463,14 @@ impl<'a> Lower<'a> {
             } => {
                 let ret = member.ret;
                 let suspend = member.suspend;
-                self.emit_library_member_call(recv, owner_fallback, *member, ret, suspend, vec![])
+                self.emit_library_member_call(
+                    recv,
+                    owner_fallback.render(),
+                    *member,
+                    ret,
+                    suspend,
+                    vec![],
+                )
             }
             IteratorDispatchTarget::Extension(callable) => {
                 self.emit_library_static_call(*callable, vec![recv], false)
@@ -10535,7 +10585,7 @@ impl<'a> Lower<'a> {
     /// The single abstract method of a same-module interface `internal` as `(method_name, returns_void)`
     /// — used for SAM conversion. `None` if not a single-method interface in this module.
     fn sam_target(&self, internal: &str) -> Option<(String, bool)> {
-        let ci = self.classes.get(internal)?;
+        let ci = self.class_info(internal)?;
         let cls = &self.ir.classes[ci.id as usize];
         if !cls.is_interface {
             return None;
@@ -10585,8 +10635,11 @@ impl<'a> Lower<'a> {
         // `FunctionN` whose body ignores the continuation and VerifyErrors when driven as a coroutine.)
         if matches!(self.afile.expr(arg), Expr::Lambda { .. }) {
             if let Ty::Fun(s) = self.info.ty(arg) {
-                let tail_continuation = s.params.last().and_then(|p| p.obj_internal())
-                    == Some("kotlin/coroutines/Continuation");
+                let tail_continuation = s
+                    .params
+                    .last()
+                    .and_then(|p| p.obj_internal())
+                    .is_some_and(|n| n.matches("kotlin/coroutines/Continuation"));
                 if tail_continuation && !s.suspend {
                     // Value parameters are everything before the trailing continuation (the receiver of a
                     // `Recv.() -> R` builder lambda is modeled as the single value parameter `it`).
@@ -10609,9 +10662,10 @@ impl<'a> Lower<'a> {
         // SAM conversion: a lambda flowing into a simple `fun interface` parameter becomes an instance of
         // that interface whose single abstract method runs the lambda (the checker validated the target).
         if let Some(internal) = target.non_null().obj_internal() {
-            if self.is_simple_fun_interface(internal) {
+            let internal = internal.render();
+            if self.is_simple_fun_interface(&internal) {
                 if let Expr::Lambda { params, body } = self.afile.expr(arg).clone() {
-                    if let Some((method, void)) = self.sam_target(internal) {
+                    if let Some((method, void)) = self.sam_target(&internal) {
                         return self.lower_lambda_sam(
                             arg,
                             &params,
@@ -10834,7 +10888,7 @@ impl<'a> Lower<'a> {
             body,
             vec![IrCatch {
                 var: catch_var,
-                exc_internal,
+                exc_internal: type_name(&exc_internal),
                 body: caught,
             }],
             None,
@@ -10878,16 +10932,12 @@ impl<'a> Lower<'a> {
                 ret: Ty::obj("kotlin/Any"),
             });
             self.emit_new_external(
-                "java/lang/AssertionError".to_string(),
-                "(Ljava/lang/Object;)V".to_string(),
+                "java/lang/AssertionError",
+                "(Ljava/lang/Object;)V",
                 vec![msg],
             )
         } else {
-            self.emit_new_external(
-                "java/lang/AssertionError".to_string(),
-                "()V".to_string(),
-                vec![],
-            )
+            self.emit_new_external("java/lang/AssertionError", "()V", vec![])
         };
         let throw = self.emit_throw(assertion);
         let throw_block = self.emit_block(vec![throw], None);
@@ -11067,7 +11117,7 @@ impl<'a> Lower<'a> {
         recv_slot_ty: Option<Ty>,
     ) -> Option<u32> {
         let (class, idx, pty) = self.resolve_field(recv_internal, name)?;
-        let owner_internal = self.ir.classes[class as usize].fq_name.clone();
+        let owner_internal = self.ir.classes[class as usize].fq_name();
         if self.cur_class.as_deref() != Some(owner_internal.as_str()) {
             if let Some((mclass, mindex, _, _)) =
                 self.resolve_method(recv_internal, &property_getter_name(name))
@@ -11104,13 +11154,14 @@ impl<'a> Lower<'a> {
         // field is private). Resolved from the sibling class's `ClassSig`.
         if let Ty::Obj(i, _) = rt {
             if self.class_of(rt).is_none() {
+                let i = i.render();
                 if let Some((owner, ret_ty, is_iface)) = self
                     .syms
-                    .class_by_internal(i)
+                    .class_by_internal(&i)
                     .filter(|cs| cs.value_field.is_none())
                     .and_then(|cs| {
                         cs.props.iter().find_map(|(n, t, _)| {
-                            (n == name).then(|| (i.to_string(), *t, cs.is_interface))
+                            (n == name).then(|| (i.clone(), *t, cs.is_interface))
                         })
                     })
                 {
@@ -11297,9 +11348,9 @@ impl<'a> Lower<'a> {
         // non-null class either way.
         let owner = member
             .owner
-            .clone()
-            .or_else(|| self.class_of(rt).map(|ci| ci.internal.clone()))
-            .or_else(|| rt.non_null().obj_internal().map(str::to_string))?;
+            .map(|owner| owner.render())
+            .or_else(|| self.class_of(rt).map(|ci| ci.internal()))
+            .or_else(|| rt.non_null().obj_internal().map(|n| n.render()))?;
         crate::trace_compiler!(
             "resolve",
             "lower_library_default_member_call {owner}.{} args={} named={}",
@@ -11651,9 +11702,10 @@ impl<'a> Lower<'a> {
     ) -> Option<u32> {
         // A user instance method on the receiver's class — `this.m(args)`.
         if let Some(internal) = this_ty.obj_internal() {
-            if let Some((class, index, mfid, ret)) = self.resolve_method(internal, name) {
+            let internal = internal.render();
+            if let Some((class, index, mfid, ret)) = self.resolve_method(&internal, name) {
                 let params = self.ir.functions[mfid as usize].params.clone();
-                let vararg = self.syms.method_is_vararg(internal, name);
+                let vararg = self.syms.method_is_vararg(&internal, name);
                 if let Some(n_fixed) = vararg_arity(vararg, params.len(), args.len()) {
                     let recv = self.emit_get_value(this_v);
                     let a = self.lower_call_args_vararg(args, &params, vararg, n_fixed)?;
@@ -11719,10 +11771,12 @@ impl<'a> Lower<'a> {
                 }
                 lowered
             };
-            let owner = member
-                .owner
-                .clone()
-                .unwrap_or_else(|| this_ty.obj_internal().unwrap_or("kotlin/Any").to_string());
+            let owner = member.owner.map(|owner| owner.render()).unwrap_or_else(|| {
+                this_ty
+                    .obj_internal()
+                    .map(|n| n.render())
+                    .unwrap_or_else(|| "kotlin/Any".to_string())
+            });
             let physical_ret = member.physical_ret;
             let call = self.emit_library_member_call(recv, owner, member, ret, false, a);
             return Some(self.coerce_generic_read(call, e, physical_ret));
@@ -11913,13 +11967,13 @@ impl<'a> Lower<'a> {
                 .syms
                 .classes
                 .get(outer)
-                .map(|c| c.internal.clone())
+                .map(|c| c.internal())
                 .or_else(|| {
                     self.syms
                         .class_names
                         .get(outer)
                         .filter(|i| !i.starts_with("__ty/"))
-                        .cloned()
+                        .map(TypeName::render)
                 })
                 // A name PRUNED from the global index (ambiguous across the classpath) still resolves
                 // through this file's explicit import — the same fallback the checker's
@@ -12007,16 +12061,13 @@ impl<'a> Lower<'a> {
                 return None;
             }
             Ty::array(e)
-        } else if self.classes.contains_key(&r.name) {
+        } else if self.contains_class(&r.name) {
             Ty::obj(&r.name)
-        } else if self
-            .classes
-            .contains_key(&class_internal(self.afile, &r.name))
-        {
+        } else if self.contains_class(&class_internal(self.afile, &r.name)) {
             // A nested class by source name (`Outer.Inner` → `Outer$Inner`).
             Ty::obj(&class_internal(self.afile, &r.name))
         } else if let Some(cs) = self.syms.classes.get(&r.name) {
-            Ty::obj(&cs.internal)
+            Ty::obj(&cs.internal())
         } else if let Some(internal) = self.syms.class_names.get(&r.name) {
             // A classpath / built-in mapped type (`Number`, `CharSequence`, `Runnable`, a Java class) —
             // the same name→internal map the checker resolves `is`/`as` targets against. `"__ty/<prim>"`
@@ -12024,7 +12075,7 @@ impl<'a> Lower<'a> {
             if internal.starts_with("__ty/") {
                 return None;
             }
-            Ty::obj(internal)
+            Ty::obj_name(internal)
         } else if let Some(internal) = self.resolve_qualified_nested(&r.name) {
             // A dotted CLASSPATH nested type (`Subject.User`) → `Outer$Nested`, matching the checker's
             // `resolve_ty` — so an `is`/`as` target on such a type resolves the same internal name.
@@ -12033,7 +12084,7 @@ impl<'a> Lower<'a> {
             .cur_class
             .as_ref()
             .map(|c| format!("{c}${}", r.name))
-            .filter(|n| self.classes.contains_key(n))
+            .filter(|n| self.contains_class(n))
         {
             // A sibling nested type unqualified within the enclosing class body (`is Inner`/`as Inner` /
             // `Inner` type in `class Outer { class Inner }`) → `Outer$Inner`, matching the checker's
@@ -12716,18 +12767,12 @@ impl<'a> Lower<'a> {
                     Some(r)
                         if r.nullable
                             && Ty::from_name(&r.name).is_some_and(|t| !t.is_reference())
-                            && !self
-                                .classes
-                                .contains_key(&class_internal(self.afile, &r.name)) =>
+                            && !self.contains_class(&class_internal(self.afile, &r.name)) =>
                     {
                         ty_of(self.afile, r, &*self.syms.libraries)
                     }
                     Some(r) if Ty::from_name(&r.name).is_some() => Ty::from_name(&r.name).unwrap(),
-                    Some(r)
-                        if self
-                            .classes
-                            .contains_key(&class_internal(self.afile, &r.name)) =>
-                    {
+                    Some(r) if self.contains_class(&class_internal(self.afile, &r.name)) => {
                         Ty::obj(&class_internal(self.afile, &r.name))
                     }
                     // A primitive array (`ByteArray` → `[B`) or a boxed `Array<X>` — resolve via `ty_of`
@@ -12784,10 +12829,17 @@ impl<'a> Lower<'a> {
                 // wide enough to hold a later `arrayOf("OK")`. Narrow to a nested-array element only — a
                 // concrete/nullable element (`Array<Int?>`) keeps its inferred creation (see
                 // `collectionLiterals`). Take-once (consumed by the outer creation's `synth_array_elem`).
-                let nested_array_elem = (kty.non_null().obj_internal() == Some("kotlin/Array"))
+                let nested_array_elem = kty
+                    .non_null()
+                    .obj_internal()
+                    .is_some_and(|n| n.matches("kotlin/Array"))
                     .then(|| kty.array_elem())
                     .flatten()
-                    .filter(|e| e.non_null().obj_internal() == Some("kotlin/Array"));
+                    .filter(|e| {
+                        e.non_null()
+                            .obj_internal()
+                            .is_some_and(|n| n.matches("kotlin/Array"))
+                    });
                 // SAVE-RESTORE (not set-then-clear): a nested-array local INSIDE the initializer (`… = run
                 // { val y: Array<Array<Int>> = …; arrayOf(y) }`) must not clobber this one's expected element.
                 let prev_expected = self.expected_array_elem.replace(nested_array_elem);
@@ -12819,7 +12871,9 @@ impl<'a> Lower<'a> {
                                     let recv_ty = self.info.ty(*receiver);
                                     recv_ty
                                         .obj_internal()
-                                        .and_then(|internal| self.resolve_method(internal, name))
+                                        .and_then(|internal| {
+                                            self.resolve_method(&internal.render(), name)
+                                        })
                                         .is_some_and(|(_, _, fid, _)| {
                                             self.ir.functions[fid as usize].ret.is_nullable()
                                         })
@@ -12862,7 +12916,7 @@ impl<'a> Lower<'a> {
                 }
                 let (gv, gv_ret) = match self.info.delegate_getvalue(delegate)? {
                     DelegateGetValueTarget::Member { owner, params, ret } => {
-                        if owner != &delegate_internal {
+                        if !owner.matches(&delegate_internal) {
                             return None;
                         }
                         (
@@ -12893,7 +12947,11 @@ impl<'a> Lower<'a> {
                     .as_ref()
                     .map(|r| ty_of(self.afile, r, &*self.syms.libraries))
                     .unwrap_or(gv_ret);
-                if gv_ret != prop_ty || prop_ty.obj_internal().is_some_and(is_value_cls) {
+                if gv_ret != prop_ty
+                    || prop_ty
+                        .obj_internal()
+                        .is_some_and(|n| is_value_cls(&n.render()))
+                {
                     return None;
                 }
                 let setvalue_sig = if is_var {
@@ -12976,13 +13034,12 @@ impl<'a> Lower<'a> {
                         // A `var` custom-accessor property writes through `setX`, never the raw field.
                         // A `val` custom-accessor (no setter) is assigned once in a constructor by
                         // writing its backing field directly, so it is NOT excluded here.
-                        if self
-                            .field_accessor_var_props
-                            .contains(&(c.clone(), name.clone()))
-                        {
+                        if existing_type_name(c).is_some_and(|c| {
+                            self.field_accessor_var_props.contains(&(c, name.clone()))
+                        }) {
                             return None;
                         }
-                        self.classes.get(c).and_then(|ci| {
+                        self.class_info(c).and_then(|ci| {
                             ci.fields
                                 .iter()
                                 .position(|(fn_, _)| *fn_ == name)
@@ -13022,7 +13079,7 @@ impl<'a> Lower<'a> {
                     }
                     let val = self.lower_arg(value, &ty_to_ir(ty))?;
                     Some(self.emit_cross_file_call(
-                        facade,
+                        facade.render(),
                         property_setter_name(&name),
                         vec![ty_to_ir(ty)],
                         Ty::Unit,
@@ -13085,13 +13142,12 @@ impl<'a> Lower<'a> {
                     // A field of *this* class is read/written directly; an inherited one (or an external
                     // `this`), or a CUSTOM-accessor property, goes through its getter/setter accessors.
                     let own = self.cur_class.as_ref().and_then(|c| {
-                        if self
-                            .field_accessor_props
-                            .contains(&(c.clone(), name.clone()))
+                        if existing_type_name(c)
+                            .is_some_and(|c| self.field_accessor_props.contains(&(c, name.clone())))
                         {
                             return None;
                         }
-                        self.classes.get(c).and_then(|ci| {
+                        self.class_info(c).and_then(|ci| {
                             ci.fields
                                 .iter()
                                 .position(|(fn_, _)| *fn_ == name)
@@ -13449,12 +13505,12 @@ impl<'a> Lower<'a> {
                 return true;
             }
             if let Some(c) = self.syms.class_by_internal(&i) {
-                if let Some(s) = &c.super_internal {
-                    stack.push(s.clone());
+                if let Some(s) = c.super_internal() {
+                    stack.push(s);
                 }
-                stack.extend(c.interfaces.iter().cloned());
+                stack.extend(c.interfaces.iter_rendered());
             } else if let Some(t) = self.syms.libraries.resolve_type(&i) {
-                stack.extend(t.supertypes.iter().cloned());
+                stack.extend(t.supertypes.to_vec());
             }
         }
         false
@@ -13536,11 +13592,11 @@ impl<'a> Lower<'a> {
         let unlock_m = self.info.synthetic_member_call(call, "unlock")?.clone();
         let lock_owner = lock_m
             .owner
-            .clone()
+            .map(|owner| owner.render())
             .unwrap_or_else(|| receiver_internal.clone());
         let unlock_owner = unlock_m
             .owner
-            .clone()
+            .map(|owner| owner.render())
             .unwrap_or_else(|| receiver_internal.clone());
         // The withLock result type. When EVERY path of the lambda is a non-local `return@withLock`, type
         // inference gives the call (and the lambda body) `Nothing` — all paths diverge. A `Nothing`/`Unit`
@@ -13651,8 +13707,7 @@ impl<'a> Lower<'a> {
         let elem = protocol.elem_ty;
 
         // acc = new ArrayList()
-        let acc_new =
-            self.emit_new_external("java/util/ArrayList".to_string(), "()V".to_string(), vec![]);
+        let acc_new = self.emit_new_external("java/util/ArrayList", "()V", vec![]);
         let acc_v = self.fresh_value();
         let acc_ty = Ty::obj("java/util/ArrayList");
         let var_acc = self.emit_named_variable(acc_v, ty_to_ir(acc_ty), Some(acc_new));
@@ -13675,7 +13730,14 @@ impl<'a> Lower<'a> {
             } => {
                 let ret = member.ret;
                 let suspend = member.suspend;
-                self.emit_library_member_call(recv_g, owner_fallback, *member, ret, suspend, vec![])
+                self.emit_library_member_call(
+                    recv_g,
+                    owner_fallback.render(),
+                    *member,
+                    ret,
+                    suspend,
+                    vec![],
+                )
             }
             IteratorDispatchTarget::Extension(callable) => {
                 self.emit_library_static_call(*callable, vec![recv_g], false)
@@ -13756,7 +13818,7 @@ impl<'a> Lower<'a> {
         if is_flat
             && !part_ty
                 .obj_internal()
-                .is_some_and(|i| self.type_is_collection(i))
+                .is_some_and(|i| self.type_is_collection(&i.render()))
         {
             self.scope.truncate(depth);
             return None;
@@ -13811,7 +13873,7 @@ impl<'a> Lower<'a> {
         // generic loop once that shape is supplied.
         if let Some(loop_info) = it_ty
             .obj_internal()
-            .and_then(|internal| self.runtime.counted_loop_info(internal))
+            .and_then(|internal| self.runtime.counted_loop_info(&internal.render()))
         {
             return if loop_info.step.is_some() {
                 self.lower_foreach_progression(name, iterable, body, it_ty, loop_info, label)
@@ -13966,13 +14028,14 @@ impl<'a> Lower<'a> {
         // (the backing field is private). A cross-file `val` write bails.
         if self.class_of(rt).is_none() {
             if let Ty::Obj(i, _) = &rt {
+                let i = i.render();
                 if let Some((owner, pty, is_var, interface)) = self
                     .syms
-                    .class_by_internal(i)
+                    .class_by_internal(&i)
                     .filter(|cs| cs.value_field.is_none())
                     .and_then(|cs| {
                         cs.props.iter().find_map(|(n, t, v)| {
-                            (n.as_str() == name).then(|| (i.to_string(), *t, *v, cs.is_interface))
+                            (n.as_str() == name).then(|| (i.clone(), *t, *v, cs.is_interface))
                         })
                     })
                 {
@@ -14007,11 +14070,12 @@ impl<'a> Lower<'a> {
                         .first()
                         .map(|t| ty_to_ir(*t))
                         .unwrap_or_else(|| ty_to_ir(self.info.ty(value)));
-                    let is_iface = self.library_type_is_interface(&setter.owner);
+                    let setter_owner = setter.owner_name();
+                    let is_iface = self.library_type_is_interface(&setter_owner);
                     let r = self.expr(receiver)?;
                     let v = self.lower_arg(value, &pty)?;
                     return Some(self.emit_virtual_call(
-                        setter.owner,
+                        setter_owner,
                         setter.name,
                         setter.descriptor,
                         is_iface,
@@ -14021,7 +14085,7 @@ impl<'a> Lower<'a> {
                 }
             }
         }
-        let owner_internal = self.class_of(rt)?.internal.clone();
+        let owner_internal = self.class_of(rt)?.internal();
         // The backing field is private; a write from outside the declaring class goes through
         // the public `setX()` accessor (matching kotlinc). Inside the class, write directly.
         if self.cur_class.as_deref() != Some(owner_internal.as_str()) {
@@ -14676,11 +14740,11 @@ impl<'a> Lower<'a> {
                     IrConst::Null
                 } else {
                     match ret_ty.non_null().kotlin_class_internal() {
-                        Some("kotlin/Long") => IrConst::Long(0),
-                        Some("kotlin/Float") => IrConst::Float(0.0),
-                        Some("kotlin/Double") => IrConst::Double(0.0),
-                        Some("kotlin/Boolean") => IrConst::Boolean(false),
-                        Some("kotlin/Char") => IrConst::Char('\0'),
+                        Some(n) if n.matches("kotlin/Long") => IrConst::Long(0),
+                        Some(n) if n.matches("kotlin/Float") => IrConst::Float(0.0),
+                        Some(n) if n.matches("kotlin/Double") => IrConst::Double(0.0),
+                        Some(n) if n.matches("kotlin/Boolean") => IrConst::Boolean(false),
+                        Some(n) if n.matches("kotlin/Char") => IrConst::Char('\0'),
                         _ => IrConst::Int(0), // Int/Short/Byte
                     }
                 };
@@ -14753,7 +14817,7 @@ impl<'a> Lower<'a> {
                 // A user class with a member `operator fun invoke`: a direct method call.
                 if let Some((class, index, fid, mret)) = self
                     .class_of(rt)
-                    .map(|ci| ci.internal.clone())
+                    .map(|ci| ci.internal())
                     .and_then(|i| self.resolve_method(&i, "invoke"))
                 {
                     let recv = self.expr(receiver)?;
@@ -14785,9 +14849,11 @@ impl<'a> Lower<'a> {
                         None => a.push(self.expr(arg)?),
                     }
                 }
-                let owner = member
-                    .owner
-                    .unwrap_or_else(|| rt.obj_internal().unwrap_or("kotlin/Any").to_string());
+                let owner = member.owner.map(|owner| owner.render()).unwrap_or_else(|| {
+                    rt.obj_internal()
+                        .map(|n| n.render())
+                        .unwrap_or_else(|| "kotlin/Any".to_string())
+                });
                 let call = self.emit_virtual_call(
                     owner,
                     member.name,
@@ -14935,7 +15001,7 @@ impl<'a> Lower<'a> {
         let cond = self.emit_primitive_bin_op(IrBinOp::Ne, get1, nullc);
         let recv2 = self.emit_get_value(v);
         let member = if let Some((fclass, idx, _)) = self.resolve_field(&internal, name) {
-            let owner_internal = self.ir.classes[fclass as usize].fq_name.clone();
+            let owner_internal = self.ir.classes[fclass as usize].fq_name();
             if self.cur_class.as_deref() != Some(owner_internal.as_str()) {
                 if let Some((mclass, mindex, _, _)) =
                     self.resolve_method(&internal, &property_getter_name(name))
@@ -15117,7 +15183,7 @@ impl<'a> Lower<'a> {
                     match cbody {
                         Some(cb) => ir_catches.push(crate::ir::IrCatch {
                             var: v,
-                            exc_internal,
+                            exc_internal: type_name(&exc_internal),
                             body: cb,
                         }),
                         None => {
@@ -15146,11 +15212,8 @@ impl<'a> Lower<'a> {
                 // `checkNotNull` call (which is `(Object)V` and so appears to fall through, leaving a
                 // handler placed right after it with an inconsistent frame).
                 if self.info.ty(operand) == Ty::Null {
-                    let exc = self.emit_new_external(
-                        "java/lang/NullPointerException".to_string(),
-                        "()V".to_string(),
-                        vec![],
-                    );
+                    let exc =
+                        self.emit_new_external("java/lang/NullPointerException", "()V", vec![]);
                     return Some(self.emit_throw(exc));
                 }
                 let v = self.expr(operand)?;
@@ -15339,7 +15402,7 @@ impl<'a> Lower<'a> {
                     result_ty.obj_internal().is_some_and(|i| self
                         .syms
                         .classes
-                        .get(i.rsplit('/').next().unwrap_or(i))
+                        .get(i.render().rsplit('/').next().unwrap_or(""))
                         .is_some_and(|c| c.value_field.is_some()))
                 );
                 // A nullable-primitive result (`s?.length` : `Int?`): box the primitive member value so
@@ -15349,7 +15412,7 @@ impl<'a> Lower<'a> {
                 } else if result_ty.obj_internal().is_some_and(|i| {
                     self.syms
                         .classes
-                        .get(i.rsplit('/').next().unwrap_or(i))
+                        .get(i.render().rsplit('/').next().unwrap_or(""))
                         .is_some_and(|c| c.value_field.is_some())
                 }) {
                     // A nullable VALUE-CLASS result (`a?.foo()` : `Z?`): the member returns the unboxed
@@ -15509,7 +15572,7 @@ impl<'a> Lower<'a> {
                     if let Ty::Fun(sig) = self.info.ty(e) {
                         return self.lower_imported_object_ref(
                             e,
-                            &internal,
+                            internal,
                             &name,
                             &sig.params,
                             sig.ret,
@@ -15535,7 +15598,7 @@ impl<'a> Lower<'a> {
                         &adapted_params,
                         ret,
                         fixed,
-                        object_internal.as_deref(),
+                        object_internal,
                     );
                 }
                 // An ADAPTED same-file top-level function reference (`::foo` with trailing defaults passed
@@ -15774,7 +15837,7 @@ impl<'a> Lower<'a> {
                     return None;
                 }
                 let param_tys = tys_to_ir(&c.params);
-                let owner = c.owner.clone();
+                let owner = c.owner_name();
                 let target_name = c.name.clone();
                 let ret = ty_to_ir(c.ret);
                 return self.make_func_ref(
@@ -15804,7 +15867,7 @@ impl<'a> Lower<'a> {
                         Some(ExprLowering::LabeledThisInner) => "this".to_string(),
                         Some(ExprLowering::LabeledThisOuter) => {
                             let internal = self.cur_class.clone()?;
-                            let class = self.classes.get(&internal)?.id;
+                            let class = self.class_info(&internal)?.id;
                             if let Some((v, _)) = self.lookup("this$0") {
                                 return Some(self.emit_get_value(v));
                             }
@@ -15840,7 +15903,8 @@ impl<'a> Lower<'a> {
                 // recorded it; read `getstatic <internal>.INSTANCE`.
                 if let Some(ExprLowering::ObjectValue { internal }) = self.info.expr_lowers.get(&e)
                 {
-                    let field = self.runtime.object_instance_field(internal)?;
+                    let internal = internal.render();
+                    let field = self.runtime.object_instance_field(&internal)?;
                     return Some(self.platform_static_field(field));
                 }
                 // A class NAME with a typed `companion object` used as a VALUE (`val c: I = C`): read its
@@ -15849,10 +15913,11 @@ impl<'a> Lower<'a> {
                 // the same name shadows it.
                 if self.lookup(&n).is_none() {
                     if let Some(cls) = self.syms.classes.get(&n) {
-                        let comp_internal = format!("{}$Companion", cls.internal);
+                        let cls_internal = cls.internal();
+                        let comp_internal = format!("{cls_internal}$Companion");
                         if self.syms.class_by_internal(&comp_internal).is_some() {
                             let field = self.runtime.companion_instance_field(
-                                &cls.internal,
+                                &cls_internal,
                                 &comp_internal,
                                 "Companion",
                             )?;
@@ -15922,7 +15987,9 @@ impl<'a> Lower<'a> {
                             // more concrete type than the checker's erased `info.ty` (a generic inline
                             // parameter/`this` bound to the actual argument type); the spurious
                             // `checkcast Object` it would emit erases the value and breaks verification.
-                            && narrowed.obj_internal() != Some("kotlin/Any")
+                            && !narrowed
+                                .obj_internal()
+                                .is_some_and(|n| n.matches("kotlin/Any"))
                         {
                             self.emit_type_op(IrTypeOp::Cast, read, ty_to_ir(narrowed))
                         } else {
@@ -15940,7 +16007,8 @@ impl<'a> Lower<'a> {
                 } else if let Some(c) = self
                     .cur_class
                     .as_ref()
-                    .and_then(|cc| self.object_const_lits.get(&(cc.clone(), n.clone())))
+                    .and_then(|cc| existing_type_name(cc))
+                    .and_then(|cc| self.object_const_lits.get(&(cc, n.clone())))
                     .cloned()
                 {
                     // A `const val` of the enclosing `object` read UNQUALIFIED inside its own method
@@ -15968,7 +16036,7 @@ impl<'a> Lower<'a> {
                         // `getstatic <facade>.X` (kotlinc inlines the constant; a field read is equivalent
                         // and avoids a `NoSuchMethodError` on the non-existent `getX`).
                         self.emit_external_static_field(
-                            facade,
+                            facade.render(),
                             n.clone(),
                             self.runtime.type_descriptor(ty)?,
                         )
@@ -15976,7 +16044,7 @@ impl<'a> Lower<'a> {
                         // A top-level property from ANOTHER file → call its facade's `getX()` (the field is
                         // private), reusing the backend-agnostic cross-file callee.
                         self.emit_cross_file_call(
-                            facade,
+                            facade.render(),
                             property_getter_name(&n),
                             vec![],
                             ty_to_ir(ty),
@@ -15984,8 +16052,7 @@ impl<'a> Lower<'a> {
                         )
                     }
                 } else if let Some(class) = self
-                    .classes
-                    .get(&class_internal(self.afile, &n))
+                    .class_info(&class_internal(self.afile, &n))
                     .filter(|ci| self.ir.classes[ci.id as usize].is_object)
                     .map(|ci| ci.id)
                 {
@@ -16009,14 +16076,10 @@ impl<'a> Lower<'a> {
                                 .libraries
                                 .resolve_type(&internal)
                                 .and_then(|lt| lt.companion_object)
-                                .map(|(f, t)| (internal, f, t))
+                                .map(|(f, t)| (internal, f, t.render()))
                         })
                 } {
-                    self.ir.add_expr(IrExpr::ExternalStaticInstance {
-                        owner,
-                        ty: cty,
-                        field,
-                    })
+                    self.ir.external_static_instance(&owner, &cty, field)
                 } else {
                     // Unqualified member of the enclosing class: a backing field (`this.<field>`), or a
                     // computed property (`this.getX()`).
@@ -16060,18 +16123,16 @@ impl<'a> Lower<'a> {
                         // an unqualified property read in a default method routes through the getter
                         // (`invokeinterface getX`), never a (nonexistent) interface field.
                         let cur_is_iface = self
-                            .classes
-                            .get(&cur)
+                            .class_info(&cur)
                             .is_some_and(|ci| self.ir.classes[ci.id as usize].is_interface);
                         let field = if cur_is_iface
-                            || self
-                                .field_accessor_props
-                                .contains(&(cur.clone(), n.clone()))
-                        {
+                            || existing_type_name(&cur).is_some_and(|cur| {
+                                self.field_accessor_props.contains(&(cur, n.clone()))
+                            }) {
                             // A custom-accessor property reads through `getX`, never the raw field.
                             None
                         } else {
-                            self.classes.get(&cur).and_then(|ci| {
+                            self.class_info(&cur).and_then(|ci| {
                                 ci.fields
                                     .iter()
                                     .position(|(fn_, _)| *fn_ == n)
@@ -16086,7 +16147,7 @@ impl<'a> Lower<'a> {
                             self.emit_method_call(class, index, recv, vec![])
                         } else {
                             // An inner class reads an enclosing member through `this$0` (its field 0).
-                            let cur_id = self.classes.get(&cur)?.id;
+                            let cur_id = self.class_info(&cur)?.id;
                             let outer = match self.ir.classes[cur_id as usize].fields.first() {
                                 Some(IrField { name: n0, ty, .. })
                                     if n0 == "this$0" && ty.non_null().obj_internal().is_some() =>
@@ -16096,7 +16157,10 @@ impl<'a> Lower<'a> {
                                 _ => return None,
                             };
                             let this0 = if let Some((v, vty)) = self.lookup("this$0") {
-                                if vty.obj_internal() != Some(outer.as_str()) {
+                                if !vty
+                                    .obj_internal()
+                                    .is_some_and(|n| n.matches(outer.as_str()))
+                                {
                                     return None;
                                 }
                                 self.emit_get_value(v)
@@ -16116,11 +16180,12 @@ impl<'a> Lower<'a> {
                         // collection accessor, …) — the same path a qualified `this.n` read takes.
                         let internal = this_ty.obj_internal();
                         if let Some(internal) = internal {
+                            let internal = internal.render();
                             if let Some((class, index, _, _)) =
-                                self.resolve_method(internal, &property_getter_name(&n))
+                                self.resolve_method(&internal, &property_getter_name(&n))
                             {
                                 self.emit_method_call(class, index, recv, vec![])
-                            } else if let Some((fclass, idx, _)) = self.resolve_field(internal, &n)
+                            } else if let Some((fclass, idx, _)) = self.resolve_field(&internal, &n)
                             {
                                 self.emit_get_field(recv, fclass, idx)
                             } else {
@@ -16136,7 +16201,7 @@ impl<'a> Lower<'a> {
                     let narrowed = self.info.ty(e);
                     let field_is_ref = this_ty
                         .obj_internal()
-                        .and_then(|i| self.syms.prop_of(i, &n))
+                        .and_then(|i| self.syms.prop_of(&i.render(), &n))
                         .map_or(false, |(t, _)| t.is_reference());
                     if self.has_scalar_value_repr(narrowed) && field_is_ref {
                         self.emit_type_op(IrTypeOp::ImplicitCoercion, read, ty_to_ir(narrowed))
@@ -16168,6 +16233,7 @@ impl<'a> Lower<'a> {
                     descriptor,
                 }) = self.info.expr_lowers.get(&e).cloned()
                 {
+                    let owner = owner.render();
                     return Some(self.emit_external_static_field(&owner, &name, &descriptor));
                 }
                 // `X::class.java`.
@@ -16181,7 +16247,8 @@ impl<'a> Lower<'a> {
                 // `getstatic <Outer$Nested>.INSTANCE`.
                 if let Some(ExprLowering::ObjectValue { internal }) = self.info.expr_lowers.get(&e)
                 {
-                    let field = self.runtime.object_instance_field(internal)?;
+                    let internal = internal.render();
+                    let field = self.runtime.object_instance_field(&internal)?;
                     return Some(self.platform_static_field(field));
                 }
                 // A classpath EXTENSION property recorded by the checker (`d.elementDescriptors`) →
@@ -16208,7 +16275,7 @@ impl<'a> Lower<'a> {
                         .ir
                         .classes
                         .iter()
-                        .find(|c| c.fq_name == internal && c.is_annotation)
+                        .find(|c| c.fq_name_matches(&internal.render()) && c.is_annotation)
                         .and_then(|c| c.fields.iter().find(|f| f.name == *name))
                     {
                         let descriptor =
@@ -16267,7 +16334,7 @@ impl<'a> Lower<'a> {
                 // `EnumClass.ENTRY` — a static enum-constant read.
                 if let Expr::Name(rn) = self.afile.expr(receiver).clone() {
                     let internal = class_internal(self.afile, &rn);
-                    if let Some(ci) = self.classes.get(&internal) {
+                    if let Some(ci) = self.class_info(&internal) {
                         let cls = ci.id;
                         if let Some(idx) = self.ir.classes[cls as usize]
                             .enum_entries
@@ -16282,17 +16349,17 @@ impl<'a> Lower<'a> {
                     }
                     // `Obj.NAME` where `NAME` is a `const val` of an `object` → inline the literal
                     // (kotlinc inlines a const read; no `getstatic`).
+                    let internal_name = type_name(&internal);
                     if let Some(c) = self
                         .object_const_lits
-                        .get(&(internal.clone(), name.clone()))
+                        .get(&(internal_name, name.clone()))
                         .cloned()
                     {
                         return Some(self.emit_const(c));
                     }
                     // `C.X` where `X` is a companion `const val` → `getstatic C.X` (the field lives on the
                     // outer class C; the JVM initializes it from its `ConstantValue` attribute).
-                    if let Some(cty) = self.companion_consts.get(&(internal.clone(), name.clone()))
-                    {
+                    if let Some(cty) = self.companion_consts.get(&(internal_name, name.clone())) {
                         return Some(self.emit_external_static_field(
                             internal,
                             name.clone(),
@@ -16301,8 +16368,9 @@ impl<'a> Lower<'a> {
                     }
                     // `Kind.PENDING` on a CLASSPATH enum -> `getstatic <internal>.PENDING:L<internal>;`.
                     if let Some(enum_internal) = self.info.resolved_library_enum_entry_owner(e) {
+                        let enum_internal = enum_internal.render();
                         return Some(self.emit_external_static_field(
-                            enum_internal.to_string(),
+                            enum_internal.clone(),
                             name.clone(),
                             format!("L{enum_internal};"),
                         ));
@@ -16313,7 +16381,7 @@ impl<'a> Lower<'a> {
                 // enum-constant read (the bare-`Name` case above only covers a top-level enum).
                 if matches!(self.afile.expr(receiver), Expr::Member { .. }) {
                     if let Some(internal) = self.info.ty(e).obj_internal() {
-                        if let Some(ci) = self.classes.get(internal) {
+                        if let Some(ci) = self.class_info_name(internal) {
                             let cls = ci.id;
                             if let Some(idx) = self.ir.classes[cls as usize]
                                 .enum_entries
@@ -16335,7 +16403,7 @@ impl<'a> Lower<'a> {
                         let cid = ci.id as usize;
                         if !self.ir.classes[cid].enum_entries.is_empty() {
                             // Read the owner before the mutable `self.expr` borrow (drops `ci`'s borrow).
-                            let owner = self.ir.classes[cid].fq_name.clone();
+                            let owner = self.ir.classes[cid].fq_name();
                             let recv = self.expr(receiver)?;
                             return Some(self.emit_virtual_call(
                                 owner,
@@ -16358,7 +16426,7 @@ impl<'a> Lower<'a> {
                 } else if let Some(rci) = self.class_of(rt) {
                     // Resolve the field through the superclass chain — it may be declared on a base
                     // class (`b.baseField`). `class` is the *owning* class (whose fieldref we emit).
-                    let recv_internal = rci.internal.clone();
+                    let recv_internal = rci.internal();
                     let recv = self.expr(receiver)?;
                     // The receiver's declared slot type (when it is a simple `Name`) drives the
                     // smartcast `checkcast` inside the shared field-read helper.
@@ -16519,8 +16587,8 @@ impl<'a> Lower<'a> {
                                 let r = self.lower_arg(rhs, &ty_to_ir(param))?;
                                 let owner_fallback = lt
                                     .kotlin_class_internal()
-                                    .unwrap_or("kotlin/Any")
-                                    .to_string();
+                                    .map(|n| n.render())
+                                    .unwrap_or_else(|| "kotlin/Any".to_string());
                                 let cmp = self.emit_library_member_call(
                                     l,
                                     owner_fallback,
@@ -17519,8 +17587,8 @@ impl<'a> Lower<'a> {
                             _ => return None,
                         };
                         let recv_field = self.runtime.companion_instance_field(
-                            &cf.class_internal,
-                            &cf.companion_internal,
+                            &cf.class_internal.render(),
+                            &cf.companion_internal.render(),
                             &cf.companion_field,
                         )?;
                         let recv = self.platform_static_field(recv_field);
@@ -17535,7 +17603,7 @@ impl<'a> Lower<'a> {
                         }
                         Some(self.emit_call(
                             Callee::Static {
-                                owner: cf.callable.owner.clone(),
+                                owner: cf.callable.owner_name(),
                                 name: cf.callable.name.clone(),
                                 descriptor: cf.callable.descriptor.clone(),
                                 inline: cf.callable.inline,
@@ -17567,7 +17635,7 @@ impl<'a> Lower<'a> {
                     if let Some(ExprLowering::ObjectMemberCall { internal }) =
                         self.info.expr_lowers.get(&e)
                     {
-                        return self.lower_object_member_call(internal.clone(), &fname, &args, e);
+                        return self.lower_object_member_call(*internal, &fname, &args, e);
                     }
                     let one_lambda_arg = self.single_lambda_arg(&args);
                     // Reified free function `serializer<T>()` (kotlinx.serialization.serializer): a
@@ -17640,10 +17708,11 @@ impl<'a> Lower<'a> {
                         (one_lambda_arg.as_ref(), self.lookup(&fname).is_none())
                     {
                         if let Some(internal) = self.info.ty(e).obj_internal() {
-                            let target = self.sam_target(internal).or_else(|| {
+                            let internal = internal.render();
+                            let target = self.sam_target(&internal).or_else(|| {
                                 self.syms
                                     .libraries
-                                    .resolve_type(internal)
+                                    .resolve_type(&internal)
                                     .and_then(|t| t.sam_method)
                                     .map(|m| (m.name, m.ret == Ty::Unit))
                             });
@@ -17664,8 +17733,7 @@ impl<'a> Lower<'a> {
                     if self.lookup(&fname).is_none() && !self.module_declares(&fname) {
                         if let Some(cur) = self.cur_class.clone() {
                             if self
-                                .classes
-                                .get(&cur)
+                                .class_info(&cur)
                                 .map_or(false, |ci| ci.fields.iter().any(|(n, _)| *n == fname))
                             {
                                 return None;
@@ -17841,7 +17909,7 @@ impl<'a> Lower<'a> {
                                             .fn_facades_by_decl
                                             .get(&(file, decl.0))
                                             .cloned()
-                                            .map(|facade| (target, facade))
+                                            .map(|facade| (target, facade.render()))
                                     },
                                 )
                             })
@@ -18146,7 +18214,7 @@ impl<'a> Lower<'a> {
                         // class — route through the owner's synthetic `access$foo` accessor (a public
                         // `invokevirtual`), exactly as a callable reference to it does.
                         let (class, index) = if self.ir.private_methods.contains(&mfid) {
-                            let owner = self.ir.classes[class as usize].fq_name.clone();
+                            let owner = self.ir.classes[class as usize].fq_name();
                             // Bail (skip) if the accessor can't be made — never fall back to the private
                             // method, which would emit an illegal `invokespecial` from the inner class.
                             let acc = self.ensure_private_accessor(&owner, &fname)?;
@@ -18168,7 +18236,8 @@ impl<'a> Lower<'a> {
                         .info
                         .ty(e)
                         .obj_internal()
-                        .filter(|i| !self.classes.contains_key(*i))
+                        .filter(|&i| !self.contains_class_name(i))
+                        .map(|i| i.render())
                     {
                         // Constructing a classpath (non-IR) class — `RuntimeException("x")`,
                         // `StringBuilder()`. The constructor descriptor comes from the classpath. NAMED
@@ -18180,7 +18249,7 @@ impl<'a> Lower<'a> {
                         // default. It handles the all-supplied case too (reorder + positional). A named call
                         // it can't map returns `None` (skip) — do NOT fall through to the positional path,
                         // which would pair the SOURCE-order args against the wrong parameters (a miscompile).
-                        return self.lower_external_new(internal, e, &args);
+                        return self.lower_external_new(&internal, e, &args);
                     } else {
                         // Constructor: the call's result type is the class.
                         let ci = self.class_of(self.info.ty(e))?;
@@ -18221,12 +18290,12 @@ impl<'a> Lower<'a> {
                         let class = if self.ir.classes[class as usize].is_annotation {
                             let impl_name = format!(
                                 "{}$annotationImpl",
-                                self.ir.classes[class as usize].fq_name
+                                self.ir.classes[class as usize].fq_name()
                             );
                             self.ir
                                 .classes
                                 .iter()
-                                .position(|c| c.fq_name == impl_name)
+                                .position(|c| c.fq_name_matches(&impl_name))
                                 .map(|p| p as u32)
                                 .unwrap_or(class)
                         } else {
@@ -18407,7 +18476,7 @@ impl<'a> Lower<'a> {
                     if let Some(ExprLowering::ObjectMemberCall { internal }) =
                         self.info.expr_lowers.get(&e)
                     {
-                        return self.lower_object_member_call(internal.clone(), &name, &args, e);
+                        return self.lower_object_member_call(*internal, &name, &args, e);
                     }
                     // `"""…""".trimIndent()` / `.trimMargin()` on a compile-time-constant string receiver:
                     // fold the stdlib transform to a string constant (kotlinc special-cases a constant
@@ -18430,10 +18499,9 @@ impl<'a> Lower<'a> {
                     }
                     // Exact named user-member calls reorder arguments before positional lowering.
                     if self.afile.call_arg_names.contains_key(&e.0) {
-                        if let Some(internal) =
-                            self.info.ty(receiver).obj_internal().map(str::to_string)
-                        {
-                            if let Some((_, _, fid, _)) = self.resolve_method(&internal, &name) {
+                        if let Some(internal) = self.info.ty(receiver).obj_internal() {
+                            if let Some((_, _, fid, _)) = self.resolve_method_name(internal, &name)
+                            {
                                 let params_len = self.ir.functions[fid as usize].params.len();
                                 let no_defaults = self
                                     .ir
@@ -18445,6 +18513,7 @@ impl<'a> Lower<'a> {
                                 // an overload the class map didn't keep degrades to a skip, not a miscompile.
                                 // A method WITH defaults keeps the existing default/positional path.
                                 if no_defaults {
+                                    let internal = internal.render();
                                     let no_vararg = !self.syms.method_is_vararg(&internal, &name);
                                     if args.len() == params_len && no_vararg {
                                         return self.lower_named_member_call(
@@ -18463,8 +18532,12 @@ impl<'a> Lower<'a> {
                         {
                             if let Some(internal) =
                                 self.nested_ctor_internal(receiver, &name).filter(|i| {
-                                    !self.classes.contains_key(i)
-                                        && self.info.ty(e).obj_internal() == Some(i.as_str())
+                                    !self.contains_class(i)
+                                        && self
+                                            .info
+                                            .ty(e)
+                                            .obj_internal()
+                                            .is_some_and(|n| n.matches(i.as_str()))
                                 })
                             {
                                 // NAMED args (`Op.Ext(a = 1, b = "x")`, or omitting a defaulted param) map
@@ -18508,7 +18581,7 @@ impl<'a> Lower<'a> {
                             return None;
                         }
                         let cur = self.cur_class.clone()?;
-                        let cur_id = self.classes.get(&cur)?.id as usize;
+                        let cur_id = self.class_info(&cur)?.id as usize;
                         // A `super.f()` inside a `@JvmInline value class` calls through the unboxed
                         // receiver, which invokespecial can't target — not modeled (value classes are
                         // handled by the dedicated pass); skip rather than emit a verify error.
@@ -18530,7 +18603,7 @@ impl<'a> Lower<'a> {
                         }
                         return Some(self.emit_call(
                             Callee::Special {
-                                owner: target.owner,
+                                owner: target.owner.render(),
                                 name: name.clone(),
                                 descriptor,
                                 interface: target.interface,
@@ -18589,7 +18662,7 @@ impl<'a> Lower<'a> {
                         .info
                         .ty(e)
                         .obj_internal()
-                        .and_then(|i| self.classes.get(i))
+                        .and_then(|i| self.class_info_name(i))
                         .map(|ci| ci.id)
                         .filter(|&id| {
                             let c = &self.ir.classes[id as usize];
@@ -18601,7 +18674,7 @@ impl<'a> Lower<'a> {
                                 }
                                 _ => None,
                             };
-                            c.fq_name.ends_with(&format!("${name}"))
+                            c.fq_name().ends_with(&format!("${name}"))
                                 && this0_outer == self.info.ty(receiver).obj_internal()
                         })
                     {
@@ -18633,7 +18706,7 @@ impl<'a> Lower<'a> {
                         let iterable = rty.array_elem().is_some()
                             || rty == Ty::String
                             || rty.obj_internal().map_or(false, |i| {
-                                self.runtime.counted_loop_info(i).is_some()
+                                self.runtime.counted_loop_info(&i.render()).is_some()
                                     || self.info.iterator_protocol(receiver).is_some()
                             });
                         if iterable {
@@ -18805,8 +18878,7 @@ impl<'a> Lower<'a> {
                     if let Expr::Name(root) = self.afile.expr(receiver).clone() {
                         if self.lookup(&root).is_none() {
                             let qname = format!("{root}.{name}");
-                            if let Some(ci) = self.classes.get(&class_internal(self.afile, &qname))
-                            {
+                            if let Some(ci) = self.class_info(&class_internal(self.afile, &qname)) {
                                 let class = ci.id;
                                 let ctor_count =
                                     self.ir.classes[class as usize].ctor_param_count as usize;
@@ -18856,9 +18928,8 @@ impl<'a> Lower<'a> {
                                 cd.is_some_and(|cd| self.serializable_uses_companion_accessor(cd));
                             if is_serializable && self.lookup(&cls).is_none() {
                                 if let Some(internal) = self
-                                    .classes
-                                    .get(&class_internal(self.afile, &cls))
-                                    .map(|ci| self.ir.classes[ci.id as usize].fq_name.clone())
+                                    .class_info(&class_internal(self.afile, &cls))
+                                    .map(|ci| self.ir.classes[ci.id as usize].fq_name())
                                 {
                                     let ret = ty_to_ir(Ty::obj_args(
                                         "kotlinx/serialization/KSerializer",
@@ -18872,12 +18943,11 @@ impl<'a> Lower<'a> {
                                     }
                                     if companion_routed {
                                         let comp = format!("{internal}$Companion");
-                                        let recv =
-                                            self.ir.add_expr(IrExpr::ExternalStaticInstance {
-                                                owner: internal.clone(),
-                                                ty: comp.clone(),
-                                                field: "Companion".to_string(),
-                                            });
+                                        let recv = self.ir.external_static_instance(
+                                            &internal,
+                                            &comp,
+                                            "Companion",
+                                        );
                                         return Some(self.ir.add_expr(IrExpr::Call {
                                             callee: Callee::CrossFileVirtual {
                                                 owner: comp,
@@ -19111,7 +19181,7 @@ impl<'a> Lower<'a> {
                     }
                     if let Expr::Name(rn) = self.afile.expr(receiver).clone() {
                         let internal = class_internal(self.afile, &rn);
-                        if let Some(ci) = self.classes.get(&internal) {
+                        if let Some(ci) = self.class_info(&internal) {
                             let cls = ci.id;
                             if !self.ir.classes[cls as usize].enum_entries.is_empty() {
                                 if name == "values" && args.is_empty() {
@@ -19142,6 +19212,7 @@ impl<'a> Lower<'a> {
                             return None;
                         }
                         let recv = self.expr(receiver)?;
+                        let owner = owner.render();
                         if let Some((class, index, _fid, mret)) =
                             self.link_local_method(&owner, &target, &params)
                         {
@@ -19206,8 +19277,11 @@ impl<'a> Lower<'a> {
                         let member = resolved.member;
                         let physical_ret = member.physical_ret;
                         let mparams = member.params.clone();
-                        let owner = member.owner.clone().unwrap_or_else(|| {
-                            rt.obj_internal().unwrap_or("kotlin/Any").to_string()
+                        let owner = member.owner.unwrap_or_else(|| {
+                            rt.obj_internal()
+                                .map(|n| n.render())
+                                .unwrap_or_else(|| "kotlin/Any".to_string())
+                                .into()
                         });
                         // Fewer arguments than the resolved member has parameters means a DEFAULTED
                         // argument was omitted, but the `$default` path above (`lower_library_default_member_
@@ -19278,7 +19352,7 @@ impl<'a> Lower<'a> {
                         };
                         let call = self.emit_library_member_call(
                             recv,
-                            owner,
+                            owner.render(),
                             member,
                             ret,
                             resolved.suspend,
@@ -19298,7 +19372,7 @@ impl<'a> Lower<'a> {
                         })
                     } {
                         let (internal, m) = m;
-                        let owner = m.owner.unwrap_or(internal);
+                        let owner = m.owner_name_or(&internal);
                         let vararg_arr = m.params.last().copied().filter(|last| {
                             last.array_elem().is_some()
                                 && !(args.len() == m.params.len()
@@ -19428,7 +19502,8 @@ impl<'a> Lower<'a> {
                         // NOT an argument. The checker recorded it; the lowerer has no other path for it
                         // (emitting it static would leave the receiver on the operand stack → `VerifyError`).
                         let phys = c.physical_ret;
-                        let interface = self.library_type_is_interface(&c.owner);
+                        let owner = c.owner_name();
+                        let interface = self.library_type_is_interface(&owner);
                         let recv = self.expr(receiver)?;
                         let mut a = Vec::new();
                         for (i, &arg) in args.iter().enumerate() {
@@ -19437,14 +19512,8 @@ impl<'a> Lower<'a> {
                                 None => a.push(self.expr(arg)?),
                             }
                         }
-                        let call = self.emit_virtual_call(
-                            c.owner,
-                            c.name,
-                            c.descriptor,
-                            interface,
-                            recv,
-                            a,
-                        );
+                        let call =
+                            self.emit_virtual_call(owner, c.name, c.descriptor, interface, recv, a);
                         self.coerce_generic_read(call, e, phys)
                     } else {
                         // A private `@InlineOnly` extension (scope fn / `String.uppercase()`) is recorded
@@ -19746,7 +19815,7 @@ fn ctor_default_to_ir(
         CtorDefaultValue::Null => IrExpr::Const(IrConst::Null),
         CtorDefaultValue::Object(internal) => {
             let field = runtime.object_instance_field(internal)?;
-            platform_field_expr(field)
+            return Some(platform_field_expr(ir, field));
         }
     };
     Some(ir.add_expr(e))
@@ -19788,12 +19857,8 @@ impl crate::synthetics::SyntheticIrBuilder for Lower<'_> {
     }
 }
 
-fn platform_field_expr(field: PlatformField) -> IrExpr {
-    IrExpr::ExternalStaticField {
-        owner: field.owner,
-        name: field.name,
-        descriptor: field.descriptor,
-    }
+fn platform_field_expr(ir: &mut IrFile, field: PlatformField) -> ExprId {
+    ir.external_static_field(&field.owner, field.name, field.descriptor)
 }
 
 /// Const-fold a primary-constructor default-value expression to an [`IrConst`] for the serialization
@@ -20456,7 +20521,11 @@ fn runtime_annotation_decl<'a>(file: &'a ast::File, name: &str) -> Option<&'a as
 
 /// Fold an annotation argument expression to an encodable `AnnoValue` (JVMS §4.7.16.1), or `None` for a
 /// shape not modeled — in which case the whole annotation is dropped (never emitted with a wrong value).
-fn eval_anno_value(file: &ast::File, e: AstExprId) -> Option<crate::ir::AnnoValue> {
+fn eval_anno_value(
+    file: &ast::File,
+    ir: &crate::ir::IrFile,
+    e: AstExprId,
+) -> Option<crate::ir::AnnoValue> {
     use crate::ir::{AnnoValue, IrConst};
     Some(match file.expr(e) {
         Expr::StringLit(s) => AnnoValue::Const(IrConst::String(s.clone())),
@@ -20472,7 +20541,8 @@ fn eval_anno_value(file: &ast::File, e: AstExprId) -> Option<crate::ir::AnnoValu
                 return None;
             };
             file_class_decl(file, enum_name).filter(|c| c.kind == ast::ClassKind::Enum)?;
-            AnnoValue::Enum(class_internal(file, enum_name), name.clone())
+            let internal = class_internal(file, enum_name);
+            AnnoValue::Enum(type_name(&internal), name.clone())
         }
         // `A::class` — a class literal.
         Expr::CallableRef {
@@ -20482,7 +20552,8 @@ fn eval_anno_value(file: &ast::File, e: AstExprId) -> Option<crate::ir::AnnoValu
             let Expr::Name(cn) = file.expr(*r) else {
                 return None;
             };
-            AnnoValue::Class(class_internal(file, cn))
+            let internal = class_internal(file, cn);
+            AnnoValue::Class(type_name(&internal))
         }
         Expr::Call { callee, args } => {
             let Expr::Name(fname) = file.expr(*callee) else {
@@ -20493,11 +20564,11 @@ fn eval_anno_value(file: &ast::File, e: AstExprId) -> Option<crate::ir::AnnoValu
                 "arrayOf" | "intArrayOf" | "longArrayOf" | "doubleArrayOf" | "floatArrayOf"
                 | "booleanArrayOf" | "charArrayOf" | "byteArrayOf" | "shortArrayOf" => {
                     let items: Option<Vec<_>> =
-                        args.iter().map(|&a| eval_anno_value(file, a)).collect();
+                        args.iter().map(|&a| eval_anno_value(file, ir, a)).collect();
                     AnnoValue::Array(items?)
                 }
                 // A NESTED annotation instance `A(...)`.
-                _ => AnnoValue::Annotation(build_applied_annotation(file, fname, args)?),
+                _ => AnnoValue::Annotation(build_applied_annotation(file, fname, args, ir)?),
             }
         }
         _ => return None,
@@ -20511,15 +20582,16 @@ fn build_applied_annotation(
     file: &ast::File,
     name: &str,
     args: &[AstExprId],
+    ir: &crate::ir::IrFile,
 ) -> Option<crate::ir::AppliedAnnotation> {
     let cd = runtime_annotation_decl(file, name)?;
     let mut values = Vec::new();
     for (i, &arg) in args.iter().enumerate() {
         let pname = cd.props.get(i)?.name.clone();
-        values.push((pname, eval_anno_value(file, arg)?));
+        values.push((pname, eval_anno_value(file, ir, arg)?));
     }
     Some(crate::ir::AppliedAnnotation {
-        internal: class_internal(file, name),
+        internal: type_name(&class_internal(file, name)),
         values,
     })
 }
@@ -20528,11 +20600,12 @@ fn build_applied_annotations(
     file: &ast::File,
     names: &[String],
     args: &[Vec<AstExprId>],
+    ir: &crate::ir::IrFile,
 ) -> Vec<crate::ir::AppliedAnnotation> {
     names
         .iter()
         .zip(args.iter())
-        .filter_map(|(name, args)| build_applied_annotation(file, name, args))
+        .filter_map(|(name, args)| build_applied_annotation(file, name, args, ir))
         .collect()
 }
 
@@ -20542,19 +20615,20 @@ fn class_field_annotations(
     file: &ast::File,
     c: &ast::ClassDecl,
     syms: &FrontendSymbols,
+    ir: &crate::ir::IrFile,
 ) -> Vec<crate::ir::FieldAnnotations> {
     let mut out = Vec::new();
     for e in &c.enum_entries {
         let mut visible = Vec::new();
         let mut invisible = Vec::new();
         for (n, a) in e.annotations.iter().zip(e.annotation_args.iter()) {
-            match resolve_field_annotation(file, syms, n, a) {
+            match resolve_field_annotation(file, syms, n, a, ir) {
                 Some((anno, Retention::Runtime)) => visible.push(anno),
                 Some((anno, Retention::Binary)) => invisible.push(anno),
                 // SAME-FILE RUNTIME annotations still resolve through build_applied_annotation directly
                 // when the classpath path can't (a file-local annotation class isn't on the classpath).
                 None => {
-                    if let Some(anno) = build_applied_annotation(file, n, a) {
+                    if let Some(anno) = build_applied_annotation(file, n, a, ir) {
                         visible.push(anno);
                     }
                 }
@@ -20588,6 +20662,7 @@ fn resolve_field_annotation(
     syms: &FrontendSymbols,
     name: &str,
     args: &[AstExprId],
+    ir: &crate::ir::IrFile,
 ) -> Option<(crate::ir::AppliedAnnotation, Retention)> {
     let internal = file.imports.iter().find_map(|imp| {
         let cand = imp.replace('.', "/");
@@ -20607,17 +20682,24 @@ fn resolve_field_annotation(
     let mut values = Vec::new();
     for (i, &arg) in args.iter().enumerate() {
         let ename = elements.get(i)?.0.clone();
-        values.push((ename, eval_anno_value(file, arg)?));
+        values.push((ename, eval_anno_value(file, ir, arg)?));
     }
-    Some((crate::ir::AppliedAnnotation { internal, values }, retention))
+    Some((
+        crate::ir::AppliedAnnotation {
+            internal: type_name(&internal),
+            values,
+        },
+        retention,
+    ))
 }
 
 /// The RUNTIME-retained applied annotations on a class declaration, folded for `RuntimeVisibleAnnotations`.
 fn class_applied_annotations(
     file: &ast::File,
     c: &ast::ClassDecl,
+    ir: &crate::ir::IrFile,
 ) -> Vec<crate::ir::AppliedAnnotation> {
-    build_applied_annotations(file, &c.annotations, &c.annotation_args)
+    build_applied_annotations(file, &c.annotations, &c.annotation_args, ir)
 }
 
 /// Extract the BACKEND-AGNOSTIC generic-signature shape of a generic class (`class Box<T>`), or `None`
@@ -20703,7 +20785,7 @@ fn resolve_super_internal(
     }
     // The signature phase's import-driven resolution already recorded this name → internal (a classpath
     // supertype resolves through the file's imports/default packages), so read it back here.
-    class_names.get(name).cloned()
+    class_names.get(name).map(TypeName::render)
 }
 
 /// For a generic class, list `(field name, type-parameter name)` for each property whose declared type
@@ -20835,7 +20917,7 @@ fn field_ty_with_args(file: &ast::File, tr: &ast::TypeRef, plat: &dyn SemanticPl
                 .iter()
                 .map(|a| field_ty_with_args(file, a, plat))
                 .collect();
-            Ty::obj_args(fq, &targs)
+            Ty::obj_args(&fq.render(), &targs)
         }
         _ => base.non_null(),
     };
@@ -21053,19 +21135,27 @@ fn ir_array_element(t: &Ty) -> Option<Ty> {
     let Some(fq_name) = t.non_null().obj_internal() else {
         return None;
     };
-    if fq_name == "kotlin/Array" {
+    if fq_name.matches("kotlin/Array") {
         return t.non_null().type_args().first().copied();
     }
-    let prim = match fq_name {
-        "kotlin/IntArray" => "kotlin/Int",
-        "kotlin/LongArray" => "kotlin/Long",
-        "kotlin/DoubleArray" => "kotlin/Double",
-        "kotlin/FloatArray" => "kotlin/Float",
-        "kotlin/BooleanArray" => "kotlin/Boolean",
-        "kotlin/CharArray" => "kotlin/Char",
-        "kotlin/ByteArray" => "kotlin/Byte",
-        "kotlin/ShortArray" => "kotlin/Short",
-        _ => return None,
+    let prim = if fq_name.matches("kotlin/IntArray") {
+        "kotlin/Int"
+    } else if fq_name.matches("kotlin/LongArray") {
+        "kotlin/Long"
+    } else if fq_name.matches("kotlin/DoubleArray") {
+        "kotlin/Double"
+    } else if fq_name.matches("kotlin/FloatArray") {
+        "kotlin/Float"
+    } else if fq_name.matches("kotlin/BooleanArray") {
+        "kotlin/Boolean"
+    } else if fq_name.matches("kotlin/CharArray") {
+        "kotlin/Char"
+    } else if fq_name.matches("kotlin/ByteArray") {
+        "kotlin/Byte"
+    } else if fq_name.matches("kotlin/ShortArray") {
+        "kotlin/Short"
+    } else {
+        return None;
     };
     Some(Ty::obj(prim))
 }

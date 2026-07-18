@@ -6,7 +6,7 @@ use krusty::jvm::classpath::Classpath;
 use krusty::jvm::jvm_libraries::JvmLibraries;
 use krusty::jvm::metadata::{package_functions, parse_builtins};
 use krusty::symbol_resolver::{SymRecv, Symbol, SymbolResolver};
-use krusty::types::Ty;
+use krusty::types::{type_name, Ty};
 use std::rc::Rc;
 
 use super::common;
@@ -30,17 +30,17 @@ fn collection_factory_return_types_distinguish_mutable() {
     };
     assert_eq!(
         ret("listOf"),
-        Some("kotlin/collections/List"),
+        Some(type_name("kotlin/collections/List")),
         "listOf must decode to the read-only List from @Metadata"
     );
     assert_eq!(
         ret("mutableListOf"),
-        Some("kotlin/collections/MutableList"),
+        Some(type_name("kotlin/collections/MutableList")),
         "mutableListOf must decode to MutableList from @Metadata (JVM signature erases both to java/util/List)"
     );
-    assert_eq!(ret("emptyList"), Some("kotlin/collections/List"));
+    assert_eq!(ret("emptyList"), Some(type_name("kotlin/collections/List")));
     // A type stored directly in the d2 string table (not a predefined) still resolves.
-    assert_eq!(ret("arrayListOf"), Some("java/util/ArrayList"));
+    assert_eq!(ret("arrayListOf"), Some(type_name("java/util/ArrayList")));
 }
 
 #[test]
