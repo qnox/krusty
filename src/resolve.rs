@@ -585,6 +585,13 @@ impl SymbolTable {
         }
         out
     }
+
+    pub fn supertype_methods_name(&self, internal: TypeName) -> Vec<(String, Signature)> {
+        let mut out = Vec::new();
+        self.collect_super_methods(internal, &mut out);
+        out
+    }
+
     fn collect_super_methods(&self, internal: TypeName, out: &mut Vec<(String, Signature)>) {
         let Some(c) = self.class_by_type_name(internal) else {
             return;
@@ -3320,8 +3327,7 @@ fn delegated_getvalue_ret_for_signature(
     if internal.starts_with("kotlin/reflect/") {
         return None;
     }
-    let internal = internal.render();
-    if let Some(sig) = table.method_of(&internal, "getValue") {
+    if let Some(sig) = table.method_of_name(internal, "getValue") {
         return Some(sig.ret);
     }
     let module = crate::module_symbols::ModuleSymbols::new(table);
@@ -5234,13 +5240,13 @@ pub fn check_file_at(
                 }
                 let methods: Vec<&FunDecl> = cl.methods.iter().collect();
                 c.check_no_erased_clash(&methods, false);
-                if let Some(internal) = syms.classes.get(&cl.name).map(ClassSig::internal) {
-                    c.check_no_bridge_needed(&internal, cl.span);
+                if let Some(internal) = syms.classes.get(&cl.name).map(ClassSig::internal_name) {
+                    c.check_no_bridge_needed(internal, cl.span);
                     // A `data class` implementing an interface that declares `copy`/`componentN` would
                     // need bridges for its *synthesized* members (which return the class itself, not
                     // the supertype) — krusty doesn't emit those, so reject (cleanly skip).
                     if cl.is_data {
-                        let supers = syms.supertype_methods(&internal);
+                        let supers = syms.supertype_methods_name(internal);
                         if let Some((sn, _)) = supers
                             .iter()
                             .find(|(sn, _)| sn == "copy" || sn.starts_with("component"))
@@ -7450,11 +7456,11 @@ impl<'a> Checker<'a> {
     /// signature comes from an interface. The JVM resolves such a call via the supertype's descriptor
     /// and would need a synthetic bridge method, which krusty does not emit — so the file is cleanly
     /// skipped rather than throwing `AbstractMethodError` at runtime.
-    fn check_no_bridge_needed(&mut self, internal: &str, span: Span) {
-        let supers = self.syms.supertype_methods(internal);
+    fn check_no_bridge_needed(&mut self, internal: TypeName, span: Span) {
+        let supers = self.syms.supertype_methods_name(internal);
         let obj = Ty::obj("kotlin/Any");
         for (name, ssig) in &supers {
-            let Some(impl_sig) = self.syms.method_of(internal, name) else {
+            let Some(impl_sig) = self.syms.method_of_name(internal, name) else {
                 continue;
             };
             // A supertype method wants a `@JvmInline value class` return (unboxed), but the concrete
@@ -8118,17 +8124,16 @@ impl<'a> Checker<'a> {
                 // for an `override` of an inherited member (a base class OR an implemented interface, e.g.
                 // an enum entry overriding an interface method) — that member's declared return type.
                 if let Some(Ty::Obj(internal, _)) = self.this_ty {
-                    let internal = internal.render();
                     if let Some(sig) = self
                         .syms
-                        .class_by_internal(&internal)
+                        .class_by_type_name(internal)
                         .and_then(|c| c.methods.get(&f.name))
                     {
                         return sig.ret;
                     }
                     if let Some((_, sig)) = self
                         .syms
-                        .supertype_methods(&internal)
+                        .supertype_methods_name(internal)
                         .into_iter()
                         .find(|(n, _)| n == &f.name)
                     {
@@ -8315,8 +8320,7 @@ impl<'a> Checker<'a> {
         if internal.starts_with("__ty/") {
             return None;
         }
-        let internal = internal.render();
-        let lt = self.resolved_type(&internal)?;
+        let lt = self.resolved_type_name(internal)?;
         let (_, companion_ty) = lt.companion_object?;
         Some(Ty::obj_name(companion_ty))
     }
@@ -10340,13 +10344,12 @@ impl<'a> Checker<'a> {
                         // captures `this` = value 0 in `lower_method_ref`/`lower_prop_ref`).
                         if rn == "this" {
                             if let Some(Ty::Obj(internal, _)) = self.this_ty {
-                                let internal = internal.render();
-                                if let Some(sig) = self.syms.method_of(&internal, &name) {
+                                if let Some(sig) = self.syms.method_of_name(internal, &name) {
                                     if sig.requires_all_args() {
                                         return self.set(e, Ty::fun(sig.params.clone(), sig.ret));
                                     }
                                 }
-                                if let Some((_, is_var)) = self.lookup_prop(&internal, &name) {
+                                if let Some((_, is_var)) = self.lookup_prop_name(internal, &name) {
                                     if let Some(ty) = self.property_ref_ty(0, is_var) {
                                         return self.set(e, ty);
                                     }
@@ -10363,9 +10366,8 @@ impl<'a> Checker<'a> {
                                     }
                                 }
                                 // bound property reference `obj::prop` keeps property-reference APIs.
-                                let internal = internal.to_string();
                                 if let Some(is_var) =
-                                    self.syms.class_by_internal(&internal).and_then(|c| {
+                                    self.syms.class_by_type_name(internal).and_then(|c| {
                                         c.props
                                             .iter()
                                             .find_map(|(n, _, v)| (*n == name).then_some(*v))
@@ -10380,7 +10382,7 @@ impl<'a> Checker<'a> {
                                 // `KProperty0`; the lowerer synthesizes a reference calling the static
                                 // extension getter/setter with the captured receiver.
                                 if let Some((_, is_var)) =
-                                    self.syms.ext_prop(Ty::obj(&internal), &name)
+                                    self.syms.ext_prop(Ty::obj_name(internal), &name)
                                 {
                                     self.expr(r); // capture the receiver
                                     if let Some(ty) = self.property_ref_ty(0, is_var) {
@@ -10995,9 +10997,8 @@ impl<'a> Checker<'a> {
             // A `vararg` member (`fun f(vararg s: T)`) accepts any number of trailing `T` arguments,
             // packed into the array parameter — element-type them rather than matching the single array
             // parameter positionally (which would reject `f(x)` as "T but Array<T> expected").
-            let internal = internal.render();
-            if self.syms.method_is_vararg(&internal, name) {
-                if let Some(sig) = self.syms.method_of(&internal, name) {
+            if self.syms.method_is_vararg_name(*internal, name) {
+                if let Some(sig) = self.syms.method_of_name(*internal, name) {
                     let n_fixed = sig.params.len().saturating_sub(1);
                     if arg_tys.len() >= n_fixed {
                         self.expect_call_args(&sig.params, true, args, arg_tys);
@@ -14768,7 +14769,7 @@ impl<'a> Checker<'a> {
                             // positionally.
                             let vararg = self
                                 .syms
-                                .method_of(&internal_rendered, &fname)
+                                .method_of_name(internal, &fname)
                                 .is_some_and(|s| s.vararg);
                             self.expect_call_args(&params, vararg, args, &arg_tys);
                             // An EXPRESSION-body sibling method whose declared return was the collection
@@ -14800,10 +14801,9 @@ impl<'a> Checker<'a> {
                                 .next()
                             {
                                 self.narrowed_this_member.insert(call, bi);
-                                let bi_rendered = bi.render();
                                 let vararg = self
                                     .syms
-                                    .method_of(&bi_rendered, &fname)
+                                    .method_of_name(bi, &fname)
                                     .is_some_and(|s| s.vararg);
                                 self.expect_call_args(&m.params, vararg, args, &arg_tys);
                                 return self
@@ -15800,9 +15800,7 @@ impl<'a> Checker<'a> {
                     match rt {
                         Ty::Error => {}
                         Ty::Obj(internal, _) => {
-                            if let Some((lty, is_var)) =
-                                self.syms.prop_of(&internal.render(), &name)
-                            {
+                            if let Some((lty, is_var)) = self.syms.prop_of_name(internal, &name) {
                                 if !is_var {
                                     self.diags
                                         .error(span, "'val' cannot be reassigned.".to_string());
