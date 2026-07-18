@@ -11819,8 +11819,10 @@ impl<'a> Lower<'a> {
     /// only) miss, erasing the field/getter/componentN to `Object`. `enclosing` is the outer class's
     /// source name (`Outer`, or `Outer.Mid` for a deeper nesting).
     fn field_ty_in(&self, file: &ast::File, r: &ast::TypeRef, enclosing: &str) -> Ty {
-        let base = self.field_ty(file, r);
-        if (base.is_erased_top() || base == Ty::Error) && !r.name.contains('.') {
+        // Kotlin nested-type scoping: an UNQUALIFIED simple name referring to the enclosing class's own
+        // nested type SHADOWS a top-level/imported type of the same name — resolve the nested form FIRST
+        // (consistent with the checker's `enclosing_nested_type`; `ty_of`/`field_ty` see only top-level).
+        if !r.name.contains('.') {
             let nested = format!("{enclosing}.{}", r.name);
             if file
                 .decls
@@ -11830,7 +11832,7 @@ impl<'a> Lower<'a> {
                 return Ty::obj(&class_internal(file, &nested));
             }
         }
-        base
+        self.field_ty(file, r)
     }
 
     fn field_ty(&self, file: &ast::File, r: &ast::TypeRef) -> Ty {

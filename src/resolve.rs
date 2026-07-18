@@ -1552,12 +1552,11 @@ pub fn collect_signatures_with_cp(
                         for &nd in &file.decls {
                             if let Decl::Class(nc) = file.decl(nd) {
                                 if let Some(seg) = nc.name.strip_prefix(&prefix) {
-                                    // Only bring the nested type into scope when its simple name does NOT
-                                    // already resolve to a top-level/imported type — a same-name collision
-                                    // (`class Foo; class Outer { class Foo }`) is left to the top-level
-                                    // resolution, so the signature checker and the lowerer's `ty_ref`
-                                    // (both last-resort on nested) agree (no checker/codegen mismatch).
-                                    if !seg.contains('.') && !ext.contains_key(seg) {
+                                    // Kotlin nested-type scoping: the enclosing class's own nested type
+                                    // SHADOWS a same-named top-level/imported type — insert unconditionally
+                                    // (overwriting any top-level entry). Consistent with the checker's
+                                    // `enclosing_nested_type` and the lowerer's `field_ty_in`.
+                                    if !seg.contains('.') {
                                         let ni = class_names
                                             .get(&nc.name)
                                             .cloned()
@@ -6945,6 +6944,27 @@ impl<'a> Checker<'a> {
         resolve_nested_internal(internal, &source)
     }
 
+    /// The internal name of an ENCLOSING class's nested type named `name` (`Inner` inside `Outer` →
+    /// `Outer$Inner`), walking outward through the current `this_ty`'s `$`-separated enclosing chain
+    /// (nearest first). `None` if no enclosing class declares such a nested type — the scope in which a
+    /// nested type SHADOWS a same-named top-level (Kotlin nested-type scoping).
+    fn enclosing_nested_type(&self, name: &str) -> Option<String> {
+        let Some(Ty::Obj(outer, _)) = self.this_ty else {
+            return None;
+        };
+        let mut prefix: &str = outer;
+        loop {
+            let cand = format!("{prefix}${name}");
+            if self.syms.classes.values().any(|s| s.internal == cand) {
+                return Some(cand);
+            }
+            match prefix.rsplit_once('$') {
+                Some((p, _)) => prefix = p,
+                None => return None,
+            }
+        }
+    }
+
     /// If a bare type name `n` denotes a reference type usable as an UNBOUND class literal `n::class`,
     /// its `Ty`. Resolves the same way [`Self::resolve_ty_no_diag`] does (built-in `from_name` types + user
     /// classes) — deliberately NOT via the global simple-name index, which falsely collides names like
@@ -7008,6 +7028,12 @@ impl<'a> Checker<'a> {
             }
         } else if self.tparams.contains(&r.name) {
             self.tparams.erase(&r.name) // erased generic type parameter (primitive if `<T: Int>`)
+        } else if let Some(internal) = self.enclosing_nested_type(&r.name) {
+            // Kotlin nested-type scoping: an UNQUALIFIED name that names one of the ENCLOSING class's own
+            // nested types SHADOWS a same-named top-level/imported type — so resolve the nested form FIRST
+            // (before the global `syms.classes`/import lookups). Drives both this type position AND, via
+            // `info.ty`, the construction-expression lowering, keeping them consistent.
+            self.obj_with_targs(&internal, r)
         } else if let Some(cs) = self.syms.classes.get(&r.name) {
             let internal = cs.internal.clone();
             self.obj_with_targs(&internal, r)

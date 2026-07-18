@@ -546,6 +546,8 @@ mod nested_string_template_e2e;
 mod nested_try_finally_e2e;
 #[path = "nested_type_scope_e2e.rs"]
 mod nested_type_scope_e2e;
+#[path = "nested_type_shadowing_e2e.rs"]
+mod nested_type_shadowing_e2e;
 #[path = "newline_method_chain_e2e.rs"]
 mod newline_method_chain_e2e;
 #[path = "not_null_assert_e2e.rs"]
