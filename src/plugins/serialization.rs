@@ -1637,9 +1637,8 @@ impl IrPlugin for SerializationPlugin {
                         _ => *ty,
                     })
                     .collect();
-                // kotlinc's bit-mask is one `int` per 32 properties (`(n+31)/32`, min 1) — a class with
-                // >32 serialized fields carries multiple leading seq-mask ints.
-                let n_masks = foo_fields.len().max(1).div_ceil(32);
+                // kotlinc always emits one seen-mask slot past the last full 32-field group.
+                let n_masks = foo_fields.len() / 32 + 1;
                 let mut deser_params = vec![Ty::Int; n_masks];
                 deser_params.extend(deser_field_tys.iter().cloned());
                 deser_params.push(class_ty(
@@ -2831,6 +2830,26 @@ mod tests {
                 "typeParametersSerializers"
             ]
         );
+    }
+
+    #[test]
+    fn deser_ctor_seq_mask_count_is_floor_div_32_plus_1() {
+        for (n, expect) in [(1usize, 1usize), (31, 1), (32, 2), (33, 2), (64, 3)] {
+            let tys: Vec<&str> = std::iter::repeat_n("kotlin/String", n).collect();
+            let (mut ir, ctx, _) = serializable_class("demo/M", &tys);
+            run(&mut ir, &ctx);
+            let ctor = find_class(&ir, "demo/M")
+                .secondary_ctors
+                .iter()
+                .find(|c| c.synthetic)
+                .expect("synthetic deserialization ctor");
+            let masks = ctor.params.iter().take_while(|t| **t == Ty::Int).count();
+            assert_eq!(
+                masks, expect,
+                "n={n} fields: expected {expect} seq-mask ints"
+            );
+            assert_eq!(ctor.params.len(), expect + n + 1, "n={n} total ctor params");
+        }
     }
 
     #[test]

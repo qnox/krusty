@@ -153,6 +153,35 @@ fun box(): String {
 }
 
 #[test]
+fn serial_name_with_dollar_char_template_round_trips_in_krusty() {
+    let src = r#"import kotlinx.serialization.SerialName
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.Json
+
+@Serializable
+data class Schema(@SerialName("${'$'}ref") val ref: String)
+
+fun box(): String {
+    val expected = Schema("here")
+    val json = Json.encodeToString(Schema.serializer(), expected)
+    if (json != "{\"\$ref\":\"here\"}") return "Fail-encode: $json"
+    val actual = Json.decodeFromString(Schema.serializer(), json)
+    if (expected != actual) return "Fail-decode: $actual"
+    return "OK"
+}
+"#;
+    let Some((stdout, stderr)) = run_box_in_krusty(src, "SerDollar") else {
+        eprintln!("skipping: serialization runtime / JAVA_HOME not located");
+        return;
+    };
+    assert!(
+        stdout == "OK",
+        "@SerialName $-char-template round-trip wrong.\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    eprintln!("pure-krusty @SerialName $-char-template round-trip OK");
+}
+
+#[test]
 fn reified_serializer_round_trips_entirely_in_krusty() {
     // The REIFIED form `Json.encodeToString(x)` / `Json.decodeFromString<C>(s)` (no explicit serializer
     // argument) — a `reified inline` that can't be called directly. krusty desugars it to the 2-arg
