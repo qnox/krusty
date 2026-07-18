@@ -16005,6 +16005,26 @@ impl<'a> Lower<'a> {
                         {
                             return Some(self.emit_method_call(class, index, cast, vec![]));
                         }
+                        // A CLASSPATH narrowed type (`is Drift.Missed` on a classpath sealed `Drift`) has
+                        // no IR class — the checker recorded its property getter as a `ResolvedCall::Member`;
+                        // invoke it on the cast receiver (`invokevirtual <bi>.getN()`), coercing an erased
+                        // generic return exactly as a normal member read would.
+                        if let Some(ResolvedCall::Member(resolved)) =
+                            self.info.resolved_calls.get(&e).cloned()
+                        {
+                            let member = resolved.member;
+                            let ret = resolved.ret;
+                            let physical_ret = member.physical_ret;
+                            let call = self.emit_library_member_call(
+                                cast,
+                                bi,
+                                member,
+                                ret,
+                                resolved.suspend,
+                                vec![],
+                            );
+                            return Some(self.coerce_to_static(call, ret, physical_ret));
+                        }
                         let (fclass, idx, _) = self.resolve_field(&bi, &n)?;
                         return Some(self.emit_get_field(cast, fclass, idx));
                     }

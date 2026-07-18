@@ -9332,6 +9332,24 @@ impl<'a> Checker<'a> {
                             return self.set(e, Ty::Error);
                         }
                     }
+                    // When `this` is flow-narrowed by an enclosing `if (this is B)` / `when (this) { is B }`,
+                    // kotlinc reads EVERY implicit member — inherited base members included — through the
+                    // narrowed type `B` (`checkcast this to B`, then the read). Resolve against `B` FIRST so
+                    // the emitted read matches byte-for-byte: a same-file member (lowered via B's IR
+                    // field/getter) or a classpath member (a recorded getter, invoked on the cast receiver).
+                    // `narrowed_this_member` records the checkcast target for the lowerer.
+                    if let Some(bt) = self.this_narrow {
+                        if let Some(bi) = bt.obj_internal() {
+                            if let Some((ty, _)) = self.lookup_prop(bi, &n) {
+                                self.narrowed_this_member.insert(e, bi.to_string());
+                                return self.set(e, ty);
+                            }
+                            if let Some(ty) = self.try_member_read(bt, &n, self.span(e), Some(e)) {
+                                self.narrowed_this_member.insert(e, bi.to_string());
+                                return self.set(e, ty);
+                            }
+                        }
+                    }
                     // Unqualified property of the implicit/extension receiver: `fun Box.f() = v`
                     // means `this.v` (sibling method calls already resolve via `this_ty`).
                     if let Some(Ty::Obj(internal, _)) = self.this_ty {
@@ -9359,19 +9377,6 @@ impl<'a> Checker<'a> {
                     // general member read so builtin/library members (`String.length`) resolve too.
                     if let Some(rt) = self.this_ty {
                         if let Some(ty) = self.try_member_read(rt, &n, self.span(e), Some(e)) {
-                            return self.set(e, ty);
-                        }
-                    }
-                    // The bare name is not a member of the DECLARED receiver — try the flow-narrowed
-                    // receiver from an enclosing `if (this is B)`. A member found only on `B` records
-                    // the narrowing so the lowerer inserts a `checkcast` on `this` before the read.
-                    if let Some(bt) = self.this_narrow {
-                        if let Some((ty, _)) =
-                            bt.obj_internal().and_then(|i| self.lookup_prop(i, &n))
-                        {
-                            if let Some(bi) = bt.obj_internal() {
-                                self.narrowed_this_member.insert(e, bi.to_string());
-                            }
                             return self.set(e, ty);
                         }
                     }
