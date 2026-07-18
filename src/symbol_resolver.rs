@@ -1631,7 +1631,23 @@ fn resolve_companion(
     if !t.is_public {
         return None;
     }
-    best_overload(t.companion.iter(), name, args).cloned()
+    if let Some(m) = best_overload(t.companion.iter(), name, args) {
+        return Some(m.clone());
+    }
+    // Widen each argument to the static parameter type, but only when the match is unique.
+    let mut widened = t.companion.iter().filter(|m| {
+        m.name == name
+            && m.params.len() == args.len()
+            && m.params
+                .iter()
+                .zip(args)
+                .all(|(p, a)| abi_arg_subtype_of_param(lib, *a, *p))
+    });
+    let first = widened.next()?;
+    if widened.next().is_some() {
+        return None;
+    }
+    Some(first.clone())
 }
 
 /// Resolve an instance member `recv.name(args)` — the receiver's static type must be public, but the

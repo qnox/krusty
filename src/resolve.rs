@@ -12705,6 +12705,21 @@ impl<'a> Checker<'a> {
                         .error(span, format!("krusty: unresolved super method '{name}'"));
                     return Ty::Error;
                 }
+                // Fully-qualified static call `pkg.Type.method(args)`.
+                if let Expr::Member { .. } = self.file.expr(receiver) {
+                    if let Some(fq) = qualified_path(self.file, receiver) {
+                        let leftmost = fq.split('/').next().unwrap_or("");
+                        if self.lookup(leftmost).is_none() && self.resolved_type(&fq).is_some() {
+                            let arg_tys = self.arg_tys(args);
+                            if let Some(m) = self.resolve_companion(&fq, &name, &arg_tys) {
+                                self.set(receiver, Ty::obj(&fq));
+                                let ret = m.ret;
+                                self.resolved_calls.insert(call, ResolvedCall::Companion(m));
+                                return ret;
+                            }
+                        }
+                    }
+                }
                 // Java static call: `ClassName.method(args)` where ClassName is an imported class
                 // (not a local/param) resolvable on the classpath. A top-level PROPERTY of the same name
                 // shadows the type/import in value position (`private val logger = logger {}; logger.info()`
