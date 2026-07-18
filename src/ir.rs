@@ -626,6 +626,9 @@ pub struct IrClass {
     pub is_sealed: bool,
     /// `true` for an `abstract class` (not `sealed`).
     pub is_abstract: bool,
+    /// `true` for a source `open`/`sealed` class. Needed by backends because a subclass may be emitted
+    /// from a different `IrFile`, so same-file subclass scans are not enough to decide JVM finality.
+    pub is_open: bool,
     /// Semantic superclass internal name (`kotlin/Any` normally, or a user base class for
     /// `class B : A(args)`). Target-specific representation classes such as JVM enum bases are chosen by
     /// the backend.
@@ -1472,6 +1475,7 @@ mod tests {
             annotation_impl_of: None,
             is_sealed: false,
             is_abstract: false,
+            is_open: false,
             superclass: "kotlin/Any".to_string(),
             super_args: Vec::new(),
             enum_entries: Vec::new(),

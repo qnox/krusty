@@ -80,7 +80,7 @@ impl<'a> ModuleSymbols<'a> {
             return; // a classpath supertype — not owned by the module source
         };
         if let Some(sig) = c.methods.get(name) {
-            out.push(lib_member(name, sig));
+            out.push(lib_member(name, sig, c.internal.clone(), c.is_interface));
         }
         for i in &c.interfaces {
             self.collect_member_libs(i, name, out, seen);
@@ -222,8 +222,10 @@ impl<'a> ModuleSymbols<'a> {
 /// A user [`Signature`] as a [`LibraryMember`] — the module-source shape of a class method. Carries the
 /// source call-shape (`call_sig`) so a named / omitted-default member call resolves through the type
 /// interface.
-fn lib_member(name: &str, sig: &Signature) -> LibraryMember {
+fn lib_member(name: &str, sig: &Signature, owner: String, is_interface: bool) -> LibraryMember {
     let mut m = LibraryMember::new(name.to_string(), sig.params.clone(), sig.ret, String::new());
+    m.owner = Some(owner);
+    m.is_interface = is_interface;
     m.suspend = sig.is_suspend;
     m.inline = crate::libraries::InlineKind::from_flags(sig.is_inline, false);
     m.call_sig = sig.call_sig();
@@ -347,11 +349,15 @@ impl SymbolSource for ModuleSymbols<'_> {
 
     fn resolve_type(&self, internal: &str) -> Option<LibraryType> {
         let c = self.class_by_internal(internal)?;
-        let members = c.methods.iter().map(|(n, s)| lib_member(n, s)).collect();
+        let members = c
+            .methods
+            .iter()
+            .map(|(n, s)| lib_member(n, s, c.internal.clone(), c.is_interface))
+            .collect();
         let companion = c
             .static_methods
             .iter()
-            .map(|(n, s)| lib_member(n, s))
+            .map(|(n, s)| lib_member(n, s, c.internal.clone(), c.is_interface))
             .collect();
         // The primary constructor (+ secondaries) as `<init>` members returning Unit.
         let mut constructors = vec![LibraryMember::new(

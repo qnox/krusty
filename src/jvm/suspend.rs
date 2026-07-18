@@ -3917,6 +3917,7 @@ fn build_continuation_class(
         annotation_impl_of: None,
         is_sealed: false,
         is_abstract: false,
+        is_open: false,
         superclass: CONTINUATION_IMPL.to_string(),
         super_args: vec![super_arg],
         enum_entries: vec![],

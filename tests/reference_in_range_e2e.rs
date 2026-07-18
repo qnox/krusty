@@ -1,7 +1,7 @@
 //! `x in a..b` where `a`/`b` are USER types desugars to `a.rangeTo(b).contains(x)`. A member
 //! `operator fun rangeTo` returning a range type with a member `operator fun contains` is emitted as the
-//! two operator calls; `!in` negates. Same-file, runnable. (An extension `rangeTo`/`contains` is a later
-//! slice and still skips.)
+//! two operator calls; `!in` negates. Same-file, runnable. Same-module extension `rangeTo` is selected
+//! by the checker and consumed by lowering through the recorded synthetic operator target.
 use super::common;
 fn run(src: &str) -> Option<String> {
     common::compile_and_run_with_stdlib(src, "Main")

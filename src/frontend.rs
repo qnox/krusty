@@ -13,10 +13,11 @@ pub use crate::resolve::{
     check_file, check_file_at, collect_signatures, collect_signatures_with_cp,
 };
 pub(crate) use crate::resolve::{
-    function_scope_packages, map_param_list_args, pick_overload, qualified_path, typeref_leaf,
-    ClassNames, CtorDefaultValue, DelegateGetValueTarget, ExprLowering, InlineCall, InvokeKind,
-    LambdaCapture, LambdaInfo, ReceiverLambda, ResolvedCall, ResolvedLocalFunctionCall,
-    ResolvedModuleTopLevelCall, Signature, StmtLowering,
+    pick_overload, qualified_path, typeref_leaf, ClassNames, CtorDefaultValue,
+    DelegateGetValueTarget, DestructureComponentTarget, ExprLowering, InlineCall, InvokeKind,
+    IteratorDispatchTarget, LambdaCapture, LambdaInfo, ReceiverLambda, ResolvedCall,
+    ResolvedConstructor, ResolvedLocalFunctionCall, ResolvedMember, ResolvedModuleTopLevelCall,
+    Signature, StmtLowering,
 };
 
 /// A single parsed file together with the frontend facts needed by a backend.

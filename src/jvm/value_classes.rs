@@ -1256,6 +1256,11 @@ pub fn lower_value_classes(
         if let Some(root) = f.body {
             s4_bodies.push((root, slot_types[fid].clone(), boxed_this));
         }
+        if let Some(defaults) = ir.param_defaults(fid as u32) {
+            for &root in defaults.iter().flatten() {
+                s4_bodies.push((root, slot_types[fid].clone(), boxed_this));
+            }
+        }
     }
     for (cidx, c) in ir.classes.iter().enumerate() {
         // A class's `init { … }` block runs in `<init>` over the unboxed ctor params; a regular class's
@@ -1464,6 +1469,11 @@ pub fn lower_value_classes(
         if let Some(root) = ir.functions[fid].body {
             bodies.push((root, slot_types[fid].clone()));
         }
+        if let Some(defaults) = ir.param_defaults(fid as u32) {
+            for &root in defaults.iter().flatten() {
+                bodies.push((root, slot_types[fid].clone()));
+            }
+        }
     }
     for (cidx, c) in ir.classes.iter().enumerate() {
         if let Some(root) = c.init_body {
@@ -1618,7 +1628,9 @@ pub fn lower_value_classes(
                 args,
             } = &ir.exprs[id as usize]
             {
-                if is_vc[*class as usize] {
+                if is_vc[*class as usize]
+                    || !under.contains_key(&ir.classes[*class as usize].fq_name)
+                {
                     if let Repr::Unboxed(x) = repr_ctx.repr(*receiver) {
                         ops.push((*receiver, BoxOp::Box(x)));
                     }
