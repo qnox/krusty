@@ -14934,7 +14934,31 @@ impl<'a> Checker<'a> {
                                     );
                                     callable.suspend = m.suspend;
                                     let ret = m.ret;
-                                    self.expect_call_args(&m.params, false, args, &arg_tys);
+                                    // A trailing VARARGS array parameter matched element-wise (`import
+                                    // Filters.and; and(eq(...))` → `and(Bson...)`): flag the element type so
+                                    // lowering collects the trailing args into an array, and type-check each
+                                    // element against it (not the whole array). Spread (last arg IS the
+                                    // array) keeps the fixed-arity path.
+                                    let vararg =
+                                        m.params.last().and_then(|p| p.array_elem()).filter(|_| {
+                                            m.params.len() != args.len()
+                                                || arg_tys.last() != m.params.last()
+                                        });
+                                    if let Some(elem) = vararg {
+                                        callable.vararg_elem = Some(elem);
+                                        let fixed = m.params.len() - 1;
+                                        for (i, &a) in args.iter().enumerate() {
+                                            let pt = if i < fixed { m.params[i] } else { elem };
+                                            self.expect_assignable(
+                                                pt,
+                                                arg_tys[i],
+                                                self.span(a),
+                                                "argument",
+                                            );
+                                        }
+                                    } else {
+                                        self.expect_call_args(&m.params, false, args, &arg_tys);
+                                    }
                                     self.resolved_calls
                                         .insert(call, ResolvedCall::TopLevel(callable));
                                     return ret;

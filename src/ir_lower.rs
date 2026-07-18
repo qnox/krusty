@@ -19237,13 +19237,38 @@ impl<'a> Lower<'a> {
                     } {
                         let (internal, m) = m;
                         let owner = m.owner.unwrap_or(internal);
-                        let mut a = Vec::new();
-                        for (i, &arg) in args.iter().enumerate() {
-                            match m.params.get(i) {
-                                Some(p) => a.push(self.lower_arg(arg, &ty_to_ir(*p))?),
-                                None => a.push(self.expr(arg)?),
+                        // A trailing VARARGS array parameter (`Filters.and(Bson...)`,
+                        // `Sorts.descending(String...)`, `Arrays.asList(Object...)`): the trailing element
+                        // args collect into a `new T[]{…}` (boxing each to the element type), unless the
+                        // call passes the array itself (a spread — same arity, last arg IS the array).
+                        let vararg_arr = m.params.last().copied().filter(|last| {
+                            last.array_elem().is_some()
+                                && !(args.len() == m.params.len()
+                                    && args.last().is_some_and(|&arg| self.info.ty(arg) == *last))
+                        });
+                        let a = if let Some(arr_ty) = vararg_arr {
+                            let elem = arr_ty.array_elem().unwrap();
+                            let fixed = m.params.len() - 1;
+                            let mut a = Vec::with_capacity(fixed + 1);
+                            for (&arg, &pt) in args[..fixed].iter().zip(&m.params[..fixed]) {
+                                a.push(self.lower_arg(arg, &ty_to_ir(pt))?);
                             }
-                        }
+                            let mut elems = Vec::with_capacity(args.len() - fixed);
+                            for &arg in &args[fixed..] {
+                                elems.push(self.lower_arg(arg, &ty_to_ir(elem))?);
+                            }
+                            a.push(self.emit_vararg(arr_ty, elems));
+                            a
+                        } else {
+                            let mut a = Vec::new();
+                            for (i, &arg) in args.iter().enumerate() {
+                                match m.params.get(i) {
+                                    Some(p) => a.push(self.lower_arg(arg, &ty_to_ir(*p))?),
+                                    None => a.push(self.expr(arg)?),
+                                }
+                            }
+                            a
+                        };
                         let call = self.emit_static_call(owner, m.name, m.descriptor, m.inline, a);
                         self.coerce_to_static(call, m.ret, m.physical_ret)
                     } else if let Some(c) = self.info.resolved_extension(e).cloned() {

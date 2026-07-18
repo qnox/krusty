@@ -901,6 +901,32 @@ pub(crate) fn best_overload<'a>(
                 .clone()
                 .find(|m| m.params.len() >= args.len() && m.params[..args.len()] == *args)
         })
+        .or_else(|| {
+            // A trailing VARARGS array parameter (a Java `T...` / Kotlin `vararg`, e.g.
+            // `Filters.and(Bson...)`, `Sorts.descending(String...)`): N element arguments collect into the
+            // array. Match the fixed leading params exactly (or against an erased `Object`), and each
+            // trailing argument against the array's element type. A SPREAD (the sole trailing arg IS the
+            // array itself, same arity) already matched exactly above, so exclude it here.
+            named.clone().find(|m| {
+                let Some((last, fixed)) = m.params.split_last() else {
+                    return false;
+                };
+                let Some(elem) = last.array_elem() else {
+                    return false;
+                };
+                if args.len() == m.params.len() && args.last() == Some(last) {
+                    return false; // a spread `f(*arr)` — not element-wise varargs
+                }
+                args.len() >= fixed.len()
+                    && fixed
+                        .iter()
+                        .zip(args)
+                        .all(|(p, a)| p == a || p.is_erased_top())
+                    && args[fixed.len()..]
+                        .iter()
+                        .all(|a| *a == elem || elem.is_erased_top() || a.is_erased_top())
+            })
+        })
 }
 
 impl LibraryType {

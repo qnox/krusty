@@ -18,3 +18,24 @@ fn java_static_method_imported_unqualified_resolves() {
         "OK"
     );
 }
+
+#[test]
+fn classpath_varargs_static_qualified_and_via_import() {
+    // A trailing VARARGS parameter on a classpath static (`java.util.Arrays.asList(T...)`) matched
+    // element-wise, collecting the args into an array — BOTH qualified (`Arrays.asList(1, 2, 3)`) and
+    // through a static member import (`import Arrays.asList; asList(...)`). Pervasive in the Mongo repos
+    // (`Filters.and(Bson...)`, `Sorts.descending(String...)`). krusty resolved neither before, and once
+    // resolving would emit N loose args against a 1-array-param descriptor (VerifyError) without the
+    // call-site array collection.
+    const SRC: &str = "import java.util.Arrays\n\
+        import java.util.Arrays.asList\n\
+        fun box(): String {\n\
+        \x20 val a = Arrays.asList(1, 2, 3)\n\
+        \x20 val b = asList(\"x\", \"y\")\n\
+        \x20 return if (a.size == 3 && a[2] == 3 && b.size == 2 && b[0] == \"x\") \"OK\" else \"FAIL:$a|$b\"\n\
+        }\n";
+    assert_eq!(
+        common::compile_and_run_with_stdlib(SRC, "Main").expect("classpath varargs static"),
+        "OK"
+    );
+}
