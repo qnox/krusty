@@ -49,11 +49,6 @@ fn is_smartcast_to_imported_top_level_subclass() {
 
 #[test]
 fn this_smartcast_reads_classpath_subclass_member() {
-    // `when (this) { is V.Ok -> v }` in an extension on a CLASSPATH sealed type: `this` narrows to the
-    // subclass, and the implicit member `v` (both the base `id` and the subclass-only `v`) reads through
-    // the narrowed type — `checkcast this to V$Ok; invokevirtual`, byte-for-byte kotlinc. Previously the
-    // implicit-this narrowed read only consulted same-file classes, so a classpath subclass member was
-    // "unresolved reference".
     const LIB: &str = "package q\n\
         sealed class V {\n\
         \x20 abstract val id: String\n\

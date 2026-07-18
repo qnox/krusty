@@ -9332,12 +9332,6 @@ impl<'a> Checker<'a> {
                             return self.set(e, Ty::Error);
                         }
                     }
-                    // When `this` is flow-narrowed by an enclosing `if (this is B)` / `when (this) { is B }`,
-                    // kotlinc reads EVERY implicit member — inherited base members included — through the
-                    // narrowed type `B` (`checkcast this to B`, then the read). Resolve against `B` FIRST so
-                    // the emitted read matches byte-for-byte: a same-file member (lowered via B's IR
-                    // field/getter) or a classpath member (a recorded getter, invoked on the cast receiver).
-                    // `narrowed_this_member` records the checkcast target for the lowerer.
                     if let Some(bt) = self.this_narrow {
                         if let Some(bi) = bt.obj_internal() {
                             if let Some((ty, _)) = self.lookup_prop(bi, &n) {

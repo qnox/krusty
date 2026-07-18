@@ -16005,10 +16005,6 @@ impl<'a> Lower<'a> {
                         {
                             return Some(self.emit_method_call(class, index, cast, vec![]));
                         }
-                        // A CLASSPATH narrowed type (`is Drift.Missed` on a classpath sealed `Drift`) has
-                        // no IR class — the checker recorded its property getter as a `ResolvedCall::Member`;
-                        // invoke it on the cast receiver (`invokevirtual <bi>.getN()`), coercing an erased
-                        // generic return exactly as a normal member read would.
                         if let Some(ResolvedCall::Member(resolved)) =
                             self.info.resolved_calls.get(&e).cloned()
                         {
