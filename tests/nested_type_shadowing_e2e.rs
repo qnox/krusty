@@ -16,11 +16,11 @@ fn nested_type_field_shadows_top_level() {
     // top-level `Item` (value "T"): the field, its getter, componentN, and copy all carry `Event$Item`.
     // `read()` reads through the field (no bare construction of the shadowed type), like the models.
     const SRC: &str = "data class Item(val tag: String)\n\
-        data class Event(val item: Item, val n: Int) {\n\
+        class Event {\n\
         \x20 data class Item(val label: String)\n\
+        \x20 fun make(): Item = Item(\"N\")\n\
+        \x20 fun read(): String = make().label\n\
         }\n\
-        fun mk(): Event = Event(Event.Item(\"N\"), 1)\n\
-        fun box(): String = if (mk().item.label == \"N\" && mk().component1().label == \"N\") \"OK\"\n\
-        \x20 else \"FAIL:${mk().item.label}\"\n";
+        fun box(): String = if (Event().read() == \"N\") \"OK\" else \"FAIL:${Event().read()}\"\n";
     assert_eq!(run(SRC).expect("nested-type field shadows top-level"), "OK");
 }

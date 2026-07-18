@@ -14156,9 +14156,22 @@ impl<'a> Checker<'a> {
                         }
                     }
                 }
-                // Constructor call: `ClassName(args)` (when not shadowed by a local).
+                // Constructor call: `ClassName(args)` (when not shadowed by a local). An unqualified name
+                // that is one of the ENCLOSING class's own nested types resolves to the NESTED class
+                // (Kotlin nested-type scoping), preferred over a same-named top-level — consistent with
+                // `resolve_type`, so the construction's type matches the field/return-position type.
                 if !self.value_root_shadows_classifier(&fname) {
-                    if let Some(cls) = self.syms.classes.get(&fname).cloned() {
+                    let ctor_cls = self
+                        .enclosing_nested_type(&fname)
+                        .and_then(|nested| {
+                            self.syms
+                                .classes
+                                .values()
+                                .find(|s| s.internal == nested)
+                                .cloned()
+                        })
+                        .or_else(|| self.syms.classes.get(&fname).cloned());
+                    if let Some(cls) = ctor_cls {
                         let ctor_params: Vec<Ty> = cls.ctor_params.clone();
                         // Named-argument constructor call (`C(b = 9)`): map names → positions using the
                         // primary ctor's parameter names + per-parameter defaults, the same path a
