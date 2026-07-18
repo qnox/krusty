@@ -12705,21 +12705,13 @@ impl<'a> Checker<'a> {
                         .error(span, format!("krusty: unresolved super method '{name}'"));
                     return Ty::Error;
                 }
-                // Fully-qualified static call `pkg.Type.method(args)` — the receiver is a DOTTED chain
-                // that names a classpath type verbatim (`java.time.Instant.parse(it)`), NOT an imported
-                // simple name. Resolve the chain to a type and dispatch `.method` as its static/companion
-                // member (the same path the imported-name case below takes). Guards: the leftmost segment
-                // must not be a value in scope (a chained call `local.a.b()` is not a package path), and the
-                // whole chain must resolve to a real type — so a value-rooted `a.b.c()` is never hijacked.
+                // Fully-qualified static call `pkg.Type.method(args)`.
                 if let Expr::Member { .. } = self.file.expr(receiver) {
                     if let Some(fq) = qualified_path(self.file, receiver) {
                         let leftmost = fq.split('/').next().unwrap_or("");
                         if self.lookup(leftmost).is_none() && self.resolved_type(&fq).is_some() {
                             let arg_tys = self.arg_tys(args);
                             if let Some(m) = self.resolve_companion(&fq, &name, &arg_tys) {
-                                // Type the dotted receiver as the resolved type so LOWERING emits the
-                                // static call (`invokestatic <fq>.method`) — the receiver itself is never
-                                // emitted as a value (a static call has no receiver).
                                 self.set(receiver, Ty::obj(&fq));
                                 let ret = m.ret;
                                 self.resolved_calls.insert(call, ResolvedCall::Companion(m));

@@ -1634,12 +1634,7 @@ fn resolve_companion(
     if let Some(m) = best_overload(t.companion.iter(), name, args) {
         return Some(m.clone());
     }
-    // Subtype-widening fallback: a Java static may expose only a SUPERTYPE-parameter overload
-    // (`Instant.parse(CharSequence)` called with a `String`; `Optional.of(Object)` with any reference).
-    // `best_overload` matches descriptors by identity; widen each argument to its parameter through the
-    // platform subtype relation — the SAME relation instance-member resolution uses. Only a UNIQUE match
-    // is accepted: an ambiguous widening could pick a different overload than kotlinc (a miscompile), so
-    // decline instead (kotlinc's most-specific rule isn't modeled here).
+    // Widen each argument to the static parameter type, but only when the match is unique.
     let mut widened = t.companion.iter().filter(|m| {
         m.name == name
             && m.params.len() == args.len()
