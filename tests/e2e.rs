@@ -628,6 +628,8 @@ mod qq1_safecall_diverging_scope_block_e2e;
 mod range_property_e2e;
 #[path = "range_step_e2e.rs"]
 mod range_step_e2e;
+#[path = "raw_string_interpolation_e2e.rs"]
+mod raw_string_interpolation_e2e;
 #[path = "receiver_lambda_e2e.rs"]
 mod receiver_lambda_e2e;
 #[path = "reference_adaptation_e2e.rs"]

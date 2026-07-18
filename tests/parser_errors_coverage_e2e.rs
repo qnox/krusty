@@ -57,13 +57,6 @@ fn unterminated_backtick_identifier() {
 }
 
 #[test]
-fn raw_string_interpolation_rejected() {
-    // interpolation inside a raw string is unsupported
-    let d = parse_diags("fun box(): Int { val x = 1; val s = \"\"\"$x\"\"\"; return 0 }");
-    assert_rejected(&d, "raw string interpolation not supported");
-}
-
-#[test]
 fn unterminated_template_string() {
     // interpolated string opened, contains a `$x`, never closed
     let d = parse_diags("fun box(): Int { val x = 1; val s = \"hi $x ; return 0 }");

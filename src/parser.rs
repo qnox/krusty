@@ -6128,7 +6128,7 @@ impl<'a> Parser<'a> {
                 self.bump();
                 self.file.add_expr(Expr::CharLit(c), span)
             }
-            TokenKind::TemplateStart => self.parse_template(),
+            TokenKind::TemplateStart | TokenKind::RawTemplateStart => self.parse_template(),
             TokenKind::KwTrue => {
                 self.bump();
                 self.file.add_expr(Expr::BoolLit(true), span)
@@ -6270,12 +6270,20 @@ impl<'a> Parser<'a> {
     /// Parse a string template: `TemplateStart (StrChunk | Dollar Ident | Dollar { expr })* TemplateEnd`.
     fn parse_template(&mut self) -> ExprId {
         let start = self.tok().span;
-        self.bump(); // TemplateStart
+        // A raw (triple-quoted) template's chunks are verbatim — no escape processing.
+        let raw = self.kind() == TokenKind::RawTemplateStart;
+        self.bump(); // TemplateStart / RawTemplateStart
         let mut parts = Vec::new();
         loop {
             match self.kind() {
                 TokenKind::StrChunk => {
-                    parts.push(TemplatePart::Str(unescape_chunk(self.text())));
+                    let text = self.text();
+                    let piece = if raw {
+                        text.to_string()
+                    } else {
+                        unescape_chunk(text)
+                    };
+                    parts.push(TemplatePart::Str(piece));
                     self.bump();
                 }
                 TokenKind::Dollar => {
@@ -6942,6 +6950,7 @@ fn starts_expr(k: TokenKind) -> bool {
             | TokenKind::StringLit
             | TokenKind::CharLit
             | TokenKind::TemplateStart
+            | TokenKind::RawTemplateStart
             | TokenKind::KwTrue
             | TokenKind::KwFalse
             | TokenKind::KwNull
