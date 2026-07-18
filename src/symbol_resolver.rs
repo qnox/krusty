@@ -15,6 +15,7 @@ use crate::libraries::{
 };
 use crate::symbol_source::SymbolSource;
 use crate::types::Ty;
+use std::borrow::Cow;
 
 #[derive(Clone, Debug, Default)]
 pub struct TopLevelLambdaShape {
@@ -57,7 +58,7 @@ impl crate::assignable::TypeOracle for PlatformOracle<'_> {
     fn value_underlying(&self, ty: Ty) -> Option<Ty> {
         self.0.value_underlying(ty)
     }
-    fn canonical_class(&self, internal: &str) -> String {
+    fn canonical_class<'a>(&self, internal: &'a str) -> Cow<'a, str> {
         platform_class_identity(
             self.0
                 .library_value_form(Ty::obj(internal))
@@ -67,10 +68,15 @@ impl crate::assignable::TypeOracle for PlatformOracle<'_> {
     }
 }
 
-pub(crate) fn platform_class_identity(internal: &str) -> String {
+pub(crate) fn platform_class_identity(internal: &str) -> Cow<'_, str> {
     match internal.rfind('/') {
-        Some(i) => format!("{}{}", &internal[..=i], internal[i + 1..].replace('.', "$")),
-        None => internal.replace('.', "$"),
+        Some(i) if internal[i + 1..].contains('.') => Cow::Owned(format!(
+            "{}{}",
+            &internal[..=i],
+            internal[i + 1..].replace('.', "$")
+        )),
+        None if internal.contains('.') => Cow::Owned(internal.replace('.', "$")),
+        _ => Cow::Borrowed(internal),
     }
 }
 
@@ -1905,20 +1911,27 @@ pub(crate) fn source_receiver_rank(src: &dyn SymbolSource, recv: Ty, decl_recv: 
     }
     let want = decl_recv.erased_recv().kotlin_class_internal();
     if let (Some(want), Some(start)) = (want, recv.erased_recv().kotlin_class_internal()) {
-        let mut frontier = vec![start.to_string()];
-        let mut seen: std::collections::HashSet<String> =
-            std::iter::once(start.to_string()).collect();
+        let mut seen = crate::types::NameWalkSet::new();
+        let (start_id, _) = seen.insert(start.to_string());
+        let mut frontier = vec![start_id];
         let mut rung = 0u32;
         while !frontier.is_empty() {
-            if frontier.iter().any(|t| t == want) {
+            if frontier
+                .iter()
+                .any(|&t| seen.get(t).is_some_and(|t| t == want))
+            {
                 return Some(rung);
             }
             let mut next = Vec::new();
-            for t in &frontier {
-                if let Some(lt) = src.resolve_type(t) {
-                    for s in lt.supertypes {
-                        if seen.insert(s.clone()) {
-                            next.push(s);
+            for &t in &frontier {
+                let supertypes = seen
+                    .get(t)
+                    .and_then(|t| src.resolve_type(t).map(|lt| lt.supertypes));
+                if let Some(supertypes) = supertypes {
+                    for supertype in supertypes {
+                        let (id, inserted) = seen.insert(supertype);
+                        if inserted {
+                            next.push(id);
                         }
                     }
                 }
@@ -2342,10 +2355,17 @@ mod tests {
         }
 
         fn resolve_type(&self, internal: &str) -> Option<crate::libraries::LibraryType> {
-            matches!(internal, "kotlin/UInt" | "demo/Box").then(|| crate::libraries::LibraryType {
+            let supertypes = match internal {
+                "demo/Leaf" => vec!["demo/Mid".to_string()],
+                "demo/Mid" => vec!["demo/Base".to_string()],
+                "demo/Base" => vec!["kotlin/Any".to_string()],
+                "kotlin/UInt" | "demo/Box" => vec!["kotlin/Any".to_string()],
+                _ => return None,
+            };
+            Some(crate::libraries::LibraryType {
                 is_public: true,
                 kind: TypeKind::Class,
-                supertypes: vec!["kotlin/Any".to_string()],
+                supertypes,
                 constructors: vec![],
                 members: vec![],
                 companion: vec![],
@@ -2370,6 +2390,13 @@ mod tests {
         fn value_underlying(&self, ty: Ty) -> Option<Ty> {
             self.resolve_type(ty.obj_internal()?)
                 .and_then(|t| t.value_underlying)
+        }
+
+        fn library_value_form(&self, ty: Ty) -> Ty {
+            ty.obj_internal()
+                .and_then(crate::jvm::jvm_class_map::kotlin_builtin_to_jvm)
+                .map(Ty::obj)
+                .unwrap_or(ty)
         }
     }
 
@@ -2431,6 +2458,50 @@ mod tests {
             ret: crate::libraries::ReturnInfo::new(true, None),
             ..FunctionInfo::plain(FnKind::Extension, Some(receiver), callable)
         }
+    }
+
+    #[test]
+    fn source_receiver_rank_walks_supertypes() {
+        let src = FakeSource {
+            name: "unused",
+            receiver: None,
+            info: top_level_nullable_string_info(),
+        };
+        assert_eq!(
+            source_receiver_rank(&src, Ty::obj("demo/Leaf"), Ty::obj("demo/Base")),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn platform_class_identity_borrows_unchanged_names() {
+        assert!(matches!(
+            platform_class_identity("kotlin/collections/Map$Entry"),
+            std::borrow::Cow::Borrowed("kotlin/collections/Map$Entry")
+        ));
+        assert_eq!(
+            platform_class_identity("kotlin/collections/Map.Entry").as_ref(),
+            "kotlin/collections/Map$Entry"
+        );
+    }
+
+    #[test]
+    fn platform_oracle_canonicalizes_map_entry_spellings() {
+        let src = FakeSource {
+            name: "unused",
+            receiver: None,
+            info: top_level_nullable_string_info(),
+        };
+        let oracle = PlatformOracle(&src);
+        assert_eq!(
+            crate::assignable::TypeOracle::canonical_class(&oracle, "kotlin/collections/Map.Entry")
+                .as_ref(),
+            "java/util/Map$Entry"
+        );
+        assert_eq!(
+            crate::assignable::TypeOracle::canonical_class(&oracle, "kotlin/collections/Map$Entry"),
+            crate::assignable::TypeOracle::canonical_class(&oracle, "kotlin/collections/Map.Entry")
+        );
     }
 
     fn member_nullable_string_info() -> FunctionInfo {

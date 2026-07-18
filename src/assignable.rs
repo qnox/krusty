@@ -15,6 +15,7 @@
 //! arguments and nullability) and without a type-variable context.
 
 use crate::types::Ty;
+use std::borrow::Cow;
 use std::collections::HashMap;
 
 /// The class-hierarchy oracle the assignability relation walks — the direct supertypes of a class in
@@ -35,8 +36,8 @@ pub trait TypeOracle {
     /// and its single JVM interface (`kotlin/collections/List` ≡ `kotlin/collections/MutableList` ≡
     /// `java/util/List`). Two classes with the same canonical identity are the same class here. Default:
     /// the name itself (no aliasing).
-    fn canonical_class(&self, internal: &str) -> String {
-        internal.to_string()
+    fn canonical_class<'a>(&self, internal: &'a str) -> Cow<'a, str> {
+        Cow::Borrowed(internal)
     }
 }
 
@@ -226,16 +227,19 @@ fn class_assignable(oracle: &dyn TypeOracle, sub: Ty, sup: Ty, value_class: bool
         return false;
     };
     let target_c = oracle.canonical_class(target);
-    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut stack = vec![start.to_string()];
+    let mut seen = crate::types::NameWalkSet::new();
+    let (start_id, _) = seen.insert(start.to_string());
+    let mut stack = vec![start_id];
     while let Some(cur) = stack.pop() {
-        if cur == target || oracle.canonical_class(&cur) == target_c {
+        let cur = seen.get(cur).expect("walk index was inserted");
+        if cur == target || oracle.canonical_class(cur) == target_c {
             return true;
         }
-        if !seen.insert(cur.clone()) {
-            continue;
-        }
-        stack.extend(oracle.direct_supertypes(&cur));
+        let direct = oracle.direct_supertypes(cur);
+        stack.extend(direct.into_iter().filter_map(|s| {
+            let (id, inserted) = seen.insert(s);
+            inserted.then_some(id)
+        }));
     }
     // A value/inline class is assignable where its underlying representation is expected (the JVM-ABI
     // boundary) — only under `is_assignable`, not the pure `is_subtype` relation.
@@ -273,6 +277,12 @@ mod tests {
             match ty {
                 Ty::Obj("app/Aid", _) => Some(Ty::String),
                 _ => None,
+            }
+        }
+        fn canonical_class<'a>(&self, internal: &'a str) -> Cow<'a, str> {
+            match internal {
+                "canonical/Readonly" | "canonical/Mutable" => Cow::Borrowed("canonical/List"),
+                _ => Cow::Borrowed(internal),
             }
         }
     }
@@ -328,6 +338,11 @@ mod tests {
         assert!(!ok(s("app/Animal"), s("app/Dog")));
         assert!(ok(Ty::String, s("kotlin/CharSequence")));
         assert!(ok(Ty::Int, s("kotlin/Number")));
+    }
+
+    #[test]
+    fn canonical_class_aliases_match_through_assignability() {
+        assert!(ok(s("canonical/Mutable"), s("canonical/Readonly")));
     }
 
     #[test]

@@ -1,7 +1,8 @@
 //! Type model: Kotlin scalar, object, array, function, nullable, and type-parameter shapes.
 //! Backend-specific names and descriptors are kept out of this module.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::{Mutex, OnceLock};
 
 /// Intern a class internal-name to a `&'static str` so `Ty` stays `Copy`. The compiler is
@@ -16,6 +17,66 @@ pub fn intern(name: &str) -> &'static str {
     let leaked: &'static str = Box::leak(name.to_string().into_boxed_str());
     set.insert(leaked);
     leaked
+}
+
+enum WalkBucket {
+    One(usize),
+    Many(Vec<usize>),
+}
+
+/// A per-walk class-name set. It gives hierarchy traversals compact local indices while storing each
+/// visited string once, avoiding both global interning and the old `seen`/`frontier` string clone.
+pub(crate) struct NameWalkSet {
+    names: Vec<String>,
+    by_hash: HashMap<u64, WalkBucket>,
+}
+
+impl NameWalkSet {
+    pub(crate) fn new() -> Self {
+        NameWalkSet {
+            names: Vec::new(),
+            by_hash: HashMap::new(),
+        }
+    }
+
+    pub(crate) fn insert(&mut self, name: String) -> (usize, bool) {
+        let hash = hash_name(&name);
+        if let Some(bucket) = self.by_hash.get(&hash) {
+            match bucket {
+                WalkBucket::One(id) if self.names[*id] == name => return (*id, false),
+                WalkBucket::One(_) => {}
+                WalkBucket::Many(ids) => {
+                    if let Some(&id) = ids.iter().find(|&&id| self.names[id] == name) {
+                        return (id, false);
+                    }
+                }
+            }
+        }
+
+        let id = self.names.len();
+        self.names.push(name);
+        self.by_hash
+            .entry(hash)
+            .and_modify(|bucket| match bucket {
+                WalkBucket::One(prev) => {
+                    let prev = *prev;
+                    *bucket = WalkBucket::Many(vec![prev, id]);
+                }
+                WalkBucket::Many(ids) => ids.push(id),
+            })
+            .or_insert(WalkBucket::One(id));
+        (id, true)
+    }
+
+    pub(crate) fn get(&self, id: usize) -> Option<&str> {
+        self.names.get(id).map(String::as_str)
+    }
+}
+
+fn hash_name(name: &str) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    name.hash(&mut hasher);
+    hasher.finish()
 }
 
 /// Identity comparison of two INTERNED names. Both operands MUST come from [`intern`] (or [`wk`]); then
