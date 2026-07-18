@@ -1637,7 +1637,10 @@ impl IrPlugin for SerializationPlugin {
                         _ => *ty,
                     })
                     .collect();
-                let mut deser_params = vec![Ty::Int];
+                // kotlinc's bit-mask is one `int` per 32 properties (`(n+31)/32`, min 1) — a class with
+                // >32 serialized fields carries multiple leading seq-mask ints.
+                let n_masks = foo_fields.len().max(1).div_ceil(32);
+                let mut deser_params = vec![Ty::Int; n_masks];
                 deser_params.extend(deser_field_tys.iter().cloned());
                 deser_params.push(class_ty(
                     "kotlinx/serialization/internal/SerializationConstructorMarker",
@@ -1654,7 +1657,8 @@ impl IrPlugin for SerializationPlugin {
                 let this = ir.add_expr(IrExpr::GetValue(0));
                 let mut deser_stmts = Vec::with_capacity(foo_fields.len());
                 for i in 0..foo_fields.len() {
-                    let arg = ir.add_expr(IrExpr::GetValue(i as u32 + 2));
+                    // `this` at 0, the `n_masks` seq-mask ints at 1..=n_masks, then the field params.
+                    let arg = ir.add_expr(IrExpr::GetValue(i as u32 + 1 + n_masks as u32));
                     deser_stmts.push(ir.add_expr(IrExpr::SetField {
                         receiver: this,
                         class: class_id,

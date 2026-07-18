@@ -3951,8 +3951,8 @@ fn emit_ctor_default_stub(
     e.next_slot = slot;
 
     // The stackmap frame at each mask-branch target: `this` (slot 0) is UNINITIALIZED (the real `<init>`
-    // has not run yet), the params keep their types, then mask + marker. Built manually because the frame
-    // machinery types slot 0 from `e.slots` as an initialized `Object`, which the verifier rejects here.
+    // has not run yet), the params keep their types, then the mask ints + marker. Built manually because
+    // the frame machinery types slot 0 from `e.slots` as an initialized `Object`, which the verifier rejects.
     let branch_locals: Vec<VerifType> = {
         let mut raw = vec![VerifType::Top; e.next_slot as usize];
         raw[0] = VerifType::UninitializedThis;
@@ -5463,11 +5463,11 @@ impl<'a> Emitter<'a> {
                     code.invokestatic(m, aw, slot_words(ret) as i32);
                 }
                 Callee::LocalDefault(fid) => {
-                    // The `foo$default(realparams, int mask, Object marker)` synthetic on the self facade
-                    // (emitted by `emit_facade_default_stub`). Args already include the mask + marker.
+                    // The `foo$default(realparams, mask..., Object marker)` synthetic on the self facade
+                    // (emitted by `emit_facade_default_stub`). Args already include mask words + marker.
                     let f = &self.ir.functions[*fid as usize];
                     let mut param_tys = jvm_tys(&f.params);
-                    param_tys.push(Ty::Int);
+                    param_tys.extend(std::iter::repeat_n(Ty::Int, default_mask_count(f.params.len())));
                     param_tys.push(Ty::obj("java/lang/Object"));
                     let ret = ir_ty_to_jvm(&f.ret);
                     let name = format!("{}$default", f.name);

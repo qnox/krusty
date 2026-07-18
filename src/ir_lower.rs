@@ -45,6 +45,14 @@ pub fn lower_bail_reason() -> String {
     BAIL_REASON.with(|r| r.borrow().clone())
 }
 
+fn default_mask_count(param_count: usize) -> usize {
+    param_count.div_ceil(32).max(1)
+}
+
+fn default_mask_bit(param_index: usize) -> i32 {
+    (1u32 << (param_index % 32)) as i32
+}
+
 fn is_conversion_call_name(name: &str) -> bool {
     matches!(
         name,
@@ -2812,13 +2820,11 @@ pub fn lower_file_at(
                 // A REGULAR (non-value, non-inner) class with a DEFAULT on any primary-ctor parameter needs
                 // kotlinc's synthetic `<init>(params…, int mask, DefaultConstructorMarker)` overload. Lower
                 // each default in the INSTANCE `<init>` frame (`this` = value 0, params = 1..=n) and stash
-                // them by class internal; the backend emits the overload. Gated like the member-default
-                // path: not an interface, ≤31 params, and only when at least one default exists.
+                // them by class internal; the backend emits the overload (one int mask per 32 params).
                 if !c.is_value
                     && c.inner_of.is_none()
                     && !c.is_interface()
                     && c.has_primary_ctor
-                    && c.props.len() <= 31
                     && c.props.iter().any(|p| p.default.is_some())
                 {
                     lo.scope.clear();
@@ -7605,8 +7611,9 @@ impl<'a> Lower<'a> {
                     .collect();
                 checks.resize(fields.len(), None);
                 self.ir.functions[copy_fid as usize].param_checks = checks;
-                // Each `copy` parameter defaults to the corresponding receiver property.
-                if fields.len() <= 31 {
+                // Each `copy` parameter defaults to the corresponding receiver property. The `$default`
+                // stub's bit-mask is one `int` per 32 params (multi-mask), so any parameter count works.
+                {
                     let defaults: Vec<Option<u32>> = (0..fields.len())
                         .map(|i| {
                             let this = self.emit_get_value(0);
@@ -8267,9 +8274,9 @@ impl<'a> Lower<'a> {
             "lower_toplevel_default_call fid={fid} ir_params={ir_params:?} slot_temp={slot_temp:?}"
         );
         // Build the `$default` argument list in slot order: provided temp, or a zero placeholder for an
-        // omitted slot (with its mask bit set). Then the int mask and the null marker.
-        let mut a: Vec<u32> = Vec::with_capacity(n + 2);
-        let mut mask: i32 = 0;
+        // omitted slot (with its mask bit set). Then the mask words and the null marker.
+        let mut a: Vec<u32> = Vec::with_capacity(n + default_mask_count(n) + 1);
+        let mut omitted = Vec::new();
         for (k, item) in slot_temp.iter().enumerate() {
             match item {
                 Some(tmp) => a.push(self.emit_get_value(*tmp)),
@@ -8277,12 +8284,12 @@ impl<'a> Lower<'a> {
                 // passed through by `$default`, not filled from the mask).
                 None if vararg && k == n - 1 => a.push(self.empty_array(ir_params[k])),
                 None => {
-                    mask |= 1i32 << k;
+                    omitted.push(k);
                     a.push(self.zero_placeholder(ir_params[k]));
                 }
             }
         }
-        self.append_default_mask_marker(&mut a, mask);
+        self.append_default_masks_marker(&mut a, n, omitted);
         let dcall = self.emit_local_default_call(fid, a);
         Some(self.wrap_arg_prelude(dcall, prelude))
     }
@@ -9185,18 +9192,18 @@ impl<'a> Lower<'a> {
             if !crate::ir::toplevel_default_stub_safe(&self.ir, fid) {
                 return None;
             }
-            let mut mask: i32 = 0;
+            let mut omitted = Vec::new();
             for (k, &pt) in target_params.iter().enumerate().skip(n) {
                 if k == m - 1 && target_vararg {
                     // The dropped trailing vararg gets an EMPTY array and NO mask bit (passed through by
                     // `$default`, not filled from the mask).
                     a.push(self.empty_array(ty_to_ir(pt)));
                 } else {
-                    mask |= 1i32 << k;
+                    omitted.push(k);
                     a.push(self.zero_placeholder(pt));
                 }
             }
-            self.append_default_mask_marker(&mut a, mask);
+            self.append_default_masks_marker(&mut a, m, omitted);
             self.emit_local_default_call(fid, a)
         };
         // A `Unit`-returning invoke (a coercion, or the target itself returns `Unit`) yields the `Unit`
@@ -10703,6 +10710,22 @@ impl<'a> Lower<'a> {
 
     fn append_default_mask_marker(&mut self, out: &mut Vec<u32>, mask: i32) {
         out.push(self.emit_const(IrConst::Int(mask)));
+        out.push(self.emit_const(IrConst::Null));
+    }
+
+    fn append_default_masks_marker(
+        &mut self,
+        out: &mut Vec<u32>,
+        param_count: usize,
+        omitted: impl IntoIterator<Item = usize>,
+    ) {
+        let mut masks = vec![0i32; default_mask_count(param_count)];
+        for i in omitted {
+            masks[i / 32] |= default_mask_bit(i);
+        }
+        for mask in masks {
+            out.push(self.emit_const(IrConst::Int(mask)));
+        }
         out.push(self.emit_const(IrConst::Null));
     }
 
