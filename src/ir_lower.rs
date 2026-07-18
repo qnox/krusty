@@ -4812,7 +4812,7 @@ impl<'a> Lower<'a> {
 
     fn emit_virtual_call(
         &mut self,
-        owner: String,
+        owner: impl Into<TypeName>,
         name: String,
         descriptor: String,
         interface: bool,
@@ -4821,7 +4821,7 @@ impl<'a> Lower<'a> {
     ) -> u32 {
         self.emit_call(
             Callee::Virtual {
-                owner: type_name(&owner),
+                owner: owner.into(),
                 name,
                 descriptor,
                 interface,
@@ -4853,7 +4853,7 @@ impl<'a> Lower<'a> {
 
     fn emit_static_call(
         &mut self,
-        owner: String,
+        owner: impl Into<TypeName>,
         name: String,
         descriptor: String,
         inline: InlineKind,
@@ -4861,7 +4861,7 @@ impl<'a> Lower<'a> {
     ) -> u32 {
         self.emit_call(
             Callee::Static {
-                owner: type_name(&owner),
+                owner: owner.into(),
                 name,
                 descriptor,
                 inline,
@@ -5121,7 +5121,7 @@ impl<'a> Lower<'a> {
         &self,
         delegate_expr: AstExprId,
         delegate_internal: &str,
-    ) -> Option<(String, String, Ty, InlineKind, bool)> {
+    ) -> Option<(TypeName, String, Ty, InlineKind, bool)> {
         // Property-reference delegates need dedicated bytecode support.
         if delegate_internal.starts_with("kotlin/reflect/") {
             return None;
@@ -5129,10 +5129,10 @@ impl<'a> Lower<'a> {
         match self.info.delegate_getvalue(delegate_expr)? {
             DelegateGetValueTarget::Member { owner, params, ret } => {
                 let desc = self.runtime.method_descriptor(params, *ret)?;
-                Some((owner.render(), desc, *ret, InlineKind::None, false))
+                Some((*owner, desc, *ret, InlineKind::None, false))
             }
             DelegateGetValueTarget::Extension(c) => {
-                Some((c.owner_name(), c.descriptor.clone(), c.ret, c.inline, true))
+                Some((c.owner, c.descriptor.clone(), c.ret, c.inline, true))
             }
         }
     }

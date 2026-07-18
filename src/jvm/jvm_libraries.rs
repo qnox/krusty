@@ -75,12 +75,13 @@ impl JvmLibraries {
         // Top-level (receiver-less) functions of this name — `listOf`, `run`, `println`, … — each with
         // its inline/`@InlineOnly` flags in one place.
         for c in self.cp.find_top_level(name) {
+            let owner_rendered = c.owner.render();
             let is_default = c.name.ends_with("$default");
             let meta_name = c.name.strip_suffix("$default").unwrap_or(&c.name);
             // Suspend-ness lives on the SOURCE function's `@Metadata`; a `$default` synthetic is not in
             // metadata, so detect it via the stripped `meta_name` — otherwise a suspend function's
             // `withLock$default` keeps its `Continuation` param and no normal call shape resolves.
-            let suspend = self.cp.is_suspend_method(&c.owner, meta_name);
+            let suspend = self.cp.is_suspend_method(&owner_rendered, meta_name);
             // A `suspend fun`'s physical method appends a `Continuation` parameter and erases the
             // return to `Object`; present the LOGICAL signature (drop the continuation) so a normal
             // call resolves. The coroutine pass re-derives the CPS form for the emitted call.
@@ -113,9 +114,13 @@ impl JvmLibraries {
             // leading params (their exact types — an extension receiver, a vararg array) and
             // truncate the trailing synthetics. A normal function's metadata count equals the
             // descriptor's param count, so this is a no-op for it (no regression).
-            let meta =
-                self.cp
-                    .metadata_call_facts(&c.owner, meta_name, &params, &physical_ret, false);
+            let meta = self.cp.metadata_call_facts(
+                &owner_rendered,
+                meta_name,
+                &params,
+                &physical_ret,
+                false,
+            );
             if let Some(keep) = meta.kept_params {
                 if keep < params.len() {
                     params.truncate(keep);
@@ -126,9 +131,9 @@ impl JvmLibraries {
             } else {
                 c.descriptor.clone()
             };
-            let inline = self
-                .cp
-                .is_inline_callable(&c.owner, meta_name, &inline_desc, &params);
+            let inline =
+                self.cp
+                    .is_inline_callable(&owner_rendered, meta_name, &inline_desc, &params);
             let call_sig = meta.call_sig;
             let ret_metadata = meta.ret;
             let ret = if suspend {
@@ -151,7 +156,7 @@ impl JvmLibraries {
                 default_call: is_default,
                 signature: c.signature.clone(),
                 ..LibraryCallable::library(
-                    type_name(&c.owner),
+                    c.owner,
                     c.name.clone(),
                     params,
                     ret,
@@ -165,7 +170,7 @@ impl JvmLibraries {
             // by-receiver query; keeping the kind honest is what lets the top-level queries ignore it
             // without per-call-site receiver checks.
             let generic_sig = self.callable_generic_sig(
-                &c.owner,
+                &owner_rendered,
                 &c.name,
                 &c.descriptor,
                 c.signature.as_deref(),

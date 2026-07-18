@@ -20,7 +20,7 @@ use crate::jvm::classreader::{parse_class, read_method_code, ClassInfo, MethodCo
 use crate::jvm::names::type_descriptor;
 use crate::libraries::{CallSig, FunctionSet, ReturnInfo};
 use crate::name_tree::{NameId, NameTree};
-use crate::types::{type_name, Ty, TypeName};
+use crate::types::{type_name, type_name_from, Ty, TypeName};
 
 /// Map a Kotlin internal type name (`kotlin/Int`, `kotlin/Char`, …) from builtins metadata to a `Ty`.
 pub(super) fn kotlin_name_to_ty(name: &str) -> Ty {
@@ -538,7 +538,7 @@ impl ExtCandidateRecord {
 
     fn render(&self, owner_names: &NameTree) -> ExtCandidate {
         ExtCandidate {
-            owner: owner_names.render(self.owner),
+            owner: type_name_from(owner_names, self.owner),
             name: self.name.clone(),
             descriptor: self.descriptor.clone(),
             ret_desc: self.ret_desc.clone(),
@@ -604,7 +604,7 @@ fn global_class_cache(key: &[PathBuf]) -> ClassCache {
 /// descriptor, the method name, and the return-type descriptor.
 #[derive(Clone, Debug)]
 pub struct ExtCandidate {
-    pub owner: String,
+    pub owner: TypeName,
     pub name: String,
     pub descriptor: String,
     pub ret_desc: String,
@@ -1305,14 +1305,14 @@ impl Classpath {
 
     /// Every distinct owner (facade) that declares a static method whose first parameter matches
     /// `receiver_desc` — the facades to consult for a Kotlin-name resolution (`sumOf`).
-    pub fn find_extension_owners(&self, receiver_desc: &str) -> Vec<String> {
+    pub fn find_extension_owners(&self, receiver_desc: &str) -> Vec<TypeName> {
         self.ensure_ext_index();
         let ext = self.ext.borrow().as_ref().cloned();
         ext.and_then(|idx| {
             idx.by_recv_owners.get(receiver_desc).map(|owners| {
                 owners
                     .iter()
-                    .map(|&id| idx.owner_names.render(id))
+                    .map(|&id| type_name_from(&idx.owner_names, id))
                     .collect()
             })
         })
@@ -2028,7 +2028,7 @@ impl Classpath {
                     continue;
                 };
                 out.push(ExtCandidate {
-                    owner: root.to_string(),
+                    owner: type_name(root),
                     name: m.name.clone(),
                     descriptor: m.descriptor.clone(),
                     ret_desc,
@@ -2177,10 +2177,11 @@ impl Classpath {
     /// The scoped, lazy analogue of [`Self::find_extension_owners`]: the facades that declare a static
     /// whose receiver (first-parameter) descriptor is `recv_desc`, among the in-scope `packages`. Reads
     /// the per-(jar, package) `owners_by_recv` index — no `ensure_ext_index`.
-    pub fn extension_owners_in_scope(&self, recv_desc: &str, packages: &[String]) -> Vec<String> {
+    pub fn extension_owners_in_scope(&self, recv_desc: &str, packages: &[String]) -> Vec<TypeName> {
         let tree = self.package_tree();
         let mut out = Vec::new();
         let mut seen = std::collections::HashSet::new();
+        let mut seen_owner = std::collections::HashSet::new();
         for pkg in packages {
             if !seen.insert(pkg.as_str()) {
                 continue;
@@ -2195,8 +2196,8 @@ impl Classpath {
                 let members = self.jar_pkg_members(entry, pkg);
                 if let Some(owners) = members.owners_by_recv.get(recv_desc) {
                     for &id in owners {
-                        let o = members.owner_names.render(id);
-                        if !out.contains(&o) {
+                        let o = type_name_from(&members.owner_names, id);
+                        if seen_owner.insert(o) {
                             out.push(o);
                         }
                     }
@@ -2227,7 +2228,7 @@ impl Classpath {
         &self,
         recv_desc: &str,
         scope: Option<&[String]>,
-    ) -> Vec<String> {
+    ) -> Vec<TypeName> {
         match scope {
             None => self.find_extension_owners(recv_desc),
             Some(pkgs) => self.extension_owners_in_scope(recv_desc, pkgs),
@@ -3127,9 +3128,9 @@ mod fq_tests {
 
         assert_eq!(cached.owner_names.len(), 4);
         let all = cached.render_all();
-        assert_eq!(all[0].owner, "kotlin/collections/CollectionsKt");
+        assert!(all[0].owner.matches("kotlin/collections/CollectionsKt"));
         let by_recv = cached.render_by_recv("Ljava/lang/Iterable;");
-        assert_eq!(by_recv[0].owner, "kotlin/collections/CollectionsKt");
+        assert!(by_recv[0].owner.matches("kotlin/collections/CollectionsKt"));
     }
 
     #[test]
@@ -3161,7 +3162,9 @@ mod fq_tests {
         assert_eq!(members.by_source["sumOf"], vec![0]);
         assert_eq!(members.by_jvm["sumOfInt"], vec![0]);
         let rendered = members.render_indices(&members.by_source["sumOf"]);
-        assert_eq!(rendered[0].owner, "kotlin/collections/CollectionsKt");
+        assert!(rendered[0]
+            .owner
+            .matches("kotlin/collections/CollectionsKt"));
         assert_eq!(rendered[0].name, "sumOfInt");
     }
 
@@ -3412,19 +3415,17 @@ mod fq_tests {
         let recv = "Ljava/lang/Iterable;";
         // The scoped, tree-driven enumeration returns exactly the eager index's candidates whose owner
         // facade sits in the scoped package — the equivalence the `select_overload` switch relies on.
-        let want_owner_in_scope = |c: &ExtCandidate| {
-            c.owner.rsplit_once('/').map_or("", |(p, _)| p) == "kotlin/collections"
-        };
+        let want_owner_in_scope = |c: &ExtCandidate| c.owner.package_matches("kotlin/collections");
         let mut eager: Vec<_> = cp
             .find_extensions(recv, "map")
             .into_iter()
             .filter(want_owner_in_scope)
-            .map(|c| (c.owner, c.name, c.descriptor))
+            .map(|c| (c.owner.render(), c.name, c.descriptor))
             .collect();
         let mut lazy: Vec<_> = cp
             .extensions_in_scope(recv, "map", &coll)
             .into_iter()
-            .map(|c| (c.owner, c.name, c.descriptor))
+            .map(|c| (c.owner.render(), c.name, c.descriptor))
             .collect();
         eager.sort();
         lazy.sort();
@@ -3443,7 +3444,7 @@ mod fq_tests {
             cp.find_extension_owners(recv)
                 .iter()
                 .filter(|o| o.starts_with("kotlin/collections/"))
-                .all(|o| owners.contains(&facade_of(o))),
+                .all(|o| owners.contains(&type_name(&facade_of(&o.render())))),
             "every in-scope eager owner's facade is a scoped owner"
         );
         // Out of scope: an Iterable extension is invisible when its package is not imported.

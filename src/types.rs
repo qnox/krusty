@@ -24,8 +24,18 @@ pub fn type_name(internal: &str) -> TypeName {
     TypeName(type_names().lock().unwrap().insert(internal))
 }
 
+pub fn type_name_from(names: &NameTree, id: NameId) -> TypeName {
+    TypeName(type_names().lock().unwrap().insert_from(names, id))
+}
+
 pub fn existing_type_name(internal: &str) -> Option<TypeName> {
     type_names().lock().unwrap().get(internal).map(TypeName)
+}
+
+impl From<&String> for TypeName {
+    fn from(internal: &String) -> Self {
+        type_name(internal)
+    }
 }
 
 /// Intern a generic type-parameter name. This must not be used for class/FQN storage; class names live
