@@ -132,6 +132,122 @@ fn referenced_class_names(ir: &IrFile) -> Vec<String> {
     out
 }
 
+/// A method that OVERRIDES a supertype declaration is emitted WITHOUT `ACC_FINAL` by kotlinc (even in a
+/// final class). Mark every such class method `open`. Walks the SAME-FILE supertype chain (via
+/// `ir.classes`) and, when it leaves the file into a CLASSPATH supertype, asks the resolver whether that
+/// supertype declares the member. Runs for EVERY file — independent of value classes — because a plain
+/// class implementing a classpath interface (a Mongo adapter `: UserRegistryPort`) has the same overrides
+/// but no value class, so it must not be gated behind `lower_value_classes`'s value-class-only path.
+pub(crate) fn apply_override_final_drop(
+    ir: &mut IrFile,
+    resolver: &crate::symbol_resolver::SymbolResolver,
+) {
+    // Per non-value class: the method NAMES its KNOWN same-file supertype chain declares, or `None` when
+    // the chain leaves the file (a classpath super — handled by the resolver fallback below).
+    let super_member_names: HashMap<String, Option<HashMap<String, Option<Ty>>>> = ir
+        .classes
+        .iter()
+        .filter(|c| !c.is_value)
+        .map(|c| {
+            let mut names: HashMap<String, Option<Ty>> = HashMap::new();
+            let mut work: Vec<&str> = c
+                .interfaces
+                .iter()
+                .map(String::as_str)
+                .chain(c.supertypes.iter().filter_map(|t| t.obj_internal()))
+                .chain(
+                    (!c.superclass.is_empty()
+                        && c.superclass != "java/lang/Object"
+                        && c.superclass != "kotlin/Any")
+                        .then_some(c.superclass.as_str()),
+                )
+                .collect();
+            let mut known = true;
+            let mut seen: HashSet<&str> = HashSet::new();
+            while let Some(s) = work.pop() {
+                if s == "java/lang/Object" || s == "kotlin/Any" || !seen.insert(s) {
+                    continue;
+                }
+                match ir.classes.iter().find(|o| o.fq_name == s) {
+                    Some(sup) => {
+                        for &m in &sup.methods {
+                            if let Some(f) = ir.functions.get(m as usize) {
+                                let getter_ret = (f.name.starts_with("get") && f.params.is_empty())
+                                    .then_some(f.ret);
+                                names.insert(f.name.clone(), getter_ret);
+                            }
+                        }
+                        work.extend(sup.interfaces.iter().map(String::as_str));
+                        work.extend(sup.supertypes.iter().filter_map(|t| t.obj_internal()));
+                        if !sup.superclass.is_empty()
+                            && sup.superclass != "java/lang/Object"
+                            && sup.superclass != "kotlin/Any"
+                        {
+                            work.push(sup.superclass.as_str());
+                        }
+                    }
+                    None => {
+                        known = false;
+                        break;
+                    }
+                }
+            }
+            (c.fq_name.clone(), known.then_some(names))
+        })
+        .collect();
+    let mut override_opens: Vec<u32> = Vec::new();
+    for c in &ir.classes {
+        if c.is_interface || c.fq_name.ends_with("$$serializer") {
+            continue;
+        }
+        let Some(Some(names)) = super_member_names.get(&c.fq_name) else {
+            continue;
+        };
+        for &m in &c.methods {
+            if let Some(f) = ir.functions.get(m as usize) {
+                if !f.is_static && names.contains_key(&f.name) {
+                    override_opens.push(m);
+                }
+            }
+        }
+    }
+    // A class whose supertype chain leaves the file (a CLASSPATH base/interface — `known=false` above):
+    // ask the resolver whether the supertype declares the member — an override drops `ACC_FINAL` exactly
+    // like the same-file case (a Mongo adapter `: UserRegistryPort` from mission-core).
+    for c in &ir.classes {
+        if c.is_interface || c.fq_name.ends_with("$$serializer") {
+            continue;
+        }
+        if let Some(Some(_)) = super_member_names.get(&c.fq_name) {
+            continue; // whole chain same-file — handled above
+        }
+        let mut supers: Vec<String> = c.interfaces.clone();
+        supers.extend(
+            c.supertypes
+                .iter()
+                .filter_map(|t| t.obj_internal())
+                .map(str::to_string),
+        );
+        if !c.superclass.is_empty()
+            && c.superclass != "java/lang/Object"
+            && c.superclass != "kotlin/Any"
+        {
+            supers.push(c.superclass.clone());
+        }
+        if supers.is_empty() {
+            continue;
+        }
+        for &m in &c.methods {
+            if let Some(f) = ir.functions.get(m as usize) {
+                if !f.is_static && supers.iter().any(|s| resolver.declares_member(s, &f.name)) {
+                    override_opens.push(m);
+                }
+            }
+        }
+    }
+    ir.open_methods.extend(override_opens);
+}
+
 #[must_use]
 pub fn lower_value_classes(
     ir: &mut IrFile,
@@ -597,75 +713,8 @@ pub fn lower_value_classes(
             (c.fq_name.clone(), known.then_some(names))
         })
         .collect();
-    // A method that OVERRIDES a supertype declaration is emitted WITHOUT `ACC_FINAL` by kotlinc (even in
-    // a final class). Mark every class method whose name a KNOWN same-file supertype chain declares as
-    // open; an unknown (classpath) chain conservatively keeps the status quo.
-    let mut override_opens: Vec<u32> = Vec::new();
-    for c in &ir.classes {
-        if c.is_interface {
-            continue;
-        }
-        // A `@Serializable` class's synthetic `$$serializer` object is the exception to the
-        // override-drops-`ACC_FINAL` rule: kotlinc emits its `serialize`/`deserialize`/`childSerializers`/
-        // `getDescriptor` implementations as `final` (they're compiler-generated, not user-overridable).
-        // Its erased KSerializer bridges live in `class.bridges` (never `class.methods`), so skipping the
-        // whole class here leaves them untouched.
-        if c.fq_name.ends_with("$$serializer") {
-            continue;
-        }
-        let Some(Some(names)) = super_member_names.get(&c.fq_name) else {
-            continue;
-        };
-        for &m in &c.methods {
-            if let Some(f) = ir.functions.get(m as usize) {
-                if !f.is_static && names.contains_key(&f.name) {
-                    override_opens.push(m);
-                }
-            }
-        }
-    }
-    // A class whose supertype chain leaves the file (a CLASSPATH base/interface — `known=false`
-    // above): ask the resolver whether the supertype declares the member — an override drops
-    // `ACC_FINAL` exactly like the same-file case (`class ChangeAwareEngine : Engine` from a jar).
-    {
-        let mut classpath_opens: Vec<u32> = Vec::new();
-        for c in &ir.classes {
-            if c.is_interface {
-                continue;
-            }
-            if c.fq_name.ends_with("$$serializer") {
-                continue; // serializer impls stay `final` — see the override_opens loop above
-            }
-            if let Some(Some(_)) = super_member_names.get(&c.fq_name) {
-                continue; // whole chain same-file — handled above
-            }
-            let mut supers: Vec<String> = c.interfaces.clone();
-            supers.extend(
-                c.supertypes
-                    .iter()
-                    .filter_map(|t| t.obj_internal())
-                    .map(str::to_string),
-            );
-            if !c.superclass.is_empty()
-                && c.superclass != "java/lang/Object"
-                && c.superclass != "kotlin/Any"
-            {
-                supers.push(c.superclass.clone());
-            }
-            if supers.is_empty() {
-                continue;
-            }
-            for &m in &c.methods {
-                if let Some(f) = ir.functions.get(m as usize) {
-                    if !f.is_static && supers.iter().any(|s| resolver.declares_member(s, &f.name)) {
-                        classpath_opens.push(m);
-                    }
-                }
-            }
-        }
-        override_opens.extend(classpath_opens);
-    }
-    ir.open_methods.extend(override_opens);
+    // (Dropping `ACC_FINAL` on overrides — same-file AND classpath — is done by `apply_override_final_drop`,
+    // called unconditionally from the backend so a value-class-FREE file gets it too.)
     // A getter NAME whose override pair DIVERGES in type across the same-file hierarchy (a covariant
     // `val alt: Vid` overriding `val alt: Vid?`): the two sides would hash differently, and krusty
     // doesn't emit the bridge kotlinc pairs them with — keep BOTH sides unmangled (consistent).
