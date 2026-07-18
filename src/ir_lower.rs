@@ -2038,10 +2038,9 @@ pub fn lower_file_at_reporting(
                 // generic/covariant override) needs a synthetic JVM bridge that krusty doesn't emit
                 // yet — bail rather than miscompile (the erased call wouldn't reach the override).
                 if let Some(super_int) = lo.class_info(&internal)?.super_internal {
-                    let super_internal = super_int.render();
                     for m in &c.methods {
                         if let Some((_, _, base_fid, _)) =
-                            lo.resolve_method(&super_internal, &m.name)
+                            lo.resolve_method_name(super_int, &m.name)
                         {
                             // A param/return typed by a class type-param that carries a *class* upper
                             // bound (`class D<T : Foo> : Base<T>() { override fun bar(x: T) }`): kotlinc
@@ -2106,7 +2105,7 @@ pub fn lower_file_at_reporting(
                         })
                     });
                     for fname in own_fields {
-                        if lo.resolve_field(&super_internal, fname).is_some() {
+                        if lo.resolve_field_name(super_int, fname).is_some() {
                             // A base with its own base, or a base member reading `fname`, risks the
                             // internal-read bypass — bail conservatively; else the override is safe.
                             let unsafe_base = base_decl.map_or(true, |bd| {
@@ -2147,14 +2146,13 @@ pub fn lower_file_at_reporting(
                                 let own_desc = lo.runtime.type_descriptor(own_ty)?;
                                 if sty_desc != own_desc {
                                     let gname = property_getter_name(&pname);
-                                    let sup_rendered = sup.render();
                                     let super_ret = lo
-                                        .class_info(&sup_rendered)
+                                        .class_info_name(sup)
                                         .and_then(|ci| ci.methods.get(&gname))
                                         .map(|(_, fid, _)| lo.ir.functions[*fid as usize].ret)
                                         .unwrap_or_else(|| ty_to_ir(sty));
                                     let own_ret = lo
-                                        .class_info(&internal)
+                                        .class_info_name(internal_name)
                                         .and_then(|ci| ci.methods.get(&gname))
                                         .map(|(_, fid, _)| lo.ir.functions[*fid as usize].ret)
                                         .unwrap_or_else(|| ty_to_ir(own_ty));
@@ -5285,12 +5283,11 @@ impl<'a> Lower<'a> {
         args: &[AstExprId],
         call_expr: AstExprId,
     ) -> Option<u32> {
-        let internal_name = internal.render();
         // A SAME-FILE object or companion: read the singleton (`Obj.INSTANCE` or `C.Companion`) and
         // invoke the recorded member on it. The classpath path below needs a library type.
-        if let Some(ci) = self.class_info(&internal_name) {
+        if let Some(ci) = self.class_info_name(internal) {
             let cid = ci.id;
-            let (class_id, index, fid, ret) = self.resolve_method(&internal_name, name)?;
+            let (class_id, index, fid, ret) = self.resolve_method_name(internal, name)?;
             let params = self.ir.functions[fid as usize].params.clone();
             if params.len() != args.len() {
                 return None;
@@ -5298,6 +5295,7 @@ impl<'a> Lower<'a> {
             let recv = if self.ir.classes[cid as usize].is_object {
                 self.emit_static_instance(cid, cid, "INSTANCE")
             } else if self.ir.classes[cid as usize].is_companion {
+                let internal_name = internal.render();
                 let outer = internal_name.strip_suffix("$Companion")?;
                 let field =
                     self.runtime
@@ -5313,6 +5311,7 @@ impl<'a> Lower<'a> {
             let mc = self.emit_method_call(class_id, index, recv, a);
             return Some(self.coerce_generic_read(mc, call_expr, ret));
         }
+        let internal_name = internal.render();
         let resolved = self.info.resolved_member(call_expr).cloned()?;
         let m = resolved.member;
         if m.name != name || m.params.len() != args.len() {
@@ -6763,12 +6762,11 @@ impl<'a> Lower<'a> {
         let Some(outer) = outer_ty.obj_internal() else {
             return false;
         };
-        let outer = outer.render();
-        fn scan(lo: &Lower, outer: &str, bound: &[String], e: AstExprId, deep: bool) -> bool {
+        fn scan(lo: &Lower, outer: TypeName, bound: &[String], e: AstExprId, deep: bool) -> bool {
             if let Expr::Name(n) = lo.afile.expr(e) {
                 if !bound.contains(n)
-                    && (lo.resolve_field(outer, n).is_some()
-                        || lo.resolve_method(outer, n).is_some())
+                    && (lo.resolve_field_name(outer, n).is_some()
+                        || lo.resolve_method_name(outer, n).is_some())
                 {
                     return true;
                 }
@@ -6782,7 +6780,7 @@ impl<'a> Lower<'a> {
                         .any_child_stmt(s, &mut |c| scan(lo, outer, bound, c, deep))
                 })
         }
-        scan(self, &outer, bound, body, deep)
+        scan(self, outer, bound, body, deep)
     }
 
     /// Whether the AST subtree at `e` contains a NON-LOCAL `return` (no label — it exits the enclosing
@@ -7291,13 +7289,12 @@ impl<'a> Lower<'a> {
         // overridden by the synthesized member (KT-6206); a final one is inherited (can't override).
         // Other synthesis (an interface-delegation forwarder) inherits any base member.
         if let Some(s) = self.class_info(internal).and_then(|ci| ci.super_internal) {
-            let super_internal = s.render();
             let blocks = if force_override {
                 self.syms
-                    .method_of(&super_internal, name)
+                    .method_of_name(s, name)
                     .map_or(false, |sig| sig.is_final)
             } else {
-                self.resolve_method(&super_internal, name).is_some()
+                self.resolve_method_name(s, name).is_some()
             };
             if blocks {
                 return None;
@@ -8856,7 +8853,11 @@ impl<'a> Lower<'a> {
     /// Resolve a field by name, walking the superclass chain. Returns the *owning* class id, the
     /// field index within that class, and its type.
     fn resolve_field(&self, internal: &str, name: &str) -> Option<(ClassId, u32, Ty)> {
-        let mut cur = existing_type_name(internal);
+        self.resolve_field_name(existing_type_name(internal)?, name)
+    }
+
+    fn resolve_field_name(&self, internal: TypeName, name: &str) -> Option<(ClassId, u32, Ty)> {
+        let mut cur = Some(internal);
         while let Some(ci_name) = cur {
             let ci = self.class_info_name(ci_name)?;
             if let Some(idx) = ci.fields.iter().position(|(fn_, _)| fn_ == name) {
@@ -9167,10 +9168,9 @@ impl<'a> Lower<'a> {
         }
         let arr = self.emit_vararg(ty_to_ir(arr_ty), collected);
         let call = if let Some(internal) = object_internal {
-            let internal = internal.render();
             // A member of a same-file `object`: dispatch on its `INSTANCE` singleton.
-            let cid = self.class_info(&internal)?.id;
-            let (class_id, index, _fid, _) = self.resolve_method(&internal, name)?;
+            let cid = self.class_info_name(internal)?.id;
+            let (class_id, index, _fid, _) = self.resolve_method_name(internal, name)?;
             let recv = self.emit_static_instance(cid, cid, "INSTANCE");
             let mut a: Vec<Option<u32>> = (0..fixed as u32)
                 .map(|k| Some(self.emit_get_value(k)))
@@ -9569,12 +9569,12 @@ impl<'a> Lower<'a> {
         if ret == Ty::Nothing {
             return None;
         }
-        let internal = internal.render();
-        let cid = self.class_info(&internal)?.id;
+        let cid = self.class_info_name(internal)?.id;
         let inst = self.emit_static_instance(cid, cid, "INSTANCE");
-        let (_, _, target_fid, _) = self.resolve_method(&internal, name)?;
+        let (_, _, target_fid, _) = self.resolve_method_name(internal, name)?;
         let call_name = if self.ir.private_methods.contains(&target_fid) {
-            self.ensure_private_accessor(&internal, name)?
+            let internal_rendered = internal.render();
+            self.ensure_private_accessor(&internal_rendered, name)?
         } else {
             name.to_string()
         };
@@ -9583,11 +9583,11 @@ impl<'a> Lower<'a> {
             e.0,
             true,
             params.len() as u8,
-            Some(type_name(&internal)),
+            Some(internal),
             name.to_string(),
             0,
             crate::ir::FrDispatch::VirtualBound,
-            Some(type_name(&internal)),
+            Some(internal),
             call_name,
             false,
             param_tys,
@@ -11690,10 +11690,9 @@ impl<'a> Lower<'a> {
     ) -> Option<u32> {
         // A user instance method on the receiver's class — `this.m(args)`.
         if let Some(internal) = this_ty.obj_internal() {
-            let internal = internal.render();
-            if let Some((class, index, mfid, ret)) = self.resolve_method(&internal, name) {
+            if let Some((class, index, mfid, ret)) = self.resolve_method_name(internal, name) {
                 let params = self.ir.functions[mfid as usize].params.clone();
-                let vararg = self.syms.method_is_vararg(&internal, name);
+                let vararg = self.syms.method_is_vararg_name(internal, name);
                 if let Some(n_fixed) = vararg_arity(vararg, params.len(), args.len()) {
                     let recv = self.emit_get_value(this_v);
                     let a = self.lower_call_args_vararg(args, &params, vararg, n_fixed)?;
@@ -16089,7 +16088,7 @@ impl<'a> Lower<'a> {
                             );
                             return Some(self.coerce_to_static(call, ret, physical_ret));
                         }
-                        let (fclass, idx, _) = self.resolve_field(&bi.render(), &n)?;
+                        let (fclass, idx, _) = self.resolve_field_name(bi, &n)?;
                         return Some(self.emit_get_field(cast, fclass, idx));
                     }
                     let read = if let Some(cur) = self.cur_class.clone() {
@@ -16154,12 +16153,12 @@ impl<'a> Lower<'a> {
                         // collection accessor, …) — the same path a qualified `this.n` read takes.
                         let internal = this_ty.obj_internal();
                         if let Some(internal) = internal {
-                            let internal = internal.render();
                             if let Some((class, index, _, _)) =
-                                self.resolve_method(&internal, &property_getter_name(&n))
+                                self.resolve_method_name(internal, &property_getter_name(&n))
                             {
                                 self.emit_method_call(class, index, recv, vec![])
-                            } else if let Some((fclass, idx, _)) = self.resolve_field(&internal, &n)
+                            } else if let Some((fclass, idx, _)) =
+                                self.resolve_field_name(internal, &n)
                             {
                                 self.emit_get_field(recv, fclass, idx)
                             } else {
@@ -17948,11 +17947,10 @@ impl<'a> Lower<'a> {
                                     recv,
                                     ty_to_ir(Ty::obj_name(bi)),
                                 );
-                                let bi_rendered = bi.render();
                                 let (class, index, mfid, _) =
-                                    self.resolve_method(&bi_rendered, &fname)?;
+                                    self.resolve_method_name(bi, &fname)?;
                                 let params = self.ir.functions[mfid as usize].params.clone();
-                                let vararg = self.syms.method_is_vararg(&bi_rendered, &fname);
+                                let vararg = self.syms.method_is_vararg_name(bi, &fname);
                                 let n_fixed = vararg_arity(vararg, params.len(), args.len())?;
                                 let a =
                                     self.lower_call_args_vararg(&args, &params, vararg, n_fixed)?;
@@ -18491,9 +18489,10 @@ impl<'a> Lower<'a> {
                                 // an overload the class map didn't keep degrades to a skip, not a miscompile.
                                 // A method WITH defaults keeps the existing default/positional path.
                                 if no_defaults {
-                                    let internal = internal.render();
-                                    let no_vararg = !self.syms.method_is_vararg(&internal, &name);
+                                    let no_vararg =
+                                        !self.syms.method_is_vararg_name(internal, &name);
                                     if args.len() == params_len && no_vararg {
+                                        let internal = internal.render();
                                         return self.lower_named_member_call(
                                             e, receiver, &name, &args, &internal,
                                         );
