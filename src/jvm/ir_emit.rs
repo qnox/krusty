@@ -902,7 +902,7 @@ fn emit_class(
     // A SEALED class is abstract (kotlinc: sealed implies no direct instantiation), and an
     // `abstract class` is too — both alongside any class with an abstract (body-less) member.
     let is_abstract = has_abstract || c.is_sealed || c.is_abstract;
-    if !extended && !is_abstract {
+    if !extended && !is_abstract && !c.is_open {
         access |= 0x0010;
     } // FINAL
     if is_abstract {
@@ -1210,10 +1210,15 @@ fn emit_class(
                 for &t in &param_tys {
                     push_zero(t, &mut z, &mut cw);
                 }
-                z.push_int((1i32 << param_tys.len()) - 1, &mut cw);
+                for mask in full_default_masks(param_tys.len()) {
+                    z.push_int(mask, &mut cw);
+                }
                 z.aconst_null();
                 let mut stub_params = param_tys.clone();
-                stub_params.push(Ty::Int);
+                stub_params.extend(std::iter::repeat_n(
+                    Ty::Int,
+                    default_mask_count(param_tys.len()),
+                ));
                 stub_params.push(Ty::obj("kotlin/jvm/internal/DefaultConstructorMarker"));
                 let aw: i32 = 1 + stub_params
                     .iter()
@@ -3593,16 +3598,23 @@ fn emit_default_stub(
         param_slots.push((slot, *t));
         slot += slot_words(*t);
     }
-    let mask_slot = slot;
-    e.slots.insert(9_000_001, (mask_slot, Ty::Int)); // register so frames type these slots
-    slot += 1;
-    e.slots
-        .insert(9_000_002, (slot, Ty::obj("java/lang/Object")));
+    let mask_slots: Vec<u16> = (0..default_mask_count(real_params.len()))
+        .map(|mi| {
+            let s = slot;
+            e.slots.insert(9_000_001 + mi as u32, (s, Ty::Int)); // register so frames type these slots
+            slot += 1;
+            s
+        })
+        .collect();
+    e.slots.insert(
+        9_000_001 + mask_slots.len() as u32,
+        (slot, Ty::obj("java/lang/Object")),
+    );
     slot += 1;
     e.next_slot = slot;
 
     let mut code = CodeBuilder::new(slot);
-    emit_default_param_overwrites(&mut e, &mut code, defaults, &param_slots, mask_slot);
+    emit_default_param_overwrites(&mut e, &mut code, defaults, &param_slots, &mask_slots);
     code.aload(0);
     for &(pslot, pty) in &param_slots {
         load(pty, pslot, &mut code);
@@ -3630,7 +3642,10 @@ fn emit_default_stub(
 
     let mut stub_params = vec![owner_ty];
     stub_params.extend(real_params.iter().copied());
-    stub_params.push(Ty::Int);
+    stub_params.extend(std::iter::repeat_n(
+        Ty::Int,
+        default_mask_count(real_params.len()),
+    ));
     stub_params.push(Ty::obj("java/lang/Object"));
     let desc = method_descriptor(&stub_params, ret);
     e.cw.add_method(
@@ -3660,13 +3675,13 @@ fn emit_default_param_overwrites(
     code: &mut CodeBuilder,
     defaults: &[Option<u32>],
     param_slots: &[(u16, Ty)],
-    mask_slot: u16,
+    mask_slots: &[u16],
 ) {
     for (i, def) in defaults.iter().enumerate().take(param_slots.len()) {
         if let Some(def_expr) = def {
             let (pslot, pty) = param_slots[i];
-            code.iload(mask_slot);
-            code.push_int(1 << i, e.cw);
+            code.iload(mask_slots[i / 32]);
+            code.push_int(default_mask_bit(i), e.cw);
             code.iand();
             let skip = code.new_label();
             e.frame(skip, vec![], code);
@@ -3676,6 +3691,24 @@ fn emit_default_param_overwrites(
             code.bind(skip);
         }
     }
+}
+
+fn default_mask_count(param_count: usize) -> usize {
+    param_count.div_ceil(32).max(1)
+}
+
+fn default_mask_bit(param_index: usize) -> i32 {
+    (1u32 << (param_index % 32)) as i32
+}
+
+fn full_default_masks(param_count: usize) -> Vec<i32> {
+    (0..default_mask_count(param_count))
+        .map(|chunk| {
+            let start = chunk * 32;
+            let end = ((chunk + 1) * 32).min(param_count);
+            (start..end).fold(0i32, |mask, i| mask | default_mask_bit(i))
+        })
+        .collect()
 }
 
 /// Emit the `foo$default(params…, int mask, Object marker)` synthetic for a TOP-LEVEL facade function
@@ -3718,15 +3751,21 @@ fn emit_facade_default_stub(
         param_slots.push((slot, *t));
         slot += slot_words(*t);
     }
-    let mask_slot = slot;
-    e.slots.insert(9_000_001, (mask_slot, Ty::Int)); // register so frames type these slots
-    slot += 1;
-    e.slots.insert(9_000_002, (slot, marker));
+    let mask_slots: Vec<u16> = (0..default_mask_count(real_params.len()))
+        .map(|mi| {
+            let s = slot;
+            e.slots.insert(9_000_001 + mi as u32, (s, Ty::Int)); // register so frames type these slots
+            slot += 1;
+            s
+        })
+        .collect();
+    e.slots
+        .insert(9_000_001 + mask_slots.len() as u32, (slot, marker));
     slot += 1;
     e.next_slot = slot;
 
     let mut code = CodeBuilder::new(slot);
-    emit_default_param_overwrites(&mut e, &mut code, defaults, &param_slots, mask_slot);
+    emit_default_param_overwrites(&mut e, &mut code, defaults, &param_slots, &mask_slots);
     for &(pslot, pty) in &param_slots {
         load(pty, pslot, &mut code);
     }
@@ -3739,7 +3778,10 @@ fn emit_facade_default_stub(
     code.link();
 
     let mut stub_params = real_params.clone();
-    stub_params.push(Ty::Int);
+    stub_params.extend(std::iter::repeat_n(
+        Ty::Int,
+        default_mask_count(real_params.len()),
+    ));
     stub_params.push(marker);
     let desc = method_descriptor(&stub_params, ret);
     e.cw.add_method(
@@ -3786,10 +3828,16 @@ fn emit_ctor_default_stub(
         param_slots.push((slot, *t));
         slot += slot_words(*t);
     }
-    let mask_slot = slot;
-    e.slots.insert(9_000_001, (mask_slot, Ty::Int));
-    slot += 1;
-    e.slots.insert(9_000_002, (slot, marker));
+    let mask_slots: Vec<u16> = (0..default_mask_count(real_params.len()))
+        .map(|mi| {
+            let s = slot;
+            e.slots.insert(9_000_001 + mi as u32, (s, Ty::Int));
+            slot += 1;
+            s
+        })
+        .collect();
+    e.slots
+        .insert(9_000_001 + mask_slots.len() as u32, (slot, marker));
     slot += 1;
     e.next_slot = slot;
 
@@ -3802,8 +3850,10 @@ fn emit_ctor_default_stub(
         for &(pslot, pty) in &param_slots {
             raw[pslot as usize] = e.verif_single(pty);
         }
-        raw[mask_slot as usize] = VerifType::Integer;
-        raw[(mask_slot + 1) as usize] = e.verif_single(marker);
+        for &mask_slot in &mask_slots {
+            raw[mask_slot as usize] = VerifType::Integer;
+        }
+        raw[slot as usize - 1] = e.verif_single(marker);
         // Collapse the two-slot categories (long/double occupy one verif entry) and trim trailing Top.
         let mut out = Vec::new();
         let mut i = 0;
@@ -3821,8 +3871,8 @@ fn emit_ctor_default_stub(
     for (i, def) in defaults.iter().enumerate().take(n) {
         if let Some(def_expr) = def {
             let (pslot, pty) = param_slots[i];
-            code.iload(mask_slot);
-            code.push_int(1 << i, e.cw);
+            code.iload(mask_slots[i / 32]);
+            code.push_int(default_mask_bit(i), e.cw);
             code.iand();
             let skip = code.new_label();
             code.add_frame_if_new(skip, branch_locals.clone(), vec![]);
@@ -3849,7 +3899,10 @@ fn emit_ctor_default_stub(
     code.link();
 
     let mut stub_params = real_params.to_vec();
-    stub_params.push(Ty::Int);
+    stub_params.extend(std::iter::repeat_n(
+        Ty::Int,
+        default_mask_count(real_params.len()),
+    ));
     stub_params.push(marker);
     let desc = method_descriptor(&stub_params, Ty::Unit);
     e.cw.add_method(0x1001 /* PUBLIC | SYNTHETIC */, "<init>", &desc, &code);
@@ -5189,21 +5242,26 @@ impl<'a> Emitter<'a> {
                     // mask bit set), the mask, then a null marker.
                     let args = args.clone();
                     self.emit_value(*receiver, code);
-                    let mut mask = 0i32;
+                    let mut masks = vec![0i32; default_mask_count(param_tys.len())];
                     for (i, arg) in args.iter().enumerate() {
                         match arg {
                             Some(a) => self.emit_value(*a, code),
                             None => {
                                 push_zero(param_tys[i], code, self.cw);
-                                mask |= 1 << i;
+                                masks[i / 32] |= default_mask_bit(i);
                             }
                         }
                     }
-                    code.push_int(mask, self.cw);
+                    for mask in masks {
+                        code.push_int(mask, self.cw);
+                    }
                     code.aconst_null();
                     let mut stub_params = vec![Ty::obj(&owner)];
                     stub_params.extend(param_tys.iter().copied());
-                    stub_params.push(Ty::Int);
+                    stub_params.extend(std::iter::repeat_n(
+                        Ty::Int,
+                        default_mask_count(param_tys.len()),
+                    ));
                     stub_params.push(Ty::obj("java/lang/Object"));
                     let aw: i32 = stub_params.iter().map(|t| slot_words(*t) as i32).sum();
                     let stub_desc = method_descriptor(&stub_params, ret);
@@ -6180,6 +6238,11 @@ impl<'a> Emitter<'a> {
             "kotlin/String.length" => {
                 self.emit_value(recv.unwrap(), code);
                 let m = self.cw.methodref("java/lang/String", "length", "()I");
+                code.invokevirtual(m, 0, 1);
+            }
+            "kotlin/String.hashCode" => {
+                self.emit_value(recv.unwrap(), code);
+                let m = self.cw.methodref("java/lang/String", "hashCode", "()I");
                 code.invokevirtual(m, 0, 1);
             }
             // `s[i]` → `String.charAt(i)`.

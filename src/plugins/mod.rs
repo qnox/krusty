@@ -496,6 +496,7 @@ pub(crate) fn synthetic_class(fq_name: impl Into<String>) -> crate::ir::IrClass 
         annotation_impl_of: None,
         is_sealed: false,
         is_abstract: false,
+        is_open: false,
         superclass: "java/lang/Object".to_string(),
         super_args: Vec::new(),
         enum_entries: Vec::new(),

@@ -79,7 +79,7 @@ pub(crate) fn platform_class_identity(internal: &str) -> String {
 /// parameters (`ty.type_params`) is bound by unifying the matching-arity constructor's parsed generic
 /// parameter signatures against `arg_tys`; an unbound formal defaults to `Any`. `None` when the type is
 /// non-generic or no constructor carries a generic signature to unify.
-pub fn infer_constructor_type_args(
+pub(crate) fn infer_constructor_type_args(
     ty: &crate::libraries::LibraryType,
     arg_tys: &[Ty],
 ) -> Option<Vec<Ty>> {
@@ -1431,6 +1431,7 @@ fn resolve_constructor(
 ///     real `<init>` is private), and the caller passes every arg plus a `null` marker (`mask: None`);
 ///   * an omitted DEFAULT parameter uses `<init>(<params…>, int mask, DefaultConstructorMarker)`, and the
 ///     caller passes the provided args, a placeholder per omitted param, the `mask`, then the `null` marker.
+#[derive(Clone, Debug)]
 pub struct SyntheticCtorCall {
     /// The synthetic `<init>` descriptor to invoke.
     pub descriptor: String,
@@ -1450,12 +1451,12 @@ pub struct SyntheticCtorCall {
 /// sibling — is required because a class with a VALUE-CLASS parameter has a PRIVATE primary constructor
 /// (absent from the public `constructors`) and ALSO a separate value-class marker overload
 /// `<init>(<params…>, marker)` (no mask); only the `arity + 2` shape is the default synthetic.
-pub fn synthetic_default_ctor(
-    lib: &dyn SemanticPlatform,
+pub(crate) fn synthetic_default_ctor(
+    source: &dyn SymbolSource,
     internal: &str,
     arity: usize,
 ) -> Option<(String, Vec<Ty>)> {
-    let t = lib.resolve_type(internal)?;
+    let t = source.resolve_type(internal)?;
     let m = t
         .constructors
         .iter()
@@ -1467,13 +1468,13 @@ pub fn synthetic_default_ctor(
 /// Object marker): Ret` (a static, e.g. a data class's `copy$default`) — as `(descriptor, real_params,
 /// ret)`, the parameter types being the source method's (WITHOUT the leading receiver and trailing
 /// mask/marker). Lets a call omit a defaulted argument. `None` when the class has no such synthetic.
-pub fn synthetic_default_member(
-    lib: &dyn SemanticPlatform,
+pub(crate) fn synthetic_default_member(
+    source: &dyn SymbolSource,
     owner: &str,
     name: &str,
     arity: usize,
 ) -> Option<(String, Vec<Ty>, Ty, bool)> {
-    let t = lib.resolve_type(owner)?;
+    let t = source.resolve_type(owner)?;
     let dname = format!("{name}$default");
     // Shape `(Owner receiver, <real params…>, int mask, Object marker)`: exactly `arity` real params, an
     // `int` mask, and a reference marker. Match by `arity` (not just name) so an overloaded `name$default`
@@ -1640,6 +1641,7 @@ fn resolve_instance_ref(lib: &dyn SemanticPlatform, recv: Ty, name: &str) -> Opt
 /// backend emits: the getter's owner + physical name + the property type. Every classification and
 /// emittability decision is made HERE — the checker and lowerer just consume this, never re-deriving
 /// value-class-ness, interface-ness, or property-vs-function from the platform themselves.
+#[derive(Clone, Debug)]
 pub struct BoundPropertyRef {
     pub owner: String,
     pub getter_name: String,

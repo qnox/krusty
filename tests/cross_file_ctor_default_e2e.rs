@@ -115,3 +115,25 @@ fn cross_file_top_level_default_before_trailing_lambda() {
     let b = "fun box(): String = host { \"K\" }\n";
     assert_eq!(run_two(a, b).as_deref(), Some("OK"));
 }
+
+#[test]
+fn cross_file_base_class_resolves_as_module_symbol() {
+    if common::java_home().is_none() || common::stdlib_jar().is_none() {
+        return;
+    }
+    let a = "open class Base { fun ok(): String = \"O\" }\n";
+    let b = "class Child : Base()\n\
+             fun box(): String = Child().ok() + \"K\"\n";
+    assert_eq!(run_two(a, b).as_deref(), Some("OK"));
+}
+
+#[test]
+fn cross_file_interface_resolves_as_module_symbol() {
+    if common::java_home().is_none() || common::stdlib_jar().is_none() {
+        return;
+    }
+    let a = "interface Marker\n";
+    let b = "class Impl : Marker\n\
+             fun box(): String = if (Impl() is Marker) \"OK\" else \"fail\"\n";
+    assert_eq!(run_two(a, b).as_deref(), Some("OK"));
+}

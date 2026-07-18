@@ -344,6 +344,12 @@ fn emit_expr_node(ir: &IrFile, node: &IrExpr, inst: bool) -> String {
                     emit_expr(ir, dispatch_receiver.unwrap(), inst),
                     emit_expr(ir, args[0], inst)
                 ),
+                "kotlin/String.hashCode" => {
+                    let recv = emit_expr(ir, dispatch_receiver.unwrap(), inst);
+                    format!(
+                        "(()=>{{const s={recv};let h=0;for(let i=0;i<s.length;i++){{h=((h*31)+s.charCodeAt(i))|0;}}return h;}})()"
+                    )
+                }
                 "kotlin/Any.toString" => format!(
                     "String({})",
                     emit_expr(ir, dispatch_receiver.unwrap(), inst)

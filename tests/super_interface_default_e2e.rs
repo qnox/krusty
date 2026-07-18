@@ -33,3 +33,18 @@ fn typed_super_selects_interface() {
         fun box(): String = if (A().foo() == \"OK\") \"OK\" else \"fail: \" + A().foo()\n";
     assert_eq!(run(SRC).expect("typed super"), "OK");
 }
+
+#[test]
+fn super_skips_abstract_class_override_for_interface_default() {
+    const SRC: &str = "interface Test { fun test(): String = \"fail\" }\n\
+        abstract class TestClass : Test { abstract override fun test(): String }\n\
+        interface Test2 : Test { override fun test(): String = \"OK\" }\n\
+        class TestClass2 : TestClass(), Test2 {\n\
+        \x20 override fun test(): String = super.test()\n\
+        }\n\
+        fun box(): String = TestClass2().test()\n";
+    assert_eq!(
+        run(SRC).expect("abstract super/interface default diamond"),
+        "OK"
+    );
+}
