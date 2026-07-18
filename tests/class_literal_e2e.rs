@@ -39,9 +39,6 @@ fn primitive_class_literals_bound_and_unbound_agree() {
 
 #[test]
 fn class_literal_java_is_identity_on_the_class() {
-    // `X::class.java` is the `java.lang.Class` of the literal. krusty already models `X::class` AS a
-    // `java/lang/Class`, so `.java` is an identity — byte-for-byte the same `ldc X.class` kotlinc emits.
-    // Exercised UNBOUND (`Foo::class.java`, `String::class.java`) and BOUND (`x::class.java`).
     const SRC: &str = "class Foo\n\
 fun box(): String {\n\
     if (Foo::class.java != Foo::class.java) return \"Fail 1\"\n\
@@ -56,8 +53,6 @@ fun box(): String {\n\
 
 #[test]
 fn class_literal_java_on_explicitly_imported_type() {
-    // An UNBOUND literal on an EXPLICITLY IMPORTED reference type (`import java.util.ArrayList`) resolves
-    // to that type's class constant — the same interop shape as `Document::class.java` in real code.
     const SRC: &str = "import java.util.ArrayList\n\
 fun box(): String {\n\
     val c = ArrayList::class.java\n\

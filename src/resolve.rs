@@ -7027,25 +7027,16 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// If a bare type name `n` denotes a reference type usable as an UNBOUND class literal `n::class`,
-    /// its `Ty`. Resolves the same way [`Self::resolve_ty_no_diag`] does (built-in `from_name` types + user
-    /// classes) — deliberately NOT via the global simple-name index, which falsely collides names like
-    /// `IntArray` with unrelated JDK classes. A primitive (`Int::class` needs `Integer.TYPE`-style
-    /// lowering) or unknown name returns `None` so the literal is skipped rather than miscompiled.
+    /// If a bare type name `n` denotes a reference type usable as an unbound class literal `n::class`,
+    /// its `Ty`. Checks built-ins, user classes, enclosing nested types, and imports, but not the global
+    /// simple-name index because it collides with built-in names. Primitive or unknown names return `None`.
     fn class_literal_unbound_ty(&self, n: &str) -> Option<Ty> {
         if self.tparams.contains(n) {
             return None;
         }
-        // A value binding with this name shadows any same-named type: `n::class` is then a BOUND
-        // literal on the value (handled by the caller's bound path) — don't read it as unbound.
         if self.lookup(n).is_some() {
             return None;
         }
-        // Built-in `from_name` types + user classes, then the NESTED type of an enclosing class and
-        // finally an EXPLICIT/wildcard import (`import org.bson.Document` → `Document::class`). Both
-        // extra sources name a definite reference type the file brought into scope — unlike the global
-        // simple-name index, which is deliberately skipped (it collides names like `IntArray` with
-        // unrelated JDK classes).
         let ty = Ty::from_name(n)
             .or_else(|| self.syms.classes.get(n).map(|cs| Ty::obj(&cs.internal)))
             .or_else(|| self.enclosing_nested_type(n).map(|i| Ty::obj(&i)))
