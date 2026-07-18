@@ -64,6 +64,15 @@ pub struct LibraryMember {
     pub call_sig: CallSig,
 }
 
+/// A public static field read.
+#[derive(Clone, Debug)]
+pub struct StaticFieldRef {
+    pub owner: String,
+    pub name: String,
+    pub descriptor: String,
+    pub ty: Ty,
+}
+
 /// Source-level services exposed by compiled libraries.
 pub trait SemanticPlatform: crate::symbol_source::SymbolSource {
     /// Semantic interface/class used by the platform libraries to model a function value of `arity`.
@@ -75,6 +84,11 @@ pub trait SemanticPlatform: crate::symbol_source::SymbolSource {
     /// no value classes; a library provider recovers the underlying from its type metadata plus
     /// any builtins whose source type is not represented as `Ty::Obj` (`UInt` → `Int`).
     fn value_underlying(&self, _ty: Ty) -> Option<Ty> {
+        None
+    }
+
+    /// A runtime-valued public static field on `internal` or its supertypes.
+    fn static_field(&self, _internal: &str, _name: &str) -> Option<StaticFieldRef> {
         None
     }
 
@@ -900,6 +914,27 @@ pub(crate) fn best_overload<'a>(
             named
                 .clone()
                 .find(|m| m.params.len() >= args.len() && m.params[..args.len()] == *args)
+        })
+        .or_else(|| {
+            named.clone().find(|m| {
+                let Some((last, fixed)) = m.params.split_last() else {
+                    return false;
+                };
+                let Some(elem) = last.array_elem() else {
+                    return false;
+                };
+                if args.len() == m.params.len() && args.last() == Some(last) {
+                    return false;
+                }
+                args.len() >= fixed.len()
+                    && fixed
+                        .iter()
+                        .zip(args)
+                        .all(|(p, a)| p == a || p.is_erased_top())
+                    && args[fixed.len()..]
+                        .iter()
+                        .all(|a| *a == elem || elem.is_erased_top() || a.is_erased_top())
+            })
         })
 }
 
