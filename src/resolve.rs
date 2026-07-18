@@ -6328,6 +6328,15 @@ impl<'a> Checker<'a> {
         .iter()
         .any(|o| o.callable.owner.starts_with("kotlin/contracts"))
     }
+
+    fn is_resolved_stdlib_precondition_call(&self, call: ExprId, name: &str) -> bool {
+        matches!(
+            self.resolved_calls.get(&call),
+            Some(ResolvedCall::TopLevel(c))
+                if c.name == name && c.owner.starts_with("kotlin/PreconditionsKt")
+        )
+    }
+
     /// Resolve an operator/method call `receiver.name(args)` — a user-class MEMBER, a same-module
     /// EXTENSION, or a library member — checking each argument type and returning the selected target.
     /// `None` when no such method of matching arity exists (the caller then declines). Used by the
@@ -9758,6 +9767,23 @@ impl<'a> Checker<'a> {
                             if self.expr_diverges(then_branch) {
                                 if let Some((n, t)) = self.smartcast_binding(cond, true) {
                                     self.declare(&n, t, false);
+                                }
+                            }
+                        }
+                        // `require(x is T)` / `check(x is T)` — a stdlib precondition that throws when the
+                        // condition is FALSE (`contract { returns() implies (x is T) }`), so the condition
+                        // holds for the rest of the block. Narrow a stable binding in the FIRST argument
+                        // (the condition), exactly as the `if (…) return` guard above does. Gated on the
+                        // stdlib name not being shadowed by a lexical local or module-declared function.
+                        else if let Expr::Call { callee, args } = self.file.expr(ie).clone() {
+                            if let Expr::Name(fname) = self.file.expr(callee).clone() {
+                                if (fname == "require" || fname == "check")
+                                    && !args.is_empty()
+                                    && self.is_resolved_stdlib_precondition_call(ie, &fname)
+                                {
+                                    if let Some((n, t)) = self.smartcast_binding(args[0], false) {
+                                        self.declare(&n, t, false);
+                                    }
                                 }
                             }
                         }
