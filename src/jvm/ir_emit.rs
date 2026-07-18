@@ -3681,7 +3681,14 @@ fn emit_default_stub(
     e.next_slot = slot;
 
     let mut code = CodeBuilder::new(slot);
-    emit_default_param_overwrites(&mut e, &mut code, defaults, &param_slots, &mask_slots, &boxed);
+    emit_default_param_overwrites(
+        &mut e,
+        &mut code,
+        defaults,
+        &param_slots,
+        &mask_slots,
+        &boxed,
+    );
     code.aload(0);
     for (i, &(pslot, pty)) in param_slots.iter().enumerate() {
         load(pty, pslot, &mut code);
@@ -5467,7 +5474,10 @@ impl<'a> Emitter<'a> {
                     // (emitted by `emit_facade_default_stub`). Args already include mask words + marker.
                     let f = &self.ir.functions[*fid as usize];
                     let mut param_tys = jvm_tys(&f.params);
-                    param_tys.extend(std::iter::repeat_n(Ty::Int, default_mask_count(f.params.len())));
+                    param_tys.extend(std::iter::repeat_n(
+                        Ty::Int,
+                        default_mask_count(f.params.len()),
+                    ));
                     param_tys.push(Ty::obj("java/lang/Object"));
                     let ret = ir_ty_to_jvm(&f.ret);
                     let name = format!("{}$default", f.name);

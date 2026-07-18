@@ -760,6 +760,8 @@ mod top_level_generic_property_inference_e2e;
 mod top_level_property_e2e;
 #[path = "toplevel_array_inference_e2e.rs"]
 mod toplevel_array_inference_e2e;
+#[path = "toplevel_default_multimask_e2e.rs"]
+mod toplevel_default_multimask_e2e;
 #[path = "toplevel_prop_with_companion_const_e2e.rs"]
 mod toplevel_prop_with_companion_const_e2e;
 #[path = "toplevel_property_inference_e2e.rs"]

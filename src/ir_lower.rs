@@ -1947,16 +1947,10 @@ pub fn lower_file_at(
                     param_vals.push(v);
                     lo.scope.push((p.name.clone(), v, *t));
                 }
-                // Register parameter defaults for a plain top-level function (no extension receiver, no
-                // vararg, ≤31 params) so a transform/plugin can read the lowered default exprs. Lowered
-                // with the STATIC value layout — params at values `0..n` (no `this`), the layout these
-                // bodies already use. This does NOT emit a `name$default` stub: stub emission runs only on
-                // the class path (`emit_default_stub`), never the facade, so a top-level function's codegen
-                // is unchanged (top-level calls keep filling omitted args at the call site).
                 // Register parameter defaults for a top-level function OR EXTENSION (the latter's IR
                 // function prepends the receiver as parameter 0, so the defaults/names get a leading
-                // receiver slot). The omitted args are filled at the CALL SITE (no `$default` stub), like a
-                // plain top-level call.
+                // receiver slot). Plain top-level functions may also emit a facade `$default` stub; the
+                // JVM backend uses one mask word per 32 parameters, so there is no 31-param cap here.
                 // An EXTENSION fills its omitted defaults at the CALL SITE by REUSING these lowered default
                 // exprs, so restrict it to CONSTANT defaults (a literal carries no function-local value
                 // dependency); a non-constant extension default isn't modeled — skip registration so an
@@ -1973,11 +1967,7 @@ pub fn lower_file_at(
                 // receiver-offset vararg is left out (a later slice).
                 let vararg_ok = !f.params.iter().any(|p| p.is_vararg)
                     || (f.receiver.is_none() && f.params.last().is_some_and(|p| p.is_vararg));
-                if const_ok
-                    && f.params.iter().any(|p| p.default.is_some())
-                    && vararg_ok
-                    && f.params.len() <= 31
-                {
+                if const_ok && f.params.iter().any(|p| p.default.is_some()) && vararg_ok {
                     let ir_params = lo.ir.functions[fid as usize].params.clone();
                     let recv_off = usize::from(f.receiver.is_some());
                     let mut defaults: Vec<Option<u32>> = vec![None; recv_off];
