@@ -826,3 +826,5 @@ mod when_multiple_else_check_e2e;
 mod when_nothing_arm_e2e;
 #[path = "when_throwing_branch_e2e.rs"]
 mod when_throwing_branch_e2e;
+#[path = "wrapped_param_type_e2e.rs"]
+mod wrapped_param_type_e2e;

@@ -1772,6 +1772,7 @@ impl<'a> Parser<'a> {
                 }
                 let pname = self.ident_or_error("parameter name");
                 self.expect(TokenKind::Colon, "':'");
+                self.skip_newlines(); // a wrapped declaration puts the type on the next line (`val x:\n  T`)
                 let ty = self.parse_type();
                 let ty = if is_vararg {
                     vararg_array_typeref(ty)
@@ -2595,6 +2596,7 @@ impl<'a> Parser<'a> {
                 };
                 let pname = self.ident_or_error("parameter name");
                 self.expect(TokenKind::Colon, "':'");
+                self.skip_newlines(); // a wrapped declaration puts the type on the next line (`val x:\n  T`)
                 let ty = self.parse_type();
                 let ty = if is_vararg {
                     vararg_array_typeref(ty)
