@@ -782,9 +782,8 @@ fn emit_statics(ir: &IrFile, facade: &str, cw: &mut ClassWriter, bodies: &dyn Me
         let fref = cw.fieldref(facade, &s.name, &desc);
         g.getstatic(fref, slot_words(jt) as i32);
         emit_return(jt, &mut g);
-        finish_code(
+        finish_code::<0x0019>(
             cw,
-            0x0019,
             &property_getter_name(&s.name),
             &format!("(){desc}"),
             &mut g,
@@ -808,9 +807,8 @@ fn emit_statics(ir: &IrFile, facade: &str, cw: &mut ClassWriter, bodies: &dyn Me
             let fref = cw.fieldref(facade, &s.name, &desc);
             st.putstatic(fref, slot_words(jt) as i32);
             st.ret_void();
-            finish_code(
+            finish_code::<0x0019>(
                 cw,
-                0x0019,
                 &property_setter_name(&s.name),
                 &format!("({desc})V"),
                 &mut st,
@@ -850,7 +848,7 @@ fn emit_statics(ir: &IrFile, facade: &str, cw: &mut ClassWriter, bodies: &dyn Me
         return;
     }
     code.ret_void();
-    finish_code(e.cw, 0x0008, "<clinit>", "()V", &mut code, e.next_slot);
+    finish_code::<0x0008>(e.cw, "<clinit>", "()V", &mut code, e.next_slot);
 }
 
 fn emit_class(
@@ -1629,7 +1627,7 @@ fn emit_prop_ref_class(c: &crate::ir::IrClass, facade: &str) -> Vec<u8> {
     );
     ctor.invokespecial(sup, 4, 0);
     ctor.ret_void();
-    finish_code(&mut cw, 0x0000, "<init>", "()V", &mut ctor, 1);
+    finish_code::<0x0000>(&mut cw, "<init>", "()V", &mut ctor, 1);
 
     // `get(Object)Object`: ((Owner) it).getName(), boxed if primitive.
     let mut get = CodeBuilder::new(2);
@@ -1642,9 +1640,8 @@ fn emit_prop_ref_class(c: &crate::ir::IrClass, facade: &str) -> Vec<u8> {
         box_prim_free(&mut cw, &mut get, prop_jvm);
     }
     get.areturn();
-    finish_code(
+    finish_code::<0x0001>(
         &mut cw,
-        0x0001,
         "get",
         "(Ljava/lang/Object;)Ljava/lang/Object;",
         &mut get,
@@ -1674,9 +1671,8 @@ fn emit_prop_ref_class(c: &crate::ir::IrClass, facade: &str) -> Vec<u8> {
         let sref = cw.methodref(&pr.owner_internal, &setter, &setter_desc);
         set.invokevirtual(sref, slot_words(prop_jvm) as i32, 0);
         set.ret_void();
-        finish_code(
+        finish_code::<0x0001>(
             &mut cw,
-            0x0001,
             "set",
             "(Ljava/lang/Object;Ljava/lang/Object;)V",
             &mut set,
@@ -1694,7 +1690,7 @@ fn emit_prop_ref_class(c: &crate::ir::IrClass, facade: &str) -> Vec<u8> {
     let fref = cw.fieldref(&fq, "INSTANCE", &self_desc);
     clinit.putstatic(fref, 1);
     clinit.ret_void();
-    finish_code(&mut cw, 0x0008, "<clinit>", "()V", &mut clinit, 0);
+    finish_code::<0x0008>(&mut cw, "<clinit>", "()V", &mut clinit, 0);
     cw.finish()
 }
 
@@ -1734,14 +1730,7 @@ fn emit_bound_prop_ref_class(
     );
     ctor.invokespecial(sup, 5, 0);
     ctor.ret_void();
-    finish_code(
-        &mut cw,
-        0x0000,
-        "<init>",
-        "(Ljava/lang/Object;)V",
-        &mut ctor,
-        2,
-    );
+    finish_code::<0x0000>(&mut cw, "<init>", "(Ljava/lang/Object;)V", &mut ctor, 2);
 
     // `get()Object`: for a member ref `((Owner) this.receiver).getName()`; for an extension ref
     // `Facade.getName((Owner) this.receiver)`. Boxed if primitive.
@@ -1762,7 +1751,7 @@ fn emit_bound_prop_ref_class(
         box_prim_free(&mut cw, &mut get, prop_jvm);
     }
     get.areturn();
-    finish_code(&mut cw, 0x0001, "get", "()Ljava/lang/Object;", &mut get, 1);
+    finish_code::<0x0001>(&mut cw, "get", "()Ljava/lang/Object;", &mut get, 1);
 
     // `set(Object)V` (a bound `var` reference): `((Owner) this.receiver).setName(v)` after
     // casting/unboxing the argument to the property type.
@@ -1795,7 +1784,7 @@ fn emit_bound_prop_ref_class(
             set.invokevirtual(sref, slot_words(prop_jvm) as i32, 0);
         }
         set.ret_void();
-        finish_code(&mut cw, 0x0001, "set", "(Ljava/lang/Object;)V", &mut set, 2);
+        finish_code::<0x0001>(&mut cw, "set", "(Ljava/lang/Object;)V", &mut set, 2);
     }
     cw.finish()
 }
@@ -1836,7 +1825,7 @@ fn emit_toplevel_prop_ref_class(
     );
     ctor.invokespecial(sup, 4, 0);
     ctor.ret_void();
-    finish_code(&mut cw, 0x0000, "<init>", "()V", &mut ctor, 1);
+    finish_code::<0x0000>(&mut cw, "<init>", "()V", &mut ctor, 1);
 
     // `get()Object`: invokestatic <facade>.getName(), boxed if primitive.
     let mut get = CodeBuilder::new(1);
@@ -1846,7 +1835,7 @@ fn emit_toplevel_prop_ref_class(
         box_prim_free(&mut cw, &mut get, prop_jvm);
     }
     get.areturn();
-    finish_code(&mut cw, 0x0001, "get", "()Ljava/lang/Object;", &mut get, 1);
+    finish_code::<0x0001>(&mut cw, "get", "()Ljava/lang/Object;", &mut get, 1);
 
     // `set(Object)V` (a `var`): invokestatic <facade>.setName(v) after casting/unboxing the argument.
     if pr.mutable {
@@ -1867,7 +1856,7 @@ fn emit_toplevel_prop_ref_class(
         let sref = cw.methodref(owner, &setter, &setter_desc);
         set.invokestatic(sref, slot_words(prop_jvm) as i32, 0);
         set.ret_void();
-        finish_code(&mut cw, 0x0001, "set", "(Ljava/lang/Object;)V", &mut set, 2);
+        finish_code::<0x0001>(&mut cw, "set", "(Ljava/lang/Object;)V", &mut set, 2);
     }
 
     // `<clinit>`: INSTANCE = new.
@@ -1880,7 +1869,7 @@ fn emit_toplevel_prop_ref_class(
     let fref = cw.fieldref(&fq, "INSTANCE", &self_desc);
     clinit.putstatic(fref, 1);
     clinit.ret_void();
-    finish_code(&mut cw, 0x0008, "<clinit>", "()V", &mut clinit, 0);
+    finish_code::<0x0008>(&mut cw, "<clinit>", "()V", &mut clinit, 0);
     cw.finish()
 }
 
@@ -1975,9 +1964,7 @@ fn emit_func_ref_class(ir: &IrFile, c: &crate::ir::IrClass, facade: &str) -> Vec
         );
         ctor.invokespecial(sup, 6, 0);
         ctor.ret_void();
-        ctor.ensure_locals(2);
-        ctor.link();
-        cw.add_method(0x0000, "<init>", "(Ljava/lang/Object;)V", &ctor);
+        finish_code::<0x0000>(&mut cw, "<init>", "(Ljava/lang/Object;)V", &mut ctor, 2);
     } else {
         cw.add_field(0x0019, "INSTANCE", &self_desc); // PUBLIC|STATIC|FINAL
                                                       // `<init>()V`: super(arity, owner.class, name, sig, flags).
@@ -1995,9 +1982,7 @@ fn emit_func_ref_class(ir: &IrFile, c: &crate::ir::IrClass, facade: &str) -> Vec
         );
         ctor.invokespecial(sup, 5, 0);
         ctor.ret_void();
-        ctor.ensure_locals(1);
-        ctor.link();
-        cw.add_method(0x0000, "<init>", "()V", &ctor);
+        finish_code::<0x0000>(&mut cw, "<init>", "()V", &mut ctor, 1);
         // `<clinit>`: INSTANCE = new <self>().
         let mut clinit = CodeBuilder::new(0);
         let cls = cw.class_ref(&fq);
@@ -2008,9 +1993,7 @@ fn emit_func_ref_class(ir: &IrFile, c: &crate::ir::IrClass, facade: &str) -> Vec
         let fref = cw.fieldref(&fq, "INSTANCE", &self_desc);
         clinit.putstatic(fref, 1);
         clinit.ret_void();
-        clinit.ensure_locals(0);
-        clinit.link();
-        cw.add_method(0x0008, "<clinit>", "()V", &clinit);
+        finish_code::<0x0008>(&mut cw, "<clinit>", "()V", &mut clinit, 0);
     }
 
     // The erased `invoke(Object×arity)Object`.
@@ -2168,9 +2151,7 @@ fn emit_func_ref_class(ir: &IrFile, c: &crate::ir::IrClass, facade: &str) -> Vec
         box_prim_free(&mut cw, &mut inv, target_ret_jvm);
     }
     inv.areturn();
-    inv.ensure_locals(1 + arity);
-    inv.link();
-    cw.add_method(0x0001, "invoke", &invoke_desc, &inv);
+    finish_code::<0x0001>(&mut cw, "invoke", &invoke_desc, &mut inv, 1 + arity);
     cw.finish()
 }
 
@@ -2274,9 +2255,8 @@ fn throw_assertion_error(cw: &mut ClassWriter, code: &mut CodeBuilder) {
     code.athrow();
 }
 
-fn finish_code(
+fn finish_code<const ACCESS: u16>(
     cw: &mut ClassWriter,
-    access: u16,
     name: &str,
     desc: &str,
     code: &mut CodeBuilder,
@@ -2284,7 +2264,7 @@ fn finish_code(
 ) {
     code.ensure_locals(locals);
     code.link();
-    cw.add_method(access, name, desc, code);
+    cw.add_method(ACCESS, name, desc, code);
 }
 
 fn finish_bridge(
@@ -2294,7 +2274,7 @@ fn finish_bridge(
     code: &mut CodeBuilder,
     locals: u16,
 ) {
-    finish_code(cw, 0x0001 | 0x0040 | 0x1000, name, desc, code, locals);
+    finish_code::<{ 0x0001 | 0x0040 | 0x1000 }>(cw, name, desc, code, locals);
 }
 
 /// Emit `ACC_BRIDGE|ACC_SYNTHETIC` methods: each has the supertype's erased descriptor, adapts its
@@ -2552,9 +2532,6 @@ fn emit_annotation_impl_class(c: &crate::ir::IrClass, iface: &str) -> Vec<u8> {
             ctor.putfield(fref, slot_words(*jt) as i32);
             slot += slot_words(*jt);
         }
-        ctor.ret_void();
-        ctor.ensure_locals(1 + params_words);
-        ctor.link();
         let desc = format!(
             "({})V",
             members
@@ -2562,7 +2539,8 @@ fn emit_annotation_impl_class(c: &crate::ir::IrClass, iface: &str) -> Vec<u8> {
                 .map(|(_, jt)| type_descriptor(*jt))
                 .collect::<String>()
         );
-        cw.add_method(0x0001, "<init>", &desc, &ctor);
+        ctor.ret_void();
+        finish_code::<0x0001>(&mut cw, "<init>", &desc, &mut ctor, 1 + params_words);
     }
 
     // Per-member accessor `x()T`: return this.x.
@@ -2572,9 +2550,13 @@ fn emit_annotation_impl_class(c: &crate::ir::IrClass, iface: &str) -> Vec<u8> {
         let fref = cw.fieldref(&fq, name, &type_descriptor(*jt));
         g.getfield(fref, slot_words(*jt) as i32);
         emit_return(*jt, &mut g);
-        g.ensure_locals(1);
-        g.link();
-        cw.add_method(0x0011, name, &format!("(){}", type_descriptor(*jt)), &g);
+        finish_code::<0x0011>(
+            &mut cw,
+            name,
+            &format!("(){}", type_descriptor(*jt)),
+            &mut g,
+            1,
+        );
     }
 
     // annotationType(): return <iface>.class.
@@ -2582,9 +2564,7 @@ fn emit_annotation_impl_class(c: &crate::ir::IrClass, iface: &str) -> Vec<u8> {
         let mut m = CodeBuilder::new(1);
         m.ldc_class(iface, &mut cw);
         m.areturn();
-        m.ensure_locals(1);
-        m.link();
-        cw.add_method(0x0011, "annotationType", "()Ljava/lang/Class;", &m);
+        finish_code::<0x0011>(&mut cw, "annotationType", "()Ljava/lang/Class;", &mut m, 1);
     }
 
     emit_annotation_equals(&mut cw, &fq, iface, &members);
@@ -2726,9 +2706,7 @@ fn emit_annotation_hashcode(cw: &mut ClassWriter, fq: &str, members: &[(String, 
         cb.iadd();
     }
     cb.ireturn();
-    cb.ensure_locals(1);
-    cb.link();
-    cw.add_method(0x0011, "hashCode", "()I", &cb);
+    finish_code::<0x0011>(cw, "hashCode", "()I", &mut cb, 1);
 }
 
 /// `toString()` for an annotation impl: `@<fqName>(m1=v1, m2=v2, …)` built with a `StringBuilder` (arrays
@@ -2828,9 +2806,7 @@ fn emit_annotation_tostring(cw: &mut ClassWriter, fq: &str, iface: &str, members
     let to_str = cw.methodref(sb, "toString", "()Ljava/lang/String;");
     cb.invokevirtual(to_str, 0, 1);
     cb.areturn();
-    cb.ensure_locals(1);
-    cb.link();
-    cw.add_method(0x0011, "toString", "()Ljava/lang/String;", &cb);
+    finish_code::<0x0011>(cw, "toString", "()Ljava/lang/String;", &mut cb, 1);
 }
 
 /// Emit an `interface`: `ACC_PUBLIC|ACC_INTERFACE|ACC_ABSTRACT`, extends `java/lang/Object`. A method
@@ -3242,9 +3218,7 @@ fn emit_enum_class(
     let arr_cls = cw.class_ref(&arr_desc);
     vals.checkcast(arr_cls);
     vals.areturn();
-    vals.ensure_locals(0);
-    vals.link();
-    cw.add_method(0x0009, "values", &format!("(){arr_desc}"), &vals);
+    finish_code::<0x0009>(&mut cw, "values", &format!("(){arr_desc}"), &mut vals, 0);
 
     // valueOf(String): `Enum.valueOf(E.class, name)` cast to E.
     let mut vof = CodeBuilder::new(1);
@@ -3259,13 +3233,12 @@ fn emit_enum_class(
     let cc = cw.class_ref(&fq);
     vof.checkcast(cc);
     vof.areturn();
-    vof.ensure_locals(1);
-    vof.link();
-    cw.add_method(
-        0x0009,
+    finish_code::<0x0009>(
+        &mut cw,
         "valueOf",
         &format!("(Ljava/lang/String;){self_desc}"),
-        &vof,
+        &mut vof,
+        1,
     );
 
     // getEntries(): the `entries` property accessor → `return $ENTRIES`. Carries the generic
