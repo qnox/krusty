@@ -74,9 +74,10 @@ pub fn kotlin_builtin_to_jvm(internal: &str) -> Option<&'static str> {
             "java/util/ListIterator"
         }
         "kotlin/collections/Map" | "kotlin/collections/MutableMap" => "java/util/Map",
-        "kotlin/collections/Map.Entry" | "kotlin/collections/MutableMap.MutableEntry" => {
-            "java/util/Map$Entry"
-        }
+        "kotlin/collections/Map.Entry"
+        | "kotlin/collections/Map$Entry"
+        | "kotlin/collections/MutableMap.MutableEntry"
+        | "kotlin/collections/MutableMap$MutableEntry" => "java/util/Map$Entry",
         _ => return None,
     })
 }

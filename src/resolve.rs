@@ -5730,7 +5730,7 @@ impl crate::assignable::TypeOracle for Checker<'_> {
             .unwrap_or_default()
     }
 
-    fn canonical_class(&self, internal: &str) -> String {
+    fn canonical_class<'a>(&self, internal: &'a str) -> std::borrow::Cow<'a, str> {
         if internal.starts_with("kotlin/collections/") {
             crate::symbol_resolver::platform_class_identity(
                 self.syms
@@ -5740,7 +5740,7 @@ impl crate::assignable::TypeOracle for Checker<'_> {
                     .unwrap_or(internal),
             )
         } else {
-            internal.to_string()
+            std::borrow::Cow::Borrowed(internal)
         }
     }
 }
