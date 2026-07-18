@@ -505,15 +505,14 @@ pub fn lower_file_at_reporting(
             for p in c.body_props.iter().filter(|p| p.delegate.is_some()) {
                 let dt = info.ty(p.delegate.unwrap());
                 let di = dt.obj_internal()?;
-                let is_value_cls = |internal: &str| {
-                    syms.class_by_internal(internal)
+                let is_value_cls = |internal: TypeName| {
+                    syms.class_by_type_name(internal)
                         .is_some_and(|cs| cs.value_field.is_some())
                 };
-                let di = di.render();
-                if is_value_cls(&di) || syms.method_of(&di, "provideDelegate").is_some() {
+                if is_value_cls(di) || syms.method_of_name(di, "provideDelegate").is_some() {
                     return None;
                 }
-                let (_, _, gv_ret, _, _) = lo.delegate_getvalue_info(p.delegate.unwrap(), &di)?;
+                let (_, _, gv_ret, _, _) = lo.delegate_getvalue_info(p.delegate.unwrap(), di)?;
                 let prop_ty = syms
                     .classes
                     .get(&c.name)
@@ -530,10 +529,7 @@ pub fn lower_file_at_reporting(
                 if gv_ret != prop_ty && !gv_ret.is_reference() {
                     return None;
                 }
-                if prop_ty
-                    .obj_internal()
-                    .is_some_and(|n| is_value_cls(&n.render()))
-                {
+                if prop_ty.obj_internal().is_some_and(is_value_cls) {
                     return None;
                 }
             }
@@ -1789,8 +1785,7 @@ pub fn lower_file_at_reporting(
                 } else {
                     let delegate_ty = info.ty(p.delegate?);
                     let internal = delegate_ty.obj_internal()?;
-                    lo.delegate_getvalue_info(p.delegate?, &internal.render())?
-                        .2
+                    lo.delegate_getvalue_info(p.delegate?, internal)?.2
                 };
                 let fid = lo.ir.add_fun(IrFunction {
                     name: property_getter_name(&p.name),
@@ -2542,7 +2537,7 @@ pub fn lower_file_at_reporting(
                 for p in c.body_props.iter().filter(|p| p.delegate.is_some()) {
                     let class_id = lo.class_info(&internal)?.id;
                     let delegate_ty = lo.info.ty(p.delegate.unwrap());
-                    let delegate_internal = delegate_ty.obj_internal()?.to_string();
+                    let delegate_internal = delegate_ty.obj_internal()?;
                     let fname = format!("{}$delegate", p.name);
                     let field_idx = lo.ir.classes[class_id as usize]
                         .fields
@@ -2567,7 +2562,7 @@ pub fn lower_file_at_reporting(
                     };
                     // getX() calls either the delegate member or the checker-recorded classpath extension.
                     let (gv_owner, gv_desc, gv_ret, gv_inline, gv_is_ext) =
-                        lo.delegate_getvalue_info(p.delegate?, &delegate_internal)?;
+                        lo.delegate_getvalue_info(p.delegate?, delegate_internal)?;
                     let this_e = lo.emit_get_value(0);
                     let dele = lo.emit_get_field(this_e, class_id, field_idx);
                     let this_arg = lo.emit_get_value(0);
@@ -2600,7 +2595,7 @@ pub fn lower_file_at_reporting(
                     if p.is_var {
                         let sname = property_setter_name(&p.name);
                         let (_, set_fid, _) = lo.class_info(&internal)?.methods[&sname];
-                        let sv = lo.syms.method_of(&delegate_internal, "setValue")?;
+                        let sv = lo.syms.method_of_name(delegate_internal, "setValue")?;
                         let sv_desc = lo.runtime.method_descriptor(&sv.params, sv.ret)?;
                         let this_e = lo.emit_get_value(0);
                         let dele = lo.emit_get_field(this_e, class_id, field_idx);
@@ -2624,7 +2619,7 @@ pub fn lower_file_at_reporting(
                             _ => value_arg,
                         };
                         let call = lo.emit_virtual_call(
-                            delegate_internal.clone(),
+                            delegate_internal,
                             "setValue".to_string(),
                             sv_desc,
                             false,
@@ -4309,12 +4304,12 @@ fn is_simple_interface(c: &ast::ClassDecl) -> bool {
 /// parameter) in the body — i.e. uses property reflection. Such delegates need the property reference
 /// to resolve through `@Metadata` (not emitted for delegated properties), so they're skipped. A
 /// library/classpath delegate (not found here) returns `false` — library `getValue`s don't reflect.
-fn delegate_getvalue_uses_property(file: &ast::File, internal: &str) -> bool {
+fn delegate_getvalue_uses_property(file: &ast::File, internal: TypeName) -> bool {
     for &d in &file.decls {
         let ast::Decl::Class(c) = file.decl(d) else {
             continue;
         };
-        if internal != c.name && !internal.ends_with(&format!("/{}", c.name)) {
+        if !internal.matches(&class_internal(file, &c.name)) {
             continue;
         }
         for m in &c.methods {
@@ -4497,8 +4492,8 @@ type InlineLambda = (String, Vec<String>, AstExprId, Vec<Ty>, String);
 /// `<delegate>.getValue(null, propref)`, a `var`'s writes to `setValue(null, propref, value)`.
 #[derive(Clone)]
 struct LocalDelegate {
-    /// JVM internal name of the delegate type (owner of `getValue`/`setValue`).
-    delegate_internal: String,
+    /// Tree-backed internal name of the delegate type (owner of `getValue`/`setValue`).
+    delegate_internal: TypeName,
     /// Resolved `getValue(Object, KProperty): T` signature.
     getvalue_sig: Signature,
     /// Resolved `setValue(Object, KProperty, value): Unit` signature — `None` for a `val`.
@@ -5131,7 +5126,7 @@ impl<'a> Lower<'a> {
     fn delegate_getvalue_info(
         &self,
         delegate_expr: AstExprId,
-        delegate_internal: &str,
+        delegate_internal: TypeName,
     ) -> Option<(TypeName, String, Ty, InlineKind, bool)> {
         // Property-reference delegates need dedicated bytecode support.
         if delegate_internal.starts_with("kotlin/reflect/") {
@@ -5606,18 +5601,18 @@ impl<'a> Lower<'a> {
     fn lower_delegated_top_level(&mut self, p: &ast::PropDecl) -> Option<()> {
         let delegate_expr = p.delegate?;
         let delegate_ty = self.info.ty(delegate_expr);
-        let delegate_internal = delegate_ty.obj_internal()?.to_string();
+        let delegate_internal = delegate_ty.obj_internal()?;
         // If the delegate's `getValue` reflects on its `KProperty` parameter (`p.name`, `p.returnType`,
         // `p.toString()`, …), correctness needs the synthesized property reference to resolve through the
         // facade's `@Metadata` — which krusty doesn't emit for delegated properties. Skip rather than
         // miscompile. A `getValue` that ignores the property parameter is unaffected.
-        if delegate_getvalue_uses_property(self.afile, &delegate_internal) {
+        if delegate_getvalue_uses_property(self.afile, delegate_internal) {
             return None;
         }
         // `getValue` is a MEMBER operator on the delegate, or a classpath EXTENSION operator
         // (`operator fun Lazy<T>.getValue(...)` in `LazyKt`, `@InlineOnly` → `this.value`).
         let (gv_owner, gv_desc, gv_ret, gv_inline, gv_is_ext) =
-            self.delegate_getvalue_info(delegate_expr, &delegate_internal)?;
+            self.delegate_getvalue_info(delegate_expr, delegate_internal)?;
         let prop_ty =
             p.ty.as_ref()
                 .map(|r| ty_of(self.afile, r, &*self.syms.libraries))
@@ -5680,7 +5675,7 @@ impl<'a> Lower<'a> {
         } else {
             let is_iface = self
                 .syms
-                .class_by_internal(&delegate_internal)
+                .class_by_type_name(delegate_internal)
                 .map(|c| c.is_interface)
                 .unwrap_or(false);
             self.emit_virtual_call(
@@ -12888,26 +12883,26 @@ impl<'a> Lower<'a> {
                 delegate,
             } => {
                 let delegate_ty = self.info.ty(delegate);
-                let delegate_internal = delegate_ty.obj_internal()?.to_string();
+                let delegate_internal = delegate_ty.obj_internal()?;
                 // Same soundness guards as member delegation: only a concrete (non-value-class, no
                 // `provideDelegate`) delegate whose `getValue` return matches the property type.
-                let is_value_cls = |s: &str| {
+                let is_value_cls = |s: TypeName| {
                     self.syms
-                        .class_by_internal(s)
+                        .class_by_type_name(s)
                         .is_some_and(|cs| cs.value_field.is_some())
                 };
-                if is_value_cls(&delegate_internal)
+                if is_value_cls(delegate_internal)
                     || self
                         .syms
-                        .method_of(&delegate_internal, "provideDelegate")
+                        .method_of_name(delegate_internal, "provideDelegate")
                         .is_some()
-                    || delegate_getvalue_uses_property(self.afile, &delegate_internal)
+                    || delegate_getvalue_uses_property(self.afile, delegate_internal)
                 {
                     return None;
                 }
                 let (gv, gv_ret) = match self.info.delegate_getvalue(delegate)? {
                     DelegateGetValueTarget::Member { owner, params, ret } => {
-                        if !owner.matches(&delegate_internal) {
+                        if *owner != delegate_internal {
                             return None;
                         }
                         (
@@ -12938,15 +12933,11 @@ impl<'a> Lower<'a> {
                     .as_ref()
                     .map(|r| ty_of(self.afile, r, &*self.syms.libraries))
                     .unwrap_or(gv_ret);
-                if gv_ret != prop_ty
-                    || prop_ty
-                        .obj_internal()
-                        .is_some_and(|n| is_value_cls(&n.render()))
-                {
+                if gv_ret != prop_ty || prop_ty.obj_internal().is_some_and(is_value_cls) {
                     return None;
                 }
                 let setvalue_sig = if is_var {
-                    Some(self.syms.method_of(&delegate_internal, "setValue")?)
+                    Some(self.syms.method_of_name(delegate_internal, "setValue")?)
                 } else {
                     None
                 };
@@ -12998,7 +12989,7 @@ impl<'a> Lower<'a> {
                     let null_a = self.emit_const(IrConst::Null);
                     let pref = self.make_local_propref(&ld)?;
                     return Some(self.emit_virtual_call(
-                        ld.delegate_internal.clone(),
+                        ld.delegate_internal,
                         "setValue".to_string(),
                         self.runtime.method_descriptor(&sv.params, sv.ret)?,
                         false,
@@ -15918,7 +15909,7 @@ impl<'a> Lower<'a> {
                     let pref = self.make_local_propref(&ld)?;
                     return Some(
                         self.emit_virtual_call(
-                            ld.delegate_internal.clone(),
+                            ld.delegate_internal,
                             "getValue".to_string(),
                             self.runtime
                                 .method_descriptor(&ld.getvalue_sig.params, ld.getvalue_sig.ret)?,
