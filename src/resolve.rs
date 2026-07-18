@@ -7436,10 +7436,10 @@ impl<'a> Checker<'a> {
     /// Whether the file-declared class `internal` declares method `name` as abstract (`fun f()` /
     /// `abstract override fun f()`). Such a declaration is not a concrete `super.f()` target; resolution
     /// must continue to a matching interface default when one exists.
-    fn class_method_is_abstract(&self, internal: &str, name: &str) -> bool {
+    fn class_method_is_abstract_name(&self, internal: TypeName, name: &str) -> bool {
         self.file.decls.iter().any(|&d| {
             matches!(self.file.decl(d), Decl::Class(c) if !c.is_interface()
-                && class_internal(self.file, &c.name) == internal
+                && internal.matches(&class_internal(self.file, &c.name))
                 && c.methods.iter().any(|m| m.name == name && matches!(m.body, FunBody::None)))
         })
     }
@@ -8343,8 +8343,8 @@ impl<'a> Checker<'a> {
     /// erases its method to `Object` — the `LambdaMetafactory` descriptor `lower_lambda_sam` emits
     /// wouldn't match; a value-class method has a mangled name / boxing the path doesn't model; a
     /// library/Kotlin function interface is handled separately at the `Foo { … }` call site.)
-    fn simple_fun_interface(&self, internal: &str) -> bool {
-        let Some(c) = self.syms.class_by_internal(internal) else {
+    fn simple_fun_interface_name(&self, internal: TypeName) -> bool {
+        let Some(c) = self.syms.class_by_type_name(internal) else {
             return false;
         };
         // A generic fun interface is allowed: its method erases to `Object`, which the SAM descriptor
@@ -8358,8 +8358,8 @@ impl<'a> Checker<'a> {
     }
 
     /// The SAM parameter types of a simple fun interface, used to type a converted lambda.
-    fn fun_interface_sam_params(&self, internal: &str) -> Option<Vec<Ty>> {
-        let c = self.syms.class_by_internal(internal)?;
+    fn fun_interface_sam_params_name(&self, internal: TypeName) -> Option<Vec<Ty>> {
+        let c = self.syms.class_by_type_name(internal)?;
         Some(c.single_method()?.params.clone())
     }
 
@@ -8547,7 +8547,7 @@ impl<'a> Checker<'a> {
         // lowering builds an instance whose single abstract method runs the lambda.
         if matches!(actual, Ty::Fun(_)) {
             if let Some(internal) = expected.obj_internal() {
-                if self.simple_fun_interface(&internal.render()) {
+                if self.simple_fun_interface_name(internal) {
                     return;
                 }
             }
@@ -12920,11 +12920,10 @@ impl<'a> Checker<'a> {
                             .and_then(|c| c.super_internal);
                         if let Some(sup) = sup.filter(|s| matches_qual(*s)) {
                             // A user base-class method.
-                            let sup_rendered = sup.render();
                             if let Some(sig) = self
                                 .syms
                                 .method_of_name(sup, &name)
-                                .filter(|_| !self.class_method_is_abstract(&sup_rendered, &name))
+                                .filter(|_| !self.class_method_is_abstract_name(sup, &name))
                             {
                                 self.expect_call_args(&sig.params, false, args, &arg_tys);
                                 self.resolved_super_calls.insert(
@@ -12940,6 +12939,7 @@ impl<'a> Checker<'a> {
                                 return sig.ret;
                             }
                             // A classpath base-class method (`class C : ArrayList<…>() { … super.add(x) }`).
+                            let sup_rendered = sup.render();
                             if let Some(m) = self.resolve_instance(&sup_rendered, &name, &arg_tys) {
                                 self.resolved_super_calls.insert(
                                     call,
@@ -14495,9 +14495,10 @@ impl<'a> Checker<'a> {
                                 && matches!(self.file.expr(a), Expr::Lambda { .. })
                             {
                                 if let Some(internal) = sig.params[i].obj_internal() {
-                                    let internal = internal.render();
-                                    if self.simple_fun_interface(&internal) {
-                                        if let Some(sp) = self.fun_interface_sam_params(&internal) {
+                                    if self.simple_fun_interface_name(internal) {
+                                        if let Some(sp) =
+                                            self.fun_interface_sam_params_name(internal)
+                                        {
                                             return self.check_lambda_with_types(a, &sp);
                                         }
                                     }
