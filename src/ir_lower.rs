@@ -8528,8 +8528,9 @@ impl<'a> Lower<'a> {
                 }
             }
         }
-        // Receiver first, then arguments in SOURCE order into temps.
-        let recv_v = self.lower_arg(receiver, &params[0])?;
+        // Receiver first, then arguments in SOURCE order into temps. `params[0]` is the declared
+        // receiver — upcast a subtype receiver to it (`checkcast`) for parity, as the positional path does.
+        let recv_v = self.lower_ext_receiver(receiver, &params[0], &params[0])?;
         let recv_tmp = self.fresh_value();
         let recv_decl = self.emit_variable(recv_tmp, params[0], Some(recv_v));
         let mut prelude = vec![recv_decl];
@@ -8616,7 +8617,10 @@ impl<'a> Lower<'a> {
     /// unmatched keeps the file skipped rather than miscompiled; and CLASSPATH supertypes (`Any`,
     /// `Number`, …) are not walked at all, so a builtin/operator on them is never shadowed by an
     /// extension registered under the supertype.
-    fn ext_fun_id_for_recv(&self, recv_ty: Ty, name: &str, n_args: usize) -> Option<u32> {
+    /// Returns `(fid, declared_receiver)` — the declared receiver is the type the extension was found on
+    /// (the exact receiver, or a supertype). The caller upcasts the actual receiver to it (`checkcast`)
+    /// when they differ, matching kotlinc.
+    fn ext_fun_id_for_recv(&self, recv_ty: Ty, name: &str, n_args: usize) -> Option<(u32, Ty)> {
         // An extension overloaded by arity resolves to the overload whose logical parameter count
         // matches the call's argument count; a single-overload extension falls back to the primary id.
         let pick = |recv: Ty| {
@@ -8629,7 +8633,7 @@ impl<'a> Lower<'a> {
                 .copied()
         };
         if let Some(fid) = pick(recv_ty) {
-            return Some(fid);
+            return Some((fid, recv_ty));
         }
         // A MEMBER (own or inherited through the user hierarchy) shadows a SUPERTYPE extension of the
         // same name — decline so the call lowers as a member instead (Kotlin member-over-extension
@@ -8643,39 +8647,75 @@ impl<'a> Lower<'a> {
             }
         }
         let mut seen = std::collections::HashSet::new();
-        let mut queue = std::collections::VecDeque::new();
-        if let Some(c) = recv_ty
+        let mut queue: std::collections::VecDeque<String> = recv_ty
             .non_null()
             .obj_internal()
-            .and_then(|i| self.syms.class_by_internal(i))
-        {
-            for i in &c.interfaces {
-                queue.push_back(i.clone());
-            }
-            if let Some(s) = &c.super_internal {
-                queue.push_back(s.clone());
-            }
-        }
+            .map(|i| self.direct_supertypes(i))
+            .unwrap_or_default()
+            .into();
         while let Some(internal) = queue.pop_front() {
             if !seen.insert(internal.clone()) {
                 continue;
             }
-            let Some(c) = self.syms.class_by_internal(&internal) else {
+            // Never bind on `Any`/`Object`: an extension registered there must not shadow a builtin.
+            if internal == "kotlin/Any" || internal == "java/lang/Object" {
                 continue;
-            };
-            if c.tparam_names.is_empty() {
-                if let Some(fid) = pick(Ty::obj(&internal)) {
-                    return Some(fid);
+            }
+            // A GENERIC user supertype (`Top<D>`) needs erased-`Object` boxing the emit doesn't model —
+            // skip BINDING on it (but keep walking through). A classpath supertype is keyed by its raw
+            // internal (no type args), so it binds normally — this lets a same-file extension on a
+            // classpath BASE (`fun V.f()`) resolve when called on a classpath SUBTYPE value (`V.Ok`).
+            let generic_user = self
+                .syms
+                .class_by_internal(&internal)
+                .is_some_and(|c| !c.tparam_names.is_empty());
+            if !generic_user {
+                let rty = Ty::obj(&internal);
+                if let Some(fid) = pick(rty) {
+                    return Some((fid, rty));
                 }
             }
-            for i in &c.interfaces {
-                queue.push_back(i.clone());
-            }
-            if let Some(s) = &c.super_internal {
-                queue.push_back(s.clone());
+            for s in self.direct_supertypes(&internal) {
+                queue.push_back(s);
             }
         }
         None
+    }
+
+    /// Lower an extension call's receiver as its first argument, coerced to the extension's declared
+    /// receiver `param0`. When the receiver's static type is a strict SUBTYPE of the declared receiver
+    /// (`fun A.f()` called on a `B : A`), kotlinc emits an explicit `checkcast` upcast before the static
+    /// call — replicate it for byte parity; the exact-receiver case gets none.
+    fn lower_ext_receiver(
+        &mut self,
+        receiver: AstExprId,
+        decl_recv: &Ty,
+        param0: &Ty,
+    ) -> Option<u32> {
+        let recv_ty = self.recv_ty(receiver);
+        let recv = self.lower_arg(receiver, param0)?;
+        if recv_ty.is_reference() && recv_ty.erased_recv() != decl_recv.erased_recv() {
+            return Some(self.emit_type_op(IrTypeOp::Cast, recv, *param0));
+        }
+        Some(recv)
+    }
+
+    /// The DIRECT supertypes (implemented interfaces + superclass) of `internal`, whether a same-file
+    /// user class (`ClassSig`) or a classpath type (library `@Metadata`). The uniform supertype step that
+    /// [`Self::ext_fun_id_for_recv`] walks, so an extension declared on a classpath base binds on a
+    /// classpath subtype exactly as it does across the user hierarchy.
+    fn direct_supertypes(&self, internal: &str) -> Vec<String> {
+        if let Some(c) = self.syms.class_by_internal(internal) {
+            let mut v = c.interfaces.clone();
+            if let Some(s) = &c.super_internal {
+                v.push(s.clone());
+            }
+            v
+        } else if let Some(t) = self.syms.libraries.resolve_type(internal) {
+            t.supertypes.clone()
+        } else {
+            Vec::new()
+        }
     }
 
     /// An arithmetic operator member of a primitive numeric type called by its METHOD name
@@ -18894,7 +18934,7 @@ impl<'a> Lower<'a> {
                     // Resolve exact-receiver-first, then the receiver's supertype closure, so a
                     // `fun A.f()` called on a `B : A` binds (the checker already resolves it that way).
                     {
-                        if let Some(fid) =
+                        if let Some((fid, decl_recv)) =
                             self.ext_fun_id_for_recv(self.recv_ty(receiver), &name, args.len())
                         {
                             let params = self.ir.functions[fid as usize].params.clone();
@@ -18905,7 +18945,8 @@ impl<'a> Lower<'a> {
                                 if self.afile.call_arg_names.contains_key(&e.0) {
                                     return self.lower_named_ext_call(e, receiver, fid, &args);
                                 }
-                                let recv = self.lower_arg(receiver, &params[0])?;
+                                let recv =
+                                    self.lower_ext_receiver(receiver, &decl_recv, &params[0])?;
                                 let mut a = vec![recv];
                                 for (arg, pt) in args.iter().zip(&params[1..]) {
                                     a.push(self.lower_arg(*arg, pt)?);
@@ -18918,7 +18959,8 @@ impl<'a> Lower<'a> {
                                 let names = param_info.names;
                                 let n = params.len();
                                 let arg_names = self.afile.call_arg_names.get(&e.0).cloned();
-                                let recv = self.lower_arg(receiver, &params[0])?;
+                                let recv =
+                                    self.lower_ext_receiver(receiver, &decl_recv, &params[0])?;
                                 let mut slot: Vec<Option<u32>> = vec![None; n];
                                 slot[0] = Some(recv);
                                 let mut pos = 1usize;
