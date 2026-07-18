@@ -4208,7 +4208,7 @@ pub struct TypeInfo {
     /// implicit receiver (`if (this is B) … a …`, where `a`/`m()` is a member of `B` but not of the
     /// declared receiver). Maps the read/call `ExprId` to the narrowed receiver's internal name so the
     /// lowerer emits a `checkcast` on the loaded `this` before the field read / method call.
-    pub narrowed_this_member: HashMap<ExprId, String>,
+    pub narrowed_this_member: HashMap<ExprId, TypeName>,
     /// Calls the checker already resolved, keyed by the `Expr::Call` (or member-read) `ExprId`. The
     /// lowerer reads the resolved target here instead of re-running `symbol_resolver`, so a source call
     /// is resolved exactly once and the two passes cannot select different overloads. Module-local
@@ -5006,7 +5006,7 @@ pub fn check_file_at(
         }
         for ((internal, name, params), ret) in method_rets {
             if let Some(sig) = syms
-                .class_by_internal_mut(&internal)
+                .class_by_type_name_mut(internal)
                 .and_then(|c| c.methods.get_mut(&name))
                 .filter(|s| s.params == params)
             {
@@ -5712,7 +5712,7 @@ pub fn check_file_at(
     }
     for ((internal, name, params), ret) in inferred_method_rets {
         if let Some(sig) = syms
-            .class_by_internal_mut(&internal)
+            .class_by_type_name_mut(internal)
             .and_then(|c| c.methods.get_mut(&name))
             .filter(|s| s.params == params)
         {
@@ -5811,7 +5811,7 @@ struct Checker<'a> {
     expr_lowers: HashMap<ExprId, ExprLowering>,
     inferred_fun_rets: HashMap<(u32, u32), Ty>,
     inferred_ext_fun_rets: HashMap<(Ty, String, Vec<Ty>), Ty>,
-    inferred_method_rets: HashMap<(String, String, Vec<Ty>), Ty>,
+    inferred_method_rets: HashMap<(TypeName, String, Vec<Ty>), Ty>,
     /// A class internal name → the base-constructor parameter types its `super(args)` resolved to
     /// (see [`ClassSig::super_ctor_params`]). Stashed during checking (where the argument types are
     /// known) and applied to the `ClassSig` after, since `syms` is borrowed immutably while checking.
@@ -5819,7 +5819,7 @@ struct Checker<'a> {
     stmt_lowers: HashMap<StmtId, StmtLowering>,
     local_decl_types: HashMap<StmtId, Ty>,
     resolved_call_type_args: HashMap<ExprId, Vec<Ty>>,
-    narrowed_this_member: HashMap<ExprId, String>,
+    narrowed_this_member: HashMap<ExprId, TypeName>,
     /// Calls resolved during checking, keyed by the `Expr::Call` `ExprId` (moved into
     /// [`TypeInfo::resolved_calls`] so the lowerer reads them instead of re-resolving). See
     /// [`ResolvedCall`] for the variants.
@@ -8160,7 +8160,7 @@ impl<'a> Checker<'a> {
                             })
                             .collect();
                         self.inferred_method_rets
-                            .insert((internal.to_string(), f.name.clone(), params), inferred);
+                            .insert((internal, f.name.clone(), params), inferred);
                     }
                 }
             }
@@ -9534,11 +9534,11 @@ impl<'a> Checker<'a> {
                     if let Some(bt) = self.this_narrow {
                         if let Some(bi) = bt.obj_internal() {
                             if let Some((ty, _)) = self.lookup_prop_name(bi, &n) {
-                                self.narrowed_this_member.insert(e, bi.render());
+                                self.narrowed_this_member.insert(e, bi);
                                 return self.set(e, ty);
                             }
                             if let Some(ty) = self.try_member_read(bt, &n, self.span(e), Some(e)) {
-                                self.narrowed_this_member.insert(e, bi.to_string());
+                                self.narrowed_this_member.insert(e, bi);
                                 return self.set(e, ty);
                             }
                         }
@@ -9581,7 +9581,7 @@ impl<'a> Checker<'a> {
                             bt.obj_internal().and_then(|i| self.lookup_prop_name(i, &n))
                         {
                             if let Some(bi) = bt.obj_internal() {
-                                self.narrowed_this_member.insert(e, bi.render());
+                                self.narrowed_this_member.insert(e, bi);
                             }
                             return self.set(e, ty);
                         }
@@ -11067,7 +11067,7 @@ impl<'a> Checker<'a> {
     fn inferred_member_ret(&self, receiver: Ty, name: &str, params: &[Ty]) -> Option<Ty> {
         let internal = receiver.obj_internal()?;
         self.inferred_method_rets
-            .get(&(internal.to_string(), name.to_string(), params.to_vec()))
+            .get(&(internal, name.to_string(), params.to_vec()))
             .copied()
     }
 
@@ -14726,25 +14726,25 @@ impl<'a> Checker<'a> {
                 // inner class, an unqualified call may target an enclosing method (`this.this$0.foo()`).
                 if !self.module_declares(&fname) {
                     if let Some(Ty::Obj(internal, _)) = self.this_ty {
-                        let internal = internal.render();
+                        let internal_rendered = internal.render();
                         // The sibling member through the module source; the enclosing-class fallback walks
                         // `inner_of` (a LEXICAL scope, not the type hierarchy) so it stays on `lookup_method`.
                         let resolved: Option<(Vec<Ty>, Ty)> =
                             crate::module_symbols::ModuleSymbols::new(self.syms)
-                                .instance_members(Ty::obj(&internal), &fname)
+                                .instance_members(Ty::obj_name(internal), &fname)
                                 .into_iter()
                                 .next()
                                 .map(|m| (m.params, m.ret))
                                 .or_else(|| {
                                     self.syms
-                                        .class_by_internal(&internal)
+                                        .class_by_internal(&internal_rendered)
                                         .and_then(ClassSig::inner_of)
                                         .and_then(|outer| self.lookup_method(&outer, &fname))
                                         .map(|s| (s.params, s.ret))
                                 });
                         crate::trace_compiler!(
                             "resolve",
-                            "unqualified sibling call {fname}() on this_ty={internal} -> {resolved:?}"
+                            "unqualified sibling call {fname}() on this_ty={internal_rendered} -> {resolved:?}"
                         );
                         if let Some((params, ret)) = resolved {
                             // A `vararg` sibling method (`fun f(vararg s: T)`) accepts trailing `T` args
@@ -14752,7 +14752,7 @@ impl<'a> Checker<'a> {
                             // positionally.
                             let vararg = self
                                 .syms
-                                .method_of(&internal, &fname)
+                                .method_of(&internal_rendered, &fname)
                                 .is_some_and(|s| s.vararg);
                             self.expect_call_args(&params, vararg, args, &arg_tys);
                             // An EXPRESSION-body sibling method whose declared return was the collection
@@ -14760,7 +14760,7 @@ impl<'a> Checker<'a> {
                             // its body was checked (an anonymous object / local class whose `fun m() = f()`
                             // return couldn't be inferred at collection). Matches the qualified-member path.
                             return self
-                                .inferred_member_ret(Ty::obj(&internal), &fname, &params)
+                                .inferred_member_ret(Ty::obj_name(internal), &fname, &params)
                                 .unwrap_or(ret);
                         }
                     } else {
@@ -14778,15 +14778,17 @@ impl<'a> Checker<'a> {
                     // `this_narrow` is only ever a known reference subtype of the receiver.
                     if let Some(bt) = self.this_narrow {
                         if let Some(bi) = bt.obj_internal() {
-                            let bi = bi.render();
                             if let Some(m) = crate::module_symbols::ModuleSymbols::new(self.syms)
                                 .instance_members(bt, &fname)
                                 .into_iter()
                                 .next()
                             {
-                                self.narrowed_this_member.insert(call, bi.clone());
-                                let vararg =
-                                    self.syms.method_of(&bi, &fname).is_some_and(|s| s.vararg);
+                                self.narrowed_this_member.insert(call, bi);
+                                let bi_rendered = bi.render();
+                                let vararg = self
+                                    .syms
+                                    .method_of(&bi_rendered, &fname)
+                                    .is_some_and(|s| s.vararg);
                                 self.expect_call_args(&m.params, vararg, args, &arg_tys);
                                 return self
                                     .inferred_member_ret(bt, &fname, &m.params)

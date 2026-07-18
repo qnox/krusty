@@ -16072,14 +16072,15 @@ impl<'a> Lower<'a> {
                     // `this` was flow-narrowed to a subtype by an enclosing `if (this is B)`, and this
                     // member exists only on `B` — `checkcast` the receiver to `B`, then read the member
                     // (backing field or getter) on `B`.
-                    if let Some(bi) = self.info.narrowed_this_member.get(&e).cloned() {
-                        let cast = self.emit_type_op(IrTypeOp::Cast, recv, ty_to_ir(Ty::obj(&bi)));
+                    if let Some(bi) = self.info.narrowed_this_member.get(&e).copied() {
+                        let cast =
+                            self.emit_type_op(IrTypeOp::Cast, recv, ty_to_ir(Ty::obj_name(bi)));
                         // `B`'s backing field is private, and `this` is the ENCLOSING class (a
                         // different class), so read through the property getter — a direct `getfield`
                         // would be an `IllegalAccessError`. Fall back to a direct field read only when
                         // there is no getter (a public/platform field).
                         if let Some((class, index, _, _)) =
-                            self.resolve_method(&bi, &property_getter_name(&n))
+                            self.resolve_method_name(bi, &property_getter_name(&n))
                         {
                             return Some(self.emit_method_call(class, index, cast, vec![]));
                         }
@@ -16099,7 +16100,7 @@ impl<'a> Lower<'a> {
                             );
                             return Some(self.coerce_to_static(call, ret, physical_ret));
                         }
-                        let (fclass, idx, _) = self.resolve_field(&bi, &n)?;
+                        let (fclass, idx, _) = self.resolve_field(&bi.render(), &n)?;
                         return Some(self.emit_get_field(cast, fclass, idx));
                     }
                     let read = if let Some(cur) = self.cur_class.clone() {
@@ -17950,14 +17951,19 @@ impl<'a> Lower<'a> {
                         // is B) foo()`). Load the implicit receiver (the extension receiver or enclosing
                         // `this`), `checkcast` it to `B`, and dispatch the member on `B` — the call analog
                         // of the narrowed bare-name property read.
-                        if let Some(bi) = self.info.narrowed_this_member.get(&e).cloned() {
+                        if let Some(bi) = self.info.narrowed_this_member.get(&e).copied() {
                             self.lookup("this").and_then(|(this_v, _)| {
                                 let recv = self.emit_get_value(this_v);
-                                let cast =
-                                    self.emit_type_op(IrTypeOp::Cast, recv, ty_to_ir(Ty::obj(&bi)));
-                                let (class, index, mfid, _) = self.resolve_method(&bi, &fname)?;
+                                let cast = self.emit_type_op(
+                                    IrTypeOp::Cast,
+                                    recv,
+                                    ty_to_ir(Ty::obj_name(bi)),
+                                );
+                                let bi_rendered = bi.render();
+                                let (class, index, mfid, _) =
+                                    self.resolve_method(&bi_rendered, &fname)?;
                                 let params = self.ir.functions[mfid as usize].params.clone();
-                                let vararg = self.syms.method_is_vararg(&bi, &fname);
+                                let vararg = self.syms.method_is_vararg(&bi_rendered, &fname);
                                 let n_fixed = vararg_arity(vararg, params.len(), args.len())?;
                                 let a =
                                     self.lower_call_args_vararg(&args, &params, vararg, n_fixed)?;
