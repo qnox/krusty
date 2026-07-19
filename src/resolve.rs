@@ -7560,7 +7560,7 @@ impl<'a> Checker<'a> {
                             .syms
                             .classes
                             .get(en)
-                            .map_or(false, |c| c.internal_matches(&internal.render()))
+                            .map_or(false, |c| c.internal_name() == internal)
                         {
                             covered.insert(entry);
                         }
@@ -11935,9 +11935,11 @@ impl<'a> Checker<'a> {
     }
 
     fn ctor_result(&mut self, call: ExprId, internal: &str) -> Ty {
-        // Cannot construct an abstract class / interface directly (kotlinc rejects it; the JVM would
-        // throw at `new`). Only fires on a genuine construction call here — a `super(…)` delegation
-        // and an `object : I {}` literal reach the backend by other paths, not `ctor_result`.
+        if let Some(internal) = existing_type_name(internal) {
+            return self.ctor_result_name(call, internal);
+        }
+        // Compatibility path for classpath/boundary strings that have not been copied into the
+        // global type-name tree yet.
         if let Some(cls) = self.syms.class_by_internal(internal) {
             if cls.is_interface || cls.is_abstract {
                 let kind = if cls.is_interface {
@@ -11957,8 +11959,6 @@ impl<'a> Checker<'a> {
                 return Ty::obj_args(internal, &args);
             }
         }
-        // No explicit `<T>` — INFER a classpath generic type's arguments from the constructor call's
-        // argument types (`Pair(1, 2)` → `Pair<Int, Int>`), so members/`componentN` type concretely.
         if let Expr::Call { args, .. } = self.file.expr(call).clone() {
             let arg_tys: Vec<Ty> = args
                 .iter()
@@ -11974,6 +11974,49 @@ impl<'a> Checker<'a> {
             }
         }
         Ty::obj(internal)
+    }
+
+    fn ctor_result_name(&mut self, call: ExprId, internal: TypeName) -> Ty {
+        // Cannot construct an abstract class / interface directly (kotlinc rejects it; the JVM would
+        // throw at `new`). Only fires on a genuine construction call here — a `super(…)` delegation
+        // and an `object : I {}` literal reach the backend by other paths, not `ctor_result`.
+        if let Some(cls) = self.syms.class_by_type_name(internal) {
+            if cls.is_interface || cls.is_abstract {
+                let kind = if cls.is_interface {
+                    "an interface"
+                } else {
+                    "an abstract class"
+                };
+                let rendered = internal.render();
+                self.diags.error(
+                    self.span(call),
+                    format!("cannot create an instance of {kind} '{rendered}'"),
+                );
+            }
+        }
+        if let Some(targs) = self.file.call_type_args.get(&call.0).cloned() {
+            let args: Vec<Ty> = targs.iter().map(|r| self.resolve_ty(r)).collect();
+            if !args.is_empty() {
+                return Ty::obj_args_name(internal, &args);
+            }
+        }
+        // No explicit `<T>` — INFER a classpath generic type's arguments from the constructor call's
+        // argument types (`Pair(1, 2)` → `Pair<Int, Int>`), so members/`componentN` type concretely.
+        if let Expr::Call { args, .. } = self.file.expr(call).clone() {
+            let arg_tys: Vec<Ty> = args
+                .iter()
+                .map(|&a| self.expr_types[a.0 as usize])
+                .collect();
+            if let Some(inferred) = self
+                .resolved_type_name(internal)
+                .and_then(|t| crate::symbol_resolver::infer_constructor_type_args(&t, &arg_tys))
+            {
+                if inferred.iter().any(|t| !t.is_erased_top()) {
+                    return Ty::obj_args_name(internal, &inferred);
+                }
+            }
+        }
+        Ty::obj_name(internal)
     }
 
     /// Whether a member of `owner` with visibility `vis` is accessible from the CURRENT site (the class
@@ -12667,7 +12710,7 @@ impl<'a> Checker<'a> {
                                         .diags
                                         .error(span, format!("constructor '{qname}': {msg}")),
                                 }
-                                return self.ctor_result(call, &cls.internal());
+                                return self.ctor_result_name(call, cls.internal_name());
                             }
                         }
                         let arg_tys = self.arg_tys(args);
@@ -12692,7 +12735,7 @@ impl<'a> Checker<'a> {
                                 ),
                             ),
                         }
-                        return self.ctor_result(call, &cls.internal());
+                        return self.ctor_result_name(call, cls.internal_name());
                     }
                 }
                 // `EnumName.values()` / `EnumName.valueOf(s)` — synthetic static enum methods.
@@ -13915,13 +13958,13 @@ impl<'a> Checker<'a> {
                         .values()
                         .find(|cs| {
                             cs.internal_matches(&inner_internal)
-                                && cs.inner_of_matches(&outer_internal.render())
+                                && cs.inner_of_name() == Some(outer_internal)
                         })
                         .cloned()
                     {
                         if inner.ctor_params.len() == arg_tys.len() {
                             self.expect_call_args(&inner.ctor_params, false, args, &arg_tys);
-                            return Ty::obj(&inner_internal);
+                            return Ty::obj_name(inner.internal_name());
                         }
                     }
                 }
@@ -14554,7 +14597,7 @@ impl<'a> Checker<'a> {
                                             .error(span, format!("constructor '{fname}': {msg}"));
                                     }
                                 }
-                                return self.ctor_result(call, &cls.internal());
+                                return self.ctor_result_name(call, cls.internal_name());
                             }
                         }
                         // Omitted trailing arguments are allowed when those parameters have a default
@@ -14582,7 +14625,7 @@ impl<'a> Checker<'a> {
                                 .or_else(|| cls.secondary_ctors.iter().find(|sp| sp.len() == got));
                             if let Some(sparams) = chosen {
                                 self.expect_call_args(sparams, false, args, &arg_tys);
-                                return self.ctor_result(call, &cls.internal());
+                                return self.ctor_result_name(call, cls.internal_name());
                             }
                             self.diags.error(
                                 span,
@@ -14605,12 +14648,12 @@ impl<'a> Checker<'a> {
                                     .find(|sp| self.ctor_args_match(sp, &arg_tys))
                                 {
                                     self.expect_call_args(sparams, false, args, &arg_tys);
-                                    return self.ctor_result(call, &cls.internal());
+                                    return self.ctor_result_name(call, cls.internal_name());
                                 }
                             }
                             self.expect_call_args(&ctor_params, false, args, &arg_tys);
                         }
-                        return self.ctor_result(call, &cls.internal());
+                        return self.ctor_result_name(call, cls.internal_name());
                     }
                     // Named classpath constructors use metadata names/defaults; lowering selects
                     // either the plain constructor or the default-argument synthetic.
@@ -15101,14 +15144,11 @@ impl<'a> Checker<'a> {
                         // check is the same. It is valid ONLY inside the enclosing instance where `this`
                         // is available — this branch requires `this_ty == outer`, and an inner class must
                         // declare exactly that outer (`inner_of == outer`) so `this` is the right instance.
-                        let inner_ok = cls
-                            .inner_of
-                            .as_ref()
-                            .map_or(true, |o| o.matches(&outer.render()));
+                        let inner_ok = cls.inner_of_name().is_none_or(|o| o == outer);
                         if inner_ok && cls.ctor_params.len() == arg_tys.len() && arg_names.is_none()
                         {
                             self.expect_call_args(&cls.ctor_params, false, args, &arg_tys);
-                            return self.ctor_result(call, &cls.internal());
+                            return self.ctor_result_name(call, cls.internal_name());
                         }
                     }
                 }
