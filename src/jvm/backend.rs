@@ -60,9 +60,6 @@ pub fn run_backend_passes(
         &vc_module,
         &[],
     );
-    // Drop `ACC_FINAL` on every override (same-file or classpath) — runs for EVERY file, unlike
-    // `lower_value_classes` which returns early when the file has no value class (a plain adapter
-    // implementing a classpath interface has overrides but no value class).
     crate::jvm::value_classes::apply_override_final_drop(ir, &vc_resolver);
     if !crate::jvm::value_classes::lower_value_classes(ir, &vc_resolver) {
         return Err(SkipReason::ValueClasses);

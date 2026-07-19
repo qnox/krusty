@@ -288,10 +288,6 @@ fn data_class_copy_null_checks_nonnull_reference_params() {
 
 #[test]
 fn classpath_interface_override_is_not_final() {
-    // A class implementing a CLASSPATH interface (with NO value class in the file) must emit its
-    // overrides WITHOUT `ACC_FINAL`, exactly like kotlinc. The override-final-drop previously ran only
-    // inside `lower_value_classes`, which returns early for a value-class-free file — so a plain adapter
-    // (`class Adapter : Port` from a jar) kept its overrides `final`. Now it runs for every file.
     let Some(jh) = java_home() else {
         return;
     };
