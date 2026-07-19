@@ -9057,7 +9057,6 @@ impl<'a> Lower<'a> {
             return None;
         }
         let p = self.info.bound_property_ref(e)?.clone();
-        let owner = p.owner.render();
         let prop_ty = ty_to_ir(p.prop_ty);
         let cap = self.expr(recv)?;
         let synth_fq = class_internal(
@@ -9089,7 +9088,7 @@ impl<'a> Lower<'a> {
             enum_entries: vec![],
             enum_entry_of: None,
             prop_ref: Some(crate::ir::PropRef {
-                owner_internal: Some(type_name(&owner)),
+                owner_internal: Some(p.owner),
                 prop_name: name.to_string(),
                 getter_name: p.getter_name,
                 prop_ty,
@@ -9287,22 +9286,22 @@ impl<'a> Lower<'a> {
         if self.statics.contains_key(&format!("{name}$delegate")) {
             return None;
         }
-        // Resolve the property's type, mutability, and declaring facade. A same-file property uses the
-        // facade sentinel (empty); a cross-file one carries its facade. `const val`s have no accessor,
-        // so they can't be referenced — skip.
-        let (owner, prop_ty, is_var) =
+        // Resolve the property's type, mutability, and declaring facade. A same-file property leaves the
+        // facade implicit; a cross-file one carries its facade id. `const val`s have no accessor, so they
+        // can't be referenced — skip.
+        let (owner, prop_ty, is_var): (Option<TypeName>, Ty, bool) =
             if let Some((ty, is_var, is_const)) = self.syms.props.get(name).cloned() {
                 if is_const {
                     return None;
                 }
-                (String::new(), ty, is_var)
+                (None, ty, is_var)
             } else if let Some((facade, ty, is_var, is_const)) =
                 self.syms.prop_facades.get(name).cloned()
             {
                 if is_const {
                     return None;
                 }
-                (facade.render(), ty, is_var)
+                (Some(facade), ty, is_var)
             } else {
                 return None;
             };
@@ -9336,7 +9335,7 @@ impl<'a> Lower<'a> {
             enum_entries: vec![],
             enum_entry_of: None,
             prop_ref: Some(crate::ir::PropRef {
-                owner_internal: (!owner.is_empty()).then(|| type_name(&owner)),
+                owner_internal: owner,
                 prop_name: name.to_string(),
                 getter_name: property_getter_name(name),
                 prop_ty,
