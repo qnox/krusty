@@ -420,6 +420,7 @@ pub struct SymbolResolver<'a> {
 pub enum SymRecv<'q> {
     Value(Ty),
     Type(&'q str),
+    TypeName(TypeName),
     /// No receiver — a plain `name(args)` resolved against the import scope's top-level (and same-facade
     /// extension) functions. A DOTTED `name` (`kotlinx.coroutines.runBlocking`) is a fully-qualified
     /// reference: it resolves against its own package, not the import scope.
@@ -800,22 +801,29 @@ impl<'a> SymbolResolver<'a> {
                     extension_property_getter: None,
                 })))
             }
-            SymRecv::Type(internal) => {
+            SymRecv::Type(internal) => self.resolve_symbol(
+                SymRecv::TypeName(crate::types::type_name(internal)),
+                name,
+                args,
+                type_args,
+            ),
+            SymRecv::TypeName(internal) => {
                 if name.is_empty() {
                     // `Type(args)` — the type's constructor, real or synthesized.
-                    resolve_constructor(self.lib, internal, args)
+                    resolve_constructor_name(self.lib, internal, args)
                         .map(Symbol::Constructor)
                         .or_else(|| {
-                            resolve_synthetic_constructor(self.lib, internal, args)
+                            resolve_synthetic_constructor_name(self.lib, internal, args)
                                 .map(Symbol::SyntheticConstructor)
                         })
                 } else {
                     // `Type.name(args)` — an object/companion instance member, else a static/companion
                     // member. The resolver discovers which.
-                    resolve_instance(self.lib, internal, name, args)
+                    resolve_instance_name(self.lib, internal, name, args)
                         .map(Symbol::Instance)
                         .or_else(|| {
-                            resolve_companion(self.lib, internal, name, args).map(Symbol::Companion)
+                            resolve_companion_name(self.lib, internal, name, args)
+                                .map(Symbol::Companion)
                         })
                 }
             }
@@ -1355,12 +1363,12 @@ fn value_erased_args(lib: &dyn SemanticPlatform, args: &[Ty]) -> Vec<Ty> {
 }
 
 /// Resolve a constructor on a library type by argument types (with the type's own widening).
-fn resolve_constructor(
+fn resolve_constructor_name(
     lib: &dyn SemanticPlatform,
-    internal: &str,
+    internal: TypeName,
     args: &[Ty],
 ) -> Option<LibraryMember> {
-    let Some(t) = lib.resolve_type(internal) else {
+    let Some(t) = lib.resolve_type_name(internal) else {
         crate::trace_compiler!(
             "value_classes",
             "resolve_constructor {internal} resolve_type=None args={args:?}"
@@ -1437,11 +1445,7 @@ fn resolve_constructor(
         // ONLY when that synthetic exists on the classpath, AND the underlying is a REFERENCE: the lowering
         // passes `null` for the dummy underlying slot, which fits only a reference (a scalar would need a
         // typed zero). A mandatory-param value class stays unresolved (no synthetic → no phantom call).
-        let all_default = args.is_empty()
-            && underlying.is_reference()
-            && lib
-                .resolve_type(internal)
-                .is_some_and(|t| t.value_ctor_has_default);
+        let all_default = args.is_empty() && underlying.is_reference() && t.value_ctor_has_default;
         crate::trace_compiler!(
             "value_classes",
             "resolve_constructor {internal} value-class underlying={underlying:?} args={args:?} fits={fits} all_default={all_default}"
@@ -1452,7 +1456,7 @@ fn resolve_constructor(
             return Some(LibraryMember::new(
                 "<init>".to_string(),
                 vec![underlying],
-                Ty::obj(internal),
+                Ty::obj_name(internal),
                 String::new(),
             ));
         }
@@ -1460,7 +1464,7 @@ fn resolve_constructor(
             return Some(LibraryMember::new(
                 "<init>".to_string(),
                 vec![],
-                Ty::obj(internal),
+                Ty::obj_name(internal),
                 String::new(),
             ));
         }
@@ -1556,12 +1560,12 @@ pub(crate) fn synthetic_default_member(
 /// Resolve a classpath construction that a plain [`resolve_constructor`] can't match because it needs a
 /// synthetic `DefaultConstructorMarker` overload (a value-class param, or omitted defaults). See
 /// [`SyntheticCtorCall`]. `None` when no marker overload fits.
-fn resolve_synthetic_constructor(
+fn resolve_synthetic_constructor_name(
     lib: &dyn SemanticPlatform,
-    internal: &str,
+    internal: TypeName,
     args: &[Ty],
 ) -> Option<SyntheticCtorCall> {
-    let t = lib.resolve_type(internal)?;
+    let t = lib.resolve_type_name(internal)?;
     let erased = value_erased_args(lib, args);
     for m in &t.constructors {
         if m.params
@@ -1623,13 +1627,13 @@ fn resolve_synthetic_constructor(
 }
 
 /// Resolve a companion member `Type.name(args)` (the receiver type must be public).
-fn resolve_companion(
+fn resolve_companion_name(
     lib: &dyn SemanticPlatform,
-    internal: &str,
+    internal: TypeName,
     name: &str,
     args: &[Ty],
 ) -> Option<LibraryMember> {
-    let t = lib.resolve_type(internal)?;
+    let t = lib.resolve_type_name(internal)?;
     if !t.is_public {
         return None;
     }
@@ -1656,13 +1660,13 @@ fn resolve_companion(
 /// member may be inherited from a (possibly non-public) supertype. Candidates come from the consolidated
 /// `functions` query, whose Member overloads carry the breadth-first `receiver_rank`; the closest rung's
 /// best overload wins (most-derived first), exactly the inherited-member walk this used to do by hand.
-fn resolve_instance(
+fn resolve_instance_name(
     lib: &dyn SemanticPlatform,
-    internal: &str,
+    internal: TypeName,
     name: &str,
     args: &[Ty],
 ) -> Option<LibraryMember> {
-    select_instance_info(lib, Ty::obj(internal), name, args).map(|o| {
+    select_instance_info(lib, Ty::obj_name(internal), name, args).map(|o| {
         let ret = o.ret.apply(o.callable.ret);
         o.member_with_return(ret)
     })

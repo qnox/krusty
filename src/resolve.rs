@@ -6407,6 +6407,17 @@ impl<'a> Checker<'a> {
             .resolve_symbol(SymRecv::Type(internal), name, args, &[])
             .and_then(Symbol::instance)
     }
+    fn resolve_instance_name(
+        &self,
+        internal: TypeName,
+        name: &str,
+        args: &[Ty],
+    ) -> Option<crate::libraries::LibraryMember> {
+        use crate::symbol_resolver::{SymRecv, Symbol};
+        self.resolver()
+            .resolve_symbol(SymRecv::TypeName(internal), name, args, &[])
+            .and_then(Symbol::instance)
+    }
     fn resolve_companion(
         &self,
         internal: &str,
@@ -6416,6 +6427,17 @@ impl<'a> Checker<'a> {
         use crate::symbol_resolver::{SymRecv, Symbol};
         self.resolver()
             .resolve_symbol(SymRecv::Type(internal), name, args, &[])
+            .and_then(Symbol::companion)
+    }
+    fn resolve_companion_name(
+        &self,
+        internal: TypeName,
+        name: &str,
+        args: &[Ty],
+    ) -> Option<crate::libraries::LibraryMember> {
+        use crate::symbol_resolver::{SymRecv, Symbol};
+        self.resolver()
+            .resolve_symbol(SymRecv::TypeName(internal), name, args, &[])
             .and_then(Symbol::companion)
     }
     fn resolve_constructor(
@@ -9317,8 +9339,8 @@ impl<'a> Checker<'a> {
                                     .next()
                                     .map(|m| m.ret)
                                     .or_else(|| {
-                                        self.resolve_instance(&internal.render(), &name, &arg_tys)
-                                            .map(|m| {
+                                        self.resolve_instance_name(internal, &name, &arg_tys).map(
+                                            |m| {
                                                 let ret = m.ret;
                                                 let suspend = m.suspend;
                                                 self.resolved_calls.insert(
@@ -9332,7 +9354,8 @@ impl<'a> Checker<'a> {
                                                     ),
                                                 );
                                                 ret
-                                            })
+                                            },
+                                        )
                                     })
                                     // A stdlib/classpath EXTENSION reached by `?.` (`c?.takeIf { … }`):
                                     // resolve AND RECORD the callable keyed by the safe-call `ExprId`, so the
@@ -11401,24 +11424,23 @@ impl<'a> Checker<'a> {
 
     fn iterator_protocol_target(&self, iterable_ty: Ty) -> Option<IteratorProtocolTarget> {
         let internal = iterable_ty.obj_internal()?;
-        let iterator =
-            if let Some(member) = self.resolve_instance(&internal.render(), "iterator", &[]) {
-                IteratorDispatchTarget::Member {
-                    owner_fallback: internal,
-                    member: Box::new(member),
-                }
-            } else {
-                IteratorDispatchTarget::Extension(Box::new(self.library_extension_callable(
-                    "iterator",
-                    iterable_ty,
-                    &[],
-                    &[],
-                )?))
-            };
+        let iterator = if let Some(member) = self.resolve_instance_name(internal, "iterator", &[]) {
+            IteratorDispatchTarget::Member {
+                owner_fallback: internal,
+                member: Box::new(member),
+            }
+        } else {
+            IteratorDispatchTarget::Extension(Box::new(self.library_extension_callable(
+                "iterator",
+                iterable_ty,
+                &[],
+                &[],
+            )?))
+        };
         let iter_ty = iterator.ret();
-        let iter_internal = iter_ty.obj_internal()?.render();
-        let has_next = self.resolve_instance(&iter_internal, "hasNext", &[])?;
-        let next = self.resolve_instance(&iter_internal, "next", &[])?;
+        let iter_internal = iter_ty.obj_internal()?;
+        let has_next = self.resolve_instance_name(iter_internal, "hasNext", &[])?;
+        let next = self.resolve_instance_name(iter_internal, "next", &[])?;
         let elem_ty = iterable_ty
             .obj_internal()
             .and_then(|i| self.syms.libraries.iterable_element_type(&i.render()))
@@ -12869,8 +12891,7 @@ impl<'a> Checker<'a> {
                                 return sig.ret;
                             }
                             // A classpath base-class method (`class C : ArrayList<…>() { … super.add(x) }`).
-                            let sup_rendered = sup.render();
-                            if let Some(m) = self.resolve_instance(&sup_rendered, &name, &arg_tys) {
+                            if let Some(m) = self.resolve_instance_name(sup, &name, &arg_tys) {
                                 self.resolved_super_calls.insert(
                                     call,
                                     ResolvedSuperCall {
@@ -13932,7 +13953,7 @@ impl<'a> Checker<'a> {
                 // not an instance member. Resolve it there as a static call on the receiver's type.
                 if let Some(internal) = rt.obj_internal() {
                     if let Some(m) = self
-                        .resolve_companion(&internal.render(), &name, &arg_tys)
+                        .resolve_companion_name(internal, &name, &arg_tys)
                         // A `@JvmStatic suspend fun` keeps its physical `Continuation` param here (the
                         // companion path doesn't strip/CPS it), so leave it unresolved rather than
                         // miscompile the calling convention.
