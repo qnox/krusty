@@ -1054,7 +1054,9 @@ fn resolve_name_against_imports_name(
         // level-precedence + within-level ambiguity is applied HERE (the caller's own rule), the record
         // keeping classifier separate from callables so a coexisting `fun`/`val` never perturbs it.
         let mut hits: Vec<TypeName> = Vec::new();
-        for (fqn, r) in crate::symbol_resolver::resolve_symbols_in_scope(source, name, level) {
+        let level_names: Vec<TypeName> = level.iter().map(|pkg| type_name(pkg)).collect();
+        for (fqn, r) in crate::symbol_resolver::resolve_symbols_in_scope(source, name, &level_names)
+        {
             if let Some(t) = r.classifier {
                 let internal = t.alias_target.unwrap_or(fqn);
                 if !hits.contains(&internal) {
@@ -4825,20 +4827,28 @@ struct Local {
 /// import packages (same-package, star, explicit, defaults) plus each explicit import's package. Used to
 /// scope BOTH the checker and the lowerer so the two resolve a `@JvmName`-mangled library family (e.g.
 /// `sumOf` → `sumOfInt`) identically — an unscoped lowerer walk misses it and bails.
-pub(crate) fn function_scope_packages(file: &File, syms: &SymbolTable) -> Vec<String> {
+pub(crate) fn function_scope_packages(file: &File, syms: &SymbolTable) -> Vec<TypeName> {
     function_scope_packages_with(file, syms.libraries.platform_default_import_packages())
 }
 
 /// [`function_scope_packages`] with only a platform default-import list, for pre-check contexts that do
 /// not yet have a full `SymbolTable`.
-pub(crate) fn function_scope_packages_with(file: &File, platform_defaults: &[&str]) -> Vec<String> {
+pub(crate) fn function_scope_packages_with(
+    file: &File,
+    platform_defaults: &[&str],
+) -> Vec<TypeName> {
     let imports = import_map(file);
     let import_levels = import_levels(file, platform_defaults);
-    let mut fn_scope: Vec<String> = import_levels.iter().flatten().cloned().collect();
+    let mut fn_scope: Vec<TypeName> = import_levels
+        .iter()
+        .flatten()
+        .map(|pkg| type_name(pkg))
+        .collect();
     for fq in imports.values() {
         if let Some((pkg, _)) = fq.rsplit_once('/') {
-            if !fn_scope.iter().any(|p| p == pkg) {
-                fn_scope.push(pkg.to_string());
+            let pkg = type_name(pkg);
+            if !fn_scope.contains(&pkg) {
+                fn_scope.push(pkg);
             }
         }
     }
@@ -4850,7 +4860,8 @@ pub(crate) fn function_scope_packages_with(file: &File, platform_defaults: &[&st
     for i in 0..file.expr_spans.len() {
         if let Expr::Member { receiver, .. } = file.expr(ExprId(i as u32)) {
             if let Some(pkg) = qualified_path(file, *receiver) {
-                if pkg.contains('/') && !fn_scope.contains(&pkg) {
+                let pkg = type_name(&pkg);
+                if pkg.contains("/") && !fn_scope.contains(&pkg) {
                     fn_scope.push(pkg);
                 }
             }
@@ -5787,7 +5798,7 @@ struct Checker<'a> {
     /// The packages in scope for TOP-LEVEL function resolution: every `import_levels` package PLUS the
     /// package of each explicit import (`import a.b.foo` scopes `a/b`). A top-level call resolves only to
     /// a function whose facade is in this set (kotlinc), passed to the [`SymbolResolver`].
-    fn_scope: Vec<String>,
+    fn_scope: Vec<TypeName>,
     /// Generic type parameters in scope (erased to `java/lang/Object`).
     tparams: TParams,
     /// The `reified` type parameters in scope (a subset of `tparams`, from the enclosing `inline fun`).
@@ -5998,7 +6009,7 @@ impl<'a> Checker<'a> {
     /// caller, which already resolved which prefix is the package, supplies it here.
     fn resolver_in_scope<'s>(
         &'s self,
-        scope: &'s [String],
+        scope: &'s [TypeName],
     ) -> crate::symbol_resolver::SymbolResolver<'s> {
         crate::symbol_resolver::SymbolResolver::new_scoped_with_module(
             &*self.syms.libraries,
@@ -12529,7 +12540,7 @@ impl<'a> Checker<'a> {
                                 .get(&call.0)
                                 .map(|ts| ts.iter().map(|r| self.resolve_ty(r)).collect())
                                 .unwrap_or_default();
-                            let pkg_scope = [pkg.clone()];
+                            let pkg_scope = [type_name(&pkg)];
                             if let Some(c) = self
                                 .resolver_in_scope(&pkg_scope)
                                 .resolve_symbol(
@@ -12540,7 +12551,7 @@ impl<'a> Checker<'a> {
                                 )
                                 .and_then(crate::symbol_resolver::Symbol::top_level_call)
                             {
-                                if c.owner_package_matches(pkg.as_str()) {
+                                if c.owner_package_matches_name(pkg_scope[0]) {
                                     crate::trace_compiler!(
                                         "resolve",
                                         "fully-qualified top-level call {pkg}.{name} -> {}",
@@ -12606,7 +12617,7 @@ impl<'a> Checker<'a> {
                                     };
                                     let mut full = arg_tys.clone();
                                     full[last] = lam_ty;
-                                    let pkg_scope = [pkg.clone()];
+                                    let pkg_scope = [type_name(&pkg)];
                                     if let Some(c) = self
                                         .resolver_in_scope(&pkg_scope)
                                         .resolve_symbol(
@@ -12617,7 +12628,7 @@ impl<'a> Checker<'a> {
                                         )
                                         .and_then(crate::symbol_resolver::Symbol::top_level_call)
                                     {
-                                        if c.owner_package_matches(pkg.as_str()) {
+                                        if c.owner_package_matches_name(pkg_scope[0]) {
                                             crate::trace_compiler!(
                                                 "resolve",
                                                 "fully-qualified trailing-lambda call {pkg}.{name} -> {}",

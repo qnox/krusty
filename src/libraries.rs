@@ -298,6 +298,10 @@ impl LibraryCallable {
         self.owner.package_matches(package)
     }
 
+    pub fn owner_package_matches_name(&self, package: TypeName) -> bool {
+        self.owner.parent() == Some(package)
+    }
+
     pub fn owner_package(&self) -> String {
         self.owner.package()
     }

@@ -1809,7 +1809,7 @@ impl SymbolSource for JvmLibraries {
         // consumer). Top-level functions of the source name declared in the fqn's package, plus the
         // package's extensions (source-keyed via the tree, so a `@JvmName`-mangled extension `sum` →
         // `sumOfInt` is found under its SOURCE name; the JVM name stays on the callable for emit).
-        let pkg = fqn.parent().map_or_else(String::new, TypeName::render);
+        let pkg = fqn.parent().unwrap_or_else(|| type_name(""));
         let name = fqn.segment();
         // TOP-LEVEL functions of the package (receiver-less). The receiver-less `functions(name, None)`
         // query classifies each candidate by its metadata receiver, so an EXTENSION compiled into the same
@@ -1819,7 +1819,7 @@ impl SymbolSource for JvmLibraries {
         let mut overloads: Vec<_> = self
             .top_level_overloads(&name)
             .into_iter()
-            .filter(|o| o.kind == FnKind::TopLevel && o.callable.owner_package_matches(&pkg))
+            .filter(|o| o.kind == FnKind::TopLevel && o.callable.owner_package_matches_name(pkg))
             .collect();
         // Extension PROPERTIES of the source name live in the CALLABLE namespace's property half. A name is
         // functions XOR a property, so these are surfaced separately and chosen when there are no functions.
@@ -1830,7 +1830,7 @@ impl SymbolSource for JvmLibraries {
         // descriptor) is only the emit handle, rooted at the PUBLIC facade — kotlinc's `invokestatic`
         // target — so a package-private multifile PART never leaks a `false` visibility. Receiver-coupled
         // JVM specifics (element-variant `sumOfInt`, value-class mangling) are the emitter's job.
-        for facade in self.cp.package_facades(&pkg) {
+        for facade in self.cp.package_facades_name(pkg) {
             let facade_rendered = facade.render();
             for mf in self.cp.meta_functions_name(facade).iter() {
                 if mf.kotlin_name != name || !mf.is_extension {

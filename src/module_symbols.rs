@@ -170,7 +170,7 @@ impl<'a> ModuleSymbols<'a> {
         &self,
         name: &str,
         arg_tys: &[Ty],
-        packages: &[String],
+        packages: &[TypeName],
     ) -> Option<FunctionInfo> {
         let overloads = self.top_level_overloads_in_scope(name, packages);
         let params = overloads
@@ -225,7 +225,7 @@ impl<'a> ModuleSymbols<'a> {
     pub fn top_level_overloads_in_scope(
         &self,
         name: &str,
-        packages: &[String],
+        packages: &[TypeName],
     ) -> Vec<FunctionInfo> {
         self.top_level_overloads(name)
             .into_iter()
@@ -239,7 +239,7 @@ impl<'a> ModuleSymbols<'a> {
                             })
                         })
                     })
-                    .is_some_and(|sig| packages.iter().any(|pkg| pkg == &sig.package))
+                    .is_some_and(|sig| packages.iter().any(|pkg| pkg.matches(&sig.package)))
             })
             .collect()
     }
@@ -361,7 +361,7 @@ impl SymbolSource for ModuleSymbols<'_> {
         // their declaring package (a same-file function has no recorded facade — it lives in the file's own
         // package, which the resolver queries as the same-package candidate fqn).
         let classifier = self.resolve_type_name(fqn);
-        let pkg = fqn.parent().map_or_else(String::new, TypeName::render);
+        let pkg = fqn.parent().unwrap_or_else(|| type_name(""));
         let name = fqn.segment();
         let pkg_scope = [pkg];
         let mut overloads = if self.syms.funs.contains_key(&name) {

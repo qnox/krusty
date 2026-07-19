@@ -411,7 +411,7 @@ pub struct SymbolResolver<'a> {
     /// When `Some`, a top-level function resolves only if its facade's package is in scope, matching
     /// kotlinc: an unqualified top-level call binds ONLY to an imported/same-package/default function,
     /// not to any classpath function of that name.
-    fn_scope: Option<&'a [String]>,
+    fn_scope: Option<&'a [TypeName]>,
 }
 
 /// The receiver of a reference: a VALUE of some type (`x.name`), or a named TYPE (`Type(args)`,
@@ -582,7 +582,7 @@ impl<'a> SymbolResolver<'a> {
     }
 
     /// A resolver whose top-level function resolution is restricted to `fn_scope`'s packages.
-    pub fn new_scoped(lib: &'a dyn SemanticPlatform, fn_scope: &'a [String]) -> Self {
+    pub fn new_scoped(lib: &'a dyn SemanticPlatform, fn_scope: &'a [TypeName]) -> Self {
         SymbolResolver {
             lib,
             src: crate::symbol_source::CompositeSource::new(vec![lib as &dyn SymbolSource]),
@@ -594,7 +594,7 @@ impl<'a> SymbolResolver<'a> {
     pub fn new_scoped_with_module(
         lib: &'a dyn SemanticPlatform,
         module: &'a dyn SymbolSource,
-        fn_scope: &'a [String],
+        fn_scope: &'a [TypeName],
     ) -> Self {
         SymbolResolver {
             lib,
@@ -2001,16 +2001,16 @@ pub(crate) fn source_receiver_rank(src: &dyn SymbolSource, recv: Ty, decl_recv: 
 pub(crate) fn resolve_symbols_in_scope(
     src: &dyn SymbolSource,
     name: &str,
-    packages: &[String],
+    packages: &[TypeName],
 ) -> Vec<(TypeName, crate::libraries::ResolvedSymbols)> {
     let lib = src;
     packages
         .iter()
         .filter_map(|pkg| {
-            let fqn = if pkg.is_empty() {
+            let fqn = if pkg.matches("") {
                 name.to_string()
             } else {
-                format!("{pkg}/{name}")
+                format!("{}/{name}", pkg.render())
             };
             let fqn = type_name(&fqn);
             let r = lib.resolve_symbols_name(fqn);
@@ -2038,13 +2038,15 @@ fn function_set_from_symbols(
 /// visibility is resolved separately, and its facade owner may be package-less. Only a CLASSPATH
 /// ([`Origin::Library`]) callable must have its facade's package imported (same-package / star / explicit
 /// / default), matching kotlinc. `None` scope keeps everything (a context with no import scope).
-fn fn_in_scope(o: &FunctionInfo, fn_scope: Option<&[String]>) -> bool {
+fn fn_in_scope(o: &FunctionInfo, fn_scope: Option<&[TypeName]>) -> bool {
     if !matches!(o.callable.origin, Origin::Library) {
         return true;
     }
     match fn_scope {
         None => true,
-        Some(scope) => scope.iter().any(|p| o.callable.owner_package_matches(p)),
+        Some(scope) => scope
+            .iter()
+            .any(|&p| o.callable.owner_package_matches_name(p)),
     }
 }
 
@@ -2054,7 +2056,7 @@ fn fn_in_scope(o: &FunctionInfo, fn_scope: Option<&[String]>) -> bool {
 #[derive(Clone, Copy)]
 struct ExtCtx<'a> {
     allow_must_inline: bool,
-    fn_scope: Option<&'a [String]>,
+    fn_scope: Option<&'a [TypeName]>,
 }
 
 /// The single call-overload selector for a receiver call `recv.name(args)`. It is parameterized by
@@ -2107,7 +2109,7 @@ fn select_overload(
     crate::trace_compiler!(
         "resolve",
         "select_overload name={name} recv={recv:?} kind={kind:?} scope={:?} cands={}",
-        ext.fn_scope.map(<[String]>::len),
+        ext.fn_scope.map(|scope| scope.len()),
         fs.overloads.len(),
     );
     for o in &fs.overloads {
@@ -2633,7 +2635,7 @@ mod tests {
             receiver: None,
             info: top_level_default_uint_info(),
         };
-        let scope = vec![String::new()];
+        let scope = vec![type_name("")];
         let resolver = SymbolResolver::new_scoped(&source, &scope);
         let call = resolver
             .resolve_symbol(SymRecv::TopLevel, "make", &[], &[])
@@ -2651,7 +2653,7 @@ mod tests {
             receiver: None,
             info: top_level_nullable_string_info(),
         };
-        let scope = vec![String::new()];
+        let scope = vec![type_name("")];
         let resolver = SymbolResolver::new_scoped(&source, &scope);
         let call = resolver
             .resolve_symbol(SymRecv::TopLevel, "maybe", &[], &[])
@@ -2668,7 +2670,7 @@ mod tests {
             receiver: Some(Ty::String),
             info: extension_nullable_string_info(),
         };
-        let scope = vec![String::new()];
+        let scope = vec![type_name("")];
         let resolver = SymbolResolver::new_scoped(&source, &scope);
         let call = resolver
             .resolve_symbol(SymRecv::Value(Ty::String), "maybeSuffix", &[], &[])

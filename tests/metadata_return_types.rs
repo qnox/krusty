@@ -174,7 +174,7 @@ fn plus_assign_receiver_is_mutable() {
         return;
     };
     let libs = JvmLibraries::new(Rc::new(Classpath::new(vec![jar])));
-    let scope = ["kotlin/collections".to_string()];
+    let scope = [type_name("kotlin/collections")];
     let resolver = SymbolResolver::new_scoped(&libs, &scope);
     let mutable = resolver
         .resolve_symbol(

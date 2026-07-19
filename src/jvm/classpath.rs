@@ -429,7 +429,7 @@ fn global_entry_types() -> &'static EntryCache<TypeIndex> {
 
 /// The spec's `(jar, package) → PkgMembers`: a per-(jar, package) index of the package's static
 /// callables, parsed once from that jar's `kotlin_module` facades and SHARED across every classpath that
-/// includes the jar (keyed by jar path + package), exactly like the other per-entry caches. Three
+/// includes the jar (keyed by jar path + package id), exactly like the other per-entry caches. Three
 /// indices from ONE facade-statics pass so every scoped query is O(1): [`Self::by_source`] for a
 /// source-name lookup (top-level/extension resolution), [`Self::by_jvm`] for a JVM-name lookup (the
 /// mangled `@JvmName` extension paths), and [`Self::owners_by_recv`] for the receiver-descriptor →
@@ -459,10 +459,11 @@ impl PkgMembers {
 }
 
 type JarPkgMembers = std::sync::Arc<PkgMembers>;
-fn global_jar_pkg_members() -> &'static std::sync::Mutex<HashMap<(PathBuf, String), JarPkgMembers>>
+fn global_jar_pkg_members() -> &'static std::sync::Mutex<HashMap<(PathBuf, TypeName), JarPkgMembers>>
 {
-    static CACHE: std::sync::OnceLock<std::sync::Mutex<HashMap<(PathBuf, String), JarPkgMembers>>> =
-        std::sync::OnceLock::new();
+    static CACHE: std::sync::OnceLock<
+        std::sync::Mutex<HashMap<(PathBuf, TypeName), JarPkgMembers>>,
+    > = std::sync::OnceLock::new();
     CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
 }
 
@@ -2152,19 +2153,20 @@ impl Classpath {
 
     /// The spec's `(jar, package) → PkgMembers`: the member index (`name → static callables`) that ONE
     /// jar/dir contributes for `pkg`, built once from that jar's `kotlin_module` facades and shared across
-    /// classpaths (keyed by jar path + package in [`global_jar_pkg_members`]). Roots at the PUBLIC facade
+    /// classpaths (keyed by jar path + package id in [`global_jar_pkg_members`]). Roots at the PUBLIC facade
     /// (`CollectionsKt`), not the package-private multifile PART (`CollectionsKt__…`) `kotlin_module`
     /// lists — the callable public statics live on the facade, and `facade_statics` drops a non-public
     /// root's public statics (the `@InlineOnly` rule).
-    fn jar_pkg_members(&self, entry: &Entry, pkg: &str) -> JarPkgMembers {
-        let key = (entry.path().to_path_buf(), pkg.to_string());
+    fn jar_pkg_members_name(&self, entry: &Entry, pkg: TypeName) -> JarPkgMembers {
+        let key = (entry.path().to_path_buf(), pkg);
         let mut g = global_jar_pkg_members().lock().unwrap();
         if let Some(m) = g.get(&key) {
             return m.clone();
         }
         let jp = global_jar_packages().get_or_build(entry.path(), || build_jar_packages(entry));
+        let pkg_rendered = pkg.render();
         let mut m = PkgMembers::default();
-        if let Some(pe) = jp.entry(pkg) {
+        if let Some(pe) = jp.entry(&pkg_rendered) {
             let mut seen_facade = std::collections::HashSet::new();
             for &part_id in &pe.facades {
                 let part = jp.names.render(part_id);
@@ -2214,9 +2216,14 @@ impl Classpath {
     /// `@Metadata`-driven extension/top-level discovery reads each facade's merged metadata — the source
     /// of truth — instead of scanning JVM statics. Declaration order, deduped.
     pub fn package_facades(&self, pkg: &str) -> Vec<TypeName> {
+        self.package_facades_name(type_name(pkg))
+    }
+
+    pub fn package_facades_name(&self, pkg: TypeName) -> Vec<TypeName> {
         let tree = self.package_tree();
         let mut out = Vec::new();
-        let Some(node) = tree.node_for(pkg) else {
+        let pkg_rendered = pkg.render();
+        let Some(node) = tree.node_for(&pkg_rendered) else {
             return out;
         };
         for &jar_id in &node.jars {
@@ -2224,7 +2231,7 @@ impl Classpath {
                 continue;
             };
             let jp = global_jar_packages().get_or_build(entry.path(), || build_jar_packages(entry));
-            if let Some(pe) = jp.entry(pkg) {
+            if let Some(pe) = jp.entry(&pkg_rendered) {
                 for &part_id in &pe.facades {
                     let part = jp.names.render(part_id);
                     let facade = part
@@ -2249,23 +2256,24 @@ impl Classpath {
         &self,
         recv_desc: &str,
         jvm_name: &str,
-        packages: &[String],
+        packages: &[TypeName],
     ) -> Vec<ExtCandidate> {
         let tree = self.package_tree();
         let mut out = Vec::new();
         let mut seen = std::collections::HashSet::new();
-        for pkg in packages {
-            if !seen.insert(pkg.as_str()) {
+        for &pkg in packages {
+            if !seen.insert(pkg) {
                 continue;
             }
-            let Some(node) = tree.node_for(pkg) else {
+            let pkg_rendered = pkg.render();
+            let Some(node) = tree.node_for(&pkg_rendered) else {
                 continue;
             };
             for &jar_id in &node.jars {
                 let Some(entry) = self.entries.get(jar_id) else {
                     continue;
                 };
-                let members = self.jar_pkg_members(entry, pkg);
+                let members = self.jar_pkg_members_name(entry, pkg);
                 if let Some(indices) = members.by_jvm.get(jvm_name) {
                     for &idx in indices {
                         let Some(c) = members.candidates.get(idx) else {
@@ -2288,23 +2296,28 @@ impl Classpath {
     /// The scoped, lazy analogue of [`Self::find_extension_owners`]: the facades that declare a static
     /// whose receiver (first-parameter) descriptor is `recv_desc`, among the in-scope `packages`. Reads
     /// the per-(jar, package) `owners_by_recv` index — no `ensure_ext_index`.
-    pub fn extension_owners_in_scope(&self, recv_desc: &str, packages: &[String]) -> Vec<TypeName> {
+    pub fn extension_owners_in_scope(
+        &self,
+        recv_desc: &str,
+        packages: &[TypeName],
+    ) -> Vec<TypeName> {
         let tree = self.package_tree();
         let mut out = Vec::new();
         let mut seen = std::collections::HashSet::new();
         let mut seen_owner = std::collections::HashSet::new();
-        for pkg in packages {
-            if !seen.insert(pkg.as_str()) {
+        for &pkg in packages {
+            if !seen.insert(pkg) {
                 continue;
             }
-            let Some(node) = tree.node_for(pkg) else {
+            let pkg_rendered = pkg.render();
+            let Some(node) = tree.node_for(&pkg_rendered) else {
                 continue;
             };
             for &jar_id in &node.jars {
                 let Some(entry) = self.entries.get(jar_id) else {
                     continue;
                 };
-                let members = self.jar_pkg_members(entry, pkg);
+                let members = self.jar_pkg_members_name(entry, pkg);
                 if let Some(owners) = members.owners_by_recv.get(recv_desc) {
                     for &id in owners {
                         let o = type_name_from(&members.owner_names, id);
@@ -2325,7 +2338,7 @@ impl Classpath {
         &self,
         recv_desc: &str,
         jvm_name: &str,
-        scope: Option<&[String]>,
+        scope: Option<&[TypeName]>,
     ) -> Vec<ExtCandidate> {
         match scope {
             None => self.find_extensions(recv_desc, jvm_name),
@@ -2338,7 +2351,7 @@ impl Classpath {
     pub fn find_extension_owners_scoped(
         &self,
         recv_desc: &str,
-        scope: Option<&[String]>,
+        scope: Option<&[TypeName]>,
     ) -> Vec<TypeName> {
         match scope {
             None => self.find_extension_owners(recv_desc),
@@ -2350,22 +2363,23 @@ impl Classpath {
     /// `packages` — the tree-driven, scope-pruned function/property lookup (spec § Functions). For each
     /// package it consults only the jars that declare it (the tree), composing their per-(jar, package)
     /// `PkgMembers`; NOT a whole-classpath scan. A package is consulted at most once.
-    pub fn functions_in_scope(&self, name: &str, packages: &[String]) -> Vec<ExtCandidate> {
+    pub fn functions_in_scope(&self, name: &str, packages: &[TypeName]) -> Vec<ExtCandidate> {
         let tree = self.package_tree();
         let mut out = Vec::new();
         let mut seen = std::collections::HashSet::new();
-        for pkg in packages {
-            if !seen.insert(pkg.as_str()) {
+        for &pkg in packages {
+            if !seen.insert(pkg) {
                 continue;
             }
-            let Some(node) = tree.node_for(pkg) else {
+            let pkg_rendered = pkg.render();
+            let Some(node) = tree.node_for(&pkg_rendered) else {
                 continue;
             };
             for &jar_id in &node.jars {
                 let Some(entry) = self.entries.get(jar_id) else {
                     continue;
                 };
-                let members = self.jar_pkg_members(entry, pkg);
+                let members = self.jar_pkg_members_name(entry, pkg);
                 if let Some(indices) = members.by_source.get(name) {
                     out.extend(members.render_indices(indices));
                 }
@@ -3511,14 +3525,14 @@ mod fq_tests {
         };
         let cp = Classpath::new(vec![jar]);
         // In scope: emptyList (kotlin/collections) resolves via the tree-driven per-package lookup.
-        let coll = vec!["kotlin/collections".to_string()];
+        let coll = vec![type_name("kotlin/collections")];
         assert!(cp
             .functions_in_scope("emptyList", &coll)
             .iter()
             .any(|c| c.name == "emptyList"));
         // Out of scope: the same name does NOT resolve (kotlinc import visibility) — the lookup only
         // consults the given packages' facades, never the whole classpath.
-        let text = vec!["kotlin/text".to_string()];
+        let text = vec![type_name("kotlin/text")];
         assert!(cp.functions_in_scope("emptyList", &text).is_empty());
     }
 
@@ -3528,7 +3542,7 @@ mod fq_tests {
             return;
         };
         let cp = Classpath::new(vec![jar]);
-        let coll = vec!["kotlin/collections".to_string()];
+        let coll = vec![type_name("kotlin/collections")];
         let recv = "Ljava/lang/Iterable;";
         // The scoped, tree-driven enumeration returns exactly the eager index's candidates whose owner
         // facade sits in the scoped package — the equivalence the `select_overload` switch relies on.
@@ -3566,7 +3580,7 @@ mod fq_tests {
         );
         // Out of scope: an Iterable extension is invisible when its package is not imported.
         assert!(cp
-            .extensions_in_scope(recv, "map", &["kotlin/text".to_string()])
+            .extensions_in_scope(recv, "map", &[type_name("kotlin/text")])
             .is_empty());
     }
 

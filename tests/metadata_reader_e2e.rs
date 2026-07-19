@@ -115,7 +115,7 @@ fn result_get_or_throw_resolves_as_inline_extension() {
     let libs = JvmLibraries::new(Rc::new(Classpath::new(vec![sl])));
     // `getOrThrow` lives in `kotlin/ResultKt` (package `kotlin`); an unqualified extension resolves only
     // through the import scope, so put `kotlin` in scope (matching a file that has `Result` in scope).
-    let scope = vec!["kotlin".to_string()];
+    let scope = vec![type_name("kotlin")];
     let resolver = SymbolResolver::new_scoped(&libs, &scope);
     let c = resolver
         .resolve_symbol(
