@@ -2300,9 +2300,7 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
                 let e = ty.array_elem().unwrap_or_else(|| Ty::obj("kotlin/Any"));
                 Ty::obj_args("kotlin/Array", &[self.library_value_form(e)])
             }
-            Ty::Obj(internal, _) => {
-                Ty::obj(super::jvm_class_map::to_jvm_internal(&internal.render()))
-            }
+            Ty::Obj(internal, _) => Ty::obj_name(super::jvm_class_map::to_jvm_type_name(internal)),
             _ => ty,
         }
     }
