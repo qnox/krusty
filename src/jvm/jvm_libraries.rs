@@ -2307,6 +2307,10 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
         }
     }
 
+    fn library_value_form_name(&self, internal: TypeName) -> TypeName {
+        super::jvm_class_map::to_jvm_type_name(internal)
+    }
+
     fn function_like_arity(&self, ty: Ty) -> Option<usize> {
         ty.fun_arity().map(usize::from).or_else(|| {
             let internal = ty.obj_internal()?;

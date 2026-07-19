@@ -83,6 +83,13 @@ impl TypeName {
         type_names().lock().unwrap().package(self.0)
     }
 
+    pub fn nested_separator_matches(self, other: TypeName) -> bool {
+        type_names()
+            .lock()
+            .unwrap()
+            .nested_separator_matches(self.0, other.0)
+    }
+
     pub fn strip_prefix(self, prefix: &str) -> Option<String> {
         type_names().lock().unwrap().strip_prefix(self.0, prefix)
     }

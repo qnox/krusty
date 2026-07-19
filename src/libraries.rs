@@ -108,6 +108,12 @@ pub trait SemanticPlatform: crate::symbol_source::SymbolSource {
         ty
     }
 
+    fn library_value_form_name(&self, internal: TypeName) -> TypeName {
+        self.library_value_form(Ty::obj_name(internal))
+            .obj_internal()
+            .unwrap_or(internal)
+    }
+
     /// The receiver-MRO RUNG of an extension whose declared receiver is `decl_recv`, for an actual receiver
     /// `recv`: `0` when the extension's receiver IS the receiver's own type, increasing up the receiver's
     /// supertype chain (with the platform's primitive/array/value-class widening — an `Int` widens through

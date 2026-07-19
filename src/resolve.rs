@@ -6001,6 +6001,12 @@ impl crate::assignable::TypeOracle for Checker<'_> {
         };
         crate::symbol_resolver::platform_class_names_match(candidate, target_canonical)
     }
+
+    fn same_class_name(&self, a: TypeName, b: TypeName) -> bool {
+        let a = self.syms.libraries.library_value_form_name(a);
+        let b = self.syms.libraries.library_value_form_name(b);
+        crate::symbol_resolver::platform_type_names_match(a, b)
+    }
 }
 
 impl<'a> Checker<'a> {

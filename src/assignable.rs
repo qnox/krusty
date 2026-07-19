@@ -68,6 +68,18 @@ pub trait TypeOracle {
         let candidate = candidate.render();
         self.canonical_class(&candidate).as_ref() == target_canonical
     }
+
+    /// Id-backed class identity comparison used by assignability/coercion walks. The default preserves
+    /// legacy string hooks only as a compatibility fallback; production oracles should override this when
+    /// they can compare platform identities by ids.
+    fn same_class_name(&self, a: TypeName, b: TypeName) -> bool {
+        if a == b {
+            return true;
+        }
+        let a = a.render();
+        let b = b.render();
+        self.same_class(&a, &b)
+    }
 }
 
 /// The in-scope type variables, each mapped to a `Ty` — its declared upper BOUND for a free variable
@@ -255,13 +267,11 @@ fn class_assignable(oracle: &dyn TypeOracle, sub: Ty, sup: Ty, value_class: bool
     else {
         return false;
     };
-    let target_rendered = target.render();
-    let target_c = oracle.canonical_class(&target_rendered);
     let mut seen = std::collections::HashSet::new();
     seen.insert(start);
     let mut stack = vec![start];
     while let Some(cur) = stack.pop() {
-        if oracle.matches_class_name(cur, target, target_c.as_ref()) {
+        if oracle.same_class_name(cur, target) {
             return true;
         }
         let direct = oracle.direct_supertypes(cur);

@@ -181,6 +181,20 @@ impl NameTree {
             .map_or_else(String::new, |parent| self.render(parent))
     }
 
+    pub fn nested_separator_matches(&self, left: NameId, right: NameId) -> bool {
+        let (left_len, left_nested_start) = self.path_len_and_nested_start(left);
+        let (right_len, right_nested_start) = self.path_len_and_nested_start(right);
+        if left_len != right_len || left_nested_start != right_nested_start {
+            return false;
+        }
+        self.path_bytes(left)
+            .zip(self.path_bytes(right))
+            .enumerate()
+            .all(|(idx, (a, b))| {
+                a == b || (idx >= left_nested_start && matches!((a, b), (b'.' | b'$', b'.' | b'$')))
+            })
+    }
+
     pub fn parent(&self, id: NameId) -> Option<NameId> {
         self.node(id).parent
     }
@@ -240,6 +254,18 @@ impl NameTree {
             matched += 1;
         }
         matched == path.len()
+    }
+
+    fn path_len_and_nested_start(&self, id: NameId) -> (usize, usize) {
+        let mut len = 0usize;
+        let mut nested_start = 0usize;
+        for b in self.path_bytes(id) {
+            len += 1;
+            if b == b'/' {
+                nested_start = len;
+            }
+        }
+        (len, nested_start)
     }
 
     fn path_bytes(&self, id: NameId) -> impl Iterator<Item = u8> + '_ {

@@ -43,6 +43,10 @@ impl crate::assignable::TypeOracle for SourceOracle<'_> {
             .resolve_type_name(ty.kotlin_class_internal()?)
             .and_then(|t| t.value_underlying)
     }
+
+    fn same_class_name(&self, a: TypeName, b: TypeName) -> bool {
+        a == b
+    }
 }
 
 /// [`crate::assignable::TypeOracle`] over a [`SemanticPlatform`].
@@ -99,6 +103,12 @@ impl crate::assignable::TypeOracle for PlatformOracle<'_> {
         };
         platform_class_names_match(candidate, target_canonical)
     }
+
+    fn same_class_name(&self, a: TypeName, b: TypeName) -> bool {
+        let a = self.0.library_value_form_name(a);
+        let b = self.0.library_value_form_name(b);
+        platform_type_names_match(a, b)
+    }
 }
 
 fn platform_value_identity<'a>(value: Option<TypeName>, original: &'a str) -> Cow<'a, str> {
@@ -117,6 +127,12 @@ pub(crate) fn platform_class_identity(internal: &str) -> &str {
 
 pub(crate) fn platform_class_names_match(a: &str, b: &str) -> bool {
     a == b || nested_separator_names_match(a, b)
+}
+
+pub(crate) fn platform_type_names_match(a: TypeName, b: TypeName) -> bool {
+    a == b
+        || crate::jvm::jvm_class_map::type_names_map_to_same_jvm_internal(a, b)
+        || a.nested_separator_matches(b)
 }
 
 fn nested_separator_names_match(a: &str, b: &str) -> bool {
@@ -2588,6 +2604,17 @@ mod tests {
             "lib/Flex.FMap",
             "lib/Flex$Other"
         ));
+    }
+
+    #[test]
+    fn platform_type_names_match_nested_spellings_without_rendering() {
+        let dotted = crate::types::type_name("lib/Flex.Inner.Deep");
+        let dollar = crate::types::type_name("lib/Flex$Inner$Deep");
+        let other_pkg = crate::types::type_name("other/Flex$Inner$Deep");
+        let other_tail = crate::types::type_name("lib/Flex$Inner$Other");
+        assert!(platform_type_names_match(dotted, dollar));
+        assert!(!platform_type_names_match(dotted, other_pkg));
+        assert!(!platform_type_names_match(dotted, other_tail));
     }
 
     #[test]
