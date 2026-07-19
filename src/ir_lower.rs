@@ -763,7 +763,7 @@ pub fn lower_file_at_reporting(
                                     .iter()
                                     .map(|a| field_ty_with_args(file, a, &*syms.libraries))
                                     .collect();
-                            let base = Ty::obj_args(&fq_name.render(), &targs);
+                            let base = Ty::obj_args_name(fq_name, &targs);
                             if ir.is_nullable() {
                                 Ty::nullable(base)
                             } else {
@@ -20882,7 +20882,7 @@ fn field_ty_with_args(file: &ast::File, tr: &ast::TypeRef, plat: &dyn SemanticPl
                 .iter()
                 .map(|a| field_ty_with_args(file, a, plat))
                 .collect();
-            Ty::obj_args(&fq.render(), &targs)
+            Ty::obj_args_name(fq, &targs)
         }
         _ => base.non_null(),
     };

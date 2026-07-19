@@ -249,6 +249,28 @@ pub fn wrapper_to_kotlin_prim(internal: &str) -> Option<&'static str> {
     })
 }
 
+pub fn wrapper_to_kotlin_prim_name(internal: TypeName) -> Option<&'static str> {
+    Some(if internal.matches("java/lang/Integer") {
+        "kotlin/Int"
+    } else if internal.matches("java/lang/Long") {
+        "kotlin/Long"
+    } else if internal.matches("java/lang/Short") {
+        "kotlin/Short"
+    } else if internal.matches("java/lang/Byte") {
+        "kotlin/Byte"
+    } else if internal.matches("java/lang/Double") {
+        "kotlin/Double"
+    } else if internal.matches("java/lang/Float") {
+        "kotlin/Float"
+    } else if internal.matches("java/lang/Boolean") {
+        "kotlin/Boolean"
+    } else if internal.matches("java/lang/Character") {
+        "kotlin/Char"
+    } else {
+        return None;
+    })
+}
+
 /// Map a Kotlin built-in type's internal name to its JVM name (`kotlin/Any` → `java/lang/Object`).
 /// Any other name — a user class, a JDK class already named in JVM form, a Kotlin stdlib class with
 /// no JVM-builtin counterpart — passes through unchanged. Applied at the Ty→bytecode boundary.
@@ -442,6 +464,28 @@ pub fn type_name_maps_to_jvm_collection_interface(internal: TypeName) -> bool {
         || type_name_maps_to_jvm_internal(internal, "java/util/Map$Entry")
 }
 
+pub fn jvm_collection_to_kotlin_type_name(internal: TypeName) -> Option<TypeName> {
+    Some(if internal.matches("java/lang/Iterable") {
+        crate::types::type_name("kotlin/collections/Iterable")
+    } else if internal.matches("java/util/Iterator") {
+        crate::types::type_name("kotlin/collections/Iterator")
+    } else if internal.matches("java/util/ListIterator") {
+        crate::types::type_name("kotlin/collections/ListIterator")
+    } else if internal.matches("java/util/Collection") {
+        crate::types::type_name("kotlin/collections/Collection")
+    } else if internal.matches("java/util/List") {
+        crate::types::type_name("kotlin/collections/List")
+    } else if internal.matches("java/util/Set") {
+        crate::types::type_name("kotlin/collections/Set")
+    } else if internal.matches("java/util/Map") {
+        crate::types::type_name("kotlin/collections/Map")
+    } else if internal.matches("java/util/Map$Entry") {
+        crate::types::type_name("kotlin/collections/Map.Entry")
+    } else {
+        return None;
+    })
+}
+
 pub fn type_name_to_jvm_builtin_internal(internal: TypeName) -> Option<&'static str> {
     Some(
         if type_name_maps_to_jvm_internal(internal, "java/lang/Object") {
@@ -513,8 +557,11 @@ pub fn wrapper_internal(t: Ty) -> Option<&'static str> {
 
 #[cfg(test)]
 mod tests {
-    use super::{kotlin_prim_to_wrapper, to_jvm_internal, wrapper_internal};
-    use crate::types::Ty;
+    use super::{
+        jvm_collection_to_kotlin_type_name, kotlin_prim_to_wrapper, to_jvm_internal,
+        wrapper_internal, wrapper_to_kotlin_prim_name,
+    };
+    use crate::types::{type_name, Ty};
 
     #[test]
     fn primitive_wrapper_table_is_single_source() {
@@ -531,6 +578,10 @@ mod tests {
         ];
         for (internal, wrapper, prim) in pairs {
             assert_eq!(kotlin_prim_to_wrapper(internal), Some(wrapper));
+            assert_eq!(
+                wrapper_to_kotlin_prim_name(type_name(wrapper)),
+                Some(internal)
+            );
             // The emit-only boxing in `to_jvm_internal` and the `Ty`-keyed `wrapper_internal` agree.
             assert_eq!(to_jvm_internal(internal), wrapper);
             assert_eq!(wrapper_internal(prim), Some(wrapper));
@@ -566,5 +617,17 @@ mod tests {
         // A user/JDK class passes through unchanged.
         assert_eq!(to_jvm_internal("demo/Foo"), "demo/Foo");
         assert_eq!(to_jvm_internal("java/util/List"), "java/util/List");
+        assert_eq!(
+            jvm_collection_to_kotlin_type_name(type_name("java/util/List")),
+            Some(type_name("kotlin/collections/List"))
+        );
+        assert_eq!(
+            jvm_collection_to_kotlin_type_name(type_name("java/util/Map$Entry")),
+            Some(type_name("kotlin/collections/Map.Entry"))
+        );
+        assert_eq!(
+            jvm_collection_to_kotlin_type_name(type_name("demo/Foo")),
+            None
+        );
     }
 }

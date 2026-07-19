@@ -13114,7 +13114,7 @@ impl<'a> Checker<'a> {
                                             // Record the receiver's type as the companion's type so the
                                             // LOWERING resolves this as an instance call on the
                                             // getstatic'd companion value (`Random` → `Random$Default`).
-                                            self.set(receiver, Ty::obj(&cty.render()));
+                                            self.set(receiver, Ty::obj_name(cty));
                                             // A generic member whose return ERASED to `Any`
                                             // (`Json.decodeFromString(KSerializer<Foo>, String): T`)
                                             // recovers its substituted return (`Foo`) from the arguments.

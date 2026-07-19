@@ -984,25 +984,23 @@ fn canonicalize_jvm_collections(ty: Ty) -> Ty {
         // generic argument's primitive in its boxed JVM form (`List<Integer>`), but `List<Int>`'s element
         // is `Int`, so `for (x in xs) { s += x }` / `xs.sum()` resolve and the element unboxes rather than
         // comparing `Int` against a boxed reference.
-        Ty::Obj(name, args)
-            if args.is_empty()
-                && super::jvm_class_map::wrapper_to_kotlin_prim(&name.render()).is_some() =>
-        {
-            super::classpath::kotlin_name_to_ty(
-                super::jvm_class_map::wrapper_to_kotlin_prim(&name.render()).unwrap(),
-            )
-        }
+        Ty::Obj(name, []) => match super::jvm_class_map::wrapper_to_kotlin_prim_name(name) {
+            Some(prim) => super::classpath::kotlin_name_to_ty(prim),
+            None => Ty::obj_name(
+                super::jvm_class_map::jvm_collection_to_kotlin_type_name(name).unwrap_or(name),
+            ),
+        },
         Ty::Obj(name, args) => {
             // Canonicalize a JVM collection to its Kotlin form (`java/util/List` →
             // `kotlin/collections/List`), so a member/`for`/extension keyed on the Kotlin collection
             // resolves on the recovered type.
-            let name = name.render();
-            let kname = super::jvm_class_map::jvm_collection_to_kotlin(&name).unwrap_or(&name);
+            let kname =
+                super::jvm_class_map::jvm_collection_to_kotlin_type_name(name).unwrap_or(name);
             let cargs: Vec<Ty> = args
                 .iter()
                 .map(|a| canonicalize_jvm_collections(*a))
                 .collect();
-            Ty::obj_args(kname, &cargs)
+            Ty::obj_args_name(kname, &cargs)
         }
         other => other,
     }
@@ -2139,16 +2137,15 @@ impl SymbolSource for JvmLibraries {
                                 // ignored rather than forming an arity-mismatched type.
                                 (Ty::Obj(base_name, args), Some(Ty::Obj(meta_cls, _)))
                                     if meta_cls.starts_with("kotlin/collections/")
-                                        && super::jvm_class_map::to_jvm_internal(
-                                            &meta_cls.render(),
-                                        ) == super::jvm_class_map::to_jvm_internal(
-                                            &base_name.render(),
+                                        && super::jvm_class_map::type_names_map_to_same_jvm_internal(
+                                            meta_cls,
+                                            base_name,
                                         ) =>
                                 {
-                                    Ty::obj_args(&meta_cls.render(), args)
+                                    Ty::obj_args_name(meta_cls, args)
                                 }
                                 (Ty::Obj(base_name, args), Some(Ty::Obj(_, _))) => {
-                                    Ty::obj_args(&base_name.render(), args)
+                                    Ty::obj_args_name(base_name, args)
                                 }
                                 (b, _) => b,
                             };
@@ -2166,9 +2163,7 @@ impl SymbolSource for JvmLibraries {
                             // `val n: Long = r.count()` type-checks. Nullability is applied by
                             // `ret_nullable` below (which mirrors the non-suspend member path).
                             base.obj_internal()
-                                .and_then(|n| {
-                                    super::jvm_class_map::wrapper_to_kotlin_prim(&n.render())
-                                })
+                                .and_then(super::jvm_class_map::wrapper_to_kotlin_prim_name)
                                 .map(kotlin_name_to_ty)
                                 .unwrap_or(base)
                         } else {
