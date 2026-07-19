@@ -481,18 +481,12 @@ pub fn lower_value_classes(
     // for the declaration sites, and by `(owner, source-name, arity)` for the recompute sites (bridges,
     // fn-references) — keyed BEFORE any name mangling so every site agrees on the same mangled name.
     let suspend_fids: std::collections::HashSet<u32> = ir.suspend_funs.iter().copied().collect();
-    let suspend_sig: std::collections::HashSet<(String, String, usize)> = ir
+    let suspend_sig: std::collections::HashSet<(Option<TypeName>, String, usize)> = ir
         .functions
         .iter()
         .enumerate()
         .filter(|(fid, _)| suspend_fids.contains(&(*fid as u32)))
-        .map(|(fid, f)| {
-            (
-                f.dispatch_receiver.clone().unwrap_or_default(),
-                f.name.clone(),
-                orig_params[fid].len(),
-            )
-        })
+        .map(|(fid, f)| (f.dispatch_receiver, f.name.clone(), orig_params[fid].len()))
         .collect();
     let slot_types: Vec<HashMap<u32, Ty>> = ir
         .functions
@@ -635,7 +629,7 @@ pub fn lower_value_classes(
     let mut target_nullable_map: HashMap<(Option<TypeName>, String, usize), Vec<bool>> =
         HashMap::new();
     for (fid, f) in ir.functions.iter().enumerate() {
-        let owner = f.dispatch_receiver.as_deref().map(type_name);
+        let owner = f.dispatch_receiver;
         let key = (owner, f.name.clone(), orig_params[fid].len());
         let nullable = orig_params[fid]
             .iter()
@@ -686,19 +680,17 @@ pub fn lower_value_classes(
         // and always mangles.
         let is_vc_field_getter = f.name.starts_with("get")
             && orig_params[fid].is_empty()
-            && !f.dispatch_receiver.as_ref().is_some_and(|r| {
+            && !f.dispatch_receiver.is_some_and(|r| {
                 // Mangle this getter only when the owner's WHOLE supertype chain is same-file-known
                 // AND either none of it declares this name (the class's own getter) or the
                 // declaration is the SAME-typed getter (both sides mangle to the same hash). A
                 // type-divergent pair stays unmangled on both sides.
                 !divergent_getters.contains(&f.name)
-                    && existing_type_name(r).is_some_and(|r| {
-                        super_member_names.get(&r).is_some_and(|sups| {
-                            sups.as_ref().is_some_and(|names| match names.get(&f.name) {
-                                None => true,
-                                Some(Some(t)) => *t == orig_rets[fid],
-                                Some(None) => false,
-                            })
+                    && super_member_names.get(&r).is_some_and(|sups| {
+                        sups.as_ref().is_some_and(|names| match names.get(&f.name) {
+                            None => true,
+                            Some(Some(t)) => *t == orig_rets[fid],
+                            Some(None) => false,
                         })
                     })
             });
@@ -735,7 +727,7 @@ pub fn lower_value_classes(
             if mangled != f.name {
                 if let Some(owner) = &f.dispatch_receiver {
                     mangle_map.insert(
-                        (type_name(owner), f.name.clone(), orig_params[fid].len()),
+                        (*owner, f.name.clone(), orig_params[fid].len()),
                         mangled.clone(),
                     );
                 }
@@ -867,11 +859,8 @@ pub fn lower_value_classes(
         } else {
             target_decl_params.clone()
         };
-        let fr_suspend = suspend_sig.contains(&(
-            call_owner.map(TypeName::render).unwrap_or_default(),
-            fr.call_name.clone(),
-            target_decl_params.len(),
-        ));
+        let fr_suspend =
+            suspend_sig.contains(&(call_owner, fr.call_name.clone(), target_decl_params.len()));
         fr.call_name = vc_mangle(
             &fr.call_name,
             &mangle_params,
@@ -991,7 +980,7 @@ pub fn lower_value_classes(
                             &under,
                             false,
                             suspend_sig.contains(&(
-                                owner_fq.clone(),
+                                Some(c.fq_name),
                                 b.name.clone(),
                                 b.concrete_params.len(),
                             )),
@@ -1053,7 +1042,7 @@ pub fn lower_value_classes(
                             &under,
                             false,
                             suspend_sig.contains(&(
-                                owner_fq.clone(),
+                                Some(c.fq_name),
                                 b.name.clone(),
                                 b.concrete_params.len(),
                             )),
@@ -3390,7 +3379,7 @@ fn synth_value_members(ir: &mut IrFile, class_id: u32, under: &Under, has_init: 
             ret,
             body: Some(body),
             is_static: true,
-            dispatch_receiver: Some(internal.clone()),
+            dispatch_receiver: Some(internal_name),
             param_checks: Vec::new(),
         });
         ir.classes[class_id as usize].methods.push(fid);
@@ -3412,7 +3401,7 @@ fn synth_value_members(ir: &mut IrFile, class_id: u32, under: &Under, has_init: 
                 ret,
                 body: Some(body),
                 is_static: false,
-                dispatch_receiver: Some(internal.clone()),
+                dispatch_receiver: Some(internal_name),
                 param_checks: Vec::new(),
             });
             ir.classes[class_id as usize].methods.push(fid);

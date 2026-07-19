@@ -922,7 +922,7 @@ pub fn lower_file_at_reporting(
                     ret: ret_ir,
                     body: None,
                     is_static: false,
-                    dispatch_receiver: Some(internal.clone()),
+                    dispatch_receiver: Some(type_name(&internal)),
                     param_checks,
                 });
                 // A `private` method is NON-VIRTUAL: a call to it (even the unqualified `foo()` inside a
@@ -1046,7 +1046,7 @@ pub fn lower_file_at_reporting(
                     ret: ty_to_ir(ty),
                     body: None,
                     is_static: false,
-                    dispatch_receiver: Some(internal.clone()),
+                    dispatch_receiver: Some(type_name(&internal)),
                     param_checks: vec![],
                 });
                 methods.insert(gname, (mi, fid, ty));
@@ -1072,7 +1072,7 @@ pub fn lower_file_at_reporting(
                     ret: ty_to_ir(prop_ty),
                     body: None,
                     is_static: false,
-                    dispatch_receiver: Some(internal.clone()),
+                    dispatch_receiver: Some(type_name(&internal)),
                     param_checks: vec![],
                 });
                 methods.insert(gname, (mi, fid, prop_ty));
@@ -1086,7 +1086,7 @@ pub fn lower_file_at_reporting(
                         ret: Ty::Unit,
                         body: None,
                         is_static: false,
-                        dispatch_receiver: Some(internal.clone()),
+                        dispatch_receiver: Some(type_name(&internal)),
                         param_checks: vec![],
                     });
                     methods.insert(sname, (mi, fid, Ty::Unit));
@@ -1135,7 +1135,7 @@ pub fn lower_file_at_reporting(
                             ret: ir_ty,
                             body: None,
                             is_static: false,
-                            dispatch_receiver: Some(internal.clone()),
+                            dispatch_receiver: Some(type_name(&internal)),
                             param_checks: vec![],
                         });
                         methods.insert(gname, (mi, fid, ty));
@@ -1151,7 +1151,7 @@ pub fn lower_file_at_reporting(
                                 ret: Ty::Unit,
                                 body: None,
                                 is_static: false,
-                                dispatch_receiver: Some(internal.clone()),
+                                dispatch_receiver: Some(type_name(&internal)),
                                 param_checks: vec![],
                             });
                             methods.insert(sname, (mi, fid, Ty::Unit));
@@ -1220,7 +1220,7 @@ pub fn lower_file_at_reporting(
                             ret: fty_ir,
                             body: Some(body),
                             is_static: false,
-                            dispatch_receiver: Some(internal.clone()),
+                            dispatch_receiver: Some(type_name(&internal)),
                             param_checks: vec![],
                         });
                         if let Some(tp) = field_tp.get(pname) {
@@ -1251,7 +1251,7 @@ pub fn lower_file_at_reporting(
                                 ret: Ty::Unit,
                                 body: Some(body),
                                 is_static: false,
-                                dispatch_receiver: Some(internal.clone()),
+                                dispatch_receiver: Some(type_name(&internal)),
                                 param_checks: vec![],
                             });
                             // `var x = …; private set` — the setter is emitted `private`.
@@ -1502,7 +1502,7 @@ pub fn lower_file_at_reporting(
                         ret: ty_to_ir(ret),
                         body: None,
                         is_static: false,
-                        dispatch_receiver: Some(comp_fq.clone()),
+                        dispatch_receiver: Some(type_name(&comp_fq)),
                         param_checks,
                     });
                     cmethods.insert(m.name.clone(), (mi as u32, fid, ret));
@@ -3587,7 +3587,7 @@ pub fn lower_file_at_reporting(
                                 ret: ty_to_ir(sig.ret),
                                 body: None,
                                 is_static: false,
-                                dispatch_receiver: Some(sub_fq.clone()),
+                                dispatch_receiver: Some(type_name(&sub_fq)),
                                 param_checks: vec![],
                             });
                             lo.scope.clear();
@@ -7306,7 +7306,7 @@ impl<'a> Lower<'a> {
             ret: ty_to_ir(ret),
             body: Some(body),
             is_static: false,
-            dispatch_receiver: Some(internal.to_string()),
+            dispatch_receiver: Some(type_name(internal)),
             param_checks: Vec::new(),
         });
         let idx = self.ir.classes[class_id as usize].methods.len() as u32;
@@ -9873,7 +9873,7 @@ impl<'a> Lower<'a> {
             ret: ret_ir,
             body: Some(body),
             is_static: false,
-            dispatch_receiver: Some(internal.render()),
+            dispatch_receiver: Some(internal),
             param_checks: Vec::new(),
         });
         let cid = self.class_info_name(internal)?.id;

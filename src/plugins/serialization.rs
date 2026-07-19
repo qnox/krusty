@@ -191,7 +191,7 @@ fn place_serializer_accessor(
         ret,
         body: Some(body),
         is_static: false,
-        dispatch_receiver: Some(comp_fq.clone()),
+        dispatch_receiver: Some(type_name(&comp_fq)),
         param_checks: Vec::new(),
     });
     if let Some(existing) = ir.classes[class_id as usize].companion_class {
@@ -1195,7 +1195,7 @@ impl SerializationPlugin {
             ret,
             body,
             is_static: false,
-            dispatch_receiver: Some(owner_fq.to_string()),
+            dispatch_receiver: Some(type_name(owner_fq)),
             param_checks: Vec::new(),
         })
     }

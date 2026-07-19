@@ -487,8 +487,8 @@ pub struct IrFunction {
     /// The body expression (typically an `IrBlock`), or `None` for abstract/external.
     pub body: Option<ExprId>,
     pub is_static: bool,
-    /// `Some(class fq_name)` for an instance method — `this` is value index 0, params follow.
-    pub dispatch_receiver: Option<String>,
+    /// `Some(class internal)` for an instance method — `this` is value index 0, params follow.
+    pub dispatch_receiver: Option<TypeName>,
     /// Per-parameter `Some(name)` when the backend should guard it with a non-null assertion at method
     /// entry (`Intrinsics.checkNotNullParameter` on the JVM) — non-null reference parameters of a
     /// visible (non-private) function. Empty for synthesized methods (no guards). Parallel to `params`.

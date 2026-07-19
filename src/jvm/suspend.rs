@@ -31,7 +31,7 @@ use crate::ir::{
     IrFunction, IrTypeOp,
 };
 use crate::libraries::InlineKind;
-use crate::types::{type_name, Ty};
+use crate::types::{type_name, Ty, TypeName};
 use std::collections::HashSet;
 
 const I32_MIN: i32 = i32::MIN;
@@ -1338,7 +1338,7 @@ fn build_state_machine(ir: &mut IrFile, facade: &str, fid: u32, b: ExprId, unit_
 
     // For an instance method `this` is value-index 0, so params (and the appended continuation) shift up
     // by one; the receiver's class internal name is the dispatch receiver (the continuation captures it).
-    let receiver: Option<String> = ir.functions[fid as usize].dispatch_receiver.clone();
+    let receiver: Option<TypeName> = ir.functions[fid as usize].dispatch_receiver;
     let this_offset = u32::from(receiver.is_some());
     // Real value parameters (excluding the appended CPS `Continuation`), at value-indices
     // `this_offset .. this_offset + real_params.len()`.
@@ -1505,7 +1505,9 @@ fn build_state_machine(ir: &mut IrFile, facade: &str, fid: u32, b: ExprId, unit_
     // kotlinc nests a suspend method's continuation class under its ENCLOSING class
     // (`Svc$work$1`), and a top-level suspend fun's under the file facade (`FooKt$foo$1`). The
     // dispatch receiver is the enclosing class internal name; a top-level/extension fun has none.
-    let cont_owner = receiver.as_deref().unwrap_or(facade);
+    let cont_owner = receiver
+        .map(TypeName::render)
+        .unwrap_or_else(|| facade.to_string());
     // The continuation class uses the SOURCE method name, never the value-class-mangled JVM name:
     // kotlinc names `create-SCm-oBs`'s continuation `<Owner>$create$1`. `-` can't occur in a Kotlin
     // identifier, so it only ever separates the mangle hash — strip from the first `-`.
@@ -1587,7 +1589,7 @@ fn build_state_machine(ir: &mut IrFile, facade: &str, fid: u32, b: ExprId, unit_
         fid,
         &layout,
         &param_caps,
-        receiver.as_deref(),
+        receiver,
         &real_params,
     );
 
@@ -3691,7 +3693,7 @@ fn build_continuation_class(
     outer_fid: u32,
     layout: &SpillLayout,
     _param_caps: &[(u32, Ty)],
-    receiver: Option<&str>,
+    receiver: Option<TypeName>,
     params: &[Ty],
 ) -> ClassId {
     let class_id = ir.classes.len() as ClassId;
@@ -3746,6 +3748,7 @@ fn build_continuation_class(
             args: reentry_args,
         }),
         Some(owner) => {
+            let owner_internal = owner.render();
             // `((C)this.this$0).m(<params…>, (Continuation)this)` — invokevirtual the member on the receiver.
             let cont_this = ir.add_expr(IrExpr::GetValue(0));
             let recv = ir.add_expr(IrExpr::GetField {
@@ -3765,7 +3768,7 @@ fn build_continuation_class(
             // A PRIVATE member can't be invoked from the continuation class (a separate class,
             // pre-nestmates). kotlinc emits a `PUBLIC|STATIC|FINAL|SYNTHETIC access$<name>` bridge on the
             // owner that `invokespecial`s the private member; the continuation calls the bridge.
-            let owner_cid = ir.classes.iter().position(|c| c.fq_name_matches(owner));
+            let owner_cid = ir.classes.iter().position(|c| c.fq_name == owner);
             let owner_midx = owner_cid
                 .and_then(|cid| ir.classes[cid].methods.iter().position(|&m| m == outer_fid));
             if let (true, Some(cid), Some(midx)) = (
@@ -3792,7 +3795,7 @@ fn build_continuation_class(
                     stmts: vec![aret],
                     value: None,
                 });
-                let mut aparams = vec![Ty::obj(owner)];
+                let mut aparams = vec![Ty::obj_name(owner)];
                 aparams.extend(params.iter().copied());
                 aparams.push(continuation_ty());
                 let afid = ir.add_fun(IrFunction {
@@ -3801,7 +3804,7 @@ fn build_continuation_class(
                     ret: object_ty(),
                     body: Some(abody),
                     is_static: true,
-                    dispatch_receiver: Some(owner.to_string()),
+                    dispatch_receiver: Some(owner),
                     param_checks: Vec::new(),
                 });
                 ir.classes[cid].methods.push(afid);
@@ -3814,11 +3817,11 @@ fn build_continuation_class(
                 );
                 let mut aargs = vec![recv];
                 aargs.extend(reentry_args);
-                add_static_call(ir, owner, &access_name, &adesc, aargs)
+                add_static_call(ir, &owner_internal, &access_name, &adesc, aargs)
             } else {
                 ir.add_expr(IrExpr::Call {
                     callee: Callee::Virtual {
-                        owner: type_name(owner),
+                        owner,
                         name,
                         descriptor,
                         interface: false,
@@ -3840,7 +3843,7 @@ fn build_continuation_class(
         ret: object_ty(),
         body: Some(inv_body),
         is_static: false,
-        dispatch_receiver: Some(internal.to_string()),
+        dispatch_receiver: Some(type_name(internal)),
         param_checks: vec![None],
     });
 
@@ -3871,7 +3874,7 @@ fn build_continuation_class(
     let mut ctor_stores: Vec<ExprId> = Vec::new();
     let mut arg_idx = 1u32; // value-index of the next ctor argument (`this` is 0)
     if let Some(owner) = receiver {
-        let recv_ty = Ty::obj(owner);
+        let recv_ty = Ty::obj_name(owner);
         fields.push(crate::ir::IrField {
             is_final: true,
             is_private: false,
