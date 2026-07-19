@@ -366,7 +366,6 @@ pub struct SymbolTable {
     pub funs: HashMap<String, Vec<Signature>>,
     /// Declared classes by simple name (e.g. `Point`).
     pub classes: HashMap<String, ClassSig>,
-    classes_by_type_name: HashMap<TypeName, String>,
     /// Top-level properties (name → type, is_var, is_const), backed by static fields on the file facade.
     /// `is_const` distinguishes a `const val` (public field, no accessor, cross-file `getstatic`) from a
     /// plain `val`/`var` (private field, read/written through `getX`/`setX`).
@@ -414,7 +413,6 @@ impl Default for SymbolTable {
         SymbolTable {
             funs: HashMap::new(),
             classes: HashMap::new(),
-            classes_by_type_name: HashMap::new(),
             props: HashMap::new(),
             computed_props: std::collections::HashSet::new(),
             objects: std::collections::HashSet::new(),
@@ -436,7 +434,6 @@ impl SymbolTable {
     }
 
     pub fn insert_class_sig(&mut self, name: String, sig: ClassSig) -> Option<ClassSig> {
-        self.classes_by_type_name.insert(sig.internal, name.clone());
         self.classes.insert(name, sig)
     }
 
@@ -480,13 +477,13 @@ impl SymbolTable {
     }
 
     pub fn class_by_type_name(&self, internal: TypeName) -> Option<&ClassSig> {
-        self.classes_by_type_name
-            .get(&internal)
-            .and_then(|name| self.classes.get(name))
+        self.classes.values().find(|sig| sig.internal == internal)
     }
 
     pub fn class_simple_name(&self, internal: TypeName) -> Option<&str> {
-        self.classes_by_type_name.get(&internal).map(String::as_str)
+        self.classes
+            .iter()
+            .find_map(|(name, sig)| (sig.internal == internal).then_some(name.as_str()))
     }
 
     /// The extension-function overloads registered for a receiver + name (empty if none). The receiver
@@ -506,16 +503,14 @@ impl SymbolTable {
     }
 
     pub fn class_by_internal_mut(&mut self, internal: &str) -> Option<&mut ClassSig> {
-        let name = self
-            .classes_by_type_name
-            .get(&existing_type_name(internal)?)
-            .cloned()?;
-        self.classes.get_mut(&name)
+        let internal = existing_type_name(internal)?;
+        self.class_by_type_name_mut(internal)
     }
 
     pub fn class_by_type_name_mut(&mut self, internal: TypeName) -> Option<&mut ClassSig> {
-        let name = self.classes_by_type_name.get(&internal)?.clone();
-        self.classes.get_mut(&name)
+        self.classes
+            .values_mut()
+            .find(|sig| sig.internal == internal)
     }
 
     /// A method (own or inherited up the base-class chain) on a class internal name.
