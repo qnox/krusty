@@ -6417,24 +6417,24 @@ impl<'a> Checker<'a> {
             .resolve_symbol(SymRecv::TypeName(internal), name, args, &[])
             .and_then(Symbol::companion)
     }
-    fn resolve_constructor(
+    fn resolve_constructor_name(
         &self,
-        internal: &str,
+        internal: TypeName,
         args: &[Ty],
     ) -> Option<crate::libraries::LibraryMember> {
         use crate::symbol_resolver::{SymRecv, Symbol};
         self.resolver()
-            .resolve_symbol(SymRecv::Type(internal), "", args, &[])
+            .resolve_symbol(SymRecv::TypeName(internal), "", args, &[])
             .and_then(Symbol::constructor)
     }
-    fn resolve_synthetic_constructor(
+    fn resolve_synthetic_constructor_name(
         &self,
-        internal: &str,
+        internal: TypeName,
         args: &[Ty],
     ) -> Option<crate::symbol_resolver::SyntheticCtorCall> {
         use crate::symbol_resolver::{SymRecv, Symbol};
         self.resolver()
-            .resolve_symbol(SymRecv::Type(internal), "", args, &[])
+            .resolve_symbol(SymRecv::TypeName(internal), "", args, &[])
             .and_then(Symbol::synthetic_constructor)
     }
     /// Whether the current module declares a top-level function `name` (shadow-precedence test) — asked
@@ -7038,7 +7038,11 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn qualified_nested_ctor_internal(&self, receiver: ExprId, name: &str) -> Option<String> {
+    fn qualified_nested_ctor_internal_name(
+        &self,
+        receiver: ExprId,
+        name: &str,
+    ) -> Option<TypeName> {
         // The receiver's leftmost segment must be a TYPE/PACKAGE, not a value in scope.
         let root = self.dotted_root(receiver)?;
         if self.value_root_shadows_classifier(&root) {
@@ -7046,18 +7050,19 @@ impl<'a> Checker<'a> {
         }
         match self.file.expr(receiver) {
             // `Outer.Nested(…)` — a nested type under an in-scope/imported outer type.
-            Expr::Name(outer) => self.resolve_qualified_nested(&format!("{outer}.{name}")),
+            Expr::Name(outer) => self.resolve_qualified_nested_name(&format!("{outer}.{name}")),
             // `a.b.Ctx(…)` — a FULLY-QUALIFIED constructor via a package PATH: the receiver `a.b` is a
             // package, `Ctx` a top-level class of it (`a/b/Ctx`), verified on the classpath.
             Expr::Member { .. } => {
                 let internal = format!("{}/{name}", qualified_path(self.file, receiver)?);
-                self.resolved_type(&internal).map(|_| internal)
+                let internal = type_name(&internal);
+                self.resolved_type_name(internal).map(|_| internal)
             }
             _ => None,
         }
     }
 
-    fn resolve_qualified_nested(&self, name: &str) -> Option<String> {
+    fn resolve_qualified_nested_name(&self, name: &str) -> Option<TypeName> {
         // A nested type under a resolvable outer type FIRST (`Subject.User` → `lib/Subject$User`) — an
         // in-scope type name shadows a package path, as kotlinc resolves it.
         if let Some((outer, rest)) = name.split_once('.') {
@@ -7065,18 +7070,17 @@ impl<'a> Checker<'a> {
                 .syms
                 .classes
                 .get(outer)
-                .map(ClassSig::internal)
-                .or_else(|| self.imported_type_internal(outer))
+                .map(ClassSig::internal_name)
+                .or_else(|| self.imported_type_name(outer))
                 .or_else(|| {
                     self.syms
                         .class_names
                         .get(outer)
                         .filter(|i| !i.starts_with("__ty/"))
-                        .map(TypeName::render)
                 });
             if let Some(base) = base {
-                let candidate = format!("{base}${}", rest.replace('.', "$"));
-                if self.resolved_type(&candidate).is_some() {
+                let candidate = type_name(&format!("{}${}", base.render(), rest.replace('.', "$")));
+                if self.resolved_type_name(candidate).is_some() {
                     return Some(candidate);
                 }
             }
@@ -7086,13 +7090,13 @@ impl<'a> Checker<'a> {
         // qualified constructor call (`lib.Thing(5)`). `nested_internal` also recovers a DEEP FQN whose
         // tail names a NESTED type (`a.b.Outer.Inner` → `a/b/Outer$Inner`), which the flat slash form misses.
         let fq = name.replace('.', "/");
-        self.nested_internal(&fq)
+        self.nested_internal_name(&fq)
     }
 
     fn classpath_object_value(&self, name: &str) -> Option<TypeName> {
-        let internal = self.imported_type_internal(name)?;
-        if self.resolved_type(&internal)?.is_object() {
-            Some(type_name(&internal))
+        let internal = self.imported_type_name(name)?;
+        if self.resolved_type_name(internal)?.is_object() {
+            Some(internal)
         } else {
             None
         }
@@ -7146,8 +7150,12 @@ impl<'a> Checker<'a> {
     /// syntactically, so convert `/` → `$` from the RIGHT until `resolve_type` finds the class. Returns
     /// the input unchanged when it already resolves (the common package-qualified case).
     fn nested_internal(&self, internal: &str) -> Option<String> {
+        self.nested_internal_name(internal).map(TypeName::render)
+    }
+
+    fn nested_internal_name(&self, internal: &str) -> Option<TypeName> {
         let source = self.fed_source();
-        resolve_nested_internal(internal, &source)
+        resolve_nested_internal_name(internal, &source)
     }
 
     /// The internal name of an ENCLOSING class's nested type named `name` (`Inner` inside `Outer` →
@@ -7155,19 +7163,18 @@ impl<'a> Checker<'a> {
     /// (nearest first). `None` if no enclosing class declares such a nested type — the scope in which a
     /// nested type SHADOWS a same-named top-level (Kotlin nested-type scoping).
     fn enclosing_nested_type(&self, name: &str) -> Option<String> {
+        self.enclosing_nested_type_name(name).map(TypeName::render)
+    }
+
+    fn enclosing_nested_type_name(&self, name: &str) -> Option<TypeName> {
         let Some(Ty::Obj(outer, _)) = self.this_ty else {
             return None;
         };
         let outer = outer.render();
         let mut prefix: &str = &outer;
         loop {
-            let cand = format!("{prefix}${name}");
-            if self
-                .syms
-                .classes
-                .values()
-                .any(|s| s.internal_matches(&cand))
-            {
+            let cand = type_name(&format!("{prefix}${name}"));
+            if self.syms.class_by_type_name(cand).is_some() {
                 return Some(cand);
             }
             match prefix.rsplit_once('$') {
@@ -7192,10 +7199,10 @@ impl<'a> Checker<'a> {
                 self.syms
                     .classes
                     .get(n)
-                    .map(|cs| Ty::obj_name(type_name(&cs.internal())))
+                    .map(|cs| Ty::obj_name(cs.internal_name()))
             })
-            .or_else(|| self.enclosing_nested_type(n).map(|i| Ty::obj(&i)))
-            .or_else(|| self.imported_type_internal(n).map(|i| Ty::obj(&i)))?;
+            .or_else(|| self.enclosing_nested_type_name(n).map(Ty::obj_name))
+            .or_else(|| self.imported_type_name(n).map(Ty::obj_name))?;
         if ty == Ty::Error {
             return None;
         }
@@ -7212,10 +7219,6 @@ impl<'a> Checker<'a> {
             return None;
         }
         ty.boxed_ref()
-    }
-
-    fn obj_with_targs(&mut self, internal: &str, r: &TypeRef) -> Ty {
-        self.obj_with_targs_name(type_name(internal), r)
     }
 
     fn obj_with_targs_name(&mut self, internal: TypeName, r: &TypeRef) -> Ty {
@@ -7252,12 +7255,12 @@ impl<'a> Checker<'a> {
             }
         } else if self.tparams.contains(&r.name) {
             self.tparams.erase(&r.name) // erased generic type parameter (primitive if `<T: Int>`)
-        } else if let Some(internal) = self.enclosing_nested_type(&r.name) {
+        } else if let Some(internal) = self.enclosing_nested_type_name(&r.name) {
             // Kotlin nested-type scoping: an UNQUALIFIED name that names one of the ENCLOSING class's own
             // nested types SHADOWS a same-named top-level/imported type — so resolve the nested form FIRST
             // (before the global `syms.classes`/import lookups). Drives both this type position AND, via
             // `info.ty`, the construction-expression lowering, keeping them consistent.
-            self.obj_with_targs(&internal, r)
+            self.obj_with_targs_name(internal, r)
         } else if let Some(cs) = self.syms.classes.get(&r.name) {
             self.obj_with_targs_name(cs.internal_name(), r)
         } else if let Some(internal) = self.syms.class_names.get(&r.name) {
@@ -7269,31 +7272,29 @@ impl<'a> Checker<'a> {
                 Some(prim) => Ty::from_name(&prim).unwrap_or(Ty::Error),
                 None => self.obj_with_targs_name(internal, r),
             }
-        } else if let Some(internal) = self.imported_type_internal(&r.name) {
+        } else if let Some(internal) = self.imported_type_name(&r.name) {
             // An explicit/wildcard import resolves a name whose simple form is ABSENT from the global
             // index — either never registered or pruned because it's ambiguous across the whole classpath
             // (`Continuation` collides with `jdk/internal/vm/Continuation`). The import names the package.
-            self.obj_with_targs(&internal, r)
-        } else if let Some(internal) = self.resolve_qualified_nested(&r.name) {
+            self.obj_with_targs_name(internal, r)
+        } else if let Some(internal) = self.resolve_qualified_nested_name(&r.name) {
             // A dotted CLASSPATH nested type (`Subject.User`, `SlugValidation.Ok`) → `Outer$Nested`.
-            self.obj_with_targs(&internal, r)
+            self.obj_with_targs_name(internal, r)
         } else if let Some(internal) = {
             // An UNQUALIFIED reference to a sibling nested type within the enclosing class body (`Inner`
             // in `class Outer { class Inner }`) → `Outer$Inner` (Kotlin nested-type scoping). Reached only
             // when nothing else resolved, in a checker-only position (`val v: Inner`, `x as Inner`);
             // member SIGNATURE positions are covered by the collect_signatures class-scope extension.
             if let Some(Ty::Obj(outer, _)) = self.this_ty {
-                let nested = format!("{outer}${}", r.name);
+                let nested = type_name(&format!("{outer}${}", r.name));
                 self.syms
-                    .classes
-                    .values()
-                    .find(|s| s.internal_matches(&nested))
-                    .map(ClassSig::internal)
+                    .class_by_type_name(nested)
+                    .map(ClassSig::internal_name)
             } else {
                 None
             }
         } {
-            self.obj_with_targs(&internal, r)
+            self.obj_with_targs_name(internal, r)
         } else {
             Ty::Error
         };
@@ -7662,15 +7663,15 @@ impl<'a> Checker<'a> {
 
     /// The JVM internal name of a `catch` clause's exception type: a common JDK exception, an
     /// imported class, or a declared class. `None` if krusty can't resolve it to a concrete class.
-    fn catch_internal(&self, name: &str) -> Option<String> {
+    fn catch_internal_name(&self, name: &str) -> Option<TypeName> {
         self.imports
             .get(name)
-            .cloned()
-            .or_else(|| self.syms.classes.get(name).map(ClassSig::internal))
+            .map(|internal| type_name(internal))
+            .or_else(|| self.syms.classes.get(name).map(ClassSig::internal_name))
             // Exception types resolve from the classpath: stdlib `TypeAliasesKt` aliases
             // (`Exception`, `RuntimeException`, …) and the ported `JavaToKotlinClassMap`
             // built-ins (`Throwable`) are both folded into `class_names`.
-            .or_else(|| self.syms.class_names.get(name).map(TypeName::render))
+            .or_else(|| self.syms.class_names.get(name))
     }
 
     /// Resolve a type without emitting diagnostics (used for speculative smart-cast narrowing).
@@ -7708,25 +7709,23 @@ impl<'a> Checker<'a> {
                 None => Ty::obj_name(internal),
             }
         } else if let Some(internal) = self
-            .imported_type_internal(&r.name)
-            .or_else(|| self.resolve_qualified_nested(&r.name))
+            .imported_type_name(&r.name)
+            .or_else(|| self.resolve_qualified_nested_name(&r.name))
         {
             // A CLASSPATH type (imported `is Ok`, or a qualified nested `is V.Ok`) — resolved the same way
             // `resolve_ty` resolves it, so an `is`/`as` smart-cast to a classpath sealed/open subclass
             // narrows (`val v: V; if (v is V.Ok) v.v`). Without this the type erased to `Ty::Error`, the
             // narrowing was dropped, and every member access on the smart-cast value failed ("member … on
             // <parent>").
-            Ty::obj(&internal)
+            Ty::obj_name(internal)
         } else if let Some(Ty::Obj(outer, _)) = self.this_ty {
             // A sibling nested type unqualified within the enclosing class body (`is Inner` in
             // `class Outer { class Inner }`) → `Outer$Inner`, so a nested-type `is`/`as` smart-cast
             // narrows. Mirrors the same fallback in `resolve_ty`.
-            let nested = format!("{outer}${}", r.name);
+            let nested = type_name(&format!("{outer}${}", r.name));
             self.syms
-                .classes
-                .values()
-                .find(|s| s.internal_matches(&nested))
-                .map(|s| Ty::obj(&s.internal()))
+                .class_by_type_name(nested)
+                .map(|s| Ty::obj_name(s.internal_name()))
                 .unwrap_or(Ty::Error)
         } else {
             Ty::Error
@@ -8909,12 +8908,12 @@ impl<'a> Checker<'a> {
                 }
                 let mut result = bt;
                 for c in &catches {
-                    let cty = match self.catch_internal(&c.ty.name) {
+                    let cty = match self.catch_internal_name(&c.ty.name) {
                         // A catch type SHOULD be a `Throwable` subtype, but krusty's exception-hierarchy
                         // walk is incomplete (`NotImplementedError` and other stdlib errors don't chain
                         // to `Throwable`), so enforcing it here false-rejects valid catches. Deferred
                         // until the hierarchy is complete.
-                        Some(i) => Ty::obj(&i),
+                        Some(i) => Ty::obj_name(i),
                         None => {
                             self.diags.error(
                                 c.ty.span,
@@ -11803,16 +11802,16 @@ impl<'a> Checker<'a> {
     /// resolve. Falls back to the raw class type when there are no explicit type arguments.
     /// Select and record the classpath/library constructor target for `call`. The checker owns overload,
     /// named/default, value-class, and marker-constructor selection; lowering only emits this target.
-    fn select_library_constructor(
+    fn select_library_constructor_name(
         &self,
-        internal: &str,
+        internal: TypeName,
         args: Vec<ExprId>,
         arg_tys: &[Ty],
     ) -> Option<ResolvedConstructor> {
-        if let Some(member) = self.resolve_constructor(internal, arg_tys) {
+        if let Some(member) = self.resolve_constructor_name(internal, arg_tys) {
             if member.descriptor.is_empty() {
                 if let Some(underlying) = self
-                    .resolved_type(internal)
+                    .resolved_type_name(internal)
                     .and_then(|t| t.value_underlying)
                 {
                     return Some(ResolvedConstructor::ValueClass {
@@ -11823,31 +11822,31 @@ impl<'a> Checker<'a> {
             }
             return Some(ResolvedConstructor::Plain { member, args });
         }
-        self.resolve_synthetic_constructor(internal, arg_tys)
+        self.resolve_synthetic_constructor_name(internal, arg_tys)
             .map(|ctor| ResolvedConstructor::Synthetic { ctor, args })
     }
 
-    fn record_library_constructor(
+    fn record_library_constructor_name(
         &mut self,
         call: ExprId,
-        internal: &str,
+        internal: TypeName,
         args: Vec<ExprId>,
         arg_tys: &[Ty],
     ) -> Option<ResolvedConstructor> {
-        let target = self.select_library_constructor(internal, args, arg_tys)?;
+        let target = self.select_library_constructor_name(internal, args, arg_tys)?;
         self.resolved_constructors.insert(call, target.clone());
         Some(target)
     }
 
-    fn record_named_library_constructor(
+    fn record_named_library_constructor_name(
         &mut self,
         call: ExprId,
-        internal: &str,
+        internal: TypeName,
         args: &[ExprId],
         arg_names: &[Option<String>],
     ) -> Result<Option<ResolvedConstructor>, String> {
         let Some(ctor_params) = self
-            .resolved_type(internal)
+            .resolved_type_name(internal)
             .and_then(|t| t.constructor_named_params(args.len()))
         else {
             return Ok(None);
@@ -11861,7 +11860,7 @@ impl<'a> Checker<'a> {
                 .iter()
                 .map(|a| self.expr_types[a.0 as usize])
                 .collect();
-            let Some(target) = self.select_library_constructor(internal, ordered, &tys) else {
+            let Some(target) = self.select_library_constructor_name(internal, ordered, &tys) else {
                 return Ok(None);
             };
             let target = match target {
@@ -11875,7 +11874,7 @@ impl<'a> Checker<'a> {
         }
         let source = self.fed_source();
         let Some((descriptor, real_params)) =
-            crate::symbol_resolver::synthetic_default_ctor(&source, internal, slots.len())
+            crate::symbol_resolver::synthetic_default_ctor_name(&source, internal, slots.len())
         else {
             return Ok(None);
         };
@@ -11924,48 +11923,6 @@ impl<'a> Checker<'a> {
                 suspend,
             },
         );
-    }
-
-    fn ctor_result(&mut self, call: ExprId, internal: &str) -> Ty {
-        if let Some(internal) = existing_type_name(internal) {
-            return self.ctor_result_name(call, internal);
-        }
-        // Compatibility path for classpath/boundary strings that have not been copied into the
-        // global type-name tree yet.
-        if let Some(cls) = self.syms.class_by_internal(internal) {
-            if cls.is_interface || cls.is_abstract {
-                let kind = if cls.is_interface {
-                    "an interface"
-                } else {
-                    "an abstract class"
-                };
-                self.diags.error(
-                    self.span(call),
-                    format!("cannot create an instance of {kind} '{internal}'"),
-                );
-            }
-        }
-        if let Some(targs) = self.file.call_type_args.get(&call.0).cloned() {
-            let args: Vec<Ty> = targs.iter().map(|r| self.resolve_ty(r)).collect();
-            if !args.is_empty() {
-                return Ty::obj_args(internal, &args);
-            }
-        }
-        if let Expr::Call { args, .. } = self.file.expr(call).clone() {
-            let arg_tys: Vec<Ty> = args
-                .iter()
-                .map(|&a| self.expr_types[a.0 as usize])
-                .collect();
-            if let Some(inferred) = self
-                .resolved_type(internal)
-                .and_then(|t| crate::symbol_resolver::infer_constructor_type_args(&t, &arg_tys))
-            {
-                if inferred.iter().any(|t| !t.is_erased_top()) {
-                    return Ty::obj_args(internal, &inferred);
-                }
-            }
-        }
-        Ty::obj(internal)
     }
 
     fn ctor_result_name(&mut self, call: ExprId, internal: TypeName) -> Ty {
@@ -12364,15 +12321,19 @@ impl<'a> Checker<'a> {
     /// The classpath internal name a bare class name resolves to — an explicit import first, then the
     /// federated class-name seed (default/same-package/wildcard imports). Used to reach a classpath type's
     /// `@Metadata` (e.g. constructor parameter names) from a simple-name constructor call.
-    fn classpath_class_internal(&self, name: &str) -> Option<String> {
+    fn classpath_class_internal_name(&self, name: &str) -> Option<TypeName> {
         // Resolve through the same NESTED-type rewrite the positional-construction path uses: an
         // unqualified nested-type import (`import lib.Op.Apply`) stores the flat `lib/Op/Apply`, but the
         // class is `lib/Op$Apply`. `imported_type_internal` applies the `/`→`$` recovery (and wildcard
         // imports), so a NAMED constructor call on such an import (`Apply(a = 1)`) resolves its ctor
         // parameter names the same way the positional form already resolves the class.
-        self.imported_type_internal(name)
-            .or_else(|| self.imports.get(name).cloned())
-            .or_else(|| self.syms.class_names.get(name).map(TypeName::render))
+        self.imported_type_name(name)
+            .or_else(|| {
+                self.imports
+                    .get(name)
+                    .and_then(|i| self.nested_internal_name(i))
+            })
+            .or_else(|| self.syms.class_names.get(name))
     }
 
     /// If `name` is imported from a classpath `object` (`import a.b.Obj.member` → `imports[member] =
@@ -12394,10 +12355,10 @@ impl<'a> Checker<'a> {
                 }
             }
         }
-        let owner = self.nested_internal(owner_path)?;
-        self.resolved_type(&owner)
+        let owner = self.nested_internal_name(owner_path)?;
+        self.resolved_type_name(owner)
             .filter(|t| t.is_object())
-            .map(|_| type_name(&owner))
+            .map(|_| owner)
     }
 
     /// Primary-constructor parameter names/defaults of a same-file class, in declaration order — for
@@ -12482,8 +12443,8 @@ impl<'a> Checker<'a> {
                         // the FULL parameter list for a ctor with at least `args.len()` params, so an
                         // omitted-default named call is still recognized.
                         || self
-                            .classpath_class_internal(n)
-                            .and_then(|i| self.resolved_type(&i))
+                            .classpath_class_internal_name(n)
+                            .and_then(|i| self.resolved_type_name(i))
                             .and_then(|t| t.constructor_named_params(args.len()))
                             .is_some()
                 }
@@ -12496,12 +12457,12 @@ impl<'a> Checker<'a> {
                 }
                 Expr::Member { receiver, name }
                     if self
-                        .qualified_nested_ctor_internal(*receiver, name)
+                        .qualified_nested_ctor_internal_name(*receiver, name)
                         .is_some() =>
                 {
                     // Classpath nested-class constructor with named args.
-                    self.qualified_nested_ctor_internal(*receiver, name)
-                        .and_then(|i| self.resolved_type(&i))
+                    self.qualified_nested_ctor_internal_name(*receiver, name)
+                        .and_then(|i| self.resolved_type_name(i))
                         .and_then(|t| t.constructor_named_params(args.len()))
                         .is_some()
                 }
@@ -12777,15 +12738,17 @@ impl<'a> Checker<'a> {
                 // path `a.b.Ctx(args)`: resolve the whole qualifier to an `Outer$Nested` / `a/b/Ctx`
                 // classpath internal and match a constructor. Lowering emits `new …; invokespecial`.
                 {
-                    if let Some(internal) = self.qualified_nested_ctor_internal(receiver, &name) {
-                        let qualified = internal.clone();
+                    if let Some(internal) =
+                        self.qualified_nested_ctor_internal_name(receiver, &name)
+                    {
+                        let qualified = internal.render();
                         // Named classpath constructors use metadata names/defaults; lowering selects
                         // either the plain constructor or the default-argument synthetic.
                         if let Some(names) = arg_names.as_deref() {
                             match self
-                                .record_named_library_constructor(call, &internal, args, names)
+                                .record_named_library_constructor_name(call, internal, args, names)
                             {
-                                Ok(Some(_)) => return Ty::obj(&internal),
+                                Ok(Some(_)) => return Ty::obj_name(internal),
                                 Ok(None) => {}
                                 Err(msg) => {
                                     self.diags
@@ -12798,9 +12761,9 @@ impl<'a> Checker<'a> {
                         // POSITIONAL — a plain constructor, a value-class-param/omitted-default
                         // synthetic. Type-check the provided
                         // arguments against the plain constructor's params when it matches.
-                        if let Some(target) = self.record_library_constructor(
+                        if let Some(target) = self.record_library_constructor_name(
                             call,
-                            &internal,
+                            internal,
                             args.to_vec(),
                             &arg_tys,
                         ) {
@@ -12811,7 +12774,7 @@ impl<'a> Checker<'a> {
                             if let ResolvedConstructor::Plain { member, .. } = target {
                                 self.expect_call_args(&member.params, false, args, &arg_tys);
                             }
-                            return Ty::obj(&internal);
+                            return Ty::obj_name(internal);
                         }
                     }
                 }
@@ -12821,8 +12784,8 @@ impl<'a> Checker<'a> {
                 // receiver + an inline-splice of the companion method.
                 if let Expr::Name(root) = self.file.expr(receiver).clone() {
                     if !self.value_root_shadows_classifier(&root) {
-                        if let Some(internal) = self.imported_type_internal(&root) {
-                            if let Some(cf) = self.resolved_type(&internal).and_then(|t| {
+                        if let Some(internal) = self.imported_type_name(&root) {
+                            if let Some(cf) = self.resolved_type_name(internal).and_then(|t| {
                                 t.value_companion_fns.into_iter().find(|cf| {
                                     cf.callable.name == name
                                         && cf.callable.params.len() == args.len()
@@ -14650,9 +14613,9 @@ impl<'a> Checker<'a> {
                     // Named classpath constructors use metadata names/defaults; lowering selects
                     // either the plain constructor or the default-argument synthetic.
                     if let Some(names) = arg_names.as_deref() {
-                        if let Some(internal) = self.classpath_class_internal(&fname) {
+                        if let Some(internal) = self.classpath_class_internal_name(&fname) {
                             match self
-                                .record_named_library_constructor(call, &internal, args, names)
+                                .record_named_library_constructor_name(call, internal, args, names)
                             {
                                 Ok(Some(target)) => {
                                     if let ResolvedConstructor::Plain { member, args } = target {
@@ -14665,7 +14628,7 @@ impl<'a> Checker<'a> {
                                             );
                                         }
                                     }
-                                    return self.ctor_result(call, &internal);
+                                    return self.ctor_result_name(call, internal);
                                 }
                                 Ok(None) => {}
                                 Err(msg) => self
@@ -14683,26 +14646,35 @@ impl<'a> Checker<'a> {
                     if let Some(internal) = self
                         .imports
                         .get(&fname)
-                        .and_then(|i| self.nested_internal(i))
+                        .and_then(|i| self.nested_internal_name(i))
                     {
                         if self
-                            .record_library_constructor(call, &internal, args.to_vec(), &arg_tys)
+                            .record_library_constructor_name(
+                                call,
+                                internal,
+                                args.to_vec(),
+                                &arg_tys,
+                            )
                             .is_some()
                         {
-                            return self.ctor_result(call, &internal);
+                            return self.ctor_result_name(call, internal);
                         }
                     }
                     // A library type by simple name (`throw RuntimeException("msg")`, a mapped/aliased
                     // type with no explicit import): ask the library to resolve the constructor. The
                     // library owns any target-specific knowledge (e.g. the throwable-ctor shapes the
                     // JVM jimage can't surface) — the resolver no longer special-cases throwables.
-                    if let Some(internal) = self.syms.class_names.get(&fname).map(TypeName::render)
-                    {
+                    if let Some(internal) = self.syms.class_names.get(&fname) {
                         if self
-                            .record_library_constructor(call, &internal, args.to_vec(), &arg_tys)
+                            .record_library_constructor_name(
+                                call,
+                                internal,
+                                args.to_vec(),
+                                &arg_tys,
+                            )
                             .is_some()
                         {
-                            return self.ctor_result(call, &internal);
+                            return self.ctor_result_name(call, internal);
                         }
                     }
                     // `Any()` constructs java.lang.Object (Kotlin's root type).

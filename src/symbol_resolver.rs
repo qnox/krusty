@@ -1498,12 +1498,12 @@ pub struct SyntheticCtorCall {
 /// sibling — is required because a class with a VALUE-CLASS parameter has a PRIVATE primary constructor
 /// (absent from the public `constructors`) and ALSO a separate value-class marker overload
 /// `<init>(<params…>, marker)` (no mask); only the `arity + 2` shape is the default synthetic.
-pub(crate) fn synthetic_default_ctor(
+pub(crate) fn synthetic_default_ctor_name(
     source: &dyn SymbolSource,
-    internal: &str,
+    internal: TypeName,
     arity: usize,
 ) -> Option<(String, Vec<Ty>)> {
-    let t = source.resolve_type(internal)?;
+    let t = source.resolve_type_name(internal)?;
     let m = t
         .constructors
         .iter()
