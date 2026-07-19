@@ -2325,9 +2325,8 @@ fn fun_arg_matches(lib: &dyn SemanticPlatform, param: &Ty, arg: &Ty) -> bool {
     let arity_ok = param.fun_arity().is_some_and(|pn| pn == arg_arity)
         || param
             .obj_internal()
-            .and_then(|p| p.strip_prefix("kotlin/jvm/functions/Function"))
-            .and_then(|d| d.parse::<u8>().ok())
-            == Some(arg_arity);
+            .and_then(|p| p.unsigned_suffix_after_prefix("kotlin/jvm/functions/Function"))
+            == Some(usize::from(arg_arity));
     arity_ok && fun_return_compatible(lib, param, *arg)
 }
 

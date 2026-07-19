@@ -134,6 +134,31 @@ impl NameTree {
         })
     }
 
+    pub fn unsigned_suffix_after_prefix(&self, id: NameId, prefix: &str) -> Option<usize> {
+        let prefix = prefix.as_bytes();
+        let mut matched = 0usize;
+        let mut value = None;
+        for b in self.path_bytes(id) {
+            if matched < prefix.len() {
+                if prefix[matched] != b {
+                    return None;
+                }
+                matched += 1;
+            } else if b.is_ascii_digit() {
+                let digit = usize::from(b - b'0');
+                value = Some(
+                    value
+                        .unwrap_or(0usize)
+                        .checked_mul(10)?
+                        .checked_add(digit)?,
+                );
+            } else {
+                return None;
+            }
+        }
+        (matched == prefix.len()).then_some(value).flatten()
+    }
+
     pub fn contains(&self, id: NameId, needle: &str) -> bool {
         if needle.is_empty() {
             return true;
@@ -301,6 +326,19 @@ mod tests {
             Some("Map".to_string())
         );
         assert_eq!(names.strip_prefix(map, "kotlin/List"), None);
+        let function = names.insert("kotlin/jvm/functions/Function12");
+        assert_eq!(
+            names.unsigned_suffix_after_prefix(function, "kotlin/jvm/functions/Function"),
+            Some(12)
+        );
+        assert_eq!(
+            names.unsigned_suffix_after_prefix(function, "kotlin/jvm/functions/Function12"),
+            None
+        );
+        assert_eq!(
+            names.unsigned_suffix_after_prefix(map, "kotlin/jvm/functions/Function"),
+            None
+        );
         assert!(names.contains(map, "collections/Map"));
         assert!(names.qualifier_matches(map, "Map"));
         assert!(names.qualifier_matches(map, "kotlin/collections/Map"));

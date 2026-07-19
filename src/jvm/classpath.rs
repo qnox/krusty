@@ -76,9 +76,7 @@ pub(super) fn kotlin_type_name_to_ty(name: TypeName) -> Ty {
 }
 
 fn meta_function_arity_name(name: TypeName) -> Option<usize> {
-    name.strip_prefix("kotlin/Function")
-        .filter(|arity| !arity.is_empty() && arity.bytes().all(|b| b.is_ascii_digit()))
-        .and_then(|arity| arity.parse::<usize>().ok())
+    name.unsigned_suffix_after_prefix("kotlin/Function")
 }
 
 fn primitive_array_descriptor_name(internal: TypeName) -> Option<&'static str> {

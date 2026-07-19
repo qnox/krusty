@@ -94,6 +94,13 @@ impl TypeName {
         type_names().lock().unwrap().strip_prefix(self.0, prefix)
     }
 
+    pub fn unsigned_suffix_after_prefix(self, prefix: &str) -> Option<usize> {
+        type_names()
+            .lock()
+            .unwrap()
+            .unsigned_suffix_after_prefix(self.0, prefix)
+    }
+
     pub fn replace(self, from: char, to: &str) -> String {
         self.render().replace(from, to)
     }

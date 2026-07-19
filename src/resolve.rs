@@ -3797,12 +3797,11 @@ fn infer_lit_ty_p(
 /// The `invoke` arity of a reflection property/function-reference type — a `KProperty{N}`,
 /// `KMutableProperty{N}`, or `KFunction{N}` extends `Function{N}`, so calling the reference invokes
 /// `Function{N}.invoke`. Returns `N` for those internal names, else `None`.
-fn callable_reference_invoke_arity(internal: &str) -> Option<usize> {
-    let digits = internal
-        .strip_prefix("kotlin/reflect/KProperty")
-        .or_else(|| internal.strip_prefix("kotlin/reflect/KMutableProperty"))
-        .or_else(|| internal.strip_prefix("kotlin/reflect/KFunction"))?;
-    digits.parse::<usize>().ok()
+fn callable_reference_invoke_arity(internal: TypeName) -> Option<usize> {
+    internal
+        .unsigned_suffix_after_prefix("kotlin/reflect/KProperty")
+        .or_else(|| internal.unsigned_suffix_after_prefix("kotlin/reflect/KMutableProperty"))
+        .or_else(|| internal.unsigned_suffix_after_prefix("kotlin/reflect/KFunction"))
 }
 
 /// Generic type parameters in scope, each with its JVM erasure. A parameter with a wrappable standard
@@ -6396,17 +6395,6 @@ impl<'a> Checker<'a> {
             .resolve_symbol(SymRecv::Value(recv), name, &[], &[])
             .and_then(Symbol::method_ref)
     }
-    fn resolve_instance(
-        &self,
-        internal: &str,
-        name: &str,
-        args: &[Ty],
-    ) -> Option<crate::libraries::LibraryMember> {
-        use crate::symbol_resolver::{SymRecv, Symbol};
-        self.resolver()
-            .resolve_symbol(SymRecv::Type(internal), name, args, &[])
-            .and_then(Symbol::instance)
-    }
     fn resolve_instance_name(
         &self,
         internal: TypeName,
@@ -6838,10 +6826,8 @@ impl<'a> Checker<'a> {
             // it goes through `Function{N}.invoke` — an `invokeinterface`, not the `operator fun invoke`
             // member path (which would emit an `invokevirtual` on the interface method → ICCE). Args and
             // result are the erased `Object` the reflection `invoke` uses.
-            Ty::Obj(internal, _)
-                if callable_reference_invoke_arity(&internal.render()).is_some() =>
-            {
-                let arity = callable_reference_invoke_arity(&internal.render()).unwrap();
+            Ty::Obj(internal, _) if callable_reference_invoke_arity(internal).is_some() => {
+                let arity = callable_reference_invoke_arity(internal).unwrap();
                 let obj = Ty::obj_name(crate::types::wk::any());
                 (
                     vec![obj; arity],
@@ -11315,25 +11301,25 @@ impl<'a> Checker<'a> {
         {
             return;
         }
-        let Some(receiver_internal) = receiver.obj_internal().map(|n| n.render()) else {
+        let Some(receiver_internal) = receiver.obj_internal() else {
             return;
         };
         let owner = Ty::obj("kotlin/Any");
-        self.record_synthetic_member_call(call, &receiver_internal, "lock", &[owner]);
-        self.record_synthetic_member_call(call, &receiver_internal, "unlock", &[owner]);
+        self.record_synthetic_member_call(call, receiver_internal, "lock", &[owner]);
+        self.record_synthetic_member_call(call, receiver_internal, "unlock", &[owner]);
     }
 
     fn record_synthetic_member_call(
         &mut self,
         anchor: ExprId,
-        receiver_internal: &str,
+        receiver_internal: TypeName,
         name: &str,
         args: &[Ty],
     ) {
-        if let Some(mut member) = self.resolve_instance(receiver_internal, name, args) {
-            let owner = member.owner_name_or(receiver_internal);
+        if let Some(mut member) = self.resolve_instance_name(receiver_internal, name, args) {
+            let owner = member.owner_type_or(receiver_internal);
             member.is_interface = self
-                .resolved_type(&owner)
+                .resolved_type_name(owner)
                 .is_some_and(|ty| ty.is_interface());
             self.synthetic_member_calls
                 .insert((anchor, name.to_string()), member);
