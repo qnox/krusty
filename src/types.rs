@@ -139,6 +139,10 @@ impl TypeNameList {
         self.names.iter().any(|name| name.matches(internal))
     }
 
+    pub fn contains_name(&self, internal: TypeName) -> bool {
+        self.names.contains(&internal)
+    }
+
     pub fn to_vec(&self) -> Vec<String> {
         self.iter_rendered().collect()
     }

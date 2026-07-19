@@ -1610,13 +1610,16 @@ impl SymbolSource for JvmLibraries {
                     format!("({})V", type_descriptor(Ty::String)),
                 ));
             }
-            let mut supertypes = ci.interfaces.to_vec();
-            if let Some(s) = ci.super_class() {
-                supertypes.push(s);
+            let mut supertypes = TypeNameList::new();
+            for s in ci.interfaces.iter_ids() {
+                supertypes.push_name(s);
             }
-            for s in self.cp.builtin_supertypes(internal) {
-                if !supertypes.iter().any(|existing| existing == &s) {
-                    supertypes.push(s);
+            if let Some(s) = ci.super_class {
+                supertypes.push_name(s);
+            }
+            for s in self.cp.builtin_supertypes_name(internal_name).iter_ids() {
+                if !supertypes.contains_name(s) {
+                    supertypes.push_name(s);
                 }
             }
             // A JVM collection type (`java/util/Set`) and its JVM supertypes ARE their Kotlin mapped types
@@ -1626,10 +1629,9 @@ impl SymbolSource for JvmLibraries {
             // java.util ↔ kotlin.collections platform mapping instead of dead-ending in the JDK hierarchy.
             // The read-only Kotlin face of every JVM collection interface in the hierarchy — an extension on
             // `kotlin/collections/Iterable`/`List`/… applies to a `java/util/*` receiver.
-            let mut mapped: Vec<String> = std::iter::once(internal)
-                .chain(supertypes.iter().map(String::as_str))
-                .filter_map(super::jvm_class_map::jvm_collection_to_kotlin)
-                .map(str::to_string)
+            let mut mapped: Vec<TypeName> = std::iter::once(internal_name)
+                .chain(supertypes.iter_ids())
+                .filter_map(super::jvm_class_map::jvm_collection_to_kotlin_type_name)
                 .collect();
             // The MUTABLE face — but ONLY for a CONCRETE class (`java/util/ArrayList`, `HashMap`), never for
             // the JVM collection INTERFACES: `java/util/List` is the shared realization of BOTH the read-only
@@ -1638,18 +1640,18 @@ impl SymbolSource for JvmLibraries {
             // `MutableCollection.plusAssign`. A concrete class is genuinely mutable, so its `MutableList`/
             // `MutableSet`/`MutableMap` face is sound (derived from the java.util interface it implements).
             if !ci.is_interface() {
-                for m in std::iter::once(internal)
-                    .chain(supertypes.iter().map(String::as_str))
-                    .filter_map(super::jvm_class_map::jvm_collection_to_kotlin_mutable)
+                for m in std::iter::once(internal_name)
+                    .chain(supertypes.iter_ids())
+                    .filter_map(super::jvm_class_map::jvm_collection_to_kotlin_mutable_type_name)
                 {
-                    if !mapped.iter().any(|x| x == m) {
-                        mapped.push(m.to_string());
+                    if !mapped.contains(&m) {
+                        mapped.push(m);
                     }
                 }
             }
             for k in mapped {
-                if !supertypes.iter().any(|existing| existing == &k) {
-                    supertypes.push(k);
+                if !supertypes.contains_name(k) {
+                    supertypes.push_name(k);
                 }
             }
             // A companion object compiles to a `public static final C$Name` field on `C` (default name
@@ -1746,7 +1748,7 @@ impl SymbolSource for JvmLibraries {
             Some(LibraryType {
                 is_public: ci.is_public(),
                 kind,
-                supertypes: supertypes.into(),
+                supertypes,
                 constructors,
                 members: members
                     .into_iter()

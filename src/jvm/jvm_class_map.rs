@@ -486,6 +486,28 @@ pub fn jvm_collection_to_kotlin_type_name(internal: TypeName) -> Option<TypeName
     })
 }
 
+pub fn jvm_collection_to_kotlin_mutable_type_name(internal: TypeName) -> Option<TypeName> {
+    Some(if internal.matches("java/lang/Iterable") {
+        crate::types::type_name("kotlin/collections/MutableIterable")
+    } else if internal.matches("java/util/Iterator") {
+        crate::types::type_name("kotlin/collections/MutableIterator")
+    } else if internal.matches("java/util/ListIterator") {
+        crate::types::type_name("kotlin/collections/MutableListIterator")
+    } else if internal.matches("java/util/Collection") {
+        crate::types::type_name("kotlin/collections/MutableCollection")
+    } else if internal.matches("java/util/List") {
+        crate::types::type_name("kotlin/collections/MutableList")
+    } else if internal.matches("java/util/Set") {
+        crate::types::type_name("kotlin/collections/MutableSet")
+    } else if internal.matches("java/util/Map") {
+        crate::types::type_name("kotlin/collections/MutableMap")
+    } else if internal.matches("java/util/Map$Entry") {
+        crate::types::type_name("kotlin/collections/MutableMap.MutableEntry")
+    } else {
+        return None;
+    })
+}
+
 pub fn type_name_to_jvm_builtin_internal(internal: TypeName) -> Option<&'static str> {
     Some(
         if type_name_maps_to_jvm_internal(internal, "java/lang/Object") {
