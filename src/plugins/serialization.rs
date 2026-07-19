@@ -279,7 +279,7 @@ fn class_ty(fq: &str) -> Ty {
 
 /// Rewrite every `PluginPlaceholder { plugin: "serialization" }` core emitted for a reified
 /// `StringFormat` round-trip into the concrete 2-arg member call. Core recorded the operands
-/// (`exprs = [receiver, serializer, value-or-string]`) and the resolved names (`data = [format
+/// (`exprs = [receiver, serializer, value-or-string]`) and the resolved name ids (`data = [format
 /// internal, @Serializable class internal]`); the kotlinx member descriptors are owned here. Each
 /// placeholder's arena slot is overwritten in place (the index-based IR makes this a local edit):
 /// encode becomes the `encodeToString` call; decode becomes the `decodeFromString` call wrapped in a
@@ -309,10 +309,10 @@ fn specialize_reified_placeholders(ir: &mut IrFile) {
         let (&[recv, ser, arg], [fmt, class_internal]) = (exprs.as_slice(), data.as_slice()) else {
             continue;
         };
-        let (kind, fmt, class_internal) = (*kind, fmt.clone(), class_internal.clone());
+        let (kind, fmt, class_internal) = (*kind, *fmt, *class_internal);
         let call = |descriptor: &str| IrExpr::Call {
             callee: Callee::Virtual {
-                owner: type_name(&fmt),
+                owner: fmt,
                 name: kind.to_string(),
                 descriptor: descriptor.to_string(),
                 interface: false,
@@ -327,7 +327,7 @@ fn specialize_reified_placeholders(ir: &mut IrFile) {
                 ir.exprs[mid] = IrExpr::TypeOp {
                     op: IrTypeOp::Cast,
                     arg: decoded,
-                    type_operand: Ty::obj(&class_internal),
+                    type_operand: Ty::obj_name(class_internal),
                 };
             }
             _ => {}
@@ -3140,8 +3140,8 @@ mod tests {
             kind,
             exprs: vec![recv, ser, arg],
             data: vec![
-                "kotlinx/serialization/json/Json".to_string(),
-                "demo/Foo".to_string(),
+                type_name("kotlinx/serialization/json/Json"),
+                type_name("demo/Foo"),
             ],
         });
         (ir, mid, [recv, ser, arg])

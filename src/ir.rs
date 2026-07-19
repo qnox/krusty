@@ -156,7 +156,7 @@ pub enum IrExpr {
     /// A placeholder a compiler-extension plugin must specialize before emit. Core lowering produces
     /// it generically, without plugin-specific ABI details, and the plugin rewrites this arena slot into
     /// concrete IR in its body phase. `exprs` are already-lowered operands, `data` carries resolved
-    /// names; the meaning of both is private to the named plugin. A node that survives to emit is
+    /// name ids; the meaning of both is private to the named plugin. A node that survives to emit is
     /// declined by `jvm_can_emit`.
     PluginPlaceholder {
         /// Which plugin specializes this node.
@@ -165,8 +165,8 @@ pub enum IrExpr {
         kind: &'static str,
         /// Already-lowered operand expressions, in a plugin-defined order.
         exprs: Vec<ExprId>,
-        /// Resolved names the plugin needs.
-        data: Vec<String>,
+        /// Resolved name ids the plugin needs.
+        data: Vec<TypeName>,
     },
     /// `IrReturn` from the enclosing function.
     Return(Option<ExprId>),

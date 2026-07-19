@@ -7945,12 +7945,14 @@ impl<'a> Lower<'a> {
             })
     }
 
-    fn class_decl_by_internal(&self, internal: &str) -> Option<&ast::ClassDecl> {
+    fn class_decl_by_type_name(&self, internal: TypeName) -> Option<&ast::ClassDecl> {
         self.afile
             .decls
             .iter()
             .find_map(|&d| match self.afile.decl(d) {
-                Decl::Class(c) if class_internal(self.afile, &c.name) == internal => Some(c),
+                Decl::Class(c) if type_name(&class_internal(self.afile, &c.name)) == internal => {
+                    Some(c)
+                }
                 _ => None,
             })
     }
@@ -7966,12 +7968,11 @@ impl<'a> Lower<'a> {
             && self.custom_serializer_of(c).is_none()
     }
 
-    /// The IR fq name of a `@Serializable` USER class for `ty` (the value/type-arg of a reified
+    /// The IR fq-name id of a `@Serializable` USER class for `ty` (the value/type-arg of a reified
     /// serialization call), or `None`. Detection mirrors the plugin/checker (annotation simple name).
-    fn serializable_internal(&self, ty: Ty) -> Option<String> {
-        let internal = ty.obj_internal()?.render();
-        let simple = internal.rsplit('/').next().unwrap_or(&internal);
-        let cd = self.class_decl(simple)?;
+    fn serializable_internal(&self, ty: Ty) -> Option<TypeName> {
+        let internal = ty.obj_internal()?;
+        let cd = self.class_decl_by_type_name(internal)?;
         let is_ser = cd
             .annotations
             .iter()
@@ -7979,26 +7980,27 @@ impl<'a> Lower<'a> {
         if !is_ser {
             return None;
         }
-        self.class_info(&class_internal(self.afile, simple))
-            .map(|ci| self.ir.classes[ci.id as usize].fq_name())
+        self.class_info_name(internal)
+            .map(|ci| self.ir.classes[ci.id as usize].fq_name_id())
     }
 
     /// `C.serializer()` — routed through `C.Companion` for a PLAIN non-generic `@Serializable` class
     /// (the plugin relocates the accessor there), else `invokestatic C.serializer()` (enum / sealed /
     /// generic keep the static form). The plugin fills the accessor body before emit.
-    fn serializer_crossfile(&mut self, c_internal: &str) -> u32 {
-        let ret = ty_to_ir(Ty::obj_args(
-            "kotlinx/serialization/KSerializer",
-            &[Ty::obj(c_internal)],
+    fn serializer_crossfile(&mut self, c_internal: TypeName) -> u32 {
+        let ret = ty_to_ir(Ty::obj_args_name(
+            type_name("kotlinx/serialization/KSerializer"),
+            &[Ty::obj_name(c_internal)],
         ));
         let companion_routed = self
-            .class_decl_by_internal(c_internal)
+            .class_decl_by_type_name(c_internal)
             .is_some_and(|c| self.serializable_uses_companion_accessor(c));
         if companion_routed {
-            let comp = format!("{c_internal}$Companion");
+            let c_internal_rendered = c_internal.render();
+            let comp = format!("{c_internal_rendered}$Companion");
             let recv = self
                 .ir
-                .external_static_instance(c_internal, &comp, "Companion");
+                .external_static_instance(&c_internal_rendered, &comp, "Companion");
             return self.ir.add_expr(IrExpr::Call {
                 callee: Callee::CrossFileVirtual {
                     owner: type_name(&comp),
@@ -8011,13 +8013,7 @@ impl<'a> Lower<'a> {
                 args: vec![],
             });
         }
-        self.emit_cross_file_call(
-            type_name(c_internal),
-            "serializer".to_string(),
-            vec![],
-            ret,
-            vec![],
-        )
+        self.emit_cross_file_call(c_internal, "serializer".to_string(), vec![], ret, vec![])
     }
 
     /// Desugar a REIFIED kotlinx serialization round-trip call — `fmt.encodeToString(x)` /
@@ -8035,7 +8031,7 @@ impl<'a> Lower<'a> {
         let [arg] = args else {
             return None;
         };
-        let fmt = self.info.ty(receiver).obj_internal()?.to_string();
+        let fmt = self.info.ty(receiver).obj_internal()?;
         let resolved = self.info.resolved_member(call)?;
         if resolved.member.name != name || resolved.member.params.len() != args.len() {
             return None;
@@ -8069,7 +8065,7 @@ impl<'a> Lower<'a> {
             _ => return None,
         };
         let recv = self.expr(receiver)?;
-        let ser = self.serializer_crossfile(&c);
+        let ser = self.serializer_crossfile(c);
         let value = self.expr(*arg)?;
         Some(self.ir.add_expr(IrExpr::PluginPlaceholder {
             plugin: "serialization",
@@ -17614,7 +17610,7 @@ impl<'a> Lower<'a> {
                             .and_then(|tr| self.ty_ref(tr))
                             .and_then(|targ| self.serializable_internal(targ))
                         {
-                            return Some(self.serializer_crossfile(&c));
+                            return Some(self.serializer_crossfile(c));
                         }
                     }
                     // No-receiver `run { … }` (the stdlib `inline fun <R> run(block: () -> R): R =
