@@ -194,6 +194,8 @@ mod compound_index_assign_e2e;
 mod compound_member_assign_lhs_caching_e2e;
 #[path = "computed_prop_e2e.rs"]
 mod computed_prop_e2e;
+#[path = "computed_prop_generic_return_e2e.rs"]
+mod computed_prop_generic_return_e2e;
 #[path = "const_constantvalue_e2e.rs"]
 mod const_constantvalue_e2e;
 #[path = "const_read_inline_e2e.rs"]
