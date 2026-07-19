@@ -4276,7 +4276,7 @@ fn binds_value_class_suspension(ir: &IrFile, e: ExprId, suspend_set: &HashSet<u3
             && ir
                 .classes
                 .iter()
-                .any(|c| c.fq_name_matches(&internal.render()) && c.is_value)
+                .any(|c| c.fq_name_id() == *internal && c.is_value)
         {
             return true;
         }

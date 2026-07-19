@@ -854,6 +854,10 @@ impl PropRef {
 }
 
 impl IrClass {
+    pub fn fq_name_id(&self) -> TypeName {
+        self.fq_name
+    }
+
     pub fn fq_name(&self) -> String {
         self.fq_name.render()
     }

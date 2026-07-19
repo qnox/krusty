@@ -16241,7 +16241,7 @@ impl<'a> Lower<'a> {
                         .ir
                         .classes
                         .iter()
-                        .find(|c| c.fq_name_matches(&internal.render()) && c.is_annotation)
+                        .find(|c| c.fq_name_id() == internal && c.is_annotation)
                         .and_then(|c| c.fields.iter().find(|f| f.name == *name))
                     {
                         let descriptor =
