@@ -9420,23 +9420,24 @@ impl<'a> Lower<'a> {
             Some((v, ty)) => (Some(self.emit_get_value(v)), ty),
             None => {
                 let internal = class_internal(self.afile, &rn);
-                let cid = self.class_info(&internal)?.id;
+                let internal_name = type_name(&internal);
+                let cid = self.class_info_name(internal_name)?.id;
                 if self.ir.classes[cid as usize].is_object {
                     let inst = self.emit_static_instance(cid, cid, "INSTANCE");
-                    (Some(inst), Ty::obj(&internal))
+                    (Some(inst), Ty::obj_name(internal_name))
                 } else {
                     (None, *params.first()?)
                 }
             }
         };
-        let internal = recv_ty.obj_internal()?.to_string();
+        let internal = recv_ty.obj_internal()?;
         // An UNBOUND reference to a same-module extension function (`A::foo`): the lifted static
         // `foo(recv, args…)` is the impl — emit a `FunctionReferenceImpl` calling `invokestatic
         // <facade>.foo(recv, args)` (equatable, same shape as a top-level `::foo` ref). The receiver is
         // the first parameter, not captured. (A member of the same name, resolved below, wins; a BOUND
         // `obj::ext` is handled by `lower_bound_expr_ref`. A value-class receiver is skipped.)
         if capture.is_none()
-            && self.resolve_method(&internal, name).is_none()
+            && self.resolve_method_name(internal, name).is_none()
             && self
                 .ext_fun_ids
                 .contains_key(&(recv_ty.erased_recv(), name.to_string()))
@@ -9466,7 +9467,7 @@ impl<'a> Lower<'a> {
         // `invokevirtual` on the (captured bound / first-parameter unbound) receiver dispatches any real
         // override at runtime.
         if matches!(name, "equals" | "hashCode" | "toString")
-            && self.resolve_method(&internal, name).is_none()
+            && self.resolve_method_name(internal, name).is_none()
             // A BOUND receiver that may be null (nullable, or an erased type-parameter/`Any`/`Object`)
             // needs the null-safe intrinsic kotlinc uses (`x::toString` on `null` yields "null"); a
             // plain `invokevirtual` on the captured null NPEs. Only handle a bound ref on a concrete
@@ -9503,20 +9504,20 @@ impl<'a> Lower<'a> {
         }
         // Only a user-class method is modeled (the invoke does `invokevirtual`/`invokeinterface
         // internal.name`); a classpath/library receiver fails here → bail (skip), never miscompile.
-        let (_, _, target_fid, _) = self.resolve_method(&internal, name)?;
+        let (_, _, target_fid, _) = self.resolve_method_name(internal, name)?;
         // A PRIVATE target can't be invoked from the separate reference class (`IllegalAccessError`);
         // retarget the reference's invoke at a synthetic `access$<name>` accessor on the owner (a public
         // instance method that forwards to the private one). The reflection NAME (`fn_name`) stays the
         // real method; only the physical `call_name` changes. Bail (skip) if the accessor can't be made,
         // rather than emit an illegal private access.
         let call_name = if self.ir.private_methods.contains(&target_fid) {
-            self.ensure_private_accessor(&internal, name)?
+            self.ensure_private_accessor_name(internal, name)?
         } else {
             name.to_string()
         };
         // Dispatch on the receiver's STATIC type: an interface receiver needs `invokeinterface`.
         let call_interface = self
-            .class_info(&internal)
+            .class_info_name(internal)
             .is_some_and(|ci| self.ir.classes[ci.id as usize].is_interface);
         let bound = capture.is_some();
         let dispatch = if bound {
@@ -9529,11 +9530,11 @@ impl<'a> Lower<'a> {
             e.0,
             bound,
             params.len() as u8,
-            Some(type_name(&internal)),
+            Some(internal),
             name.to_string(),
             0, // member
             dispatch,
-            Some(type_name(&internal)),
+            Some(internal),
             call_name,
             call_interface,
             param_tys,
@@ -10156,20 +10157,20 @@ impl<'a> Lower<'a> {
             if let Some(sup) = ci.super_internal {
                 stack.push(sup);
             }
-            for itf in self.ir.classes[ci.id as usize].interfaces.iter_rendered() {
-                if let Some(ici) = self.class_info(&itf) {
+            for itf in self.ir.classes[ci.id as usize].interfaces.iter_ids() {
+                if let Some(ici) = self.class_info_name(itf) {
                     // Only a genuine DEFAULT method (a body in the source) is a valid inherited target.
                     // An ABSTRACT interface method reached here (e.g. via class delegation `by`, where
                     // the class neither defines nor IR-registers it) would emit an `invokeinterface` to an
                     // unimplemented method (`AbstractMethodError`). Check the AST (order-independent; the
                     // IR body is set later in pass 2).
-                    if self.iface_method_is_default(&itf, name) {
+                    if self.iface_method_is_default_name(itf, name) {
                         if let Some(&(idx, fid, ret)) = ici.methods.get(name) {
                             return Some((ici.id, idx, fid, ret));
                         }
                     }
                 }
-                stack.push(type_name(&itf));
+                stack.push(itf);
             }
         }
         None
@@ -10189,10 +10190,10 @@ impl<'a> Lower<'a> {
 
     /// Whether a same-file interface's method is a DEFAULT method (declared with a body) — checked on
     /// the AST so it's independent of pass-2 lowering order.
-    fn iface_method_is_default(&self, iface_internal: &str, name: &str) -> bool {
+    fn iface_method_is_default_name(&self, iface_internal: TypeName, name: &str) -> bool {
         self.afile.decls.iter().any(|&d| {
             matches!(self.afile.decl(d), Decl::Class(c) if c.is_interface()
-                && class_internal(self.afile, &c.name) == iface_internal
+                && type_name(&class_internal(self.afile, &c.name)) == iface_internal
                 && c.methods.iter().any(|m| m.name == name && !matches!(m.body, FunBody::None)))
         })
     }
