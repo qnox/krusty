@@ -536,10 +536,10 @@ impl JvmLibraries {
     /// exposed so a `suspend` member's return (recovered from `Continuation<T>`, which `member_return`
     /// cannot use because the JVM return is erased to `Object`) can be substituted under the same bindings.
     /// Empty when the receiver carries no type arguments or `target_internal` is not reached.
-    fn receiver_type_bindings(
+    fn receiver_type_bindings_name(
         &self,
         receiver: Ty,
-        target_internal: &str,
+        target_internal: TypeName,
     ) -> std::collections::HashMap<String, Ty> {
         let Ty::Obj(start, start_args) = receiver else {
             return std::collections::HashMap::new();
@@ -547,7 +547,7 @@ impl JvmLibraries {
         if start_args.is_empty() {
             return std::collections::HashMap::new();
         }
-        let target = super::jvm_class_map::to_jvm_type_name(type_name(target_internal));
+        let target = super::jvm_class_map::to_jvm_type_name(target_internal);
         let mut seen = std::collections::HashSet::new();
         let mut q = std::collections::VecDeque::new();
         q.push_back((
@@ -1295,7 +1295,7 @@ impl SymbolSource for JvmLibraries {
         // Member properties of the receiver's type + its supertypes, most-derived first (rung 0). Each
         // carries the REAL getter/setter from `@Metadata`'s `JvmPropertySignature`, so the caller emits the
         // accessor by name rather than guessing `getX`. Extension properties are surfaced by `resolve_symbols`.
-        let Some(internal) = recv.kotlin_class_internal().map(|n| n.render()) else {
+        let Some(internal) = recv.kotlin_class_internal() else {
             return PropertySet::default();
         };
         let mut overloads = Vec::new();
@@ -1304,10 +1304,10 @@ impl SymbolSource for JvmLibraries {
         let mut seen = std::collections::HashSet::new();
         let mut rung = 0u32;
         while let Some(cn) = queue.pop_front() {
-            if !seen.insert(cn.clone()) {
+            if !seen.insert(cn) {
                 continue;
             }
-            if let Some(ci) = self.cp.find(&cn) {
+            if let Some(ci) = self.cp.find_name(cn) {
                 for mp in metadata::class_properties(&ci) {
                     if mp.name != name {
                         continue;
@@ -1319,7 +1319,7 @@ impl SymbolSource for JvmLibraries {
                         .map_or(Ty::obj("kotlin/Any"), kotlin_type_name_to_ty);
                     let ty = mp.ret_class.map_or(Ty::obj("kotlin/Any"), Ty::obj_name);
                     let getter = LibraryCallable::library(
-                        type_name(&cn),
+                        cn,
                         getter.name,
                         vec![],
                         ret_ty,
@@ -1328,7 +1328,7 @@ impl SymbolSource for JvmLibraries {
                     );
                     let setter = mp.setter.map(|s| {
                         LibraryCallable::library(
-                            type_name(&cn),
+                            cn,
                             s.name,
                             vec![ret_ty],
                             Ty::Unit,
@@ -1338,20 +1338,20 @@ impl SymbolSource for JvmLibraries {
                     });
                     overloads.push(PropertyInfo {
                         kind: PropKind::Member,
-                        receiver: Some(Ty::obj(&cn)),
+                        receiver: Some(Ty::obj_name(cn)),
                         formals: Vec::new(),
                         ty,
                         getter,
                         setter,
                         is_const: mp.is_const,
                         visibility: mp.visibility,
-                        owner: type_name(&cn),
+                        owner: cn,
                         receiver_rank: rung,
                     });
                 }
             }
-            if let Some(t) = self.resolve_type(&cn) {
-                queue.extend(t.supertypes.to_vec());
+            if let Some(t) = self.resolve_type_name(cn) {
+                queue.extend(t.supertypes.iter_ids());
             }
             rung += 1;
         }
@@ -2060,13 +2060,13 @@ impl SymbolSource for JvmLibraries {
         if let Some(internal) = receiver.kotlin_class_internal() {
             let mut seen = std::collections::HashSet::new();
             let mut queue = std::collections::VecDeque::new();
-            queue.push_back(internal.to_string());
+            queue.push_back(internal);
             let mut rung: u32 = 0;
             while let Some(cn) = queue.pop_front() {
-                if !seen.insert(cn.clone()) {
+                if !seen.insert(cn) {
                     continue;
                 }
-                let Some(t) = self.resolve_type(&cn) else {
+                let Some(t) = self.resolve_type_name(cn) else {
                     continue;
                 };
                 for m in &t.members {
@@ -2076,9 +2076,10 @@ impl SymbolSource for JvmLibraries {
                             ("keySet", "keys") | ("entrySet", "entries")
                         )
                     {
+                        let cn_rendered = cn.render();
                         crate::trace_compiler!(
                             "resolve",
-                            "member walk {cn}.{} (rung {rung}) desc={} sig={:?}",
+                            "member walk {cn_rendered}.{} (rung {rung}) desc={} sig={:?}",
                             m.name,
                             m.descriptor,
                             m.signature
@@ -2089,7 +2090,7 @@ impl SymbolSource for JvmLibraries {
                         // continuation, recover the real return from the `Continuation<T>` type
                         // argument in the generic signature) so a normal call resolves. The coroutine
                         // pass re-derives the CPS form for the emit.
-                        let suspend = self.cp.is_suspend_method(&cn, &m.name);
+                        let suspend = self.cp.is_suspend_method(&cn_rendered, &m.name);
                         let params: Vec<Ty> = if suspend {
                             m.params
                                 .split_last()
@@ -2107,9 +2108,11 @@ impl SymbolSource for JvmLibraries {
                         // mangled members (`copy` → `copy-<hash>`), and by the source/JVM name for
                         // ordinary members.
                         let meta_name = m.physical_name.as_deref().unwrap_or(&m.name);
-                        let member_facts =
-                            self.cp
-                                .metadata_member_call_facts(&cn, meta_name, params.len());
+                        let member_facts = self.cp.metadata_member_call_facts(
+                            &cn_rendered,
+                            meta_name,
+                            params.len(),
+                        );
                         // A `suspend` member's return facts are erased twice (to `Object`, then via the
                         // `Continuation<T>` type argument), so recover nullability and exact source
                         // classifier from the same class `@Metadata` member record.
@@ -2120,7 +2123,7 @@ impl SymbolSource for JvmLibraries {
                             // A generic `suspend` member returns a type parameter (`byId(): T`) via
                             // `Continuation<T>`; bind `T` to the receiver's concrete argument
                             // (`Repo<Cfg>` → `T = Cfg`) so the return isn't erased to `Any`.
-                            let recv_binds = self.receiver_type_bindings(receiver, &cn);
+                            let recv_binds = self.receiver_type_bindings_name(receiver, cn);
                             let base = generic_sig
                                 .as_ref()
                                 .and_then(|g| suspend_return_from_gsig(g, &recv_binds))
@@ -2194,11 +2197,14 @@ impl SymbolSource for JvmLibraries {
                         // `cn` may already be the front-end `kotlin/collections/…` name or the erased
                         // JVM form (`java/util/Map`, when the member is found on a classpath supertype);
                         // map both to the builtin whose `@Metadata` declares the nullability.
-                        let builtin_cn = super::jvm_class_map::jvm_collection_to_kotlin(&cn)
-                            .or_else(|| {
-                                super::jvm_class_map::jvm_to_kotlin_builtin_with_members(&cn)
-                            })
-                            .unwrap_or(cn.as_str());
+                        let builtin_cn =
+                            super::jvm_class_map::jvm_collection_to_kotlin(&cn_rendered)
+                                .or_else(|| {
+                                    super::jvm_class_map::jvm_to_kotlin_builtin_with_members(
+                                        &cn_rendered,
+                                    )
+                                })
+                                .unwrap_or(cn_rendered.as_str());
                         let builtin_ret_nullable = !ret.is_reference()
                             && self.cp.builtin_member_ret_nullable(
                                 builtin_cn,
@@ -2210,7 +2216,7 @@ impl SymbolSource for JvmLibraries {
                             suspend,
                             signature: m.signature.clone(),
                             ..LibraryCallable::library(
-                                m.owner.as_ref().cloned().unwrap_or_else(|| type_name(&cn)),
+                                m.owner.as_ref().cloned().unwrap_or(cn),
                                 m.physical_name.clone().unwrap_or_else(|| m.name.clone()),
                                 params,
                                 ret,
@@ -2238,7 +2244,7 @@ impl SymbolSource for JvmLibraries {
                         });
                     }
                 }
-                queue.extend(t.supertypes.to_vec());
+                queue.extend(t.supertypes.iter_ids());
                 rung += 1;
             }
         }
