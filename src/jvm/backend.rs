@@ -60,6 +60,7 @@ pub fn run_backend_passes(
         &vc_module,
         &[],
     );
+    crate::jvm::value_classes::apply_override_final_drop(ir, &vc_resolver);
     if !crate::jvm::value_classes::lower_value_classes(ir, &vc_resolver) {
         return Err(SkipReason::ValueClasses);
     }
