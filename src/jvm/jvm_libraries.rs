@@ -357,6 +357,66 @@ impl JvmLibraries {
         })
     }
 
+    fn counted_loop_info_for_name(&self, internal: TypeName) -> Option<CountedLoopInfo> {
+        let unit_step = |elem, first_desc, last_desc| CountedLoopInfo {
+            elem,
+            first: Self::range_accessor("getFirst", first_desc),
+            last: Self::range_accessor("getLast", last_desc),
+            step: None,
+        };
+        let progression = |elem, first_desc, last_desc, step_desc, step_ty| CountedLoopInfo {
+            elem,
+            first: Self::range_accessor("getFirst", first_desc),
+            last: Self::range_accessor("getLast", last_desc),
+            step: Some((Self::range_accessor("getStep", step_desc), step_ty)),
+        };
+        Some(if internal.matches("kotlin/ranges/IntRange") {
+            unit_step(Ty::Int, "()I", "()I")
+        } else if internal.matches("kotlin/ranges/LongRange") {
+            unit_step(Ty::Long, "()J", "()J")
+        } else if internal.matches("kotlin/ranges/IntProgression") {
+            progression(Ty::Int, "()I", "()I", "()I", Ty::Int)
+        } else if internal.matches("kotlin/ranges/LongProgression") {
+            progression(Ty::Long, "()J", "()J", "()J", Ty::Long)
+        } else if internal.matches("kotlin/ranges/CharProgression") {
+            progression(Ty::Char, "()C", "()C", "()I", Ty::Int)
+        } else if internal.matches("kotlin/ranges/UIntRange") {
+            CountedLoopInfo {
+                elem: Ty::UInt,
+                first: self.member_accessor_by_prefix("kotlin/ranges/UIntRange", "getFirst-")?,
+                last: self.member_accessor_by_prefix("kotlin/ranges/UIntRange", "getLast-")?,
+                step: None,
+            }
+        } else if internal.matches("kotlin/ranges/ULongRange") {
+            CountedLoopInfo {
+                elem: Ty::ULong,
+                first: self.member_accessor_by_prefix("kotlin/ranges/ULongRange", "getFirst-")?,
+                last: self.member_accessor_by_prefix("kotlin/ranges/ULongRange", "getLast-")?,
+                step: None,
+            }
+        } else if internal.matches("kotlin/ranges/UIntProgression") {
+            CountedLoopInfo {
+                elem: Ty::UInt,
+                first: self
+                    .member_accessor_by_prefix("kotlin/ranges/UIntProgression", "getFirst-")?,
+                last: self
+                    .member_accessor_by_prefix("kotlin/ranges/UIntProgression", "getLast-")?,
+                step: Some((Self::range_accessor("getStep", "()I"), Ty::Int)),
+            }
+        } else if internal.matches("kotlin/ranges/ULongProgression") {
+            CountedLoopInfo {
+                elem: Ty::ULong,
+                first: self
+                    .member_accessor_by_prefix("kotlin/ranges/ULongProgression", "getFirst-")?,
+                last: self
+                    .member_accessor_by_prefix("kotlin/ranges/ULongProgression", "getLast-")?,
+                step: Some((Self::range_accessor("getStep", "()J"), Ty::Long)),
+            }
+        } else {
+            return None;
+        })
+    }
+
     fn member_return(&self, recv: Ty, name: &str, args: &[Ty]) -> Option<Ty> {
         let Ty::Obj(start, start_args) = recv else {
             return None;
@@ -2378,6 +2438,11 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
         self.counted_loop_info_for_type(internal)
             .map(|info| info.elem)
     }
+
+    fn iterable_element_type_name(&self, internal: TypeName) -> Option<Ty> {
+        self.counted_loop_info_for_name(internal)
+            .map(|info| info.elem)
+    }
 }
 
 impl crate::runtime::TargetRuntime for JvmLibraries {
@@ -2479,6 +2544,10 @@ impl crate::runtime::TargetRuntime for JvmLibraries {
 
     fn counted_loop_info(&self, internal: &str) -> Option<CountedLoopInfo> {
         self.counted_loop_info_for_type(internal)
+    }
+
+    fn counted_loop_info_name(&self, internal: TypeName) -> Option<CountedLoopInfo> {
+        self.counted_loop_info_for_name(internal)
     }
 
     fn range_construction(&self, lo: Ty, hi: Ty) -> Option<RangeConstruction> {

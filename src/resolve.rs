@@ -11443,7 +11443,7 @@ impl<'a> Checker<'a> {
         let next = self.resolve_instance_name(iter_internal, "next", &[])?;
         let elem_ty = iterable_ty
             .obj_internal()
-            .and_then(|i| self.syms.libraries.iterable_element_type(&i.render()))
+            .and_then(|i| self.syms.libraries.iterable_element_type_name(i))
             .or_else(|| iter_ty.type_args().first().copied())
             .or_else(|| iterable_ty.type_args().first().copied())
             .unwrap_or_else(|| Ty::obj("kotlin/Any"));

@@ -195,6 +195,10 @@ pub trait SemanticPlatform: crate::symbol_source::SymbolSource {
     fn iterable_element_type(&self, _internal: &str) -> Option<Ty> {
         None
     }
+
+    fn iterable_element_type_name(&self, _internal: TypeName) -> Option<Ty> {
+        None
+    }
 }
 
 impl LibraryMember {

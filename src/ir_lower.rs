@@ -13839,7 +13839,7 @@ impl<'a> Lower<'a> {
         // generic loop once that shape is supplied.
         if let Some(loop_info) = it_ty
             .obj_internal()
-            .and_then(|internal| self.runtime.counted_loop_info(&internal.render()))
+            .and_then(|internal| self.runtime.counted_loop_info_name(internal))
         {
             return if loop_info.step.is_some() {
                 self.lower_foreach_progression(name, iterable, body, it_ty, loop_info, label)
@@ -16169,7 +16169,7 @@ impl<'a> Lower<'a> {
                     let narrowed = self.info.ty(e);
                     let field_is_ref = this_ty
                         .obj_internal()
-                        .and_then(|i| self.syms.prop_of(&i.render(), &n))
+                        .and_then(|i| self.syms.prop_of_name(i, &n))
                         .map_or(false, |(t, _)| t.is_reference());
                     if self.has_scalar_value_repr(narrowed) && field_is_ref {
                         self.emit_type_op(IrTypeOp::ImplicitCoercion, read, ty_to_ir(narrowed))
@@ -18678,7 +18678,7 @@ impl<'a> Lower<'a> {
                         let iterable = rty.array_elem().is_some()
                             || rty == Ty::String
                             || rty.obj_internal().map_or(false, |i| {
-                                self.runtime.counted_loop_info(&i.render()).is_some()
+                                self.runtime.counted_loop_info_name(i).is_some()
                                     || self.info.iterator_protocol(receiver).is_some()
                             });
                         if iterable {
