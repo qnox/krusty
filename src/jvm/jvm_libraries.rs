@@ -272,10 +272,10 @@ impl JvmLibraries {
         out
     }
 
-    fn builtin_members_for_type(&self, internal: &str) -> Vec<LibraryMember> {
-        let kotlin = crate::jvm::jvm_class_map::jvm_to_kotlin_builtin_with_members(internal)
+    fn builtin_members_for_type_name(&self, internal: TypeName) -> Vec<LibraryMember> {
+        let kotlin = crate::jvm::jvm_class_map::jvm_to_kotlin_builtin_with_members_name(internal)
             .unwrap_or(internal);
-        self.cp.builtin_members(kotlin)
+        self.cp.builtin_members_name(kotlin)
     }
 
     fn range_accessor(name: &str, descriptor: &str) -> PlatformAccessor {
@@ -1138,7 +1138,7 @@ fn mapped_builtin_fallback(internal: &str) -> Option<LibraryType> {
 /// `.kotlin_builtins` data, kind from the metadata `is_interface` flag.
 fn builtin_library_type(
     is_interface: bool,
-    supertypes: Vec<String>,
+    supertypes: TypeNameList,
     members: Vec<LibraryMember>,
 ) -> LibraryType {
     LibraryType {
@@ -1148,7 +1148,7 @@ fn builtin_library_type(
         } else {
             crate::libraries::TypeKind::Class
         },
-        supertypes: supertypes.into(),
+        supertypes,
         constructors: Vec::new(),
         members,
         companion: Vec::new(),
@@ -1426,8 +1426,8 @@ impl SymbolSource for JvmLibraries {
                             if let Some(is_iface) = self.cp.builtin_is_interface(internal) {
                                 return Some(builtin_library_type(
                                     is_iface,
-                                    self.cp.builtin_supertypes(internal),
-                                    self.builtin_members_for_type(internal),
+                                    self.cp.builtin_supertypes_name(internal_name),
+                                    self.builtin_members_for_type_name(internal_name),
                                 ));
                             }
                             // Otherwise the backend's curated minimal ABI for the well-known mapped builtins.
@@ -1753,7 +1753,7 @@ impl SymbolSource for JvmLibraries {
                 members: members
                     .into_iter()
                     .chain(value_class_metadata_members)
-                    .chain(self.builtin_members_for_type(internal))
+                    .chain(self.builtin_members_for_type_name(internal_name))
                     .collect(),
                 companion,
                 companion_consts: self.companion_consts_for_class(&ci),
@@ -2201,15 +2201,15 @@ impl SymbolSource for JvmLibraries {
                         // JVM form (`java/util/Map`, when the member is found on a classpath supertype);
                         // map both to the builtin whose `@Metadata` declares the nullability.
                         let builtin_cn =
-                            super::jvm_class_map::jvm_collection_to_kotlin(&cn_rendered)
+                            super::jvm_class_map::jvm_collection_to_kotlin_type_name(cn)
                                 .or_else(|| {
-                                    super::jvm_class_map::jvm_to_kotlin_builtin_with_members(
-                                        &cn_rendered,
+                                    super::jvm_class_map::jvm_to_kotlin_builtin_with_members_name(
+                                        cn,
                                     )
                                 })
-                                .unwrap_or(cn_rendered.as_str());
+                                .unwrap_or(cn);
                         let builtin_ret_nullable = !ret.is_reference()
-                            && self.cp.builtin_member_ret_nullable(
+                            && self.cp.builtin_member_ret_nullable_name(
                                 builtin_cn,
                                 &m.name,
                                 params.len(),

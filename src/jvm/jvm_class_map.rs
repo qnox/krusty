@@ -171,6 +171,18 @@ pub fn jvm_to_kotlin_builtin_with_members(internal: &str) -> Option<&'static str
     })
 }
 
+pub fn jvm_to_kotlin_builtin_with_members_name(internal: TypeName) -> Option<TypeName> {
+    Some(if internal.matches("java/lang/CharSequence") {
+        crate::types::type_name("kotlin/CharSequence")
+    } else if internal.matches("java/lang/Number") {
+        crate::types::type_name("kotlin/Number")
+    } else if internal.matches("java/lang/Comparable") {
+        crate::types::type_name("kotlin/Comparable")
+    } else {
+        return None;
+    })
+}
+
 /// Whether a JVM-mapped Kotlin built-in is a JVM **interface** (so a member dispatches via
 /// `invokeinterface`, not `invokevirtual`). A reliable answer for the curated mapped types — matching
 /// kotlinc's `JavaToKotlinClassMap` — for when the classpath `.class` reader can't be consulted (e.g. a
@@ -181,6 +193,25 @@ pub fn jvm_mapped_builtin_is_interface(jvm_internal: &str) -> Option<bool> {
         "java/lang/Number" | "java/lang/Object" | "java/lang/String" | "java/lang/Enum" => false,
         _ => return None,
     })
+}
+
+pub fn jvm_mapped_builtin_is_interface_name(jvm_internal: TypeName) -> Option<bool> {
+    Some(
+        if jvm_internal.matches("java/lang/CharSequence")
+            || jvm_internal.matches("java/lang/Comparable")
+            || jvm_internal.matches("java/lang/Iterable")
+        {
+            true
+        } else if jvm_internal.matches("java/lang/Number")
+            || jvm_internal.matches("java/lang/Object")
+            || jvm_internal.matches("java/lang/String")
+            || jvm_internal.matches("java/lang/Enum")
+        {
+            false
+        } else {
+            return None;
+        },
+    )
 }
 
 /// Whether a resolved JVM internal name denotes a `Throwable` subtype, recognised structurally by
@@ -510,7 +541,23 @@ pub fn jvm_collection_to_kotlin_mutable_type_name(internal: TypeName) -> Option<
 
 pub fn type_name_to_jvm_builtin_internal(internal: TypeName) -> Option<&'static str> {
     Some(
-        if type_name_maps_to_jvm_internal(internal, "java/lang/Object") {
+        if internal.matches("kotlin/Int") || internal.matches("java/lang/Integer") {
+            "java/lang/Integer"
+        } else if internal.matches("kotlin/Long") || internal.matches("java/lang/Long") {
+            "java/lang/Long"
+        } else if internal.matches("kotlin/Short") || internal.matches("java/lang/Short") {
+            "java/lang/Short"
+        } else if internal.matches("kotlin/Byte") || internal.matches("java/lang/Byte") {
+            "java/lang/Byte"
+        } else if internal.matches("kotlin/Double") || internal.matches("java/lang/Double") {
+            "java/lang/Double"
+        } else if internal.matches("kotlin/Float") || internal.matches("java/lang/Float") {
+            "java/lang/Float"
+        } else if internal.matches("kotlin/Boolean") || internal.matches("java/lang/Boolean") {
+            "java/lang/Boolean"
+        } else if internal.matches("kotlin/Char") || internal.matches("java/lang/Character") {
+            "java/lang/Character"
+        } else if type_name_maps_to_jvm_internal(internal, "java/lang/Object") {
             "java/lang/Object"
         } else if type_name_maps_to_jvm_internal(internal, "java/lang/String") {
             "java/lang/String"
@@ -581,7 +628,7 @@ pub fn wrapper_internal(t: Ty) -> Option<&'static str> {
 mod tests {
     use super::{
         jvm_collection_to_kotlin_type_name, kotlin_prim_to_wrapper, to_jvm_internal,
-        wrapper_internal, wrapper_to_kotlin_prim_name,
+        to_jvm_type_name, wrapper_internal, wrapper_to_kotlin_prim_name,
     };
     use crate::types::{type_name, Ty};
 
@@ -606,6 +653,7 @@ mod tests {
             );
             // The emit-only boxing in `to_jvm_internal` and the `Ty`-keyed `wrapper_internal` agree.
             assert_eq!(to_jvm_internal(internal), wrapper);
+            assert_eq!(to_jvm_type_name(type_name(internal)), type_name(wrapper));
             assert_eq!(wrapper_internal(prim), Some(wrapper));
         }
         // Unsigned boxes to its own inline-class wrapper (`kotlin/UInt`), not a `java/lang/*`.

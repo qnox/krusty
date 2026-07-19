@@ -1495,7 +1495,13 @@ impl Classpath {
     /// `LibraryMember` facts. The source name stays in `name`; JVM realization details stay in the JVM
     /// backend/provider and descriptor data.
     pub fn builtin_members(&self, internal: &str) -> Vec<crate::libraries::LibraryMember> {
-        let internal_id = type_name(internal);
+        self.builtin_members_name(type_name(internal))
+    }
+
+    pub fn builtin_members_name(
+        &self,
+        internal_id: TypeName,
+    ) -> Vec<crate::libraries::LibraryMember> {
         if let Some(members) = self.builtin_members.borrow_mut().get(&internal_id) {
             cache_stat!(builtin_members, true);
             return members.as_ref().clone();
@@ -1503,7 +1509,7 @@ impl Classpath {
         cache_stat!(builtin_members, false);
         let f = self.builtins_file_for_package(Self::builtins_package_for(internal_id));
         let members: Vec<_> = f
-            .get(internal)
+            .get_name(internal_id)
             .map(|class| {
                 class.members.iter().map(|m| {
                     let pdesc: String = m.params.iter().map(BuiltinType::descriptor).collect();
@@ -1517,25 +1523,14 @@ impl Classpath {
                     // The owner's JVM class: the kotlin↔JVM map (`kotlin/String` → `java/lang/String`), and for the
                     // non-collection mapped builtins (`kotlin/CharSequence` → `java/lang/CharSequence`, …) the
                     // emit-only simple-name mapping — the member virtual-dispatches on that JVM type.
-                    let mapped = crate::jvm::jvm_class_map::to_jvm_internal(internal);
-                    let owner = if mapped != internal {
-                        mapped.to_string()
-                    } else if let Some(j) = internal
-                        .strip_prefix("kotlin/")
-                        .filter(|s| !s.contains('/'))
-                        .and_then(crate::jvm::jvm_class_map::kotlin_builtin_to_jvm)
-                    {
-                        j.to_string()
-                    } else {
-                        internal.to_string()
-                    };
+                    let owner = crate::jvm::jvm_class_map::to_jvm_type_name(internal_id);
                     // Interface dispatch: prefer the real class flag, but fall back to the curated mapped-builtin
                     // answer when the `.class` reader can't load the owner (a JDK jimage krusty can't decode).
                     let is_iface = self
-                        .find(&owner)
+                        .find_name(owner)
                         .map(|ci| ci.is_interface())
                         .or_else(|| {
-                            crate::jvm::jvm_class_map::jvm_mapped_builtin_is_interface(&owner)
+                            crate::jvm::jvm_class_map::jvm_mapped_builtin_is_interface_name(owner)
                         })
                         .unwrap_or(false);
                     // The READ direction of the property-accessor mapping (the WRITE direction is the
@@ -1557,7 +1552,7 @@ impl Classpath {
                     };
                     crate::libraries::LibraryMember {
                         name: member_name,
-                        owner: Some(type_name(&owner)),
+                        owner: Some(owner),
                         physical_name: None,
                         params: m.params.iter().map(BuiltinType::ty).collect(),
                         ret,
@@ -1594,7 +1589,15 @@ impl Classpath {
     /// nullability — so the builtin's `Type.nullable` flag is the only surviving record. `false` when no
     /// such member/builtin is recorded.
     pub fn builtin_member_ret_nullable(&self, internal: &str, name: &str, arity: usize) -> bool {
-        let internal_id = type_name(internal);
+        self.builtin_member_ret_nullable_name(type_name(internal), name, arity)
+    }
+
+    pub fn builtin_member_ret_nullable_name(
+        &self,
+        internal_id: TypeName,
+        name: &str,
+        arity: usize,
+    ) -> bool {
         self.builtins_file_for_package(Self::builtins_package_for(internal_id))
             .get_name(internal_id)
             .is_some_and(|c| {
