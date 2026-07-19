@@ -20,7 +20,7 @@ use crate::jvm::classreader::{parse_class, read_method_code, ClassInfo, MethodCo
 use crate::jvm::names::type_descriptor;
 use crate::libraries::{CallSig, FunctionSet, ReturnInfo};
 use crate::name_tree::{NameId, NameTree};
-use crate::types::{type_name, type_name_from, Ty, TypeName};
+use crate::types::{type_name, type_name_from, Ty, TypeName, TypeNameList};
 
 /// Map a Kotlin internal type name (`kotlin/Int`, `kotlin/Char`, …) from builtins metadata to a `Ty`.
 pub(super) fn kotlin_name_to_ty(name: &str) -> Ty {
@@ -658,11 +658,9 @@ struct EntryExt {
 /// whole ~30k-class JDK jimage included) was ~85 MB of retained dead weight + a full-image name scan.
 #[derive(Default, Clone, Debug)]
 pub struct TypeIndex {
-    alias_names: NameTree,
-    target_names: NameTree,
-    /// Kotlin type alias name ID → target JVM internal name ID
+    /// Kotlin type alias name → target JVM internal name
     /// (e.g. `"StringBuilder"` → `"java/lang/StringBuilder"`).
-    type_aliases: HashMap<NameId, NameId>,
+    type_aliases: HashMap<TypeName, TypeName>,
 }
 
 impl TypeIndex {
@@ -727,8 +725,16 @@ impl BuiltinsFile {
         self.classes.get(&id)
     }
 
+    fn get_name(&self, internal: TypeName) -> Option<&super::metadata::BuiltinClass> {
+        self.get(&internal.render())
+    }
+
     fn contains_key(&self, internal: &str) -> bool {
         self.get(internal).is_some()
+    }
+
+    fn contains_key_name(&self, internal: TypeName) -> bool {
+        self.get_name(internal).is_some()
     }
 
     fn is_subtype(&self, sub: &str, sup: &str) -> bool {
@@ -736,6 +742,10 @@ impl BuiltinsFile {
             return false;
         };
         self.is_subtype_id(sub, sup)
+    }
+
+    fn is_subtype_name(&self, sub: TypeName, sup: TypeName) -> bool {
+        self.is_subtype(&sub.render(), &sup.render())
     }
 
     fn is_subtype_id(&self, sub: &str, sup: NameId) -> bool {
@@ -1560,6 +1570,13 @@ impl Classpath {
             .is_some_and(|c| c.members.iter().any(|m| m.name == name && m.is_property))
     }
 
+    pub fn builtin_member_is_property_name(&self, internal: TypeName, name: &str) -> bool {
+        let path = Self::builtins_path_for(&internal.render());
+        self.builtins_file(&path)
+            .get_name(internal)
+            .is_some_and(|c| c.members.iter().any(|m| m.name == name && m.is_property))
+    }
+
     /// Direct supertypes declared in `.kotlin_builtins` for a Kotlin builtin class.
     pub fn builtin_supertypes(&self, internal: &str) -> Vec<String> {
         let path = Self::builtins_path_for(internal);
@@ -1569,14 +1586,30 @@ impl Classpath {
             .unwrap_or_default()
     }
 
+    pub fn builtin_supertypes_name(&self, internal: TypeName) -> TypeNameList {
+        let path = Self::builtins_path_for(&internal.render());
+        self.builtins_file(&path)
+            .get_name(internal)
+            .map(|c| {
+                c.supertypes
+                    .iter()
+                    .map(|s| type_name(s))
+                    .collect::<Vec<_>>()
+                    .into()
+            })
+            .unwrap_or_default()
+    }
+
     /// The target internal name of the classpath `typealias` named `internal` (full name, e.g.
     /// `kotlin/collections/ArrayList` → `java/util/ArrayList`), or `None` if `internal` is not an alias.
     pub fn type_alias_target(&self, internal: &str) -> Option<String> {
+        self.type_alias_target_name(type_name(internal))
+            .map(TypeName::render)
+    }
+
+    pub fn type_alias_target_name(&self, internal: TypeName) -> Option<TypeName> {
         let idx = self.scan_types();
-        let alias = idx.alias_names.get(internal)?;
-        idx.type_aliases
-            .get(&alias)
-            .map(|&target| idx.target_names.render(target))
+        idx.type_aliases.get(&internal).copied()
     }
 
     /// Whether `internal` is a Kotlin BUILTIN declared in a `.kotlin_builtins` fragment (`kotlin/Number`,
@@ -1590,6 +1623,13 @@ impl Classpath {
             .map(|c| c.is_interface)
     }
 
+    pub fn builtin_is_interface_name(&self, internal: TypeName) -> Option<bool> {
+        let path = Self::builtins_path_for(&internal.render());
+        self.builtins_file(&path)
+            .get_name(internal)
+            .map(|c| c.is_interface)
+    }
+
     /// Whether `internal` names a type in the Kotlin collection hierarchy (`collections.kotlin_builtins`)
     /// — i.e. one whose read-only/mutable identity is known here. A platform `java/util/List` or a user
     /// class is NOT (the front end never produces the former for a Kotlin collection; both keep their
@@ -1598,12 +1638,20 @@ impl Classpath {
         self.collection_builtins().contains_key(internal)
     }
 
+    pub fn is_kotlin_collection_name(&self, internal: TypeName) -> bool {
+        self.collection_builtins().contains_key_name(internal)
+    }
+
     /// Whether `sub` is, or transitively is a subtype of, `sup` within the Kotlin collection hierarchy
     /// read from `collections.kotlin_builtins` (`MutableList <: MutableCollection`; `List` is NOT). The
     /// generic subtype query behind extension applicability — `MutableCollection.plusAssign` applies to a
     /// `MutableList` receiver but not a read-only `List`, exactly as kotlinc's overload resolution.
     pub fn kotlin_subtype(&self, sub: &str, sup: &str) -> bool {
         self.collection_builtins().is_subtype(sub, sup)
+    }
+
+    pub fn kotlin_subtype_name(&self, sub: TypeName, sup: TypeName) -> bool {
+        self.collection_builtins().is_subtype_name(sub, sup)
     }
 
     pub fn empty() -> Classpath {
@@ -1643,8 +1691,6 @@ impl Classpath {
                 // "first hit" invariant). The old inline scan `insert`ed in entry order, so a LATER jar
                 // overwrote an earlier one (last-wins); that was a latent divergence, masked only because
                 // no two corpus jars declare the same alias (box conformance stays FAIL:0 either way).
-                let alias = idx.alias_names.insert_from(&part.alias_names, alias);
-                let target = idx.target_names.insert_from(&part.target_names, target);
                 idx.type_aliases.entry(alias).or_insert(target);
             }
         }
@@ -2869,9 +2915,8 @@ fn class_internal_from_entry(name: &str) -> Option<&str> {
 fn parse_aliases_from_bytes(bytes: &[u8], idx: &mut TypeIndex) {
     let Ok(ci) = parse_class(bytes) else { return };
     for (alias, internal) in super::metadata::package_type_aliases(&ci) {
-        let alias = idx.alias_names.insert(&alias);
-        let target = idx.target_names.insert(&internal);
-        idx.type_aliases.insert(alias, target);
+        idx.type_aliases
+            .insert(type_name(&alias), type_name(&internal));
     }
 }
 
@@ -3200,25 +3245,19 @@ mod fq_tests {
     }
 
     #[test]
-    fn type_index_composes_alias_targets_as_name_ids() {
+    fn type_index_composes_alias_targets_as_type_names() {
         let mut part = TypeIndex::default();
-        let array_list_alias = part.alias_names.insert("kotlin/collections/ArrayList");
-        let array_list = part.target_names.insert("java/util/ArrayList");
+        let array_list_alias = type_name("kotlin/collections/ArrayList");
+        let array_list = type_name("java/util/ArrayList");
         part.type_aliases.insert(array_list_alias, array_list);
 
         let mut idx = TypeIndex::default();
         for (&alias, &target) in &part.type_aliases {
-            let alias = idx.alias_names.insert_from(&part.alias_names, alias);
-            let target = idx.target_names.insert_from(&part.target_names, target);
             idx.type_aliases.entry(alias).or_insert(target);
         }
 
-        let alias = idx
-            .alias_names
-            .get("kotlin/collections/ArrayList")
-            .expect("alias id");
-        let target = idx.type_aliases[&alias];
-        assert_eq!(idx.target_names.render(target), "java/util/ArrayList");
+        let target = idx.type_aliases[&array_list_alias];
+        assert!(target.matches("java/util/ArrayList"));
         assert!(!idx.is_empty());
     }
 

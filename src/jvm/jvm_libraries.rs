@@ -1262,10 +1262,6 @@ fn supertype_descriptors(cp: &Classpath, receiver: Ty) -> Vec<String> {
 /// Whether `internal` is, transitively, a subtype of `target` (a superclass or implemented interface,
 /// at any depth). Names are normalized to their JVM spelling so a Kotlin built-in (`kotlin/collections/
 /// MutableMap`) and its `java/util/Map` realization compare equal.
-fn class_implements(cp: &Classpath, internal: &str, target: &str) -> bool {
-    class_implements_name(cp, type_name(internal), type_name(target))
-}
-
 fn class_implements_name(cp: &Classpath, internal: TypeName, target: TypeName) -> bool {
     let target = super::jvm_class_map::to_jvm_type_name(target);
     let mut seen = std::collections::HashSet::new();
@@ -1363,16 +1359,16 @@ impl SymbolSource for JvmLibraries {
         let Some(internal) = recv.kotlin_class_internal() else {
             return false;
         };
-        let mut queue = vec![internal.to_string()];
+        let mut queue = vec![internal];
         let mut seen = std::collections::HashSet::new();
         while let Some(cn) = queue.pop() {
-            if !seen.insert(cn.clone()) {
+            if !seen.insert(cn) {
                 continue;
             }
-            if self.cp.builtin_member_is_property(&cn, name) {
+            if self.cp.builtin_member_is_property_name(cn, name) {
                 return true;
             }
-            queue.extend(self.cp.builtin_supertypes(&cn));
+            queue.extend(self.cp.builtin_supertypes_name(cn).iter_ids());
         }
         false
     }
@@ -1402,9 +1398,9 @@ impl SymbolSource for JvmLibraries {
             // A classpath `typealias` (`kotlin/collections/ArrayList` → `java/util/ArrayList`) has no class of
             // its own; resolve the underlying type and tag it with `alias_target` so name resolution records
             // the real internal.
-            if let Some(target) = self.cp.type_alias_target(internal) {
-                let mut t = self.resolve_type(&target)?;
-                t.alias_target = Some(type_name(&target));
+            if let Some(target) = self.cp.type_alias_target_name(internal_name) {
+                let mut t = self.resolve_type_name(target)?;
+                t.alias_target = Some(target);
                 return Some(t);
             }
             // A Kotlin MAPPED type (`kotlin.collections.List`, `kotlin.CharSequence`, …) has no own JVM
@@ -1446,7 +1442,7 @@ impl SymbolSource for JvmLibraries {
             // `Map.put` returns the PREVIOUS value (`V?`, null for a fresh key) — Kotlin enhances this Java
             // method's nullability. It applies to ANY `Map` subtype (`HashMap`, `TreeMap`, …), since a call
             // resolves the member on the concrete class, not on `Map` itself.
-            let is_map = class_implements(&self.cp, internal, "java/util/Map");
+            let is_map = class_implements_name(&self.cp, internal_name, type_name("java/util/Map"));
             // The class's `@Metadata` function records — carry each member's SOURCE parameter names and
             // default flags, which the erased JVM descriptor loses. Populate every member's `call_sig` from
             // its record so a named-argument / omitted-`$default` member call resolves through the ONE
@@ -1781,6 +1777,13 @@ impl SymbolSource for JvmLibraries {
     fn resolve_type_name(&self, internal: TypeName) -> Option<LibraryType> {
         if let Some(hit) = self.cp.cached_library_type_name(internal) {
             return hit.as_ref().map(|rc| (**rc).clone());
+        }
+        if let Some(target) = self.cp.type_alias_target_name(internal) {
+            let mut t = self.resolve_type_name(target)?;
+            t.alias_target = Some(target);
+            self.cp
+                .cache_library_type_name(internal, Some(std::rc::Rc::new(t.clone())));
+            return Some(t);
         }
         self.resolve_type(&internal.render())
     }
