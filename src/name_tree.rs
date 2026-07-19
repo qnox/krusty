@@ -224,6 +224,10 @@ impl NameTree {
         self.node(id).parent
     }
 
+    pub fn segment(&self, id: NameId) -> &str {
+        &self.node(id).segment
+    }
+
     #[cfg(test)]
     pub fn len(&self) -> usize {
         self.nodes.len()

@@ -83,6 +83,14 @@ impl TypeName {
         type_names().lock().unwrap().package(self.0)
     }
 
+    pub fn parent(self) -> Option<TypeName> {
+        type_names().lock().unwrap().parent(self.0).map(TypeName)
+    }
+
+    pub fn segment(self) -> String {
+        type_names().lock().unwrap().segment(self.0).to_string()
+    }
+
     pub fn nested_separator_matches(self, other: TypeName) -> bool {
         type_names()
             .lock()

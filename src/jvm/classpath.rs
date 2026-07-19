@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 
 use crate::jvm::classreader::{parse_class, read_method_code, ClassInfo, MethodCode};
 use crate::jvm::names::type_descriptor;
-use crate::libraries::{CallSig, FunctionSet, ReturnInfo};
+use crate::libraries::{CallSig, ReturnInfo};
 use crate::name_tree::{NameId, NameTree};
 use crate::types::{type_name, type_name_from, Ty, TypeName, TypeNameList};
 
@@ -290,7 +290,6 @@ struct CacheStats {
     l2_class: CacheCounter,
     ext_l1: CacheCounter,
     ext_l2: CacheCounter,
-    functions: CacheCounter,
     meta_fns: CacheCounter,
     bodies: CacheCounter,
     builtin_members: CacheCounter,
@@ -311,12 +310,11 @@ pub fn trace_cache_stats() {
         let s = cache_stats();
         crate::trace_compiler!(
             "cache",
-            "class L1 {} · L2 {} | ext L1 {} · L2 {} | fns {} | meta_fns {} | bodies {} | builtin {}",
+            "class L1 {} · L2 {} | ext L1 {} · L2 {} | meta_fns {} | bodies {} | builtin {}",
             s.l1_class.line("hits"),
             s.l2_class.line("hits"),
             s.ext_l1.line("hits"),
             s.ext_l2.line("hits"),
-            s.functions.line("hits"),
             s.meta_fns.line("hits"),
             s.bodies.line("hits"),
             s.builtin_members.line("hits"),
@@ -945,21 +943,17 @@ pub struct Classpath {
     meta_fns: MetaFnsCache,
     /// Cache of each class's `@Metadata` Kotlin-name → `@JvmName` overloads (see [`MetaOverloadCache`]).
     meta_overloads: MetaOverloadCache,
-    /// Cache of resolved library function sets keyed by semantic call query. A `JvmLibraries` wrapper is
-    /// rebuilt for every snippet, but the `Classpath` is reused on the worker thread, so keeping this here
-    /// avoids re-walking metadata/extension indexes for common stdlib calls across thousands of snippets.
-    functions: RefCell<crate::lru::LruCache<(String, Option<Ty>), FunctionSet>>,
-    /// Cache of resolved `LibraryType`s by global internal-name id. Like `functions`, kept on the reused-per-thread
+    /// Cache of resolved `LibraryType`s by global internal-name id. Kept on the reused-per-thread
     /// `Classpath` (NOT the per-compile `JvmLibraries`) so the import-driven `resolve_type` probing — which
     /// asks for the same stdlib types across thousands of snippets — warms across compiles instead of
     /// rebuilding each `LibraryType` (descriptor parses + `@Metadata` decodes) from cold every file.
     resolved_types:
         RefCell<crate::lru::LruCache<TypeName, Option<std::rc::Rc<crate::libraries::LibraryType>>>>,
-    /// Parsed `.kotlin_builtins` fragments, keyed by resource path (e.g. `kotlin/kotlin.kotlin_builtins`,
-    /// `kotlin/collections/collections.kotlin_builtins`), each mapping class internal name → its
-    /// supertypes + members. Built once per file on first use — the single source for BOTH the collection
-    /// read-only/mutable hierarchy AND every builtin type's API. Empty if no stdlib is on the classpath.
-    builtins: RefCell<HashMap<String, std::rc::Rc<BuiltinsFile>>>,
+    /// Parsed `.kotlin_builtins` fragments, keyed by package-name id (e.g. `kotlin`,
+    /// `kotlin/collections`), each mapping class internal name → its supertypes + members. Built once
+    /// per file on first use — the single source for BOTH the collection read-only/mutable hierarchy AND
+    /// every builtin type's API. Empty if no stdlib is on the classpath.
+    builtins: RefCell<HashMap<TypeName, std::rc::Rc<BuiltinsFile>>>,
     /// Resolved builtin member vectors, keyed by Kotlin internal class name. The raw builtins fragment is
     /// already cached, but mapping it to `LibraryMember`s also resolves JVM owners/interface flags and
     /// allocates descriptors. `resolve_type` asks for these repeatedly during member/subtype lookup.
@@ -1043,7 +1037,6 @@ impl Classpath {
             bodies: RefCell::new(crate::lru::LruCache::new(BODY_CAP)),
             meta_fns: RefCell::new(crate::lru::LruCache::new(META_CAP)),
             meta_overloads: RefCell::new(crate::lru::LruCache::new(META_CAP)),
-            functions: RefCell::new(crate::lru::LruCache::new(FN_CAP)),
             resolved_types: RefCell::new(crate::lru::LruCache::new(CLASS_CAP)),
             builtins: RefCell::new(HashMap::new()),
             builtin_members: RefCell::new(crate::lru::LruCache::new(META_CAP)),
@@ -1061,7 +1054,7 @@ impl Classpath {
     }
 
     /// A one-line snapshot of every cache's entry count — for memory profiling (`KRUSTY_MEM_REPORT`). The
-    /// per-`Classpath` caches (`L1_class`/`fns`/`meta*`/`bodies`/`builtin`) are LRU-bounded, so they
+    /// per-`Classpath` caches (`L1_class`/`meta*`/`bodies`/`builtin`) are LRU-bounded, so they
     /// plateau at their caps; the shared `L2_class` map and the `jimage`/`type`/`ext` INDEXES are the
     /// library-sized structures (the jimage names every JDK class) — the ones to watch if RSS is high.
     pub fn cache_report(&self) -> String {
@@ -1086,12 +1079,11 @@ impl Classpath {
             .as_ref()
             .map_or(0, |t| t.package_count());
         format!(
-            "classpath#{} L1_class={} L2_class={} fns={} meta_fns={} meta_ovl={} bodies={} builtin={} | \
+            "classpath#{} L1_class={} L2_class={} meta_fns={} meta_ovl={} bodies={} builtin={} | \
              jimage={} type={} ext={} pkgtree={}",
             self.id,
             self.local_cache.borrow().len(),
             self.cache.len(),
-            self.functions.borrow().len(),
             self.meta_fns.borrow().len(),
             self.meta_overloads.borrow().len(),
             self.bodies.borrow().len(),
@@ -1132,16 +1124,6 @@ impl Classpath {
             .insert(key, tree.clone());
         *self.pkg_tree.borrow_mut() = Some(tree.clone());
         tree
-    }
-
-    pub fn cached_functions(&self, key: &(String, Option<Ty>)) -> Option<FunctionSet> {
-        let hit = self.functions.borrow_mut().get(key).cloned();
-        cache_stat!(functions, hit.is_some());
-        hit
-    }
-
-    pub fn cache_functions(&self, key: (String, Option<Ty>), set: FunctionSet) {
-        self.functions.borrow_mut().insert(key, set);
     }
 
     /// Memoized `resolve_type` result for `internal` (the outer `Option` = cached-vs-not; the inner =
@@ -1468,41 +1450,44 @@ impl Classpath {
         out
     }
 
-    /// A parsed `.kotlin_builtins` fragment by resource path (class internal-name id → supertypes+members),
+    /// A parsed `.kotlin_builtins` fragment by package id (class internal-name id → supertypes+members),
     /// read once and cached. The single builtins entry point — both the collection hierarchy and a
     /// type's member API derive from it.
-    fn builtins_file(&self, path: &str) -> std::rc::Rc<BuiltinsFile> {
-        if let Some(m) = self.builtins.borrow().get(path) {
+    fn builtins_file_for_package(&self, package: TypeName) -> std::rc::Rc<BuiltinsFile> {
+        if let Some(m) = self.builtins.borrow().get(&package) {
             return m.clone();
         }
+        let path = Self::builtins_path_for_package(package);
         let mut map = HashMap::new();
         for e in &self.entries {
             if let Entry::Jar(j) = e {
-                if let Some(bytes) = self.jar_entry(j, path) {
+                if let Some(bytes) = self.jar_entry(j, &path) {
                     map = super::metadata::parse_builtins(&bytes);
                     break;
                 }
             }
         }
         let rc = std::rc::Rc::new(BuiltinsFile::from_classes(map));
-        self.builtins
-            .borrow_mut()
-            .insert(path.to_string(), rc.clone());
+        self.builtins.borrow_mut().insert(package, rc.clone());
         rc
     }
 
     /// The `.kotlin_builtins` fragment path for a package, mirroring kotlinc's
     /// `BuiltInSerializerProtocol.getBuiltInsFilePath`: `kotlin` → `kotlin/kotlin.kotlin_builtins`,
     /// `kotlin/collections` → `kotlin/collections/collections.kotlin_builtins`.
-    fn builtins_path_for(internal: &str) -> String {
-        let pkg = internal.rsplit_once('/').map_or("", |(p, _)| p);
-        let last = pkg.rsplit_once('/').map_or(pkg, |(_, l)| l);
+    fn builtins_path_for_package(package: TypeName) -> String {
+        let pkg = package.render();
+        let last = package.segment();
         format!("{pkg}/{last}.kotlin_builtins")
+    }
+
+    fn builtins_package_for(internal: TypeName) -> TypeName {
+        internal.parent().unwrap_or_else(|| type_name(""))
     }
 
     /// The parsed `collections.kotlin_builtins` fragment (the Kotlin collection hierarchy lives here).
     fn collection_builtins(&self) -> std::rc::Rc<BuiltinsFile> {
-        self.builtins_file("kotlin/collections/collections.kotlin_builtins")
+        self.builtins_file_for_package(type_name("kotlin/collections"))
     }
 
     /// Kotlin BUILTIN members (`String.length`, `List.get`, `Number.toInt`, …) as regular
@@ -1515,8 +1500,7 @@ impl Classpath {
             return members.as_ref().clone();
         }
         cache_stat!(builtin_members, false);
-        let path = Self::builtins_path_for(internal);
-        let f = self.builtins_file(&path);
+        let f = self.builtins_file_for_package(Self::builtins_package_for(internal_id));
         let members: Vec<_> = f
             .get(internal)
             .map(|class| {
@@ -1609,43 +1593,43 @@ impl Classpath {
     /// nullability — so the builtin's `Type.nullable` flag is the only surviving record. `false` when no
     /// such member/builtin is recorded.
     pub fn builtin_member_ret_nullable(&self, internal: &str, name: &str, arity: usize) -> bool {
-        let path = Self::builtins_path_for(internal);
-        self.builtins_file(&path).get(internal).is_some_and(|c| {
-            c.nullable_member_returns
-                .iter()
-                .any(|(n, a)| n == name && *a == arity)
-        })
+        let internal_id = type_name(internal);
+        self.builtins_file_for_package(Self::builtins_package_for(internal_id))
+            .get_name(internal_id)
+            .is_some_and(|c| {
+                c.nullable_member_returns
+                    .iter()
+                    .any(|(n, a)| n == name && *a == arity)
+            })
     }
 
     /// Whether the Kotlin builtin `internal` declares `name` as a PROPERTY (not a function) in its
     /// `.kotlin_builtins` fragment (`CharSequence.length`, `Collection.size`). Distinguishes a property
     /// reference (`s::length` → `KProperty0`) from a zero-arg method reference (`it::next` → function).
     pub fn builtin_member_is_property(&self, internal: &str, name: &str) -> bool {
-        let path = Self::builtins_path_for(internal);
-        self.builtins_file(&path)
-            .get(internal)
+        let internal_id = type_name(internal);
+        self.builtins_file_for_package(Self::builtins_package_for(internal_id))
+            .get_name(internal_id)
             .is_some_and(|c| c.members.iter().any(|m| m.name == name && m.is_property))
     }
 
     pub fn builtin_member_is_property_name(&self, internal: TypeName, name: &str) -> bool {
-        let path = Self::builtins_path_for(&internal.render());
-        self.builtins_file(&path)
+        self.builtins_file_for_package(Self::builtins_package_for(internal))
             .get_name(internal)
             .is_some_and(|c| c.members.iter().any(|m| m.name == name && m.is_property))
     }
 
     /// Direct supertypes declared in `.kotlin_builtins` for a Kotlin builtin class.
     pub fn builtin_supertypes(&self, internal: &str) -> Vec<String> {
-        let path = Self::builtins_path_for(internal);
-        self.builtins_file(&path)
-            .get(internal)
+        let internal_id = type_name(internal);
+        self.builtins_file_for_package(Self::builtins_package_for(internal_id))
+            .get_name(internal_id)
             .map(|c| c.supertypes.iter_rendered().collect())
             .unwrap_or_default()
     }
 
     pub fn builtin_supertypes_name(&self, internal: TypeName) -> TypeNameList {
-        let path = Self::builtins_path_for(&internal.render());
-        self.builtins_file(&path)
+        self.builtins_file_for_package(Self::builtins_package_for(internal))
             .get_name(internal)
             .map(|c| c.supertypes.clone())
             .unwrap_or_default()
@@ -1668,15 +1652,14 @@ impl Classpath {
     /// `resolve_type` report a builtin whose JVM class is absent (a no-JDK compile) from the builtins data,
     /// with the right class-vs-interface kind for member-invoke codegen.
     pub fn builtin_is_interface(&self, internal: &str) -> Option<bool> {
-        let path = Self::builtins_path_for(internal);
-        self.builtins_file(&path)
-            .get(internal)
+        let internal_id = type_name(internal);
+        self.builtins_file_for_package(Self::builtins_package_for(internal_id))
+            .get_name(internal_id)
             .map(|c| c.is_interface)
     }
 
     pub fn builtin_is_interface_name(&self, internal: TypeName) -> Option<bool> {
-        let path = Self::builtins_path_for(&internal.render());
-        self.builtins_file(&path)
+        self.builtins_file_for_package(Self::builtins_package_for(internal))
             .get_name(internal)
             .map(|c| c.is_interface)
     }
