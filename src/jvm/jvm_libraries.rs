@@ -1791,30 +1791,35 @@ impl SymbolSource for JvmLibraries {
     }
 
     fn resolve_symbols(&self, fqn: &str) -> crate::libraries::ResolvedSymbols {
+        self.resolve_symbols_name(type_name(fqn))
+    }
+
+    fn resolve_symbols_name(&self, fqn: TypeName) -> crate::libraries::ResolvedSymbols {
         use crate::libraries::{Callables, ResolvedSymbols};
         // The spec's top-level memo: this classpath `SymbolSource` composes the namespace record for `fqn`
         // once and reuses it across the compile. A `JvmLibraries` wrapper is rebuilt per snippet, but the
         // `Classpath` (which owns the memo) is reused on the worker thread, so hot stdlib names resolve
         // without re-walking metadata/extension indexes.
-        if let Some(cached) = self.cp.cached_symbols(fqn) {
+        if let Some(cached) = self.cp.cached_symbols_name(fqn) {
             return (*cached).clone();
         }
         // Classifier namespace: the class/interface/object (or a typealias's target) at the fqn.
-        let classifier = self.resolve_type(fqn);
+        let classifier = self.resolve_type_name(fqn);
         // Callable namespace, receiver-AGNOSTIC (resolution is by fqn; the receiver binds later, in the
         // consumer). Top-level functions of the source name declared in the fqn's package, plus the
         // package's extensions (source-keyed via the tree, so a `@JvmName`-mangled extension `sum` →
         // `sumOfInt` is found under its SOURCE name; the JVM name stays on the callable for emit).
-        let (pkg, name) = fqn.rsplit_once('/').unwrap_or(("", fqn));
+        let pkg = fqn.parent().map_or_else(String::new, TypeName::render);
+        let name = fqn.segment();
         // TOP-LEVEL functions of the package (receiver-less). The receiver-less `functions(name, None)`
         // query classifies each candidate by its metadata receiver, so an EXTENSION compiled into the same
         // facade surfaces here too — but with no receiver populated (`FnKind::Extension`, `receiver: None`),
         // a malformed shape for extension selection. Take only genuine `TopLevel` here; extensions come
         // from the receiver-carrying tree loop below, so the namespace has ONE clean source per kind.
         let mut overloads: Vec<_> = self
-            .top_level_overloads(name)
+            .top_level_overloads(&name)
             .into_iter()
-            .filter(|o| o.kind == FnKind::TopLevel && o.callable.owner_package_matches(pkg))
+            .filter(|o| o.kind == FnKind::TopLevel && o.callable.owner_package_matches(&pkg))
             .collect();
         // Extension PROPERTIES of the source name live in the CALLABLE namespace's property half. A name is
         // functions XOR a property, so these are surfaced separately and chosen when there are no functions.
@@ -1825,7 +1830,7 @@ impl SymbolSource for JvmLibraries {
         // descriptor) is only the emit handle, rooted at the PUBLIC facade — kotlinc's `invokestatic`
         // target — so a package-private multifile PART never leaks a `false` visibility. Receiver-coupled
         // JVM specifics (element-variant `sumOfInt`, value-class mangling) are the emitter's job.
-        for facade in self.cp.package_facades(pkg) {
+        for facade in self.cp.package_facades(&pkg) {
             let facade_rendered = facade.render();
             for mf in self.cp.meta_functions_name(facade).iter() {
                 if mf.kotlin_name != name || !mf.is_extension {
@@ -2041,7 +2046,7 @@ impl SymbolSource for JvmLibraries {
         } else {
             Callables::None
         };
-        (*self.cp.memoize_symbols(
+        (*self.cp.memoize_symbols_name(
             fqn,
             ResolvedSymbols {
                 classifier,

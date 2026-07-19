@@ -63,6 +63,13 @@ pub trait SymbolSource {
         ResolvedSymbols::default()
     }
 
+    /// Id-backed namespace lookup. Providers that already carry class/internal names as ids should
+    /// override this; the default keeps legacy string-backed sources working while callers stop rendering
+    /// names at each use site.
+    fn resolve_symbols_name(&self, fqn: TypeName) -> ResolvedSymbols {
+        self.resolve_symbols(&fqn.render())
+    }
+
     /// The MEMBER-property declarations named `name` on receiver `recv` (own + inherited), each with its
     /// [`crate::libraries::PropKind`], type, accessors, and visibility — symmetric to [`Self::member_overloads`]
     /// and RECEIVER-COUPLED for the same reason (a member property is a shape of the type). Extension/top-level
@@ -138,6 +145,10 @@ impl SymbolSource for CompositeSource<'_> {
     }
 
     fn resolve_symbols(&self, fqn: &str) -> ResolvedSymbols {
+        self.resolve_symbols_name(crate::types::type_name(fqn))
+    }
+
+    fn resolve_symbols_name(&self, fqn: TypeName) -> ResolvedSymbols {
         use crate::libraries::Callables;
         // Classifier: first source wins (user shadows library). Callables: concatenate in precedence
         // order (each overload keeps its origin) — functions XOR a property, so take whichever appears.
@@ -145,7 +156,7 @@ impl SymbolSource for CompositeSource<'_> {
         let mut fns = Vec::new();
         let mut props = Vec::new();
         for c in &self.children {
-            let r = c.resolve_symbols(fqn);
+            let r = c.resolve_symbols_name(fqn);
             if classifier.is_none() {
                 classifier = r.classifier;
             }

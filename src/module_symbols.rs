@@ -351,16 +351,21 @@ fn fn_info(
 
 impl SymbolSource for ModuleSymbols<'_> {
     fn resolve_symbols(&self, fqn: &str) -> crate::libraries::ResolvedSymbols {
+        self.resolve_symbols_name(type_name(fqn))
+    }
+
+    fn resolve_symbols_name(&self, fqn: TypeName) -> crate::libraries::ResolvedSymbols {
         use crate::libraries::{Callables, ResolvedSymbols};
         // Classifier: a module class at the fqn. Callables: `functions(name, receiver)` — members (always
         // visible on their type) plus the module's top-level/extension functions when the fqn's package is
         // their declaring package (a same-file function has no recorded facade — it lives in the file's own
         // package, which the resolver queries as the same-package candidate fqn).
-        let classifier = self.resolve_type(fqn);
-        let (pkg, name) = fqn.rsplit_once('/').unwrap_or(("", fqn));
-        let pkg_scope = [pkg.to_string()];
-        let mut overloads = if self.syms.funs.contains_key(name) {
-            self.top_level_overloads_in_scope(name, &pkg_scope)
+        let classifier = self.resolve_type_name(fqn);
+        let pkg = fqn.parent().map_or_else(String::new, TypeName::render);
+        let name = fqn.segment();
+        let pkg_scope = [pkg];
+        let mut overloads = if self.syms.funs.contains_key(&name) {
+            self.top_level_overloads_in_scope(&name, &pkg_scope)
         } else {
             Vec::new()
         };
@@ -369,7 +374,7 @@ impl SymbolSource for ModuleSymbols<'_> {
         // `ext_funs` — the exact-receiver key is rung 0, the universal `Any` key rung 1.
         let any = Ty::obj("kotlin/Any");
         for ((recv, en), sigs) in &self.syms.ext_funs {
-            if en == name {
+            if en == &name {
                 let rank = if *recv == any { 1 } else { 0 };
                 // Surface EVERY overload registered for this (receiver, name) so the resolver's
                 // overload picker can choose by arity/argument types (`fun R.f()` vs `fun R.f(x)`).
@@ -379,7 +384,7 @@ impl SymbolSource for ModuleSymbols<'_> {
                         sig,
                         Some(*recv),
                         crate::types::type_name(""),
-                        name,
+                        &name,
                         rank,
                         Origin::Module {
                             facade: type_name(""),

@@ -2382,8 +2382,14 @@ impl Classpath {
         &self,
         fqn: &str,
     ) -> Option<std::rc::Rc<crate::libraries::ResolvedSymbols>> {
-        let fqn_id = type_name(fqn);
-        self.symbols_memo.borrow_mut().get(&fqn_id).cloned()
+        self.cached_symbols_name(type_name(fqn))
+    }
+
+    pub fn cached_symbols_name(
+        &self,
+        fqn: TypeName,
+    ) -> Option<std::rc::Rc<crate::libraries::ResolvedSymbols>> {
+        self.symbols_memo.borrow_mut().get(&fqn).cloned()
     }
 
     /// Store the composed namespace record for `fqn` in the top-level memo, returning the shared `Rc` the
@@ -2393,9 +2399,16 @@ impl Classpath {
         fqn: &str,
         symbols: crate::libraries::ResolvedSymbols,
     ) -> std::rc::Rc<crate::libraries::ResolvedSymbols> {
-        let fqn_id = type_name(fqn);
+        self.memoize_symbols_name(type_name(fqn), symbols)
+    }
+
+    pub fn memoize_symbols_name(
+        &self,
+        fqn: TypeName,
+        symbols: crate::libraries::ResolvedSymbols,
+    ) -> std::rc::Rc<crate::libraries::ResolvedSymbols> {
         let rc = std::rc::Rc::new(symbols);
-        self.symbols_memo.borrow_mut().insert(fqn_id, rc.clone());
+        self.symbols_memo.borrow_mut().insert(fqn, rc.clone());
         rc
     }
 

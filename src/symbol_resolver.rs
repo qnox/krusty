@@ -14,7 +14,7 @@ use crate::libraries::{
     LibraryMember, Origin, PropKind, SemanticPlatform,
 };
 use crate::symbol_source::SymbolSource;
-use crate::types::{Ty, TypeName};
+use crate::types::{type_name, Ty, TypeName};
 
 #[derive(Clone, Debug, Default)]
 pub struct TopLevelLambdaShape {
@@ -2012,7 +2012,7 @@ pub(crate) fn resolve_symbols_in_scope(
             } else {
                 format!("{pkg}/{name}")
             };
-            let r = lib.resolve_symbols(&fqn);
+            let r = lib.resolve_symbols_name(type_name(&fqn));
             (!r.is_empty()).then_some((fqn, r))
         })
         .collect()
