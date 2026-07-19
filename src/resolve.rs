@@ -1666,14 +1666,6 @@ pub fn collect_signatures_with_cp(
                             match (&bp.ty, &bp.getter) {
                                 (Some(r), _) => ty_of_ref(r, &class_names, &ctp, diags),
                                 (None, Some(FunBody::Expr(g))) if !c.is_value => infer_lit_ty_p(
-                                    // Full light inference (resolver-based) — like the delegate/initializer
-                                    // cases below — so a computed getter over a classpath member-call CHAIN
-                                    // keeps its generic return arg (`get() = db.getCollection("c")` →
-                                    // `MongoCollection<Document>`, not erased to `Error`/`Any`, which made
-                                    // every downstream `.find{}.map{ it… }` read `it` as `Any`). A VALUE
-                                    // class keeps the conservative `infer_getter_ty`: its specialized
-                                    // unbox/mangle member emit mishandles a richer computed-property type
-                                    // (a `VerifyError` on box `callComputablePropertyInsideInlineClass.kt`).
                                     file,
                                     *g,
                                     &class_names,
