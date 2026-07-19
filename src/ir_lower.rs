@@ -8893,23 +8893,24 @@ impl<'a> Lower<'a> {
         // (`obj::p`) or an arbitrary expression (`A(..)::p`, receiver evaluated exactly once).
         // UNBOUND: `Type::p` — the `Name` is a class, and the reference takes the receiver as its
         // `get` argument. `capture` holds the captured-receiver expression for the bound forms.
-        let (owner, capture): (String, Option<u32>) = match self.afile.expr(recv).clone() {
+        let (owner, capture): (TypeName, Option<u32>) = match self.afile.expr(recv).clone() {
             Expr::Name(rn) => match self.lookup(&rn) {
-                Some((v, ty)) => (ty.obj_internal()?.to_string(), Some(self.emit_get_value(v))),
+                Some((v, ty)) => (ty.obj_internal()?, Some(self.emit_get_value(v))),
                 None => {
                     let owner = class_internal(self.afile, &rn);
+                    let owner_name = type_name(&owner);
                     // An OBJECT singleton receiver (`O::p`) is BOUND to `O.INSTANCE`; a plain class name
                     // (`Type::p`) stays an UNBOUND reference (`get(receiver)`).
                     match self
-                        .class_info(&owner)
+                        .class_info_name(owner_name)
                         .map(|ci| ci.id)
                         .filter(|&cid| self.ir.classes[cid as usize].is_object)
                     {
                         Some(cid) => {
                             let inst = self.emit_static_instance(cid, cid, "INSTANCE");
-                            (owner, Some(inst))
+                            (owner_name, Some(inst))
                         }
-                        None => (owner, None),
+                        None => (owner_name, None),
                     }
                 }
             },
@@ -8917,18 +8918,18 @@ impl<'a> Lower<'a> {
                 // Only a USER-class receiver is handled here; a library receiver is left to
                 // `lower_bound_library_prop_ref` (checked BEFORE capturing, so the receiver expression
                 // isn't evaluated twice).
-                let owner = self.info.ty(recv).obj_internal()?.to_string();
-                if !self.contains_class(&owner) {
+                let owner = self.info.ty(recv).obj_internal()?;
+                if !self.contains_class_name(owner) {
                     return None;
                 }
                 (owner, Some(self.expr(recv)?))
             }
         };
-        let owner_id = self.class_info(&owner)?.id;
+        let owner_id = self.class_info_name(owner)?.id;
         // A member field property dispatches through the instance `getName()`/`setName()`; an EXTENSION
         // property (`val A.ext`, not a field) dispatches through the static `getName(A)`/`setName(A, v)`
         // on the facade — `ext_facade = Some(())` selects that emit shape.
-        let (prop_ty, is_var, ext_facade): (Ty, bool, Option<String>) = {
+        let (prop_ty, is_var, ext_facade): (Ty, bool, Option<Option<TypeName>>) = {
             // Search the receiver class and its superclasses for a backing field — an inherited member
             // property's getter/setter are inherited too, so the reference dispatches them on the
             // receiver just like an own property.
@@ -8942,22 +8943,15 @@ impl<'a> Lower<'a> {
                 }
                 cur = cls
                     .has_non_top_superclass()
-                    .then(|| {
-                        let superclass = cls.superclass();
-                        self.class_info(&superclass).map(|c| c.id)
-                    })
+                    .then(|| self.class_info_name(cls.superclass).map(|c| c.id))
                     .flatten();
             }
             if let Some((pty, is_var)) = field {
                 (pty, is_var, None)
             } else {
-                let gfid = self.ext_prop_get_id(Ty::obj(&owner), name)?;
-                let is_var = self.ext_prop_set_id(Ty::obj(&owner), name).is_some();
-                (
-                    self.ir.functions[gfid as usize].ret,
-                    is_var,
-                    Some(String::new()),
-                )
+                let gfid = self.ext_prop_get_id(Ty::obj_name(owner), name)?;
+                let is_var = self.ext_prop_set_id(Ty::obj_name(owner), name).is_some();
+                (self.ir.functions[gfid as usize].ret, is_var, Some(None))
             }
         };
         // A user function whose name collides with a MEMBER property's accessor (`var x` alongside a
@@ -8966,7 +8960,7 @@ impl<'a> Lower<'a> {
         // the accessor the ref calls can be missing. Decline (skip) rather than miscompile into a
         // NoSuchMethodError. (An extension property's accessor lives on the facade, so no clash.)
         if ext_facade.is_none() {
-            if let Some(sig) = self.syms.class_by_internal(&owner) {
+            if let Some(sig) = self.syms.class_by_type_name(owner) {
                 if sig.methods.contains_key(&property_getter_name(name))
                     || (is_var && sig.methods.contains_key(&property_setter_name(name)))
                 {
@@ -9009,15 +9003,14 @@ impl<'a> Lower<'a> {
             enum_entries: vec![],
             enum_entry_of: None,
             prop_ref: Some(crate::ir::PropRef {
-                owner_internal: Some(type_name(&owner)),
+                owner_internal: Some(owner),
                 prop_name: name.to_string(),
                 getter_name: property_getter_name(name),
                 prop_ty,
                 bound,
                 static_dispatch: false,
                 mutable: is_var,
-                ext_facade: ext_facade
-                    .map(|facade| (!facade.is_empty()).then(|| type_name(&facade))),
+                ext_facade,
             }),
             func_ref: None,
             bridges: vec![],
