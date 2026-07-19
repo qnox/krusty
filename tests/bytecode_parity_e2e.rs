@@ -287,6 +287,47 @@ fn data_class_copy_null_checks_nonnull_reference_params() {
 }
 
 #[test]
+fn classpath_interface_override_is_not_final() {
+    let Some(jh) = java_home() else {
+        return;
+    };
+    let Some(jdk) = common::jdk_modules() else {
+        return;
+    };
+    let Some(libdir) = common::compile_lib(
+        "cpiface",
+        "package p\ninterface Port { fun handle(s: String): String }\n",
+    ) else {
+        return;
+    };
+    let src = "import p.Port\n\
+        class Adapter : Port { override fun handle(s: String): String = s + \"!\" }\n\
+        fun box() = \"OK\"\n";
+    let classes = common::compile_in_process(src, "Main", &[libdir], Some(&jdk))
+        .expect("krusty should compile the adapter");
+    let dir = std::env::temp_dir().join(format!("krusty_cpiface_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    for (internal, bytes) in &classes {
+        let path = dir.join(format!("{internal}.class"));
+        if let Some(p) = path.parent() {
+            fs::create_dir_all(p).ok();
+        }
+        fs::write(&path, bytes).unwrap();
+    }
+    let text = javap(&jh, &dir.join("Adapter.class"));
+    let _ = fs::remove_dir_all(&dir);
+    let line = text
+        .lines()
+        .find(|l| l.contains(" handle("))
+        .expect("Adapter must declare handle");
+    assert!(
+        !line.contains("final"),
+        "a classpath-interface override must NOT be final (kotlinc drops ACC_FINAL):\n{line}"
+    );
+}
+
+#[test]
 fn data_class_object_overrides_are_not_final() {
     // kotlinc leaves a data class's Object-overrides (toString/hashCode/equals) `public` (open) even in
     // a final class, but emits component/copy/getX as `public final`. Match that exactly.

@@ -43,6 +43,7 @@ fn is_ieee_fp(fq: &str) -> bool {
 /// underlying. Keyed on the getter's IDENTITY (owning class + method slot), not its name, so a
 /// coincidentally-named boxing override does not collide.
 type FieldGetters = HashMap<(u32, u32), Ty>;
+type SuperMemberNames = HashMap<String, Option<HashMap<String, Option<Ty>>>>;
 
 /// Lower all `@JvmInline value class` usage in `ir` to the JVM's unboxed representation: erase the
 /// value-class type to its single field's type, rewrite construction/sole-property access, and insert
@@ -130,6 +131,122 @@ fn referenced_class_names(ir: &IrFile) -> Vec<String> {
     out.sort();
     out.dedup();
     out
+}
+
+fn same_file_super_member_names(ir: &IrFile) -> SuperMemberNames {
+    ir.classes
+        .iter()
+        .filter(|c| !c.is_value)
+        .map(|c| {
+            let mut names: HashMap<String, Option<Ty>> = HashMap::new();
+            let mut work: Vec<&str> = c
+                .interfaces
+                .iter()
+                .map(String::as_str)
+                .chain(c.supertypes.iter().filter_map(|t| t.obj_internal()))
+                .chain(
+                    (!c.superclass.is_empty()
+                        && c.superclass != "java/lang/Object"
+                        && c.superclass != "kotlin/Any")
+                        .then_some(c.superclass.as_str()),
+                )
+                .collect();
+            let mut known = true;
+            let mut seen: HashSet<&str> = HashSet::new();
+            while let Some(s) = work.pop() {
+                if s == "java/lang/Object" || s == "kotlin/Any" || !seen.insert(s) {
+                    continue;
+                }
+                match ir.classes.iter().find(|o| o.fq_name == s) {
+                    Some(sup) => {
+                        for &m in &sup.methods {
+                            if let Some(f) = ir.functions.get(m as usize) {
+                                let getter_ret = (f.name.starts_with("get") && f.params.is_empty())
+                                    .then_some(f.ret);
+                                names.insert(f.name.clone(), getter_ret);
+                            }
+                        }
+                        work.extend(sup.interfaces.iter().map(String::as_str));
+                        work.extend(sup.supertypes.iter().filter_map(|t| t.obj_internal()));
+                        if !sup.superclass.is_empty()
+                            && sup.superclass != "java/lang/Object"
+                            && sup.superclass != "kotlin/Any"
+                        {
+                            work.push(sup.superclass.as_str());
+                        }
+                    }
+                    None => {
+                        known = false;
+                        break;
+                    }
+                }
+            }
+            crate::trace_compiler!(
+                "value_classes",
+                "super_member_names {} known={known} names={:?} ifaces={:?} super={:?}",
+                c.fq_name,
+                names,
+                c.interfaces,
+                c.superclass
+            );
+            (c.fq_name.clone(), known.then_some(names))
+        })
+        .collect()
+}
+
+pub(crate) fn apply_override_final_drop(
+    ir: &mut IrFile,
+    resolver: &crate::symbol_resolver::SymbolResolver,
+) {
+    let super_member_names = same_file_super_member_names(ir);
+    let mut override_opens: Vec<u32> = Vec::new();
+    for c in &ir.classes {
+        if c.is_interface || c.fq_name.ends_with("$$serializer") {
+            continue;
+        }
+        let Some(Some(names)) = super_member_names.get(&c.fq_name) else {
+            continue;
+        };
+        for &m in &c.methods {
+            if let Some(f) = ir.functions.get(m as usize) {
+                if !f.is_static && names.contains_key(&f.name) {
+                    override_opens.push(m);
+                }
+            }
+        }
+    }
+    for c in &ir.classes {
+        if c.is_interface || c.fq_name.ends_with("$$serializer") {
+            continue;
+        }
+        if let Some(Some(_)) = super_member_names.get(&c.fq_name) {
+            continue;
+        }
+        let mut supers: Vec<String> = c.interfaces.clone();
+        supers.extend(
+            c.supertypes
+                .iter()
+                .filter_map(|t| t.obj_internal())
+                .map(str::to_string),
+        );
+        if !c.superclass.is_empty()
+            && c.superclass != "java/lang/Object"
+            && c.superclass != "kotlin/Any"
+        {
+            supers.push(c.superclass.clone());
+        }
+        if supers.is_empty() {
+            continue;
+        }
+        for &m in &c.methods {
+            if let Some(f) = ir.functions.get(m as usize) {
+                if !f.is_static && supers.iter().any(|s| resolver.declares_member(s, &f.name)) {
+                    override_opens.push(m);
+                }
+            }
+        }
+    }
+    ir.open_methods.extend(override_opens);
 }
 
 #[must_use]
@@ -530,142 +647,7 @@ pub fn lower_value_classes(
         target_param_map.insert(key.clone(), orig_params[fid].clone());
         target_nullable_map.insert(key, nullable);
     }
-    // Per owner: the members its supertype chain declares — `None` when any supertype is not a
-    // SAME-FILE class (a classpath/cross-file parent can't be inspected → conservatively skip getter
-    // mangling for that owner entirely). Each declared member name maps to `Some(ret)` when it is a
-    // no-arg property GETTER (pre-erasure return), `None` for any other member. A getter that
-    // OVERRIDES a supertype declaration mangles ONLY when the supertype's declaration is the same
-    // getter of the SAME type — then BOTH sides mangle to the same `get<X>-<hash>` (kotlinc's
-    // behavior for `interface I { val id: Vid }` + `class C(override val id: Vid) : I`). Mangling
-    // one side of a pair is an AbstractMethodError (box `overrideReturnNothing.kt`).
-    let super_member_names: HashMap<String, Option<HashMap<String, Option<Ty>>>> = ir
-        .classes
-        .iter()
-        .filter(|c| !c.is_value)
-        .map(|c| {
-            let mut names: HashMap<String, Option<Ty>> = HashMap::new();
-            let mut work: Vec<&str> = c
-                .interfaces
-                .iter()
-                .map(String::as_str)
-                .chain(c.supertypes.iter().filter_map(|t| t.obj_internal()))
-                .chain(
-                    (!c.superclass.is_empty()
-                        && c.superclass != "java/lang/Object"
-                        && c.superclass != "kotlin/Any")
-                        .then_some(c.superclass.as_str()),
-                )
-                .collect();
-            let mut known = true;
-            let mut seen: HashSet<&str> = HashSet::new();
-            while let Some(s) = work.pop() {
-                if s == "java/lang/Object" || s == "kotlin/Any" || !seen.insert(s) {
-                    continue;
-                }
-                match ir.classes.iter().find(|o| o.fq_name == s) {
-                    Some(sup) => {
-                        for &m in &sup.methods {
-                            if let Some(f) = ir.functions.get(m as usize) {
-                                let getter_ret = (f.name.starts_with("get") && f.params.is_empty())
-                                    .then_some(f.ret);
-                                names.insert(f.name.clone(), getter_ret);
-                            }
-                        }
-                        work.extend(sup.interfaces.iter().map(String::as_str));
-                        work.extend(sup.supertypes.iter().filter_map(|t| t.obj_internal()));
-                        if !sup.superclass.is_empty()
-                            && sup.superclass != "java/lang/Object"
-                            && sup.superclass != "kotlin/Any"
-                        {
-                            work.push(sup.superclass.as_str());
-                        }
-                    }
-                    None => {
-                        known = false;
-                        break;
-                    }
-                }
-            }
-            crate::trace_compiler!(
-                "value_classes",
-                "super_member_names {} known={known} names={:?} ifaces={:?} super={:?}",
-                c.fq_name,
-                names,
-                c.interfaces,
-                c.superclass
-            );
-            (c.fq_name.clone(), known.then_some(names))
-        })
-        .collect();
-    // A method that OVERRIDES a supertype declaration is emitted WITHOUT `ACC_FINAL` by kotlinc (even in
-    // a final class). Mark every class method whose name a KNOWN same-file supertype chain declares as
-    // open; an unknown (classpath) chain conservatively keeps the status quo.
-    let mut override_opens: Vec<u32> = Vec::new();
-    for c in &ir.classes {
-        if c.is_interface {
-            continue;
-        }
-        // A `@Serializable` class's synthetic `$$serializer` object is the exception to the
-        // override-drops-`ACC_FINAL` rule: kotlinc emits its `serialize`/`deserialize`/`childSerializers`/
-        // `getDescriptor` implementations as `final` (they're compiler-generated, not user-overridable).
-        // Its erased KSerializer bridges live in `class.bridges` (never `class.methods`), so skipping the
-        // whole class here leaves them untouched.
-        if c.fq_name.ends_with("$$serializer") {
-            continue;
-        }
-        let Some(Some(names)) = super_member_names.get(&c.fq_name) else {
-            continue;
-        };
-        for &m in &c.methods {
-            if let Some(f) = ir.functions.get(m as usize) {
-                if !f.is_static && names.contains_key(&f.name) {
-                    override_opens.push(m);
-                }
-            }
-        }
-    }
-    // A class whose supertype chain leaves the file (a CLASSPATH base/interface — `known=false`
-    // above): ask the resolver whether the supertype declares the member — an override drops
-    // `ACC_FINAL` exactly like the same-file case (`class ChangeAwareEngine : Engine` from a jar).
-    {
-        let mut classpath_opens: Vec<u32> = Vec::new();
-        for c in &ir.classes {
-            if c.is_interface {
-                continue;
-            }
-            if c.fq_name.ends_with("$$serializer") {
-                continue; // serializer impls stay `final` — see the override_opens loop above
-            }
-            if let Some(Some(_)) = super_member_names.get(&c.fq_name) {
-                continue; // whole chain same-file — handled above
-            }
-            let mut supers: Vec<String> = c.interfaces.clone();
-            supers.extend(
-                c.supertypes
-                    .iter()
-                    .filter_map(|t| t.obj_internal())
-                    .map(str::to_string),
-            );
-            if !c.superclass.is_empty()
-                && c.superclass != "java/lang/Object"
-                && c.superclass != "kotlin/Any"
-            {
-                supers.push(c.superclass.clone());
-            }
-            if supers.is_empty() {
-                continue;
-            }
-            for &m in &c.methods {
-                if let Some(f) = ir.functions.get(m as usize) {
-                    if !f.is_static && supers.iter().any(|s| resolver.declares_member(s, &f.name)) {
-                        classpath_opens.push(m);
-                    }
-                }
-            }
-        }
-        override_opens.extend(classpath_opens);
-    }
-    ir.open_methods.extend(override_opens);
+    let super_member_names = same_file_super_member_names(ir);
     // A getter NAME whose override pair DIVERGES in type across the same-file hierarchy (a covariant
     // `val alt: Vid` overriding `val alt: Vid?`): the two sides would hash differently, and krusty
     // doesn't emit the bridge kotlinc pairs them with — keep BOTH sides unmangled (consistent).
